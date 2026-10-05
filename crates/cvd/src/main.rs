@@ -26,6 +26,10 @@ const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CV_BU
     version = BUILD_VERSION
 )]
 struct Cli {
+    /// Only discover sessions under this project root (repeat for multiple roots).
+    #[arg(long, global = true, value_name = "ROOT")]
+    scope: Vec<PathBuf>,
+
     /// Archive home (default: $CLUSTERVISION_HOME or ~/.clustervision).
     #[arg(long, global = true, value_name = "DIR")]
     home: Option<PathBuf>,
@@ -83,6 +87,9 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if !cli.scope.is_empty() {
+        cv_core::scope::set_roots(cli.scope);
+    }
     eprintln!("cvd {BUILD_VERSION}");
     let archive = Archive::resolve(cli.home.clone())?;
 
@@ -274,6 +281,8 @@ fn archive_event(archive: &Archive, r: &SessionRef, kind: EventKind, delta: usiz
 
 fn cmd_ls(archive: &Archive) -> Result<()> {
     let mut entries = archive.load_catalog()?;
+    let roots = cv_core::scope::roots();
+    entries.retain(|e| cv_core::scope::allows(e.cwd.as_deref(), &roots));
     if entries.is_empty() {
         println!("(archive empty — run `cvd sync`)");
         println!("archive: {}", archive.home().display());

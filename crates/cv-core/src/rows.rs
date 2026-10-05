@@ -67,7 +67,7 @@ impl SearchRow<'_> {
     /// `snippet`, and the sub-agent provenance trio — always present, null for a top-level hit.
     pub fn to_json(&self) -> Value {
         let harness = Harness::parse(self.harness);
-        let cataloged = crate::catalog::lookup(self.id, harness)
+        let cataloged = crate::scope::filter(crate::catalog::lookup(self.id, harness))
             .into_iter()
             .find(|r| r.id == self.id);
         let mut row = match &cataloged {

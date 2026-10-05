@@ -1026,7 +1026,13 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
 
     // A session is several docs (body chunks) sharing one id, so over-fetch and dedup to one row per
     // id, keeping the best-scoring doc (TopDocs is score-ordered, so the first id occurrence wins).
-    let fetch = (limit.saturating_mul(4)).max(64);
+    let roots = cv_core::scope::roots();
+    let fetch = if roots.is_empty() {
+        (limit.saturating_mul(4)).max(64)
+    } else {
+        // Excluded high-scoring documents must not crowd out visible sessions.
+        (searcher.num_docs() as usize).max(1)
+    };
     let top = searcher
         .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
         .context("running search")?;
@@ -1040,6 +1046,10 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
         let doc: TantivyDocument = searcher.doc(addr).context("loading stored doc")?;
         let get_str =
             |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
+        let cwd = get_str(f.cwd);
+        if !cv_core::scope::allows(cwd.as_deref().map(Path::new), &roots) {
+            continue;
+        }
         let id = get_str(f.id).unwrap_or_default();
         if !seen.insert(id.clone()) {
             continue; // another chunk of a session we already have
@@ -1072,7 +1082,7 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
         hits.push(Hit {
             id,
             harness,
-            cwd: get_str(f.cwd),
+            cwd,
             title: get_str(f.title),
             created_at: doc.get_first(f.created_at).and_then(|v| v.as_i64()),
             updated_at: doc.get_first(f.updated_at).and_then(|v| v.as_i64()),

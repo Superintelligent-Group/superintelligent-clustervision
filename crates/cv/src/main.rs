@@ -132,6 +132,10 @@ fn grouped_help(cmd: &clap::Command) -> String {
     help_template = "{before-help}{about-with-newline}\n{usage-heading} {usage}\n\nOptions:\n{options}\n{after-help}"
 )]
 struct Cli {
+    /// Only discover sessions under this project root (repeat for multiple roots).
+    /// Overrides CV_ALLOW_ROOTS and config allow_roots.
+    #[arg(long, global = true, value_name = "ROOT")]
+    scope: Vec<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -905,6 +909,9 @@ fn run() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    if !cli.scope.is_empty() {
+        cv_core::scope::set_roots(cli.scope);
+    }
     match cli.cmd {
         Cmd::Ls {
             harness,

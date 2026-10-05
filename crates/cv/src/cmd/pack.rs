@@ -249,11 +249,8 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
     let words: Vec<&str> = needle.split_whitespace().filter(|w| w.len() > 2).collect();
 
     let mut scored: Vec<(i64, cv_search::Hit)> = Vec::new();
-    for adapter in cv_core::harness::all() {
-        if adapter.storage_root().is_none() {
-            continue;
-        }
-        for r in adapter.discover()? {
+    for r in cv_core::discover_all() {
+        if let Some(adapter) = cv_core::harness::for_harness(r.harness) {
             let mut sink = CapSink::new(&r.path);
             let meta = match adapter.stream(&r, &ParseOptions::lazy(), &mut sink) {
                 Ok(m) => m,

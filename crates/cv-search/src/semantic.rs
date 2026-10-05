@@ -370,7 +370,11 @@ fn migrate_legacy_sibling(path: &Path) {
 /// records to [`Hit`]s. Split from [`semantic_search`] so the record→hit projection (dates,
 /// preview-as-snippet) is testable without loading the embedding model.
 fn rank(store: &Store, q: &[f32], k: usize) -> Vec<Hit> {
-    let mut scored: Vec<(f32, usize)> = (0..store.meta.len()).map(|i| (cosine(q, store.vector(i)), i)).collect();
+    let roots = cv_core::scope::roots();
+    let mut scored: Vec<(f32, usize)> = (0..store.meta.len())
+        .filter(|&i| cv_core::scope::allows(store.meta[i].cwd.as_deref().map(Path::new), &roots))
+        .map(|i| (cosine(q, store.vector(i)), i))
+        .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     scored.truncate(k);
 

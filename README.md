@@ -62,6 +62,24 @@ cv scry
 - 🧠 **An MCP server** so a *running* agent can read **other** agents' sessions — "what happened in this project before?", "what's my sibling agent doing right now?", "have I solved this before?" — mid-task, without leaving its harness.
 - 🌐 **A zero-install web viewer**: drag a zip of any harness folder into your browser and explore it. Nothing uploaded, all WASM.
 
+## Limit discovery to selected projects
+
+Set an optional allowlist in ~/.config/clustervision/config.toml (or under XDG_CONFIG_HOME):
+
+    allow_roots = ["/work/project", "/work/shared"]
+
+For a single invocation, use cv --scope /work/project ls; repeat --scope for
+multiple roots. CV_ALLOW_ROOTS supplies the same override to cv, cv-mcp, and cvd,
+as an OS path list (colon-separated on Unix, semicolon-separated on Windows).
+Precedence is CLI scope, then environment, then config; an empty list keeps the
+default unrestricted behavior.
+
+Only sessions with a known cwd at or below an allowed directory are visible,
+including cached lookups and existing full-text/semantic indexes. Matching
+normalizes separators and dot components, checks directory boundaries, and is
+case-insensitive on Windows. It is lexical, so symlinks are not resolved and the
+project does not need to exist. Existing catalog/index files are not erased.
+
 ## 🪐 23 harnesses, one IR
 
 | | Harness | Parse | Port *to* | | | Harness | Parse | Port *to* |

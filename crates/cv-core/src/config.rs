@@ -1,7 +1,7 @@
 //! User config — a human-editable TOML file at `$XDG_CONFIG_HOME/clustervision/config.toml` (falling
 //! back to `~/.config/clustervision/config.toml`).
 //!
-//! Today it holds the **export source index**: the dirs (or `conversations.json` files) where your
+//! It holds project visibility settings and the **export source index**: the dirs (or `conversations.json` files) where your
 //! account data exports (ChatGPT / Claude.ai) live. Account exports have no fixed home like the CLI
 //! harnesses, so rather than scan a hardcoded path, you register the ones you care about — as many as
 //! you like — and the [`export`](crate::harness::export) adapters read them from here. (`$CV_EXPORTS`,
@@ -17,6 +17,9 @@ pub struct Config {
     /// Dirs or `conversations.json` files holding account data exports to discover. Scanned ≤2 deep.
     #[serde(default)]
     pub exports: Vec<PathBuf>,
+    /// Only discover sessions under these project directories. Empty means unrestricted.
+    #[serde(default)]
+    pub allow_roots: Vec<PathBuf>,
 }
 
 /// `$XDG_CONFIG_HOME/clustervision` (or `~/.config/clustervision`). `None` only if there's no home.
@@ -71,10 +74,12 @@ mod tests {
     fn round_trips_exports() {
         let cfg = Config {
             exports: vec![PathBuf::from("/a/exports"), PathBuf::from("/b/conversations.json")],
+            allow_roots: vec![PathBuf::from("/work")],
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.exports, cfg.exports);
+        assert_eq!(back.allow_roots, cfg.allow_roots);
         // empty/missing tolerated
         let empty: Config = toml::from_str("").unwrap();
         assert!(empty.exports.is_empty());

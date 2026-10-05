@@ -6,7 +6,8 @@
 //! `cv`** written into the same temp tree, so the CLI-generated half of the toolset is exercised
 //! end-to-end (schema dump → tool registration → argv → exit code) without depending on a built
 //! `clustervision` binary being present. What the real commands *do* is the CLI crate's business;
-//! what this crate owes is the translation.
+//! what this crate owes is the translation. The scoped-search regression also uses a real
+//! sibling cv binary; build it first with cargo build -p clustervision.
 
 use serde_json::{json, Value};
 use std::fs;
@@ -27,6 +28,10 @@ struct Server {
 
 impl Server {
     fn spawn(tag: &str) -> Server {
+        Self::spawn_scoped(tag, None)
+    }
+
+    fn spawn_scoped(tag: &str, scope: Option<&str>) -> Server {
         let base = std::env::temp_dir().join(format!(
             "cv-mcp-{tag}-{}-{}",
             std::process::id(),
@@ -64,13 +69,32 @@ impl Server {
             fs::write(proj.join(format!("{name}.jsonl")), body).unwrap();
         }
 
-        let cv_bin = write_stub_cv(&base);
+        let cv_bin = if scope.is_some() {
+            let bin = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(if cfg!(windows) { "cv.exe" } else { "cv" });
+            assert!(bin.exists(), "build the CLI first: cargo build -p clustervision");
+            let outside = proj.join("betasess.jsonl");
+            let body = fs::read_to_string(&outside)
+                .unwrap()
+                .replace("/work/proj", "/elsewhere");
+            fs::write(outside, body).unwrap();
+            bin
+        } else {
+            write_stub_cv(&base)
+        };
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_cv-mcp"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("CV_ALLOW_ROOTS", scope.unwrap_or(""))
             .env("CV_BIN", &cv_bin)
             .env("CLUSTERVISION_HOME", &cv_home)
             .env_remove("CV_ENDPOINT") // hermetic: ambient identity must not leak into the tests
@@ -802,4 +826,18 @@ fn observe_stream_unusable_cursor_is_a_fresh_baseline() {
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["count"], 0, "{text}");
     }
+}
+
+#[test]
+fn scoped_search_tool_uses_real_cli() {
+    let mut s = Server::spawn_scoped("scope-search", Some("/work/proj"));
+    s.request(1, "initialize", json!({"protocolVersion": "2025-06-18"}));
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let (text, error) = s.call_tool(2, "search", json!({"query": "zebrafish"}));
+    assert!(!error, "{text}");
+    assert!(text.contains("alphasess"), "{text}");
+    let (text, error) = s.call_tool(3, "search", json!({"query": "quokkas"}));
+    assert!(!error, "{text}");
+    assert!(!text.contains("betasess"), "{text}");
+    assert!(!text.contains("seventeen quokkas"), "{text}");
 }

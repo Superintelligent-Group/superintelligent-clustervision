@@ -33,6 +33,7 @@ pub mod render;
 pub mod rows;
 pub mod sanitize;
 pub mod scan;
+pub mod scope;
 pub mod stats;
 pub mod stream;
 pub mod task;
@@ -97,7 +98,7 @@ pub fn discover_all() -> Vec<SessionRef> {
         out.extend(refs);
     }
     catalog::stamp_full_sync();
-    out
+    scope::filter(out)
 }
 
 /// Every known session, served from the catalog when it's provably fresh — the **fast read path**
@@ -141,7 +142,7 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
                 discover_cache::persist(false);
             }
             if let Some(rows) = catalog::all_sessions() {
-                return (rows, false);
+                return (scope::filter(rows), false);
             }
         }
     }
@@ -211,10 +212,10 @@ where
 /// `Workflow` sub-agents and the meta/journal sidecars that carry each agent's purpose and outcome —
 /// use [`subagent_tree_of`].
 pub fn subagents_of(r: &SessionRef) -> Vec<SessionRef> {
-    match r.harness {
+    scope::filter(match r.harness {
         Harness::Claude => harness::claude::subagent_refs(&r.path),
         _ => Vec::new(),
-    }
+    })
 }
 
 pub use harness::claude::SubagentInfo;
@@ -225,7 +226,8 @@ pub use harness::claude::SubagentInfo;
 /// orchestrator's journaled result (`status` + `summary`). Newest first. Non-Claude harnesses
 /// return empty for now.
 pub fn subagent_tree_of(r: &SessionRef) -> Vec<SubagentInfo> {
-    match r.harness {
+    let roots = scope::roots();
+    let mut tree = match r.harness {
         Harness::Claude => harness::claude::subagent_tree(&r.path),
         Harness::Devin => {
             #[cfg(feature = "sqlite")]
@@ -238,7 +240,9 @@ pub fn subagent_tree_of(r: &SessionRef) -> Vec<SubagentInfo> {
             }
         }
         _ => Vec::new(),
-    }
+    };
+    tree.retain(|s| scope::allows(s.session.cwd.as_deref(), &roots));
+    tree
 }
 
 pub use harness::claude_workflow::{Workflow, WorkflowAgent, WorkflowLaunch, WorkflowPhase};
@@ -445,7 +449,7 @@ type FoundSession = (SessionRef, Box<dyn Adapter>);
 fn find_inner(id: &str, harness: Option<Harness>) -> Result<(Option<FoundSession>, bool)> {
     // Fast path: the persisted catalog resolves the id without touching the fleet. We trust a row
     // only if its file still exists (a stale row — session deleted/moved — falls through to scan).
-    let cataloged = catalog::lookup(id, harness);
+    let cataloged = scope::filter(catalog::lookup(id, harness));
     if !cataloged.is_empty() {
         if let Some(r) = cataloged.iter().find(|r| r.id == id && r.path.exists()) {
             if let Some(a) = harness::for_harness(r.harness) {

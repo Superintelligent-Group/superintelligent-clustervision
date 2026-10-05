@@ -125,11 +125,11 @@ pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<L
         hits: Vec::new(),
         truncated: false,
     };
-    for adapter in crate::harness::all() {
-        if want.is_some_and(|h| adapter.harness() != h) || adapter.storage_root().is_none() {
+    for r in crate::discover_all() {
+        if want.is_some_and(|h| r.harness != h) {
             continue;
         }
-        for r in adapter.discover()? {
+        if let Some(adapter) = crate::harness::for_harness(r.harness) {
             let mut sink = CapSink::new(&r.path);
             let meta = match adapter.stream(&r, &ParseOptions::lazy(), &mut sink) {
                 Ok(m) => m,
