@@ -57,6 +57,11 @@
 //!   parent_session_key, fork_source_session_id, archived_at, …)` — `entry_json` is the old
 //!   `sessions.json` entry (`{sessionId, updatedAt, cwd?, label?, spawnedCwd?, spawnedWorkspaceDir?, …}`).
 //!
+//! 2026.10 (`OPENCLAW_AGENT_SCHEMA_VERSION = 24`) compresses: an event of at least 1 KiB is a zstd
+//! frame in `transcript_events.event_zstd` with `event_json` NULL ([`EventReader`] decodes both).
+//! Sub-agents (`agent:<id>:subagent:<uuid>` keys) name their spawner's key in `spawnedBy` /
+//! `session_windows.spawned_by`; [`KeyFacts`] turns that into `Lineage::parent`.
+//!
 //! `sessions.json` is a legacy discovery target only. JSONL files on disk are now: pre-July
 //! transcripts (still read), and archives that are NOT sessions — `<sid>.checkpoint.<uuid>.jsonl`
 //! (compaction checkpoints), `*.trajectory.jsonl`, `<sid>.jsonl.<reset|deleted|bak>.<ts>[.zst]`,
@@ -154,6 +159,14 @@ impl OpenClaw {
         }
         OpenClaw { roots }
     }
+
+    /// An adapter rooted at one OpenClaw state dir (what `OPENCLAW_STATE_DIR` names), reading its
+    /// `agents/` tree only; never consults the environment.
+    pub fn with_state_dir(state_dir: &Path) -> Self {
+        OpenClaw {
+            roots: vec![state_dir.join("agents")],
+        }
+    }
 }
 
 impl Adapter for OpenClaw {
@@ -215,12 +228,14 @@ impl Adapter for OpenClaw {
         // A transcript with `leaf` controls is a tree: the visible branch must be selected over the
         // whole file (see [`select_rows`]), so load it. Everything else streams one record at a time,
         // peak memory O(largest line) — OpenClaw's own rule for flat readers.
+        let facts = jsonl_key_facts(&r.path, &r.id);
         if file_has_leaf_controls(&r.path)? {
             let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
             let entries: Vec<Value> = text.lines().filter_map(parse_line).collect();
             return Ok(stream_rows(
                 rows_from_values(entries, opts.complete).into_iter(),
                 r,
+                &facts,
                 opts,
                 sink,
             ));
@@ -236,7 +251,7 @@ impl Adapter for OpenClaw {
             BufReader::new(file).lines().filter_map(Result::ok)
         };
         let rows = lines.filter_map(|l| parse_line(&l)).map(Row::active);
-        Ok(stream_rows(rows, r, opts, sink))
+        Ok(stream_rows(rows, r, &facts, opts, sink))
     }
 }
 
@@ -301,7 +316,13 @@ fn parse_text(text: &str, r: &SessionRef) -> Session {
 fn parse_text_with(text: &str, r: &SessionRef, opts: &ParseOptions) -> Session {
     let mut sink = crate::stream::CollectSink::default();
     let entries: Vec<Value> = text.lines().filter_map(parse_line).collect();
-    let mut s = stream_rows(rows_from_values(entries, opts.complete).into_iter(), r, opts, &mut sink);
+    let mut s = stream_rows(
+        rows_from_values(entries, opts.complete).into_iter(),
+        r,
+        &KeyFacts::default(),
+        opts,
+        &mut sink,
+    );
     s.messages = sink.messages;
     s
 }
@@ -312,6 +333,7 @@ fn parse_text_with(text: &str, r: &SessionRef, opts: &ParseOptions) -> Session {
 fn stream_rows<I: Iterator<Item = Row>>(
     rows: I,
     r: &SessionRef,
+    facts: &KeyFacts,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Session {
@@ -323,6 +345,14 @@ fn stream_rows<I: Iterator<Item = Row>>(
         source_path: Some(r.path.clone()),
         ..Session::new(r.id.clone(), Harness::OpenClaw)
     };
+    s.lineage.parent = facts.parent.clone();
+    for (k, v) in [("session_key", &facts.session_key), ("spawned_by", &facts.spawned_by)] {
+        if let Some(v) = v {
+            s.harness_extra_mut(Harness::OpenClaw)
+                .insert(k.into(), Value::from(v.as_str()));
+        }
+    }
+    let prompt_origin = facts.prompt_origin();
     let mut header_version: Option<i64> = None;
     let mut meta_sent = false;
 
@@ -392,6 +422,13 @@ fn stream_rows<I: Iterator<Item = Row>>(
             _ => carrier_if_complete(&v, opts),
         };
         for (i, mut m) in msgs.into_iter().enumerate() {
+            // A cron run's or a sub-agent's prompts were written by the scheduler / the parent
+            // agent, not typed: the session key says which.
+            if let Some(o) = prompt_origin {
+                if m.kind == MessageKind::Prompt && m.origin == Origin::Human {
+                    m.origin = o;
+                }
+            }
             // The branch selection's normalized parent applies to the entry's own turn; a second
             // turn split off the same entry (a compaction summary) already points at the first.
             if i == 0 {
@@ -440,6 +477,143 @@ fn stream_rows<I: Iterator<Item = Row>>(
         sink.meta(&s);
     }
     s
+}
+
+/// What the store's index says about a session beyond its transcript: its session key (`sessions.json`
+/// map key / `session_windows.session_key`), the key of the session that spawned it
+/// (`spawnedBy` / `session_windows.spawned_by`), and that spawner's session id when it can be pinned.
+#[derive(Default)]
+struct KeyFacts {
+    session_key: Option<String>,
+    spawned_by: Option<String>,
+    parent: Option<String>,
+}
+
+impl KeyFacts {
+    /// `agent:<id>:cron:<job>[:run:<id>]` is an isolated cron run; `agent:<id>:subagent:<uuid>` a
+    /// sub-agent (`sessions_spawn`). Their prompts come from the scheduler / the parent agent.
+    fn prompt_origin(&self) -> Option<Origin> {
+        let key = self.session_key.as_deref()?;
+        let mut parts = key.split(':');
+        if parts.next() != Some("agent") {
+            return None;
+        }
+        match parts.nth(1)? {
+            "cron" => Some(Origin::Scheduler),
+            "subagent" => Some(Origin::Subagent),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `text` records `key` as a spawned child: a `childSessionKey` field (plain, or JSON-escaped
+/// inside a tool result's text) right before an occurrence of the key. A bare mention, such as a
+/// `sessions_list` result, does not count.
+fn names_child(text: &str, key: &str) -> bool {
+    text.match_indices(key).any(|(i, _)| {
+        let start = text.floor_char_boundary(i.saturating_sub(24));
+        text[start..i].contains("childSessionKey")
+    })
+}
+
+/// [`KeyFacts`] from the `sessions.json` beside a JSONL transcript. A key names a *current* session
+/// only (a reset re-points it), so the spawner is pinned by content: the session whose transcript
+/// records this one's key as `childSessionKey` (the `sessions_spawn` result), trying the
+/// spawner key's current session first.
+fn jsonl_key_facts(path: &Path, session_id: &str) -> KeyFacts {
+    let Some(dir) = path.parent() else {
+        return KeyFacts::default();
+    };
+    let Ok(text) = fs::read_to_string(dir.join("sessions.json")) else {
+        return KeyFacts::default();
+    };
+    let Ok(Value::Object(index)) = serde_json::from_str::<Value>(&text) else {
+        return KeyFacts::default();
+    };
+    let sid_of = |e: &Value| e.get("sessionId").and_then(Value::as_str).map(str::to_string);
+    let Some((key, entry)) = index.iter().find(|(_, e)| sid_of(e).as_deref() == Some(session_id)) else {
+        return KeyFacts::default();
+    };
+    let spawned_by = entry.get("spawnedBy").and_then(Value::as_str).map(str::to_string);
+    let parent = spawned_by.as_ref().and_then(|by| {
+        let first = index.get(by).and_then(sid_of);
+        let mut candidates: Vec<PathBuf> = first.iter().map(|sid| dir.join(format!("{sid}.jsonl"))).collect();
+        if let Ok(rd) = fs::read_dir(dir) {
+            let mut rest: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(is_primary_transcript_name)
+                })
+                .collect();
+            rest.sort();
+            candidates.extend(rest);
+        }
+        candidates
+            .into_iter()
+            .filter(|p| p.as_path() != path)
+            .find(|p| fs::read_to_string(p).is_ok_and(|t| names_child(&t, key)))
+            .map(|p| session_id_from_filename(&p))
+    });
+    KeyFacts {
+        session_key: Some(key.clone()),
+        spawned_by,
+        parent,
+    }
+}
+
+/// [`KeyFacts`] from `session_windows`. The spawner is the window under `spawned_by` — when that key
+/// has several windows (resets, rollovers), the one whose transcript records this session's key as `childSessionKey`.
+#[cfg(feature = "sqlite")]
+fn sqlite_key_facts(conn: &rusqlite::Connection, session_id: &str) -> Result<KeyFacts> {
+    let cols = super::store::sqlite::columns(conn, "session_windows");
+    if !cols.contains("session_key") {
+        return Ok(KeyFacts::default());
+    }
+    let spawned_col = if cols.contains("spawned_by") {
+        "spawned_by"
+    } else {
+        "NULL"
+    };
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            &format!("SELECT session_key, {spawned_col} FROM session_windows WHERE session_id = ?1"),
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+    let Some((key, spawned_by)) = row else {
+        return Ok(KeyFacts::default());
+    };
+    let mut parent = None;
+    if let Some(by) = &spawned_by {
+        let mut stmt =
+            conn.prepare("SELECT session_id FROM session_windows WHERE session_key = ?1 AND session_id != ?2")?;
+        let candidates: Vec<String> = stmt
+            .query_map([by.as_str(), session_id], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        parent = if candidates.len() == 1 {
+            candidates.into_iter().next()
+        } else {
+            let mut events = EventReader::new(conn)?;
+            let mut found = None;
+            for c in candidates {
+                let (entries, _) = events.entries(&c)?;
+                if entries.iter().any(|v| names_child(&v.to_string(), &key)) {
+                    found = Some(c);
+                    break;
+                }
+            }
+            found
+        };
+    }
+    Ok(KeyFacts {
+        session_key: Some(key),
+        spawned_by,
+        parent,
+    })
 }
 
 /// A System turn for a non-`message` entry: id / parent / timestamp from the entry, and — in the
@@ -776,11 +950,20 @@ fn parse_entry(v: &Value) -> Vec<Message> {
         "compactionSummary" => (Role::System, MessageKind::CompactionSummary, Origin::Harness),
         _ => return Vec::new(),
     };
+    let provenance = msg.get("provenance").filter(|p| p.is_object());
+    let (kind, origin) = match (role_str, provenance) {
+        ("user", Some(p)) => user_provenance(p),
+        _ => (kind, origin),
+    };
     let mut m = Message::of_kind(role, kind, origin);
     m.id = v.get("id").and_then(Value::as_str).map(str::to_string);
     m.parent_id = v.get("parentId").and_then(Value::as_str).map(str::to_string);
     m.timestamp = entry_timestamp(v);
     m.model = msg.get("model").and_then(Value::as_str).map(str::to_string);
+    if let Some(p) = provenance {
+        m.harness_extra_mut(Harness::OpenClaw)
+            .insert("provenance".into(), p.clone());
+    }
 
     match role_str {
         "toolResult" => parse_tool_result(&mut m, msg),
@@ -819,6 +1002,25 @@ fn parse_entry(v: &Value) -> Vec<Message> {
     m.harness_extra_mut(Harness::OpenClaw)
         .insert("message_role".into(), Value::from(role_str));
     vec![boundary, m]
+}
+
+/// A user message OpenClaw wrote on someone else's behalf carries `provenance` (`InputProvenance`,
+/// `src/sessions/input-provenance.ts`; not yet in 2026.1.29, present by `0e9181234a`): `inter_session` is a
+/// message from another session (`sourceSessionKey`), and a sub-agent's announce to its requester is
+/// its return; `internal_system` with `sourceTool: "cron"` is a cron run's prompt.
+fn user_provenance(p: &Value) -> (MessageKind, Origin) {
+    let field = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("");
+    match field("kind") {
+        "inter_session"
+            if field("sourceRole") == "subagent" || field("sourceSessionKey").split(':').nth(2) == Some("subagent") =>
+        {
+            (MessageKind::SubagentReturn, Origin::Subagent)
+        }
+        "inter_session" => (MessageKind::Prompt, Origin::Subagent),
+        "internal_system" if field("sourceTool") == "cron" => (MessageKind::Prompt, Origin::Scheduler),
+        "internal_system" => (MessageKind::InjectedContext, Origin::Harness),
+        _ => (MessageKind::Prompt, Origin::Human),
+    }
 }
 
 fn parse_tool_result(m: &mut Message, msg: &Value) {
@@ -1073,15 +1275,12 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
             ))
         })?
         .collect::<std::result::Result<_, _>>()?;
-    let mut events = conn.prepare("SELECT event_json FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC")?;
+    let mut events = EventReader::new(&conn)?;
     let mut out = Vec::with_capacity(rows.len());
     for (session_id, created, updated, transcript_updated, w_display, n_label, n_display, entry_json) in rows {
         let mut acc = ScanAcc::default();
-        let jsons = events.query_map([&session_id], |row| row.get::<_, String>(0))?;
-        for json in jsons.flatten() {
-            if let Some(v) = parse_line(&json) {
-                acc.feed(&v);
-            }
+        for v in events.entries(&session_id)?.0 {
+            acc.feed(&v);
         }
         let entry: Option<Value> = entry_json.as_deref().and_then(|e| serde_json::from_str(e).ok());
         let title = n_label
@@ -1110,6 +1309,61 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
     Ok(out)
 }
 
+/// Reads one window's `transcript_events` in `seq` order. Since OpenClaw added payload compression
+/// (`transcript-payload.ts`, after `0e9181234a`), an event of at least 1 KiB is stored as a zstd frame
+/// of its UTF-8 JSON in `event_zstd` with `event_json` NULL (plus a `navigation_json` projection
+/// cv does not need); smaller ones stay in `event_json`. A row that decodes to nothing is counted
+/// (`extra["cv"]["skipped_lines"]`), never silently dropped.
+#[cfg(feature = "sqlite")]
+struct EventReader<'c> {
+    stmt: rusqlite::Statement<'c>,
+}
+
+#[cfg(feature = "sqlite")]
+impl<'c> EventReader<'c> {
+    fn new(conn: &'c rusqlite::Connection) -> Result<Self> {
+        let zstd = super::store::sqlite::columns(conn, "transcript_events").contains("event_zstd");
+        let sql = if zstd {
+            "SELECT event_json, event_zstd FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC"
+        } else {
+            "SELECT event_json, NULL FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC"
+        };
+        Ok(EventReader {
+            stmt: conn.prepare(sql)?,
+        })
+    }
+
+    /// The decoded entries, and how many rows decoded to nothing (`extra["cv"]["skipped_lines"]`).
+    fn entries(&mut self, session_id: &str) -> Result<(Vec<Value>, u64)> {
+        let rows = self.stmt.query_map([session_id], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+        })?;
+        let (mut out, mut skipped) = (Vec::new(), 0);
+        for row in rows {
+            let (json, zstd) = row?;
+            let text = match (json, zstd) {
+                (Some(j), _) => Some(j),
+                (None, Some(z)) => decompress_zstd(&z).and_then(|b| String::from_utf8(b).ok()),
+                (None, None) => None,
+            };
+            match text.as_deref().and_then(parse_line) {
+                Some(v) => out.push(v),
+                None => skipped += 1,
+            }
+        }
+        Ok((out, skipped))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn decompress_zstd(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(data).ok()?;
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
 #[cfg(not(feature = "sqlite"))]
 fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
     Ok(Vec::new())
@@ -1120,18 +1374,17 @@ fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
 #[cfg(feature = "sqlite")]
 fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
     let conn = open_ro(&r.path)?;
-    let mut stmt = conn.prepare("SELECT event_json FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC")?;
-    let entries: Vec<Value> = stmt
-        .query_map([&r.id], |row| row.get::<_, String>(0))?
-        .flatten()
-        .filter_map(|j| parse_line(&j))
-        .collect();
-    Ok(stream_rows(
+    let facts = sqlite_key_facts(&conn, &r.id)?;
+    let (entries, skipped) = EventReader::new(&conn)?.entries(&r.id)?;
+    let mut s = stream_rows(
         rows_from_values(entries, opts.complete).into_iter(),
         r,
+        &facts,
         opts,
         sink,
-    ))
+    );
+    super::note_skipped_lines(&mut s, skipped);
+    Ok(s)
 }
 
 #[cfg(not(feature = "sqlite"))]
@@ -2221,5 +2474,140 @@ mod tests {
         assert_eq!(reply.text().as_deref(), Some("done bridging"));
         // bridged turns have no captured tool calls / thinking — confirm the gap
         assert!(reply.content.iter().all(|b| matches!(b, Block::Text { .. })));
+    }
+
+    /// 2026.10: an event of 1 KiB or more is a zstd frame in `event_zstd` with `event_json` NULL. It
+    /// reads like any other row; a frame that does not decode is counted, not dropped silently. A
+    /// sub-agent window points at its spawner through `spawned_by`, and the spawner's copy of the
+    /// announce (`provenance.kind = inter_session` from a sub-agent key) is the return.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn compressed_events_and_subagent_windows() {
+        let agents = tmp_agents();
+        let agent_dir = agents.join("main").join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let db = agent_dir.join("openclaw-agent.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(&fixture_text("transcript-tables.sql")).unwrap();
+        conn.execute_batch(
+            "DROP TABLE transcript_events;
+             CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT,
+               created_at INTEGER NOT NULL, event_zstd BLOB, event_utf8_bytes INTEGER, navigation_json TEXT,
+               PRIMARY KEY (session_id, seq)) STRICT;",
+        )
+        .unwrap();
+        let child_key = "agent:main:subagent:0f38eb76-c49b-46a0-99f1-1c03787525d8";
+        for (sid, key, by) in [
+            ("parent-1", "agent:main:explicit:parent-1", None),
+            ("child-1", child_key, Some("agent:main:explicit:parent-1")),
+        ] {
+            conn.execute(
+                "INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at) VALUES (?1, ?2, '{}', 1)",
+                rusqlite::params![key, sid],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session_windows (session_id, session_key, created_at, updated_at, spawned_by) VALUES (?1, ?2, 1, 1, ?3)",
+                rusqlite::params![sid, key, by],
+            )
+            .unwrap();
+        }
+        let long = "x".repeat(2000);
+        let spawn_result = format!(
+            r#"{{"type":"message","id":"p3","parentId":"p2","timestamp":"2026-10-11T20:00:02Z","message":{{"role":"toolResult","toolCallId":"c1","toolName":"sessions_spawn","content":[{{"type":"text","text":"{{\"status\": \"accepted\", \"childSessionKey\": \"{child_key}\"}} {long}"}}],"isError":false}}}}"#
+        );
+        let announce = format!(
+            r#"{{"type":"message","id":"p4","parentId":"p3","timestamp":"2026-10-11T20:00:03Z","message":{{"role":"user","content":"[Subagent Context] settled","provenance":{{"kind":"inter_session","sourceSessionKey":"{child_key}","sourceTool":"subagent_announce"}}}}}}"#
+        );
+        type Row<'a> = (&'a str, i64, Option<String>, Option<Vec<u8>>);
+        let rows: Vec<Row> = vec![
+            ("parent-1", 0, Some(r#"{"type":"session","version":4,"id":"parent-1","timestamp":"2026-10-11T20:00:00Z","cwd":"/w"}"#.into()), None),
+            ("parent-1", 1, Some(r#"{"type":"message","id":"p2","parentId":null,"timestamp":"2026-10-11T20:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"sessions_spawn","arguments":{}}],"model":"m"}}"#.into()), None),
+            ("parent-1", 2, None, Some(ruzstd::encoding::compress_to_vec(spawn_result.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest))),
+            ("parent-1", 3, Some(announce), None),
+            ("parent-1", 4, None, Some(b"\x28\xb5\x2f\xfd not a frame".to_vec())),
+            ("child-1", 0, Some(r#"{"type":"message","id":"k1","parentId":null,"timestamp":"2026-10-11T20:00:01Z","message":{"role":"user","content":"Reply ok."}}"#.into()), None),
+        ];
+        for (sid, seq, json, zstd) in rows {
+            conn.execute(
+                "INSERT INTO transcript_events (session_id, seq, event_json, event_zstd, created_at) VALUES (?1, ?2, ?3, ?4, 1)",
+                rusqlite::params![sid, seq, json, zstd],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let a = OpenClaw::with_state_dir(agents.parent().unwrap());
+        let refs = a.discover().unwrap();
+        let by_id = |id: &str| a.parse(refs.iter().find(|r| r.id == id).unwrap()).unwrap();
+        let parent = by_id("parent-1");
+        let kinds: Vec<MessageKind> = parent.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [MessageKind::Reply, MessageKind::ToolResult, MessageKind::SubagentReturn]
+        );
+        assert!(format!("{:?}", parent.messages[1].content).contains(&long));
+        assert_eq!(parent.messages[2].origin, Origin::Subagent);
+        assert_eq!(parent.cv_extra().unwrap()["skipped_lines"], 1);
+        let child = by_id("child-1");
+        assert_eq!(child.lineage.parent.as_deref(), Some("parent-1"));
+        assert_eq!(child.extra["openclaw"]["spawned_by"], "agent:main:explicit:parent-1");
+        assert_eq!(child.messages[0].origin, Origin::Subagent);
+        let _ = fs::remove_dir_all(agents.parent().unwrap());
+    }
+
+    /// 2026.1: `sessions.json` names a sub-agent's spawner by KEY, and a reset has since re-pointed
+    /// that key at a newer session, so the spawner is the transcript recording the child's key as
+    /// `childSessionKey`, not the key's current session. A cron run's key makes its prompt the
+    /// scheduler's.
+    #[test]
+    fn jsonl_subagent_parent_survives_a_reset_and_cron_prompts_are_scheduled() {
+        let agents = tmp_agents();
+        let dir = agents.join("main").join("sessions");
+        fs::create_dir_all(&dir).unwrap();
+        let child_key = "agent:main:subagent:40223705-4ebc-4437-855c-e6a384c8c77a";
+        let user = |id: &str, text: &str| {
+            format!(
+                r#"{{"type":"message","id":"{id}","parentId":null,"timestamp":"2026-10-11T20:00:00Z","message":{{"role":"user","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            )
+        };
+        let spawn = format!(
+            r#"{{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-11T20:00:01Z","message":{{"role":"toolResult","toolCallId":"c","toolName":"sessions_spawn","content":[{{"type":"text","text":"{{\n  \"childSessionKey\": \"{child_key}\"\n}}"}}],"isError":false}}}}"#
+        );
+        fs::write(
+            dir.join("old-main.jsonl"),
+            format!("{}\n{spawn}\n", user("a", "spawn one")),
+        )
+        .unwrap();
+        // the key's current session only lists the child (a bare mention is not a spawn)
+        fs::write(
+            dir.join("new-main.jsonl"),
+            format!("{}\n", user("n", &format!("list {child_key}"))),
+        )
+        .unwrap();
+        fs::write(dir.join("child.jsonl"), format!("{}\n", user("k", "Reply ok."))).unwrap();
+        fs::write(
+            dir.join("cronrun.jsonl"),
+            format!("{}\n", user("r", "[cron:j1 ping] pong")),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("sessions.json"),
+            format!(
+                r#"{{"agent:main:main":{{"sessionId":"new-main"}},"{child_key}":{{"sessionId":"child","spawnedBy":"agent:main:main"}},"agent:main:cron:j1":{{"sessionId":"cronrun"}}}}"#
+            ),
+        )
+        .unwrap();
+        let a = OpenClaw::with_state_dir(agents.parent().unwrap());
+        let refs = a.discover().unwrap();
+        let by_id = |id: &str| a.parse(refs.iter().find(|r| r.id == id).unwrap()).unwrap();
+        let child = by_id("child");
+        assert_eq!(child.lineage.parent.as_deref(), Some("old-main"));
+        assert_eq!(child.extra["openclaw"]["session_key"], child_key);
+        assert_eq!(child.messages[0].origin, Origin::Subagent);
+        assert_eq!(by_id("cronrun").messages[0].origin, Origin::Scheduler);
+        let main = by_id("new-main");
+        assert!(main.lineage.is_empty());
+        assert_eq!(main.messages[0].origin, Origin::Human);
+        let _ = fs::remove_dir_all(agents.parent().unwrap());
     }
 }

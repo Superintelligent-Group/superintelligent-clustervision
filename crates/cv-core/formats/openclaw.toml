@@ -16,8 +16,8 @@ store = [
 
 [upstream]
 repo = "https://github.com/openclaw/openclaw (~/pug/openclaw)"
-commit = "0e9181234a"
-date = "2026-09-19"
+commit = "e178c39e9a (tag v2026.10.1, npm 2026.10.1); also diffed: v2026.1.29 77e703c69b (JSONL era), main 8fc091038f"
+date = "2026-10-11"
 
 [types]
 "entry.leaf" = { status = "handled", note = "branch control; visible path selected" }
@@ -43,3 +43,14 @@ date = "2026-09-19"
 "file.trajectory" = { status = "ignored", note = "*.trajectory.jsonl" }
 "file.zst" = { status = "ignored", note = "cold-tier archive" }
 "path.agents" = { status = "handled", note = "$OPENCLAW_STATE_DIR/agents/<id>/" }
+"column.event_zstd" = { status = "handled", note = "2026.10: zstd frame of the event JSON when >= 1 KiB; event_json is then NULL" }
+"column.event_utf8_bytes" = { status = "ignored", note = "decoded size of event_zstd" }
+"column.navigation_json" = { status = "ignored", note = "tree-navigation projection of a compressed event" }
+"column.spawned_by" = { status = "handled", note = "session_windows: spawner key -> Lineage::parent" }
+"column.session_key" = { status = "handled", note = "extra[openclaw][session_key]; cron/subagent keys set prompt origin" }
+"index.spawnedBy" = { status = "handled", note = "sessions.json: spawner key -> Lineage::parent (pinned by childSessionKey)" }
+"message.provenance" = { status = "handled", note = "user turns: inter_session / internal_system -> origin, sub-agent announce -> SubagentReturn" }
+"custom_type.openclaw.nested-tool.v1" = { status = "carried", note = "2026.10: the tool tool_call ran (toolName/input/result) as a Notice, details in extra[openclaw][custom_details]" }
+"table.session_entry_snapshots" = { status = "ignored", note = "2026.10: skillsSnapshot/systemPromptReport side table" }
+"file.subagents_runs" = { status = "ignored", note = "JSONL era subagents/runs.json; sqlite era state/openclaw.sqlite subagent_runs" }
+"file.cron" = { status = "ignored", note = "cron/jobs.json + cron/runs/<job>.jsonl; sqlite era cron_jobs/cron_run_receipts" }

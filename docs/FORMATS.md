@@ -520,7 +520,8 @@ vocabulary is `formats/hermes.toml`.
 
 ## OpenClaw — `$OPENCLAW_STATE_DIR` or `~/.openclaw/agents/<agentId>/`
 
-Re-verified 2026-09-19 at `0e9181234a`. Ground truth: `src/state/openclaw-agent-schema.sql`,
+Re-verified 2026-09-19 at `0e9181234a`; 2026-10-11 against releases 2026.1.29 (`77e703c69b`) and 2026.10.1
+(`e178c39e9a`), whose real stores are the corpus in `crates/cv-core/tests/corpus/openclaw/`. Ground truth: `src/state/openclaw-agent-schema.sql`,
 `src/state/openclaw-agent-db-contract.ts` (`OPENCLAW_AGENT_SCHEMA_VERSION = 21` — the schema version
 is *there*, not in the `.sql`), `src/config/sessions/*`,
 `src/agents/sessions/session-manager-types.ts`.
@@ -535,6 +536,27 @@ is *there*, not in the `.sql`), `src/config/sessions/*`,
   display_name, parent_session_key, fork_source_session_id, pinned_at, archived_at, last_activity_at, …)`;
   archives `session_transcript_archives` (zstd blobs, reason deleted|reset), `session_transcript_cold_archives`,
   `trajectory_runtime_events`.
+- **2026.10 compresses transcript payloads** (`OPENCLAW_AGENT_SCHEMA_VERSION = 24`,
+  `src/config/sessions/transcript-payload.ts`): an event of at least 1 KiB is stored as a zstd frame (level 1,
+  checksum) of its UTF-8 JSON in `transcript_events.event_zstd`, with `event_json` NULL, its size in
+  `event_utf8_bytes`, and a tree-navigation projection in `navigation_json`. Smaller events stay in
+  `event_json`. A reader that selects only `event_json` silently loses every large tool result. Also new:
+  `session_entry_snapshots` (skillsSnapshot / systemPromptReport, moved out of `entry_json`),
+  `session_reactions`, `session_nodes.snapshot_revision`.
+- **Session keys** say what a session is: `agent:<id>:main`, `agent:<id>:explicit:<sid>` (2026.10 `--session-id`),
+  `agent:<id>:subagent:<uuid>` (a `sessions_spawn` child; its spawner's key in `spawnedBy` /
+  `session_windows.spawned_by`), `agent:<id>:cron:<job>[:run:<sid>]` (an isolated cron run). A key names the
+  *current* session only: in 2026.1 a reset gives `agent:main:main` a new session id, so the spawner is pinned by
+  the transcript whose `sessions_spawn` result records the child as `childSessionKey`. Sub-agent and cron
+  registries: 2026.1 `subagents/runs.json`, `cron/jobs.json`, `cron/runs/<job>.jsonl`; 2026.10
+  `state/openclaw.sqlite` `subagent_runs`, `cron_jobs`, `cron_run_receipts`.
+- **User-turn provenance** (`src/sessions/input-provenance.ts`, absent in 2026.1): `message.provenance{kind:
+  external_user|inter_session|internal_system, sourceSessionKey?, sourceTool?, sourceRole?, jobId?, runId?}`. A
+  sub-agent's announce to its requester is `inter_session` from the sub-agent key; a cron run's prompt is
+  `internal_system` with `sourceTool: "cron"`.
+- **2026.10 nested tools:** the model sees a small tool surface (`tool_search`, `tool_describe`, `tool_call`, …)
+  and reaches the rest through `tool_call`; the tool that actually ran is recorded as a `custom` message,
+  `customType: "openclaw.nested-tool.v1"`, `details{toolName, input, result, parentToolCallId}`.
 - **JSONL on disk is legacy or archive only:** pre-July `sessions/<sid>.jsonl` (+ `<sid>-topic-<id>.jsonl`,
   `sessions.json` index), cold-tier `<sha256>.jsonl.zst`, reset/delete archives `<sid>.jsonl.<reason>.<ts>[.zst]`,
   compaction checkpoints `<sid>.checkpoint.<uuid>.jsonl`, `*.trajectory.jsonl`, `*.migrated*`, `*.bak` — only the
@@ -555,7 +577,12 @@ is *there*, not in the `.sql`), `src/config/sessions/*`,
   `system_prompt` (and the first one fills `Session::system_prompt`), `bashExecution` →
   `injected_context`, `compactionSummary` → `compaction_summary`, an assistant message with
   `errorCode`/`errorType` → `kind: error`. A fork's `header.parentSession` is
-  `Session::lineage.forked_from`. `usage{input, output, cacheRead, cacheWrite, cost{total}}` fills
+  `Session::lineage.forked_from`; a sub-agent's spawner is `lineage.parent`, and the session key and spawner key
+  are `extra.openclaw.{session_key, spawned_by}`. A cron run's prompts are `origin: scheduler`, a sub-agent's
+  `origin: subagent`; a user turn's `provenance` (kept in `extra.openclaw.provenance`) maps `inter_session` from a
+  sub-agent to `kind: subagent_return`, other `inter_session` to `origin: subagent`, `internal_system` cron to
+  `origin: scheduler` and other `internal_system` to `injected_context`. A `nested-tool.v1` record is a `notice`
+  with its details in `extra.openclaw.custom_details`. `usage{input, output, cacheRead, cacheWrite, cost{total}}` fills
   `Usage` including **`cost_usd`**; OpenClaw reports no reasoning-token count.
   `formats/openclaw.toml` `[types]` is the checked entry/role/block vocabulary.
 

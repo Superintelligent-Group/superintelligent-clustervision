@@ -30,6 +30,9 @@
 - Grok 1.0.50: reasoning records read as thinking; forks and sub-agents carry their parent; its corpus joins the golden test.
 - Goose: a real compaction (agent-visibility flip plus agent-only summary) reads as a compaction boundary; delegate results keep the child session id.
 - Goose corpus: real stores from Goose 1.51.0 and 1.54.0, covering every persisted affordance a headless run can drive.
+- OpenClaw 2026.10: zstd-compressed transcript events are read; before, every event of 1 KiB or more (most tool results) was silently dropped.
+- OpenClaw: sub-agent sessions name their parent (`lineage.parent`); cron and sub-agent prompts get scheduler/subagent origin; sub-agent announces are `subagent_return`.
+- OpenClaw corpus: real stores from 2026.1.29 (JSONL) and 2026.10.1 (sqlite), re-read by the golden test.
 
 ## 0.15.1 — 2026-10-11
 
