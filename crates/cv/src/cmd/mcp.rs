@@ -257,7 +257,7 @@ fn tool_list() -> Value {
     tools
 }
 
-fn base_tool_list() -> Value {
+pub(crate) fn base_tool_list() -> Value {
     json!([
         {
             "name": "await_omen",

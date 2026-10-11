@@ -292,6 +292,99 @@ mod tests {
         assert_eq!(MessageKind::for_role(Role::System), MessageKind::Notice);
     }
 
+    /// `docs/INTERFACE-V2.md` §1 (the command groups) and §6 (the MCP roster) are generated from
+    /// the clap tree between `<!-- begin: … -->`/`<!-- end: … -->` markers, so the contract cannot
+    /// state a command set the binary does not have. `CV_REGEN_CONTRACT=1` rewrites them.
+    #[test]
+    fn contract_tables_are_the_clap_tree() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024) // a debug clap tree overflows the 2 MB test stack
+            .spawn(contract_tables_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn contract_tables_body() {
+        let tree = crate::build_cli();
+        let commands = commands_json(&tree);
+        let commands = commands.as_array().unwrap();
+        let name = |c: &Value| c["name"].as_str().unwrap().to_string();
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        let mut subs: Vec<(String, Vec<String>)> = Vec::new();
+        for c in commands {
+            let (n, g) = (name(c), c["group"].as_str().unwrap().to_string());
+            match n.split_once(' ') {
+                Some((parent, sub)) => match subs.iter_mut().find(|(p, _)| p == parent) {
+                    Some((_, v)) => v.push(sub.to_string()),
+                    None => subs.push((parent.to_string(), vec![sub.to_string()])),
+                },
+                None => match groups.iter_mut().find(|(have, _)| *have == g) {
+                    Some((_, v)) => v.push(n),
+                    None => groups.push((g, vec![n])),
+                },
+            }
+        }
+        let ticks = |v: &[String]| v.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(" ");
+        let mut s1 = String::from("| group | commands |\n|---|---|\n");
+        for (g, v) in &groups {
+            s1.push_str(&format!("| **{g}** | {} |\n", ticks(v)));
+        }
+        s1.push_str("\n| command | subcommands |\n|---|---|\n");
+        for (p, v) in &subs {
+            s1.push_str(&format!("| `{p}` | {} |\n", ticks(v)));
+        }
+
+        let group_of = |tool: &str| {
+            commands
+                .iter()
+                .find(|c| name(c).replace(' ', "_") == tool)
+                .map(|c| c["group"].as_str().unwrap().to_string())
+                .unwrap_or_else(|| "MCP-only".to_string())
+        };
+        let generated = crate::cmd::mcp_tools::CliTools::from_tree(&tree).unwrap().tool_list();
+        let hand = crate::cmd::mcp::base_tool_list();
+        let mut roster: Vec<(String, Vec<String>)> = Vec::new();
+        for t in generated.iter().chain(hand.as_array().unwrap()) {
+            let tool = t["name"].as_str().unwrap().to_string();
+            let g = group_of(&tool);
+            match roster.iter_mut().find(|(have, _)| *have == g) {
+                Some((_, v)) => v.push(tool),
+                None => roster.push((g, vec![tool])),
+            }
+        }
+        let mut s6 = String::from("| group | tools |\n|---|---|\n");
+        for (g, v) in &roster {
+            s6.push_str(&format!("| **{g}** | {} |\n", ticks(v)));
+        }
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/INTERFACE-V2.md");
+        let doc = std::fs::read_to_string(&path).unwrap();
+        let want = splice_marked(
+            &splice_marked(&doc, "cv schema --commands", &s1),
+            "cv mcp tools/list",
+            &s6,
+        );
+        if std::env::var_os("CV_REGEN_CONTRACT").is_some() {
+            std::fs::write(&path, &want).unwrap();
+        } else {
+            assert!(
+                doc == want,
+                "docs/INTERFACE-V2.md §1/§6 disagree with the clap tree; regenerate with\n  \
+                 CV_REGEN_CONTRACT=1 cargo test -p clustervision --bin cv contract_tables\n\
+                 and review the diff (a command that appeared or went is a contract change)"
+            );
+        }
+    }
+
+    /// `doc` with the text between `<!-- begin: {key} -->` and `<!-- end: {key} -->` replaced.
+    fn splice_marked(doc: &str, key: &str, body: &str) -> String {
+        let (begin, end) = (format!("<!-- begin: {key} -->\n"), format!("<!-- end: {key} -->"));
+        let a = doc.find(&begin).unwrap_or_else(|| panic!("no `{begin}` marker")) + begin.len();
+        let b = doc[a..].find(&end).unwrap_or_else(|| panic!("no `{end}` marker")) + a;
+        format!("{}{body}{}", &doc[..a], &doc[b..])
+    }
+
     #[test]
     fn data_schema_names_the_session_row_keys() {
         let v = data_schema_json();

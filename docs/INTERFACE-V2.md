@@ -11,17 +11,74 @@ the same thing on every command that has it; a JSON key is spelled one way; a me
 
 ---
 
+## The shape
+
+*From the 2026-10 parsimony review, which measured cv at 110K lines growing 20K a month and cut it
+toward this. It is the direction every change steers by: a change that moves away from it needs a
+reason written next to it.*
+
+**Three crates, one binary, one API, one UI, ~30 verbs, two reshape primitives.**
+
+- `cv-core`: IR, adapters, emit, the read API that every door maps onto, tasks, lanes, watch.
+  `cv-search` stays the one satellite only because tantivy does not belong inside the dependency
+  fence. `cv-web` is the wasm cdylib.
+- `cv`: `cv <verb>`, `cv mcp`, `cv serve`, `cv watch`. `cvd` and `cv-mcp` are subcommands, not
+  binaries. The MCP roster is generated from the in-process clap tree, so it cannot skew from the
+  CLI (it once shelled out to whatever `cv` was on PATH, and found a stale one).
+- **An adapter is `roots + discover + record-to-Message stream`, 150 to 400 lines**, importing
+  its wire codec (`harness/wire/{anthropic,openai}`) and its store helper
+  (`harness/store/{jsonl,sqlite}`). Emitters live beside their readers and are the codec run
+  backwards plus a store writer. Grok, at 500 lines, is the model, not Claude.
+- **Two reshape primitives, each spelled once.** Record-level and lossless for Claude:
+  `derive(src, Select, Rewrite)`, where prune, rewind and adopt are 30 to 80-line selectors.
+  IR-level for any harness in: `select messages, then emit(Claude)`, where the emitter itself
+  guarantees linear parents, no orphan `tool_use`, correct sidechain identity and the sidecar, so
+  fork, distill, splice and `pack --format session` are 20 to 50-line selectors and `loom`,
+  `linearize`, `restamp` and the emit-read-rewrite dance do not exist.
+- **A task is an append-only log of about eleven event kinds** folded by a ~450-line pure
+  reducer under one CAS. A decision is a task with a `posed`; one event poses, one answers,
+  provisional-then-confirm is the one override. Completion is self-reported and labeled so.
+  Lanes are a pure function of the session directory, never stored. One wake primitive
+  (`Watcher` with a cursor), one notify channel (`task events --since`), no board.
+- **One hand-written guide of about twelve chapters**, one generated command reference from
+  `cv schema --commands --json`, one contract with a test that fails when its command table
+  disagrees with the clap tree, a CHANGELOG whose every heading is a tag, tests where the rule
+  lives (reducer rules in the reducer, renders beside the command, one `cv-testkit` World, a
+  ~1,200-line CLI smoke file).
+
+A session mid-work asks: is this a `--kind`, a `--sort`, a selector, a route on the one API, or
+a reducer event? It is never a new top-level command, binary, server, renderer, scanner or
+harness.
+
+---
+
 ## 1. Commands
 
-Grouped help (`cv --help` shows every command under these headings; nothing is hidden):
+Grouped help (`cv --help` shows every command under these headings; nothing is hidden).
+**Read** commands are read-only over existing sessions; **Reshape** commands produce a NEW
+session id from existing ones and never touch the source (`resume` launches one); **Export**
+commands produce something that is not a session; **Fleet & live** is multi-agent coordination,
+live views and the servers; **System** is cv's own state and reference.
 
-| group | commands | what they have in common |
-|---|---|---|
-| **Read** | `ls` `show` `cat` `search` `events` `touched` `tools` `tree` `workflow` `compaction` `prompts` `lanes` `deferrals` `stats` `blame` `doctor` | read-only over existing sessions |
-| **Reshape** | `prune` `rewind` `distill` `adopt` `splice` `port` `resume` | produce a NEW session id from existing ones (the source is never touched); `resume` launches one |
-| **Export** | `export` `dataset` `pack` | produce something that is not a session |
-| **Fleet & live** | `task` `scry` `share` | multi-agent coordination and live views |
-| **System** | `index` `config` `schema` `formats` `recipes` | cv's own state and reference |
+The two tables below are generated from the clap tree, and a unit test
+(`cmd::schema::tests::contract_tables_are_the_clap_tree`) fails when they disagree with it;
+`CV_REGEN_CONTRACT=1 cargo test -p clustervision --bin cv contract_tables` rewrites them.
+
+<!-- begin: cv schema --commands -->
+| group | commands |
+|---|---|
+| **Read** | `ls` `show` `cat` `search` `events` `touched` `tools` `tree` `workflow` `compaction` `prompts` `lanes` `deferrals` `stats` `blame` `doctor` |
+| **Reshape** | `prune` `rewind` `distill` `adopt` `splice` `port` `resume` |
+| **Export** | `export` `dataset` `pack` |
+| **Fleet & live** | `task` `scry` `watch` `archive` `serve` `mcp` `share` |
+| **System** | `index` `config` `schema` `formats` `recipes` `hooks` `hook` |
+
+| command | subcommands |
+|---|---|
+| `task` | `open` `list` `show` `claim` `release` `note` `done` `status` `abandon` `supersede` `tag` `block` `decide` `resolve` `events` `sweep` `inbox` |
+| `archive` | `sync` `ls` `path` |
+| `hooks` | `install` `remove` `show` |
+<!-- end: cv schema --commands -->
 
 Renames and removals (old → new; the old name is GONE, it errors with a pointer):
 
@@ -46,7 +103,7 @@ New:
 - **`formats`** — the format census (see §7): `formats [--harness h] [--recent N] [--json]` lists
   unknown record/part/column vocabulary seen in real data. The manifest ↔ source comparison is the
   test `cargo test -p clustervision-core --test formats_manifest`, not a command.
-- **`recipes`** — the agent quickstart: the ten things agents do with cv, each as one command
+- **`recipes`** — the agent quickstart: the things agents do with cv, each as one command
   line with its JSON shape. Also printed by `cv --help`'s last line as "run `cv recipes`".
 
 ## 2. Flags — the same word means the same thing everywhere
@@ -289,8 +346,9 @@ shapes cannot drift. Mechanism (the server is `cv mcp`, so the clap tree is in-p
   "string"|"integer"|"number"|"boolean"|"path", possible_values?, default?, help, required }] }`,
   produced from clap's `Command` introspection (`CommandFactory`), including the window flags.
 - `cv mcp` reads that tree from its own clap `Command` at startup (no binary to look up, so none
-  to be stale) and registers one tool per Read/Reshape/Export/System command and per `cv task`
-  subcommand, with the same name (`ls`, `show`, `search`, `cat`, …); each argument becomes a JSON-schema
+  to be stale) and registers one tool per Read/Reshape/Export/System command and subcommand and
+  per `cv task` subcommand (a parent with no arguments of its own is not a tool), named after the
+  command with a subcommand joined by `_` (`ls`, `show`, `task_open`, `hooks_install`, …); each argument becomes a JSON-schema
   property with the clap help as its description. Positionals map to properties named after the
   argument. A call runs the same executable as `cv <cmd> <args> --json` (or without `--json` for commands that have no
   JSON form, returning text) and returns stdout; a non-zero exit returns stderr as the error.
@@ -300,6 +358,19 @@ shapes cannot drift. Mechanism (the server is `cv mcp`, so the clap tree is in-p
   blocks, one holds a cursor). `read_session`, `search_sessions`,
   `list_sessions`, `project_sessions`, `recall`, `prune_session`, `prune_retrieve` are removed
   (their replacements are `show`, `search`, `ls`, `ls --cwd`, `pack`, `prune`, `cat`).
+
+The roster, generated by the same test as §1:
+
+<!-- begin: cv mcp tools/list -->
+| group | tools |
+|---|---|
+| **Read** | `ls` `show` `cat` `search` `events` `touched` `tools` `tree` `workflow` `compaction` `prompts` `lanes` `deferrals` `stats` `blame` `doctor` |
+| **Reshape** | `prune` `rewind` `distill` `adopt` `splice` `port` `resume` |
+| **Export** | `export` `dataset` `pack` |
+| **Fleet & live** | `task_open` `task_list` `task_show` `task_claim` `task_release` `task_note` `task_done` `task_status` `task_abandon` `task_supersede` `task_tag` `task_block` `task_decide` `task_resolve` `task_events` `task_sweep` `task_inbox` |
+| **System** | `index` `config` `schema` `formats` `recipes` `hooks_install` `hooks_remove` `hooks_show` `hook` |
+| **MCP-only** | `await_omen` `observe_stream` |
+<!-- end: cv mcp tools/list -->
 
 ## 7. Format census and manifests (`cv formats`)
 
@@ -357,11 +428,12 @@ incrementally.
 
 Two further steps toward it, both real debt found in the same pass:
 
-- **This document has no mechanical check, and was factually wrong twice on the day it was
+- **This document had no mechanical check, and was factually wrong twice on the day it was
   written** (it claimed `events.rs` reads `toolUseResult` from the harness bag after that moved to
-  the block, and listed Codex among the harnesses recording a cost, which it does not). Either §3's
-  key lists get asserted against `cv schema --json`, or the prose shrinks to only what cannot be
-  checked. A contract nothing verifies decays into folklore.
+  the block, and listed Codex among the harnesses recording a cost, which it does not). §1 and §6
+  are generated and tested now (2026-10). §3's key lists are still prose: either they get asserted
+  against `cv schema --json`, or they shrink to only what cannot be checked. A contract nothing
+  verifies decays into folklore.
 - **Done (2026-10):** `handled` is inferred from the adapter's match arms; the manifests dropped
   the 242 entries that restated an arm and carry what the source cannot say — the `[upstream]` pin,
   and the `generic`/`carried`/`ignored` judgments.
