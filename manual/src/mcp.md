@@ -69,7 +69,7 @@ subcommand, becomes one MCP tool:
 
 A call runs the same `cv` executable as `cv <command> <args…> --json`, and its stdout comes
 back as the tool result. The `--json` is appended only for commands that have the flag (so `cat`,
-`tree`, `export`, `blame`, `resume`, … return text), and `json` is therefore *not* a
+`export`, `blame`, `resume`, … return text), and `json` is therefore *not* a
 property you set. A **non-zero exit is an MCP tool error** (`isError: true`) carrying the
 child's stderr, so `cv`'s exit-2 "no session matching …" reaches the agent verbatim. A
 malformed or unknown argument never reaches `cv` at all: it comes back as JSON-RPC
@@ -254,7 +254,7 @@ slower; measurements below).
 
 | event · matcher | command | prints |
 |---|---|---|
-| `SessionStart` · `compact` | `cv hook compact` | `additionalContext`: `context compacted (auto, 180,412 tokens) at message N — compaction #k`, then `cv show <id> --pre-compaction k`, `cv prompts <id> --pre-compaction k` and `cv rewind <id> --at N-1` |
+| `SessionStart` · `compact` | `cv hook compact` | `additionalContext`: `context compacted (auto, 180,412 tokens) at message N — compaction #k`, then `cv show <id> --pre-compaction k`, `cv show <id> --kind prompt,answer --pre-compaction k` and `cv rewind <id> --at N-1` |
 | `SessionStart` · `startup\|resume` | `cv hook start` | `additionalContext`: up to six of this directory's earlier sessions (id, age, messages, title, the last commit sha its transcript's tail shows) and the count of decisions owed; capped at 4,000 characters |
 | `SubagentStart`, `SubagentStop` (`async`) | `cv hook lane` | nothing; appends `{ts, event, session_id, agent_id, agent_type, transcript_path, agent_transcript_path, cwd, last_text}` to `$CLUSTERVISION_HOME/lanes.jsonl` |
 | `UserPromptSubmit` | `cv hook decisions` | `additionalContext` only when `cv task inbox` has decisions owed to `$CV_ENDPOINT` (else `cv`): the count and the commands that answer them |
@@ -262,9 +262,9 @@ slower; measurements below).
 
 Details that matter:
 
-- **compact** streams the transcript the way `cv compaction` does, giving the exact message
+- **compact** streams the transcript the way `cv show --kind compaction_boundary` does, giving the exact message
   index and ordinal, for transcripts up to 8 MiB. Above that it reads only the last 4 MiB for the
-  newest boundary's trigger and size, and points at `cv compaction <id>` for the index. The
+  newest boundary's trigger and size, and points at `cv show <id> --kind compaction_boundary,compaction_summary` for the index. The
   pre-compaction records never leave the jsonl: [`cv show --pre-compaction`](cli.md#cv-show)
   reads them and [`cv rewind --at`](cli.md#cv-rewind) resumes from before them.
 - **start** reads the catalog as it stands, without a freshness probe. A session newer than the

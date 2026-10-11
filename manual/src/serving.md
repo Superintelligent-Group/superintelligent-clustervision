@@ -244,7 +244,7 @@ stale or missing catalog row is re-ingested on the spot.
 
 #### `GET /api/session/{harness}/{id}/compactions`
 
-Every compaction boundary in transcript order, as `cv compaction --json` rows (`boundary_msg_idx,
+Every compaction boundary in transcript order, as `cv show --kind compaction_boundary --json` rows (`boundary_msg_idx,
 summary_msg_idx, trigger, pre_tokens, duration_ms, summary, pre_compaction_span`) plus a
 `headline`. `summary` is the text that seeded the next window; `pre_compaction_span` is the
 message range compacted away, in the numbering `/messages` uses.

@@ -53,7 +53,7 @@ What cv would do. `cv hook pre-compact` reads `transcript_path`, computes the se
 boundary will cover, and emits what `cv distill` already renders for a span: decisions, files
 touched, commit shas, open questions, task ids, with every identifier verbatim and a one-line
 pointer to `cv show --pre-compaction`. The summary a lane wakes up with is then the same text the
-root reads in `cv lanes`, and `cv compaction` shows one seam, authored, not two guesses.
+root reads in `cv lanes`, and `cv show --kind compaction_boundary` shows one seam, authored, not two guesses.
 
 ## Ask 2: per-agent compaction: identity on PreCompact, a threshold in frontmatter
 

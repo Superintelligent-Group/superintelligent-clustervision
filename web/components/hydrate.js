@@ -107,7 +107,7 @@ export async function getEvents(session, kind) {
   }
 }
 
-/** Every compaction boundary in a session, as `cv compaction --json` rows plus a `headline`:
+/** Every compaction boundary in a session, as `cv show --kind compaction_boundary --json` rows plus a `headline`:
  *  `{ boundary_msg_idx, summary_msg_idx, trigger, pre_tokens, duration_ms, summary,
  *  pre_compaction_span, headline }`, in the index space `/messages` uses. `null` when unavailable
  *  so the caller can fall back to scanning a window. */

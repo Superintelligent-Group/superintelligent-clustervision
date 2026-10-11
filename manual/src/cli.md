@@ -201,6 +201,9 @@ cv show da9174f4 --json --last 40      # the IR for that window
 cv show da9174f4 --pre-compaction      # the span a compaction discarded
 cv show da9174f4 --subagents           # the sub-agent forest instead of the transcript
 cv show da9174f4 --agent af19c2f1      # one sub-agent's transcript
+cv show da9174f4 --tree                # the message threading, then the sub-agent forest
+cv show da9174f4 --kind prompt,answer  # only what the person said
+cv show da9174f4 --kind compaction_boundary,compaction_summary   # the compaction seams
 ```
 
 The header line gives you harness, full id and cwd; then each message is printed turn by turn with tool calls and results inlined. A turn's label carries its [`kind`](architecture.md#the-unified-ir) when that is more than its role says — `── system · injected_context/bash_output_audience_note ──` tells you at a glance that the harness put this in the model's input and which reminder it was.
@@ -208,14 +211,61 @@ The header line gives you harness, full id and cwd; then each message is printed
 `--json` is the unified IR: session metadata including `system_prompt` and `lineage`, then
 `messages[]` with `role`, `kind`, `origin`, `content[]` (each block tagged by `type`), `usage`,
 and harness-specific facts under `extra["<harness>"]`. The [window flags](#message-windows) apply;
-`--pre-compaction [N]` sets the window for you (pair it with [`cv compaction`](#cv-compaction) to
-see where the seams are). `--subagents` lists the forest instead of the transcript, and
+`--pre-compaction [N]` sets the window for you (pair it with [`--kind compaction_boundary`](#views)
+to see where the seams are). `--subagents` lists the forest instead of the transcript, and
 `--agent <agent-id>` renders one child through its parent. `cv show <agent-id>` also works
 **without** the parent: an id that matches no session is resolved as a sub-agent id across the
 fleet — one parent renders the agent directly with a provenance banner; several (fork lineages
 share sidecars) list ready-to-paste `cv show <parent> --agent …` commands.
 
 A piped `cv show` with no window selector will not spray a whole giant transcript at you: past ~200 KB it prints the first and last 20 messages with a hint in between. Pick a window instead.
+
+#### Views
+
+`--subagents`, `--agent`, `--tree` and `--kind` replace the transcript with one view of the same session. `--kind` takes the kinds that have a view — `prompt`/`answer` and `compaction_boundary`/`compaction_summary` — and exits 2 on anything else or on two views at once.
+
+#### The threading: `--tree`
+
+`cv show <id> --tree` shows how a session's messages thread together. If any message carries a `parent_id`, you get an indented DAG; otherwise a clean numbered list. Tool turns and sub-agent spawns are flagged, and the sub-agent forest follows. It covers the whole session; with `--json` you get the IR itself, whose messages carry the same `parent_id`.
+
+```sh
+cv show da9174f4 --tree
+```
+
+```text
+# the flux inference refactor
+claude · da9174f4-… · 87 msg
+
+• user  walk the type checker and find where flux is ignored
+• assistant [🔧 tool, ↳ sub-agent (Task)]  dispatching a search…
+  • tool [↩ result]  found 3 call sites …
+  • assistant  here's the plan …
+```
+
+#### What the person said: `--kind prompt,answer`
+
+Only what the person said. Every human-typed prompt (`kind: prompt`, `origin: human`) and every `AskUserQuestion` answer (the tool results that begin `The user answered` / `Your questions have been answered`), in order, each with its message index and local timestamp. An orchestrator re-reading its brief after a compaction, or a reviewer asking "what was actually asked for?", gets the 40 lines that matter out of a 10,000-record transcript.
+
+```sh
+cv show 0c315aee --kind prompt,answer                    # [idx] time  user|answer, then the full text
+cv show 0c315aee --kind prompt,answer --json             # [{index, timestamp, kind: prompt|answer, text}]
+cv show 0c315aee --kind prompt,answer --pre-compaction   # only the span the first compaction discarded
+cv show 0c315aee --kind prompt --range 0..500            # typed prompts only, in a window
+```
+
+The bookkeeping rows a slash command leaves behind (`<command-name>/compact</command-name>`, `<local-command-stdout>…`) are not prompts — Claude Code ≥ 2.1 writes them as `user` records, and the adapter classifies them as harness notices — so `/compact` appears once, as the line the person typed. Prompts are printed whole, never truncated; `cv show --around <index>` jumps to the conversation around any of them.
+
+#### The compaction seams: `--kind compaction_boundary,compaction_summary`
+
+Every context-compaction boundary in a session: each `/compact` (or auto-compaction), its trigger, the pre-compaction context size, and the summary that seeded the next window.
+
+```sh
+cv show 77230e3d --kind compaction_boundary,compaction_summary               # trigger · pre-size · summary head
+cv show 77230e3d --kind compaction_boundary,compaction_summary --summaries   # each summary in full
+cv show 77230e3d --kind compaction_boundary --json   # boundaries + each one's pre-compaction span
+```
+
+Boundaries are found by [`MessageKind::CompactionBoundary`](architecture.md#the-unified-ir), not by any harness's private field, so this works the same across harnesses that record compaction at all. Either kind selects the same rows, each boundary paired with its summary, over the whole session. To *read* the span a compaction discarded, jump straight to it with `cv show --pre-compaction`.
 
 ### `cv cat`
 
@@ -304,24 +354,6 @@ cv tools 3b829648 --json
 
 `--timeline` is also how you find the `tool_use_id` to hand to [`cv cat`](#cv-cat).
 
-### `cv tree`
-
-Show how a session's messages thread together. If any message carries a `parent_id`, you get an indented DAG; otherwise a clean numbered list. Tool turns and sub-agent spawns are flagged.
-
-```sh
-cv tree da9174f4
-```
-
-```text
-# the flux inference refactor
-claude · da9174f4-… · 87 msg
-
-• user  walk the type checker and find where flux is ignored
-• assistant [🔧 tool, ↳ sub-agent (Task)]  dispatching a search…
-  • tool [↩ result]  found 3 call sites …
-  • assistant  here's the plan …
-```
-
 ### `cv workflow`
 
 A [`Workflow`](https://docs.claude.com/en/docs/claude-code)-tool run, first-class: its phase tree, the agents under each phase (with state, tokens, tool-calls, duration, and a result preview), run totals, the run's `log()` lines and aggregated **result**, and the driving script. Without a `<run_id>`, it lists the session's runs.
@@ -357,30 +389,6 @@ Ghost launches are reported with everything the crash left behind: the run id re
 ```
 
 In `--json` the list form emits `{"runs": […], "ghost_launches": […]}`.
-
-### `cv compaction`
-
-Every context-compaction boundary in a session: each `/compact` (or auto-compaction), its trigger, the pre-compaction context size, and the summary that seeded the next window.
-
-```sh
-cv compaction 77230e3d               # list boundaries (trigger · pre-size · summary head)
-cv compaction 77230e3d --summaries   # print each summary in full
-cv compaction 77230e3d --json        # boundaries + each one's pre-compaction span
-```
-
-Boundaries are found by [`MessageKind::CompactionBoundary`](architecture.md#the-unified-ir), not by any harness's private field, so this works the same across harnesses that record compaction at all. To *read* the span a compaction discarded, jump straight to it with [`cv show --pre-compaction`](#cv-show).
-
-### `cv prompts`
-
-Only what the person said. Every human-typed prompt (`kind: prompt`, `origin: human`) and every `AskUserQuestion` answer (the tool results that begin `The user answered` / `Your questions have been answered`), in order, each with its message index and local timestamp. An orchestrator re-reading its brief after a compaction, or a reviewer asking "what was actually asked for?", gets the 40 lines that matter out of a 10,000-record transcript.
-
-```sh
-cv prompts 0c315aee                       # [idx] time  user|answer, then the full text
-cv prompts 0c315aee --json                # [{index, timestamp, kind: prompt|answer, text}]
-cv prompts 0c315aee --pre-compaction      # only the span the first compaction discarded (--pre-compaction 2 for the second)
-```
-
-The bookkeeping rows a slash command leaves behind (`<command-name>/compact</command-name>`, `<local-command-stdout>…`) are not prompts — Claude Code ≥ 2.1 writes them as `user` records, and the adapter classifies them as harness notices — so `/compact` appears once, as the line the person typed. Prompts are printed whole, never truncated; `cv show --around <index>` jumps to the conversation around any of them.
 
 ### `cv lanes`
 

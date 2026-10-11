@@ -52,7 +52,7 @@ cv --version               # cv 0.14.0 (<git sha>) — lags the checkout? run ma
 cv ls                         # list recent sessions across every harness
 cv search "retry backoff"     # full-text search
 cv show <id> --last 40        # print the last 40 turns (prefix-match on the id is fine)
-cv tree <id>                  # the message thread as a tree
+cv show <id> --tree           # the message thread as a tree
 cv port <id> --harness codex  # port a session into another harness
 cv scry                       # live-follow every agent on your machine
 ```

@@ -24,7 +24,7 @@ forest, the deferral linter is the closeout gate, and the inbox is what the huma
 | `cv lanes --stranded` | lanes that stopped saying they are waiting for a notification nothing will send | brief lanes to FOREGROUND-wait; resume a stranded lane with one message naming what finished |
 | `cv deferrals <session> --open-tasks` | every promise in the transcript, matched against the store | run it at every closeout; an UNMATCHED line is a task to open now |
 | `cv task show ID --notes-grep PAT` / `--notes-last N` | query a long task without loading it | a 100-note integrator task dumped whole killed a 13-hour lane; **query, never dump** |
-| `cv prompts <session>` | only what the human said | re-read the brief before any status to the human |
+| `cv show <session> --kind prompt,answer` | only what the human said | re-read the brief before any status to the human |
 | `cv show <session> --pre-compaction` | the span a compaction summary lost | after any compaction, read the full turns, not the summary: tactics live in the turns |
 | `cv prune` | a resumable copy with bulky payloads stashed | the account-move case: a running process follows the rotated credential, so prune is for context, not for accounts |
 

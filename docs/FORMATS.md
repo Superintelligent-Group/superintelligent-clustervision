@@ -202,12 +202,12 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
   (`~/.claude/debug/<sessionId>.txt`) exist only when run with `--debug`. The installed binary
   (`~/.local/share/claude/versions/<v>`, Bun-compiled Mach-O) has its JS in plaintext — `grep -a -b -o`
   + `dd` reads any behavior; older versions stay in that dir, which dates a change.
-- **cv surfacing:** `cv tree <id>` appends the sub-agent forest (direct + per-workflow, with journaled
+- **cv surfacing:** `cv show <id> --tree` appends the sub-agent forest (direct + per-workflow, with journaled
   outcomes); `cv show <id> --subagents` lists every agent with its return; `cv show <id> --agent <aid>`
   renders one sub-agent transcript; `cv events <id> --subagents` extracts the whole forest's tool activity,
   attributed per agent. **`cv workflow <id> [<runId>]`** renders a run's phase tree → agents → outcomes (+
   `--script`); **`cv tools <id>`** is the cross-agent tool-analytics surface (aggregate / `--agent` /
-  `--tool` / `--workflow` / `--across` / `--timeline`); **`cv compaction <id>`** lists every boundary +
+  `--tool` / `--workflow` / `--across` / `--timeline`); **`cv show <id> --kind compaction_boundary`** lists every boundary +
   summary (`--summaries` for full text); **`cv show <id> --pre-compaction <N>`** reads the lost pre-span.
 
 ## Codex CLI — `~/.codex/`
@@ -701,12 +701,12 @@ WAL-mode and the CLI is typically running — we open READ-ONLY and never checkp
   `summaries/<agent_id>/history_<hex>.md` beside `sessions.db` (~300 KB of pre-compaction
   markdown; referenced, not read). A synthetic `CompactionBoundary` is emitted before each pair
   (`extra["devin"]["compaction"]` = `{summarized_from, pre_chain_head, source, history_path,
-  edited_files, todo_list}` + `compactMetadata` trigger/preTokens), so `cv compaction` works.
+  edited_files, todo_list}` + `compactMetadata` trigger/preTokens), so `cv show --kind compaction_boundary` works.
 - **IR mapping:** prefix system → `system_prompt` kind (also joined into `Session::system_prompt`);
   other system and non-input user rows → `injected_context`; `summarized_from` non-null →
   `compaction_summary` regardless of role; a tool row's `chisel/tool_failure` → `is_error` +
   `details.failure_reason`; `chisel/user_question_answers` (dialog answers, "User answered your
-  questions:") → `extra`, which `cv prompts` picks up; `subagent/profile_name|model|agent_id|
+  questions:") → `extra`, which `cv show --kind answer` picks up; `subagent/profile_name|model|agent_id|
   chain_node_id` on the parent's completion rows → `extra["devin"]["subagent"]` (the tool row's
   `tool_call_id` is the child's `spawned_by_tool_use`); assistant
   metrics → `Usage`, `generation_model` → `model` (and the session's

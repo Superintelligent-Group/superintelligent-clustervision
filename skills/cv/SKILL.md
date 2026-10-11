@@ -12,9 +12,11 @@ Every command takes a session id prefix (8 chars is enough) or an `agent-<id>`.
 
 The pre-compaction records are still in your transcript; only your context lost them.
 
-- `cv compaction <id>` — every boundary (trigger, tokens, message index).
+- `cv show <id> --kind compaction_boundary,compaction_summary` — every boundary (trigger, tokens,
+  message index).
 - `cv show <id> --pre-compaction N` — the span the Nth compaction discarded, verbatim.
-- `cv prompts <id> --pre-compaction N` — only the human prompts of that span (cheap first look).
+- `cv show <id> --kind prompt,answer --pre-compaction N` — only the human prompts of that span
+  (cheap first look).
 - `cv rewind <id> --at <msg|sha>` — a NEW resumable session of the agent as it stood at a
   message or at the commit it made; `claude --resume <new-id> --fork-session`.
 
