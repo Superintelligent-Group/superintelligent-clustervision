@@ -108,8 +108,10 @@ impl Adapter for Zed {
         Harness::Zed
     }
 
+    /// The `threads/` dir holding `threads.db` (a root is a directory; the db itself is a
+    /// catalog file-watch, see `catalog::watches_for`).
     fn storage_root(&self) -> Option<PathBuf> {
-        self.db.clone()
+        self.db.as_deref().and_then(Path::parent).map(Path::to_path_buf)
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {

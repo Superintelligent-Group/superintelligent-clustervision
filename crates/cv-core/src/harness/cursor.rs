@@ -113,8 +113,10 @@ impl Adapter for Cursor {
         Harness::Cursor
     }
 
+    /// `Cursor/User`: the dir under which both the global `state.vscdb` and every
+    /// `workspaceStorage/<hash>/state.vscdb` live. The db files are catalog file-watches.
     fn storage_root(&self) -> Option<PathBuf> {
-        self.global_db().or_else(|| self.user_dir.clone())
+        self.user_dir.clone()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {

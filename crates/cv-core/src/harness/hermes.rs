@@ -217,8 +217,24 @@ impl Adapter for Hermes {
         Harness::Hermes
     }
 
+    /// The dir holding the first `state.db` — the Hermes home, or a profile dir. A root is a
+    /// directory: `emit_hermes` writes `<root>/state.db`, which is the same file this adapter
+    /// reads first.
     fn storage_root(&self) -> Option<PathBuf> {
-        self.dbs.first().cloned()
+        self.dbs.first().and_then(|db| db.parent()).map(Path::to_path_buf)
+    }
+
+    /// Every dir holding a `state.db` (home + each profile). The db files themselves are the
+    /// catalog's per-session file-watches, so growth in place is still noticed.
+    fn storage_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .dbs
+            .iter()
+            .filter_map(|db| db.parent())
+            .map(Path::to_path_buf)
+            .collect();
+        roots.dedup();
+        roots
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {

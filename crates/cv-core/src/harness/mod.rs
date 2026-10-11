@@ -154,6 +154,9 @@ pub trait Adapter: Send + Sync {
     fn harness(&self) -> Harness;
 
     /// The on-disk root this adapter reads from (already resolved against $HOME), if it exists.
+    /// Always a **directory** — for a SQLite-backed store, the dir holding the database — so an
+    /// emitter given it as `out_dir` can write beside what the reader reads, and the catalog can
+    /// watch it as a dir (the database files are its per-session file-watches).
     fn storage_root(&self) -> Option<PathBuf>;
 
     /// Every root this adapter reads sessions from, [`storage_root`](Adapter::storage_root) first.

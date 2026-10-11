@@ -3233,17 +3233,10 @@ fn emit_hermes(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
 
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    // `out_dir` may be a directory to drop state.db into, OR the state.db file itself — the hermes
-    // adapter's storage_root() returns the .db path, so `cv convert --to hermes` (no --out) passes
-    // the existing file here. Treating it as a dir made `create_dir_all` fail with "File exists".
-    let db_path = if out_dir.is_file() || out_dir.extension().is_some_and(|e| e == "db") {
-        out_dir.to_path_buf()
-    } else {
-        out_dir.join("state.db")
-    };
-    if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
+    // `out_dir` is a directory — the Hermes home or a profile dir, which is what the adapter's
+    // `storage_root()` names — and the store is its `state.db`.
+    let db_path = out_dir.join("state.db");
+    fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
     let conn = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
 
     // Create the (subset of) v14 schema if the DB is fresh. `IF NOT EXISTS` makes append safe.
