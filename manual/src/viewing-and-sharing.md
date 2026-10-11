@@ -1,4 +1,4 @@
-# The desktop & web app
+# Viewing & sharing: the app and `cv share`
 
 Everything `cv` does on the command line, clustervision also does with pixels. 🔮 The app is one static web UI — a header, a drop zone, a row of view tabs, and the active view — that runs two ways, with no code differences between them:
 
@@ -9,7 +9,7 @@ Both open on a small **bundled sample** so the app is never empty, then quietly 
 
 ## The views
 
-The tab bar across the top switches between eight views. They all read from one shared **pool** of sessions, so whatever you've loaded — your local corpus, a dropped zip, a File → Open import — is visible everywhere at once.
+The tab bar across the top switches between the views. They all read from one shared **pool** of sessions, so whatever you've loaded — your local corpus, a dropped zip, a File → Open import — is visible everywhere at once.
 
 ### 🗂 Sessions — the reading room
 
@@ -25,7 +25,7 @@ Sessions belong to repositories (their `cwd`), and over months many agents acros
 
 ### 📈 Timeline — the scrying glass
 
-A bird's-eye view of every session across all harnesses and all of time. Up top is a **GitHub-style activity heatmap** — a constellation of your working days, one cell per day, shaded by how many sessions you ran. Click a lit cell to jump that day into the feed below (it flashes). Above the heatmap sit a few at-a-glance numbers (active days, busiest day, days spanned), and below it a **day-grouped feed** — every session as a node, newest first, with a harness legend and totals. Click a node to open it. (The screenshot on the [Introduction](introduction.md) page is this view.)
+A bird's-eye view of every session across all harnesses and all of time. Up top is a **GitHub-style activity heatmap** — a constellation of your working days, one cell per day, shaded by how many sessions you ran. Click a lit cell to jump that day into the feed below (it flashes). Above the heatmap sit a few at-a-glance numbers (active days, busiest day, days spanned), and below it a **day-grouped feed** — every session as a node, newest first, with a harness legend and totals. Click a node to open it. (The screenshot on the [first page](getting-started.md) is this view.)
 
 ### 🔍 Compare — side-by-side, aligned
 
@@ -49,13 +49,9 @@ Generation calls **OpenRouter** directly, in the desktop app and the browser ali
 
 ### 📡 Fleet — the live dashboard
 
-A live window onto a running [`cv serve`](daemon.md). It polls the server's HTTP API (default `http://localhost:7777`) every ~2 seconds and shows a **recent-sessions** feed across every harness. Pause/resume and reconnect controls live in the toolbar.
+A live window onto a running [`cv serve`](serving.md). It polls the server's HTTP API (default `http://localhost:7777`) every ~2 seconds and shows a **recent-sessions** feed across every harness. Pause/resume and reconnect controls live in the toolbar.
 
-In the **desktop app** this Just Works — it bundles and launches `cv serve` on startup, so the Fleet tab is live the moment you open the app. In a **browser** it works too, as long as you have `cv serve` running locally. If the API is unreachable, Fleet shows a friendly "start `cv serve`" hint and lets you load a **static sessions `.json`** export instead. See [the server chapter](daemon.md) for what `cv serve` exposes; what the agents are committing to lives in [tasks](tasks.md).
-
-### 🧬 OpenSession — the standard
-
-An in-app presentation of the OpenSession format — the unified representation every view reads. It's the schema, the eight design principles ("the working directory is metadata, never identity"), and the block types, all on one page. For the full treatment see the [OpenSession standard](opensession.md) chapter.
+In the **desktop app** this Just Works — it bundles and launches `cv serve` on startup, so the Fleet tab is live the moment you open the app. In a **browser** it works too, as long as you have `cv serve` running locally. If the API is unreachable, Fleet shows a friendly "start `cv serve`" hint and lets you load a **static sessions `.json`** export instead. See [the server chapter](serving.md) for what `cv serve` exposes; what the agents are committing to lives in [tasks](tasks.md).
 
 ## Loading your sessions
 
@@ -113,3 +109,52 @@ The browser build is fully capable, but the Tauri desktop shell adds the things 
 - A **native menu** (File / Edit / View / Help — Edit so `Cmd+C`/`Cmd+V` work in the transcript, which is the whole point of a viewer), DevTools, and **window state persistence** across launches.
 
 Whichever way you run it, the promise on the footer holds: **all parsing happens locally; nothing is uploaded.**
+
+## Sharing a transcript: `cv share`
+
+`cv share` is asciinema for agent sessions: one command, one `.html` file, and your whole transcript is something you can post to a forum, attach to a bug report, or DM to a friend. The recipient needs **nothing installed** — they double-click the file and read it in any browser, offline.
+
+```sh
+cv share da9174f4                       # → ./da9174f4….html, redacted
+cv share da91 --out incident.html      # pick the filename
+cv share da91 --harness codex          # disambiguate, like everywhere else
+cv share da91 --no-redact              # keep secrets (loud stderr warning)
+```
+
+### What you get
+
+A single self-contained document — inline CSS, inline JS, inline data. No CDN links, no fetches, no telemetry; a `Content-Security-Policy` meta tag in the file forbids the document from loading anything remote even if it wanted to. Open it from `file://` and everything works.
+
+The page itself:
+
+- **a sticky header** — 🔮, the session title, a color-coded harness badge, model, date, working directory (shortened to `~/…`), short id, and a live message count;
+- **role-styled message cards** with timestamps — user / assistant / system / tool each get their own accent;
+- **collapsible folds** for thinking blocks, tool calls, and tool results — each fold's summary line previews the content (the command being run, the file being edited, the result size) so a collapsed transcript still *reads*;
+- **code blocks** with a tiny built-in syntax highlighter (no JS dependencies — it's ~40 lines of inline script operating on text only);
+- **keyboard nav**: `j`/`k` move between messages, `x` toggles the focused message's folds, and the header button expands/collapses everything;
+- **dark theme by default** (the 🔮 violet), light theme automatically via `prefers-color-scheme`;
+- **a footer** crediting the `clustervision` version that produced the file.
+
+Every session-derived string is HTML-escaped on the way in — a transcript containing `<script>` renders as text, never as markup.
+
+### Redaction is the default
+
+Before anything is written, every message passes through the same scrubber as [`cv export --redact`](cli.md#cv-export): API keys, private-key blocks, JWTs, emails, `password = "…"` assignments, and keyword-adjacent high-entropy blobs are replaced with `[REDACTED:kind]` placeholders. The artifact wears its provenance honestly:
+
+- redacted (the default): a **🛡 redacted** badge in the header, and a footer line — *"this transcript was redacted — N secrets scrubbed"*;
+- `--no-redact`: a **⚠ unredacted** badge, a *"shared without redaction"* footer, and a stderr warning at generation time.
+
+The scrub counts are printed to stderr either way you'd expect:
+
+```
+🔮 wrote incident.html — 400 message(s), 593.6 KB
+🛡 redacted 13 item(s): 0 api_key, 0 private_key, 0 jwt, 13 email, 0 blob, 0 assignment
+```
+
+Redaction is a best-effort pattern scrubber, not a guarantee — for anything sensitive, skim the artifact before posting it. (It's a single readable HTML file; skimming is the point.)
+
+### Big sessions
+
+Rendering **streams**: each message is parsed, scrubbed, rendered, written to disk, and dropped, so peak memory stays at roughly the largest single message no matter how long the transcript is. A multi-thousand-message session shares fine.
+
+The honest limit is the *output* size, not memory: the artifact contains the full session, so a session with megabytes of tool output becomes an HTML file of megabytes (a ~2,700-message codex session lands around 7 MB). Browsers open that without complaint, but it's a chunky attachment. There's no `--range` on `share` yet; if you want to share a slice of a huge session, [`splice`](cli.md#cv-splice) the span you care about into a new session and share *that*.

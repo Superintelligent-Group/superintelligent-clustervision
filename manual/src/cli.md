@@ -816,7 +816,7 @@ It gets its own chapter: **[`cv pack` — the context compiler](pack.md)**.
 
 ### `cv task`
 
-The fleet's durable dispatch objects: open/claim/note/done, and the decisions posed on them. Completion is self-reported and labeled so — cv never claims to have observed what it has not. The verbs are under [`cv task` in the reference](reference.md#cv-task); the inbox page is served by [`cv serve`](daemon.md).
+The fleet's durable dispatch objects: open/claim/note/done, and the decisions posed on them. Completion is self-reported and labeled so — cv never claims to have observed what it has not. The verbs are under [`cv task` in the reference](reference.md#cv-task); the inbox page is served by [`cv serve`](serving.md).
 
 `propose`, `reroute`, `pass`, `refute`, `verify`, `debt` and `stats` were removed in 0.15.0 with the land facet, `split` and `watch` with it; each errors with a pointer. This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the three laws, and a worked end-to-end example.
 
@@ -846,7 +846,7 @@ cv scry --interval 1
       assistant found it — the walker drops flux constraints here …
 ```
 
-This is the CLI face of [the daemon](daemon.md), which mirrors the same activity into a live feed for your whole fleet (and powers the MCP `await_omen` block-until-match primitive).
+This is the CLI face of [`cv watch`](serving.md), which mirrors the same activity into a live feed for your whole fleet (and powers the MCP `await_omen` block-until-match primitive).
 
 ### `cv share`
 
@@ -858,7 +858,7 @@ cv share da91 --out incident.html  # pick the filename
 cv share da91 --no-redact          # keep secrets (loud stderr warning)
 ```
 
-It gets its own chapter: **[Sharing transcripts](share.md)**.
+The rest is in **[Viewing & sharing](viewing-and-sharing.md#sharing-a-transcript-cv-share)**.
 
 ---
 

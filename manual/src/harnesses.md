@@ -40,7 +40,7 @@ All paths are the real ones the adapters look at. `~` is your home dir; `<AppSup
 | **Zed (agent panel)** | `<data_dir>/Zed/threads/threads.db` (**SQLite**) | ✓ | — | One DB, one row per thread; `data` BLOB = **zstd-compressed JSON** (pure-Rust decode). Three blob generations (versionless / agent1 0.1–0.2 / agent2 0.3 tagged-enum). cwd + git from the project snapshot; **subagents** linked by `parent_id`. |
 | **Devin CLI** (Cognition) | `~/.local/share/devin/cli/sessions.db` (**SQLite**) | ✓ | — | Closed-source, opened read-only (the CLI keeps writing while we read). `message_nodes` is a **forest** of re-prefixed copies — the transcript is the `main_chain_id`→root walk. Thinking + parallel tool calls + `sealed` signatures preserved. |
 | **ChatGPT export** | a `conversations.json` you register with `cv config --add-export <path>` | ✓ | — | The "Export data" archive. One file = many conversations; each is a `mapping` DAG (we walk root→`current_node`). Opt-in (no fixed home); deduped by id. |
-| **OpenSession** | `*.opensession.json` (or a `*.json` with an `open_session` key) under a dir you register with `cv config --add-export <path>` | ✓ | — | cv's own interchange format, written by `cv export --format json` and read back in. 0.3 *is* the IR; 0.2 spellings are accepted on the way in. See [OpenSession](opensession.md). |
+| **OpenSession** | `*.opensession.json` (or a `*.json` with an `open_session` key) under a dir you register with `cv config --add-export <path>` | ✓ | — | cv's own interchange format, written by `cv export --format json` and read back in. 0.3 *is* the IR; a 0.2 document is refused with a pointer. See [OpenSession](conversion.md#the-opensession-standard). |
 | **Claude.ai export** | a `conversations.json` you register with `cv config --add-export <path>` | ✓ | — | The claude.ai "Export data" archive. One file = many conversations; linear `chat_messages[]` (text/thinking/tool_use/tool_result). Opt-in; deduped by id. |
 
 `✓` = supported · `—` = not supported.
@@ -96,7 +96,7 @@ updated most recently.
 ## Sub-agents
 
 Several harnesses spawn child agents, and clustervision surfaces those as nested sessions you can browse
-as a tree — see [sub-agent trees in the app](app.md).
+as a tree — see [sub-agent trees in the app](viewing-and-sharing.md).
 
 - **Claude Code** writes Task sub-agents to a sibling `<sid>/subagents/agent-<id>.jsonl` (each with a
   `.meta.json` carrying `agentType` and `description`). The discovery walk is depth-limited so these

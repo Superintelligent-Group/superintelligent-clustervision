@@ -105,7 +105,7 @@ cv scry
   - a **Structure** explorer (`<cv-forest>`) — Overview / Forest / Workflows / Tools / Compaction tabs that turn a run's anatomy into something you can drill through.
 
   The browser build is zero-install — drop a harness zip, nothing uploaded (all WASM).
-- **🔌 Hooks** — two Claude Code hooks make a harness use clustervision while it runs: SessionEnd → `cv archive sync` archives everything, SessionStart → `cv ls --cwd` surfaces this project's prior sessions. Recipe in the manual's [Hooking a harness in](manual/src/integrations.md).
+- **🔌 Hooks** — `cv hooks install claude` wires five hooks into Claude Code: a compaction becomes visible and reversible from the model's context, a new session starts knowing this directory's history, lanes land in a ledger, owed decisions surface, and an edit to a file another live session is working on asks first. See the manual's [hooks section](manual/src/mcp.md#hooks-cv-inside-a-running-session).
 
 ## 📖 Manual
 

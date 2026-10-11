@@ -78,7 +78,7 @@ A tab bar (`<cv-app>`) switches between views, all reading from the merged pool:
 - **📡 Fleet** (`<cv-fleet>`) — a live dashboard over a running `cv serve` HTTP
   API. See **Fleet dashboard** below.
 
-The OpenSession format itself is documented in the manual (`manual/src/opensession.md`); the
+The OpenSession format itself is documented in the manual (`manual/src/conversion.md`, "The OpenSession standard"); the
 footer links there.
 
 ## ⚡ Loom: generation & the branch tree

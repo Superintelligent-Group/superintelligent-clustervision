@@ -33,7 +33,7 @@ text), **unexpected** when it could have and didn't. Only the unexpected ones fa
 Claude Code's Task tool spawns sub-agents whose transcripts are normally invisible. clustervision
 finds them and nests them under the parent session in the app's transcript view (lazy-loaded,
 labeled by task prompt). There can be thousands, so they're never dumped into the main list. See
-[The app](app.md).
+[The app](viewing-and-sharing.md).
 
 ### The MCP server isn't responding
 

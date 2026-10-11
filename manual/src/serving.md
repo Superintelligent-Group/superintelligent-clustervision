@@ -2,7 +2,7 @@
 
 Where most of [`cv`](cli.md) is your interactive map of *this* machine, three commands are the
 long-running side of it: the pieces that turn a pile of per-machine, per-harness session files into
-a single durable **archive**, and serve the live state as JSON so [the app](app.md)'s dashboard and
+a single durable **archive**, and serve the live state as JSON so [the app](viewing-and-sharing.md)'s dashboard and
 [the task inbox](tasks.md) can render it. 🔮 (They were the `cvd` binary until 0.15.0; `cvd` is a
 one-release shim that prints the new spelling and runs it.)
 
@@ -96,7 +96,7 @@ cv serve --host 0.0.0.0 --token s3cret   # expose beyond loopback (demands a tok
 ```
 
 `serve` is a tiny synchronous HTTP server (a small worker pool, no async stack). It answers the
-read API [the app](app.md)'s dashboard polls (and the desktop app calls in-process), serves the
+read API [the app](viewing-and-sharing.md)'s dashboard polls (and the desktop app calls in-process), serves the
 [task inbox](tasks.md) page with the routes its buttons use, and with `--web` hosts the dashboard. It binds
 `127.0.0.1:7777` by default and runs until killed.
 
@@ -351,6 +351,6 @@ cv serve --web ./web           # the dashboard, the inbox and the API on :7777
 
 …with the archive home on a synced folder so every machine contributes to one corpus. From there:
 
-- browse and visualize it all in [the app](app.md),
+- browse and visualize it all in [the app](viewing-and-sharing.md),
 - tail the live feed with `cv scry` (see [the CLI](cli.md)),
 - and coordinate running agents through [tasks](tasks.md).

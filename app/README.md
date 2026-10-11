@@ -60,7 +60,7 @@ The desktop app answers session reads **natively** instead of fetching `http://l
 `path` is any read-API path (`/api/sessions`, `/api/session/claude/<id>/messages`, …) and
 `query` its raw query string. It calls `cv_core::api::route_json`, the same function `cv serve`
 answers `/api/*` with, so a session cannot look different between the server and the app; the
-routes and shapes are the ones in the manual's [server chapter](../manual/src/daemon.md#routes).
+routes and shapes are the ones in the manual's [server chapter](../manual/src/serving.md#routes).
 The web UI calls it through `apiGet(path, params)` in `web/components/hydrate.js`, which uses
 `fetch` against `cv serve` in a browser instead.
 

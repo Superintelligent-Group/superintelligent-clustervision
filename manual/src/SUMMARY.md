@@ -1,35 +1,30 @@
 # Summary
 
-[Introduction](introduction.md)
+[clustervision: install & quick start](getting-started.md)
 
-# Getting started
+# Using cv
 
-- [Install & quick start](getting-started.md)
 - [The CLI: `cv`](cli.md)
 - [Search (full-text & semantic)](search.md)
 - [`cv pack` — the context compiler](pack.md)
 - [Reshaping a lane: `distill`, `splice`, `rewind`, `adopt`](reshaping.md)
+- [Viewing & sharing: the app and `cv share`](viewing-and-sharing.md)
 
 # The fleet
 
-- [The server and archive](daemon.md)
-- [MCP — agents reading each other's minds](mcp.md)
-- [Hooking a harness in](integrations.md)
+- [Serving: `cv serve`, `cv watch`, `cv archive`](serving.md)
+- [Inside the harness: MCP and hooks](mcp.md)
 - [The task substrate](tasks.md)
 - [Running a swarm: the orchestrator's instruments](swarm.md)
 
-# Viewing & porting
+# Harnesses
 
-- [The desktop & web app](app.md)
-- [Sharing transcripts: `cv share`](share.md)
-- [Cross-harness conversion](conversion.md)
+- [Cross-harness conversion and OpenSession](conversion.md)
 - [Harnesses & where they store sessions](harnesses.md)
-- [The OpenSession standard](opensession.md)
+- [Adding a harness](adding-a-harness.md)
 
 # Reference
 
 - [Command reference](reference.md)
-
 - [Architecture](architecture.md)
-- [Adding a harness](adding-a-harness.md)
 - [Troubleshooting & FAQ](troubleshooting.md)

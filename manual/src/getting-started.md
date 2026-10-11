@@ -1,4 +1,30 @@
-# Install & quick start
+# 🔮 clustervision
+
+> *Vibecoding is a clusterfuck. When it gets hazy, you need clustervision.*
+
+**Find, read, search, port, and visualize every AI coding-agent session you've ever run — across every harness.**
+
+<img src="screenshot-timeline.png" alt="the activity-heatmap timeline" width="100%">
+
+You spend hours teaching an agent your codebase — the dead ends, the decisions, the hard-won understanding. Then it becomes one of hundreds of `.jsonl` files in a folder named after a path, and you never find it again. Most harnesses only resume from the *exact directory* a session ran in. And every tool speaks its own dialect, so a Claude session can't be continued in Codex.
+
+clustervision fixes all three. It parses [every harness it knows](harnesses.md) into one unified representation, then lets you:
+
+- 🔎 **Search** every session — by keyword or by *meaning*.
+- 🖥️ **Browse** your whole corpus in a desktop/web app — a Projects lens, an activity heatmap, side-by-side compare, stats, and **sub-agent trees**.
+- 🚀 **Port** a session into another harness (any of the [emit targets](conversion.md)) or out of its directory jail — one verb, `cv port`.
+- 🧠 **Let running agents read each other's minds** via an MCP server — plus a task substrate: durable dispatch objects and the decisions posed on them, every completion labeled as the agent's own word.
+- 📦 **Pack** your whole history into context for the task you're about to start, so you never explain your codebase to an agent twice.
+
+It's open source (MIT/Apache-2.0) and runs **entirely locally** — nothing is uploaded.
+
+## How to read this manual
+
+- New here? [Install](#install) and take [the 60-second tour](#60-second-tour) below.
+- Living in the terminal? **[The CLI](cli.md)** is your map, and the **[command reference](reference.md)** has every flag.
+- Running a fleet of agents? See **[`cv serve` / `cv watch`](serving.md)**, **[MCP](mcp.md)**, and **[tasks](tasks.md)**.
+- Want the pretty pictures? **[The app](viewing-and-sharing.md)**.
+- Curious how it all works? **[Architecture](architecture.md)**.
 
 ## Install
 
@@ -40,11 +66,11 @@ prefix lists the candidates instead of guessing.
 [window flags](cli.md#message-windows) — `--first`, `--last`, `--range A..B`, `--around`,
 `--max-bytes` — work on `cv show` and `cv export` alike.
 
-> **If you're an agent**, run `cv recipes` first: ten command lines with the exact JSON keys each
-> one returns.
+> **If you're an agent**, run `cv recipes` first: one command line per task, with the exact JSON
+> keys each one returns.
 
 ## The desktop app
 
 Prefer a GUI? The desktop app reads **all your local sessions natively** and lays them out — a
-Projects lens, an activity-heatmap timeline, compare, stats, a loom composer, a live fleet
-dashboard, and sub-agent trees. See **[The desktop & web app](app.md)**.
+Projects lens, an activity-heatmap timeline, compare, stats, a splice composer, a live fleet
+dashboard, and sub-agent trees. See **[Viewing & sharing](viewing-and-sharing.md)**.

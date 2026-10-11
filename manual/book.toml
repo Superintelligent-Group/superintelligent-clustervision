@@ -23,3 +23,12 @@ enable = true
 # built binary (`$CV_BIN`, else `target/debug/cv`). Build cv before the book.
 [preprocessor.cv]
 command = "python3 ../tools/mdbook-cv.py"
+
+# Pages that were merged into others keep answering at their old URLs (the web app links one).
+[output.html.redirect]
+"/introduction.html" = "getting-started.html"
+"/daemon.html" = "serving.html"
+"/app.html" = "viewing-and-sharing.html"
+"/share.html" = "viewing-and-sharing.html#sharing-a-transcript-cv-share"
+"/integrations.html" = "mcp.html#hooks-cv-inside-a-running-session"
+"/opensession.html" = "conversion.html#the-opensession-standard"
