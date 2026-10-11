@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 /// Every Claude root cv reads (the store plus `CLUSTERVISION_CLAUDE_ROOTS` / `claude-roots`
-/// entries): sessions and agents are looked up across all of them.
+/// entries): the fleet lookup spans all of them; named here only in a miss's message.
 fn roots() -> Result<Vec<PathBuf>> {
     let roots = cv_core::harness::for_harness(Harness::Claude)
         .map(|a| a.storage_roots())
@@ -26,8 +26,8 @@ fn roots() -> Result<Vec<PathBuf>> {
 }
 
 /// A session spec → its file, with a miss or an ambiguity as a usage error (exit 2).
-fn session(roots: &[PathBuf], spec: &str) -> Result<SessionFile> {
-    adopt::find_session(roots, spec).or_else(|e| usage(e.to_string()))
+fn session(spec: &str) -> Result<SessionFile> {
+    adopt::find_session(spec).or_else(|e| usage(e.to_string()))
 }
 
 fn when(t: Option<std::time::SystemTime>) -> String {
@@ -55,13 +55,13 @@ pub(crate) fn cmd_adopt(a: AdoptArgs) -> Result<()> {
 }
 
 fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
-    let from = a.from.as_deref().map(|f| session(roots, f)).transpose()?;
-    let into_given = a.into.as_deref().map(|i| session(roots, i)).transpose()?;
+    let from = a.from.as_deref().map(session).transpose()?;
+    let into_given = a.into.as_deref().map(session).transpose()?;
 
     // Every copy of each named agent (newest first).
     let mut found: Vec<Vec<AgentFile>> = Vec::new();
     for spec in &a.agents {
-        let hits = adopt::find_agent(roots, spec, from.as_ref()).or_else(|e| usage(e.to_string()))?;
+        let hits = adopt::find_agent(spec, from.as_ref()).or_else(|e| usage(e.to_string()))?;
         if hits.is_empty() {
             return usage(match &from {
                 Some(f) => format!("no sub-agent {spec:?} in {}/subagents/", f.session_id),
@@ -85,7 +85,7 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
                 .project_dir
                 .file_name()
                 .context("the agent's project dir has no name")?;
-            let s = adopt::newest_session_across(roots, slug, &[first.session_id.as_str()])
+            let s = adopt::newest_session(slug, &[first.session_id.as_str()])
                 .context("the agent's project has no other session to adopt into (pass --into)")?;
             eprintln!(
                 "✦ into {} — the newest session in {} (last write {}); pass --into to choose another",

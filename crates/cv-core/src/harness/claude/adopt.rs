@@ -16,9 +16,12 @@
 //! by absolute path) and anything `cv prune` stashed in the dead session's sidecar. Both remain
 //! readable as long as the dead session's directory is kept.
 //!
-//! The functions here take the projects root explicitly so they run against fixtures; the CLI
-//! passes Claude Code's real store.
+//! The fleet is read the way every other command reads it: sessions through [`crate::sessions`] /
+//! [`crate::find`] (the catalog, kept fresh by its probe), agents through
+//! [`crate::find_subagent_parents`] and each parent's `subagents/` dir. [`plan`] and [`execute`]
+//! take resolved files, so they run against fixtures.
 
+use crate::ir::{Harness, SessionRef};
 use crate::restamp::restamp;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -64,95 +67,41 @@ pub struct AgentFile {
     pub modified: Option<SystemTime>,
 }
 
-fn is_session_transcript(p: &Path) -> Option<String> {
-    let name = p.file_name()?.to_str()?;
-    if name.ends_with(".flat.jsonl") {
-        return None; // a `cv prune` sidecar, not a session
-    }
-    name.strip_suffix(".jsonl").map(String::from)
-}
-
-fn session_files_in(project_dir: &Path) -> Vec<SessionFile> {
-    let Ok(rd) = std::fs::read_dir(project_dir) else {
-        return vec![];
-    };
-    rd.flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
-        .filter_map(|p| {
-            let id = is_session_transcript(&p)?;
-            Some(SessionFile {
-                session_id: id,
-                project_dir: project_dir.to_path_buf(),
-                modified: std::fs::metadata(&p).and_then(|m| m.modified()).ok(),
-                path: p,
-            })
+impl SessionFile {
+    /// The file behind a Claude session ref, with its mtime (what "newest" means here: a session
+    /// that just crashed was written last).
+    fn of(r: SessionRef) -> Option<SessionFile> {
+        let project_dir = r.path.parent()?.to_path_buf();
+        Some(SessionFile {
+            modified: std::fs::metadata(&r.path).and_then(|m| m.modified()).ok(),
+            session_id: r.id,
+            project_dir,
+            path: r.path,
         })
-        .collect()
+    }
 }
 
-/// Every `projects/<slug>` dir under every root. The roots are the Claude adapter's
-/// `storage_roots()` (already de-duplicated by canonical path), so a seat's config dir is searched
-/// like `~/.claude`.
-fn project_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
-    roots
-        .iter()
-        .filter_map(|root| std::fs::read_dir(root).ok())
-        .flat_map(|rd| rd.flatten().map(|e| e.path()))
-        .filter(|p| p.is_dir())
-        .collect()
-}
-
-fn roots_display(roots: &[PathBuf]) -> String {
-    roots
-        .iter()
-        .map(|r| r.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// A session by full id or unique prefix, anywhere under `roots`.
-pub fn find_session(roots: &[PathBuf], spec: &str) -> Result<SessionFile> {
+/// A Claude session by full id or unique prefix, as [`crate::find`] resolves it.
+pub fn find_session(spec: &str) -> Result<SessionFile> {
     if spec.starts_with("agent-") {
         bail!("{spec} is a sub-agent id; this wants a session id");
     }
-    let mut hits: Vec<SessionFile> = project_dirs(roots)
-        .iter()
-        .flat_map(|d| session_files_in(d))
-        .filter(|s| s.session_id.starts_with(spec))
-        .collect();
-    if let Some(i) = hits.iter().position(|s| s.session_id == spec) {
-        return Ok(hits.swap_remove(i));
-    }
-    match hits.len() {
-        0 => bail!("no Claude session matching {spec:?} under {}", roots_display(roots)),
-        1 => Ok(hits.pop().unwrap()),
-        n => {
-            let mut ids: Vec<String> = hits.iter().map(|s| s.session_id.clone()).collect();
-            ids.sort();
-            bail!("ambiguous session id {spec:?} — {n} candidates:\n{}", ids.join("\n"))
+    match crate::find(spec, Some(Harness::Claude))? {
+        Some((r, _)) if !r.id.starts_with("agent-") => {
+            SessionFile::of(r).with_context(|| format!("{spec}: the transcript has no project dir"))
         }
+        _ => bail!("no Claude session matching {spec:?}"),
     }
 }
 
-/// The most recently written session in a project, skipping `exclude`.
-pub fn newest_session(project_dir: &Path, exclude: &[&str]) -> Option<SessionFile> {
-    session_files_in(project_dir)
+/// The most recently written Claude session for one project slug (`-work-proj`) across every
+/// root, skipping `exclude`: the same working directory is one project in each Claude config dir.
+pub fn newest_session(project_slug: &std::ffi::OsStr, exclude: &[&str]) -> Option<SessionFile> {
+    crate::sessions()
         .into_iter()
-        .filter(|s| !exclude.contains(&s.session_id.as_str()))
-        .max_by_key(|s| s.modified)
-}
-
-/// The most recently written session for one project slug (`-work-proj`) across every root,
-/// skipping `exclude`: the same working directory is one project in each Claude config dir.
-pub fn newest_session_across(
-    roots: &[PathBuf],
-    project_slug: &std::ffi::OsStr,
-    exclude: &[&str],
-) -> Option<SessionFile> {
-    roots
-        .iter()
-        .filter_map(|root| newest_session(&root.join(project_slug), exclude))
+        .filter(|r| r.harness == Harness::Claude && !exclude.contains(&r.id.as_str()))
+        .filter(|r| r.path.parent().and_then(Path::file_name) == Some(project_slug))
+        .filter_map(SessionFile::of)
         .max_by_key(|s| s.modified)
 }
 
@@ -189,50 +138,37 @@ fn agent_file(session: &SessionFile, path: PathBuf) -> Option<AgentFile> {
     })
 }
 
-/// Every sub-agent directly under a session's `subagents/` dir (workflow agents, which live one
-/// level deeper, are not adoptable this way), oldest first.
-pub fn session_agents(session: &SessionFile) -> Vec<AgentFile> {
+/// Every sub-agent directly under a session's `subagents/` dir whose file name starts with
+/// `agent-<want>` (workflow agents, which live one level deeper, are not adoptable this way).
+fn agents_in(session: &SessionFile, want: &str) -> Vec<AgentFile> {
     let Ok(rd) = std::fs::read_dir(session.subagents_dir()) else {
         return vec![];
     };
-    let mut out: Vec<AgentFile> = rd
-        .flatten()
+    rd.flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&format!("agent-{want}")) && n.ends_with(".jsonl"))
+        })
         .filter_map(|p| agent_file(session, p))
-        .collect();
-    out.sort_by(|a, b| a.modified.cmp(&b.modified).then(a.agent_id.cmp(&b.agent_id)));
-    out
+        .collect()
 }
 
 /// Every copy of an agent (full id or unique prefix; `agent-` optional) in any session's
-/// `subagents/` under `roots`, or only in `from` when given. Newest copy first. Copies of ONE agent
-/// in several sessions (an earlier adoption) are expected; a prefix matching two different agent
-/// ids is an error.
-pub fn find_agent(roots: &[PathBuf], spec: &str, from: Option<&SessionFile>) -> Result<Vec<AgentFile>> {
+/// `subagents/` ([`crate::find_subagent_parents`]), or only in `from` when given. Newest copy
+/// first. Copies of ONE agent in several sessions (an earlier adoption) are expected; a prefix
+/// matching two different agent ids is an error.
+pub fn find_agent(spec: &str, from: Option<&SessionFile>) -> Result<Vec<AgentFile>> {
     let want = spec.strip_prefix("agent-").unwrap_or(spec);
     let sessions: Vec<SessionFile> = match from {
         Some(s) => vec![s.clone()],
-        None => project_dirs(roots).iter().flat_map(|d| session_files_in(d)).collect(),
+        None => crate::find_subagent_parents(want)
+            .into_iter()
+            .filter_map(SessionFile::of)
+            .collect(),
     };
-    let mut hits: Vec<AgentFile> = Vec::new();
-    for s in &sessions {
-        let Ok(rd) = std::fs::read_dir(s.subagents_dir()) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let p = e.path();
-            let matches = p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(&format!("agent-{want}")) && n.ends_with(".jsonl"));
-            if matches {
-                if let Some(a) = agent_file(s, p) {
-                    hits.push(a);
-                }
-            }
-        }
-    }
+    let mut hits: Vec<AgentFile> = sessions.iter().flat_map(|s| agents_in(s, want)).collect();
     if hits.iter().any(|a| a.agent_id == want) {
         hits.retain(|a| a.agent_id == want);
     }
@@ -250,7 +186,6 @@ pub fn find_agent(roots: &[PathBuf], spec: &str, from: Option<&SessionFile>) -> 
     Ok(hits)
 }
 
-/// One agent's adoption, planned.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub agent: AgentFile,
@@ -381,12 +316,20 @@ mod tests {
         root
     }
 
+    /// The fixture's session `id` as the fleet lookup would resolve it.
+    fn sf(root: &Path, id: &str) -> SessionFile {
+        SessionFile::of(SessionRef::from_path(
+            root.join("-tmp-proj").join(format!("{id}.jsonl")),
+            Harness::Claude,
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn adopt_restamps_only_the_session_id_and_copies_the_meta() {
         let root = fixture("rewrite");
-        let into = find_session(std::slice::from_ref(&root), "2222").unwrap();
-        assert_eq!(into.session_id, LIVE);
-        let hits = find_agent(std::slice::from_ref(&root), &format!("agent-{}", &AGENT[..6]), None).unwrap();
+        let into = sf(&root, LIVE);
+        let hits = find_agent(&format!("agent-{}", &AGENT[..6]), Some(&sf(&root, DEAD))).unwrap();
         assert_eq!(hits.len(), 1);
         let src_text = std::fs::read_to_string(&hits[0].path).unwrap();
         let p = plan(hits[0].clone(), vec![], &into);
@@ -421,13 +364,13 @@ mod tests {
     #[test]
     fn adopt_refuses_to_overwrite_without_force() {
         let root = fixture("refuse");
-        let into = find_session(std::slice::from_ref(&root), LIVE).unwrap();
-        let agent = find_agent(std::slice::from_ref(&root), AGENT, None).unwrap().remove(0);
+        let into = sf(&root, LIVE);
+        let dead = sf(&root, DEAD);
+        let agent = find_agent(AGENT, Some(&dead)).unwrap().remove(0);
         execute(&plan(agent.clone(), vec![], &into), true, false).unwrap();
 
-        // The agent now lives in both sessions; the search sees both copies, newest first.
-        let copies = find_agent(std::slice::from_ref(&root), AGENT, None).unwrap();
-        assert_eq!(copies.len(), 2);
+        // The agent now lives in both sessions.
+        assert_eq!(agents_in(&dead, AGENT).len() + agents_in(&into, AGENT).len(), 2);
 
         // A sentinel in the adopted copy shows whether a refused run wrote anything.
         let p = plan(agent.clone(), vec![], &into);
@@ -442,24 +385,7 @@ mod tests {
         assert!(std::fs::read_to_string(&p.dest).unwrap().contains(LIVE));
 
         // Adopting into the session that already owns the agent is refused.
-        let dead = find_session(std::slice::from_ref(&root), DEAD).unwrap();
         assert!(execute(&plan(agent, vec![], &dead), true, true).is_err());
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn newest_session_and_listing() {
-        let root = fixture("list");
-        let proj = root.join("-tmp-proj");
-        let dead = find_session(std::slice::from_ref(&root), DEAD).unwrap();
-        let agents = session_agents(&dead);
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].description.as_deref(), Some("fixture lane"));
-        assert!(agents[0].meta_path.is_some());
-        let newest = newest_session(&proj, &[]).unwrap().session_id;
-        assert!(newest == DEAD || newest == LIVE);
-        assert_ne!(newest_session(&proj, &[newest.as_str()]).unwrap().session_id, newest);
-        assert!(find_session(std::slice::from_ref(&root), &format!("agent-{AGENT}")).is_err());
         std::fs::remove_dir_all(&root).ok();
     }
 }
