@@ -22,6 +22,7 @@
 - `cvd --version` no longer goes stale on a branch (its build.rs watches the resolved ref, as `cv`'s does); cv-mcp's unknown-harness error names all 23 harnesses.
 - **`cv deferrals --phrases-file`** (or `~/.config/clustervision/deferrals.txt`): the phrase table is yours; the built-in default carries no maintainer's name.
 - Web: the OpenSession tab and `openSession.html` are gone; the format's home is the manual chapter, which the footer links.
+- `cvd watch --verify-interval`, `GET /api/tasks/debt` and `/api/tasks/stats` are gone with the task verifier; the flag exits 2, the routes answer 410.
 
 ## 0.14.0 — 2026-10-10
 

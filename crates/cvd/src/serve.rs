@@ -273,9 +273,12 @@ fn route_json(parts: &[&str], query: &str) -> (u16, Value) {
 
         ["api", "tasks"] => tasks(query),
 
-        ["api", "tasks", "debt"] => tasks_debt(query),
-
-        ["api", "tasks", "stats"] => tasks_stats(query),
+        // Removed in 0.15.0 with the land facet: a pointer, not a silent 404.
+        ["api", "tasks", "debt"] | ["api", "tasks", "stats"] => err(
+            410,
+            "removed in 0.15.0 with the task land facet — completion is self-reported and labeled; \
+             read /api/tasks and /api/task/{id}",
+        ),
 
         ["api", "tasks", "inbox", who] => tasks_inbox(who),
 
@@ -336,60 +339,6 @@ fn task_one(id: &str, events: bool) -> (u16, Value) {
                 "warnings": outcome.warnings,
             }))
         }
-    })
-}
-
-/// `GET /api/tasks/debt?repo=` — reviewed-but-unlanded work, grouped by repo, oldest first,
-/// plus the verifier heartbeat (`verified_as_of` / `verify_warning`) and any suspect lands
-/// (revisions recorded Landed whose content the verifier no longer observes on upstream) —
-/// the debt view is only as honest as the verifier is alive.
-fn tasks_debt(query: &str) -> (u16, Value) {
-    let params = Query::parse(query);
-    with_tasks(|outcome| {
-        let want = params.get("repo").map(std::path::PathBuf::from);
-        let hb = cv_core::task::verify::read_heartbeat(&cv_core::task::tasks_dir());
-        let report = cv_core::task::DebtReport::compute(&outcome.model, hb.as_ref(), want.as_deref());
-        // This surface has always shipped an explicit `suspect` marker on every row (`false` on
-        // debt rows, `true` on suspect rows — the dashboard keys off it); the MCP shape doesn't.
-        let rows: Vec<cv_core::task::DebtRow> = report
-            .debt
-            .into_iter()
-            .map(|r| cv_core::task::DebtRow {
-                suspect: Some(false),
-                ..r
-            })
-            .collect();
-        let suspects: Vec<cv_core::task::SuspectRow> = report
-            .suspects
-            .iter()
-            .map(cv_core::task::SuspectRow::from_suspect)
-            .collect();
-        ok(json!({
-            "debt": rows,
-            "awaiting_review": report.awaiting_review,
-            "suspects": suspects,
-            "verified_as_of": report.verified_as_of,
-            "verify_warning": report.verify_warning,
-            "warnings": outcome.warnings,
-        }))
-    })
-}
-
-/// `GET /api/tasks/stats?repo=` — fleet batting averages: per-endpoint and per-reviewer outcome
-/// counts over the replayed model, annotated with verifier freshness. Computed from observed
-/// events only (landed = git-verified); informational, never a gate.
-fn tasks_stats(query: &str) -> (u16, Value) {
-    let params = Query::parse(query);
-    with_tasks(|outcome| {
-        let want = params.get("repo").map(std::path::PathBuf::from);
-        let hb = cv_core::task::verify::read_heartbeat(&cv_core::task::tasks_dir());
-        let stats = cv_core::task::FleetStats::compute(&outcome.model, hb.as_ref(), want.as_deref());
-        let mut v = match serde_json::to_value(&stats) {
-            Ok(v) => v,
-            Err(e) => return err(500, &e.to_string()),
-        };
-        v["warnings"] = json!(outcome.warnings);
-        ok(v)
     })
 }
 

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Version with the embedded build commit (set by build.rs; "unknown" outside git) — a
-/// long-running daemon must be checkable against source ("is the running verifier the new one").
+/// long-running daemon must be checkable against source ("is the running daemon the new one").
 const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CV_BUILD_SHA"), ")");
 
 #[derive(Parser)]
@@ -49,11 +49,10 @@ enum Command {
         /// Only sessions whose cwd contains this substring.
         #[arg(long)]
         cwd: Option<String>,
-        /// Also run the task git-verifier every N seconds (0 disables). On by default: the
-        /// daemon is the engine that keeps landing state and the debt view honest without
-        /// anyone asking, and it writes the heartbeat the debt view's trust is judged by.
-        #[arg(long = "verify-interval", default_value_t = 300)]
-        verify_interval: u64,
+        // Removed in 0.15.0 with the task verifier — hidden so the old flag errors with a
+        // pointer (exit 2) instead of being silently accepted.
+        #[arg(long = "verify-interval", hide = true)]
+        verify_interval: Option<u64>,
     },
     /// Serve fleet state as JSON over HTTP for a live browser dashboard.
     Serve {
@@ -93,7 +92,16 @@ fn main() -> Result<()> {
             harness,
             cwd,
             verify_interval,
-        } => cmd_watch(&archive, interval, harness, cwd, verify_interval),
+        } => {
+            if verify_interval.is_some() {
+                eprintln!(
+                    "`cvd watch --verify-interval` was removed in 0.15.0 — the task git-verifier is gone; \
+                     completion is self-reported and labeled so (`cv task done --observed`)"
+                );
+                std::process::exit(2);
+            }
+            cmd_watch(&archive, interval, harness, cwd)
+        }
         Command::Serve {
             port,
             host,
@@ -177,13 +185,7 @@ fn cmd_sync(archive: &Archive) -> Result<()> {
     Ok(())
 }
 
-fn cmd_watch(
-    archive: &Archive,
-    interval: u64,
-    harness: Option<String>,
-    cwd: Option<String>,
-    verify_interval: u64,
-) -> Result<()> {
+fn cmd_watch(archive: &Archive, interval: u64, harness: Option<String>, cwd: Option<String>) -> Result<()> {
     let filter = Filter {
         harness: match harness {
             Some(h) => Some(parse_harness(&h)?),
@@ -203,35 +205,11 @@ fn cmd_watch(
         archive.home().display()
     );
 
-    if verify_interval > 0 {
-        eprintln!("cvd: task verifier every {verify_interval}s");
-    }
-
     // We don't use Watcher::run because it returns `!` (never returns) and we want to keep
     // ownership of `archive` for the closure; a manual loop reads identically and stays robust.
-    let mut last_verify = std::time::Instant::now();
     loop {
         for ev in watcher.poll() {
             archive_event(archive, &ev.reference, ev.kind, ev.new_messages.len());
-        }
-        if verify_interval > 0 && last_verify.elapsed().as_secs() >= verify_interval {
-            last_verify = std::time::Instant::now();
-            let store = cv_core::task::TaskStore::default_store();
-            let opts = cv_core::task::verify::VerifyOptions {
-                interval_secs: Some(verify_interval),
-                ..Default::default()
-            };
-            match cv_core::task::verify::run_verify(&store, None, &opts) {
-                Ok((appended, warnings)) => {
-                    for w in warnings {
-                        eprintln!("cvd: verify: {w}");
-                    }
-                    for ev in appended {
-                        eprintln!("cvd: observed {} on task {}", ev.kind.tag(), &ev.task_id[..8]);
-                    }
-                }
-                Err(e) => eprintln!("cvd: verify pass failed: {e:#}"),
-            }
         }
         std::thread::sleep(interval);
     }

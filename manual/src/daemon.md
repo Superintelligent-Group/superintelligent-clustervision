@@ -71,7 +71,6 @@ cvd watch                          # follow everything
 cvd watch --interval 5             # poll every 5s (default 3)
 cvd watch --harness claude         # only one harness
 cvd watch --cwd clustervision       # only sessions whose cwd contains this substring
-cvd watch --verify-interval 0      # disable the periodic task verifier (default 300s)
 ```
 
 `watch` is the resident counterpart to `sync`. On its first poll it archives whatever already
@@ -95,25 +94,6 @@ with `cv scry` (see [scry / cv](cli.md)) or read it over HTTP via `GET /api/boar
 
 Each event is posted with the harness as a tag and the session id attached, so the feed stays
 filterable.
-
-### The periodic task verifier
-
-`watch` is also the engine that keeps the [task substrate](tasks.md)'s landing state honest
-without anyone asking. Every `--verify-interval` seconds (default **300**; `0` disables) it
-runs the same git verifier as `cv task verify --all` over the whole task log: it observes
-whether each reviewed `ready`/`merged_local` revision's content is on its upstream (appending
-`landed` / `merged_local` / findings), re-observes revisions recorded `landed` (flagging
-SUSPECT rows — forged or rolled-back lands), and writes the heartbeat
-(`<home>/tasks/last_verify.json`) that the debt view's `verified_as_of` and staleness warning
-are judged by. On startup it announces itself:
-
-```text
-cvd: task verifier every 300s
-```
-
-and logs each observation as it happens (`cvd: observed landed on task 019f6e4b`). Without a
-running `cvd watch` (or manual `cv task verify` passes), the debt view says so loudly —
-*"landing state has NEVER been verified"* / *"verifier heartbeat is STALE"*.
 
 ## `cvd serve` — the local HTTP API
 
@@ -332,7 +312,7 @@ warnings ride every response, so a corrupted coordination log is visible from an
       {
         "id": "019f6e4b-74c5-74f0-a493-1f8131ca38d5",
         "title": "switch task ids to uuid v7",
-        "effective_state": "rev:landed",
+        "effective_state": "claimed",
         "assignee": "agent:mira",
         "repo": "/Users/you/code/demo",
         "channel": "tasks",
@@ -345,8 +325,9 @@ warnings ride every response, so a corrupted coordination log is visible from an
   ```
 
 - **`GET /api/task/{id}`** — one task's full projection (id prefix ok; `404` otherwise), as
-  `{ "task": {...}, "effective_state": "rev:landed", "warnings": [] }`. The `task` object is
-  the complete read model: revisions with review/land evidence, notes, recorded issues.
+  `{ "task": {...}, "effective_state": "claimed", "warnings": [] }`. The `task` object is
+  the complete read model: state, assignee, notes, tags, blockers, the decision facet, the
+  pinned STATUS.
 - **`GET /api/task/{id}/events`** — the raw durable history, `{ "events": [...], "warnings": [] }`,
   each event carrying `id`, `task_id`, `ts`, `by`, and its tagged `event` payload
   (`opened`, `claimed`, `revision_proposed`, `review_passed`, `landed`, …).
@@ -387,8 +368,10 @@ warnings ride every response, so a corrupted coordination log is visible from an
   freshness, plus `warnings`. Informational, never a gate — `cv task stats --json`.
 - **`GET /api/tasks/inbox/{who}`** — what needs this endpoint, stalest first:
   `{ "inbox": [ { "id", "title", "reason", "effective_state" } ], "warnings": [] }`, where
-  `reason` is one of `assigned_open`, `claimed_by_you`, `awaiting_your_review`,
-  `your_unlanded_work`.
+  `reason` is one of `decision_owed`, `discussing`, `provisional`, `assigned_open`,
+  `claimed_by_you`.
+- `GET /api/tasks/debt` and `GET /api/tasks/stats` were removed in 0.15.0 with the task land
+  facet; they answer `410` with a pointer.
 
 ## Putting it together
 
