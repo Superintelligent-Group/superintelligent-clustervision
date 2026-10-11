@@ -16,7 +16,7 @@ Press **`?`** (or the header `?` button) for an in-app overlay. The essentials:
 
 | Key | Action |
 | --- | --- |
-| `1`–`7` | Switch view (Sessions … OpenSession) |
+| `1`–`8` | Switch view (Sessions … Fleet) |
 | `/` | Focus the session search |
 | `j` / `k` · `↓` / `↑` | Move the selection in the session list |
 | `Enter` | Open the focused session |
@@ -77,8 +77,9 @@ A tab bar (`<cv-app>`) switches between views, all reading from the merged pool:
   tree** below.
 - **📡 Fleet** (`<cv-fleet>`) — a live dashboard over a running `cvd serve` HTTP
   API. See **Fleet dashboard** below.
-- **🧬 OpenSession** (`<cv-opensession>`) — the OpenSession standard, featured
-  in-app. Also available as a standalone page at **`openSession.html`**.
+
+The OpenSession format itself is documented in the manual (`manual/src/opensession.md`); the
+footer links there.
 
 ## ⚡ Loom: generation & the branch tree
 
@@ -230,7 +231,7 @@ All are plain native custom elements (no framework, no build step), in `componen
   per-session **Markdown / OpenSession-JSON export** buttons, and an optional
   `pickMode` (used by the loom).
 - **`<cv-timeline>`**, **`<cv-compare>`**, **`<cv-stats>`**, **`<cv-loom>`**,
-  **`<cv-fleet>`**, **`<cv-opensession>`** — the views above.
+  **`<cv-fleet>`** — the views above.
 - **`<cv-harness-badge>`** — a small per-harness colored pill.
 
 `openrouter.js` is a dependency-free OpenRouter client used by the loom (key

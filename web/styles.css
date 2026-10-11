@@ -1446,26 +1446,6 @@ cv-session-picker { position: relative; display: inline-flex; min-width: 0; }
 .fs-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; margin-top: 3px; }
 .fs-cwd { font-family: var(--mono); }
 
-/* ---------- OpenSession page ---------- */
-.os-page { max-width: 820px; margin: 0 auto; padding: 0 4px 40px; }
-.os-hero { text-align: center; padding: 16px 0 24px; }
-.os-emoji { font-size: 48px; }
-.os-hero h2 { margin: 8px 0 4px; font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
-.os-sub { color: var(--fg-muted); font-size: 14px; margin: 0; }
-.os-intro p, .os-section p { font-size: 14.5px; }
-.os-section { margin: 26px 0; }
-.os-section h3 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
-.os-principles { padding-left: 20px; display: flex; flex-direction: column; gap: 10px; }
-.os-principles li { font-size: 14px; }
-.os-schema { font-size: 12px; line-height: 1.55; max-height: none; }
-.os-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
-.os-table th, .os-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-.os-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-muted); }
-.os-table code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; }
-.os-list { padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
-.os-list code, .os-intro code, .os-section code { background: var(--code-bg); padding: 0 4px; border-radius: 4px; font-size: 0.9em; }
-.os-foot { text-align: center; margin-top: 30px; font-size: 13px; }
-
 /* ---------- Help overlay ---------- */
 .help-overlay {
   position: fixed; inset: 0; z-index: 50;

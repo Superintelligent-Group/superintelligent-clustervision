@@ -10,7 +10,6 @@
 //   forest     — session-structure explorer: agent forest, workflow lanes, tools, compaction (<cv-forest>)
 //   loom       — splice/loom composer (<cv-loom>)
 //   fleet      — live cvd serve dashboard (<cv-fleet>)
-//   opensession— the OpenSession standard (<cv-opensession>)
 import "./cv-session-list.js";
 import "./cv-transcript.js";
 import "./cv-projects.js";
@@ -20,7 +19,6 @@ import "./cv-stats.js";
 import "./cv-forest.js";
 import "./cv-loom.js";
 import "./cv-fleet.js";
-import "./cv-opensession.js";
 import { esc, normalizeSession, normalizeSessions, randomId } from "./util.js";
 import { isTauri, listen, invoke, canInvokeNative } from "../tauri.js";
 import {
@@ -41,7 +39,6 @@ const VIEWS = [
   ["forest", "Structure", "🌳"],
   ["loom", "Loom", "✨"],
   ["fleet", "Fleet", "📡"],
-  ["opensession", "OpenSession", "🧬"],
 ];
 
 class CvApp extends HTMLElement {
@@ -337,7 +334,7 @@ class CvApp extends HTMLElement {
 
       <footer class="app-footer muted">
         <span>All parsing happens locally; nothing is uploaded. ·
-        <a class="repo-link" href="#" data-goto="opensession">About OpenSession</a></span>
+        <a class="repo-link" href="https://emberian.github.io/clustervision/manual/opensession.html" target="_blank" rel="noopener">About OpenSession</a></span>
       </footer>
     `;
 
@@ -349,9 +346,6 @@ class CvApp extends HTMLElement {
 
     this.querySelectorAll(".view-tab").forEach((tab) =>
       tab.addEventListener("click", () => this._setView(tab.dataset.view)));
-    this.querySelector("[data-goto]")?.addEventListener("click", (e) => {
-      e.preventDefault(); this._setView("opensession");
-    });
 
     this._wireDropzone();
     this._wireTheme();
@@ -425,7 +419,6 @@ class CvApp extends HTMLElement {
       case "forest": host.innerHTML = `<cv-forest></cv-forest>`; break;
       case "loom": host.innerHTML = `<cv-loom></cv-loom>`; break;
       case "fleet": host.innerHTML = `<cv-fleet></cv-fleet>`; break;
-      case "opensession": host.innerHTML = `<cv-opensession></cv-opensession>`; break;
     }
     this._refreshViews();
   }

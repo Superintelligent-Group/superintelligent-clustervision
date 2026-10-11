@@ -21,6 +21,7 @@
 - The 0.11 tombstones are gone: `cv convert|query|recall`, `prune --thinking|--retrieve|--range`, `port --to|--to-dir|--from`, `--to` on `splice|loom|pack` are now plain unknown names.
 - `cvd --version` no longer goes stale on a branch (its build.rs watches the resolved ref, as `cv`'s does); cv-mcp's unknown-harness error names all 23 harnesses.
 - **`cv deferrals --phrases-file`** (or `~/.config/clustervision/deferrals.txt`): the phrase table is yours; the built-in default carries no maintainer's name.
+- Web: the OpenSession tab and `openSession.html` are gone; the format's home is the manual chapter, which the footer links.
 
 ## 0.14.0 — 2026-10-10
 
