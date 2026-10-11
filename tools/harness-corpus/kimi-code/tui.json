@@ -1,0 +1,13 @@
+[
+ {"expect": "Trust this folder\\?", "timeout": 12, "optional": true, "then": "\u001b[A\r"},
+ {"expect": "context:", "timeout": 20},
+ {"sleep": 2},
+ {"send": "/undo"}, {"sleep": 1}, {"send": "\r"},
+ {"expect": "Select messages to undo", "timeout": 6, "optional": true},
+ {"sleep": 1}, {"send": "\r"}, {"sleep": 3},
+ {"send": "\u0015"}, {"sleep": 0.5},
+ {"send": "Say hi.\r"}, {"sleep": 4},
+ {"send": "\u001b"}, {"sleep": 3},
+ {"send": "/clear"}, {"sleep": 1}, {"send": "\r"}, {"sleep": 3},
+ {"send": "\u0003"}, {"sleep": 1}, {"send": "\u0003"}, {"sleep": 1}
+]

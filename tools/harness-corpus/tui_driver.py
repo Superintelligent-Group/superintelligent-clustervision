@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Drive an interactive TUI through a pty with expect/send steps, for affordances a harness only
+offers interactively (slash commands like /undo and /clear, interrupts).
+
+    TUI_SCRIPT=script.json tui_driver.py <transcript-log> <cmd> [args...]
+
+The script is a JSON list of steps, run in order:
+    {"expect": "<regex>", "timeout": 10, "optional": false}   wait until the screen text matches
+    {"send": "<text>"}                                        type text ("\\r" is Enter, "\\u0003" ^C)
+    {"sleep": 1.5}                                            let the screen settle
+A required expect that times out stops the script (exit 3); an optional one is skipped, and with
+"then" it sends that text only when it matched. Everything the TUI printed goes to the log (ANSI
+stripped) so the generator can show what happened. The child is sent SIGTERM at the end.
+"""
+import json
+import os
+import pty
+import re
+import select
+import signal
+import sys
+import time
+
+ANSI = re.compile(rb"\x1b\[[0-9;?<>=]*[a-zA-Z~]|\x1b\][^\x07]*\x07|\x1b[=>()][0-9A-Za-z]?")
+
+
+def main():
+    steps = json.loads(open(os.environ.pop("TUI_SCRIPT")).read())
+    log = open(sys.argv[1], "ab")
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    screen = bytearray()  # text since the last matched expect
+
+    def pump(seconds, pattern=None):
+        end = time.time() + seconds
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.1)
+            if r:
+                try:
+                    d = os.read(fd, 65536)
+                except OSError:
+                    return None
+                if not d:
+                    return None
+                clean = ANSI.sub(b"", d)
+                log.write(clean)
+                screen.extend(clean)
+            if pattern is not None and pattern.search(screen.decode("utf-8", "replace")):
+                del screen[:]
+                return True
+        return False
+
+    code = 0
+    for st in steps:
+        if "sleep" in st:
+            if pump(st["sleep"]) is None:
+                break
+        elif "expect" in st:
+            hit = pump(st.get("timeout", 10), re.compile(st["expect"]))
+            if hit is None:
+                break
+            if hit and "then" in st:
+                os.write(fd, st["then"].encode())
+            if not hit and not st.get("optional"):
+                log.write(f"\n[tui_driver: timed out waiting for {st['expect']!r}]\n".encode())
+                code = 3
+                break
+        elif "send" in st:
+            os.write(fd, st["send"].encode())
+    pump(2)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()
