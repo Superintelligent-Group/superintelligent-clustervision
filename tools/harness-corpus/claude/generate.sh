@@ -183,12 +183,13 @@ if want agents; then # Agent tool: a foreground sub-agent, a custom agent type, 
     "Use the Agent tool with subagent_type echoer to echo the word ok, then use the Agent tool with subagent_type general-purpose and the prompt 'Read a.txt and reply with its first line' and report both answers."
   cc -- --resume "$id" --tools "Agent,Read,SendMessage" --allowedTools "Agent Read SendMessage" "${NOSKILLS[@]}" \
     "Use SendMessage to the echoer agent you started (by its agent id) asking it to echo the word again, and report its reply."
-  # A fork: the Agent tool without subagent_type, when forking is on, copies this conversation into the child.
+  # Asked as a fork (no subagent_type, CLAUDE_CODE_FORK_SUBAGENT=1). In 2.1.296 on a third-party
+  # endpoint the child is a plain general-purpose agent (no inherited context): forking did not engage.
   cc CLAUDE_CODE_FORK_SUBAGENT=1 -- --tools "Agent" --allowedTools "Agent" "${NOSKILLS[@]}" \
     "Use the Agent tool without a subagent_type (a fork of yourself) with the prompt 'Reply with the single word forked.' and report its reply."
   cc -- --tools "Agent,Read" --allowedTools "Agent Read" "${NOSKILLS[@]}" \
     "Use the Agent tool with run_in_background set to true, subagent_type echoer, to echo the word later. Then wait for its completion notification and report the word."
-  SCEN+=("subagent" "custom_agent_type" "send_message" "fork_subagent" "background_agent" "agent_notification")
+  SCEN+=("subagent" "custom_agent_type" "send_message" "agent_default_type" "background_agent" "agent_notification")
 fi
 if want background; then # background Bash and Monitor (a deferred tool, loaded through ToolSearch)
   # Monitor is not reachable here: it is gated on a remote feature flag (tengu_amber_sentinel) that a
@@ -197,6 +198,7 @@ if want background; then # background Bash and Monitor (a deferred tool, loaded 
     "Run this command with the Bash tool with run_in_background set to true: sleep 3; echo corpus-done   Then end your turn without any other tool call. When its task-notification arrives, report the output in one line."
   SCEN+=("background_bash" "task_notification")
   SKIP+=("monitor (remote feature flag tengu_amber_sentinel; never on for a third-party endpoint)")
+  SKIP+=("fork_subagent (CLAUDE_CODE_FORK_SUBAGENT=1 still spawned a general-purpose child)")
 fi
 if want schedule; then # timers: CronCreate/CronList/CronDelete and ScheduleWakeup (none fire in -p)
   cc -- --tools "CronCreate,CronList,CronDelete,ScheduleWakeup" --allowedTools "CronCreate CronList CronDelete ScheduleWakeup" "${NOSKILLS[@]}" \
