@@ -4,7 +4,8 @@ This is the ground-truth catalog of how each harness stores sessions on disk, re
 real machine (2026-05-29; re-verified 2026-09-19 against upstream checkouts under `~/pug` for Codex
 `132c2be23` (0.154), OpenCode `fee476bb` (1.18.31), gemini-cli `cfbcaa8`, Goose `2090ad1c`
 (1.51.0), OpenClaw `0e9181234a`, Hermes `6d8a8bebf7` (schema v30), kimi-cli `86f1364`, and against the
-shipped bundles for Claude Code 2.1.278 and Kimi Code 0.39.1). It drives the adapters in `cv-core`.
+shipped bundles for Claude Code 2.1.278 and Kimi Code 0.39.1; kimi-cli 1.48.0/1.51.0 and Kimi Code
+0.39.1/2.1.1 re-read 2026-10-11 from their corpora in `crates/cv-core/tests/corpus/`). It drives the adapters in `cv-core`.
 Keep it accurate; it is the spec.
 
 The unifying insight: **all harnesses encode the working directory (cwd) into where/how they store a
@@ -536,8 +537,18 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   Sessions at `sessions/<md5(cwd)>/<uuid>/context.jsonl` (or legacy flat `<uuid>.jsonl`); cwd from
   `~/.kimi/kimi.json` `work_dirs[]`; roles `_system_prompt`/`user`/`assistant`/`tool` (+ `_checkpoint`/`_usage`);
   Parts `text`/`think`/`image_url`; tool calls carry a JSON-string `arguments`; `wire.jsonl` (`{timestamp,
-  message:{type, payload}}`) enriches tool results + `StatusUpdate.token_usage{input_other, …}`;
-  `context_N.jsonl` are compaction segments.
+  message:{type, payload}}`) enriches tool results + `StatusUpdate.token_usage{input_other, …}`.
+  `/compact`, `/clear` and a rewind each rotate the live file out to `context_N.jsonl` (N counting
+  up), so the session is every segment oldest first, then `context.jsonl`; each segment repeats the
+  system prompt (a rewind also copies the kept prefix). cv reads them all, once each: a compaction
+  segment opens with the `<system>Previous context has been compacted` summary (`compaction_boundary`
+  + `compaction_summary`), any other rotation gets a synthetic `branch`. Sub-agents (`Agent` tool) live
+  in `<session>/subagents/<agent_id>/` (`context.jsonl`, `wire.jsonl`, `meta.json{subagent_type,
+  description, …}`, `prompt.txt`, `output`) and parse as child sessions; `tasks/<id>/` (background
+  shells) and `notifications/<id>/` sit beside them, and `state.json` keeps `todos`, `plan_mode`,
+  `approval`. 1.49+ (kosong 0.55) writes `{"type":"think","think":"","encrypted":null}` for every
+  step that streamed no reasoning; cv drops those. 1.52.0, the final release, only prints a pointer
+  to Kimi Code; 1.51.0 is the last version that writes a store (corpus: 1.48.0, 1.51.0).
 - **Kimi Code (`$KIMI_CODE_HOME` or `~/.kimi-code`)** — a different format: `session_index.jsonl`
   (`{sessionId, sessionDir, workDir}` + `{sessionId, deleted:true}` tombstones); workspace dirs
   `sessions/wd_<slug>_<sha256(cwd)[:12]>/session_<uuid>/` with `state.json` v2 `{id, version:2, cwd, archived,
@@ -560,7 +571,20 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   `Session::system_prompt`); `context.apply_compaction` is a `compaction_boundary` +
   `compaction_summary` pair; each sub-agent dir under `agents/` parses as its own `Session` with
   `lineage.parent` = the session uuid and `lineage.agent_path` = `agent-N` (`parentAgentId`/`labels`
-  stay in `extra["kimi-code"]`).
+  stay in `extra["kimi-code"]`). `context.undo{count}` (`/undo`) and `context.clear` are a `branch`
+  of human origin. `/clear` in the TUI starts a NEW session (both 0.39 and 2.1).
+- **Kimi Code 2.x (2.0.0, 2026-09-17; corpus 2.1.1)** keeps protocol 1.5 and the record shapes
+  above, and adds: `subagent.spawned{subagentId, subagentName, parentToolCallId, description,
+  swarmIndex?}` / `subagent.started` / `subagent.completed{resultSummary, usage}` on the parent's wire
+  (cv: `subagent_spawn` / `subagent_return`); `kimi fork` (`state.json.forkedFrom` →
+  `lineage.forked_from`, a `forked` record at the cut); `/undo` as `agent.switched{branch, reason:
+  "undo", base{branch, line}}` + `context.undo` + `context.undone`; a second copy of every message as
+  `agent.message.appended{kind, message, meta}`; `agent.turn.started/ended`,
+  `prompt.completed/aborted/steered`, `turn.step.retrying/interrupted`; `file_history.tracked/checkpoint`
+  with snapshots in `agents/<id>/file-history/`; `notify/state.json` per session and
+  `sessions/.index-cache/scan.json`. Opening a 0.39 store with 2.1.1 (corpus
+  `0.39.1-then-2.1.1`) rewrites one record in place, `plan.revision{path}` → `{sha256, bytes}`, and
+  otherwise only appends.
 
 ## Qwen Code — `~/.qwen/`
 
