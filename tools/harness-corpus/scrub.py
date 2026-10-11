@@ -33,7 +33,25 @@ def replacements(work, home):
         reps.append((os.path.join(real_home, "tools", "harness-versions"), "/opt/harness-versions"))
     # file:// URLs and JSON-escaped slashes carry the same paths
     reps += [(a.replace("/", "\\/"), b.replace("/", "\\/")) for a, b in list(reps)]
+    # Claude Code (and others) name a project dir by its path with every non-alphanumeric made `-`
+    reps += [(dashed(a), dashed(b)) for a, b in list(reps) if "\\" not in a]
     return sorted(set(reps), key=lambda r: -len(r[0]))
+
+
+def dashed(path):
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def rename_paths(top, reps):
+    """File and dir names carry the throwaway path too (an encoded-cwd project dir); rename them."""
+    for d, dirs, fs in os.walk(top, topdown=False):
+        for name in dirs + fs:
+            new = name
+            for a, z in reps:
+                if "/" not in a:
+                    new = new.replace(a, z)
+            if new != name:
+                os.rename(os.path.join(d, name), os.path.join(d, new))
 
 
 ACCOUNT_RE = re.compile(rb'("(?:creator_user_id|creator_account_id|account_id|user_id|email)"\s*:\s*)"[^"]*"')
@@ -86,6 +104,7 @@ def main():
     p.add_argument("--dir", required=True)
     a = p.parse_args()
     reps = replacements(a.work, a.home)
+    rename_paths(a.dir, reps)
     files = [os.path.join(d, f) for d, _, fs in os.walk(a.dir) for f in fs]
     for path in files:
         if is_sqlite(path):
@@ -113,8 +132,10 @@ def main():
             ("a token shape", any(r.search(b) for r in TOKEN_RES)),
             ("/Users/", b"/Users/" in b),
             ("the real user name", len(user) > 2 and re.search(rb"\b" + re.escape(user) + rb"\b", b) is not None),
-            ("the throwaway dir", a.work.encode() in b),
+            ("the throwaway dir", a.work.encode() in b or dashed(a.work).encode() in b),
         ) if hit]
+        if a.work in path or dashed(a.work) in path:
+            why.append("the throwaway dir in its name")
         if why:
             bad.append(f"{os.path.relpath(path, a.dir)}: {', '.join(why)}")
     if bad:
