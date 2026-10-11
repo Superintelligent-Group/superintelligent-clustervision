@@ -5,23 +5,30 @@
 # tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "opencode"
-source_files = ["harness/opencode.rs"]
+source_files = ["harness/opencode.rs", "harness/opencode/v2.rs"]
 ignore_literals = ["db"]
 store = [
-  "${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db",
+  "${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db (1.x: session/message/part; 2.x: session_v2/session_message; a migrated 2.x db has both)",
   "~/.local/share/opencode/storage/{session,message,part}/** (dead JSON tree, fallback)",
 ]
 
 [upstream]
 repo = "https://github.com/anomalyco/opencode (~/pug/opencode)"
-commit = "fee476bb"
-date = "2026-09-19"
+commit = "b44eea9e20 (tag v2.0.25; also diffed: v1.18.20 7248bc1964, and the earlier pin fee476bb)"
+date = "2026-10-11"
 
 [types]
 "table.session" = { status = "handled", note = "sqlite" }
 "table.message" = { status = "handled", note = "sqlite; data re-hydrated with id/sessionID/messageID" }
 "table.part" = { status = "handled", note = "sqlite" }
-"table.todo" = { status = "ignored", note = "not read" }
+"table.todo" = { status = "ignored", note = "1.x only; not read" }
+"table.session_v2" = { status = "handled", note = "2.x sqlite; wins over a same-id 1.x session row" }
+"table.session_message" = { status = "handled", note = "2.x sqlite; one typed row per event, ordered by seq" }
+"table.session_inbox" = { status = "ignored", note = "2.x: queued prompts/steers/compaction requests, drained on delivery" }
+"table.session_pending" = { status = "ignored", note = "2.x: admitted-but-undelivered inputs" }
+"table.instruction_entry" = { status = "ignored", note = "2.x: per-session instruction (AGENTS.md etc.) snapshots" }
+"table.event" = { status = "ignored", note = "sync/replay log of the same updates" }
+"message.idle" = { status = "carried", note = "2.x turn-end marker; Carrier under complete only" }
 "table.session_share" = { status = "ignored", note = "not read" }
 "session.metadata" = { status = "handled", note = "probed; absent on un-migrated dbs" }
 "error.ContentFilterError" = { status = "generic", note = "lifted to extra error_name" }

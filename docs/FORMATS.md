@@ -338,8 +338,39 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154); 2026-10-11 against the `rust-
 
 ## OpenCode — `~/.local/share/opencode/` (NOT `~/.opencode`, which is plugins/cache)
 
-Re-verified 2026-09-19 at `fee476bb` (1.18.31). Ground truth: `packages/core/src/session/sql.ts` (tables),
-`packages/schema/src/v1/session.ts` (Info/Part shapes), `packages/core/src/database/database.ts` (db path).
+Re-verified 2026-09-19 at `fee476bb` (1.18.31); 2026-10-11 against the `v1.18.20` and `v2.0.25` tags, with
+real stores from both (and 2.0.25's migration of the 1.18.20 store) in `crates/cv-core/tests/corpus/opencode/`.
+Ground truth: `packages/core/src/session/sql.ts` (tables), `packages/schema/src/v1/session.ts` (1.x
+Info/Part shapes), `packages/schema/src/session-message.ts` (2.x message union),
+`packages/core/src/database/v1-migration.bun.ts` (the 1.x → 2.x import), `packages/cli/src/database-path.ts`.
+
+- **2.x (npm `@opencode/cli`, not `opencode-ai`) replaced the message model.** Same file, same path rules
+  (`OPENCODE_DB`, channel dbs). New tables: `session_v2` (the 1.x `session` columns plus `fork_session_id`,
+  `fork_boundary`, `time_idle`, `time_viewed`, `idle_outcome`, `time_suspended`, `resume_attempts`) and
+  `session_message(id, session_id, type, seq, time_created, time_updated, data)`: one row per event,
+  ordered by `seq`, `data` = the `Session.Message.Info` JSON minus `id`/`type`. `type ∈ {user, synthetic,
+  system, skill, shell, assistant, compaction, model-switched, agent-switched, location-switched, idle}`.
+  `user` = `{text, files[{data (base64), mime, source{inline|uri}, name}], agents[], skills[]}`;
+  `assistant` = `{agent, model{id, providerID, variant?}, content[text | reasoning{text, state} |
+  tool{id, name, state{status: streaming|running|completed|error, input, content[text|file]?, error{type,
+  message}?, metadata?}, time}], finish, rawFinish, cost, tokens, error{type, message}?, snapshot, time}`;
+  `compaction` = one row `{status: running|completed|failed, reason: auto|manual, summary, recent}`;
+  `shell` = a user `!command` `{shellID, command, status, exit, output{output, cursor, size}}`; `idle`
+  ends a turn `{outcome}`. Tool names changed: `bash`→`shell`, `task`→`subagent` (now with
+  `background`), `apply_patch`→`patch`; `todowrite`/`todo` are gone; `question`, `websearch` and
+  `execute` (code mode) are new. A fresh 2.x db has no `session`/`message`/`part`/`todo` tables; also
+  `session_inbox`, `session_pending`, `instruction_{entry,blob,state}`, `worktree`, `kv` (the models.dev
+  catalog, ~6 MB). Errors are `{type, message, status?, response?}` with `type` like `provider.invalid-request`, `aborted`,
+  `tool.execution`. Usage and cost stay on the assistant row.
+- **2.x migrates a 1.x store in place, on first server start** (`V1Migration`, status at
+  `GET /api/experimental/migration/v1`, progress in `kv["migration.v1-v2"]`): it empties `event`, then copies
+  every `session` into `session_v2` and rebuilds its messages into `session_message` under the same ids. The
+  legacy tables are left as they were. The import drops step/snapshot/patch parts (kept as
+  `assistant.snapshot`), folds a compaction pair into one `compaction` row, turns synthetic text into
+  `synthetic` rows, and appends a `system` row telling the model about renamed tools. cv reads `session_v2`
+  first and falls back to `session` for ids it lacks, so a migrated db shows each session once, as 2.x does.
+- **1.18 already ships the 2.x tables empty** (`session_message`, `session_input`, `session_context_epoch`,
+  with `session_message` keyed to `session`); only a `session_v2` table marks a 2.x store.
 
 - **The canonical store is SQLite:** `opencode.db` in the data dir (`$XDG_DATA_HOME`-aware; `$OPENCODE_DB` may
   point elsewhere — `:memory:`, absolute, or relative to the data dir; non-default channels use

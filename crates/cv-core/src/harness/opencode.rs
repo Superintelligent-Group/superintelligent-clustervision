@@ -56,6 +56,7 @@
 //! remaining `session` columns land in `Session::extra["opencode"]`.
 
 mod emit;
+mod v2;
 pub use emit::emit;
 
 use super::Adapter;
@@ -91,6 +92,18 @@ impl OpenCode {
             root: Some(root),
             db: None,
         }
+    }
+
+    /// An adapter over an explicit OpenCode data dir (`…/opencode`, holding `opencode.db` and maybe
+    /// the old `storage/` tree), read the way [`detect`](Self::detect) reads the real one but without
+    /// consulting `$OPENCODE_DB` (the corpus test, other machines' copies).
+    pub fn with_data_dir(data: &Path) -> Self {
+        let root = Some(data.join("storage")).filter(|p| p.exists());
+        #[cfg(feature = "sqlite")]
+        let db = Some(data.join("opencode.db")).filter(|p| p.is_file());
+        #[cfg(not(feature = "sqlite"))]
+        let db = None;
+        OpenCode { root, db }
     }
 
     /// An adapter over one explicit `opencode.db` (tests, alternate data dirs). No JSON tree.
@@ -239,7 +252,7 @@ impl Adapter for OpenCode {
         // A db-backed ref points at the `.db` file itself (like the other SQLite adapters).
         #[cfg(feature = "sqlite")]
         if db::is_db_ref(r) {
-            return db::stream(r, sink);
+            return db::stream(r, _opts, sink);
         }
         // OpenCode stores a session as a *directory* of per-message JSON files (plus per-message
         // part files). The old `parse` slurped every message body into a `Vec` to sort it — for a
@@ -387,18 +400,103 @@ mod db {
 
     /// Session columns the IR first-classes (`parent_id` is `Lineage::parent`; everything else lands
     /// in `Session::extra["opencode"]` verbatim).
-    const FIRSTCLASS: &[&str] = &["id", "directory", "title", "time_created", "time_updated", "parent_id"];
+    const FIRSTCLASS: &[&str] = &[
+        "id",
+        "directory",
+        "title",
+        "time_created",
+        "time_updated",
+        "parent_id",
+        "fork_session_id",
+    ];
     /// Columns opencode declares `{ mode: "json" }` — stored as JSON text, decoded on read.
-    const JSON_COLS: &[&str] = &["model", "metadata", "revert", "permission", "summary_diffs"];
+    const JSON_COLS: &[&str] = &[
+        "model",
+        "metadata",
+        "revert",
+        "permission",
+        "summary_diffs",
+        "fork_boundary",
+    ];
 
     pub(super) fn is_db_ref(r: &SessionRef) -> bool {
         r.path.extension().and_then(|e| e.to_str()) == Some("db")
     }
 
-    /// One [`SessionRef`] per `session` row, newest first; `message_count` is user+assistant turns
-    /// (the role lives inside the `data` JSON — SQLite's built-in JSON functions read it).
+    fn has_table(conn: &rusqlite::Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            rusqlite::params![name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    /// One [`SessionRef`] per session, newest first: the 2.x `session_v2` rows, then the 1.x
+    /// `session` rows they do not already cover (a migrated database holds both under the same id;
+    /// 2.x writes only the new tables, so they win). Either table set may be absent: a 1.x database
+    /// has no `session_v2`, a database 2.x created has no `session`.
     pub(super) fn discover(db: &Path) -> Result<Vec<SessionRef>> {
         let conn = open_ro(db)?;
+        let mut refs = if has_table(&conn, "session_v2") && has_table(&conn, "session_message") {
+            discover_v2(&conn, db)?
+        } else {
+            Vec::new()
+        };
+        if has_table(&conn, "session") && has_table(&conn, "message") {
+            let seen: HashSet<String> = refs.iter().map(|r| r.id.clone()).collect();
+            refs.extend(discover_v1(&conn, db)?.into_iter().filter(|r| !seen.contains(&r.id)));
+        }
+        Ok(refs)
+    }
+
+    fn discover_v2(conn: &rusqlite::Connection, db: &Path) -> Result<Vec<SessionRef>> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT session_id, COUNT(*) FROM session_message WHERE type IN ('user', 'assistant') GROUP BY session_id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for (sid, n) in rows.flatten() {
+                counts.insert(sid, n.max(0) as usize);
+            }
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, directory, title, time_created, time_updated FROM session_v2 ORDER BY time_updated DESC",
+        )?;
+        let refs = stmt
+            .query_map([], |r| session_ref(db, r))?
+            .flatten()
+            .map(|mut r| {
+                r.message_count = counts.get(&r.id).copied().unwrap_or(0);
+                r
+            })
+            .collect();
+        Ok(refs)
+    }
+
+    fn session_ref(db: &Path, r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRef> {
+        Ok(SessionRef {
+            id: r.get(0)?,
+            harness: Harness::OpenCode,
+            path: db.to_path_buf(),
+            cwd: r
+                .get::<_, Option<String>>(1)?
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from),
+            title: r
+                .get::<_, Option<String>>(2)?
+                .filter(|t| !t.is_empty())
+                .map(|t| crate::ir::truncate(&t, 80)),
+            created_at: r.get::<_, Option<i64>>(3)?.and_then(ts_from_epoch),
+            updated_at: r.get::<_, Option<i64>>(4)?.and_then(ts_from_epoch),
+            message_count: 0,
+        })
+    }
+
+    /// The 1.x tables: `message_count` is user+assistant turns (the role lives inside the `data`
+    /// JSON — SQLite's built-in JSON functions read it).
+    fn discover_v1(conn: &rusqlite::Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let mut counts: HashMap<String, usize> = HashMap::new();
         {
             let mut stmt = conn.prepare(
@@ -414,21 +512,7 @@ mod db {
             "SELECT id, directory, title, time_created, time_updated FROM session ORDER BY time_updated DESC",
         )?;
         let refs = stmt
-            .query_map([], |r| {
-                Ok(SessionRef {
-                    id: r.get(0)?,
-                    harness: Harness::OpenCode,
-                    path: db.to_path_buf(),
-                    cwd: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
-                    title: r
-                        .get::<_, Option<String>>(2)?
-                        .filter(|t| !t.is_empty())
-                        .map(|t| crate::ir::truncate(&t, 80)),
-                    created_at: r.get::<_, Option<i64>>(3)?.and_then(ts_from_epoch),
-                    updated_at: r.get::<_, Option<i64>>(4)?.and_then(ts_from_epoch),
-                    message_count: 0,
-                })
-            })?
+            .query_map([], |r| session_ref(db, r))?
             .flatten()
             .map(|mut r| {
                 r.message_count = counts.get(&r.id).copied().unwrap_or(0);
@@ -463,12 +547,22 @@ mod db {
 
     /// Stream one db-backed session: the `session` row → [`Session`] metadata + `extra`, then each
     /// `message` row with its `part` rows hydrated and mapped one message at a time.
-    pub(super) fn stream(r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
+    pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         let conn = open_ro(&r.path)?;
+        // The 2.x tables win for a session in both (a migrated database; module doc of `v2`).
+        let v2 = has_table(&conn, "session_v2")
+            && conn
+                .query_row(
+                    "SELECT 1 FROM session_v2 WHERE id = ?1",
+                    rusqlite::params![r.id],
+                    |_| Ok(()),
+                )
+                .is_ok();
+        let table = if v2 { "session_v2" } else { "session" };
         let row = {
             // `SELECT *` + names, so a column that only exists in newer schemas (`metadata`,
             // 2026-05; `workspace_id`, `path`, …) is read when present and never demanded.
-            let mut stmt = conn.prepare("SELECT * FROM session WHERE id = ?1")?;
+            let mut stmt = conn.prepare(&format!("SELECT * FROM {table} WHERE id = ?1"))?;
             let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
             let mut rows = stmt.query(rusqlite::params![r.id])?;
             match rows.next()? {
@@ -496,9 +590,19 @@ mod db {
                     .and_then(Value::as_str)
                     .filter(|p| !p.is_empty())
                     .map(str::to_string),
+                // 2.x `fork_session_id`: the session `--fork` copied this one from.
+                forked_from: row
+                    .get("fork_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
                 ..Lineage::default()
             },
-            cwd: row.get("directory").and_then(Value::as_str).map(PathBuf::from),
+            cwd: row
+                .get("directory")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from),
             title: row
                 .get("title")
                 .and_then(Value::as_str)
@@ -522,6 +626,9 @@ mod db {
             s.harness_extra_mut(Harness::OpenCode).extend(bag);
         }
         sink.meta(&s);
+        if v2 {
+            return stream_v2(&conn, s, opts, sink);
+        }
 
         let mut msgs = conn.prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")?;
         let mut parts = conn.prepare("SELECT id, data FROM part WHERE message_id = ?1 ORDER BY id")?;
@@ -553,6 +660,47 @@ mod db {
                 }
             }
         }
+        Ok(s)
+    }
+
+    /// The 2.x `session_message` rows of one session, in `seq` order (module doc of `v2`).
+    fn stream_v2(
+        conn: &rusqlite::Connection,
+        mut s: Session,
+        opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Session> {
+        let mut stmt = conn.prepare("SELECT id, type, data FROM session_message WHERE session_id = ?1 ORDER BY seq")?;
+        let mut rows = stmt.query(rusqlite::params![s.id])?;
+        let mut unknown: std::collections::BTreeMap<String, u64> = Default::default();
+        let mut unreadable = 0u64;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let ty: String = row.get(1)?;
+            let data: String = row.get(2)?;
+            let Ok(data) = serde_json::from_str::<Value>(&data) else {
+                unreadable += 1;
+                continue;
+            };
+            let built = match v2::build(&id, &ty, &data, opts) {
+                Ok(b) => b,
+                Err(()) => {
+                    *unknown.entry(ty).or_default() += 1;
+                    Vec::new()
+                }
+            };
+            for mut m in built {
+                fold_into_session(&mut s, &mut m);
+                if sink.message(m) == Flow::Stop {
+                    return Ok(s);
+                }
+            }
+        }
+        if !unknown.is_empty() {
+            s.harness_extra_mut(Harness::OpenCode)
+                .insert("unknown_message_types".into(), json!(unknown));
+        }
+        super::super::note_skipped_lines(&mut s, unreadable);
         Ok(s)
     }
 }
