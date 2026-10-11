@@ -162,15 +162,6 @@ impl WindowArgs {
         }
         Ok(None)
     }
-
-    /// `[start, end)` bounds for the selector, or `None` when no selector was given. `total`
-    /// is consulted only for `--last`.
-    pub(crate) fn bounds(&self, total: impl FnOnce() -> Result<usize>) -> Result<Option<(usize, Option<usize>)>> {
-        match self.window()? {
-            None => Ok(None),
-            Some(w) => w.bounds(total).map(Some),
-        }
-    }
 }
 
 impl Window {

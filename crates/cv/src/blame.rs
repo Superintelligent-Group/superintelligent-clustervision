@@ -620,7 +620,7 @@ fn show_best(harness: &str, session_id: &str, msg_idx: i64) -> Result<()> {
         crate::show_header,
         crate::show_message,
         crate::RenderOpts {
-            range: Some((start, Some(end))),
+            range: Some(crate::util::Window::Range(start, Some(end))),
             max_bytes: None,
         },
     )?;

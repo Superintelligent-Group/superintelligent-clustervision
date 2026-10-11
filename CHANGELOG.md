@@ -5,6 +5,7 @@
 - Codex 0.161/0.162: `turn_aborted` notes keep the abort `error` and `root_turn_id`; `cv formats` names carried records `event_msg.<type>` as the manifest does.
 - Codex corpus: real rollouts from Codex 0.161.0 and 0.162.1, re-read by a golden test so every recorded format keeps reading.
 - `cv index` merges its segments itself, by size, to completion: no more abandoned ~1 GB background merge on long runs.
+- `cv show --last N` and `cv export --last N` read the session once instead of counting it first: about half the time.
 
 ## 0.15.1 — 2026-10-11
 
