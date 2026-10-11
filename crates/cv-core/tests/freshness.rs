@@ -305,3 +305,47 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
         "and a re-discovery keeps it (scan-cache hit)"
     );
 }
+
+/// Why the follower (`watch::Watcher`, cvd's hot loop) takes `discover_all()` instead of the
+/// catalog path: an in-place append to a session outside the probe's top-50 most recently updated
+/// is invisible to `sessions()` until the staleness backstop (15 min by default). That session is
+/// exactly the one a follower must not miss: a lane that sat quiet while 50 others ran, then
+/// resumed. Here `sessions()` still reports the old count while the watcher reports the append.
+#[test]
+fn a_follower_sees_an_append_the_catalog_probe_misses() {
+    let w = World::new("follow");
+    for k in 0..50 {
+        w.write_session("-work-proj", &format!("busy{k:02}"), 9); // updated 2026-01-09
+    }
+    let quiet = w.write_session("-work-proj", "quietsess", 1); // updated 2026-01-01: rank 51
+    cv_core::discover_all();
+    std::thread::sleep(FUDGE);
+    cv_core::sessions();
+    let mut watcher = cv_core::watch::Watcher::new(
+        cv_core::watch::Filter {
+            harness: Some(Harness::Claude),
+            cwd_contains: None,
+        },
+        false,
+    );
+
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new().append(true).open(&quiet).unwrap();
+    f.write_all(user_line("quietsess", 1).as_bytes()).unwrap();
+    drop(f);
+
+    let listed = cv_core::sessions();
+    let q = listed.iter().find(|r| r.id == "quietsess").unwrap();
+    assert_eq!(
+        q.message_count, 1,
+        "outside the top 50 the probe does not see the append"
+    );
+
+    let events = watcher.poll();
+    let ev = events
+        .iter()
+        .find(|e| e.reference.id == "quietsess")
+        .expect("the follower reports the append");
+    assert_eq!(ev.kind, cv_core::watch::EventKind::Updated);
+    assert_eq!(ev.new_messages.len(), 1);
+}

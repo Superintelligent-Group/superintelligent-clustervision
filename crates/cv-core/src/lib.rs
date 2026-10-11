@@ -106,8 +106,11 @@ pub fn discover_all() -> Vec<SessionRef> {
 
 /// Every known session, served from the catalog when it's provably fresh — the **fast read path**
 /// (~ms against a warm catalog, vs ~seconds for [`discover_all`]'s stat-the-fleet scan). This is
-/// what `cv ls`/`stats` read; other consumers (cvd, mcp, tui, indexers) should adopt it
-/// as they shed their need for a guaranteed full scan.
+/// what `cv ls`/`stats`, id resolution and `cv adopt` read. A **follower** must not use it:
+/// [`watch::Watcher`] takes [`discover_all`] on every poll, because an in-place append to a session
+/// outside the probe's top 50 (a lane that sat quiet while others ran, then resumed) is invisible
+/// here until the staleness backstop — pinned by
+/// `tests/freshness.rs::a_follower_sees_an_append_the_catalog_probe_misses`.
 ///
 /// Freshness model, in order:
 /// 1. **Cold or overaged catalog** (never fully synced, or the last full sync is older than

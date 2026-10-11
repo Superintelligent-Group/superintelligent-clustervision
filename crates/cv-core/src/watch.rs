@@ -313,7 +313,11 @@ impl Watcher {
     }
 
     /// The sessions to follow, oldest-touched first, so a bounded poll yields a chronological
-    /// slice.
+    /// slice. The default source is the full scan, not [`crate::sessions`]: the catalog probe
+    /// misses an append to a session outside its top 50, which is the resumed quiet lane a
+    /// follower exists to report (see
+    /// `tests/freshness.rs::a_follower_sees_an_append_the_catalog_probe_misses`). The per-file
+    /// scan cache keeps it one `stat` per unchanged session.
     fn discover(&self) -> Vec<SessionRef> {
         let mut refs: Vec<SessionRef> = (self.discover)()
             .into_iter()
