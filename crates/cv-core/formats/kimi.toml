@@ -10,14 +10,16 @@ ignore_literals = ["context.jsonl", "metadata"]
 store = [
   "$KIMI_SHARE_DIR or ~/.kimi/sessions/<md5(cwd)>/<uuid>/context.jsonl",
   "…/wire.jsonl",
+  "…/context_N.jsonl (segments rotated out by /compact, /clear, rewind; read oldest first)",
   "…/state.json",
+  "…/subagents/<agent_id>/{context.jsonl,wire.jsonl,meta.json}",
   "~/.kimi/kimi.json",
 ]
 
 [upstream]
 repo = "https://github.com/MoonshotAI/kimi-cli (~/pug/kimi-cli)"
-commit = "86f1364 (store frozen since 2026-06)"
-date = "2026-09-19"
+commit = "9ab1286 (1.52.0, the final release, writes nothing; 1.51.0 is the last writer; corpus 1.48.0 + 1.51.0)"
+date = "2026-10-11"
 
 [types]
 "role._system_prompt" = { status = "generic", note = "" }
@@ -34,3 +36,5 @@ date = "2026-09-19"
 "wire.CompactionEnd" = { status = "ignored", note = "" }
 "wire.StepRetry" = { status = "ignored", note = "" }
 "wire.Notification" = { status = "ignored", note = "" }
+"wire.MCPLoadingBegin" = { status = "ignored", note = "" }
+"wire.MCPLoadingEnd" = { status = "ignored", note = "" }

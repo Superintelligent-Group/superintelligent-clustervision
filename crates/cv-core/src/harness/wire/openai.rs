@@ -23,7 +23,7 @@ pub struct Quirks {
     pub thinking: Option<(&'static str, &'static str)>,
     /// Mirror the reasoning part's `encrypted` blob into `signature` too (kimi-cli).
     pub thinking_signature_mirrors_encrypted: bool,
-    /// Drop a reasoning part with neither text nor blob (Kimi Code: kosong ≥ 0.55 writes
+    /// Drop a reasoning part with neither text nor blob (kimi-cli and Kimi Code: kosong ≥ 0.55 writes
     /// `{"think":"","encrypted":null}` for an empty stream — nothing to show, nothing to re-send).
     pub skip_empty_thinking: bool,
 }
@@ -53,10 +53,12 @@ pub const CONTINUE: Quirks = Quirks {
     skip_empty_text: true,
     ..OPENAI
 };
-/// kimi-cli: `think` parts whose blob doubles as the signature.
+/// kimi-cli: `think` parts whose blob doubles as the signature; empty ones dropped (1.49+, kosong
+/// ≥ 0.55, writes `{"think":"","encrypted":null}` for every step that streamed no reasoning).
 pub const KIMI: Quirks = Quirks {
     thinking: Some(("think", "think")),
     thinking_signature_mirrors_encrypted: true,
+    skip_empty_thinking: true,
     ..OPENAI
 };
 /// Kimi Code: `think` parts, empty ones dropped.
@@ -264,19 +266,15 @@ mod tests {
             {"type": "audio_url", "audio_url": {"url": "file:///a.wav"}}
         ]);
         let kimi = blocks_from(Some(&parts), &KIMI);
-        assert_eq!(kimi.len(), 3);
+        assert_eq!(
+            kimi.len(),
+            2,
+            "kimi-cli 1.49+ writes an empty think per step; it is dropped"
+        );
         assert!(
             matches!(&kimi[0], Block::Thinking { signature: Some(s), encrypted: Some(e), .. } if s == "BLOB" && e == "BLOB")
         );
-        assert!(matches!(
-            &kimi[1],
-            Block::Thinking {
-                signature: None,
-                encrypted: None,
-                ..
-            }
-        ));
-        assert!(matches!(&kimi[2], Block::File { source: Some(u), .. } if u == "file:///a.wav"));
+        assert!(matches!(&kimi[1], Block::File { source: Some(u), .. } if u == "file:///a.wav"));
         let code = blocks_from(Some(&parts), &KIMI_CODE);
         assert_eq!(code.len(), 2, "Kimi Code drops the empty think");
         assert!(matches!(

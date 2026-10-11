@@ -9,8 +9,18 @@
 //! Two on-disk shapes (sniffed, never via a version field):
 //! - **Modern (dir form):** `sessions/<hash>/<uuid>/context.jsonl` plus a `wire.jsonl` sidecar
 //!   (timestamps + token usage), optional `state.json` (`custom_title`), and rotated-out segments
-//!   `context_1.jsonl…context_N.jsonl` (we read the live `context.jsonl`, recording the count of
-//!   segments in `extra["kimi"]["compaction_segments"]`).
+//!   `context_1.jsonl…context_N.jsonl`. `/compact`, `/clear` and a rewind each rotate the live file
+//!   out; the session is ALL segments, oldest first, then the live `context.jsonl` (the head a new
+//!   segment repeats — the system prompt, or a rewind's copied prefix — is read once). A segment
+//!   that opens with the compaction summary gets a `CompactionBoundary`; any other rotation gets a
+//!   synthetic `Branch` (`extra["kimi"]["segment"]`). The count stays in
+//!   `extra["kimi"]["compaction_segments"]`.
+//! - **Sub-agents:** `<session>/subagents/<agent_id>/` holds each `Agent`-tool child in the same
+//!   format (`context.jsonl`, `wire.jsonl`) plus `meta.json` (`subagent_type`, `description`, …);
+//!   [`subagent_refs`] lists them, parsed with `lineage.parent` = the session and `agent_path` =
+//!   the agent id. Also in a session dir, read by nothing here: `tasks/<id>/` (background shells:
+//!   `spec.json`, `runtime.json`, `output.log`, …) and `notifications/<id>/` (`event.json`,
+//!   `delivery.json`); `state.json` also keeps `todos`, `plan_mode`, `approval`.
 //! - **Legacy (flat form):** `sessions/<hash>/<uuid>.jsonl` — the transcript only, no sidecar/dir.
 //!   (kimi-cli migrates these to the dir form on next open; we still read them in place.)
 //!
@@ -87,6 +97,20 @@ impl Kimi {
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".kimi")))
             .filter(|p| p.exists());
+        match root {
+            Some(r) => Kimi::with_home(&r),
+            None => Kimi {
+                sessions: None,
+                root: None,
+            },
+        }
+    }
+
+    /// An adapter over an explicit kimi-cli share dir (the dir holding `sessions/` and
+    /// `kimi.json`), instead of `$KIMI_SHARE_DIR` / `~/.kimi` — for the harness corpus and other
+    /// tests, without mutating the process environment.
+    pub fn with_home(share_dir: &Path) -> Self {
+        let root = Some(share_dir.to_path_buf()).filter(|p| p.exists());
         let sessions = root.as_ref().map(|r| r.join("sessions")).filter(|p| p.exists());
         Kimi { sessions, root }
     }
@@ -172,8 +196,11 @@ impl Adapter for Kimi {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // r.path is the session dir (modern) or the hash dir (legacy). Locate the transcript.
+        // r.path is the session dir (modern), the hash dir (legacy), or a sub-agent's dir
+        // (`<session>/subagents/<agent_id>`, from [`subagent_refs`]). Locate the transcript and
+        // the rotated segments before it.
         let (transcript, wire) = locate_transcript(&r.path, &r.id);
+        let segments = transcript_segments(&r.path, &transcript);
 
         let mut s = Session {
             id: r.id.clone(),
@@ -191,8 +218,11 @@ impl Adapter for Kimi {
             source_path: Some(r.path.clone()),
             extra: serde_json::Map::new(),
             system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            lineage: subagent_lineage(&r.path),
         };
+        if let Some(meta) = subagent_meta(&r.path) {
+            s.harness_extra_mut(Harness::Kimi).insert("subagent".into(), meta);
+        }
 
         // Sidecar enrichment from wire.jsonl (tolerant: absent/empty/malformed ⇒ empty). The
         // per-message `tool_results` map (keyed by tool_call_id) is a per-line enrichment; the
@@ -201,25 +231,26 @@ impl Adapter for Kimi {
         // state, so they run inline here too — `parse()` is exactly `collect(stream())`.
         let enrich = wire.as_ref().map(read_wire_enrichment).unwrap_or_default();
 
-        // Note archived compaction segments (context_1.jsonl…), if any, for fidelity bookkeeping.
-        let seg_count = count_segments(&r.path);
+        // Rotated segments (context_1.jsonl…) are read first, in order; their count stays as
+        // bookkeeping.
+        let seg_count = segments.len().saturating_sub(1) as u64;
         if seg_count > 0 {
             s.harness_extra_mut(Harness::Kimi)
                 .insert("compaction_segments".into(), Value::Number(seg_count.into()));
         }
         // The system prompt is the first `context.jsonl` record; peek so the session-level copy is
         // known before the body streams.
-        s.system_prompt = peek_system_prompt(&transcript);
+        s.system_prompt = peek_system_prompt(&segments[0]);
 
         // Session metadata is known up front; hand it to the sink before the body.
         sink.meta(&s);
 
-        // Stream the transcript line-by-line (a single session can be large; `read_to_string` would
+        // Stream the segments line-by-line (a single session can be large; `read_to_string` would
         // resident-spike the whole file). Each record becomes at most one Message, emitted to `sink`
         // and dropped before the next line, so peak memory is O(largest message).
-        let Ok(file) = fs::File::open(&transcript) else {
+        if !segments.iter().any(|p| p.exists()) {
             return Ok(s);
-        };
+        }
         // Positional wire enrichment, streamed: one StatusUpdate per assistant step (in wire
         // order) and the first wire timestamp for the first user turn. Forward-only, O(1) state.
         let mut statuses = enrich.statuses.iter();
@@ -232,7 +263,14 @@ impl Adapter for Kimi {
         // waits here until the next record shows what follows. Peak memory stays O(one message).
         let mut pending: Option<Message> = None;
         let mut stopped = false;
-        let skipped = super::for_each_json_line(BufReader::new(file), |v| {
+        // Set at the first new record of a rotated-in segment: unless that record is the
+        // compaction summary (which gets its own boundary), the rotation was a `/clear` or a
+        // rewind, and what follows does not continue what precedes.
+        let mut rotated: Option<String> = None;
+        let skipped = for_each_segment_record(&segments, |v, starts| {
+            if let Some(name) = starts {
+                rotated = Some(name.to_string());
+            }
             if v.get("role").and_then(Value::as_str) == Some("_usage") {
                 if let Some(p) = pending.as_mut() {
                     fold_usage_record(p, &v);
@@ -273,6 +311,14 @@ impl Adapter for Kimi {
             {
                 stopped = true;
                 return Flow::Stop;
+            }
+            if let Some(segment) = rotated.take() {
+                if m.kind != MessageKind::CompactionSummary
+                    && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
+                {
+                    stopped = true;
+                    return Flow::Stop;
+                }
             }
             pending = Some(m);
             Flow::Continue
@@ -358,8 +404,7 @@ fn scan(
     // title: state.json.custom_title (modern only) else first user text from the transcript.
     let mut title = read_custom_title(dir);
     let mut message_count = 0usize;
-    let text = fs::read_to_string(transcript).unwrap_or_default();
-    super::for_each_json_line_str(&text, |v| {
+    for_each_segment_record(&transcript_segments(dir, transcript), |v, _| {
         let role = v.get("role").and_then(Value::as_str).unwrap_or("");
         // SessionRef contract: user + assistant turns only (no tool / _system_prompt records).
         if matches!(role, "user" | "assistant") {
@@ -425,19 +470,153 @@ fn wire_path_for(dir: &Path, transcript: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Count archived pre-compaction segments `context_1.jsonl…` next to a modern transcript.
-fn count_segments(dir: &Path) -> u64 {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return 0;
+/// The transcript's segments, oldest first: the rotated-out `context_1.jsonl…context_N.jsonl`
+/// (kimi-cli's `next_available_rotation`, numbered upward) and then the live `context.jsonl`. A
+/// legacy flat transcript has no segments of its own.
+fn transcript_segments(dir: &Path, transcript: &Path) -> Vec<PathBuf> {
+    let mut rotated: Vec<(u64, PathBuf)> = Vec::new();
+    if transcript.file_name().and_then(|n| n.to_str()) == Some("context.jsonl") {
+        if let Ok(rd) = fs::read_dir(dir) {
+            for e in rd.filter_map(|e| e.ok()) {
+                let name = e.file_name();
+                let Some(n) = name
+                    .to_str()
+                    .and_then(|n| n.strip_prefix("context_"))
+                    .and_then(|n| n.strip_suffix(".jsonl"))
+                    .and_then(|n| n.parse::<u64>().ok())
+                else {
+                    continue;
+                };
+                rotated.push((n, e.path()));
+            }
+        }
+    }
+    rotated.sort();
+    let mut v: Vec<PathBuf> = rotated.into_iter().map(|(_, p)| p).collect();
+    v.push(transcript.to_path_buf());
+    v
+}
+
+/// Every record of every segment, in order. kimi-cli rotates the live file on `/clear`, on a
+/// compaction (`Context.clear`) and on a rewind (`Context.revert_to`, which copies the kept prefix
+/// into the new file), and every new file starts with the system prompt again; so the leading
+/// lines a segment shares with the one before it are the same records and are not repeated. The
+/// callback's second argument names the segment at its first new record (never for the first
+/// segment). Returns the count of malformed lines.
+fn for_each_segment_record(segments: &[PathBuf], mut f: impl FnMut(Value, Option<&str>) -> Flow) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::io::BufRead;
+    let line_hash = |l: &str| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        l.trim().hash(&mut h);
+        h.finish()
     };
-    rd.filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|n| n.starts_with("context_") && n.ends_with(".jsonl"))
-                .unwrap_or(false)
+    let mut skipped = 0u64;
+    let mut prev: Vec<u64> = Vec::new();
+    for (i, path) in segments.iter().enumerate() {
+        let Ok(file) = fs::File::open(path) else {
+            continue;
+        };
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let mut cur: Vec<u64> = Vec::new();
+        let mut shared = i > 0;
+        let mut announce = i > 0;
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else {
+                skipped += 1;
+                continue;
+            };
+            let h = line_hash(&line);
+            cur.push(h);
+            if shared && prev.get(cur.len() - 1) == Some(&h) {
+                continue;
+            }
+            shared = false;
+            let mut stop = false;
+            skipped += super::for_each_json_line_str(&line, |v| {
+                let starts = if announce { Some(name) } else { None };
+                announce = false;
+                if f(v, starts) == Flow::Stop {
+                    stop = true;
+                    return Flow::Stop;
+                }
+                Flow::Continue
+            });
+            if stop {
+                return skipped;
+            }
+        }
+        prev = cur;
+    }
+    skipped
+}
+
+/// The lineage of a sub-agent transcript (`<session>/subagents/<agent_id>`, kimi-cli's
+/// `SubagentStore`): the owning session and the agent id. Empty for a session's own dir.
+fn subagent_lineage(path: &Path) -> crate::ir::Lineage {
+    let mut l = crate::ir::Lineage::default();
+    let parent = path.parent();
+    if parent.and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("subagents") {
+        l.parent = parent
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        l.agent_path = path.file_name().and_then(|n| n.to_str()).map(str::to_string);
+    }
+    l
+}
+
+/// A sub-agent's `meta.json` (`{agent_id, subagent_type, status, description, launch_spec, …}`).
+fn subagent_meta(path: &Path) -> Option<Value> {
+    subagent_lineage(path).parent?;
+    serde_json::from_str(&fs::read_to_string(path.join("meta.json")).ok()?).ok()
+}
+
+/// One [`SessionRef`] per sub-agent of a discovered session (`<session>/subagents/<agent_id>/`
+/// with a `context.jsonl`). Discovery lists only top-level sessions; parsing one of these yields a
+/// [`Session`] whose `lineage.parent` is the session id and `lineage.agent_path` the agent id.
+pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
+    let Ok(rd) = fs::read_dir(main.path.join("subagents")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SessionRef> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.join("context.jsonl").is_file())
+        .filter_map(|p| {
+            let agent = p.file_name()?.to_str()?.to_string();
+            let mut r = scan(
+                &format!("{}/{agent}", main.id),
+                &p.join("context.jsonl"),
+                &p,
+                main.cwd.clone(),
+                None,
+            )?;
+            if let Some(d) =
+                subagent_meta(&p).and_then(|m| m.get("description").and_then(Value::as_str).map(str::to_string))
+            {
+                r.title = Some(crate::ir::truncate(&d, 80));
+            }
+            Some(r)
         })
-        .count() as u64
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// The marker for a segment that a `/clear` or a rewind rotated in (a compaction's rotation gets
+/// [`compaction_boundary`] from its summary instead).
+fn rotation_branch(ts: Option<DateTime<Utc>>, segment: String) -> Message {
+    let mut m = Message::of_kind(Role::System, MessageKind::Branch, Origin::Harness);
+    m.timestamp = ts;
+    m.content.push(Block::Text {
+        text: "[context cleared or rewound]".into(),
+    });
+    let x = m.harness_extra_mut(Harness::Kimi);
+    x.insert("synthetic".into(), Value::Bool(true));
+    x.insert("segment".into(), Value::String(segment));
+    m
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1438,108 @@ mod tests {
     }
 
     /// Write `name`→`contents` into a fresh temp dir, return the dir.
+    /// `/compact` and `/clear` rotate `context.jsonl` into `context_N.jsonl`; the whole history is
+    /// read, oldest segment first, the repeated head (system prompt, checkpoint 0) once, with a
+    /// compaction boundary before a summary and a branch before a cleared segment.
+    #[test]
+    fn rotated_segments_read_in_order_with_their_boundaries() {
+        let sp = r#"{"role":"_system_prompt","content":"You are Kimi."}"#;
+        let c0 = r#"{"role":"_checkpoint","id":0}"#;
+        let dir = write_temp(
+            "context_1.jsonl",
+            &[
+                sp,
+                c0,
+                r#"{"role":"user","content":"first"}"#,
+                r#"{"role":"assistant","content":"one"}"#,
+            ]
+            .join("\n"),
+        );
+        fs::write(
+            dir.join("context_2.jsonl"),
+            [
+                sp,
+                c0,
+                r#"{"role":"user","content":[{"type":"text","text":"<system>Previous context has been compacted. Here is the compaction output:</system>"},{"type":"text","text":"we said one"}]}"#,
+                r#"{"role":"user","content":"second"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("context.jsonl"),
+            [sp, c0, r#"{"role":"user","content":"third"}"#].join("\n"),
+        )
+        .unwrap();
+        let id = "s1";
+        let r = scan(id, &dir.join("context.jsonl"), &dir, None, None).unwrap();
+        assert_eq!(
+            r.title.as_deref(),
+            Some("first"),
+            "the title is the first prompt of the first segment"
+        );
+        let k = Kimi {
+            sessions: None,
+            root: None,
+        };
+        let s = k.parse(&r).unwrap();
+        let kinds: Vec<MessageKind> = s.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                MessageKind::SystemPrompt,
+                MessageKind::Prompt,
+                MessageKind::Reply,
+                MessageKind::CompactionBoundary,
+                MessageKind::CompactionSummary,
+                MessageKind::Prompt,
+                MessageKind::Branch,
+                MessageKind::Prompt,
+            ]
+        );
+        assert_eq!(
+            s.messages[6]
+                .harness_extra(Harness::Kimi)
+                .and_then(|x| x.get("segment")),
+            Some(&Value::String("context.jsonl".into()))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// kimi-cli's `Agent` tool keeps each sub-agent under `<session>/subagents/<agent_id>/` in the
+    /// session's own format; it parses as its own session under the parent.
+    #[test]
+    fn subagent_dirs_parse_with_lineage() {
+        let dir = write_temp("context.jsonl", r#"{"role":"user","content":"parent"}"#);
+        let sub = dir.join("subagents").join("a1b2");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("context.jsonl"), r#"{"role":"user","content":"child task"}"#).unwrap();
+        fs::write(
+            sub.join("meta.json"),
+            r#"{"agent_id":"a1b2","subagent_type":"coder","description":"do it"}"#,
+        )
+        .unwrap();
+        let main = scan("p1", &dir.join("context.jsonl"), &dir, None, None).unwrap();
+        let refs = subagent_refs(&main);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, "p1/a1b2");
+        assert_eq!(refs[0].title.as_deref(), Some("do it"));
+        let s = Kimi {
+            sessions: None,
+            root: None,
+        }
+        .parse(&refs[0])
+        .unwrap();
+        assert_eq!(s.lineage.agent_path.as_deref(), Some("a1b2"));
+        assert_eq!(s.lineage.parent.as_deref(), dir.file_name().and_then(|n| n.to_str()));
+        assert_eq!(
+            s.harness_extra(Harness::Kimi)
+                .and_then(|x| x.get("subagent").and_then(|a| a.get("subagent_type"))),
+            Some(&Value::String("coder".into()))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     fn write_temp(name: &str, contents: &str) -> PathBuf {
         let mut d = std::env::temp_dir();
         d.push(format!(
