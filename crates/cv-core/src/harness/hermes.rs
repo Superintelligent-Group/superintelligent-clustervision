@@ -1222,76 +1222,19 @@ mod tests {
     use crate::harness::Parse;
     use rusqlite::Connection;
 
-    /// Schema matching hermes_state.py SCHEMA_VERSION 14.
-    const SCHEMA_V14: &str = "
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            source TEXT NOT NULL,
-            user_id TEXT,
-            model TEXT,
-            model_config TEXT,
-            system_prompt TEXT,
-            parent_session_id TEXT,
-            started_at REAL NOT NULL,
-            ended_at REAL,
-            end_reason TEXT,
-            message_count INTEGER DEFAULT 0,
-            tool_call_count INTEGER DEFAULT 0,
-            input_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0,
-            cache_read_tokens INTEGER DEFAULT 0,
-            cache_write_tokens INTEGER DEFAULT 0,
-            reasoning_tokens INTEGER DEFAULT 0,
-            title TEXT
-        );
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_call_id TEXT,
-            tool_calls TEXT,
-            tool_name TEXT,
-            timestamp REAL NOT NULL,
-            token_count INTEGER,
-            finish_reason TEXT,
-            reasoning TEXT,
-            reasoning_content TEXT,
-            reasoning_details TEXT,
-            codex_reasoning_items TEXT,
-            codex_message_items TEXT,
-            platform_message_id TEXT,
-            observed INTEGER DEFAULT 0
-        );
-    ";
+    /// A file under `tests/fixtures/hermes/`: a schema (`schema-*.sql`) or a test's rows
+    /// (`<test>.sql`, run in place of the `INSERT`s the test used to spell inline).
+    fn fixture(name: &str) -> String {
+        let path = format!("{}/tests/fixtures/hermes/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+    }
 
-    /// An older (pre-v14-ish) schema: only the columns Hermes had before the reasoning/codex/token
-    /// additions. Exercises the column-probing degradation path.
-    const SCHEMA_OLD: &str = "
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            source TEXT NOT NULL,
-            model TEXT,
-            started_at REAL NOT NULL,
-            ended_at REAL,
-            message_count INTEGER DEFAULT 0,
-            title TEXT
-        );
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_call_id TEXT,
-            tool_calls TEXT,
-            tool_name TEXT,
-            timestamp REAL NOT NULL
-        );
-    ";
-
+    /// An in-memory database with a fixture schema: `schema-v14.sql` (hermes_state.py
+    /// SCHEMA_VERSION 14), `schema-old.sql` (pre-v14 columns only, for the column-probing
+    /// degradation path) or `schema-v30.sql` (a subset of schema 30; see its header).
     fn mk_conn(schema: &str) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(schema).unwrap();
+        conn.execute_batch(&fixture(schema)).unwrap();
         conn
     }
 
@@ -1347,19 +1290,10 @@ mod tests {
 
     #[test]
     fn parses_basic_text_conversation() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1','user','Hello',1001.0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, token_count, finish_reason) \
-             VALUES ('s1','assistant','Hi there!',1002.0, 42, 'stop')",
-            [],
-        )
-        .unwrap();
+        conn.execute_batch(&fixture("parses_basic_text_conversation.sql"))
+            .unwrap();
 
         let s = parse_conn(&conn, &sref("s1")).unwrap();
         assert_eq!(s.messages.len(), 2);
@@ -1387,22 +1321,9 @@ mod tests {
     fn system_row_is_the_system_prompt() {
         // Older Hermes stored the system prompt as a `system` row; it is `SystemPrompt`, not a notice,
         // and the session-level copy comes from the column.
-        let conn = mk_conn(SCHEMA_V14);
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, system_prompt) VALUES ('s', 'cli', 1000.0, 'You are Hermes')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s','system','You are Hermes',1000.5)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s','user','hi',1001.0)",
-            [],
-        )
-        .unwrap();
+        let conn = mk_conn("schema-v14.sql");
+        conn.execute_batch(&fixture("system_row_is_the_system_prompt.sql"))
+            .unwrap();
         let s = parse_conn(&conn, &sref("s")).unwrap();
         assert_eq!(s.system_prompt.as_deref(), Some("You are Hermes"));
         assert_eq!(s.messages[0].role, Role::System);
@@ -1415,7 +1336,7 @@ mod tests {
 
     #[test]
     fn decodes_multimodal_sentinel() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
         let content = "\u{0}json:[{\"type\":\"text\",\"text\":\"see this\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AAAA\"}}]";
         conn.execute(
@@ -1432,7 +1353,7 @@ mod tests {
 
     #[test]
     fn decodes_input_image_string_form() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
         // input_image with image_url as a bare string (Responses API form).
         let content = "\u{0}json:[{\"type\":\"input_text\",\"text\":\"hi\"},{\"type\":\"input_image\",\"image_url\":\"data:image/jpeg;base64,ZZZ\"}]";
@@ -1449,7 +1370,7 @@ mod tests {
 
     #[test]
     fn decodes_dict_shaped_content() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
         let content = "\u{0}json:{\"parts\":[{\"text\":\"hi\"}]}";
         conn.execute(
@@ -1463,19 +1384,9 @@ mod tests {
 
     #[test]
     fn parses_tool_call_and_result() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
-        let tc = "[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"web_search\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]";
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, tool_calls, timestamp) VALUES ('s1','assistant','',?1,1001.0)",
-            [tc],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp) \
-             VALUES ('s1','tool','{\"ok\":true}','c1','web_search',1002.0)",
-            [],
-        )
-        .unwrap();
+        conn.execute_batch(&fixture("parses_tool_call_and_result.sql")).unwrap();
         let s = parse_conn(&conn, &sref("s1")).unwrap();
         assert_eq!(s.messages.len(), 2);
         let tu = &s.messages[0].content[0];
@@ -1498,14 +1409,9 @@ mod tests {
 
     #[test]
     fn maps_all_reasoning_variants() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
-        let details = "[{\"type\":\"reasoning.summary\",\"summary\":\"summarised\"},{\"type\":\"reasoning.encrypted_content\",\"encrypted_content\":\"ENC123\"}]";
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, reasoning, reasoning_content, reasoning_details) \
-             VALUES ('s1','assistant','answer',1001.0,'short summary','native scratchpad',?1)",
-            [details],
-        ).unwrap();
+        conn.execute_batch(&fixture("maps_all_reasoning_variants.sql")).unwrap();
         let s = parse_conn(&conn, &sref("s1")).unwrap();
         let think = s.messages[0]
             .content
@@ -1529,14 +1435,10 @@ mod tests {
 
     #[test]
     fn reasoning_content_not_duplicated_when_equal() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, reasoning, reasoning_content) \
-             VALUES ('s1','assistant','a',1001.0,'same','same')",
-            [],
-        )
-        .unwrap();
+        conn.execute_batch(&fixture("reasoning_content_not_duplicated_when_equal.sql"))
+            .unwrap();
         let s = parse_conn(&conn, &sref("s1")).unwrap();
         let text = s.messages[0]
             .content
@@ -1551,16 +1453,9 @@ mod tests {
 
     #[test]
     fn maps_codex_items() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
-        let cri = "[{\"type\":\"reasoning\",\"id\":\"rs_a\",\"encrypted_content\":\"BLOB\"}]";
-        let cmi = "[{\"type\":\"message\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done\"}]}]";
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, codex_reasoning_items, codex_message_items) \
-             VALUES ('s1','assistant','Done',1001.0,?1,?2)",
-            [cri, cmi],
-        )
-        .unwrap();
+        conn.execute_batch(&fixture("maps_codex_items.sql")).unwrap();
         let s = parse_conn(&conn, &sref("s1")).unwrap();
         let enc = s.messages[0].content.iter().find_map(|b| match b {
             Block::Thinking { encrypted, .. } => encrypted.clone(),
@@ -1573,14 +1468,10 @@ mod tests {
 
     #[test]
     fn platform_message_id_and_observed() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         insert_session(&conn, "s1", None, None, 1000.0, None);
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, platform_message_id, observed) \
-             VALUES ('s1','user','hi',1001.0,'abc-123',1)",
-            [],
-        )
-        .unwrap();
+        conn.execute_batch(&fixture("platform_message_id_and_observed.sql"))
+            .unwrap();
         let s = parse_conn(&conn, &sref("s1")).unwrap();
         assert_eq!(bag(&s.messages[0])["platform_message_id"], "abc-123");
         assert_eq!(bag(&s.messages[0])["observed"], Value::Bool(true));
@@ -1588,24 +1479,12 @@ mod tests {
 
     #[test]
     fn walks_compression_chain_and_dedups_replayed_user() {
-        let conn = mk_conn(SCHEMA_V14);
+        let conn = mk_conn("schema-v14.sql");
         // root ended via compression at t=2000; child created after, replays the last user msg.
         insert_session(&conn, "root", None, Some("compression"), 1000.0, Some(2000.0));
         insert_session(&conn, "child", Some("root"), None, 2001.0, None);
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('root','user','first prompt',1001.0)",
-            [],
-        )
-        .unwrap();
-        conn.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('root','assistant','first answer',1002.0)", []).unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('root','user','second prompt',1003.0)",
-            [],
-        )
-        .unwrap();
-        // child replays 'second prompt' then continues.
-        conn.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('child','user','second prompt',2002.0)", []).unwrap();
-        conn.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('child','assistant','second answer',2003.0)", []).unwrap();
+        conn.execute_batch(&fixture("walks_compression_chain_and_dedups_replayed_user.sql"))
+            .unwrap();
 
         // Parsing the CHILD should walk up to the root and merge, deduping the replayed user msg.
         let s = parse_conn(&conn, &sref("child")).unwrap();
@@ -1618,19 +1497,9 @@ mod tests {
 
     #[test]
     fn old_schema_missing_columns_still_parses() {
-        let conn = mk_conn(SCHEMA_OLD);
-        conn.execute(
-            "INSERT INTO sessions (id, source, model, started_at, title) VALUES ('s1','cli','m',1000.0,'T')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1','user','hello old',1001.0)",
-            [],
-        )
-        .unwrap();
-        conn.execute("INSERT INTO messages (session_id, role, content, tool_calls, timestamp) VALUES ('s1','assistant','',?1,1002.0)",
-            ["[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]"]).unwrap();
+        let conn = mk_conn("schema-old.sql");
+        conn.execute_batch(&fixture("old_schema_missing_columns_still_parses.sql"))
+            .unwrap();
         // Must not error despite missing reasoning/token/codex/parent columns.
         let s = parse_conn(&conn, &sref("s1")).unwrap();
         assert_eq!(s.messages.len(), 2);
@@ -1662,7 +1531,7 @@ mod tests {
         // helper: create a state.db with one named session.
         let mk_db = |path: &std::path::Path, sid: &str| {
             let conn = Connection::open(path).unwrap();
-            conn.execute_batch(SCHEMA_V14).unwrap();
+            conn.execute_batch(&fixture("schema-v14.sql")).unwrap();
             conn.execute(
                 "INSERT INTO sessions (id, source, model, started_at, message_count, title) \
                  VALUES (?1,'cli','nous/hermes-4',1000.0,1,?2)",
@@ -1708,80 +1577,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// Schema v30 (2026-09, `hermes_state_common.py:239`): the v14 tables plus the in-place
-    /// compaction flags, display sidecars, `system_prompts`, cwd/git columns and listing flags.
-    ///
-    /// A *subset* of the real schema 30 — column ORDER and types match
-    /// `tests/fixtures/hermes/state-v30.db` (`sqlite3 … '.schema sessions'`), but the gateway,
-    /// billing, handoff and compression-cooldown columns the adapter never reads are omitted.
-    /// Every column this adapter SELECTs or a test INSERTs must be here; add it in its real
-    /// position when one is missing.
-    const SCHEMA_V30: &str = "
-        CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            source TEXT NOT NULL,
-            user_id TEXT,
-            display_name TEXT,
-            -- Provenance of an imported session (`hermes sessions import` writes
-            -- `origin_json.imported_from`); real schema 30 puts it right here, after
-            -- `display_name` — verified against tests/fixtures/hermes/state-v30.db.
-            origin_json TEXT,
-            model TEXT,
-            model_config TEXT,
-            system_prompt TEXT,
-            system_prompt_hash TEXT,
-            parent_session_id TEXT,
-            started_at REAL NOT NULL,
-            ended_at REAL,
-            end_reason TEXT,
-            message_count INTEGER DEFAULT 0,
-            tool_call_count INTEGER DEFAULT 0,
-            input_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0,
-            cache_read_tokens INTEGER DEFAULT 0,
-            cache_write_tokens INTEGER DEFAULT 0,
-            reasoning_tokens INTEGER DEFAULT 0,
-            cwd TEXT,
-            git_branch TEXT,
-            git_repo_root TEXT,
-            title TEXT,
-            title_source TEXT,
-            last_activity_at REAL,
-            profile_name TEXT,
-            archived INTEGER NOT NULL DEFAULT 0,
-            hidden INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_call_id TEXT,
-            tool_calls TEXT,
-            tool_name TEXT,
-            effect_disposition TEXT,
-            timestamp REAL NOT NULL,
-            token_count INTEGER,
-            finish_reason TEXT,
-            reasoning TEXT,
-            reasoning_content TEXT,
-            reasoning_details TEXT,
-            codex_reasoning_items TEXT,
-            codex_message_items TEXT,
-            platform_message_id TEXT,
-            observed INTEGER DEFAULT 0,
-            _compressed_summary INTEGER NOT NULL DEFAULT 0,
-            active INTEGER NOT NULL DEFAULT 1,
-            compacted INTEGER NOT NULL DEFAULT 0,
-            api_content TEXT,
-            display_kind TEXT,
-            display_metadata TEXT,
-            display_identity BLOB,
-            display_order INTEGER
-        );
-    ";
-
     /// Insert a v30 message row with explicit flags; returns nothing (ids are AUTOINCREMENT in order).
     fn insert_v30(conn: &Connection, sid: &str, role: &str, content: &str, ts: f64, active: i64, compacted: i64) {
         conn.execute(
@@ -1799,7 +1594,7 @@ mod tests {
     fn orders_by_id_not_timestamp() {
         // Hermes reads `ORDER BY id`: timestamps are not monotonic and would split a tool call from
         // its result (hermes_state_messages.py:42).
-        let conn = mk_conn(SCHEMA_V30);
+        let conn = mk_conn("schema-v30.sql");
         insert_session(&conn, "s", None, None, 1000.0, None);
         insert_v30(&conn, "s", "user", "later stamp, first row", 2000.0, 1, 0);
         insert_v30(&conn, "s", "assistant", "earlier stamp, second row", 1500.0, 1, 0);
@@ -1812,18 +1607,14 @@ mod tests {
         // archive_and_compact: summarized rows → active=0,compacted=1 (still history); the summary is
         // a fresh active row with _compressed_summary=1; the carried tail is cloned (same content +
         // timestamp, new id) and superseded originals / rewound rows get active=0,compacted=0.
-        let conn = mk_conn(SCHEMA_V30);
+        let conn = mk_conn("schema-v30.sql");
         insert_session(&conn, "s", None, None, 1000.0, None);
         insert_v30(&conn, "s", "user", "q1", 1001.0, 0, 1); // id 1: summarized away
         insert_v30(&conn, "s", "assistant", "a1", 1002.0, 0, 1); // id 2
         insert_v30(&conn, "s", "user", "q2", 1003.0, 0, 1); // id 3: older generation of the carried tail
         insert_v30(&conn, "s", "user", "typo", 1003.5, 0, 0); // id 4: rewound — never displayed
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, active, compacted, _compressed_summary, display_kind) \
-             VALUES ('s', 'user', '[CONTEXT COMPACTION] earlier turns…', 1004.0, 1, 0, 1, 'hidden')",
-            [],
-        )
-        .unwrap(); // id 5: the summary
+        conn.execute_batch(&fixture("in_place_compaction_display_view.sql"))
+            .unwrap(); // id 5: the summary
         insert_v30(&conn, "s", "user", "q2", 1003.0, 1, 0); // id 6: live clone of id 3
         insert_v30(&conn, "s", "assistant", "a2", 1005.0, 1, 0); // id 7
 
@@ -1884,17 +1675,9 @@ mod tests {
     #[test]
     fn system_prompt_resolves_via_system_prompts_table() {
         // v25 hollowed `sessions.system_prompt` out into `system_prompts(hash, prompt)`.
-        let conn = mk_conn(SCHEMA_V30);
-        conn.execute(
-            "INSERT INTO system_prompts (hash, prompt) VALUES ('h1', 'You are Hermes')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, system_prompt, system_prompt_hash) VALUES ('s', 'cli', 1000.0, NULL, 'h1')",
-            [],
-        )
-        .unwrap();
+        let conn = mk_conn("schema-v30.sql");
+        conn.execute_batch(&fixture("system_prompt_resolves_via_system_prompts_table.sql"))
+            .unwrap();
         insert_v30(&conn, "s", "user", "hi", 1001.0, 1, 0);
         let s = parse_conn(&conn, &sref("s")).unwrap();
         assert_eq!(s.system_prompt.as_deref(), Some("You are Hermes"));
@@ -1903,32 +1686,22 @@ mod tests {
             "the system prompt is first-class, not a session fact"
         );
         // the old direct column still wins on a v14 DB
-        let old = mk_conn(SCHEMA_V14);
-        old.execute(
-            "INSERT INTO sessions (id, source, started_at, system_prompt) VALUES ('s', 'cli', 1000.0, 'legacy prompt')",
-            [],
-        )
-        .unwrap();
-        old.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s','user','hi',1001.0)",
-            [],
-        )
-        .unwrap();
+        let old = mk_conn("schema-v14.sql");
+        old.execute_batch(&fixture("system_prompt_resolves_via_system_prompts_table-2.sql"))
+            .unwrap();
         let s = parse_conn(&old, &sref("s")).unwrap();
         assert_eq!(s.system_prompt.as_deref(), Some("legacy prompt"));
     }
 
     #[test]
     fn branches_and_delegates_stand_alone_but_compression_still_merges() {
-        let conn = mk_conn(SCHEMA_V30);
+        let conn = mk_conn("schema-v30.sql");
         // /branch: parent ended 'branched'; the child owns a COPY of the transcript.
         insert_session(&conn, "p", None, Some("branched"), 1000.0, Some(1500.0));
         insert_v30(&conn, "p", "user", "shared prompt", 1001.0, 1, 0);
-        conn.execute(
-            "INSERT INTO sessions (id, source, parent_session_id, model_config, started_at) \
-             VALUES ('b', 'cli', 'p', '{\"_branched_from\":\"p\",\"yolo_mode\":false}', 1600.0)",
-            [],
-        )
+        conn.execute_batch(&fixture(
+            "branches_and_delegates_stand_alone_but_compression_still_merges.sql",
+        ))
         .unwrap();
         insert_v30(&conn, "b", "user", "shared prompt", 1001.0, 1, 0); // the copied row
         insert_v30(&conn, "b", "assistant", "branch answer", 1601.0, 1, 0);
@@ -1954,11 +1727,9 @@ mod tests {
         assert_eq!(b.model.as_deref(), None, "markers never leak into the model name");
 
         // delegate sub-agent run: separate conversation whose parent spawned it.
-        conn.execute(
-            "INSERT INTO sessions (id, source, parent_session_id, model_config, started_at) \
-             VALUES ('d', 'cli', 'p', '{\"_delegate_from\":\"p\"}', 1700.0)",
-            [],
-        )
+        conn.execute_batch(&fixture(
+            "branches_and_delegates_stand_alone_but_compression_still_merges-2.sql",
+        ))
         .unwrap();
         insert_v30(&conn, "d", "user", "delegate task", 1701.0, 1, 0);
         let d = parse_conn(&conn, &sref("d")).unwrap();
@@ -1972,11 +1743,9 @@ mod tests {
         );
 
         // reset child: a fresh conversation; the marker is a Hermes fact only.
-        conn.execute(
-            "INSERT INTO sessions (id, source, parent_session_id, model_config, started_at) \
-             VALUES ('r', 'cli', 'p', '{\"_reset_from\":\"p\"}', 1800.0)",
-            [],
-        )
+        conn.execute_batch(&fixture(
+            "branches_and_delegates_stand_alone_but_compression_still_merges-3.sql",
+        ))
         .unwrap();
         insert_v30(&conn, "r", "user", "fresh", 1801.0, 1, 0);
         let r = parse_conn(&conn, &sref("r")).unwrap();
@@ -2006,33 +1775,11 @@ mod tests {
 
     #[test]
     fn discovery_mirrors_hermes_listing() {
-        let conn = mk_conn(SCHEMA_V30);
+        let conn = mk_conn("schema-v30.sql");
         insert_session(&conn, "root", None, Some("compression"), 1000.0, Some(1500.0));
         insert_session(&conn, "tip", Some("root"), None, 1600.0, None);
-        conn.execute("UPDATE sessions SET title = NULL WHERE id = 'tip'", [])
+        conn.execute_batch(&fixture("discovery_mirrors_hermes_listing.sql"))
             .unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, archived) VALUES ('arch', 'cli', 1700.0, 1)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, hidden) VALUES ('hid', 'cli', 1800.0, 1)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, parent_session_id, model_config) \
-             VALUES ('del', 'cli', 1900.0, 'tip', '{\"_delegate_from\":\"tip\"}')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, cwd, last_activity_at, ended_at) \
-             VALUES ('plain', 'cli', 2000.0, '/work/proj', 5000.0, 4000.0)",
-            [],
-        )
-        .unwrap();
         let refs = discover_conn(&conn, &PathBuf::from(":memory:")).unwrap();
         let ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(
@@ -2054,20 +1801,16 @@ mod tests {
             "last_activity_at beats ended_at"
         );
         // a v14 DB is listed exactly as before (no listing columns → no filters)
-        let old = mk_conn(SCHEMA_V14);
+        let old = mk_conn("schema-v14.sql");
         insert_session(&old, "a", None, None, 1000.0, None);
         assert_eq!(discover_conn(&old, &PathBuf::from(":memory:")).unwrap().len(), 1);
     }
 
     #[test]
     fn session_cwd_git_and_activity_are_first_class() {
-        let conn = mk_conn(SCHEMA_V30);
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, ended_at, last_activity_at, cwd, git_branch, git_repo_root, profile_name) \
-             VALUES ('s', 'cli', 1000.0, 2000.0, 3000.0, '/work/proj', 'main', '/work/proj', 'hermes-x')",
-            [],
-        )
-        .unwrap();
+        let conn = mk_conn("schema-v30.sql");
+        conn.execute_batch(&fixture("session_cwd_git_and_activity_are_first_class.sql"))
+            .unwrap();
         insert_v30(&conn, "s", "user", "hi", 1001.0, 1, 0);
         let s = parse_conn(&conn, &sref("s")).unwrap();
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/work/proj")));
@@ -2080,26 +1823,10 @@ mod tests {
 
     #[test]
     fn display_kind_notices_and_sidecars() {
-        let conn = mk_conn(SCHEMA_V30);
+        let conn = mk_conn("schema-v30.sql");
         insert_session(&conn, "s", None, None, 1000.0, None);
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, display_kind) \
-             VALUES ('s', 'user', 'Model switched to x', 1001.0, 'model_switch')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, display_kind) \
-             VALUES ('s', 'user', 'keep going but faster', 1002.0, 'steer')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, api_content, effect_disposition, display_metadata) \
-             VALUES ('s', 'user', 'what the user typed', 1003.0, '[context] what the user typed', 'observed', '{\"k\":1}')",
-            [],
-        )
-        .unwrap();
+        conn.execute_batch(&fixture("display_kind_notices_and_sidecars.sql"))
+            .unwrap();
         for (kind, text) in [
             ("hidden", "[diagnostic] provider latency 900ms"),
             ("auto_continue", "continue"),
@@ -2161,13 +1888,9 @@ mod tests {
     fn imported_session_messages_carry_import_origin() {
         // `hermes sessions import` records `origin_json.imported_from`; every message of such a
         // session came through the importer, whatever its role.
-        let conn = mk_conn(SCHEMA_V30);
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, origin_json) VALUES ('f', 'codex-cli', 1000.0, \
-             '{\"imported_from\": {\"tool\": \"codex-cli\", \"path\": \"/r.jsonl\", \"foreign_session_id\": \"x1\"}}')",
-            [],
-        )
-        .unwrap();
+        let conn = mk_conn("schema-v30.sql");
+        conn.execute_batch(&fixture("imported_session_messages_carry_import_origin.sql"))
+            .unwrap();
         insert_v30(&conn, "f", "user", "hello", 1001.0, 1, 0);
         insert_v30(&conn, "f", "assistant", "hi", 1002.0, 1, 0);
         let f = parse_conn(&conn, &sref("f")).unwrap();
@@ -2190,17 +1913,8 @@ mod tests {
 
     #[test]
     fn discover_orders_and_counts() {
-        let conn = mk_conn(SCHEMA_V14);
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, message_count, title) VALUES ('a','cli',1000.0,3,'A')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at, message_count, title) VALUES ('b','cli',2000.0,5,'B')",
-            [],
-        )
-        .unwrap();
+        let conn = mk_conn("schema-v14.sql");
+        conn.execute_batch(&fixture("discover_orders_and_counts.sql")).unwrap();
         let refs = discover_conn(&conn, &PathBuf::from(":memory:")).unwrap();
         assert_eq!(refs.len(), 2);
         // ordered by started_at DESC

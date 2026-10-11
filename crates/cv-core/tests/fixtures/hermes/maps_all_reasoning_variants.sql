@@ -1,0 +1,1 @@
+INSERT INTO messages (session_id, role, content, timestamp, reasoning, reasoning_content, reasoning_details) VALUES ('s1','assistant','answer',1001.0,'short summary','native scratchpad','[{"type":"reasoning.summary","summary":"summarised"},{"type":"reasoning.encrypted_content","encrypted_content":"ENC123"}]');

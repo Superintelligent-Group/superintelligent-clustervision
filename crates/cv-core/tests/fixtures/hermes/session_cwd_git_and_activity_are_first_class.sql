@@ -1,0 +1,1 @@
+INSERT INTO sessions (id, source, started_at, ended_at, last_activity_at, cwd, git_branch, git_repo_root, profile_name) VALUES ('s', 'cli', 1000.0, 2000.0, 3000.0, '/work/proj', 'main', '/work/proj', 'hermes-x');

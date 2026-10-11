@@ -1,0 +1,1 @@
+INSERT INTO messages (session_id, role, content, timestamp, codex_reasoning_items, codex_message_items) VALUES ('s1','assistant','Done',1001.0,'[{"type":"reasoning","id":"rs_a","encrypted_content":"BLOB"}]','[{"type":"message","phase":"final_answer","content":[{"type":"output_text","text":"Done"}]}]');

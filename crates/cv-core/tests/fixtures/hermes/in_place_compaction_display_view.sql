@@ -1,0 +1,1 @@
+INSERT INTO messages (session_id, role, content, timestamp, active, compacted, _compressed_summary, display_kind) VALUES ('s', 'user', '[CONTEXT COMPACTION] earlier turns…', 1004.0, 1, 0, 1, 'hidden'); -- id 5: the summary
