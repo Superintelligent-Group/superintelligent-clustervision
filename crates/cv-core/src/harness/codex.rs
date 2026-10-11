@@ -121,9 +121,14 @@ impl Codex {
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
             .or_else(|| dirs::home_dir().map(|h| h.join(".codex")));
-        let roots = codex_home
-            .map(|c| vec![c.join("sessions"), c.join("archived_sessions")])
-            .unwrap_or_default()
+        codex_home.map_or(Codex { roots: Vec::new() }, |c| Codex::with_home(&c))
+    }
+
+    /// An adapter over an explicit Codex home (the dir holding `sessions/`), instead of
+    /// `$CODEX_HOME` / `~/.codex` — for the harness corpus and other tests, without mutating the
+    /// process environment.
+    pub fn with_home(codex_home: &Path) -> Self {
+        let roots = [codex_home.join("sessions"), codex_home.join("archived_sessions")]
             .into_iter()
             .filter(|p| p.exists())
             .collect();
