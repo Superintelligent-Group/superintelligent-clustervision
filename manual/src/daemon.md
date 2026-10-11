@@ -161,7 +161,8 @@ Two things worth noting up front:
 ### Routes
 
 All routes are `GET` and live under `/api`. Unknown paths return `404`; a bad `harness` name returns
-`400`.
+`400`. This table is the route match in `crates/cvd/src/serve.rs` on this branch;
+`crates/cvd/tests/parity.rs` keeps the JSON shapes equal to the CLI's.
 
 #### `GET /api/health`
 
@@ -216,6 +217,25 @@ curl 'http://127.0.0.1:7777/api/sessions?harness=claude&limit=2'
 ]
 ```
 
+#### `GET /api/search`
+
+Full-text (or `semantic=1`) search over the whole corpus, as the array of rows `cv search --json`
+emits: the session row plus `score`, `snippet` and the sub-agent provenance trio. Params: `q`
+(required, non-empty), `limit`, `harness`, `cwd`, `semantic=1`. With no usable index it falls back
+to the same head-capped live scan `cv search` uses and says so: the response header
+`X-Cv-Search-Source` is `index` | `semantic` | `live`, with a human sentence in `X-Cv-Search-Note`.
+
+#### `GET /api/stats`
+
+Corpus-wide statistics, exactly what `cv stats --json` prints (`sessions, messages, by_harness,
+top_cwds, earliest_created, latest_updated`). Optional `q=<query calculus>` (the string `cv stats
+-q` takes; a parse error is a `400` quoting the core's message).
+
+#### `GET /api/touched`
+
+Sessions whose tool events touched a file, newest activity first — `cv touched --json`. Params:
+`path` (required; exact or suffix match), `edits_only=1`. Empty on a cold catalog.
+
 #### `GET /api/session/{harness}/{id}`
 
 The full parsed session — the complete unified-representation transcript as JSON — or `404` if no
@@ -224,6 +244,33 @@ such session is found.
 ```sh
 curl 'http://127.0.0.1:7777/api/session/claude/a1b2c3d4-5e6f-7890-abcd-ef0123456789'
 ```
+
+#### `GET /api/session/{harness}/{id}/head`
+
+Everything a session knows about *itself* and no messages: the session row plus `model`, `git`,
+`system_prompt`, `lineage` and the exact message `total`. One cheap pass that keeps no messages,
+so a session-level fact recorded late in the transcript (Claude's `prompt_snapshot`) is reached
+without a windowed read having to scan the whole file.
+
+#### `GET /api/session/{harness}/{id}/messages`
+
+The window `[start, end)` of the session's messages as IR JSON — `cv show --range` through the
+other door. Params: `start`, `end` (a malformed index is a `400`, never a silent full read),
+`extra=1` to keep each message's harness `extra` map. Jumps to the recorded byte offset when the
+seek store has one, else streams and stops at `end`. The reply carries the actual window indices,
+`total_known` (+ `total` once EOF was reached) and `has_more`.
+
+#### `GET /api/session/{harness}/{id}/events`
+
+The session's extracted tool events (file edits/reads, commands, errors) in transcript order, as
+`cv events --json`; optional `kind=`. A stale or missing catalog row is re-ingested on the spot.
+
+#### `GET /api/session/{harness}/{id}/compactions`
+
+Every compaction boundary in transcript order, each
+`{ index, summary_index, ts, trigger, pre_tokens, duration_ms, summary, pre_span: [start, end] }`
+— `cv compaction --json`. `summary` is the text that seeded the next window; `pre_span` is the
+message range compacted away, in the numbering `/messages` uses.
 
 #### `GET /api/session/{harness}/{id}/subagents`
 
@@ -239,6 +286,11 @@ curl 'http://127.0.0.1:7777/api/session/claude/a1b2c3d4.../subagents'
 The full parsed transcript of **one** sub-agent. Sub-agents don't live in the main session pool, so
 they're loaded relative to their `{parent}`. `404` if either the parent or the named sub-agent isn't
 found.
+
+#### `GET /api/session/{harness}/{id}/workflow/{wf}/script`
+
+The driving script Claude Code recorded for a `Workflow` run, as `{ workflow, name, source }`
+(from `<session>/workflows/scripts/<slug>-<wf>.js`). `404` when the run has no script.
 
 #### Board endpoints
 
@@ -330,6 +382,9 @@ warnings ride every response, so a corrupted coordination log is visible from an
   `landed` whose content the verifier no longer observes on upstream (`"suspect": true` rows);
   `verified_as_of` / `verify_warning` carry the verifier heartbeat — `verify_warning` names a
   never-run or stale verifier, and is `null` when the heartbeat is fresh.
+- **`GET /api/tasks/stats`** — fleet batting averages computed from observed events only
+  (optional `?repo=`): per-endpoint and per-reviewer outcome counts, annotated with verifier
+  freshness, plus `warnings`. Informational, never a gate — `cv task stats --json`.
 - **`GET /api/tasks/inbox/{who}`** — what needs this endpoint, stalest first:
   `{ "inbox": [ { "id", "title", "reason", "effective_state" } ], "warnings": [] }`, where
   `reason` is one of `assigned_open`, `claimed_by_you`, `awaiting_your_review`,
