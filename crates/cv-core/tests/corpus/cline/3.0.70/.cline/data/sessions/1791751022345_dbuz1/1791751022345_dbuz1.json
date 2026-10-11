@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "session_id": "1791751022345_dbuz1",
+  "source": "cli",
+  "pid": 5530,
+  "started_at": "2026-10-11T20:37:02.347Z",
+  "ended_at": "2026-10-11T20:37:13.607Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": false,
+  "provider": "openai-compatible",
+  "model": "glm-5.3-flash",
+  "cwd": "/home/corpus/project",
+  "workspace_root": "/home/corpus/project",
+  "team_name": "team-3zR7C",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "Use fetch_web_content on https://example.com and tell me the page title.",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.70"
+    },
+    "git": {
+      "branch": "main"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "d014fa2614b4d77f92c0e58bf76d04d0e472ff7f",
+        "createdAt": 1791751022704,
+        "runCount": 1,
+        "kind": "stash"
+      },
+      "history": [
+        {
+          "ref": "d014fa2614b4d77f92c0e58bf76d04d0e472ff7f",
+          "createdAt": 1791751022704,
+          "runCount": 1,
+          "kind": "stash"
+        }
+      ]
+    },
+    "title": "Use fetch_web_content on https://example.com and tell me the page title.",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 10601,
+      "outputTokens": 122,
+      "cacheReadTokens": 10368,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 10601,
+      "outputTokens": 122,
+      "cacheReadTokens": 10368,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/home/corpus/.cline/data/sessions/1791751022345_dbuz1/1791751022345_dbuz1.messages.json"
+}

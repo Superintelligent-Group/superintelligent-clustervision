@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "roo"
+version = "0.1.17"
+generated = "2026-10-11"
+writer = "Roo Code CLI 0.1.17 (GitHub cli-v0.1.17), which runs the bundled Roo Code extension in a mock VS Code host"
+model = "glm-5.3-flash via Z.ai Anthropic-compatible endpoint, through key_proxy.py (Roo told: anthropic / claude-sonnet-4-5)"
+model_calls = 30
+scenarios = ["reasoning","chat","resume","tools","parallel_tools","tool_error","checkpoints","image","todo_list","subagent","mode_switch","followup_question","mcp","compaction"]
+skipped = []
+generator_commit = "01d2b73"

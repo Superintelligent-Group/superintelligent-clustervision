@@ -1,0 +1,206 @@
+{
+  "sessions": [
+    {
+      "id": "9b0f5c1d-87d6-4c95-b7b8-f1a3f7d81c5c",
+      "path": ".continue/sessions/9b0f5c1d-87d6-4c95-b7b8-f1a3f7d81c5c.json",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "Checklist"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "a62437ea-c92d-4990-bfe9-f86f091470ee",
+      "path": ".continue/sessions/a62437ea-c92d-4990-bfe9-f86f091470ee.json",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "Subagent"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "a9451327-bc95-4758-a88c-9fb894a380a2",
+      "path": ".continue/sessions/a9451327-bc95-4758-a88c-9fb894a380a2.json",
+      "messages": 16,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6,
+        "tool_result": 6,
+        "tool_use": 6
+      },
+      "tools": [
+        "Read",
+        "Read",
+        "Read",
+        "Edit",
+        "Bash",
+        "Bash"
+      ],
+      "usage_messages": 8,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "bb21c296-36a0-474c-b26b-47e1a40b9b45",
+      "path": ".continue/sessions/bb21c296-36a0-474c-b26b-47e1a40b9b45.json",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "Subagent"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "cac6ca8a-128c-4988-ace1-f331c8c6179d",
+      "path": ".continue/sessions/cac6ca8a-128c-4988-ace1-f331c8c6179d.json",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "add"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "d639e114-c617-4170-8eef-30637df5f023",
+      "path": ".continue/sessions/d639e114-c617-4170-8eef-30637df5f023.json",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6
+      },
+      "tools": [],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "da70bdf2-8d03-4738-8eef-9f0a5e9b7c31",
+      "path": ".continue/sessions/da70bdf2-8d03-4738-8eef-9f0a5e9b7c31.json",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "Fetch",
+        "Bash"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    }
+  ]
+}

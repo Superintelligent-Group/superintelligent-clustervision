@@ -1,0 +1,304 @@
+{
+  "sessions": [
+    {
+      "id": "01a12cae-3bd6-741f-9350-6b2181e035ce",
+      "path": ".vscode-mock/global-storage/tasks/01a12cae-3bd6-741f-9350-6b2181e035ce",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "attempt_completion"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "2c417d0e-1c66-489a-8805-96088d0418be"
+      },
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "038afbdc-5260-4ce0-adbb-984cf56e7a67",
+      "path": ".vscode-mock/global-storage/tasks/038afbdc-5260-4ce0-adbb-984cf56e7a67",
+      "messages": 3,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "mcp--corpus--add"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "176b9fb7-62b3-45c1-9a92-b8506be58408",
+      "path": ".vscode-mock/global-storage/tasks/176b9fb7-62b3-45c1-9a92-b8506be58408",
+      "messages": 5,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 2,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "attempt_completion",
+        "attempt_completion"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "2c417d0e-1c66-489a-8805-96088d0418be",
+      "path": ".vscode-mock/global-storage/tasks/2c417d0e-1c66-489a-8805-96088d0418be",
+      "messages": 3,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "new_task"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "5942ccf5-46c2-415e-b223-1178f00973b5",
+      "path": ".vscode-mock/global-storage/tasks/5942ccf5-46c2-415e-b223-1178f00973b5",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 1,
+        "tool_result": 2,
+        "tool_use": 3
+      },
+      "tools": [
+        "ask_followup_question",
+        "read_file",
+        "attempt_completion"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "8969fc35-3fb9-4046-ae0f-e9484098a9ea",
+      "path": ".vscode-mock/global-storage/tasks/8969fc35-3fb9-4046-ae0f-e9484098a9ea",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "image": 1,
+        "text": 2,
+        "thinking": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "attempt_completion"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "d76e3314-f7cf-487b-b9bf-a937f93098b0",
+      "path": ".vscode-mock/global-storage/tasks/d76e3314-f7cf-487b-b9bf-a937f93098b0",
+      "messages": 17,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt"
+      ],
+      "blocks": {
+        "text": 10,
+        "thinking": 3,
+        "tool_result": 9,
+        "tool_use": 9
+      },
+      "tools": [
+        "read_file",
+        "read_file",
+        "attempt_completion",
+        "read_file",
+        "apply_diff",
+        "execute_command",
+        "execute_command",
+        "attempt_completion",
+        "execute_command"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "e64d13e2-4c32-4c5c-b51f-7a31b29eb6c3",
+      "path": ".vscode-mock/global-storage/tasks/e64d13e2-4c32-4c5c-b51f-7a31b29eb6c3",
+      "messages": 5,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "system/compaction_boundary",
+        "user/compaction_summary"
+      ],
+      "blocks": {
+        "text": 6,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "attempt_completion"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [
+        3
+      ],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "f6642bc7-7577-44bc-b40c-88c38faf39ff",
+      "path": ".vscode-mock/global-storage/tasks/f6642bc7-7577-44bc-b40c-88c38faf39ff",
+      "messages": 5,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt"
+      ],
+      "blocks": {
+        "text": 6,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "switch_mode"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "fe3ff652-e069-4120-8e04-9230d6be96f3",
+      "path": ".vscode-mock/global-storage/tasks/fe3ff652-e069-4120-8e04-9230d6be96f3",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "thinking": 2,
+        "tool_result": 2,
+        "tool_use": 3
+      },
+      "tools": [
+        "update_todo_list",
+        "update_todo_list",
+        "attempt_completion"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    }
+  ]
+}

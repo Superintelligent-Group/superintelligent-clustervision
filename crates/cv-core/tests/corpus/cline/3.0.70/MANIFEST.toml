@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "cline"
+version = "3.0.70"
+generated = "2026-10-11"
+writer = "Cline CLI 3.0.70 (npm cline) on the Cline SDK; the 4.x VS Code extension writes the same ~/.cline/data store"
+model = "glm-5.3-flash via Z.ai coding endpoint, through key_proxy.py (provider openai-compatible)"
+model_calls = 25
+scenarios = ["chat","reasoning","tools","parallel_tools","tool_error","subagent","team","plan_mode","mcp","web_fetch","ask_question"]
+skipped = ["multi-turn chat and resume: --id opens the TUI, which needs a TTY (headless runs are single-prompt)","image: the CLI has no attachment flag","compaction: /compact is a TUI command (a -p/--json prompt of /compact is rejected); the ACP mode needs a Cline account sign-in","checkpoints and /undo, /fork: TUI only"]
+generator_commit = "bff9866"

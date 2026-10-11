@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "session_id": "1791750881047_5sehe",
+  "source": "cli",
+  "pid": 94904,
+  "started_at": "2026-10-11T20:34:41.049Z",
+  "ended_at": "2026-10-11T20:35:20.368Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": false,
+  "provider": "openai-compatible",
+  "model": "glm-5.3-flash",
+  "cwd": "/home/corpus/project",
+  "workspace_root": "/home/corpus/project",
+  "team_name": "team-H2GJE",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "Read a.txt and b.txt at the same time (two parallel tool calls), then edit notes.txt to replace TODO with DONE, then run the command: cat notes.txt missing-file.txt   and report the line count of a.txt plus b.txt and the error in one line.",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.70"
+    },
+    "git": {
+      "branch": "main"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "e4d95b40c12f6f86391f929b936d5e46eb50e65d",
+        "createdAt": 1791750881387,
+        "runCount": 1,
+        "kind": "commit"
+      },
+      "history": [
+        {
+          "ref": "e4d95b40c12f6f86391f929b936d5e46eb50e65d",
+          "createdAt": 1791750881387,
+          "runCount": 1,
+          "kind": "commit"
+        }
+      ]
+    },
+    "title": "Read a.txt and b.txt at the same time (two parallel tool calls), then edit notes.txt to replace TODO with DONE, then run",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 25613,
+      "outputTokens": 536,
+      "cacheReadTokens": 17792,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 25613,
+      "outputTokens": 536,
+      "cacheReadTokens": 17792,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/home/corpus/.cline/data/sessions/1791750881047_5sehe/1791750881047_5sehe.messages.json"
+}

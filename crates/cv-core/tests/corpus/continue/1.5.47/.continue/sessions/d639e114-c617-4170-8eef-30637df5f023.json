@@ -1,0 +1,100 @@
+{
+  "sessionId": "d639e114-c617-4170-8eef-30637df5f023",
+  "title": "Untitled Session",
+  "workspaceDirectory": "/home/corpus/project",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "Say hello in five words."
+      },
+      "contextItems": [],
+      "editorState": "Say hello in five words."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Hello there, welcome, greetings friend.",
+        "usage": {
+          "prompt_tokens": 2058,
+          "completion_tokens": 24,
+          "total_tokens": 2082,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 14
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    },
+    {
+      "message": {
+        "role": "user",
+        "content": "Now say it in French."
+      },
+      "contextItems": [],
+      "editorState": "Now say it in French."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Bonjour, salut, bonjour, coucou, allô.",
+        "usage": {
+          "prompt_tokens": 2076,
+          "completion_tokens": 33,
+          "total_tokens": 2109,
+          "prompt_tokens_details": {
+            "cached_tokens": 256
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 17
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    },
+    {
+      "message": {
+        "role": "user",
+        "content": "Which language did you use first? One word."
+      },
+      "contextItems": [],
+      "editorState": "Which language did you use first? One word."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "English",
+        "usage": {
+          "prompt_tokens": 2104,
+          "completion_tokens": 3,
+          "total_tokens": 2107,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    }
+  ],
+  "usage": {
+    "totalCost": 0.006358,
+    "promptTokens": 6238,
+    "completionTokens": 60,
+    "promptTokensDetails": {
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0
+    }
+  }
+}

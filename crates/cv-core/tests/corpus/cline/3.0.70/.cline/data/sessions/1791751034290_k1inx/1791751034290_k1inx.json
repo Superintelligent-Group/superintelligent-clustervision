@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "session_id": "1791751034290_k1inx",
+  "source": "cli",
+  "pid": 6058,
+  "started_at": "2026-10-11T20:37:14.292Z",
+  "ended_at": "2026-10-11T20:37:28.615Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": false,
+  "provider": "openai-compatible",
+  "model": "glm-5.3-flash",
+  "cwd": "/home/corpus/project",
+  "workspace_root": "/home/corpus/project",
+  "team_name": "team-3Zs4J",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "Use the ask_question tool to ask me whether to read a.txt or b.txt (two options), then read the file I pick.",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.70"
+    },
+    "git": {
+      "branch": "main"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "a9b2843fd190c61d452360410efcc2745e8b6359",
+        "createdAt": 1791751034621,
+        "runCount": 1,
+        "kind": "stash"
+      },
+      "history": [
+        {
+          "ref": "a9b2843fd190c61d452360410efcc2745e8b6359",
+          "createdAt": 1791751034621,
+          "runCount": 1,
+          "kind": "stash"
+        }
+      ]
+    },
+    "title": "Use the ask_question tool to ask me whether to read a.txt or b.txt (two options), then read the file I pick.",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 16217,
+      "outputTokens": 187,
+      "cacheReadTokens": 15744,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 16217,
+      "outputTokens": 187,
+      "cacheReadTokens": 15744,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/home/corpus/.cline/data/sessions/1791751034290_k1inx/1791751034290_k1inx.messages.json"
+}

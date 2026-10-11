@@ -1,0 +1,128 @@
+{
+  "sessionId": "bb21c296-36a0-474c-b26b-47e1a40b9b45",
+  "title": "Untitled Session",
+  "workspaceDirectory": "/home/corpus/project",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "Use the Subagent tool once (subagent_name helper) with the task 'reply with the word ok', then report what it said."
+      },
+      "contextItems": [],
+      "editorState": "Use the Subagent tool once (subagent_name helper) with the task 'reply with the word ok', then report what it said."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_cee4f8f196bf454ea87a2b39",
+            "type": "function",
+            "function": {
+              "name": "Subagent",
+              "arguments": "{\"description\":\"Reply with ok\",\"prompt\":\"reply with the word ok\",\"subagent_name\":\"helper\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2232,
+          "completion_tokens": 66,
+          "total_tokens": 2298,
+          "prompt_tokens_details": {
+            "cached_tokens": 256
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 34
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_cee4f8f196bf454ea87a2b39",
+          "toolCall": {
+            "id": "call_cee4f8f196bf454ea87a2b39",
+            "type": "function",
+            "function": {
+              "name": "Subagent",
+              "arguments": "{\"description\":\"Reply with ok\",\"prompt\":\"reply with the word ok\",\"subagent_name\":\"helper\"}"
+            }
+          },
+          "status": "errored",
+          "parsedArgs": {
+            "description": "Reply with ok",
+            "prompt": "reply with the word ok",
+            "subagent_name": "helper"
+          },
+          "output": [
+            {
+              "content": "Error executing tool Subagent: No active session found",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "The Subagent call failed with the error: `No active session found` — so the helper subagent did not reply with anything (no \"ok\" was returned).",
+        "usage": {
+          "prompt_tokens": 2278,
+          "completion_tokens": 54,
+          "total_tokens": 2332,
+          "prompt_tokens_details": {
+            "cached_tokens": 1472
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 18
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    },
+    {
+      "message": {
+        "role": "user",
+        "content": "Say the word forked."
+      },
+      "contextItems": [],
+      "editorState": "Say the word forked."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "forked",
+        "usage": {
+          "prompt_tokens": 2170,
+          "completion_tokens": 39,
+          "total_tokens": 2209,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 35
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    }
+  ],
+  "usage": {
+    "totalCost": 0.002248,
+    "promptTokens": 2170,
+    "completionTokens": 39,
+    "promptTokensDetails": {
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "session_id": "1791751014001_59vw3",
+  "source": "cli",
+  "pid": 4930,
+  "started_at": "2026-10-11T20:36:54.003Z",
+  "ended_at": "2026-10-11T20:37:01.617Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": false,
+  "provider": "openai-compatible",
+  "model": "glm-5.3-flash",
+  "cwd": "/home/corpus/project",
+  "workspace_root": "/home/corpus/project",
+  "team_name": "team-kGSlm",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "Use the corpus MCP server's add tool to add 2 and 3, then say the result.",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.70"
+    },
+    "git": {
+      "branch": "main"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "32a013a539a22624004230b47cd14a0be4c6b6a0",
+        "createdAt": 1791751014376,
+        "runCount": 1,
+        "kind": "stash"
+      },
+      "history": [
+        {
+          "ref": "32a013a539a22624004230b47cd14a0be4c6b6a0",
+          "createdAt": 1791751014376,
+          "runCount": 1,
+          "kind": "stash"
+        }
+      ]
+    },
+    "title": "Use the corpus MCP server's add tool to add 2 and 3, then say the result.",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 10501,
+      "outputTokens": 46,
+      "cacheReadTokens": 10368,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 10501,
+      "outputTokens": 46,
+      "cacheReadTokens": 10368,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/home/corpus/.cline/data/sessions/1791751014001_59vw3/1791751014001_59vw3.messages.json"
+}

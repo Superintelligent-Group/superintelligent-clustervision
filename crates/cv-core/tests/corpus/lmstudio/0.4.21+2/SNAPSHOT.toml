@@ -1,0 +1,9 @@
+# Written by tools/harness-corpus/lmstudio/snapshot.sh: a store SHAPE, not a corpus (no sessions).
+harness = "lmstudio"
+app_version = "0.4.21+2"
+recorded = "2026-10-11"
+store = "~/.lmstudio/conversations/*.conversation.json"
+files = 54
+store_last_written = "2026-10-02T05:20:30Z"
+note = "Merged over every conversation file on disk, which older LM Studio versions may have written (store_last_written)."
+generator_commit = "01d2b73"

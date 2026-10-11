@@ -1,0 +1,129 @@
+-- JSON shape merged over 54 files
+$: obj
+$.assistantLastMessagedAt: int
+$.clientInput: str
+$.clientInputDocument: obj
+$.clientInputDocument.content: list
+$.clientInputDocument.content[]: obj
+$.clientInputDocument.content[].content: list
+$.clientInputDocument.content[].content[]: obj
+$.clientInputDocument.content[].content[].text: str
+$.clientInputDocument.content[].content[].type: str = text
+$.clientInputDocument.content[].type: str = paragraph
+$.clientInputDocument.type: str = doc
+$.clientInputFiles: list
+$.createdAt: int
+$.disabledPluginTools: list
+$.lastUsedModel: obj
+$.lastUsedModel.identifier: str
+$.lastUsedModel.indexedModelIdentifier: str
+$.lastUsedModel.instanceLoadTimeConfig: obj
+$.lastUsedModel.instanceLoadTimeConfig.fields: list
+$.lastUsedModel.instanceLoadTimeConfig.fields[]: obj
+$.lastUsedModel.instanceLoadTimeConfig.fields[].key: str
+$.lastUsedModel.instanceLoadTimeConfig.fields[].value: bool|int
+$.lastUsedModel.instanceOperationTimeConfig: obj
+$.lastUsedModel.instanceOperationTimeConfig.fields: list
+$.looseFiles: list
+$.messages: list
+$.messages[]: obj
+$.messages[].currentlySelected: int
+$.messages[].versions: list
+$.messages[].versions[]: obj
+$.messages[].versions[].content: list
+$.messages[].versions[].content[]: obj
+$.messages[].versions[].content[].fileIdentifier: str
+$.messages[].versions[].content[].fileType: str = image
+$.messages[].versions[].content[].sizeBytes: int
+$.messages[].versions[].content[].text: str
+$.messages[].versions[].content[].type: str = file|text
+$.messages[].versions[].edited: bool
+$.messages[].versions[].preprocessed: obj
+$.messages[].versions[].preprocessed.content: list
+$.messages[].versions[].preprocessed.content[]: obj
+$.messages[].versions[].preprocessed.content[].fileType: str = image
+$.messages[].versions[].preprocessed.content[].identifier: str
+$.messages[].versions[].preprocessed.content[].name: str
+$.messages[].versions[].preprocessed.content[].sizeBytes: int
+$.messages[].versions[].preprocessed.content[].text: str
+$.messages[].versions[].preprocessed.content[].type: str = file|text
+$.messages[].versions[].preprocessed.role: str = user
+$.messages[].versions[].role: str = assistant|user
+$.messages[].versions[].senderInfo: obj
+$.messages[].versions[].senderInfo.senderName: str
+$.messages[].versions[].steps: list
+$.messages[].versions[].steps[]: obj
+$.messages[].versions[].steps[].content: list
+$.messages[].versions[].steps[].content[]: obj
+$.messages[].versions[].steps[].content[].fromDraftModel: bool
+$.messages[].versions[].steps[].content[].isStructural: bool
+$.messages[].versions[].steps[].content[].text: str
+$.messages[].versions[].steps[].content[].tokensCount: int
+$.messages[].versions[].steps[].content[].type: str = text
+$.messages[].versions[].steps[].debugInfo: str
+$.messages[].versions[].steps[].defaultShouldIncludeInContext: bool
+$.messages[].versions[].steps[].edited: bool
+$.messages[].versions[].steps[].genInfo: obj
+$.messages[].versions[].steps[].genInfo.identifier: str
+$.messages[].versions[].steps[].genInfo.indexedModelIdentifier: str
+$.messages[].versions[].steps[].genInfo.loadModelConfig: obj
+$.messages[].versions[].steps[].genInfo.loadModelConfig.fields: list
+$.messages[].versions[].steps[].genInfo.loadModelConfig.fields[]: obj
+$.messages[].versions[].steps[].genInfo.loadModelConfig.fields[].key: str
+$.messages[].versions[].steps[].genInfo.loadModelConfig.fields[].value: bool|float|int|obj
+$.messages[].versions[].steps[].genInfo.loadModelConfig.fields[].value.checked: bool
+$.messages[].versions[].steps[].genInfo.loadModelConfig.fields[].value.value: int
+$.messages[].versions[].steps[].genInfo.predictionConfig: obj
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields: list
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[]: obj
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].key: str
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value: bool|float|int|list|obj|str
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.checked: bool
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.enabled: bool
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.endString: str
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.jinjaPromptTemplate: obj
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.jinjaPromptTemplate.template: str
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.startString: str
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.stopStrings: list
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.type: str = jinja|none
+$.messages[].versions[].steps[].genInfo.predictionConfig.fields[].value.value: float|int
+$.messages[].versions[].steps[].genInfo.stats: obj
+$.messages[].versions[].steps[].genInfo.stats.numGpuLayers: int
+$.messages[].versions[].steps[].genInfo.stats.predictedTokensCount: int
+$.messages[].versions[].steps[].genInfo.stats.promptTokensCount: int
+$.messages[].versions[].steps[].genInfo.stats.stopReason: str = eosFound|userStopped
+$.messages[].versions[].steps[].genInfo.stats.timeToFirstTokenSec: float|int
+$.messages[].versions[].steps[].genInfo.stats.tokensPerSecond: float|int
+$.messages[].versions[].steps[].genInfo.stats.totalTimeSec: float
+$.messages[].versions[].steps[].genInfo.stats.totalTokensCount: int
+$.messages[].versions[].steps[].prefix: str
+$.messages[].versions[].steps[].shouldIncludeInContext: bool
+$.messages[].versions[].steps[].statusState: obj
+$.messages[].versions[].steps[].statusState.status: str = canceled|error
+$.messages[].versions[].steps[].statusState.text: str
+$.messages[].versions[].steps[].stepIdentifier: str
+$.messages[].versions[].steps[].style: obj
+$.messages[].versions[].steps[].style.ended: bool
+$.messages[].versions[].steps[].style.forceRenderAsPlainText: bool
+$.messages[].versions[].steps[].style.title: str
+$.messages[].versions[].steps[].style.type: str = thinking
+$.messages[].versions[].steps[].suffix: str
+$.messages[].versions[].steps[].type: str = contentBlock|debugInfoBlock|status
+$.messages[].versions[].type: str = multiStep|singleStep
+$.name: null|str
+$.notes: list
+$.perChatPredictionConfig: obj
+$.perChatPredictionConfig.fields: list
+$.perChatPredictionConfig.fields[]: obj
+$.perChatPredictionConfig.fields[].key: str
+$.perChatPredictionConfig.fields[].value: bool|str
+$.pinned: bool
+$.pluginConfigs: obj
+$.plugins: list
+$.plugins[]: str
+$.preset: str
+$.systemPrompt: str
+$.tokenCount: int
+$.usePerChatPredictionConfig: bool
+$.userFilesSizeBytes: int
+$.userLastMessagedAt: int

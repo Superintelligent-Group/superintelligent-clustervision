@@ -1,0 +1,122 @@
+-- PRAGMA user_version = 0
+CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    summary TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    data_type TEXT NOT NULL,
+    data BLOB NOT NULL
+, parent_id TEXT, worktree_branch TEXT, folder_paths TEXT, folder_paths_order TEXT, created_at TEXT);
+
+-- JSON shape of threads.data (merged over 9 rows)
+$: obj
+$.completion_mode: str
+$.cumulative_token_usage: obj
+$.cumulative_token_usage.cache_creation_input_tokens: int
+$.cumulative_token_usage.cache_read_input_tokens: int
+$.cumulative_token_usage.input_tokens: int
+$.cumulative_token_usage.output_tokens: int
+$.detailed_summary: null
+$.detailed_summary_state: obj|str
+$.detailed_summary_state.Generated: obj
+$.detailed_summary_state.Generated.message_id: int
+$.detailed_summary_state.Generated.text: str
+$.draft_prompt: null
+$.exceeded_window_error: null
+$.imported: bool
+$.initial_project_snapshot: obj
+$.initial_project_snapshot.timestamp: str
+$.initial_project_snapshot.unsaved_buffer_paths: list
+$.initial_project_snapshot.unsaved_buffer_paths[]: str
+$.initial_project_snapshot.worktree_snapshots: list
+$.initial_project_snapshot.worktree_snapshots[]: obj
+$.initial_project_snapshot.worktree_snapshots[].git_state: obj
+$.initial_project_snapshot.worktree_snapshots[].git_state.current_branch: null|str
+$.initial_project_snapshot.worktree_snapshots[].git_state.diff: str
+$.initial_project_snapshot.worktree_snapshots[].git_state.head_sha: str
+$.initial_project_snapshot.worktree_snapshots[].git_state.remote_url: str
+$.initial_project_snapshot.worktree_snapshots[].worktree_path: str
+$.messages: list
+$.messages[]: obj
+$.messages[].User: obj
+$.messages[].User.content: list
+$.messages[].User.content[]: obj
+$.messages[].User.content[].Text: str
+$.messages[].User.id: str
+$.messages[].context: str
+$.messages[].creases: list
+$.messages[].creases[]: obj
+$.messages[].creases[].end: int
+$.messages[].creases[].icon_path: str
+$.messages[].creases[].label: str
+$.messages[].creases[].start: int
+$.messages[].id: int
+$.messages[].is_hidden: bool
+$.messages[].role: str = assistant|user
+$.messages[].segments: list
+$.messages[].segments[]: obj
+$.messages[].segments[].signature: str
+$.messages[].segments[].text: str
+$.messages[].segments[].type: str = text|thinking
+$.messages[].tool_results: list
+$.messages[].tool_results[]: obj
+$.messages[].tool_results[].content: obj
+$.messages[].tool_results[].content.Text: str
+$.messages[].tool_results[].is_error: bool
+$.messages[].tool_results[].output: null|obj
+$.messages[].tool_results[].output.glob: str
+$.messages[].tool_results[].output.new_text: str
+$.messages[].tool_results[].output.old_text: str
+$.messages[].tool_results[].output.original_path: str
+$.messages[].tool_results[].output.paths: list
+$.messages[].tool_results[].output.paths[]: str
+$.messages[].tool_results[].output.raw_output: obj
+$.messages[].tool_results[].output.raw_output.parser_metrics: obj
+$.messages[].tool_results[].output.raw_output.parser_metrics.mismatched_tags: int
+$.messages[].tool_results[].output.raw_output.parser_metrics.tags: int
+$.messages[].tool_results[].output.raw_output.raw_edits: str
+$.messages[].tool_results[].output.results: list
+$.messages[].tool_results[].output.results[]: obj
+$.messages[].tool_results[].output.results[].text: str
+$.messages[].tool_results[].output.results[].title: str
+$.messages[].tool_results[].output.results[].url: str
+$.messages[].tool_results[].tool_use_id: str
+$.messages[].tool_uses: list
+$.messages[].tool_uses[]: obj
+$.messages[].tool_uses[].id: str
+$.messages[].tool_uses[].input: obj
+$.messages[].tool_uses[].input.case_sensitive: bool
+$.messages[].tool_uses[].input.cd: str
+$.messages[].tool_uses[].input.command: str
+$.messages[].tool_uses[].input.content: str
+$.messages[].tool_uses[].input.display_description: str
+$.messages[].tool_uses[].input.end_line: int
+$.messages[].tool_uses[].input.glob: str
+$.messages[].tool_uses[].input.include_pattern: str
+$.messages[].tool_uses[].input.mode: str = create|edit|overwrite
+$.messages[].tool_uses[].input.path: str
+$.messages[].tool_uses[].input.query: str
+$.messages[].tool_uses[].input.regex: str
+$.messages[].tool_uses[].input.start_line: int
+$.messages[].tool_uses[].input.url: str
+$.messages[].tool_uses[].name: str
+$.model: obj
+$.model.model: str
+$.model.provider: str
+$.profile: str
+$.request_token_usage: list|obj
+$.request_token_usage[]: obj
+$.request_token_usage[].cache_creation_input_tokens: int
+$.request_token_usage[].cache_read_input_tokens: int
+$.request_token_usage[].input_tokens: int
+$.request_token_usage[].output_tokens: int
+$.sandboxed_terminal_temp_dir: null
+$.speed: null
+$.subagent_context: null
+$.summary: str
+$.thinking_effort: null
+$.thinking_enabled: bool
+$.title: str
+$.tool_use_limit_reached: bool
+$.ui_scroll_position: null
+$.updated_at: str
+$.version: str = 0.2.0|0.3.0

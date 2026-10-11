@@ -1,0 +1,217 @@
+{
+  "sessions": [
+    {
+      "id": "caramel-fanatic",
+      "path": ".local/share/devin/cli/sessions.db",
+      "messages": 12,
+      "sequence": [
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/injected_context",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 12,
+        "thinking": 3
+      },
+      "tools": [],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "swe-2-medium",
+      "skipped_lines": 0
+    },
+    {
+      "id": "noble-weaver",
+      "path": ".local/share/devin/cli/sessions.db",
+      "messages": 42,
+      "sequence": [
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/injected_context",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 20,
+        "thinking": 6,
+        "tool_result": 12,
+        "tool_use": 12
+      },
+      "tools": [
+        "read",
+        "read",
+        "read",
+        "edit",
+        "exec",
+        "exec",
+        "read",
+        "exec",
+        "todo_write",
+        "mcp_list_tools",
+        "mcp_call_tool",
+        "webfetch"
+      ],
+      "usage_messages": 17,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "swe-2-medium",
+      "skipped_lines": 0
+    },
+    {
+      "id": "smart-isthmus",
+      "path": ".local/share/devin/cli/sessions.db",
+      "messages": 10,
+      "sequence": [
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/injected_context",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 8,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "run_subagent"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "swe-2-medium",
+      "skipped_lines": 0
+    },
+    {
+      "id": "smart-isthmus/de04b371",
+      "path": ".local/share/devin/cli/sessions.db",
+      "messages": 8,
+      "sequence": [
+        "system/system_prompt",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "find_file_by_name",
+        "find_file_by_name",
+        "find_file_by_name"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "smart-isthmus",
+        "spawned_by_tool_use": "run_subagent:0#fe660263753a4b098c617918acefe3ea",
+        "agent_path": "de04b371"
+      },
+      "model": "swe-2-medium",
+      "skipped_lines": 0
+    },
+    {
+      "id": "south-dentist",
+      "path": ".local/share/devin/cli/sessions.db",
+      "messages": 13,
+      "sequence": [
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/system_prompt",
+        "system/injected_context",
+        "system/injected_context",
+        "user/prompt",
+        "system/injected_context",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 11,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "exec"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "swe-2-medium",
+      "skipped_lines": 0
+    }
+  ]
+}

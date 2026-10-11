@@ -104,6 +104,7 @@ for db in sessions teams; do
   [ -e "$DATA/db/$db.db" ] || continue
   sqlite3 "$DATA/db/$db.db" ".backup '$OUT/.cline/data/db/$db.db'"
   sqlite3 "$OUT/.cline/data/db/$db.db" "PRAGMA journal_mode=DELETE" >/dev/null
+  rm -f "$OUT/.cline/data/db/$db.db-shm" "$OUT/.cline/data/db/$db.db-wal"
 done
 corpus_scrub "$OUT"
 corpus_manifest "$OUT" \

@@ -16,6 +16,11 @@
 - kimi-cli: sessions read every `context_N.jsonl` segment, not just the live file; `/clear` is a branch; `subagents/` parse as child sessions.
 - Kimi Code 2.x: `subagent.spawned`/`completed` are spawn/return turns, `/undo` is a branch, `kimi fork` sets `lineage.forked_from`.
 - Kimi corpus: real stores from kimi-cli 1.48.0/1.51.0, Kimi Code 0.39.1/2.1.1, and a 0.39.1 store reopened by 2.1.1.
+- Cline: sessions from the CLI 3.x and the 4.x extension (`~/.cline/data/sessions/`) are read, including spawned sub-agents and teammates.
+- Roo: Roo CLI tasks (`~/.vscode-mock/global-storage/tasks/`) are found; reasoning blocks, condense summaries and `new_task` parents are read.
+- Continue: the cn CLI's tool results (`toolCallStates`) and per-turn usage and model are read; they were missing.
+- Devin: a `run_subagent` child, which has no `subagent_heads` row, is listed as its own session.
+- Corpora for Cline 3.0.70, Roo CLI 0.1.17, Continue cn 1.5.47 and Devin 3000.11.3; schema snapshots for Zed 1.16.1 and LM Studio 0.4.21.
 
 ## 0.15.1 — 2026-10-11
 

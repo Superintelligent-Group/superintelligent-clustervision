@@ -1,0 +1,98 @@
+{
+  "sessionId": "9b0f5c1d-87d6-4c95-b7b8-f1a3f7d81c5c",
+  "title": "Untitled Session",
+  "workspaceDirectory": "/home/corpus/project",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "Use the Checklist tool to write a two-item checklist for renaming b.txt. Do not edit anything."
+      },
+      "contextItems": [],
+      "editorState": "Use the Checklist tool to write a two-item checklist for renaming b.txt. Do not edit anything."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_eac2ae7cfcb7488e84248ec9",
+            "type": "function",
+            "function": {
+              "name": "Checklist",
+              "arguments": "{\"checklist\":\"- [ ] Verify b.txt exists and confirm the new target name (e.g., a.txt or c.txt)\\n- [ ] Rename the file using `mv b.txt <new-name>` and confirm the result\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1668,
+          "completion_tokens": 163,
+          "total_tokens": 1831,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 109
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_eac2ae7cfcb7488e84248ec9",
+          "toolCall": {
+            "id": "call_eac2ae7cfcb7488e84248ec9",
+            "type": "function",
+            "function": {
+              "name": "Checklist",
+              "arguments": "{\"checklist\":\"- [ ] Verify b.txt exists and confirm the new target name (e.g., a.txt or c.txt)\\n- [ ] Rename the file using `mv b.txt <new-name>` and confirm the result\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "checklist": "- [ ] Verify b.txt exists and confirm the new target name (e.g., a.txt or c.txt)\n- [ ] Rename the file using `mv b.txt <new-name>` and confirm the result"
+          },
+          "output": [
+            {
+              "content": "Task list status:\n- [ ] Verify b.txt exists and confirm the new target name (e.g., a.txt or c.txt)\n- [ ] Rename the file using `mv b.txt <new-name>` and confirm the result",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Checklist created:\n\n- [ ] Verify b.txt exists and confirm the new target name (e.g., a.txt or c.txt)\n- [ ] Rename the file using `mv b.txt <new-name>` and confirm the result\n\nNo files were edited.",
+        "usage": {
+          "prompt_tokens": 1772,
+          "completion_tokens": 66,
+          "total_tokens": 1838,
+          "prompt_tokens_details": {
+            "cached_tokens": 192
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 12
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    }
+  ],
+  "usage": {
+    "totalCost": 0.0038980000000000004,
+    "promptTokens": 3440,
+    "completionTokens": 229,
+    "promptTokensDetails": {
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0
+    }
+  }
+}

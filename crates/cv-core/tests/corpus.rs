@@ -14,10 +14,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cv_core::harness::cline::Cline;
 use cv_core::harness::codex::Codex;
+use cv_core::harness::continuedev::Continue;
+use cv_core::harness::devin::Devin;
 use cv_core::harness::kimi::Kimi;
 use cv_core::harness::kimi_code::KimiCode;
 use cv_core::harness::opencode::OpenCode;
+use cv_core::harness::roo::Roo;
 use cv_core::ir::{Block, MessageKind};
 use cv_core::{Adapter, SessionRef};
 use cv_testkit::World;
@@ -49,10 +53,47 @@ fn kimi_code(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(KimiCode::with_home(&version_dir.join(".kimi-code")))
 }
 
+fn cline(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Cline::with_home(version_dir))
+}
+
+fn continue_(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Continue::with_root(&version_dir.join(".continue")))
+}
+
+fn devin(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Devin::with_root(&version_dir.join(".local/share/devin/cli")))
+}
+
+fn roo(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Roo::with_home(version_dir))
+}
+
+/// Harnesses that cannot be driven headless (desktop apps): their version dirs hold a schema
+/// snapshot of the store ember's installed version left on disk (`SNAPSHOT.toml` plus the
+/// `*.schema.txt` / `*.shape.txt` that `tools/harness-corpus/schema_snapshot.py` wrote), never
+/// sessions. `tools/harness-corpus/<h>/snapshot.sh --check` is what detects a change.
+const SNAPSHOT_ONLY: &[&str] = &["lmstudio", "zed"];
+
 const HARNESSES: &[CorpusHarness] = &[
+    CorpusHarness {
+        name: "cline",
+        adapter: cline,
+        children: None,
+    },
     CorpusHarness {
         name: "codex",
         adapter: codex,
+        children: None,
+    },
+    CorpusHarness {
+        name: "continue",
+        adapter: continue_,
+        children: None,
+    },
+    CorpusHarness {
+        name: "devin",
+        adapter: devin,
         children: None,
     },
     CorpusHarness {
@@ -69,6 +110,11 @@ const HARNESSES: &[CorpusHarness] = &[
         name: "kimi-code",
         adapter: kimi_code,
         children: Some(cv_core::harness::kimi_code::subagent_refs),
+    },
+    CorpusHarness {
+        name: "roo",
+        adapter: roo,
+        children: None,
     },
 ];
 
@@ -175,6 +221,12 @@ fn every_corpus_version_reads_as_its_golden_summary() {
     let known: Vec<&str> = HARNESSES.iter().map(|h| h.name).collect();
     for dir in subdirs(&corpus_root()) {
         let name = dir.file_name().unwrap().to_str().unwrap();
+        if SNAPSHOT_ONLY.contains(&name) {
+            for v in subdirs(&dir) {
+                assert!(v.join("SNAPSHOT.toml").is_file(), "{}: no SNAPSHOT.toml", v.display());
+            }
+            continue;
+        }
         assert!(known.contains(&name), "tests/corpus/{name} has no row in HARNESSES");
     }
     let mut failures = Vec::new();

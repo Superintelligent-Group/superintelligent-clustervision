@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "session_id": "1791750938370_7ouqo",
+  "source": "cli",
+  "pid": 514,
+  "started_at": "2026-10-11T20:35:38.371Z",
+  "ended_at": "2026-10-11T20:36:21.907Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": false,
+  "provider": "openai-compatible",
+  "model": "glm-5.3-flash",
+  "cwd": "/home/corpus/project",
+  "workspace_root": "/home/corpus/project",
+  "team_name": "team-Rl5zy",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "Use team_spawn_teammate to add a teammate named helper, then team_run_task to ask helper to reply with the word ok, wait for it with team_await_runs, report the reply, and finish with team_cleanup.",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.70"
+    },
+    "git": {
+      "branch": "main"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "18187f3960462547a071c64c1ad4654b42a4dfa7",
+        "createdAt": 1791750970973,
+        "runCount": 2,
+        "kind": "stash"
+      },
+      "history": [
+        {
+          "ref": "572b48ce6338085c7a640dcb6214a17e81b8d06f",
+          "createdAt": 1791750938749,
+          "runCount": 1,
+          "kind": "stash"
+        },
+        {
+          "ref": "18187f3960462547a071c64c1ad4654b42a4dfa7",
+          "createdAt": 1791750970973,
+          "runCount": 2,
+          "kind": "stash"
+        }
+      ]
+    },
+    "title": "Use team_spawn_teammate to add a teammate named helper, then team_run_task to ask helper to reply with the word ok, wait",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 34610,
+      "outputTokens": 768,
+      "cacheReadTokens": 33344,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 38650,
+      "outputTokens": 771,
+      "cacheReadTokens": 35264,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/home/corpus/.cline/data/sessions/1791750938370_7ouqo/1791750938370_7ouqo.messages.json"
+}

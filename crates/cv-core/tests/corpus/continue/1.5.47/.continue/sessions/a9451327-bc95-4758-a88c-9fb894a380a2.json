@@ -1,0 +1,402 @@
+{
+  "sessionId": "a9451327-bc95-4758-a88c-9fb894a380a2",
+  "title": "Untitled Session",
+  "workspaceDirectory": "/home/corpus/project",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "Read a.txt and b.txt at the same time (two parallel tool calls), then reply with their combined line count."
+      },
+      "contextItems": [],
+      "editorState": "Read a.txt and b.txt at the same time (two parallel tool calls), then reply with their combined line count."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_d57e09fa25074f33b490512a",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"a.txt\"}"
+            }
+          },
+          {
+            "id": "call_d8257be59e9b462a82a242fe",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"b.txt\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2076,
+          "completion_tokens": 50,
+          "total_tokens": 2126,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 28
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_d57e09fa25074f33b490512a",
+          "toolCall": {
+            "id": "call_d57e09fa25074f33b490512a",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"a.txt\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "filepath": "a.txt"
+          },
+          "output": [
+            {
+              "content": "Content of a.txt:\nalpha\nbeta\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        },
+        {
+          "toolCallId": "call_d8257be59e9b462a82a242fe",
+          "toolCall": {
+            "id": "call_d8257be59e9b462a82a242fe",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"b.txt\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "filepath": "b.txt"
+          },
+          "output": [
+            {
+              "content": "Content of b.txt:\ngamma\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Combined line count: **3** (a.txt: 2 lines, b.txt: 1 line)",
+        "usage": {
+          "prompt_tokens": 2120,
+          "completion_tokens": 50,
+          "total_tokens": 2170,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 26
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    },
+    {
+      "message": {
+        "role": "user",
+        "content": "Edit notes.txt to replace TODO with DONE, then run the shell command: cat notes.txt"
+      },
+      "contextItems": [],
+      "editorState": "Edit notes.txt to replace TODO with DONE, then run the shell command: cat notes.txt"
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_28035872c230460e9c6b3634",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"notes.txt\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2164,
+          "completion_tokens": 43,
+          "total_tokens": 2207,
+          "prompt_tokens_details": {
+            "cached_tokens": 2112
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 31
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_28035872c230460e9c6b3634",
+          "toolCall": {
+            "id": "call_28035872c230460e9c6b3634",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"filepath\":\"notes.txt\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "filepath": "notes.txt"
+          },
+          "output": [
+            {
+              "content": "Content of notes.txt:\nTODO: fix\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_c2659459a3294587ad19672e",
+            "type": "function",
+            "function": {
+              "name": "Edit",
+              "arguments": "{\"file_path\":\"notes.txt\",\"new_string\":\"DONE\",\"old_string\":\"TODO\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2189,
+          "completion_tokens": 27,
+          "total_tokens": 2216,
+          "prompt_tokens_details": {
+            "cached_tokens": 2112
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_c2659459a3294587ad19672e",
+          "toolCall": {
+            "id": "call_c2659459a3294587ad19672e",
+            "type": "function",
+            "function": {
+              "name": "Edit",
+              "arguments": "{\"file_path\":\"notes.txt\",\"new_string\":\"DONE\",\"old_string\":\"TODO\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "file_path": "notes.txt",
+            "new_string": "DONE",
+            "old_string": "TODO"
+          },
+          "output": [
+            {
+              "content": "Successfully edited /home/corpus/project/notes.txt\nDiff:\nIndex: /home/corpus/project/notes.txt\n===================================================================\n--- /home/corpus/project/notes.txt\n+++ /home/corpus/project/notes.txt\n@@ -1,1 +1,1 @@\n-TODO: fix\n+DONE: fix\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_0526eabcf2cd43479444388c",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"cat notes.txt\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2514,
+          "completion_tokens": 14,
+          "total_tokens": 2528,
+          "prompt_tokens_details": {
+            "cached_tokens": 2176
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_0526eabcf2cd43479444388c",
+          "toolCall": {
+            "id": "call_0526eabcf2cd43479444388c",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"cat notes.txt\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "command": "cat notes.txt"
+          },
+          "output": [
+            {
+              "content": "DONE: fix\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Edited notes.txt (TODO → DONE). Output of `cat notes.txt`:\n\n```\nDONE: fix\n```",
+        "usage": {
+          "prompt_tokens": 2536,
+          "completion_tokens": 37,
+          "total_tokens": 2573,
+          "prompt_tokens_details": {
+            "cached_tokens": 2496
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 12
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    },
+    {
+      "message": {
+        "role": "user",
+        "content": "Run the shell command: cat missing-file.txt   and tell me the error in one line."
+      },
+      "contextItems": [],
+      "editorState": "Run the shell command: cat missing-file.txt   and tell me the error in one line."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_8b0a41b7684f4b9f83f2be8b",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"cat missing-file.txt\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2582,
+          "completion_tokens": 15,
+          "total_tokens": 2597,
+          "prompt_tokens_details": {
+            "cached_tokens": 256
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_8b0a41b7684f4b9f83f2be8b",
+          "toolCall": {
+            "id": "call_8b0a41b7684f4b9f83f2be8b",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"cat missing-file.txt\"}"
+            }
+          },
+          "status": "errored",
+          "parsedArgs": {
+            "command": "cat missing-file.txt"
+          },
+          "output": [
+            {
+              "content": "Error executing tool Bash: Error (exit code 1): cat: missing-file.txt: No such file or directory\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "`cat: missing-file.txt: No such file or directory` (exit code 1)",
+        "usage": {
+          "prompt_tokens": 2625,
+          "completion_tokens": 30,
+          "total_tokens": 2655,
+          "prompt_tokens_details": {
+            "cached_tokens": 1920
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 9
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    }
+  ],
+  "usage": {
+    "totalCost": 0.019338,
+    "promptTokens": 18806,
+    "completionTokens": 266,
+    "promptTokensDetails": {
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0
+    }
+  }
+}

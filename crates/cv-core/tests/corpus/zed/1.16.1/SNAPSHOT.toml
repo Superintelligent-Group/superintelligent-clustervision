@@ -1,0 +1,8 @@
+# Written by tools/harness-corpus/zed/snapshot.sh: a store SHAPE, not a corpus (no sessions).
+harness = "zed"
+app_version = "1.16.1"
+recorded = "2026-10-11"
+store = "threads/threads.db (+ the agent tables of db/*-stable/db.sqlite)"
+store_last_written = "2026-06-10T19:57:44.766848+00:00"
+note = "The DDL is what the installed app migrated to; the JSON shape is merged over every thread on disk, which older Zed versions may have written (store_last_written)."
+generator_commit = "01d2b73"

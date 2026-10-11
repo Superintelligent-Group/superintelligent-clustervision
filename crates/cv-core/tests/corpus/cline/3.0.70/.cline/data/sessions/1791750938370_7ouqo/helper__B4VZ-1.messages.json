@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "updated_at": "2026-10-11T20:35:56.861Z",
+  "agent": "teammate",
+  "sessionId": "1791750938370_7ouqo__teamtask__helper__B4VZ-1",
+  "taskType": "team",
+  "origin": {
+    "source": "cli",
+    "mode": "team",
+    "sessionId": "1791750938370_7ouqo__teamtask__helper__B4VZ-1",
+    "parentThreadId": "1791750938370_7ouqo",
+    "subagent": "helper",
+    "version": "3.0.70"
+  },
+  "messages": [
+    {
+      "id": "11bd8d8d-1312-40b3-a838-c5ce4ead2a80",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Please reply with the single word: ok"
+        }
+      ],
+      "ts": 1791750952211
+    },
+    {
+      "id": "msg_RVVCZJsH",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "ts": 1791750956859,
+      "modelInfo": {
+        "id": "glm-5.3-flash",
+        "provider": "openai-compatible"
+      },
+      "metrics": {
+        "inputTokens": 4040,
+        "outputTokens": 3,
+        "cacheReadTokens": 1920,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}

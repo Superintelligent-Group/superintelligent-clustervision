@@ -1,0 +1,9 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "devin"
+version = "3000.11.3"
+generated = "2026-10-11"
+model = "swe-2-medium (Devin backend, a Free model on the signed-in account; Z.ai cannot drive Devin)"
+model_calls = "not observable (Devin's backend); 4 sessions, one devin -p per turn"
+scenarios = ["chat","resume","tools","parallel_tools","tool_error","image_read","todo_list","mcp","web_fetch","subagent","plan_mode"]
+skipped = ["sidekick (subagent_heads): Devin's sidekick runs only under a Fusion lead+sidekick model pairing, whose lead models are paid","compaction: -p /compact writes summaries/history_<hex>.md but no summary nodes before print mode exits, and DEVIN_COMPACTION_THRESHOLDS takes an undocumented format (JSON and k=v were ignored); the 262K window of the free model is out of budget","image: print mode has no attachment flag (the corpus reads dot.png through the read tool instead)"]
+generator_commit = "01d2b73"

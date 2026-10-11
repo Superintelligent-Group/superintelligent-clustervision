@@ -1,0 +1,41 @@
+-- PRAGMA user_version = 0
+CREATE TABLE archived_git_worktrees (
+  id INTEGER PRIMARY KEY,
+  worktree_path TEXT NOT NULL,
+  main_repo_path TEXT NOT NULL,
+  branch_name TEXT,
+  staged_commit_hash TEXT,
+  unstaged_commit_hash TEXT,
+  original_commit_hash TEXT
+) STRICT;
+CREATE TABLE sidebar_terminal_threads (
+  terminal_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  custom_title TEXT,
+  created_at TEXT NOT NULL,
+  working_directory TEXT,
+  folder_paths TEXT,
+  folder_paths_order TEXT,
+  main_worktree_paths TEXT,
+  main_worktree_paths_order TEXT,
+  remote_connection TEXT
+) STRICT;
+CREATE TABLE "sidebar_threads" (
+  thread_id BLOB PRIMARY KEY,
+  session_id TEXT,
+  agent_id TEXT,
+  title TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  created_at TEXT,
+  folder_paths TEXT,
+  folder_paths_order TEXT,
+  archived INTEGER DEFAULT 0,
+  main_worktree_paths TEXT,
+  main_worktree_paths_order TEXT,
+  remote_connection TEXT
+, interacted_at TEXT, title_override TEXT) STRICT;
+CREATE TABLE "thread_archived_worktrees" (
+  thread_id BLOB NOT NULL,
+  archived_worktree_id INTEGER NOT NULL REFERENCES archived_git_worktrees (id),
+  PRIMARY KEY (thread_id, archived_worktree_id)
+) STRICT;

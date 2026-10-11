@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "session_id": "1791750982698_kuf8a",
+  "source": "cli",
+  "pid": 2608,
+  "started_at": "2026-10-11T20:36:22.699Z",
+  "ended_at": "2026-10-11T20:36:53.091Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": false,
+  "provider": "openai-compatible",
+  "model": "glm-5.3-flash",
+  "cwd": "/home/corpus/project",
+  "workspace_root": "/home/corpus/project",
+  "team_name": "team-5fUQ5",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "Plan, without editing anything, how to rename b.txt to c.txt. Two steps.",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.70"
+    },
+    "git": {
+      "branch": "main"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "b9d89f9ae2d05d7b7cbb0559829686dc4102e64d",
+        "createdAt": 1791750983140,
+        "runCount": 1,
+        "kind": "stash"
+      },
+      "history": [
+        {
+          "ref": "b9d89f9ae2d05d7b7cbb0559829686dc4102e64d",
+          "createdAt": 1791750983140,
+          "runCount": 1,
+          "kind": "stash"
+        }
+      ]
+    },
+    "title": "Plan, without editing anything, how to rename b.txt to c.txt. Two steps.",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 16513,
+      "outputTokens": 565,
+      "cacheReadTokens": 9472,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 16513,
+      "outputTokens": 565,
+      "cacheReadTokens": 9472,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/home/corpus/.cline/data/sessions/1791750982698_kuf8a/1791750982698_kuf8a.messages.json"
+}

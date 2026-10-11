@@ -1,0 +1,1 @@
+{"id":"038afbdc-5260-4ce0-adbb-984cf56e7a67","number":1,"ts":1791751033829,"task":"Use the corpus MCP server's add tool to add 2 and 3, then say the result.","tokensIn":0,"tokensOut":144,"cacheWrites":0,"cacheReads":0,"totalCost":0.00216,"size":239,"workspace":"/home/corpus/project","mode":"code","apiConfigName":"default"}

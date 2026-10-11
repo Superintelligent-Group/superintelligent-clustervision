@@ -95,6 +95,7 @@ rm -f "$DSTORE/credentials.toml"
 mkdir -p "$OUT/.local/share/devin/cli"
 sqlite3 "$STORE/sessions.db" ".backup '$OUT/.local/share/devin/cli/sessions.db'"
 sqlite3 "$OUT/.local/share/devin/cli/sessions.db" "PRAGMA journal_mode=DELETE" >/dev/null
+rm -f "$OUT/.local/share/devin/cli/sessions.db-shm" "$OUT/.local/share/devin/cli/sessions.db-wal"
 for d in transcripts summaries; do [ -d "$STORE/$d" ] && cp -R "$STORE/$d" "$OUT/.local/share/devin/cli/"; done
 NSESS="$(sqlite3 "$OUT/.local/share/devin/cli/sessions.db" "select count(*) from sessions")"
 corpus_scrub "$OUT"

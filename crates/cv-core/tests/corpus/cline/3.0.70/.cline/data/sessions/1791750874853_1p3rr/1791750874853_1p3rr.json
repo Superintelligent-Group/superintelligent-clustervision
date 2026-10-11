@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "session_id": "1791750874853_1p3rr",
+  "source": "cli",
+  "pid": 94010,
+  "started_at": "2026-10-11T20:34:34.855Z",
+  "ended_at": "2026-10-11T20:34:40.289Z",
+  "exit_code": 0,
+  "status": "completed",
+  "interactive": false,
+  "provider": "openai-compatible",
+  "model": "glm-5.3-flash",
+  "cwd": "/home/corpus/project",
+  "workspace_root": "/home/corpus/project",
+  "team_name": "team-X5LXb",
+  "enable_tools": true,
+  "enable_spawn": true,
+  "enable_teams": true,
+  "prompt": "Say hello in five words, then the same in French.",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "3.0.70"
+    },
+    "git": {
+      "branch": "main"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "e4d95b40c12f6f86391f929b936d5e46eb50e65d",
+        "createdAt": 1791750875188,
+        "runCount": 1,
+        "kind": "commit"
+      },
+      "history": [
+        {
+          "ref": "e4d95b40c12f6f86391f929b936d5e46eb50e65d",
+          "createdAt": 1791750875188,
+          "runCount": 1,
+          "kind": "commit"
+        }
+      ]
+    },
+    "title": "Say hello in five words, then the same in French.",
+    "totalCost": 0,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 5202,
+      "outputTokens": 19,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 5202,
+      "outputTokens": 19,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    }
+  },
+  "messages_path": "/home/corpus/.cline/data/sessions/1791750874853_1p3rr/1791750874853_1p3rr.messages.json"
+}

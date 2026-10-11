@@ -1,0 +1,152 @@
+{
+  "sessionId": "da70bdf2-8d03-4738-8eef-9f0a5e9b7c31",
+  "title": "Untitled Session",
+  "workspaceDirectory": "/home/corpus/project",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "Use the Fetch tool on https://example.com and tell me the page title."
+      },
+      "contextItems": [],
+      "editorState": "Use the Fetch tool on https://example.com and tell me the page title."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_e44a401dc394481da4421354",
+            "type": "function",
+            "function": {
+              "name": "Fetch",
+              "arguments": "{\"url\":\"https://example.com\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2068,
+          "completion_tokens": 14,
+          "total_tokens": 2082,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_e44a401dc394481da4421354",
+          "toolCall": {
+            "id": "call_e44a401dc394481da4421354",
+            "type": "function",
+            "function": {
+              "name": "Fetch",
+              "arguments": "{\"url\":\"https://example.com\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "url": "https://example.com"
+          },
+          "output": [
+            {
+              "content": "This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_c9bd7c20eaca4fd18bed7dff",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"curl -s https://example.com | grep -i \\\"<title>\\\"\"}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2114,
+          "completion_tokens": 140,
+          "total_tokens": 2254,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 115
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_c9bd7c20eaca4fd18bed7dff",
+          "toolCall": {
+            "id": "call_c9bd7c20eaca4fd18bed7dff",
+            "type": "function",
+            "function": {
+              "name": "Bash",
+              "arguments": "{\"command\":\"curl -s https://example.com | grep -i \\\"<title>\\\"\"}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "command": "curl -s https://example.com | grep -i \"<title>\""
+          },
+          "output": [
+            {
+              "content": "<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data:,><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Example Domain</title><style>html{color-scheme:light dark;background:light-dark(#eee,#222)}body{font:16px/1.6 system-ui,sans-serif;max-width:26em;margin:auto;padding:25vh 2em 2em;text-align:center}</style></head><body><p>This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.</p><script src=/s.js></script></body></html>\n",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "The page title is **Example Domain**.",
+        "usage": {
+          "prompt_tokens": 2294,
+          "completion_tokens": 19,
+          "total_tokens": 2313,
+          "prompt_tokens_details": {
+            "cached_tokens": 2112
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 8
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    }
+  ],
+  "usage": {
+    "totalCost": 0.006822,
+    "promptTokens": 6476,
+    "completionTokens": 173,
+    "promptTokensDetails": {
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0
+    }
+  }
+}

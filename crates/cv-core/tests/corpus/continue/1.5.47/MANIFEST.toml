@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "continue"
+version = "1.5.47"
+generated = "2026-10-11"
+writer = "Continue CLI (cn, npm @continuedev/cli); the IDE extensions write the same ~/.continue/sessions"
+model = "glm-5.3-flash via Z.ai coding endpoint, through key_proxy.py"
+model_calls = 21
+scenarios = ["chat","resume","tools","parallel_tools","tool_error","mcp","subagent","fork","plan_mode","checklist","web_fetch"]
+skipped = ["image: cn -p has no attachment flag","reasoning: cn does not persist GLM reasoning_content","compaction: headless -p /compact compacts in memory and exits without saving; a small contextLength made cn drop the truncated reply instead of auto-compacting"]
+generator_commit = "bff9866"

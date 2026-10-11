@@ -1,0 +1,99 @@
+{
+  "sessionId": "cac6ca8a-128c-4988-ace1-f331c8c6179d",
+  "title": "Untitled Session",
+  "workspaceDirectory": "/home/corpus/project",
+  "history": [
+    {
+      "message": {
+        "role": "user",
+        "content": "Use the corpus MCP server's add tool to add 2 and 3, then say the result."
+      },
+      "contextItems": [],
+      "editorState": "Use the corpus MCP server's add tool to add 2 and 3, then say the result."
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_fb1250efbcff477dbb731031",
+            "type": "function",
+            "function": {
+              "name": "add",
+              "arguments": "{\"a\":2,\"b\":3}"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2073,
+          "completion_tokens": 56,
+          "total_tokens": 2129,
+          "prompt_tokens_details": {
+            "cached_tokens": 1920
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 39
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": [],
+      "toolCallStates": [
+        {
+          "toolCallId": "call_fb1250efbcff477dbb731031",
+          "toolCall": {
+            "id": "call_fb1250efbcff477dbb731031",
+            "type": "function",
+            "function": {
+              "name": "add",
+              "arguments": "{\"a\":2,\"b\":3}"
+            }
+          },
+          "status": "done",
+          "parsedArgs": {
+            "a": 2,
+            "b": 3
+          },
+          "output": [
+            {
+              "content": "[{\"type\":\"text\",\"text\":\"5\"}]",
+              "name": "Tool Result",
+              "description": "Tool execution result"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": "2 + 3 = **5**",
+        "usage": {
+          "prompt_tokens": 2105,
+          "completion_tokens": 10,
+          "total_tokens": 2115,
+          "prompt_tokens_details": {
+            "cached_tokens": 2048
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "model": "glm-5.3-flash",
+          "cost_cents": 0
+        }
+      },
+      "contextItems": []
+    }
+  ],
+  "usage": {
+    "totalCost": 0.00431,
+    "promptTokens": 4178,
+    "completionTokens": 66,
+    "promptTokensDetails": {
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0
+    }
+  }
+}

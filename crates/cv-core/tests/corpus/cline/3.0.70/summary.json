@@ -1,0 +1,285 @@
+{
+  "sessions": [
+    {
+      "id": "1791750874853_1p3rr",
+      "path": ".cline/data/sessions/1791750874853_1p3rr/1791750874853_1p3rr.messages.json",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791750881047_5sehe",
+      "path": ".cline/data/sessions/1791750881047_5sehe/1791750881047_5sehe.messages.json",
+      "messages": 9,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 5,
+        "thinking": 4,
+        "tool_result": 4,
+        "tool_use": 4
+      },
+      "tools": [
+        "read_files",
+        "read_files",
+        "editor",
+        "run_commands"
+      ],
+      "usage_messages": 4,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791750921112_4i2p2",
+      "path": ".cline/data/sessions/1791750921112_4i2p2/1791750921112_4i2p2.messages.json",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "spawn_agent"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791750921112_4i2p2/agent_4906d67a-65d4-4233-bb2f-c8ebc64f2d45",
+      "path": ".cline/data/sessions/1791750921112_4i2p2/agent_4906d67a-65d4-4233-bb2f-c8ebc64f2d45.messages.json",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "1791750921112_4i2p2",
+        "agent_path": "agent_4906d67a-65d4-4233-bb2f-c8ebc64f2d45"
+      },
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791750938370_7ouqo",
+      "path": ".cline/data/sessions/1791750938370_7ouqo/1791750938370_7ouqo.messages.json",
+      "messages": 12,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 8,
+        "thinking": 6,
+        "tool_result": 4,
+        "tool_use": 4
+      },
+      "tools": [
+        "team_spawn_teammate",
+        "team_run_task",
+        "team_await_runs",
+        "team_cleanup"
+      ],
+      "usage_messages": 6,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791750938370_7ouqo/helper__B4VZ-1",
+      "path": ".cline/data/sessions/1791750938370_7ouqo/helper__B4VZ-1.messages.json",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "1791750938370_7ouqo",
+        "agent_path": "helper"
+      },
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791750982698_kuf8a",
+      "path": ".cline/data/sessions/1791750982698_kuf8a/1791750982698_kuf8a.messages.json",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 3,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "run_commands",
+        "run_commands"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791751014001_59vw3",
+      "path": ".cline/data/sessions/1791751014001_59vw3/1791751014001_59vw3.messages.json",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "corpus__add"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791751022345_dbuz1",
+      "path": ".cline/data/sessions/1791751022345_dbuz1/1791751022345_dbuz1.messages.json",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "fetch_web_content"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "1791751034290_k1inx",
+      "path": ".cline/data/sessions/1791751034290_k1inx/1791751034290_k1inx.messages.json",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "ask_question",
+        "read_files"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    }
+  ]
+}
