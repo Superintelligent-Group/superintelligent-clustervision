@@ -114,7 +114,7 @@ pub use emit::emit;
 use super::store::sqlite::open_ro;
 #[cfg(feature = "sqlite")]
 use super::ts_from_epoch;
-use super::wire::{anthropic, coerce_text, text_parts};
+use super::wire::{anthropic, text_parts};
 use super::{parse_ts, ts_from_value, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -502,7 +502,7 @@ fn parse_control_entry(v: &Value) -> Vec<Message> {
             Some(level) => format!("[thinking level: {level}]"),
             None => "[thinking level changed]".to_string(),
         },
-        _ => coerce_text(v.get("content")),
+        _ => text_parts(v.get("content")),
     };
     if !text.is_empty() {
         m.content.push(Block::Text { text: text.into() });
@@ -827,7 +827,7 @@ fn parse_tool_result(m: &mut Message, msg: &Value) {
     // block, where every harness puts them.
     m.content.push(Block::ToolResult {
         tool_use_id,
-        content: coerce_text(msg.get("content")).into(),
+        content: text_parts(msg.get("content")).into(),
         is_error: msg.get("isError").and_then(Value::as_bool).unwrap_or(false),
         tool_name: msg.get("toolName").and_then(Value::as_str).map(str::to_string),
         status: None,
@@ -988,7 +988,7 @@ fn parse_compaction_summary(m: &mut Message, msg: &Value) {
 }
 
 fn parse_custom(m: &mut Message, msg: &Value) {
-    let text = coerce_text(msg.get("content"));
+    let text = text_parts(msg.get("content"));
     if !text.is_empty() {
         m.content.push(Block::Text { text: text.into() });
     }

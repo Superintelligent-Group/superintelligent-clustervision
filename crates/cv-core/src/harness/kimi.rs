@@ -62,7 +62,7 @@
 //! We tolerate protocol_version drift (1.1–1.9) and unknown message types: anything we don't
 //! recognize is ignored.
 
-use super::wire::{coerce_text, openai, text_parts};
+use super::wire::{openai, text_parts};
 use super::Adapter;
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -448,7 +448,7 @@ fn peek_system_prompt(transcript: &Path) -> Option<String> {
     super::for_each_json_line(BufReader::new(file), |v| {
         seen += 1;
         if v.get("role").and_then(Value::as_str) == Some("_system_prompt") {
-            let text = coerce_text(v.get("content"));
+            let text = text_parts(v.get("content"));
             if !text.is_empty() {
                 prompt = Some(text);
             }
@@ -493,7 +493,7 @@ fn context_message(
             Some(m)
         }
         "_system_prompt" => {
-            let text = coerce_text(v.get("content"));
+            let text = text_parts(v.get("content"));
             let mut m = Message::of_kind(Role::System, MessageKind::SystemPrompt, Origin::Harness);
             m.content.push(Block::Text { text: text.into() });
             Some(m)
@@ -526,7 +526,7 @@ fn context_message(
             let we = enrich.tool_results.get(&tool_use_id);
             let (content, is_error, details) = match we {
                 Some(tr) => (tr.output.clone(), tr.is_error, tr.extras.clone()),
-                None => (coerce_text(v.get("content")), false, None),
+                None => (text_parts(v.get("content")), false, None),
             };
             let status = Some(if is_error { "error" } else { "completed" }.to_string());
             let mut m = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);

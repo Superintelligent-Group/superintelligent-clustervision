@@ -30,7 +30,7 @@
 //! Missing index → glob `*.json` (minus `sessions.json`). Missing fields → skip. `content` as
 //! string or array both work. `dateCreated` ms-epoch or ISO both work. Never panics.
 
-use super::wire::{coerce_text, openai};
+use super::wire::{openai, text_parts};
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -588,7 +588,7 @@ fn history_item_to_message(item: &Value, model: &mut Option<String>) -> Option<M
     match role {
         Role::Tool => {
             // A tool result. Continue stores the output in `content`.
-            let content = coerce_text(message.get("content"));
+            let content = text_parts(message.get("content"));
             let tool_use_id = message
                 .get("toolCallId")
                 .and_then(Value::as_str)

@@ -28,7 +28,7 @@
 pub(crate) mod emit;
 pub use emit::emit;
 
-use super::wire::{coerce_text, openai, text_parts};
+use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -266,7 +266,7 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let content = coerce_text(v.get("content"));
+        let content = text_parts(v.get("content"));
         let e = enrich.get(&tool_use_id);
         let is_error = e.map(|e| e.is_error()).unwrap_or(false);
         let status = e.and_then(|e| e.status.clone());
@@ -319,7 +319,7 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
         m.model = Some(model.to_string());
     }
 
-    let text = coerce_text(v.get("content"));
+    let text = text_parts(v.get("content"));
     if !text.is_empty() {
         m.content.push(Block::Text { text: text.into() });
     }
@@ -395,7 +395,7 @@ fn user_kind_origin(v: &Value) -> (MessageKind, Origin) {
         Some("compaction_meta") => (MessageKind::CompactionSummary, Origin::Harness),
         Some(_) => (MessageKind::InjectedContext, Origin::Harness),
         None => {
-            if coerce_text(v.get("content")).trim_start().starts_with("<user_info>") {
+            if text_parts(v.get("content")).trim_start().starts_with("<user_info>") {
                 (MessageKind::InjectedContext, Origin::Harness)
             } else {
                 (MessageKind::Prompt, Origin::Human)
