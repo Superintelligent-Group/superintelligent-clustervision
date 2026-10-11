@@ -1,6 +1,8 @@
 # formats/opensession.toml — the vocabulary cv's `opensession` adapter is checked against (docs/INTERFACE-V2.md §7).
-# status: handled = per-item arm in the adapter; generic = interpreted by a blanket rule; carried = verbatim
-# under ParseOptions::complete only; ignored = known and deliberately skipped.
+# Lists only what the source cannot say: an item the adapter has a match arm for is `handled` by inference and is
+# not listed. generic = interpreted by a blanket rule; carried = verbatim under ParseOptions::complete only;
+# ignored = known and deliberately skipped; handled = interpreted, but not by a match arm (a SQL identifier, a path).
+# tests/formats_manifest.rs holds it to the adapter source.
 #
 # OpenSession is cv's OWN format, so "upstream" is docs/OPENSESSION.md and the vocabulary is the IR's:
 # 0.3 is the IR key for key, and the reader is the IR's own `Deserialize` behind a version check. So
@@ -26,8 +28,6 @@ date = "2026-09-20"
 "field.openSession" = { status = "ignored", note = "0.2 marker: sniffed in discovery only so the document is refused with a pointer, never read" }
 
 # ── roles (discovery counts user + assistant turns straight off the raw records) ──
-"role.user" = { status = "handled", note = "message_count" }
-"role.assistant" = { status = "handled", note = "message_count" }
 "role.tool" = { status = "generic", note = "ir::Role's Deserialize" }
 "role.system" = { status = "generic", note = "ir::Role's Deserialize" }
 

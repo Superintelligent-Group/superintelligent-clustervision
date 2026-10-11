@@ -1,11 +1,12 @@
 # formats/zed.toml — the vocabulary cv's `zed` adapter is checked against (docs/INTERFACE-V2.md §7).
-# status: handled = per-item arm in the adapter; generic = interpreted by a blanket rule; carried = verbatim
-# under ParseOptions::complete only; ignored = known and deliberately skipped. Hand-maintained; `cv formats check`
-# (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
+# Lists only what the source cannot say: an item the adapter has a match arm for is `handled` by inference and is
+# not listed. generic = interpreted by a blanket rule; carried = verbatim under ParseOptions::complete only;
+# ignored = known and deliberately skipped; handled = interpreted, but not by a match arm (a SQL identifier, a path).
+# tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "zed"
 source_files = ["harness/zed.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
-ignore_literals = ["json", "zstd", "Zed", "threads.db", "threads"]
+ignore_literals = ["json", "zstd"]
 store = [
   "<data_dir>/threads/threads.db (zstd blobs)",
 ]
@@ -16,12 +17,6 @@ commit = "unknown"
 date = "2026-05-29"
 
 [types]
-"role.user" = { status = "handled", note = "" }
-"role.assistant" = { status = "handled", note = "" }
-"role.system" = { status = "handled", note = "" }
-"segment.text" = { status = "handled", note = "" }
-"segment.thinking" = { status = "handled", note = "" }
-"segment.RedactedThinking" = { status = "handled", note = "" }
 "v3.User" = { status = "handled", note = "" }
 "v3.Agent" = { status = "handled", note = "" }
 "v3.Text" = { status = "handled", note = "" }

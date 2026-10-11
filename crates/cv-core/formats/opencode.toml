@@ -1,11 +1,12 @@
 # formats/opencode.toml — the vocabulary cv's `opencode` adapter is checked against (docs/INTERFACE-V2.md §7).
-# status: handled = per-item arm in the adapter; generic = interpreted by a blanket rule; carried = verbatim
-# under ParseOptions::complete only; ignored = known and deliberately skipped. Hand-maintained; `cv formats check`
-# (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
+# Lists only what the source cannot say: an item the adapter has a match arm for is `handled` by inference and is
+# not listed. generic = interpreted by a blanket rule; carried = verbatim under ParseOptions::complete only;
+# ignored = known and deliberately skipped; handled = interpreted, but not by a match arm (a SQL identifier, a path).
+# tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "opencode"
 source_files = ["harness/opencode.rs"]
-ignore_literals = ["db", "opencode", "opencode-", "storage", "sqlite"]
+ignore_literals = ["db"]
 store = [
   "${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db",
   "~/.local/share/opencode/storage/{session,message,part}/** (dead JSON tree, fallback)",
@@ -17,25 +18,6 @@ commit = "fee476bb"
 date = "2026-09-19"
 
 [types]
-"role.user" = { status = "handled", note = "" }
-"role.assistant" = { status = "handled", note = "" }
-"role.system" = { status = "handled", note = "" }
-"part.text" = { status = "handled", note = "" }
-"part.reasoning" = { status = "handled", note = "" }
-"part.tool" = { status = "handled", note = "" }
-"part.file" = { status = "handled", note = "" }
-"part.agent" = { status = "handled", note = "" }
-"part.subtask" = { status = "handled", note = "" }
-"part.patch" = { status = "handled", note = "" }
-"part.snapshot" = { status = "handled", note = "" }
-"part.step-start" = { status = "handled", note = "" }
-"part.step-finish" = { status = "handled", note = "" }
-"part.retry" = { status = "handled", note = "" }
-"part.compaction" = { status = "handled", note = "" }
-"tool_state.pending" = { status = "handled", note = "" }
-"tool_state.running" = { status = "handled", note = "" }
-"tool_state.completed" = { status = "handled", note = "attachments → File/Image, state → details" }
-"tool_state.error" = { status = "handled", note = "is_error" }
 "table.session" = { status = "handled", note = "sqlite" }
 "table.message" = { status = "handled", note = "sqlite; data re-hydrated with id/sessionID/messageID" }
 "table.part" = { status = "handled", note = "sqlite" }

@@ -1,11 +1,12 @@
 # formats/goose.toml — the vocabulary cv's `goose` adapter is checked against (docs/INTERFACE-V2.md §7).
-# status: handled = per-item arm in the adapter; generic = interpreted by a blanket rule; carried = verbatim
-# under ParseOptions::complete only; ignored = known and deliberately skipped. Hand-maintained; `cv formats check`
-# (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
+# Lists only what the source cannot say: an item the adapter has a match arm for is `handled` by inference and is
+# not listed. generic = interpreted by a blanket rule; carried = verbatim under ParseOptions::complete only;
+# ignored = known and deliberately skipped; handled = interpreted, but not by a match arm (a SQL identifier, a path).
+# tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "goose"
 source_files = ["harness/goose.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
-ignore_literals = ["NULL", "binary", "other", "goose"]
+ignore_literals = []
 store = [
   "~/.local/share/goose/sessions/sessions.db (Linux)",
   "~/Library/Application Support/Block.block.goose/sessions/sessions.db (macOS)",
@@ -19,41 +20,19 @@ commit = "2090ad1c"
 date = "2026-09-19"
 
 [types]
-"role.user" = { status = "handled", note = "" }
-"role.assistant" = { status = "handled", note = "" }
-"role.system" = { status = "handled", note = "legacy jsonl" }
-"role.tool" = { status = "handled", note = "legacy jsonl" }
-"block.text" = { status = "handled", note = "" }
-"block.image" = { status = "handled", note = "" }
 "block.document" = { status = "handled", note = "" }
 "block.thinking" = { status = "handled", note = "" }
 "block.redactedThinking" = { status = "handled", note = "" }
-"block.toolRequest" = { status = "handled", note = "" }
-"block.toolResponse" = { status = "handled", note = "" }
-"block.error" = { status = "handled", note = "" }
-"block.frontendToolRequest" = { status = "handled", note = "" }
 "block.toolConfirmationRequest" = { status = "ignored", note = "" }
 "block.actionRequired" = { status = "ignored", note = "" }
 "block.systemNotification" = { status = "ignored", note = "" }
 # `actionRequired.data.actionType` — the four Goose writes (control_block_text).
-"action.toolConfirmation" = { status = "handled", note = "" }
-"action.toolConfirmationResponse" = { status = "handled", note = "" }
-"action.elicitation" = { status = "handled", note = "" }
-"action.elicitationResponse" = { status = "handled", note = "" }
-"result.text" = { status = "handled", note = "rmcp content" }
-"result.image" = { status = "handled", note = "rmcp content" }
-"result.audio" = { status = "handled", note = "rmcp content" }
-"result.resource" = { status = "handled", note = "rmcp content" }
-"result.resource_link" = { status = "handled", note = "rmcp content" }
 "column.metadata_json" = { status = "handled", note = "usage/model/userVisible" }
 "column.tokens" = { status = "ignored", note = "never written" }
 "column.name" = { status = "handled", note = "title" }
 "column.description" = { status = "handled", note = "never written; fallback" }
 "column.session_type" = { status = "handled", note = "" }
 # `session_type` values (SessionType, session_manager.rs:47-56) -> Origin of the prompts.
-"session_type.scheduled" = { status = "handled", note = "-> Origin::Scheduler" }
-"session_type.sub_agent" = { status = "handled", note = "-> Origin::Subagent" }
-"session_type.hidden" = { status = "handled", note = "-> Origin::Harness" }
 "session_type.user" = { status = "generic", note = "user/terminal/gateway/acp all fall to the `_` Human arm" }
 "column.parent_session_id" = { status = "handled", note = "" }
 "table.usage_ledger" = { status = "ignored", note = "not read" }

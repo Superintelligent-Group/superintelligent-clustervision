@@ -52,8 +52,7 @@ fn census(harness: Option<Harness>, recent: usize, json_out: bool) -> Result<()>
             .as_ref()
             .map(|m| {
                 format!(
-                    "manifest {} handled / {} generic / {} carried / {} ignored",
-                    m.count(Status::Handled),
+                    "manifest {} generic / {} carried / {} ignored (handled: the adapter's match arms)",
                     m.count(Status::Generic),
                     m.count(Status::Carried),
                     m.count(Status::Ignored)

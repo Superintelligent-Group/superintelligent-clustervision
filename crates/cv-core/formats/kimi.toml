@@ -1,11 +1,12 @@
 # formats/kimi.toml — the vocabulary cv's `kimi` adapter is checked against (docs/INTERFACE-V2.md §7).
-# status: handled = per-item arm in the adapter; generic = interpreted by a blanket rule; carried = verbatim
-# under ParseOptions::complete only; ignored = known and deliberately skipped. Hand-maintained; `cv formats check`
-# (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
+# Lists only what the source cannot say: an item the adapter has a match arm for is `handled` by inference and is
+# not listed. generic = interpreted by a blanket rule; carried = verbatim under ParseOptions::complete only;
+# ignored = known and deliberately skipped; handled = interpreted, but not by a match arm (a SQL identifier, a path).
+# tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "kimi"
 source_files = ["harness/kimi.rs", "harness/wire/openai.rs", "harness/wire/mod.rs"]
-ignore_literals = ["local", "context.jsonl", "metadata", "text"]
+ignore_literals = ["context.jsonl", "metadata"]
 store = [
   "$KIMI_SHARE_DIR or ~/.kimi/sessions/<md5(cwd)>/<uuid>/context.jsonl",
   "…/wire.jsonl",
@@ -22,19 +23,11 @@ date = "2026-09-19"
 "role._system_prompt" = { status = "generic", note = "" }
 "role._checkpoint" = { status = "generic", note = "skipped" }
 "role._usage" = { status = "generic", note = "skipped" }
-"role.user" = { status = "handled", note = "" }
-"role.assistant" = { status = "handled", note = "" }
-"role.tool" = { status = "handled", note = "" }
 "part.text" = { status = "handled", note = "" }
 "part.think" = { status = "handled", note = "" }
 "part.image_url" = { status = "handled", note = "" }
 "part.audio_url" = { status = "handled", note = "" }
 "part.video_url" = { status = "handled", note = "" }
-"wire.ContentPart" = { status = "handled", note = "" }
-"wire.StatusUpdate" = { status = "handled", note = "token_usage" }
-"wire.ToolResult" = { status = "handled", note = "" }
-"wire.TurnBegin" = { status = "handled", note = "" }
-"wire.ToolCall" = { status = "handled", note = "" }
 "wire.SubagentEvent" = { status = "ignored", note = "" }
 "wire.ApprovalRequest" = { status = "ignored", note = "" }
 "wire.CompactionBegin" = { status = "ignored", note = "" }

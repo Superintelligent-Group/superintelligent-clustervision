@@ -1,11 +1,12 @@
 # formats/claude-export.toml — the vocabulary cv's `claude-export` adapter is checked against (docs/INTERFACE-V2.md §7).
-# status: handled = per-item arm in the adapter; generic = interpreted by a blanket rule; carried = verbatim
-# under ParseOptions::complete only; ignored = known and deliberately skipped. Hand-maintained; `cv formats check`
-# (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
+# Lists only what the source cannot say: an item the adapter has a match arm for is `handled` by inference and is
+# not listed. generic = interpreted by a blanket rule; carried = verbatim under ParseOptions::complete only;
+# ignored = known and deliberately skipped; handled = interpreted, but not by a match arm (a SQL identifier, a path).
+# tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "claude-export"
 source_files = ["harness/export.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
-ignore_literals = ["conversations.json", "all"]
+ignore_literals = ["conversations.json"]
 store = [
   "registered conversations.json (cv config --add-export)",
 ]
@@ -16,10 +17,6 @@ commit = "unknown"
 date = "2026-05-29"
 
 [types]
-"sender.human" = { status = "handled", note = "" }
-"sender.assistant" = { status = "handled", note = "" }
-"sender.user" = { status = "handled", note = "" }
-"sender.tool" = { status = "handled", note = "" }
 "block.text" = { status = "handled", note = "" }
 "block.thinking" = { status = "handled", note = "" }
 "block.tool_use" = { status = "handled", note = "" }

@@ -308,9 +308,10 @@ shapes cannot drift. Mechanism (the server is `cv mcp`, so the clap tree is in-p
   in complete mode and reports, per harness, the record/part/column vocabulary seen with counts,
   marking anything absent from the manifest as **new**.
 - **Manifests.** `formats/<harness>.toml`: `upstream = { repo, commit, date }`, `store = [...]`
-  paths, and `[types]` with each persisted type and its status `handled | carried | ignored`. A
-  test asserts every `handled` type appears in the adapter's match arms and every match arm
-  appears in the manifest.
+  paths, and `[types]` with what the source cannot say: `generic | carried | ignored`, and
+  `handled` only for an item no match arm names. An item the adapter matches on is `handled` by
+  inference. A test asserts every listed `handled` type appears in the adapter source and that no
+  entry restates a match arm.
 - **Drift script.** `tools/harness-drift.sh` fast-forwards the `~/pug` checkouts and greps the
   persistence enums against the manifests (what the 2026-09-19 survey did by hand).
 - **Fixture generators** live in `tools/harness-fixtures/<harness>/` (Goose stub provider + env,
@@ -361,10 +362,9 @@ Two further steps toward it, both real debt found in the same pass:
   the block, and listed Codex among the harnesses recording a cost, which it does not). Either §3's
   key lists get asserted against `cv schema --json`, or the prose shrinks to only what cannot be
   checked. A contract nothing verifies decays into folklore.
-- **359 of the 545 manifest type entries are `handled`**, which is exactly what the checker already
-  derives by reading the adapter's match arms. The manifests should carry what the source cannot
-  say — the `[upstream]` pin, and the `generic`/`carried`/`ignored` judgments — and let `handled`
-  be inferred. That is roughly 60% of `formats/`'s hand-maintained surface.
+- **Done (2026-10):** `handled` is inferred from the adapter's match arms; the manifests dropped
+  the 242 entries that restated an arm and carry what the source cannot say — the `[upstream]` pin,
+  and the `generic`/`carried`/`ignored` judgments.
 
 ## 9. Design history
 

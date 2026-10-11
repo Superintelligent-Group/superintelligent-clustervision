@@ -1,13 +1,14 @@
 # formats/roo.toml — the vocabulary cv's `roo` adapter is checked against (docs/INTERFACE-V2.md §7).
-# status: handled = per-item arm in the adapter; generic = interpreted by a blanket rule; carried = verbatim
-# under ParseOptions::complete only; ignored = known and deliberately skipped. Hand-maintained; `cv formats check`
-# (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
+# Lists only what the source cannot say: an item the adapter has a match arm for is `handled` by inference and is
+# not listed. generic = interpreted by a blanket rule; carried = verbatim under ParseOptions::complete only;
+# ignored = known and deliberately skipped; handled = interpreted, but not by a match arm (a SQL identifier, a path).
+# tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "roo"
 # Roo has no parser or writer of its own: `harness/roo.rs` points the Cline code at Roo's roots, so
 # the vocabulary is checked against the file that actually interprets it.
 source_files = ["harness/cline.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
-ignore_literals = ["base64", "url"]
+ignore_literals = []
 store = [
   "<globalStorage>/rooveterinaryinc.roo-cline|roo-code/tasks/<taskId>/",
   "~/.roo/tasks/",
@@ -19,15 +20,11 @@ commit = "unknown"
 date = "2026-05-29"
 
 [types]
-"role.user" = { status = "handled", note = "cline parser" }
-"role.assistant" = { status = "handled", note = "" }
-"role.system" = { status = "handled", note = "" }
 "block.text" = { status = "handled", note = "" }
 "block.thinking" = { status = "handled", note = "" }
 "block.redacted_thinking" = { status = "handled", note = "" }
 "block.tool_use" = { status = "handled", note = "" }
 "block.tool_result" = { status = "handled", note = "" }
 "block.image" = { status = "handled", note = "" }
-"ui.say" = { status = "handled", note = "ui_messages timestamp enrichment" }
 "ui.ask" = { status = "generic", note = "" }
 "ui.completion_result" = { status = "generic", note = "" }

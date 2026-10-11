@@ -7,17 +7,18 @@
 //!
 //! Three instruments, each cheap and mechanical:
 //!
-//! 1. **Manifests** — `formats/<harness>.toml`, embedded at compile time: the upstream commit the
-//!    adapter was verified against, the store paths, and the persisted vocabulary (record types,
-//!    payload types, part types, columns) with each item's status: `handled` (the adapter
-//!    interprets it with an arm of its own), `generic` (interpreted by a blanket rule, so no
-//!    per-item literal exists), `carried` (kept verbatim under `ParseOptions::complete` only),
-//!    `ignored` (known and deliberately skipped). The manifest is the human-readable spec the
-//!    adapter is checked against; `docs/FORMATS.md` stays the prose.
-//! 2. **[`check`]** — source vs manifest, both directions: every `handled` type must appear as a
-//!    string literal in the adapter's source (or the shared `harness/wire/` codec it names), and
-//!    every type-like literal in the adapter's own match arms must be in the manifest (or its
-//!    explicit `ignore_literals`). Runs as an integration test
+//! 1. **Manifests** — `formats/<harness>.toml`, embedded at compile time (one per
+//!    [`Harness::ALL`] entry, by the macro that declares the harness list): the upstream commit the
+//!    adapter was verified against, the store paths, and what the source cannot say about the
+//!    persisted vocabulary — `generic` (interpreted by a blanket rule, so no per-item literal
+//!    exists), `carried` (kept verbatim under `ParseOptions::complete` only), `ignored` (known and
+//!    deliberately skipped), and `handled` only for an item no match arm names (a SQL identifier,
+//!    a store path, a tool name). An item the adapter matches on is `handled` by inference
+//!    ([`handled`]): the arm is the spec. `docs/FORMATS.md` stays the prose.
+//! 2. **[`check`]** — source vs manifest, both directions: every explicit `handled` type must
+//!    appear as a string literal in the adapter's source (or the shared `harness/wire/` codec it
+//!    names); and no `handled` entry may restate one of the adapter's own match arms, nor
+//!    `ignore_literals` name a literal no arm uses. Runs as an integration test
 //!    (`tests/formats_manifest.rs`) on a source tree.
 //!
 //! 3. **[`census`]** — real data vs manifest: parse the N most recent sessions per harness in
@@ -56,39 +57,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-
-/// The manifests, embedded so an installed `cv` carries the vocabulary it was built against.
-/// Order matches [`Harness::ALL`]; a missing entry is a build-time error in [`manifest`]'s test.
-macro_rules! manifests {
-    ($($name:literal),+ $(,)?) => {
-        pub const MANIFEST_SOURCES: &[(&str, &str)] = &[
-            $( ($name, include_str!(concat!("../formats/", $name, ".toml"))) ),+
-        ];
-    };
-}
-manifests!(
-    "claude",
-    "codex",
-    "grok",
-    "opencode",
-    "gemini",
-    "hermes",
-    "openclaw",
-    "cursor",
-    "kimi",
-    "kimi-code",
-    "qwen",
-    "lmstudio",
-    "cline",
-    "roo",
-    "continue",
-    "goose",
-    "zed",
-    "devin",
-    "chatgpt-export",
-    "claude-export",
-    "opensession",
-);
 
 /// How an adapter treats one vocabulary item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,12 +159,7 @@ impl Manifest {
 /// The embedded manifest for `h`.
 pub fn manifest(h: Harness) -> Result<Manifest> {
     let name = h.as_str();
-    let src = MANIFEST_SOURCES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, s)| *s)
-        .with_context(|| format!("no embedded manifest for harness {name}"))?;
-    let m: Manifest = toml::from_str(src).with_context(|| format!("parsing formats/{name}.toml"))?;
+    let m: Manifest = toml::from_str(h.manifest_toml()).with_context(|| format!("parsing formats/{name}.toml"))?;
     anyhow::ensure!(
         m.harness == name,
         "formats/{name}.toml declares harness {:?}",
@@ -226,8 +189,11 @@ pub struct Finding {
 pub enum FindingKind {
     /// The manifest says `handled`, but the literal never appears in the adapter source.
     HandledMissingInSource,
-    /// The adapter matches on a type-like literal the manifest does not list (or ignore).
-    LiteralMissingInManifest,
+    /// The manifest lists as `handled` a type the adapter already names in a match arm — the arm
+    /// says it; the entry only restates it (and goes stale the day the arm is renamed).
+    HandledRestatesArm,
+    /// An `ignore_literals` entry no match arm uses any more.
+    IgnoreLiteralUnused,
     /// The manifest names a source file that does not exist.
     SourceFileMissing,
 }
@@ -374,23 +340,64 @@ pub fn check(m: &Manifest, sources: &[(String, String)]) -> Vec<Finding> {
             });
         }
     }
-    // 2. every match-arm literal ⇒ known to the manifest, by the same rule the census uses. A
-    //    shared wire codec (`harness/wire/`) carries every dialect's spellings at once, so it
-    //    answers direction 1 for each manifest that reads through it but is not one harness's
-    //    vocabulary: its literals are not required in every such manifest.
-    for (file, text) in sources.iter().filter(|(f, _)| !is_shared_codec(f)) {
-        for lit in type_literals(text) {
-            if m.lookup(&lit).is_none() && !m.ignore_literals.contains(&lit) {
-                findings.push(Finding {
-                    harness: m.harness.clone(),
-                    kind: FindingKind::LiteralMissingInManifest,
-                    item: lit.clone(),
-                    detail: format!("{file} matches on {lit:?}; add it to [types] or ignore_literals"),
-                });
-            }
+    // 2. the adapter's own match arms (not a shared `harness/wire/` codec, which carries every
+    //    dialect's spellings at once) ARE its `handled` vocabulary, so the manifest must not say
+    //    it again, and every `ignore_literals` entry must still be an arm literal. (A `generic`
+    //    entry is not held to "has no arm": its namespace-stripped literal — `role.user` → `user`
+    //    — may name an unrelated arm, and the check cannot tell which.)
+    let arms = arm_literals(sources);
+    for (ty, entry) in &m.types {
+        if entry.status != Status::Handled {
+            continue;
+        }
+        if let Some(arm) = key_candidates(ty).into_iter().find(|c| arms.contains(c)) {
+            findings.push(Finding {
+                harness: m.harness.clone(),
+                kind: FindingKind::HandledRestatesArm,
+                item: ty.clone(),
+                detail: format!("the adapter has a match arm for {arm:?}: it is handled; drop the entry"),
+            });
+        }
+    }
+    for lit in &m.ignore_literals {
+        if !arms.contains(lit) {
+            findings.push(Finding {
+                harness: m.harness.clone(),
+                kind: FindingKind::IgnoreLiteralUnused,
+                item: lit.clone(),
+                detail: "no match arm uses this literal any more; drop it from ignore_literals".into(),
+            });
         }
     }
     findings
+}
+
+/// The adapter's own match-arm literals across `sources` (a shared `harness/wire/` codec
+/// excluded): the `handled` vocabulary, inferred.
+fn arm_literals(sources: &[(String, String)]) -> BTreeSet<String> {
+    sources
+        .iter()
+        .filter(|(f, _)| !is_shared_codec(f))
+        .flat_map(|(_, t)| type_literals(t))
+        .collect()
+}
+
+/// The `handled` vocabulary of `m`: every match-arm literal of its adapter (minus
+/// `ignore_literals`, which are arm literals that are not vocabulary — file extensions, role words)
+/// plus the explicit `handled` entries the arms cannot show (SQL identifiers, store paths, tool
+/// names). The manifest itself spells only what the source cannot say.
+pub fn handled(m: &Manifest, sources: &[(String, String)]) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = arm_literals(sources)
+        .into_iter()
+        .filter(|l| !m.ignore_literals.contains(l))
+        .collect();
+    out.extend(
+        m.types
+            .iter()
+            .filter(|(_, e)| e.status == Status::Handled)
+            .map(|(k, _)| k.clone()),
+    );
+    out
 }
 
 /// [`check`] for every harness whose manifest parses, reading sources under `src_root`.
@@ -624,7 +631,6 @@ mod tests {
                 h.as_str()
             );
         }
-        assert_eq!(MANIFEST_SOURCES.len(), Harness::ALL.len(), "one manifest per harness");
     }
 
     #[test]
@@ -689,7 +695,7 @@ mod tests {
                 note: String::new(),
             },
         );
-        let src = r#"match ty { "context.append_message" => 1, _ => 0 }"#;
+        let src = r#"let t = "context.append_message";"#;
         let f = check(&m, &[("x.rs".into(), src.into())]);
         let items: Vec<&str> = f.iter().map(|f| f.item.as_str()).collect();
         assert_eq!(
@@ -782,15 +788,27 @@ mod tests {
                 note: String::new(),
             },
         );
-        let src = r#"match ty { "user" => 1, "jsonl" => 2, "novel" => 3, _ => 0 }"#;
-        let f = check(&m, &[("x.rs".into(), src.into())]);
+        m.types.insert(
+            "blanket".into(),
+            TypeEntry {
+                status: Status::Generic,
+                note: String::new(),
+            },
+        );
+        m.ignore_literals.push("stale".into());
+        let src = r#"match ty { "user" => 1, "jsonl" => 2, "novel" => 3, "blanket" => 4, _ => 0 }"#;
+        let sources = [("x.rs".to_string(), src.to_string())];
+        let f = check(&m, &sources);
         let items: Vec<(FindingKind, &str)> = f.iter().map(|f| (f.kind, f.item.as_str())).collect();
         assert!(items.contains(&(FindingKind::HandledMissingInSource, "ghost")));
-        assert!(items.contains(&(FindingKind::LiteralMissingInManifest, "novel")));
-        assert!(
-            !items.iter().any(|(_, i)| *i == "jsonl"),
-            "ignored literal is not a finding"
+        assert!(items.contains(&(FindingKind::HandledRestatesArm, "user")));
+        assert!(items.contains(&(FindingKind::IgnoreLiteralUnused, "stale")));
+        assert_eq!(
+            items.len(),
+            3,
+            "an unlisted arm literal is handled by inference, a generic one is a judgment: {items:?}"
         );
-        assert!(!items.iter().any(|(_, i)| *i == "user"));
+        let h = handled(&m, &sources);
+        assert!(h.contains("novel") && h.contains("ghost") && !h.contains("jsonl"));
     }
 }

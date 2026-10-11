@@ -56,6 +56,14 @@ macro_rules! harnesses {
                     $( Harness::$name => $str, )+
                 }
             }
+
+            /// `formats/<name>.toml`, embedded: one manifest per harness by construction, so a
+            /// harness without one does not compile.
+            pub(crate) fn manifest_toml(self) -> &'static str {
+                match self {
+                    $( Harness::$name => include_str!(concat!("../formats/", $str, ".toml")), )+
+                }
+            }
         }
     };
 }
