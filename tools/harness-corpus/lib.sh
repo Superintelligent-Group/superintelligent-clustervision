@@ -55,7 +55,8 @@ corpus_scrub() {
 
 corpus_size_check() {
   local kb
-  kb="$(du -sk "$1" | cut -f1)"
+  # Bytes as git stores them, not `du` blocks: a store of 150 small files is mostly block padding.
+  kb="$(python3 -I -c 'import os,sys; print(sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk(sys.argv[1]) for f in fs) // 1024)' "$1")"
   echo "corpus size: ${kb} KB ($1)"
   [ "$kb" -le 1024 ] || { echo "over the 1 MB hard cap — trim the scenario prompts" >&2; exit 1; }
   [ "$kb" -le 300 ] || echo "warning: over the 300 KB target" >&2

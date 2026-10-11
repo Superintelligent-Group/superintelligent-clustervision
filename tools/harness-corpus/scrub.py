@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import sys
+from urllib.parse import quote
 
 PLACEHOLDER_HOME = "/home/corpus"
 EMAIL = "corpus@example.invalid"
@@ -27,14 +28,20 @@ def replacements(work, home):
     for base in {work, os.path.realpath(work), work.replace("/private/", "/", 1)}:
         h = home.replace(work, base, 1)
         reps += [(h, PLACEHOLDER_HOME), (base, PLACEHOLDER_HOME + "/.work")]
-    # The harness's own install dir (a system prompt can list paths inside it, e.g. bundled skills).
+    # The harness's own install dir (a system prompt can list paths inside it, e.g. bundled skills),
+    # then the rest of the real home, when a model writes it out (it saw the user name in `ls -l`, or
+    # read it off a scratch path); the longer install-dir rule is applied first.
     real_home = os.environ.get("CORPUS_REAL_HOME", "")
     if real_home:
         reps.append((os.path.join(real_home, "tools", "harness-versions"), "/opt/harness-versions"))
+    if len(real_home) > 3:
+        reps.append((real_home, PLACEHOLDER_HOME))
     # file:// URLs and JSON-escaped slashes carry the same paths
     reps += [(a.replace("/", "\\/"), b.replace("/", "\\/")) for a, b in list(reps)]
     # Claude Code (and others) name a project dir by its path with every non-alphanumeric made `-`
     reps += [(dashed(a), dashed(b)) for a, b in list(reps) if "\\" not in a]
+    # ... and Grok by its percent-encoded cwd (`%2Fhome%2Fcorpus%2Fproject`)
+    reps += [(quote(a, safe=""), quote(b, safe="")) for a, b in list(reps) if a.startswith("/")]
     return sorted(set(reps), key=lambda r: -len(r[0]))
 
 
@@ -132,9 +139,9 @@ def main():
             ("a token shape", any(r.search(b) for r in TOKEN_RES)),
             ("/Users/", b"/Users/" in b),
             ("the real user name", len(user) > 2 and re.search(rb"\b" + re.escape(user) + rb"\b", b) is not None),
-            ("the throwaway dir", a.work.encode() in b or dashed(a.work).encode() in b),
+            ("the throwaway dir", any(x.encode() in b for x in (a.work, dashed(a.work), quote(a.work, safe="")))),
         ) if hit]
-        if a.work in path or dashed(a.work) in path:
+        if any(x in path for x in (a.work, dashed(a.work), quote(a.work, safe=""))):
             why.append("the throwaway dir in its name")
         if why:
             bad.append(f"{os.path.relpath(path, a.dir)}: {', '.join(why)}")
