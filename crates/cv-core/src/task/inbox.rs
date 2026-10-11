@@ -1,6 +1,6 @@
 //! The inbox page: one row shape ([`InboxItem`]) for every surface that shows what needs someone —
-//! `cv task inbox` (text, `--md`, `--json`), `cv task serve`'s page, MCP `task_inbox` and cvd's
-//! `/api/tasks/inbox/{who}`. Built from the [`super::project::inbox`] projection plus what a reader
+//! `cv task inbox` (text, `--md`, `--json`), `cv serve`'s `/inbox` page and its
+//! `/api/tasks/inbox/{who}`, and MCP `task_inbox`. Built from the [`super::project::inbox`] projection plus what a reader
 //! looks at: the decision's options and deadline, the notes, unread, blocked, age.
 //!
 //! Not in the purity fence: deadline phrases print the local day.

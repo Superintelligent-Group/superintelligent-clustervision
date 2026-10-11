@@ -997,8 +997,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let caller = task::default_endpoint();
             let page = task::inbox_page(&outcome, &who, caller.as_deref(), window, unread, now);
             if json {
-                // The page the text and Markdown render from — the shape `cv task serve`'s
-                // `/api/inbox` serves, and whose `items` are MCP's and cvd's inbox rows.
+                // The page the text and Markdown render from — the shape `cv serve`'s `/api/inbox`
+                // serves, and whose `items` are the MCP and `/api/tasks/inbox` rows.
                 println!("{}", serde_json::to_string_pretty(&page)?);
             } else if md {
                 print!("{}", task_ops::render_inbox_md(&page));

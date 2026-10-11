@@ -237,7 +237,7 @@ impl Cursor {
 
 /// A stateful poller. Call [`poll`](Watcher::poll) repeatedly, or [`run`](Watcher::run) to loop;
 /// [`to_cursor`](Watcher::to_cursor) / [`from_cursor`](Watcher::from_cursor) carry the state
-/// across processes. Every poller in cv (`cv scry`, `cvd watch`, MCP `await_omen` and
+/// across processes. Every poller in cv (`cv scry`, `cv watch`, MCP `await_omen` and
 /// `observe_stream`) is this one loop: discover → cheap trigger → resolve the mark → stream the
 /// tail — so every one of them compares against a parsed count, never a row count.
 pub struct Watcher {

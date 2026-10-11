@@ -17,7 +17,7 @@ use crate::ir::{Harness, SessionRef};
 use serde_json::{json, Value};
 
 /// THE session row (§3): the same nine keys `cv ls --json`, `cv search --json`, `cv serve`'s
-/// `/api/sessions` and the desktop app's `local_sessions` emit. `size_bytes` is passed in because
+/// `/api/sessions` and the desktop app's `api` command emit. `size_bytes` is passed in because
 /// only the caller knows whether it already has the `stat` in hand.
 pub fn session_row(r: &SessionRef, size_bytes: Option<u64>) -> Value {
     json!({

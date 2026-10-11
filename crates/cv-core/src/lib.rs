@@ -137,7 +137,7 @@ pub fn sessions() -> Vec<SessionRef> {
 /// The catalog exactly as it stands: no freshness probe, no discovery, never a fleet scan. Empty
 /// on a cold catalog. For callers that must answer in milliseconds whatever the store's state
 /// — the `cv hook` commands Claude Code runs on its own events — and can say "as of the last
-/// `cv ls` / `cvd sync`" honestly. Everything else wants [`sessions`].
+/// `cv ls` / `cv archive sync`" honestly. Everything else wants [`sessions`].
 pub fn cataloged_sessions() -> Vec<SessionRef> {
     catalog::all_sessions().unwrap_or_default()
 }

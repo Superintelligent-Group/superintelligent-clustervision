@@ -306,7 +306,7 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
     );
 }
 
-/// Why the follower (`watch::Watcher`, cvd's hot loop) takes `discover_all()` instead of the
+/// Why the follower (`watch::Watcher`, `cv watch`'s hot loop) takes `discover_all()` instead of the
 /// catalog path: an in-place append to a session outside the probe's top-50 most recently updated
 /// is invisible to `sessions()` until the staleness backstop (15 min by default). That session is
 /// exactly the one a follower must not miss: a lane that sat quiet while 50 others ran, then
