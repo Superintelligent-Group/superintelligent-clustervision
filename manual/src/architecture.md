@@ -126,24 +126,30 @@ Every harness is one `Adapter` ([`cv-core/src/harness/mod.rs`](https://github.co
 pub trait Adapter: Send + Sync {
     fn harness(&self) -> Harness;
 
-    /// The on-disk root this adapter reads from (resolved against $HOME), if it exists.
-    fn storage_root(&self) -> Option<PathBuf>;
+    /// Every on-disk root this adapter reads (resolved against $HOME, existing ones only),
+    /// the primary one first.
+    fn roots(&self) -> Vec<PathBuf>;
 
     /// Cheaply enumerate sessions without fully parsing them.
     fn discover(&self) -> Result<Vec<SessionRef>>;
 
-    /// Fully parse one discovered session into the IR.
-    fn parse(&self, r: &SessionRef) -> Result<Session>;
-
-    /// Emit an IR session into this harness's native format. Default: unsupported.
-    fn emit(&self, _session: &Session, _out_dir: &Path) -> Result<EmitResult> { /* bail */ }
-
-    /// Whether `emit` is implemented (so the CLI can list valid `--to` targets).
-    fn can_emit(&self) -> bool { false }
+    /// Stream one session's messages into `sink`, one at a time; returns the metadata.
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session>;
 }
 ```
 
-`discover` + `parse` are the read path; `emit` + `can_emit` are the optional write path that makes a harness a **conversion target**. An adapter that only implements the first two is read-only — you can search and port *out of* it, but not *into* it. Emitting returns an `EmitResult { path, new_id, resume_hint }`, where `resume_hint` is a human nudge like `claude --resume <id>`.
+`discover` + `stream` are the read path. A whole-session parse is not a fourth method:
+`adapter.parse(&r)` is `stream::collect` over `stream`, so the streaming and the materializing
+readers cannot diverge. The shared pieces an adapter imports instead of retyping live beside the
+trait: `harness/wire/{anthropic,openai}` (the two content shapes most stores persist, read into
+blocks and written back) and `harness/store` (`write_jsonl`, `xdg_data_dir`, and
+`store::sqlite::open_ro`, which opens every database read-only).
+
+Being a **conversion target** is not part of the trait either. An emitter is a free function,
+`harness/<h>/emit.rs`'s `emit(&Session, &Path, &EmitOptions) -> Result<EmitResult>` — the codec
+run backwards plus a store writer — registered in the one table `emit::emitter_for`, from which
+the CLI's `--to` list and the round-trip test are derived. `EmitResult { path, new_id,
+resume_hint }` carries a human nudge like `claude --resume <id>`.
 
 The `Send + Sync` bound is load-bearing: it's what lets discovery fan out across adapters in parallel. Every adapter holds only path data (connections are opened per call), so the bound is always satisfied.
 
@@ -152,26 +158,25 @@ Adapters are registered in one place — `harness::all()`:
 ```rust
 pub fn all() -> Vec<Box<dyn Adapter>> {
     let mut adapters: Vec<Box<dyn Adapter>> = vec![
-        Box::new(claude::Claude::new()),
-        Box::new(codex::Codex::new()),
-        Box::new(grok::Grok::new()),
-        Box::new(opencode::OpenCode::new()),
-        // … gemini, openclaw, kimi, qwen,
-        //   lmstudio, cline, roo, continuedev …
+        Box::new(claude::Claude::detect()),
+        Box::new(codex::Codex::detect()),
+        Box::new(grok::Grok::detect()),
+        // … opencode, gemini, openclaw, kimi, qwen,
+        //   lmstudio, cline, roo, continuedev, the exports …
     ];
     #[cfg(feature = "sqlite")]
-    { adapters.push(Box::new(hermes::Hermes::new()));      // SQLite-backed harnesses
-      adapters.push(Box::new(cursor::Cursor::new()));      // are gated behind a feature
-      adapters.push(Box::new(goose::Goose::new())); }
+    { adapters.push(Box::new(hermes::Hermes::detect()));   // SQLite-backed harnesses
+      adapters.push(Box::new(cursor::Cursor::detect()));   // are gated behind a feature
+      /* goose, zed, devin */ }
     adapters
 }
 ```
 
-The SQLite-backed adapters (Cursor, Hermes, Goose) are behind the `sqlite` feature so the WASM build can drop them. `for_harness(h)` returns just the one adapter you asked for. Adding a harness is, essentially, "write one `Adapter` and add a line to `all()`" — the [adding a harness](adding-a-harness.md) chapter walks the whole thing.
+`detect()` resolves each store from `$HOME` and the environment. The SQLite-backed adapters (Cursor, Hermes, Goose, Zed, Devin) are behind the `sqlite` feature so the WASM build can drop them. `for_harness(h)` returns just the one adapter you asked for. Adding a harness is "write one `Adapter`, add a line to `all()` and to the `harnesses!` list" — the [adding a harness](adding-a-harness.md) chapter walks the whole thing.
 
 ## Discovery & the incremental cache
 
-`discover_all()` is the front door. It collects every registered adapter whose `storage_root()` actually exists on this machine, then runs their `discover()` methods **in parallel via rayon**, so the cost is the slowest single adapter rather than the sum:
+`discover_all()` is the front door. It collects every registered adapter with a root on this machine, then runs their `discover()` methods **in parallel via rayon**, so the cost is the slowest single adapter rather than the sum:
 
 ```rust
 #[cfg(feature = "parallel")]

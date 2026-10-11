@@ -1,16 +1,67 @@
 # Adding a harness
 
-Got a coding agent we don't support yet? Adding one is a single new module implementing the
-[`Adapter`](architecture.md) trait. This chapter is the walkthrough; the shape:
+Got a coding agent we don't support yet? An adapter is three things — where the harness keeps its
+sessions, how to list them cheaply, and how to read one as a stream of messages — and usually
+150–400 lines. [Grok's](https://github.com/emberian/clustervision/blob/main/crates/cv-core/src/harness/grok.rs)
+is the model to copy. The steps:
 
-1. **`discover()`** — cheaply enumerate sessions on disk into `SessionRef`s (id, path, cwd, title,
-   timestamps, a message count). No full parse.
-2. **`parse()`** — turn one `SessionRef` into the unified [IR](architecture.md#the-unified-ir)
-   (`Session → Message → Block`). This is the only *required* heavy lifting.
-3. **`emit()`** *(optional)* — write the IR back into the harness's native on-disk format, making it
-   a [port target](conversion.md). Pair it with a round-trip test (emit → re-parse → compare).
-4. Register it in `harness::all()` and add a `Harness` enum variant.
-5. Add a manifest at `formats/<harness>.toml` (below).
+1. **Name it.** One line in the `harnesses!` list in `crates/cv-core/src/ir.rs`
+   (`Yours => "yours",`) gives the `Harness` variant, its canonical spelling on every door, and
+   `Harness::ALL`. The same macro embeds `formats/yours.toml`, so step 5 is not optional: the
+   crate does not compile without it.
+2. **Write `harness/yours.rs`** with a struct holding the resolved root(s) and an `Adapter` impl:
+
+   ```rust
+   pub struct Yours { root: Option<PathBuf> }
+
+   impl Yours {
+       /// Resolve the store from `$HOME` / the env (existing paths only).
+       pub fn detect() -> Self {
+           Yours { root: dirs::home_dir().map(|h| h.join(".yours/sessions")).filter(|p| p.exists()) }
+       }
+   }
+
+   impl Adapter for Yours {
+       fn harness(&self) -> Harness { Harness::Yours }
+       fn roots(&self) -> Vec<PathBuf> { self.root.clone().into_iter().collect() }
+       fn discover(&self) -> Result<Vec<SessionRef>> { /* walk the root, `scan` each file */ }
+       fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+           /* `for_each_json_line` over the file, `match record_type`, sink each Message */
+       }
+   }
+   ```
+
+   - **`roots`**: every directory you read from, the primary one first (an emitter writes there,
+     the catalog watches each). For a SQLite store, the directory holding the database.
+   - **`discover`**: one `SessionRef::new(id, Harness::Yours, path)` per session, with what is
+     cheap to know filled in by struct update (`SessionRef { cwd, title, message_count,
+     ..SessionRef::new(id, h, path) }`). `message_count` is user + assistant turns only.
+   - **`stream`**: read records one at a time and hand each `Message` to the sink, so a 1 GB
+     transcript costs one record of memory. Start the session with `Session::new(id, h)`; use
+     `harness::for_each_json_line` (a corrupt line never fails a session) and
+     `note_skipped_lines` (and the skip is never silent). A store that can only be read whole
+     parses it and calls `stream::replay`.
+   - There is no `parse`: `adapter.parse(&r)` is `stream::collect` over your `stream`, so the
+     whole-session and streaming readers cannot diverge.
+
+3. **Map content through the wire codec, don't re-type it.** If your store writes the Anthropic
+   content shape (`text | thinking | tool_use | tool_result | image | document`), call
+   `wire::anthropic::blocks_from(content, &anthropic::ANTHROPIC)`; if it writes OpenAI parts and
+   `tool_calls[].function.arguments` as a JSON string, `wire::openai::blocks_from` and
+   `openai::tool_calls`. A store that renamed a key (OpenClaw's `toolCall`, Goose's
+   `redactedThinking`) gets a `Quirks` constant beside the others in `harness/wire/`, not a copy of
+   the mapping. `wire::coerce_text` / `text_parts` flatten a string-or-parts field. A SQLite store
+   opens through `store::sqlite::open_ro` (read-only, never a lock on a live database) and probes
+   its schema with `columns` / `table_exists`; an XDG store finds itself with `store::xdg_data_dir`.
+4. **Register it** in `harness::all()` (`harness/mod.rs`).
+5. **Add `formats/yours.toml`** (below).
+6. *(Optional)* **Make it a port target**: `harness/yours/emit.rs` with
+   `pub fn emit(&Session, &Path, &EmitOptions) -> Result<EmitResult>` — the codec run backwards
+   (`anthropic::assistant_blocks`, …) plus a store writer — re-exported as `yours::emit` and
+   added to `emitter_for` in `emit.rs`. That one arm is the whole registration: the `--to` list
+   and `round_trip_all_supported_targets` are derived from it, so the round trip runs the moment
+   the arm exists. Tell `target_holds` in `emit.rs` what your store can carry, so `port --strict`
+   knows an expected loss from an unexpected one.
 
 ## Three rules the IR asks of you
 
@@ -57,12 +108,14 @@ a field — say so rather than burying it.
 
 ## The format manifest
 
-Every adapter is paired with `formats/<harness>.toml`, which records the upstream it was verified
-against and every persisted type it knows about:
+Every adapter is paired with `formats/<harness>.toml`. It records what the source cannot say: the
+upstream it was verified against, where the store lives, and the judgments about vocabulary the
+adapter does *not* match on by name:
 
 ```toml
 harness = "yours"
-source_files = ["harness/yours.rs"]
+source_files = ["harness/yours.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
+ignore_literals = ["jsonl"]
 store = ["~/.yours/sessions/<id>.jsonl"]
 
 [upstream]
@@ -71,22 +124,25 @@ commit = "a1b2c3d"
 date = "2026-09-19"
 
 [types]
-"record.message" = { status = "handled", note = "" }
 "record.checkpoint" = { status = "carried", note = "replayed on same-harness port" }
 "record.telemetry" = { status = "ignored", note = "UI-only" }
+"system.away_summary" = { status = "generic", note = "the `_` arm makes every other subtype a notice" }
+"table.events" = { status = "handled", note = "a SQL identifier, not a match arm" }
 ```
 
-`status` is one of `handled` (a per-item match arm in the adapter), `generic` (interpreted by a
-blanket rule, so no literal appears), `carried` (kept verbatim as a `carrier` message under
-`ParseOptions::complete`), or `ignored` (known and deliberately skipped).
+A type your adapter has a match arm for (`"user" =>`, `Some("summary")`) is `handled` by
+inference — the arm is the spec, so the manifest does not repeat it. The statuses you write are
+`generic` (interpreted by a blanket rule, so no per-item literal exists), `carried` (kept verbatim
+as a carrier message under `ParseOptions::complete`), `ignored` (known and deliberately skipped),
+and `handled` only for something no match arm names (a SQL table or column, a store path, a tool
+name). `ignore_literals` lists match-arm literals that are not vocabulary (file extensions, a
+role word the manifest lists elsewhere). Name the wire codec you read through in `source_files`.
 
-A test asserts the manifest and the adapter agree in **both** directions: every `handled` type
-appears in the adapter's match arms, and every type-like literal the adapter matches on appears in
-the manifest. So a new match arm fails the build until the manifest names it, and a manifest entry
-for a type you removed fails too (`cargo test -p clustervision-core --test formats_manifest`
-runs it alone), and [`cv formats`](cli.md#cv-formats) parses real sessions in complete mode and
-tells you what the harness is writing that your manifest has never heard of — which is how you find
-out upstream shipped a new record type.
+`cargo test -p clustervision-core --test formats_manifest` holds the manifest to the source: a
+listed `handled` type must appear in the adapter (or its codec), no `handled` entry may restate a
+match arm, and every `ignore_literals` entry must still be an arm literal. [`cv formats`](cli.md#cv-formats)
+then parses real sessions in complete mode and tells you what the harness is writing that your
+manifest has never heard of — which is how you find out upstream shipped a new record type.
 
 ## Send us your transcripts
 

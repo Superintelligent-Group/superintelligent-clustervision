@@ -53,6 +53,9 @@
 - `cv task propose/reroute/pass/refute/verify/debt/stats`, `--token`/`CV_TOKEN` and `done --check-*` are gone; each errors with a pointer. `done` is labeled `self-reported`.
 - MCP: `task_propose`, `task_pass`, `task_refute`, `task_verify`, `task_debt`, `task_stats` and the `token`/`check_*` params are gone; calls error with a pointer.
 - `cvd watch --verify-interval`, `GET /api/tasks/debt` and `/api/tasks/stats` are gone with the task verifier; the flag exits 2, the routes answer 410.
+- Adapters read content through one Anthropic and one OpenAI codec; a tool call's scalar or unparseable `arguments` string is now kept verbatim in every harness.
+- Epoch timestamps read one way: zero means unset (not 1970), and Goose's millisecond timestamps keep their milliseconds.
+- `formats/<harness>.toml` lists only what source can't say: a type with a match arm is `handled` by inference; `cv formats` stops counting `handled`.
 
 ## 0.14.0 — 2026-10-10
 

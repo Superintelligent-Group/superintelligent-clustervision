@@ -958,11 +958,11 @@ cv formats --recent 50 --json
 
 It parses recent sessions per harness in *format-complete* mode, where every record an adapter doesn't interpret is carried through as a [`carrier`](architecture.md#the-unified-ir) message tagged with its record type. It then reports, per harness, the record/part/column vocabulary actually seen with counts — marking anything the manifest (`formats/<harness>.toml`) does not name as `NEW`. That is drift arriving on disk: a harness started writing something cv has never seen.
 
-The other direction — does each adapter's source still do what its manifest promises — needs a checkout, so it is a test, not a command: `cargo test -p clustervision-core --test formats_manifest` compares both ways (a type the manifest calls `handled` that never appears in the adapter's match arms; a type-like literal the adapter matches on that the manifest doesn't list). A new match arm fails the build until the manifest names it — the check is a gate, not a report you can forget to read. The manifests ship embedded in the binary, so an installed `cv` carries the vocabulary it was built against.
+The other direction — does each adapter's source still match its manifest — needs a checkout, so it is a test, not a command: `cargo test -p clustervision-core --test formats_manifest`. A type the adapter has a match arm for is `handled` by inference (the arm is the spec), so a manifest lists only what the source cannot say; the test fails on a listed `handled` type that never appears in the adapter, on an entry that merely restates a match arm, and on a stale `ignore_literals` entry. The manifests ship embedded in the binary, so an installed `cv` carries the vocabulary it was built against.
 
 | status | meaning |
 | --- | --- |
-| `handled` | the adapter has a per-item arm for it |
+| `handled` | interpreted per item — inferred from a match arm, or listed when no arm names it (a SQL identifier, a path) |
 | `generic` | interpreted by a blanket rule, so no per-item literal exists |
 | `carried` | kept verbatim as a carrier under `ParseOptions::complete`, dropped otherwise |
 | `ignored` | known and deliberately skipped (transient, UI-only, or a duplicate) |
