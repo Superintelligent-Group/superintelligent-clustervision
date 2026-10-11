@@ -11,7 +11,7 @@
 //!   via `parent_message_uuid`; `sender` ∈ human/assistant; `content[]` blocks are
 //!   text/thinking/tool_use/tool_result.
 //!
-//! Distinct from `claude` (Claude Code JSONL), `claude-app`/`chatgpt-app` (desktop apps). Exports have
+//! Distinct from `claude` (Claude Code JSONL). Exports have
 //! no fixed home, so discovery scans `$CV_EXPORTS` (`:`-separated dirs/files) or, by default,
 //! `~/Downloads` — for `conversations*.json` files. Set `CV_EXPORTS` to a tighter dir if scanning
 //! Downloads is slow.

@@ -482,7 +482,10 @@ is *there*, not in the `.sql`), `src/config/sessions/*`,
   links composerIds → workspace; sibling `workspace.json` `folder:"file://…"` is the cwd. Legacy: in-workspace
   `workbench.panel.aichat.view.aichat.chatdata`. Closed-source & churny (`_v` 1..=10+) — skip the unknown.
 
-## Desktop apps (detected, not parseable)
+## Desktop apps (not harnesses: nothing on disk cv can read)
+
+Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv removed two adapters whose
+`discover()` could only ever return empty). What a look inside found, kept so nobody re-reverse-engineers them:
 
 - **Claude app** — `~/Library/Application Support/Claude/` (Electron). Transcripts are **server-side** (claude.ai);
   local LevelDB/IndexedDB holds only auth/settings/UI state. `claude-code-sessions/*.json` are metadata stubs
@@ -719,7 +722,7 @@ WAL-mode and the CLI is typically running — we open READ-ONLY and never checkp
 
 The archives you download via "Export data". One file (`conversations.json`, often split
 `conversations-000.json … -NNN.json`) holds **many** conversations, so one file → many `SessionRef`s.
-Distinct from the `claude`/`claude-app`/`chatgpt-app` harnesses. Account exports have no fixed home, so
+Distinct from the `claude` harness. Account exports have no fixed home, so
 discovery is **opt-in via the config index**: register source dirs/files with `cv config --add-export
 <path>` (stored in `$XDG_CONFIG_HOME/clustervision/config.toml` as `exports = [...]`; `$CV_EXPORTS`, a
 `:`-separated list, is honored as an ad-hoc union on top). With nothing registered, no scan happens —

@@ -47,10 +47,9 @@ These are the harnesses `emit()` can currently write — the authoritative list 
 | Continue | `continue` | `~/.continue/sessions` JSON |
 | Qwen Code | `qwen` | reuses Gemini's `ConversationRecord` emitter |
 
-> The other eleven parseable harnesses — **Cursor**, **Goose**, **Zed**, **Devin CLI**, **Kimi Code**, **OpenSession**, **Kimi CLI** (its
-> `~/.kimi` store is frozen; kimi-cli migrates it to `~/.kimi-code` on open), the **Claude
-> desktop app**, the **ChatGPT desktop app**, and the **ChatGPT/Claude.ai account data
-> exports** — are parse-only. You can read, search, and port *away* from them, but
+> The other nine parseable harnesses — **Cursor**, **Goose**, **Zed**, **Devin CLI**, **Kimi Code**, **OpenSession**, **Kimi CLI** (its
+> `~/.kimi` store is frozen; kimi-cli migrates it to `~/.kimi-code` on open), and the
+> **ChatGPT/Claude.ai account data exports** — are parse-only. You can read, search, and port *away* from them, but
 > they aren't port targets yet (their on-disk stores are harder to write back
 > safely). Asking to emit to one is a usage error ("not a supported target", exit 2) rather than
 > corrupting anything.

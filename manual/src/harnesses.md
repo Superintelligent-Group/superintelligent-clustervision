@@ -1,6 +1,6 @@
 # Harnesses & where they store sessions
 
-clustervision currently understands **23 harnesses** 🔮 (incl. the ChatGPT & Claude.ai account data
+clustervision currently understands **21 harnesses** 🔮 (incl. the ChatGPT & Claude.ai account data
 exports — `chatgpt-export`/`claude-export`, register via `cv config --add-export`). Every one of them couples a session to a
 working directory — they encode the `cwd` into the path, the filename, a hash, or a DB column — which
 is exactly why your sessions feel "dir-jailed" and impossible to find later. clustervision reads them
@@ -39,23 +39,20 @@ All paths are the real ones the adapters look at. `~` is your home dir; `<AppSup
 | **Goose (Block)** | `<AppSupport>/Block.block.goose/sessions/sessions.db` (**SQLite**) | ✓ | — | `$GOOSE_PATH_ROOT`/`$XDG_DATA_HOME` override. Modern `sessions.db` + **legacy** per-session `<name>.jsonl`. MCP-style tool content; read-only, PRAGMA-probed. |
 | **Zed (agent panel)** | `<data_dir>/Zed/threads/threads.db` (**SQLite**) | ✓ | — | One DB, one row per thread; `data` BLOB = **zstd-compressed JSON** (pure-Rust decode). Three blob generations (versionless / agent1 0.1–0.2 / agent2 0.3 tagged-enum). cwd + git from the project snapshot; **subagents** linked by `parent_id`. |
 | **Devin CLI** (Cognition) | `~/.local/share/devin/cli/sessions.db` (**SQLite**) | ✓ | — | Closed-source, opened read-only (the CLI keeps writing while we read). `message_nodes` is a **forest** of re-prefixed copies — the transcript is the `main_chain_id`→root walk. Thinking + parallel tool calls + `sealed` signatures preserved. |
-| **Claude app** | `<AppSupport>/Claude/` | ✓\* | — | **Detected, not readable.** Transcripts are **server-side** (claude.ai); local store holds only auth/UI state. `claude-code-sessions/*.json` are stubs pointing at `~/.claude/projects/` (handled by Claude Code). |
-| **ChatGPT app** | `<AppSupport>/com.openai.chat/conversations-v3-<acct>/<uuid>.data` | ✓\* | — | **Detected, not readable.** History *is* local but **encrypted at rest** with an app-held key (not in a readable Keychain). We count conversations but can't decrypt. |
 | **ChatGPT export** | a `conversations.json` you register with `cv config --add-export <path>` | ✓ | — | The "Export data" archive. One file = many conversations; each is a `mapping` DAG (we walk root→`current_node`). Opt-in (no fixed home); deduped by id. |
 | **OpenSession** | `*.opensession.json` (or a `*.json` with an `open_session` key) under a dir you register with `cv config --add-export <path>` | ✓ | — | cv's own interchange format, written by `cv export --format json` and read back in. 0.3 *is* the IR; 0.2 spellings are accepted on the way in. See [OpenSession](opensession.md). |
 | **Claude.ai export** | a `conversations.json` you register with `cv config --add-export <path>` | ✓ | — | The claude.ai "Export data" archive. One file = many conversations; linear `chat_messages[]` (text/thinking/tool_use/tool_result). Opt-in; deduped by id. |
 
-`✓` = supported · `—` = not supported · `✓\*` = installation is detected (`storage_root`) but
-`discover()` returns empty, for the reasons in the notes.
+`✓` = supported · `—` = not supported.
 
 **12 harnesses are emit-capable** (conversion targets): Claude Code, Codex, Grok, OpenCode, OpenClaw,
 Gemini, Hermes, LM Studio, Cline, Roo, Continue, Qwen. The authoritative list is
 `supported_targets()` in `emit.rs`.
 
-**11 are parse-only**: Cursor, Goose, Zed, Devin CLI and Kimi Code (closed-source / read-only stores we
+**9 are parse-only**: Cursor, Goose, Zed, Devin CLI and Kimi Code (closed-source / read-only stores we
 deliberately don't write back to), Kimi CLI (a frozen store), OpenSession (an export, not a harness
-to resume in), the two desktop apps, and the two account-data **exports** (`chatgpt-export` /
-`claude-export`, registered via `cv config --add-export`).
+to resume in), and the two account-data **exports** (`chatgpt-export` / `claude-export`, registered
+via `cv config --add-export`).
 
 ## Claude Code sessions outside `~/.claude`
 
@@ -123,21 +120,13 @@ each adapter probes `PRAGMA table_info` and selects only the columns that actual
 database degrades gracefully instead of failing the whole import. (Codex and Grok also ship SQLite, but
 only as *indexes* alongside their JSONL transcripts, not as the primary store.)
 
-## The two desktop apps — detected, not readable
+## The two desktop apps are not harnesses
 
-These are the only harnesses we can spot but can't read, and it's worth knowing *why*:
-
-- **Claude app** keeps no transcripts on disk at all. The Electron wrapper around claude.ai stores only
-  auth/settings/UI state locally; the actual chat history lives **server-side**. The one local artifact
-  is a set of metadata stubs that point (via `cliSessionId`) at `~/.claude/projects/` transcripts — and
-  those are already handled by the Claude Code adapter, so re-reading them here would just duplicate.
-- **ChatGPT app** *does* store offline history locally — one `.data` file per conversation — but every
-  file is **encrypted at rest** with a key the app holds in its own protected keychain access group.
-  There's no plaintext index and no readable Keychain item, so we can detect the install and count
-  conversations but can't decrypt a single one.
-
-Both still report a `storage_root()` so the install is detectable; their `discover()` simply returns
-empty.
+The Claude desktop app keeps no transcripts on disk (claude.ai holds them server-side; the Claude Code
+sessions it launches are ordinary `claude` sessions), and the ChatGPT desktop app encrypts its history at
+rest with a key cv cannot read. Both used to be listed as `claude-app`/`chatgpt-app` with an always-empty
+`discover()`; those names now fail with a pointer (exit 2). The findings are kept in
+[`docs/FORMATS.md`](https://github.com/emberian/cv/blob/main/docs/FORMATS.md) under "Desktop apps".
 
 ## Bring your own harness
 

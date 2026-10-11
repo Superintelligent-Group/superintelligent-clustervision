@@ -109,7 +109,7 @@ pub enum Block {
 
 A few supporting types complete the picture:
 
-- **`Harness`** — a `Copy` enum naming the source harness (`Claude`, `Codex`, `KimiCode`, `Grok`, `OpenCode`, `Gemini`, `Cursor`, `ClaudeApp`, `Goose`, …). It carries the canonical string forms: `Harness::ALL` lists every one, `as_str()` gives the lowercase name (also the key of its `extra` bag), and `parse()` accepts aliases (`cc` → `Claude`, `oc` → `OpenCode`, `kimi2` → `KimiCode`, …).
+- **`Harness`** — a `Copy` enum naming the source harness (`Claude`, `Codex`, `KimiCode`, `Grok`, `OpenCode`, `Gemini`, `Cursor`, `Goose`, …). It carries the canonical string forms: `Harness::ALL` lists every one, `as_str()` gives the lowercase name (also the key of its `extra` bag), and `parse()` accepts aliases (`cc` → `Claude`, `oc` → `OpenCode`, `kimi2` → `KimiCode`, …).
 - **`Role`** — `System | User | Assistant | Tool`. We keep `Tool` distinct even though some harnesses model a tool result as a `user` turn, so conversions can re-encode it correctly.
 - **`Usage`** — optional counts: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `reasoning_tokens`, and `cost_usd` when the harness records a cost.
 - **`Lineage`** — where a session came from and went: `forked_from`, `parent` (the owning session of a sub-agent), `spawned_by_tool_use`, `continued_in`, `continues`, `agent_path`.
@@ -156,7 +156,7 @@ pub fn all() -> Vec<Box<dyn Adapter>> {
         Box::new(codex::Codex::new()),
         Box::new(grok::Grok::new()),
         Box::new(opencode::OpenCode::new()),
-        // … gemini, openclaw, claude_app, chatgpt_app, kimi, qwen,
+        // … gemini, openclaw, kimi, qwen,
         //   lmstudio, cline, roo, continuedev …
     ];
     #[cfg(feature = "sqlite")]

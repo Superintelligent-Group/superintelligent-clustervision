@@ -32,9 +32,13 @@ pub(crate) fn usage<T>(msg: impl Into<String>) -> Result<T> {
 pub(crate) fn parse_harness(s: &Option<String>) -> Result<Option<Harness>> {
     match s {
         None => Ok(None),
-        Some(s) => Harness::parse(s)
-            .map(Some)
-            .with_context(|| format!("unknown harness: {s}")),
+        Some(s) => match Harness::parse(s) {
+            Some(h) => Ok(Some(h)),
+            None => match Harness::retired(s) {
+                Some(where_now) => usage(format!("{s} is no longer a harness: {where_now}")),
+                None => bail!("unknown harness: {s}"),
+            },
+        },
     }
 }
 

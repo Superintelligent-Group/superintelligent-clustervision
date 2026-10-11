@@ -452,8 +452,8 @@ impl RevisionState {
 /// and mapping them through [`model_family`].
 pub fn harness_family(harness: Harness) -> Option<&'static str> {
     match harness {
-        Harness::Claude | Harness::ClaudeApp | Harness::ClaudeExport => Some("anthropic"),
-        Harness::Codex | Harness::ChatGptApp | Harness::ChatGptExport => Some("openai"),
+        Harness::Claude | Harness::ClaudeExport => Some("anthropic"),
+        Harness::Codex | Harness::ChatGptExport => Some("openai"),
         Harness::Gemini => Some("google"),
         Harness::Grok => Some("xai"),
         Harness::Qwen => Some("alibaba"),

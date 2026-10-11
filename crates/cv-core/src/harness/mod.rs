@@ -9,9 +9,7 @@ use serde_json::Value;
 use std::io::BufRead;
 use std::path::PathBuf;
 
-pub mod chatgpt_app;
 pub mod claude;
-pub mod claude_app;
 /// Claude Code `Workflow`-tool runs (phase tree + script), a first-class layer over the
 /// `subagents/workflows/` agent tier that [`claude`] walks.
 pub mod claude_workflow;
@@ -213,8 +211,6 @@ pub fn all() -> Vec<Box<dyn Adapter>> {
         Box::new(opencode::OpenCode::new()),
         Box::new(gemini::Gemini::new()),
         Box::new(openclaw::OpenClaw::new()),
-        Box::new(claude_app::ClaudeApp::new()),
-        Box::new(chatgpt_app::ChatGptApp::new()),
         Box::new(kimi::Kimi::new()),
         Box::new(kimi_code::KimiCode::new()),
         Box::new(qwen::Qwen::new()),

@@ -74,8 +74,6 @@ manifests!(
     "hermes",
     "openclaw",
     "cursor",
-    "claude-app",
-    "chatgpt-app",
     "kimi",
     "kimi-code",
     "qwen",

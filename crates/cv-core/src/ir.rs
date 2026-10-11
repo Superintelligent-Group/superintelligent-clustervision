@@ -70,10 +70,6 @@ harnesses! {
     OpenClaw => "openclaw",
     /// Cursor IDE (chat/composer history in `state.vscdb`).
     Cursor => "cursor",
-    /// The Claude desktop app (macOS/Windows).
-    ClaudeApp => "claude-app",
-    /// The ChatGPT desktop app (macOS/Windows).
-    ChatGptApp => "chatgpt-app",
     /// Kimi CLI (MoonshotAI), `~/.kimi` — the legacy store, frozen since the 2026-06 migration.
     Kimi => "kimi",
     /// Kimi Code (MoonshotAI), kimi-cli's successor: `~/.kimi-code/sessions/**/wire.jsonl`.
@@ -116,8 +112,6 @@ impl Harness {
             "hermes" | "hermes-agent" => Harness::Hermes,
             "openclaw" | "claw" => Harness::OpenClaw,
             "cursor" => Harness::Cursor,
-            "claude-app" | "claude-desktop" | "claudeapp" => Harness::ClaudeApp,
-            "chatgpt-app" | "chatgpt" | "chatgpt-desktop" | "openai-app" => Harness::ChatGptApp,
             "kimi" | "kimi-cli" => Harness::Kimi,
             "kimi-code" | "kimicode" | "kimi2" => Harness::KimiCode,
             "qwen" | "qwen-code" => Harness::Qwen,
@@ -133,6 +127,25 @@ impl Harness {
             "opensession" | "open-session" | "open_session" => Harness::OpenSession,
             _ => return None,
         })
+    }
+
+    /// A name cv once accepted as a harness and no longer does, with where to look instead.
+    /// `None` for a name that never was one. The CLI answers a hit with a usage error (exit 2),
+    /// so a script written against the old name fails loudly with the replacement instead of
+    /// matching nothing.
+    pub fn retired(s: &str) -> Option<&'static str> {
+        match s.to_ascii_lowercase().as_str() {
+            "claude-app" | "claude-desktop" | "claudeapp" => Some(
+                "the Claude desktop app keeps no transcripts on disk (claude.ai holds them server-side); \
+                 the Claude Code sessions it launches are `--harness claude` — see docs/FORMATS.md, \"Desktop apps\"",
+            ),
+            "chatgpt-app" | "chatgpt" | "chatgpt-desktop" | "openai-app" => Some(
+                "the ChatGPT desktop app encrypts its history at rest and cv cannot read it; \
+                 ChatGPT conversations come from the account export (`cv config --add-export <dir>`, \
+                 `--harness chatgpt-export`) — see docs/FORMATS.md, \"Desktop apps\"",
+            ),
+            _ => None,
+        }
     }
 }
 
@@ -941,6 +954,28 @@ mod tests {
             assert_eq!(Harness::parse(h.as_str()), Some(h), "parse arm missing for {h:?}");
         }
         assert_eq!(Harness::ALL.len(), Harness::COUNT);
+    }
+
+    /// A retired harness name is neither a harness nor an unknown word: `parse` refuses it and
+    /// `retired` says where its sessions went, so the CLI can fail with a pointer (exit 2). No
+    /// live harness is retired.
+    #[test]
+    fn retired_names_do_not_parse_and_point_somewhere() {
+        for name in [
+            "claude-app",
+            "claudeapp",
+            "claude-desktop",
+            "chatgpt-app",
+            "chatgpt",
+            "openai-app",
+        ] {
+            assert_eq!(Harness::parse(name), None, "{name} must not parse");
+            assert!(Harness::retired(name).is_some(), "{name} must carry a pointer");
+        }
+        for h in Harness::ALL {
+            assert_eq!(Harness::retired(h.as_str()), None, "{h} is live");
+        }
+        assert_eq!(Harness::retired("marsrover"), None);
     }
 
     /// `meaningful_prompt` peels system-reminder blocks and rejects pure harness noise, so

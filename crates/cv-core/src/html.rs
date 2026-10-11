@@ -353,9 +353,7 @@ fn role_class(r: Role) -> &'static str {
 fn harness_color(name: &str) -> &'static str {
     match name {
         "claude" => "#d97757",
-        "claude-app" => "#c15f3c",
         "codex" => "#10a37f",
-        "chatgpt-app" => "#0e8a6c",
         "grok" => "#1d1d1f",
         "opencode" => "#5b6ee1",
         "gemini" => "#4285f4",

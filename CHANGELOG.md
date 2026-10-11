@@ -9,6 +9,7 @@
 - **`-q` sheds its sub-languages**: `thread:` paths, the `~` regex operator and the field-name typo guard are gone; `thread:`/`~` exit 2 with a pointer.
 - A malformed `-q` query is a caller mistake: exit 2, not 1.
 - **Removed `cv diff`** (a role+text prefix compare): `cv export <id> --format md` each session and diff the files; the name exits 2 with that pointer.
+- Removed the `claude-app` and `chatgpt-app` harnesses (they never had a session to read); the names now error with a pointer, exit 2.
 
 ## 0.14.0 — 2026-10-10
 

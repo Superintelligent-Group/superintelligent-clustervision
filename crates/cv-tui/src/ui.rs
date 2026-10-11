@@ -374,9 +374,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
 fn harness_color(h: Harness) -> Color {
     match h {
         Harness::Claude => Color::Rgb(217, 119, 87), // claude orange
-        Harness::ClaudeApp => Color::Rgb(217, 150, 120),
         Harness::Codex => Color::White,
-        Harness::ChatGptApp => Color::Rgb(116, 170, 156),
         Harness::Grok => Color::Rgb(120, 120, 200),
         Harness::OpenCode => Color::Yellow,
         Harness::Gemini => Color::Rgb(90, 150, 240),
