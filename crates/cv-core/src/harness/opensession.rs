@@ -28,6 +28,7 @@
 
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
+use crate::stream::{MessageSink, ParseOptions};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -79,25 +80,13 @@ pub fn document(session: &Session) -> Document<'_> {
 
 pub struct OpenSession;
 
-impl OpenSession {
-    pub fn new() -> Self {
-        OpenSession
-    }
-}
-
-impl Default for OpenSession {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for OpenSession {
     fn harness(&self) -> Harness {
         Harness::OpenSession
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        super::export::export_dirs().into_iter().next()
+    fn roots(&self) -> Vec<PathBuf> {
+        super::export::export_dirs()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -113,8 +102,8 @@ impl Adapter for OpenSession {
         Ok(out)
     }
 
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        read_document(&r.path)
+    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        crate::stream::replay(read_document(&r.path)?, sink)
     }
 }
 

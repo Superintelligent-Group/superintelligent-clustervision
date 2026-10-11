@@ -139,7 +139,7 @@ pub(crate) fn emit_to(
             let out_dir = match out {
                 Some(d) => d.clone(),
                 None => cv_core::harness::for_harness(Harness::Claude)
-                    .and_then(|a| a.storage_root())
+                    .and_then(|a| a.root())
                     .context("Claude Code's store was not found; pass --out <dir>")?,
             };
             let opts = EmitOptions {

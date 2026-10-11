@@ -17,7 +17,7 @@ use std::path::PathBuf;
 /// entries): the fleet lookup spans all of them; named here only in a miss's message.
 fn roots() -> Result<Vec<PathBuf>> {
     let roots = cv_core::harness::for_harness(Harness::Claude)
-        .map(|a| a.storage_roots())
+        .map(|a| a.roots())
         .unwrap_or_default();
     if roots.is_empty() {
         anyhow::bail!("Claude Code's store (~/.claude/projects) was not found");

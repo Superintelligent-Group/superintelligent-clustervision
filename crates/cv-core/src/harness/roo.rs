@@ -25,16 +25,10 @@ pub struct Roo {
 }
 
 impl Roo {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         Roo {
             roots: task_roots(ROO_EXT_IDS, ".roo"),
         }
-    }
-}
-
-impl Default for Roo {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -43,16 +37,12 @@ impl Adapter for Roo {
         Harness::Roo
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.roots.first().cloned()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_in(&self.roots, Harness::Roo))
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {

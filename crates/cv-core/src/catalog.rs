@@ -271,9 +271,9 @@ mod imp {
     /// 2. the [`TOP_K`] most-recently-updated session files that have a `scan_cache` entry —
     ///    an in-place append changes `(mtime, size)` there (active sessions are precisely the
     ///    recently-updated ones);
-    /// 3. each registered adapter's `storage_root()` presence vs. whether we hold watch rows for
+    /// 3. each registered adapter's `roots()` (any at all) vs. whether we hold watch rows for
     ///    it — a harness installed (or wholly removed) since the last sync is stale — and each of
-    ///    its existing `storage_roots()` vs. a watch row for that path: a root that appeared since
+    ///    its existing `roots()` vs. a watch row for that path: a root that appeared since
     ///    the last sync (a new agent seat under a `*` Claude root, a line added to the roots file,
     ///    or another cv process that syncs with different roots) is stale too.
     ///
@@ -364,11 +364,11 @@ mod imp {
                 continue;
             }
             let unwatched_root = || {
-                a.storage_roots()
+                a.roots()
                     .iter()
                     .any(|r| r.exists() && !watched_paths.contains(&(h, r.to_string_lossy().into_owned())))
             };
-            if a.storage_root().is_some() != watched_harnesses.contains(&h) || unwatched_root() {
+            if !a.roots().is_empty() != watched_harnesses.contains(&h) || unwatched_root() {
                 mark(&mut stale, h);
             }
         }

@@ -42,17 +42,11 @@ pub struct Grok {
 }
 
 impl Grok {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let root = dirs::home_dir().map(|h| h.join(".grok").join("sessions"));
         Grok {
             root: root.filter(|p| p.exists()),
         }
-    }
-}
-
-impl Default for Grok {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -61,8 +55,8 @@ impl Adapter for Grok {
         Harness::Grok
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.root.clone()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.root.clone().into_iter().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -81,10 +75,6 @@ impl Adapter for Grok {
             }
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -479,6 +469,7 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     fn enrich_from(s: &str) -> HashMap<String, ToolEnrich> {
         let dir = tempdir_with("updates.jsonl", s);

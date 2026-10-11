@@ -250,7 +250,7 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
 
     let mut scored: Vec<(i64, cv_search::Hit)> = Vec::new();
     for adapter in cv_core::harness::all() {
-        if adapter.storage_root().is_none() {
+        if adapter.roots().is_empty() {
             continue;
         }
         for r in adapter.discover()? {

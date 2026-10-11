@@ -16,6 +16,7 @@
 #![cfg(feature = "sqlite")]
 
 use cv_core::harness::opencode::OpenCode;
+use cv_core::harness::Parse;
 use cv_core::ir::SessionRef;
 use cv_core::watch::{baseline, Mark};
 use cv_core::Adapter;

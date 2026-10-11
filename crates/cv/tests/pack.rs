@@ -317,8 +317,8 @@ fn pack_session_emits_resumable_claude_session_that_round_trips() {
         updated_at: None,
         message_count: 0,
     };
-    use cv_core::Adapter;
-    let parsed = cv_core::harness::claude::Claude::new()
+    use cv_core::harness::Parse;
+    let parsed = cv_core::harness::claude::Claude::detect()
         .parse(&sref)
         .expect("claude adapter must re-parse the emitted pack session");
     assert_eq!(parsed.messages.len(), 2, "user framing + assistant ack");

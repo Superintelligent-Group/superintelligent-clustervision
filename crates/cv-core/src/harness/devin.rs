@@ -156,7 +156,7 @@ pub struct Devin {
 }
 
 impl Devin {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         // The literal path Devin CLI uses (even on macOS — not Application Support): the XDG data
         // dir's `devin/cli`.
         Devin {
@@ -174,19 +174,13 @@ impl Devin {
     }
 }
 
-impl Default for Devin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Devin {
     fn harness(&self) -> Harness {
         Harness::Devin
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.db_path().map(|_| self.root.clone())
+    fn roots(&self) -> Vec<PathBuf> {
+        self.db_path().map(|_| self.root.clone()).into_iter().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -197,10 +191,6 @@ impl Adapter for Devin {
             return Ok(vec![]);
         };
         discover_conn(&conn, &db)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {

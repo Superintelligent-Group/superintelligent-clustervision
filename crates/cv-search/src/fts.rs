@@ -1887,14 +1887,11 @@ mod tests {
             fn harness(&self) -> cv_core::Harness {
                 cv_core::Harness::Claude
             }
-            fn storage_root(&self) -> Option<std::path::PathBuf> {
-                None
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
             }
             fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
                 Ok(Vec::new())
-            }
-            fn parse(&self, _r: &cv_core::SessionRef) -> Result<cv_core::Session> {
-                anyhow::bail!("unused: this test streams")
             }
             fn stream(
                 &self,

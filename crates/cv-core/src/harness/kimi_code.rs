@@ -98,7 +98,7 @@ pub struct KimiCode {
 }
 
 impl KimiCode {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let root = std::env::var_os("KIMI_CODE_HOME")
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".kimi-code")))
@@ -113,19 +113,13 @@ impl KimiCode {
     }
 }
 
-impl Default for KimiCode {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for KimiCode {
     fn harness(&self) -> Harness {
         Harness::KimiCode
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.root.clone()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.root.clone().into_iter().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -179,10 +173,6 @@ impl Adapter for KimiCode {
                 .into_iter()
                 .collect()
         }))
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -1009,6 +999,7 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     const SID: &str = "66732eb8-2935-40cf-bcad-c0bcd204e2fb";
 

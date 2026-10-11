@@ -47,7 +47,7 @@ pub struct Continue {
 }
 
 impl Continue {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let root = std::env::var_os("CONTINUE_GLOBAL_DIR")
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".continue")));
@@ -56,19 +56,13 @@ impl Continue {
     }
 }
 
-impl Default for Continue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Continue {
     fn harness(&self) -> Harness {
         Harness::Continue
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.sessions.clone()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.sessions.clone().into_iter().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -113,11 +107,6 @@ impl Adapter for Continue {
         }
 
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        // The whole-session parse is "stream into a CollectSink" — see [`crate::stream::collect`].
-        crate::stream::collect(self, r)
     }
 
     /// Native streaming parse. A Continue session is a single JSON document
@@ -716,6 +705,7 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     fn fixtures() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/continue")

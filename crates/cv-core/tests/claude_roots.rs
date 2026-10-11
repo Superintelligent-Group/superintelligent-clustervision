@@ -100,7 +100,7 @@ fn claude_ids(refs: &[SessionRef]) -> Vec<String> {
 }
 
 fn discovered() -> Vec<String> {
-    claude_ids(&Claude::new().discover().unwrap())
+    claude_ids(&Claude::detect().discover().unwrap())
 }
 
 fn join(paths: &[PathBuf]) -> std::ffi::OsString {
@@ -115,7 +115,7 @@ fn default_root_still_works() {
     write_session(&w.default_projects(), "-work-proj", "defaultsess");
 
     assert_eq!(discovered(), vec!["defaultsess"]);
-    assert_eq!(Claude::new().storage_root(), Some(w.default_projects()));
+    assert_eq!(Claude::detect().roots().into_iter().next(), Some(w.default_projects()));
 }
 
 /// `CLUSTERVISION_CLAUDE_ROOTS` is a path list; an entry may be a projects dir itself or a Claude
@@ -132,7 +132,7 @@ fn env_roots_are_discovered() {
 
     assert_eq!(discovered(), vec!["configdirsess", "defaultsess", "projdirsess"]);
     assert_eq!(
-        Claude::new().storage_root(),
+        Claude::detect().roots().into_iter().next(),
         Some(w.default_projects()),
         "the default root stays first"
     );
@@ -150,7 +150,7 @@ fn wildcard_root_finds_every_seat_including_later_ones() {
     fs::create_dir_all(seats.join("noclaude")).unwrap(); // a seat with no claude dir is skipped
     std::env::set_var("CLUSTERVISION_CLAUDE_ROOTS", seats.join("*").join("claude"));
 
-    let adapter = Claude::new();
+    let adapter = Claude::detect();
     assert_eq!(
         claude_ids(&adapter.discover().unwrap()),
         vec!["seatonesess", "seattwosess"]
@@ -220,7 +220,7 @@ fn claude_config_dir_is_read() {
     std::env::set_var("CLAUDE_CONFIG_DIR", &cfg);
 
     assert_eq!(discovered(), vec!["configsess", "defaultsess"]);
-    assert_eq!(Claude::new().storage_root(), Some(cfg.join("projects")));
+    assert_eq!(Claude::detect().roots().into_iter().next(), Some(cfg.join("projects")));
 }
 
 /// Roots that do not exist (or are not directories) are ignored — never an error, and they do
@@ -243,7 +243,7 @@ fn missing_roots_are_ignored() {
     fs::write(w.cv_home.join("claude-roots"), "/definitely/not/here\n").unwrap();
 
     assert_eq!(discovered(), vec!["defaultsess"]);
-    assert_eq!(Claude::new().storage_root(), Some(w.default_projects()));
+    assert_eq!(Claude::detect().roots().into_iter().next(), Some(w.default_projects()));
 }
 
 /// The same directory named several ways (config dir vs projects dir, a symlink) is read once.
@@ -262,7 +262,7 @@ fn a_root_named_twice_is_read_once() {
     std::env::set_var("CLUSTERVISION_CLAUDE_ROOTS", join(&roots));
 
     assert_eq!(discovered(), vec!["defaultsess"], "one directory, one listing");
-    assert_eq!(Claude::new().storage_root(), Some(w.default_projects()));
+    assert_eq!(Claude::detect().roots().into_iter().next(), Some(w.default_projects()));
 }
 
 /// Two roots can hold the same session id — e.g. a transcript copied into a second config dir to

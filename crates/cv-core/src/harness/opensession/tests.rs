@@ -2,6 +2,7 @@
 //! and on real data), the refusal of every other version, and discovery over registered sources.
 
 use super::*;
+use crate::harness::Parse;
 use crate::harness::{claude, codex, Adapter};
 use serde_json::{json, Map};
 
@@ -51,11 +52,11 @@ fn document_leads_with_the_version_and_session_never_carries_it() {
 /// The newest real local session with a workable size, from whichever harness has one.
 fn a_real_session() -> Option<(&'static str, Session)> {
     let adapters: Vec<(&'static str, Box<dyn Adapter>)> = vec![
-        ("claude", Box::new(claude::Claude::new())),
-        ("codex", Box::new(codex::Codex::new())),
+        ("claude", Box::new(claude::Claude::detect())),
+        ("codex", Box::new(codex::Codex::detect())),
     ];
     for (name, a) in adapters {
-        if a.storage_root().is_none() {
+        if a.roots().is_empty() {
             continue;
         }
         let Ok(mut refs) = a.discover() else { continue };
@@ -110,7 +111,7 @@ fn round_trips_a_real_session_through_a_document() {
     // Read it back the way any other harness is read: through the adapter.
     let r = doc_ref(&path).expect("the document yields a ref");
     assert_eq!(r.harness, Harness::OpenSession, "the REF is tagged opensession");
-    let back = OpenSession::new().parse(&r).expect("the document parses");
+    let back = OpenSession.parse(&r).expect("the document parses");
 
     // Session-level, field by field.
     assert_eq!(back.id, original.id, "id");
@@ -383,7 +384,7 @@ fn discovers_documents_in_registered_sources() {
 
     std::env::set_var("XDG_CONFIG_HOME", dir.join("no-config"));
     std::env::set_var("CV_EXPORTS", &dir);
-    let refs = OpenSession::new().discover().unwrap();
+    let refs = OpenSession.discover().unwrap();
     std::env::remove_var("CV_EXPORTS");
     std::env::remove_var("XDG_CONFIG_HOME");
 
@@ -396,7 +397,7 @@ fn discovers_documents_in_registered_sources() {
     assert_eq!(one.message_count, 2, "conversational turns only: user + assistant");
 
     // And the ref parses into the session the document describes, with ITS harness.
-    let s = OpenSession::new().parse(one).unwrap();
+    let s = OpenSession.parse(one).unwrap();
     assert_eq!(s.harness, Harness::Codex);
     assert_eq!(s.messages.len(), 3);
     std::fs::remove_dir_all(&dir).ok();

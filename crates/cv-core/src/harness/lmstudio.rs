@@ -50,17 +50,11 @@ pub struct LmStudio {
 }
 
 impl LmStudio {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let root = dirs::home_dir().map(|h| h.join(".lmstudio").join("conversations"));
         LmStudio {
             root: root.filter(|p| p.exists()),
         }
-    }
-}
-
-impl Default for LmStudio {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -69,11 +63,13 @@ impl Adapter for LmStudio {
         Harness::LmStudio
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
+    fn roots(&self) -> Vec<PathBuf> {
         // Detect the install even if no conversations dir exists yet.
         self.root
             .clone()
             .or_else(|| dirs::home_dir().map(|h| h.join(".lmstudio")).filter(|p| p.exists()))
+            .into_iter()
+            .collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -97,11 +93,6 @@ impl Adapter for LmStudio {
             }
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        // The whole-session parse is "stream into a CollectSink" — see [`crate::stream::collect`].
-        crate::stream::collect(self, r)
     }
 
     /// Native streaming parse. An LM Studio conversation is a single JSON document
@@ -817,6 +808,7 @@ fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -127,7 +127,7 @@ pub struct OpenClaw {
 }
 
 impl OpenClaw {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let mut roots = Vec::new();
         // `OPENCLAW_STATE_DIR` overrides the state dir wholesale (`src/config/state-dir.ts`
         // `resolveStateDir`); otherwise `~/.openclaw` (and the elide-home variant).
@@ -151,19 +151,13 @@ impl OpenClaw {
     }
 }
 
-impl Default for OpenClaw {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for OpenClaw {
     fn harness(&self) -> Harness {
         Harness::OpenClaw
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.roots.first().cloned()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -207,10 +201,6 @@ impl Adapter for OpenClaw {
             }
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -1496,6 +1486,7 @@ fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     fn fixture_ref(name: &str) -> SessionRef {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

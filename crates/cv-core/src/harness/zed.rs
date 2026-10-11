@@ -69,14 +69,8 @@ pub struct Zed {
 }
 
 impl Zed {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         Zed { db: threads_db() }
-    }
-}
-
-impl Default for Zed {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -107,8 +101,13 @@ impl Adapter for Zed {
 
     /// The `threads/` dir holding `threads.db` (a root is a directory; the db itself is a
     /// catalog file-watch, see `catalog::watches_for`).
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.db.as_deref().and_then(Path::parent).map(Path::to_path_buf)
+    fn roots(&self) -> Vec<PathBuf> {
+        self.db
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -117,10 +116,6 @@ impl Adapter for Zed {
         };
         let conn = open_ro(db)?;
         discover_db(&conn, db)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -749,6 +744,7 @@ fn parse_thread(conn: &Connection, r: &SessionRef) -> Result<Session> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     /// The current full schema (base table + every ALTER-added column).
     const SCHEMA: &str = "
@@ -1309,15 +1305,15 @@ mod tests {
     fn missing_db_discovers_nothing() {
         let zed = Zed { db: None };
         assert!(zed.discover().unwrap().is_empty());
-        assert!(zed.storage_root().is_none());
+        assert!(zed.roots().is_empty());
     }
 
     /// Smoke over the real local Zed install (skipped in CI; run with --ignored --nocapture).
     #[test]
     #[ignore = "reads the live ~/Library/Application Support/Zed/threads/threads.db"]
     fn real_zed_threads_discover_and_parse() {
-        let zed = Zed::new();
-        let Some(root) = zed.storage_root() else {
+        let zed = Zed::detect();
+        let Some(root) = zed.roots().into_iter().next() else {
             eprintln!("no Zed install here; nothing to do");
             return;
         };

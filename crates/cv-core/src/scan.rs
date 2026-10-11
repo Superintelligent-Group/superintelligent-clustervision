@@ -126,7 +126,7 @@ pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<L
         truncated: false,
     };
     for adapter in crate::harness::all() {
-        if want.is_some_and(|h| adapter.harness() != h) || adapter.storage_root().is_none() {
+        if want.is_some_and(|h| adapter.harness() != h) || adapter.roots().is_empty() {
             continue;
         }
         for r in adapter.discover()? {

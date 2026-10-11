@@ -118,7 +118,7 @@ pub(crate) fn emit_session(session: &Session, to_h: Harness, out: Option<PathBuf
     let out_dir = match out {
         Some(d) => d,
         None => cv_core::harness::for_harness(to_h)
-            .and_then(|a| a.storage_root())
+            .and_then(|a| a.root())
             .with_context(|| format!("{to_h} doesn't appear installed; pass --out <dir> to write somewhere"))?,
     };
     // Verified emit: after writing, re-parse the output with the target's own adapter and diff it

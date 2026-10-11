@@ -73,7 +73,7 @@ pub struct OpenCode {
 }
 
 impl OpenCode {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let data = data_dir();
         let root = data.as_ref().map(|d| d.join("storage")).filter(|p| p.exists());
         let db = data.as_deref().and_then(resolve_db);
@@ -130,12 +130,6 @@ impl OpenCode {
     }
 }
 
-impl Default for OpenCode {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// `${XDG_DATA_HOME:-~/.local/share}/opencode` — opencode's data dir (`packages/core/src/global.ts`,
 /// via `xdg-basedir`).
 fn data_dir() -> Option<PathBuf> {
@@ -184,10 +178,12 @@ impl Adapter for OpenCode {
         Harness::OpenCode
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
+    fn roots(&self) -> Vec<PathBuf> {
         self.root
             .clone()
             .or_else(|| self.db.as_ref().and_then(|d| d.parent()).map(Path::to_path_buf))
+            .into_iter()
+            .collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -234,10 +230,6 @@ impl Adapter for OpenCode {
             });
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -923,6 +915,7 @@ fn parse_usage(mv: &Value) -> Option<Usage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     fn parts(json_strs: &[&str]) -> Vec<Value> {
         json_strs.iter().map(|s| serde_json::from_str(s).unwrap()).collect()

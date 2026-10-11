@@ -25,17 +25,11 @@ pub struct Qwen {
 }
 
 impl Qwen {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let root = dirs::home_dir()
             .map(|h| h.join(".qwen").join("tmp"))
             .filter(|p| p.exists());
         Qwen { root }
-    }
-}
-
-impl Default for Qwen {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -44,8 +38,8 @@ impl Adapter for Qwen {
         Harness::Qwen
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.root.clone()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.root.clone().into_iter().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -68,12 +62,6 @@ impl Adapter for Qwen {
                 crate::harness::gemini::scan_session_file(&path, Harness::Qwen)
             })
         }))
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        // The whole-session parse is "stream into a CollectSink" — the shared Gemini machinery
-        // (see `stream`) handles every shape, so `parse` and `collect(stream)` cannot diverge.
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -104,6 +92,7 @@ fn is_session_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
     use std::fs;
 
     /// Parse Qwen session text by delegating to the (identical) Gemini parser, then re-tag every
@@ -223,7 +212,7 @@ mod tests {
 
         let r = SessionRef::new("11112222-3333-4444-5555-666677778888", Harness::Qwen, path);
         let mut sink = crate::stream::CollectSink::default();
-        let s = Qwen::new()
+        let s = Qwen::detect()
             .stream(&r, &crate::stream::ParseOptions::full(), &mut sink)
             .expect("stream");
         assert_eq!(s.harness, Harness::Qwen);

@@ -19,6 +19,7 @@
 use super::wire::anthropic;
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
+use crate::stream::{MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -42,41 +43,19 @@ impl Kind {
 // ── Adapters (thin wrappers over the shared engine, one per export shape) ──────
 
 pub struct ChatGptExport;
-impl ChatGptExport {
-    pub fn new() -> Self {
-        ChatGptExport
-    }
-}
-impl Default for ChatGptExport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 pub struct ClaudeExport;
-impl ClaudeExport {
-    pub fn new() -> Self {
-        ClaudeExport
-    }
-}
-impl Default for ClaudeExport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for ChatGptExport {
     fn harness(&self) -> Harness {
         Harness::ChatGptExport
     }
-    fn storage_root(&self) -> Option<PathBuf> {
-        export_dirs().into_iter().next()
+    fn roots(&self) -> Vec<PathBuf> {
+        export_dirs()
     }
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_kind(Kind::ChatGpt))
     }
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        parse_ref(Kind::ChatGpt, r)
+    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        crate::stream::replay(parse_ref(Kind::ChatGpt, r)?, sink)
     }
 }
 
@@ -84,14 +63,14 @@ impl Adapter for ClaudeExport {
     fn harness(&self) -> Harness {
         Harness::ClaudeExport
     }
-    fn storage_root(&self) -> Option<PathBuf> {
-        export_dirs().into_iter().next()
+    fn roots(&self) -> Vec<PathBuf> {
+        export_dirs()
     }
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_kind(Kind::Claude))
     }
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        parse_ref(Kind::Claude, r)
+    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        crate::stream::replay(parse_ref(Kind::Claude, r)?, sink)
     }
 }
 

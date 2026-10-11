@@ -111,7 +111,7 @@ pub struct Codex {
 }
 
 impl Codex {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         // Codex resolves its home as `$CODEX_HOME`, else `~/.codex` (codex-rs/utils/home-dir/src/lib.rs
         // `find_codex_home`); honour the same override so a test home (or a relocated store) is read.
         let codex_home = std::env::var_os("CODEX_HOME")
@@ -128,19 +128,13 @@ impl Codex {
     }
 }
 
-impl Default for Codex {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Codex {
     fn harness(&self) -> Harness {
         Harness::Codex
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.roots.first().cloned()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -174,29 +168,13 @@ impl Adapter for Codex {
         }))
     }
 
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        // Concrete full parse (used directly for full-fidelity ops, and by `stream`'s legacy-JSON
-        // branch). `stream` is the memory-light path for the bulk consumers.
-        let text = read_rollout_to_string(&r.path)?;
-        let s = parse_str(&r.id, &text, is_jsonl_path(&r.path), Some(r.path.clone()));
-        crate::stream::note_turns(r, s.messages.iter().filter(|m| m.is_turn()).count());
-        Ok(s)
-    }
-
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         let is_jsonl = is_jsonl_path(&r.path);
         if !is_jsonl {
-            // 2025 legacy layout is a single JSON document — inherently whole-file. Reuse the full
-            // parse and replay (these sessions are rare and small).
-            let mut s = self.parse(r)?;
-            let messages = std::mem::take(&mut s.messages);
-            sink.meta(&s);
-            for m in messages {
-                if sink.message(m) == Flow::Stop {
-                    break;
-                }
-            }
-            return Ok(s);
+            // 2025 legacy layout is a single JSON document — inherently whole-file. Parse it whole
+            // and replay (these sessions are rare and small).
+            let text = read_rollout_to_string(&r.path)?;
+            return crate::stream::replay(parse_str(&r.id, &text, false, Some(r.path.clone())), sink);
         }
         // Modern `.jsonl` rollout: stream it. `has_events` is a whole-file property (do NL text
         // come from `event_msg`s or `response_item`s?), so we make a cheap first pass to detect it,
@@ -2089,6 +2067,7 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     /// Build a `.jsonl` transcript from individual record lines and parse it.
     /// Parse JSONL lines into a Session, checking the IR-v2 nesting invariant on the way out:
@@ -2730,7 +2709,7 @@ mod tests {
     #[test]
     #[ignore = "requires local ~/.codex corpus"]
     fn real_corpus_parses_without_panic() {
-        let cx = Codex::new();
+        let cx = Codex::detect();
         let refs = cx.discover().expect("discover");
         eprintln!("codex corpus: {} sessions", refs.len());
         let mut tool_uses = 0usize;
@@ -3262,7 +3241,7 @@ mod tests {
         for src in [newest, subagent] {
             let path = snap.join(src.file_name().unwrap());
             fs::copy(&src, &path).unwrap();
-            let cx = Codex::new();
+            let cx = Codex::detect();
             let r = scan(&path).unwrap();
             let parsed = cx.parse(&r).unwrap();
             let mut sink = crate::stream::CollectSink::default();

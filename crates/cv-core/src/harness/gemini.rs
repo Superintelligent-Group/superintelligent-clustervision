@@ -57,7 +57,7 @@ pub struct Gemini {
 }
 
 impl Gemini {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let roots = dirs::home_dir()
             .map(|h| {
                 vec![
@@ -74,19 +74,13 @@ impl Gemini {
     }
 }
 
-impl Default for Gemini {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Gemini {
     fn harness(&self) -> Harness {
         Harness::Gemini
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.roots.first().cloned()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -106,10 +100,6 @@ impl Adapter for Gemini {
             crate::discover_cache::cached_scan_many(&path, || scan_session_file(&path, Harness::Gemini))
         });
         Ok(dedupe_by_id(refs))
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -1345,6 +1335,7 @@ fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     fn fixture(name: &str) -> String {
         let path = format!("{}/tests/fixtures/gemini/{}", env!("CARGO_MANIFEST_DIR"), name);
@@ -1738,7 +1729,7 @@ mod tests {
             ],
             "two distinct sessions across three roots; the duplicate collapsed"
         );
-        assert_eq!(adapter.storage_root(), Some(rt_a.join("tmp")));
+        assert_eq!(adapter.roots().into_iter().next(), Some(rt_a.join("tmp")));
         for d in [rt_a, rt_b, rt_c] {
             let _ = fs::remove_dir_all(&d);
         }

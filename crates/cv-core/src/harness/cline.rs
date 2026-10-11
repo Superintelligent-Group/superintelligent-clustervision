@@ -62,16 +62,10 @@ pub struct Cline {
 }
 
 impl Cline {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         Cline {
             roots: task_roots(CLINE_EXT_IDS, ".cline"),
         }
-    }
-}
-
-impl Default for Cline {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -80,16 +74,12 @@ impl Adapter for Cline {
         Harness::Cline
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.roots.first().cloned()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_in(&self.roots, Harness::Cline))
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -803,6 +793,7 @@ fn ui_message_times(dir: &Path) -> UiTimes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     fn fixture(name: &str) -> String {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cline/");
@@ -949,7 +940,7 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let out_dir = std::env::temp_dir().join(format!("cv-cline-emit-{}-{}", std::process::id(), n));
 
-        let cline = Cline::new();
+        let cline = Cline::detect();
         let res = emit(&session, &out_dir, &crate::emit::EmitOptions::default()).expect("emit");
         assert_eq!(res.path, out_dir.join("tasks").join(&res.new_id));
 

@@ -72,7 +72,7 @@ pub fn discover_all() -> Vec<SessionRef> {
     // successful empty scan — their catalog rows (root deleted since last sync) must clear.
     fn run(a: &dyn Adapter) -> (Harness, Vec<std::path::PathBuf>, Option<Vec<SessionRef>>) {
         let h = a.harness();
-        let roots = a.storage_roots();
+        let roots = a.roots();
         if roots.is_empty() {
             return (h, roots, Some(Vec::new()));
         }
@@ -171,7 +171,7 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
 /// On a discover error the previous rows are kept (matching [`discover_all`]'s tolerance).
 fn refresh_harness(h: Harness) {
     let Some(a) = harness::for_harness(h) else { return };
-    let roots = a.storage_roots();
+    let roots = a.roots();
     if roots.is_empty() {
         // Root gone (harness uninstalled / dir deleted): its sessions vanish from the catalog.
         catalog::replace_harness(h, &[], &[]);

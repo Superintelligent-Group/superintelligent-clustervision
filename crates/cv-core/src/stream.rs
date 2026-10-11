@@ -225,6 +225,20 @@ impl MessageSink for CollectSink {
     }
 }
 
+/// Hand an already-parsed whole session to `sink` — the `stream` of a store that can only be read
+/// whole (an account export, an OpenSession document): metadata first, so header-rendering sinks
+/// have it, then each message until the sink stops. Returns the metadata with `messages` emptied.
+pub fn replay(mut session: Session, sink: &mut dyn MessageSink) -> Result<Session> {
+    let messages = std::mem::take(&mut session.messages);
+    sink.meta(&session);
+    for m in messages {
+        if sink.message(m) == Flow::Stop {
+            break;
+        }
+    }
+    Ok(session)
+}
+
 /// Drive `adapter.stream` into a [`CollectSink`] and reattach the messages — i.e. fully parse `r`
 /// at full fidelity. This is the default body of [`Adapter::parse`](crate::harness::Adapter::parse)
 /// for adapters that implement a native `stream`.
@@ -287,9 +301,8 @@ pub fn stream_counted(
 }
 
 /// A whole-session read of `r` counted `turns`: fill a "not counted" catalog row (see
-/// [`stream_counted`]). For the adapters whose `parse` is its own whole-text path rather than
-/// `collect` (Codex), which call it on the session they built.
-pub fn note_turns(r: &SessionRef, turns: usize) {
+/// [`stream_counted`]).
+fn note_turns(r: &SessionRef, turns: usize) {
     if r.message_count == 0 && turns > 0 {
         crate::catalog::fill_count(r, turns);
     }

@@ -42,7 +42,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         // CURSOR_USER_DIR overrides the platform default (used by tests / non-mac).
         let user_dir = std::env::var_os("CURSOR_USER_DIR")
             .map(PathBuf::from)
@@ -96,12 +96,6 @@ fn default_user_dir() -> Option<PathBuf> {
     Some(base.join("Cursor").join("User"))
 }
 
-impl Default for Cursor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Cursor {
     fn harness(&self) -> Harness {
         Harness::Cursor
@@ -109,8 +103,8 @@ impl Adapter for Cursor {
 
     /// `Cursor/User`: the dir under which both the global `state.vscdb` and every
     /// `workspaceStorage/<hash>/state.vscdb` live. The db files are catalog file-watches.
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.user_dir.clone()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.user_dir.clone().into_iter().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -137,10 +131,6 @@ impl Adapter for Cursor {
             }
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {

@@ -157,7 +157,7 @@ pub struct Hermes {
 }
 
 impl Hermes {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         // HERMES_HOME overrides ~/.hermes.
         let home = std::env::var_os("HERMES_HOME")
             .map(PathBuf::from)
@@ -190,27 +190,15 @@ impl Hermes {
     }
 }
 
-impl Default for Hermes {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Hermes {
     fn harness(&self) -> Harness {
         Harness::Hermes
     }
 
-    /// The dir holding the first `state.db` — the Hermes home, or a profile dir. A root is a
-    /// directory: `emit_hermes` writes `<root>/state.db`, which is the same file this adapter
-    /// reads first.
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.dbs.first().and_then(|db| db.parent()).map(Path::to_path_buf)
-    }
-
-    /// Every dir holding a `state.db` (home + each profile). The db files themselves are the
-    /// catalog's per-session file-watches, so growth in place is still noticed.
-    fn storage_roots(&self) -> Vec<PathBuf> {
+    /// Every dir holding a `state.db` (home + each profile), the first `state.db`'s first:
+    /// `emit_hermes` writes `<root>/state.db`, the same file this adapter reads first. The db files
+    /// themselves are the catalog's per-session file-watches, so growth in place is still noticed.
+    fn roots(&self) -> Vec<PathBuf> {
         let mut roots: Vec<PathBuf> = self
             .dbs
             .iter()
@@ -237,10 +225,6 @@ impl Adapter for Hermes {
             }
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -1232,6 +1216,7 @@ fn parse_conn_with(conn: &Connection, r: &SessionRef, opts: &ParseOptions) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
     use rusqlite::Connection;
 
     /// Schema matching hermes_state.py SCHEMA_VERSION 14.
@@ -1655,7 +1640,7 @@ mod tests {
     }
 
     /// Branch-don't-fork: the adapter must discover sessions in BOTH the top-level `state.db` AND
-    /// every `profiles/<name>/state.db`. Regression guard for the bug where `Hermes::new()` bound a
+    /// every `profiles/<name>/state.db`. Regression guard for the bug where `Hermes::detect()` bound a
     /// single `<home>/state.db` and left the active profile's sessions (2782 on the real install)
     /// invisible. Synthesizes a minimal `~/.hermes`-shaped tree under a temp `HERMES_HOME`.
     #[test]
@@ -1694,7 +1679,7 @@ mod tests {
 
         // Point the adapter at our synthetic home and discover.
         std::env::set_var("HERMES_HOME", &home);
-        let hermes = Hermes::new();
+        let hermes = Hermes::detect();
         // Two readable DBs: top-level + the one profile (snapshot is depth-2, skipped).
         assert_eq!(hermes.dbs.len(), 2, "should bind top-level + profile DB only");
         let refs = hermes.discover().unwrap();

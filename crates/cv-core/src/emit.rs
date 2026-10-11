@@ -13,6 +13,7 @@
 use crate::harness::store::write_jsonl;
 use crate::harness::wire::anthropic;
 use crate::harness::EmitResult;
+use crate::harness::Parse;
 use crate::ir::{Block, GitInfo, Harness, Message, MessageKind, Role, Session, SessionRef};
 use crate::stream::ParseOptions;
 use anyhow::{Context, Result};
@@ -391,10 +392,13 @@ fn reparse_emitted(target: Harness, result: &EmitResult, opts: &ParseOptions) ->
     match target {
         Harness::Claude => {
             let id = result.new_id.clone();
-            collect(&crate::harness::claude::Claude::new(), &sref(id, result.path.clone()))
+            collect(
+                &crate::harness::claude::Claude::detect(),
+                &sref(id, result.path.clone()),
+            )
         }
         Harness::Codex => collect(
-            &crate::harness::codex::Codex::new(),
+            &crate::harness::codex::Codex::detect(),
             &sref(String::new(), result.path.clone()),
         ),
         Harness::Grok => {
@@ -413,14 +417,14 @@ fn reparse_emitted(target: Harness, result: &EmitResult, opts: &ParseOptions) ->
                 });
             let mut r = sref(result.new_id.clone(), result.path.clone());
             r.title = title;
-            collect(&crate::harness::grok::Grok::new(), &r)
+            collect(&crate::harness::grok::Grok::detect(), &r)
         }
         Harness::OpenClaw => collect(
-            &crate::harness::openclaw::OpenClaw::new(),
+            &crate::harness::openclaw::OpenClaw::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
         Harness::Gemini => collect(
-            &crate::harness::gemini::Gemini::new(),
+            &crate::harness::gemini::Gemini::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
         Harness::OpenCode => reparse_opencode(result),
@@ -428,24 +432,24 @@ fn reparse_emitted(target: Harness, result: &EmitResult, opts: &ParseOptions) ->
         Harness::Hermes => reparse_hermes(result),
         // The emitters whose output is parseable directly from the EmitResult path.
         Harness::LmStudio => collect(
-            &crate::harness::lmstudio::LmStudio::new(),
+            &crate::harness::lmstudio::LmStudio::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
         Harness::Cline => collect(
-            &crate::harness::cline::Cline::new(),
+            &crate::harness::cline::Cline::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
         Harness::Roo => collect(
-            &crate::harness::roo::Roo::new(),
+            &crate::harness::roo::Roo::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
         Harness::Continue => collect(
-            &crate::harness::continuedev::Continue::new(),
+            &crate::harness::continuedev::Continue::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
         // Qwen reuses Gemini's emitter (same record shape) but its own parser.
         Harness::Qwen => collect(
-            &crate::harness::qwen::Qwen::new(),
+            &crate::harness::qwen::Qwen::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
         other => anyhow::bail!("re-parse for {other} not supported"),
@@ -2710,7 +2714,7 @@ fn emit_openclaw(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Resul
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    // `out_dir` is already the agents dir: storage_root() returns `~/.openclaw/agents` and discover()
+    // `out_dir` is already the agents dir: the adapter's first root is `~/.openclaw/agents` and discover()
     // walks it for `<agentId>/sessions/<id>.jsonl`. Re-joining "agents" here produced
     // `~/.openclaw/agents/agents/main/sessions/…`, which openclaw never scans (the session was written
     // but undiscoverable). If a caller instead points `--out` at the state dir (`~/.openclaw`), accept
@@ -3280,7 +3284,7 @@ fn emit_hermes(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // `out_dir` is a directory — the Hermes home or a profile dir, which is what the adapter's
-    // `storage_root()` names — and the store is its `state.db`.
+    // first root names — and the store is its `state.db`.
     let db_path = out_dir.join("state.db");
     fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
     let conn = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
@@ -3753,7 +3757,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Claude::new().parse(&r).unwrap();
+        let parsed = Claude::detect().parse(&r).unwrap();
 
         assert_eq!(parsed.title.as_deref(), Some("a test session"));
         assert_eq!(parsed.cwd, Some(PathBuf::from("/Users/test/project")));
@@ -3848,7 +3852,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Claude::new().parse(&r).unwrap();
+        let parsed = Claude::detect().parse(&r).unwrap();
 
         let rich = parsed
             .messages
@@ -4189,7 +4193,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Codex::new().parse(&r).unwrap();
+        let parsed = Codex::detect().parse(&r).unwrap();
 
         assert_eq!(parsed.id, res.new_id);
         assert_eq!(parsed.cwd, Some(PathBuf::from("/Users/test/project")));
@@ -4308,7 +4312,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Codex::new().parse(&r).unwrap();
+        let parsed = Codex::detect().parse(&r).unwrap();
         let mut results: Vec<(String, String, bool)> = Vec::new();
         for m in parsed.messages.iter().filter(|m| m.role == Role::Tool) {
             for b in &m.content {
@@ -4353,7 +4357,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Grok::new().parse(&r).unwrap();
+        let parsed = Grok::detect().parse(&r).unwrap();
 
         assert_eq!(parsed.id, res.new_id);
         assert_eq!(parsed.cwd, Some(PathBuf::from("/Users/test/project")));
@@ -4426,7 +4430,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Grok::new().parse(&r).unwrap();
+        let parsed = Grok::detect().parse(&r).unwrap();
         let mut results: Vec<(String, bool, Option<String>)> = Vec::new();
         for m in parsed.messages.iter().filter(|m| m.role == Role::Tool) {
             for b in &m.content {
@@ -4525,7 +4529,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = OpenClaw::new().parse(&r).unwrap();
+        let parsed = OpenClaw::detect().parse(&r).unwrap();
 
         assert_eq!(parsed.id, res.new_id);
         assert_eq!(parsed.cwd, Some(PathBuf::from("/Users/test/project")));
@@ -4562,7 +4566,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Gemini::new().parse(&r).unwrap();
+        let parsed = Gemini::detect().parse(&r).unwrap();
 
         assert_eq!(parsed.id, res.new_id);
         assert_eq!(parsed.title.as_deref(), Some("a test session"));
@@ -5243,7 +5247,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Codex::new().parse(&r).unwrap();
+        let parsed = Codex::detect().parse(&r).unwrap();
         assert_eq!(parsed.system_prompt.as_deref(), Some("You are a careful engineer."));
         assert!(
             parsed
@@ -5295,7 +5299,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Claude::new().parse(&r).unwrap();
+        let parsed = Claude::detect().parse(&r).unwrap();
         assert_eq!(parsed.system_prompt.as_deref(), Some("Follow the house style."));
         assert!(
             parsed
@@ -5359,7 +5363,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = OpenClaw::new().parse(&r).unwrap();
+        let parsed = OpenClaw::detect().parse(&r).unwrap();
         assert_eq!(
             parsed.title.as_deref(),
             Some("a test session"),
@@ -5751,7 +5755,7 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let parsed = Gemini::new().parse(&r).unwrap();
+        let parsed = Gemini::detect().parse(&r).unwrap();
 
         let orphan = parsed
             .messages

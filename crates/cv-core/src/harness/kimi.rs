@@ -82,7 +82,7 @@ pub struct Kimi {
 }
 
 impl Kimi {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let root = std::env::var_os("KIMI_SHARE_DIR")
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".kimi")))
@@ -92,18 +92,12 @@ impl Kimi {
     }
 }
 
-impl Default for Kimi {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Kimi {
     fn harness(&self) -> Harness {
         Harness::Kimi
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
+    fn roots(&self) -> Vec<PathBuf> {
         // The share root (`~/.kimi`), NOT `<root>/sessions`: `kimi.json` (the cwd registry) lives
         // at this root beside `sessions/`, so the root is what a consumer needs.
         // (Returning `sessions` here produced `~/.kimi/sessions/sessions/...`, which kimi-cli never
@@ -111,6 +105,8 @@ impl Adapter for Kimi {
         self.root
             .clone()
             .or_else(|| self.sessions.as_ref().and_then(|s| s.parent().map(Path::to_path_buf)))
+            .into_iter()
+            .collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -168,10 +164,6 @@ impl Adapter for Kimi {
             }
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -869,6 +861,7 @@ fn md5_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Parse;
 
     #[test]
     fn md5_matches_reference() {

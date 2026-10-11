@@ -60,7 +60,7 @@ impl Claude {
     /// Collect the root entries, in priority order:
     /// 1. `$CLAUDE_CONFIG_DIR/projects` — Claude Code's own variable for moving its config dir, so
     ///    this is where the Claude Code of this environment reads and writes (and it is the
-    ///    [`storage_root`](Adapter::storage_root), the default conversion target, when it exists);
+    ///    the first of [`roots`](Adapter::roots), the default conversion target, when it exists);
     /// 2. `~/.claude/projects` — Claude Code's default;
     /// 3. each entry of `$CLUSTERVISION_CLAUDE_ROOTS` (a path list, split like `$PATH`);
     /// 4. each non-blank line of `$CLUSTERVISION_HOME/claude-roots` (default
@@ -70,7 +70,7 @@ impl Claude {
     /// An entry from 3 or 4 may name a Claude config dir (one that holds `projects/`) or a projects
     /// dir itself, may start with `~`, and may hold path segments that are exactly `*`; each stands
     /// for every entry of the directory before it (`~/.agents/*/claude`, `~/.agents/*/instances/*/claude`).
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         let home = dirs::home_dir();
         let mut entries: Vec<PathBuf> = Vec::new();
         entries.extend(
@@ -107,7 +107,7 @@ impl Claude {
     /// and a config dir mapped to its `projects/`; missing dirs dropped; and one directory reached
     /// several ways (a symlink, or a config dir and its `projects/` both listed) kept once, under
     /// the first spelling seen.
-    fn roots(&self) -> Vec<PathBuf> {
+    fn resolve_roots(&self) -> Vec<PathBuf> {
         let mut seen = HashSet::new();
         self.entries
             .iter()
@@ -162,23 +162,13 @@ fn projects_dir(entry: PathBuf) -> Option<PathBuf> {
     (entry.is_dir() && !CONFIG_MARKERS.iter().any(|m| entry.join(m).exists())).then_some(entry)
 }
 
-impl Default for Claude {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Claude {
     fn harness(&self) -> Harness {
         Harness::Claude
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.roots().into_iter().next()
-    }
-
-    fn storage_roots(&self) -> Vec<PathBuf> {
-        self.roots()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.resolve_roots()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -188,7 +178,7 @@ impl Adapter for Claude {
         // two roots (a transcript copied into another config dir to resume there) is listed twice,
         // once per file; `crate::find` resolves such an id to the most recently updated copy.
         let paths: Vec<_> = self
-            .roots()
+            .resolve_roots()
             .iter()
             .flat_map(|root| WalkDir::new(root).min_depth(2).max_depth(2))
             .filter_map(|e| e.ok())
@@ -211,10 +201,6 @@ impl Adapter for Claude {
                 }
             })
         }))
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {

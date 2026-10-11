@@ -127,7 +127,7 @@ pub struct Goose {
 }
 
 impl Goose {
-    pub fn new() -> Self {
+    pub fn detect() -> Self {
         Goose { dir: sessions_dir() }
     }
 
@@ -178,19 +178,13 @@ fn sessions_dir() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-impl Default for Goose {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Adapter for Goose {
     fn harness(&self) -> Harness {
         Harness::Goose
     }
 
-    fn storage_root(&self) -> Option<PathBuf> {
-        self.dir.clone()
+    fn roots(&self) -> Vec<PathBuf> {
+        self.dir.clone().into_iter().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -222,10 +216,6 @@ impl Adapter for Goose {
             }
         }
         Ok(out)
-    }
-
-    fn parse(&self, r: &SessionRef) -> Result<Session> {
-        crate::stream::collect(self, r)
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -1685,7 +1675,7 @@ mod tests {
     fn empty_dir_discovers_nothing() {
         let g = Goose { dir: None };
         assert!(g.discover().unwrap().is_empty());
-        assert!(g.storage_root().is_none());
+        assert!(g.roots().is_empty());
     }
 
     fn tempdir() -> PathBuf {

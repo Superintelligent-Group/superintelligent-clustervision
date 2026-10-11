@@ -177,57 +177,59 @@ pub struct EmitResult {
     pub resume_hint: Option<String>,
 }
 
-/// A harness adapter. Implementors live in submodules and are registered in [`all`].
+/// A harness adapter: where a harness keeps its sessions ([`roots`](Adapter::roots)), how to list
+/// them cheaply ([`discover`](Adapter::discover)), and how to read one as a message stream
+/// ([`stream`](Adapter::stream)). Implementors live in submodules and are registered in [`all`].
+/// A whole-session parse is not a fourth method: it is [`stream::collect`](crate::stream::collect)
+/// over `stream`, spelled `adapter.parse(&r)` on a `dyn Adapter`, so the streaming and the
+/// whole-session readers cannot diverge.
 ///
 /// `Send + Sync` so [`crate::discover_all`] can fan discovery across adapters in parallel. Every
 /// adapter holds only path data (connections are opened per call), so this bound is always satisfied.
 pub trait Adapter: Send + Sync {
     fn harness(&self) -> Harness;
 
-    /// The on-disk root this adapter reads from (already resolved against $HOME), if it exists.
-    /// Always a **directory** — for a SQLite-backed store, the dir holding the database — so an
-    /// emitter given it as `out_dir` can write beside what the reader reads, and the catalog can
-    /// watch it as a dir (the database files are its per-session file-watches).
-    fn storage_root(&self) -> Option<PathBuf>;
-
-    /// Every root this adapter reads sessions from, [`storage_root`](Adapter::storage_root) first.
-    /// The catalog's freshness probe watches each one, and re-discovers the harness when a root
-    /// exists that it holds no watch for (one that appeared since the last sync). The default is
-    /// the single storage root; an adapter that reads several (Claude's extra roots) overrides it.
-    fn storage_roots(&self) -> Vec<PathBuf> {
-        self.storage_root().into_iter().collect()
-    }
+    /// Every on-disk root this adapter reads sessions from (resolved against `$HOME`, existing
+    /// ones only), the primary one first. Always **directories** — for a SQLite-backed store, the
+    /// dir holding the database — so an emitter given the first as `out_dir` writes beside what the
+    /// reader reads, and the catalog's freshness probe can watch each one (the database files are
+    /// its per-session file-watches), re-discovering the harness when a root appears that it holds
+    /// no watch for. Empty when the harness is not installed.
+    fn roots(&self) -> Vec<PathBuf>;
 
     /// Cheaply enumerate sessions without fully parsing them.
     fn discover(&self) -> Result<Vec<SessionRef>>;
-
-    /// Fully parse one discovered session into the IR.
-    ///
-    /// Adapters with a native [`stream`](Adapter::stream) implement this as
-    /// `crate::stream::collect(self, r)`; adapters that don't yet stream implement `parse`
-    /// directly and inherit the default [`stream`](Adapter::stream) that bridges through it.
-    fn parse(&self, r: &SessionRef) -> Result<Session>;
 
     /// Stream a session's messages into `sink` one at a time, dropping each before the next, so
     /// peak memory is O(largest message) rather than O(transcript). Returns the session's metadata
     /// (id/cwd/title/model/git/timestamps) with an **empty** `messages` vec — the messages went to
     /// the sink. `opts` controls how much of each message is materialized (see [`ParseOptions`]).
-    ///
-    /// The default bridges through [`parse`](Adapter::parse): correct for any adapter, but with no
-    /// memory savings (it materializes the whole `Session` first). Override with a native streaming
-    /// parse to get the savings — see [`claude`](crate::harness::claude) for the reference.
-    fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        let mut session = self.parse(r)?;
-        let messages = std::mem::take(&mut session.messages);
-        // The full session is already parsed, so its metadata (model/cwd/title) is known up front —
-        // hand it to the sink before the body so header-rendering sinks have it.
-        sink.meta(&session);
-        for m in messages {
-            if sink.message(m) == Flow::Stop {
-                break;
-            }
-        }
-        Ok(session)
+    /// See [`claude`](crate::harness::claude) for the reference; a store that can only be read
+    /// whole hands its parsed session to [`crate::stream::replay`].
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session>;
+}
+
+/// `parse` on a concrete adapter (`Claude::detect().parse(&r)`): the same
+/// [`stream::collect`](crate::stream::collect), by a blanket impl no adapter can override.
+pub trait Parse {
+    fn parse(&self, r: &SessionRef) -> Result<Session>;
+}
+
+impl<T: Adapter> Parse for T {
+    fn parse(&self, r: &SessionRef) -> Result<Session> {
+        crate::stream::collect(self, r)
+    }
+}
+
+impl dyn Adapter + '_ {
+    /// Fully parse one discovered session into the IR: [`stream::collect`](crate::stream::collect).
+    pub fn parse(&self, r: &SessionRef) -> Result<Session> {
+        crate::stream::collect(self, r)
+    }
+
+    /// The primary root (the first of [`roots`](Adapter::roots)), where an emitter writes.
+    pub fn root(&self) -> Option<PathBuf> {
+        self.roots().into_iter().next()
     }
 }
 // NOTE: emitting (being a *conversion target*) is deliberately NOT part of this trait. The single
@@ -239,30 +241,30 @@ pub trait Adapter: Send + Sync {
 /// All registered adapters.
 pub fn all() -> Vec<Box<dyn Adapter>> {
     let mut adapters: Vec<Box<dyn Adapter>> = vec![
-        Box::new(claude::Claude::new()),
-        Box::new(codex::Codex::new()),
-        Box::new(grok::Grok::new()),
-        Box::new(opencode::OpenCode::new()),
-        Box::new(gemini::Gemini::new()),
-        Box::new(openclaw::OpenClaw::new()),
-        Box::new(kimi::Kimi::new()),
-        Box::new(kimi_code::KimiCode::new()),
-        Box::new(qwen::Qwen::new()),
-        Box::new(lmstudio::LmStudio::new()),
-        Box::new(cline::Cline::new()),
-        Box::new(roo::Roo::new()),
-        Box::new(continuedev::Continue::new()),
-        Box::new(export::ChatGptExport::new()),
-        Box::new(export::ClaudeExport::new()),
-        Box::new(opensession::OpenSession::new()),
+        Box::new(claude::Claude::detect()),
+        Box::new(codex::Codex::detect()),
+        Box::new(grok::Grok::detect()),
+        Box::new(opencode::OpenCode::detect()),
+        Box::new(gemini::Gemini::detect()),
+        Box::new(openclaw::OpenClaw::detect()),
+        Box::new(kimi::Kimi::detect()),
+        Box::new(kimi_code::KimiCode::detect()),
+        Box::new(qwen::Qwen::detect()),
+        Box::new(lmstudio::LmStudio::detect()),
+        Box::new(cline::Cline::detect()),
+        Box::new(roo::Roo::detect()),
+        Box::new(continuedev::Continue::detect()),
+        Box::new(export::ChatGptExport),
+        Box::new(export::ClaudeExport),
+        Box::new(opensession::OpenSession),
     ];
     #[cfg(feature = "sqlite")]
     {
-        adapters.push(Box::new(hermes::Hermes::new()));
-        adapters.push(Box::new(cursor::Cursor::new()));
-        adapters.push(Box::new(goose::Goose::new()));
-        adapters.push(Box::new(zed::Zed::new()));
-        adapters.push(Box::new(devin::Devin::new()));
+        adapters.push(Box::new(hermes::Hermes::detect()));
+        adapters.push(Box::new(cursor::Cursor::detect()));
+        adapters.push(Box::new(goose::Goose::detect()));
+        adapters.push(Box::new(zed::Zed::detect()));
+        adapters.push(Box::new(devin::Devin::detect()));
     }
     adapters
 }
