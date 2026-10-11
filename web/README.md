@@ -323,7 +323,10 @@ because browsers refuse ES modules over `file://`:
     # or, from web/:
     python3 -m http.server     # then open /selftest.html
 
-Run it after any IR change.
+Run it after any IR change. CI runs it headless on every push (`tools/web-selftest.mjs`, which
+serves this directory itself); locally, with Playwright on `NODE_PATH`:
+
+    NODE_PATH=~/tools/playwright/node_modules node tools/web-selftest.mjs
 
 ## Export & the loom
 

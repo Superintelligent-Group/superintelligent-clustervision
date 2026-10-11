@@ -52,8 +52,23 @@ jobs:
       - name: Manual names exist
         run: tools/check-manual-names.sh target/debug/cv
 
+      # The manual builds, including the pages generated from the binary just built (the command
+      # reference and the MCP roster, `tools/mdbook-cv.py`). Until 0.15 only pages.yml built it,
+      # after the merge, so a broken SUMMARY or preprocessor failed the deploy and nothing else.
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2.0.0
+        with:
+          mdbook-version: '0.5.2'
+      - name: Build the manual
+        run: mdbook build manual
+
       - name: Build cv-core for wasm config (no default features)
         run: cargo build -p clustervision-core --no-default-features
+
+      # cv-search's `semantic` feature (the embedding stack) is default-on, so the keyword-only
+      # build is one nothing else compiles.
+      - name: Build cv-search without the semantic feature
+        run: cargo build -p cv-search --no-default-features
 
       # `dist plan` parses dist-workspace.toml and the release matrix without building anything.
       # A bad `publish-jobs` value sat in that file from v0.9.22 until 0.11.0 and every tag in
@@ -126,7 +141,7 @@ jobs:
           node-version: 22
       # `web/` has no build step and no framework, so nothing was ever checking that it parses —
       # or that it still matches the IR. Syntax is the floor; `web/selftest.html` carries the
-      # rendering invariants for a human to run.
+      # rendering invariants, run headless below.
       - name: Syntax-check every module
         run: |
           set -euo pipefail
@@ -151,3 +166,11 @@ jobs:
             exit 1
           fi
           echo "no stale block-tag reads"
+      # web/selftest.html in headless Chrome: every check passes and the page throws nothing.
+      # playwright-core (no bundled browser) drives the Chrome the runner image ships, so this is
+      # one small npm package, not a browser download.
+      - name: Rendering self-test (headless Chrome)
+        run: |
+          set -euo pipefail
+          npm install --no-save --ignore-scripts --prefix "$RUNNER_TEMP/pw" playwright-core@1.62.1
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" SELFTEST_CHANNEL=chrome node tools/web-selftest.mjs web
