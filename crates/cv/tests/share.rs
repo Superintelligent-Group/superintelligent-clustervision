@@ -1,73 +1,14 @@
 //! End-to-end tests for `cv share`: the self-contained HTML artifact, redaction default-on,
 //! `--no-redact` opt-out + warning, default output path, and self-containment (no external
-//! src/href). Hermetic — same temp-HOME pattern as `tests/cli.rs`, with its own helpers so the
-//! shared file stays untouched.
+//! src/href). Hermetic through `cv_testkit::World`.
 
-use std::path::PathBuf;
-use std::process::Command;
+use cv_testkit::World;
 use std::{fs, str};
 
 /// A planted secret that the default redaction pass must scrub.
 const SECRET: &str = "sk-abcDEF1234567890ghijkl";
 /// Planted conversation text that must survive into the artifact.
 const PLANTED: &str = "the quokka census migration plan";
-
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    cv_home: PathBuf,
-}
-
-impl World {
-    fn new(tag: &str) -> World {
-        let base = std::env::temp_dir().join(format!(
-            "cv-share-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        fs::create_dir_all(home.join(".claude/projects/-work-proj")).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        World { base, home, cv_home }
-    }
-
-    fn cv(&self, args: &[&str]) -> (bool, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_cv"))
-            .args(args)
-            .current_dir(&self.base)
-            .env("HOME", &self.home)
-            .env("CLUSTERVISION_HOME", &self.cv_home)
-            // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CLUSTERVISION_CLAUDE_ROOTS")
-            .env("XDG_CACHE_HOME", self.home.join(".cache"))
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("XDG_DATA_HOME", self.home.join(".local/share"))
-            .output()
-            .expect("cv should run");
-        (
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    fn cv_ok(&self, args: &[&str]) -> (String, String) {
-        let (ok, out, err) = self.cv(args);
-        assert!(ok, "cv {args:?} failed\nstdout:\n{out}\nstderr:\n{err}");
-        (out, err)
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).ok();
-    }
-}
 
 /// A claude-format session with a title, thinking, a tool round-trip, and a planted secret.
 fn share_corpus(w: &World) {
@@ -208,7 +149,7 @@ fn share_default_output_path_is_id_html() {
 fn share_unknown_session_fails_cleanly() {
     let w = World::new("missing");
     share_corpus(&w);
-    let (ok, _, err) = w.cv(&["share", "nope-no-such-session"]);
+    let (ok, _, _, err) = w.cv(&["share", "nope-no-such-session"]);
     assert!(!ok, "should fail on unknown id");
     assert!(err.contains("no session matching"), "stderr: {err}");
     assert!(!err.contains("panicked"), "panic instead of error: {err}");

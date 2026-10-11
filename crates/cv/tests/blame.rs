@@ -1,8 +1,9 @@
 //! End-to-end `cv blame`: a real (temp) git repo with controlled commit times + a temp
 //! CLUSTERVISION_HOME whose catalog is fed by ingesting a synthetic claude session — then the
-//! actual binary is run against it. Everything lives in ONE test fn because CLUSTERVISION_HOME is
+//! actual binary is run against it, in a `cv_testkit::World`. Everything lives in ONE test fn because CLUSTERVISION_HOME is
 //! process-global state for the in-process cv-core calls (parallel test fns would race it).
 
+use cv_testkit::World;
 use std::path::Path;
 use std::process::Command;
 use std::{fs, str};
@@ -35,12 +36,12 @@ fn pos(hay: &str, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("expected {needle:?} in:\n{hay}"))
 }
 
-/// Run the built `cv` binary with the temp catalog home; returns (stdout, stderr).
-fn cv(home: &Path, dir: &Path, args: &[&str]) -> (String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_cv"))
-        .args(args)
+/// Run the built `cv` binary in `w` from `dir`; returns (stdout, stderr).
+fn cv(w: &World, dir: &Path, args: &[&str]) -> (String, String) {
+    let out = w
+        .cv_command()
         .current_dir(dir)
-        .env("CLUSTERVISION_HOME", home)
+        .args(args)
         .output()
         .expect("cv should run");
     (
@@ -51,15 +52,10 @@ fn cv(home: &Path, dir: &Path, args: &[&str]) -> (String, String) {
 
 #[test]
 fn blame_end_to_end() {
-    let base = std::env::temp_dir().join(format!(
-        "cv-blame-e2e-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let home = base.join("home");
+    // In-process: the catalog ingest below reads `CLUSTERVISION_HOME` from the process env.
+    let w = World::in_process("blame-e2e");
+    let base = w.base.clone();
+    let home = w.cv_home.clone();
     let repo_raw = base.join("repo");
     fs::create_dir_all(home.join("sessions")).unwrap();
     fs::create_dir_all(repo_raw.join("src")).unwrap();
@@ -147,7 +143,6 @@ fn blame_end_to_end() {
     let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
     fs::write(&exact_jsonl, body).unwrap();
 
-    std::env::set_var("CLUSTERVISION_HOME", &home);
     let rx = cv_core::ir::SessionRef {
         id: "exact-e2e".into(),
         harness: cv_core::ir::Harness::Claude,
@@ -176,10 +171,9 @@ fn blame_end_to_end() {
         .first()
         .expect("edit event ingested")
         .msg_idx;
-    std::env::remove_var("CLUSTERVISION_HOME");
 
     // --- whole-file blame: both commits newest-first, only the first one matched ---
-    let (out, err) = cv(&home, &repo, &["blame", "src/widget.rs"]);
+    let (out, err) = cv(&w, &repo, &["blame", "src/widget.rs"]);
     assert!(out.contains("chore: tweak widget"), "stdout:\n{out}\nstderr:\n{err}");
     assert!(out.contains("feat: add widget"), "stdout:\n{out}");
     assert!(
@@ -214,7 +208,7 @@ fn blame_end_to_end() {
     assert_eq!(out.matches("exact-e2").count(), 3, "one match line + two hints:\n{out}");
 
     // --- -L: line 2 was never touched by the tweak, so only the first commit owns it ---
-    let (out, err) = cv(&home, &repo, &["blame", "src/widget.rs", "-L", "2"]);
+    let (out, err) = cv(&w, &repo, &["blame", "src/widget.rs", "-L", "2"]);
     assert!(out.contains("feat: add widget"), "stdout:\n{out}\nstderr:\n{err}");
     assert!(!out.contains("tweak widget"), "{out}");
     assert!(out.contains("blame-e2"), "{out}");
@@ -222,7 +216,7 @@ fn blame_end_to_end() {
 
     // --- --show: the range hint indexing must line up with `cv show --range` ---
     // The best match is now the exact one: its window must contain the commit call itself.
-    let (out, err) = cv(&home, &repo, &["blame", "src/widget.rs", "--show"]);
+    let (out, err) = cv(&w, &repo, &["blame", "src/widget.rs", "--show"]);
     assert!(
         out.contains("conversation around the edit"),
         "stdout:\n{out}\nstderr:\n{err}"
@@ -234,7 +228,7 @@ fn blame_end_to_end() {
     assert!(out.contains(&format!("{short1} feat: add widget")), "{out}");
 
     // --- not a git repo: degrades to pure event-catalog mode with the same hints ---
-    let (out, err) = cv(&home, &base, &["blame", "src/widget.rs"]);
+    let (out, err) = cv(&w, &base, &["blame", "src/widget.rs"]);
     assert!(
         out.contains("not inside a git repository"),
         "stdout:\n{out}\nstderr:\n{err}"
@@ -244,11 +238,8 @@ fn blame_end_to_end() {
     assert!(out.contains("cv show"), "{out}");
 
     // --- cold catalog: a clear "run cv index" hint, commits still listed ---
-    let home2 = base.join("home2");
-    fs::create_dir_all(&home2).unwrap();
-    let (out, err) = cv(&home2, &repo, &["blame", "src/widget.rs"]);
+    let cold = World::new("blame-cold");
+    let (out, err) = cv(&cold, &repo, &["blame", "src/widget.rs"]);
     assert!(err.contains("run `cv index`"), "stdout:\n{out}\nstderr:\n{err}");
     assert!(out.contains("(no agent session found)"), "{out}");
-
-    fs::remove_dir_all(&base).ok();
 }

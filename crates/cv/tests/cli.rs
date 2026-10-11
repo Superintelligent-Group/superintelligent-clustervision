@@ -6,6 +6,8 @@
 //! dir) and temp `CLUSTERVISION_HOME` (catalog/index/board), and only ever passes them to the
 //! spawned binary's environment — no process-global `set_var`, so tests run in parallel safely.
 
+use claude::user as user_line;
+use cv_testkit::{claude, World};
 use std::path::PathBuf;
 use std::process::Command;
 use std::{fs, str};
@@ -13,179 +15,24 @@ use std::{fs, str};
 /// A planted secret that `cv export --redact` must scrub (matches cv_core::redact's sk- recognizer).
 const SECRET: &str = "sk-abcDEF1234567890ghijkl";
 
-/// One temp world: a fake `$HOME` (with `.claude/projects` fixtures) + a `$CLUSTERVISION_HOME`.
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    cv_home: PathBuf,
-}
-
-impl World {
-    fn new(tag: &str) -> World {
-        let base = std::env::temp_dir().join(format!(
-            "cv-cli-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        fs::create_dir_all(home.join(".claude/projects/-work-proj")).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        World { base, home, cv_home }
-    }
-
-    /// Write a claude-format session fixture; `name` becomes the session id.
-    fn write_session(&self, name: &str, lines: &[serde_json::Value]) -> PathBuf {
-        let path = self
-            .home
-            .join(".claude/projects/-work-proj")
-            .join(format!("{name}.jsonl"));
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(&path, body).unwrap();
-        path
-    }
-
-    /// Run `cv` with this world's env; returns (status_ok, exit_code, stdout, stderr).
-    fn cv(&self, args: &[&str]) -> (bool, i32, String, String) {
-        self.cv_env(args, &[])
-    }
-
-    /// Like [`World::cv`] with extra env vars. The ambient `CV_ENDPOINT` is always cleared
-    /// first so identity-resolution tests see exactly the environment they set.
-    fn cv_env(&self, args: &[&str], extra: &[(&str, &str)]) -> (bool, i32, String, String) {
-        self.cv_full(args, extra, None)
-    }
-
-    /// Like [`World::cv`], feeding `stdin` to the process.
-    fn cv_stdin(&self, args: &[&str], stdin: &str) -> (bool, i32, String, String) {
-        self.cv_full(args, &[], Some(stdin))
-    }
-
-    fn cv_full(&self, args: &[&str], extra: &[(&str, &str)], stdin: Option<&str>) -> (bool, i32, String, String) {
-        use std::io::Write;
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cv"));
-        cmd.args(args)
-            .current_dir(&self.base)
-            .env("HOME", &self.home)
-            .env("CLUSTERVISION_HOME", &self.cv_home)
-            // Linux fallbacks for dirs::cache_dir / config_dir; harmless on macOS.
-            .env("XDG_CACHE_HOME", self.home.join(".cache"))
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("XDG_DATA_HOME", self.home.join(".local/share"))
-            .env_remove("CV_ENDPOINT")
-            // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CLUSTERVISION_CLAUDE_ROOTS");
-        for (k, v) in extra {
-            cmd.env(k, v);
-        }
-        let out = match stdin {
-            None => cmd.stdin(std::process::Stdio::null()).output().expect("cv should run"),
-            Some(text) => {
-                cmd.stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
-                let mut child = cmd.spawn().expect("cv should spawn");
-                child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
-                child.wait_with_output().expect("cv should run")
-            }
-        };
-        (
-            out.status.success(),
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    /// Seed the task log directly (the only way to plant an OLD event: the CLI stamps `now`).
-    fn seed_task_log(&self, lines: &[serde_json::Value]) {
-        let dir = self.cv_home.join("tasks");
-        fs::create_dir_all(&dir).unwrap();
-        let mut body = String::from("{\"format\":\"cv-task-log\",\"v\":1}\n");
-        for l in lines {
-            body.push_str(&l.to_string());
-            body.push('\n');
-        }
-        fs::write(dir.join("events.jsonl"), body).unwrap();
-    }
-
-    /// Append raw events to the task log (after whatever the CLI wrote) — how a test plants a
-    /// shape the CLI no longer writes, e.g. a legacy tag-only decision.
-    fn append_task_log(&self, lines: &[serde_json::Value]) {
-        use std::io::Write;
-        let dir = self.cv_home.join("tasks");
-        fs::create_dir_all(&dir).unwrap();
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("events.jsonl"))
-            .unwrap();
-        for l in lines {
-            writeln!(f, "{l}").unwrap();
-        }
-    }
-
-    /// A legacy decision: opened assigned to `who` and tagged `decision`, with nothing posed — the
-    /// shape `cv task open --tags decision` wrote before it was refused. Stamped a few seconds
-    /// ahead so it sorts after anything the test just opened.
-    fn plant_legacy_tag_decision(&self, id: &str, title: &str, who: &str) {
-        let ts = chrono_at(3);
-        self.append_task_log(&[
-            serde_json::json!({"id": id, "task_id": id, "ts": ts, "by": "cv", "event": "opened",
-                "title": title, "channel": "tasks", "assignee": who}),
-            serde_json::json!({"id": format!("{}f", &id[..id.len() - 1]), "task_id": id, "ts": ts, "by": "cv",
-                "event": "tagged", "tags": ["decision"]}),
-        ]);
-    }
-
-    /// Like `cv`, asserting success and returning (stdout, stderr).
-    fn cv_ok(&self, args: &[&str]) -> (String, String) {
-        let (ok, code, out, err) = self.cv(args);
-        assert!(ok, "cv {args:?} exited {code}\nstdout:\n{out}\nstderr:\n{err}");
-        (out, err)
-    }
-
-    /// Assert the command fails with a nonzero exit and *some* explanation on stderr.
-    fn cv_fails(&self, args: &[&str]) -> (String, String) {
-        let (ok, code, out, err) = self.cv(args);
-        assert!(!ok, "cv {args:?} unexpectedly succeeded\nstdout:\n{out}");
-        assert_ne!(code, -1, "cv {args:?} died by signal (panic/abort?)\nstderr:\n{err}");
-        assert!(
-            !err.trim().is_empty(),
-            "cv {args:?} failed silently (empty stderr)\nstdout:\n{out}"
-        );
-        assert!(
-            !err.contains("panicked"),
-            "cv {args:?} panicked instead of erroring:\n{err}"
-        );
-        (out, err)
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).ok();
-    }
-}
-
-fn user_line(uuid: &str, ts: &str, text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "user", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "cwd": "/work/proj",
-        "message": {"role": "user", "content": text}
-    })
+/// A legacy decision: opened assigned to `who` and tagged `decision`, with nothing posed — the
+/// shape `cv task open --tags decision` wrote before it was refused. Stamped a few seconds
+/// ahead so it sorts after anything the test just opened.
+fn plant_legacy_tag_decision(w: &World, id: &str, title: &str, who: &str) {
+    let ts = chrono_at(3);
+    w.append_task_log(&[
+        serde_json::json!({"id": id, "task_id": id, "ts": ts, "by": "cv", "event": "opened",
+            "title": title, "channel": "tasks", "assignee": who}),
+        serde_json::json!({"id": format!("{}f", &id[..id.len() - 1]), "task_id": id, "ts": ts, "by": "cv",
+            "event": "tagged", "tags": ["decision"]}),
+    ]);
 }
 
 fn assistant_line(uuid: &str, ts: &str, blocks: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "type": "assistant", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "cwd": "/work/proj",
-        "message": {"role": "assistant", "model": "claude-test-1", "content": blocks}
-    })
+    claude::with(
+        claude::assistant(uuid, ts, "claude-test-1", blocks),
+        serde_json::json!({"cwd": "/work/proj"}),
+    )
 }
 
 /// The standard two-session corpus:
@@ -1686,7 +1533,7 @@ fn task_inbox_groups_decisions_first() {
     let w = World::new("task-inbox");
     // A tag-only decision is a shape older stores hold; the CLI no longer writes it.
     let d = "01a0f000-0000-7000-8000-00000000000a".to_string();
-    w.plant_legacy_tag_decision(&d, "pick the enrollment rate", "ember");
+    plant_legacy_tag_decision(&w, &d, "pick the enrollment rate", "ember");
     w.cv_ok(&["task", "open", "write the docs", "--assignee", "ember"]);
     let (out, _) = w.cv_ok(&["task", "open", "the claimed one"]);
     let c = opened_task_id(&out);
@@ -2033,7 +1880,8 @@ fn task_inbox_orders_decisions_first_and_renders_markdown() {
         "orchestrator:x",
     ]);
     let d = opened_task_id(&out);
-    w.plant_legacy_tag_decision(
+    plant_legacy_tag_decision(
+        &w,
         "01a0f000-0000-7000-8000-00000000000b",
         "legacy decision by tag",
         "ember",
@@ -2410,12 +2258,9 @@ fn http(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u16, Strin
 /// Start `cv serve` on an ephemeral port in this world; returns (child, addr).
 fn serve(w: &World, who: &str) -> (std::process::Child, String) {
     use std::io::{BufRead, BufReader};
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cv"))
+    let mut child = w
+        .cv_command()
         .args(["serve", "--port", "0", "--who", who])
-        .current_dir(&w.base)
-        .env("HOME", &w.home)
-        .env("CLUSTERVISION_HOME", &w.cv_home)
-        .env_remove("CV_ENDPOINT")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -3227,7 +3072,7 @@ fn task_decision_tag_without_options_is_refused() {
     let d = opened_task_id(&out);
     w.cv_ok(&["task", "tag", &d, "decision,urgent"]);
 
-    w.plant_legacy_tag_decision("01a0f000-0000-7000-8000-00000000000c", "legacy tag-only", "ember");
+    plant_legacy_tag_decision(&w, "01a0f000-0000-7000-8000-00000000000c", "legacy tag-only", "ember");
     let (out, _) = w.cv_ok(&["task", "inbox", "ember"]);
     assert!(
         out.starts_with("decisions owed (2):") && out.contains("legacy tag-only"),

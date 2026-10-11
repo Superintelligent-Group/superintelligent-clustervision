@@ -3,71 +3,25 @@
 //! and each line of `$CLUSTERVISION_HOME/claude-roots` (an entry may hold `*` segments).
 //!
 //! These tests mutate process-global env (`HOME`, `CLUSTERVISION_HOME`, `CLAUDE_CONFIG_DIR`,
-//! `CLUSTERVISION_CLAUDE_ROOTS`), so every test holds a static mutex for its whole body (the
-//! `World` guard), the same way `freshness.rs` does.
+//! `CLUSTERVISION_CLAUDE_ROOTS`), so every test holds the testkit's process lock for its whole body
+//! (`cv_testkit::World::in_process`), the same way `freshness.rs` does.
 
 use cv_core::harness::claude::Claude;
 use cv_core::ir::{Harness, SessionRef};
 use cv_core::Adapter;
+use cv_testkit::World;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-
-static ENV: Mutex<()> = Mutex::new(());
 
 /// The catalog's recorded-watch fudge window (2s) plus margin; see `freshness.rs`.
 const FUDGE: std::time::Duration = std::time::Duration::from_millis(2100);
 
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    cv_home: PathBuf,
-    _guard: MutexGuard<'static, ()>,
+fn world(tag: &str) -> World {
+    World::in_process(tag)
 }
 
-impl World {
-    fn new(tag: &str) -> World {
-        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let base = std::env::temp_dir().join(format!(
-            "cv-roots-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        fs::create_dir_all(home.join(".claude/projects")).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        std::env::set_var("HOME", &home);
-        std::env::set_var("CLUSTERVISION_HOME", &cv_home);
-        std::env::set_var("XDG_CACHE_HOME", home.join(".cache"));
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-        std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
-        std::env::remove_var("CLUSTERVISION_CLAUDE_ROOTS");
-        std::env::remove_var("CLUSTERVISION_MAX_STALE_SECS");
-        std::env::remove_var("CURSOR_USER_DIR");
-        World {
-            base,
-            home,
-            cv_home,
-            _guard: guard,
-        }
-    }
-
-    fn default_projects(&self) -> PathBuf {
-        self.home.join(".claude/projects")
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
-        std::env::remove_var("CLUSTERVISION_CLAUDE_ROOTS");
-        fs::remove_dir_all(&self.base).ok();
-    }
+fn default_projects(w: &World) -> PathBuf {
+    w.home.join(".claude/projects")
 }
 
 /// Write a one-message claude session `<projects>/<proj>/<sid>.jsonl`.
@@ -111,19 +65,19 @@ fn join(paths: &[PathBuf]) -> std::ffi::OsString {
 /// its storage root.
 #[test]
 fn default_root_still_works() {
-    let w = World::new("default");
-    write_session(&w.default_projects(), "-work-proj", "defaultsess");
+    let w = world("default");
+    write_session(&default_projects(&w), "-work-proj", "defaultsess");
 
     assert_eq!(discovered(), vec!["defaultsess"]);
-    assert_eq!(Claude::detect().roots().into_iter().next(), Some(w.default_projects()));
+    assert_eq!(Claude::detect().roots().into_iter().next(), Some(default_projects(&w)));
 }
 
 /// `CLUSTERVISION_CLAUDE_ROOTS` is a path list; an entry may be a projects dir itself or a Claude
 /// config dir that holds `projects/`.
 #[test]
 fn env_roots_are_discovered() {
-    let w = World::new("env");
-    write_session(&w.default_projects(), "-work-proj", "defaultsess");
+    let w = world("env");
+    write_session(&default_projects(&w), "-work-proj", "defaultsess");
     let projects_dir = w.base.join("elsewhere/projects");
     let config_dir = w.base.join("otherconfig");
     write_session(&projects_dir, "-work-proj", "projdirsess");
@@ -133,7 +87,7 @@ fn env_roots_are_discovered() {
     assert_eq!(discovered(), vec!["configdirsess", "defaultsess", "projdirsess"]);
     assert_eq!(
         Claude::detect().roots().into_iter().next(),
-        Some(w.default_projects()),
+        Some(default_projects(&w)),
         "the default root stays first"
     );
 }
@@ -142,7 +96,7 @@ fn env_roots_are_discovered() {
 /// discover, so a seat created after the adapter was built is still found.
 #[test]
 fn wildcard_root_finds_every_seat_including_later_ones() {
-    let w = World::new("wild");
+    let w = world("wild");
     let seats = w.base.join("seats");
     write_session(&seats.join("one/claude/projects"), "-work-proj", "seatonesess");
     write_session(&seats.join("two/claude/projects"), "-work-proj", "seattwosess");
@@ -168,7 +122,7 @@ fn wildcard_root_finds_every_seat_including_later_ones() {
 /// (`seats/*/instances/*/claude`) is covered by one line.
 #[test]
 fn every_wildcard_segment_expands() {
-    let w = World::new("wild2");
+    let w = world("wild2");
     let seats = w.base.join("seats");
     write_session(
         &seats.join("codex/instances/c1/claude/projects"),
@@ -195,7 +149,7 @@ fn every_wildcard_segment_expands() {
 /// skipped, surrounding whitespace is trimmed, and a leading `~` is the home dir.
 #[test]
 fn roots_file_is_read() {
-    let w = World::new("file");
+    let w = world("file");
     write_session(&w.home.join("seats/alpha/claude/projects"), "-work-proj", "filesess");
     write_session(&w.base.join("plain/projects"), "-work-proj", "plainsess");
     let roots = format!(
@@ -213,8 +167,8 @@ fn roots_file_is_read() {
 /// writes — it is the storage root (the default conversion target) when set.
 #[test]
 fn claude_config_dir_is_read() {
-    let w = World::new("ccd");
-    write_session(&w.default_projects(), "-work-proj", "defaultsess");
+    let w = world("ccd");
+    write_session(&default_projects(&w), "-work-proj", "defaultsess");
     let cfg = w.base.join("seatconfig");
     write_session(&cfg.join("projects"), "-work-proj", "configsess");
     std::env::set_var("CLAUDE_CONFIG_DIR", &cfg);
@@ -227,8 +181,8 @@ fn claude_config_dir_is_read() {
 /// not displace the default storage root.
 #[test]
 fn missing_roots_are_ignored() {
-    let w = World::new("missing");
-    write_session(&w.default_projects(), "-work-proj", "defaultsess");
+    let w = world("missing");
+    write_session(&default_projects(&w), "-work-proj", "defaultsess");
     let a_file = w.base.join("not-a-dir");
     fs::write(&a_file, b"x").unwrap();
     std::env::set_var("CLAUDE_CONFIG_DIR", w.base.join("no-such-config"));
@@ -243,16 +197,16 @@ fn missing_roots_are_ignored() {
     fs::write(w.cv_home.join("claude-roots"), "/definitely/not/here\n").unwrap();
 
     assert_eq!(discovered(), vec!["defaultsess"]);
-    assert_eq!(Claude::detect().roots().into_iter().next(), Some(w.default_projects()));
+    assert_eq!(Claude::detect().roots().into_iter().next(), Some(default_projects(&w)));
 }
 
 /// The same directory named several ways (config dir vs projects dir, a symlink) is read once.
 #[test]
 fn a_root_named_twice_is_read_once() {
-    let w = World::new("dedupe");
-    write_session(&w.default_projects(), "-work-proj", "defaultsess");
+    let w = world("dedupe");
+    write_session(&default_projects(&w), "-work-proj", "defaultsess");
     std::env::set_var("CLAUDE_CONFIG_DIR", w.home.join(".claude"));
-    let mut roots = vec![w.default_projects(), w.home.join(".claude")];
+    let mut roots = vec![default_projects(&w), w.home.join(".claude")];
     #[cfg(unix)]
     {
         let link = w.base.join("link-to-claude");
@@ -262,7 +216,7 @@ fn a_root_named_twice_is_read_once() {
     std::env::set_var("CLUSTERVISION_CLAUDE_ROOTS", join(&roots));
 
     assert_eq!(discovered(), vec!["defaultsess"], "one directory, one listing");
-    assert_eq!(Claude::detect().roots().into_iter().next(), Some(w.default_projects()));
+    assert_eq!(Claude::detect().roots().into_iter().next(), Some(default_projects(&w)));
 }
 
 /// Two roots can hold the same session id — e.g. a transcript copied into a second config dir to
@@ -270,8 +224,8 @@ fn a_root_named_twice_is_read_once() {
 /// picks the most recently updated copy instead of an arbitrary one or an "ambiguous" error.
 #[test]
 fn same_id_in_two_roots_resolves_to_the_newest_copy() {
-    let w = World::new("dupid");
-    write_session_at(&w.default_projects(), "-work-proj", "dupsess", "2026-01-01T10:00:00Z");
+    let w = world("dupid");
+    write_session_at(&default_projects(&w), "-work-proj", "dupsess", "2026-01-01T10:00:00Z");
     let seat = w.base.join("seat/projects");
     let newer = write_session_at(&seat, "-work-proj", "dupsess", "2026-02-01T10:00:00Z");
     std::env::set_var("CLUSTERVISION_CLAUDE_ROOTS", &seat);
@@ -292,8 +246,8 @@ fn same_id_in_two_roots_resolves_to_the_newest_copy() {
 /// Each change is made after the watches settle, so no fudge-stamped mtime can be what finds it.
 #[test]
 fn catalog_sees_new_sessions_under_extra_roots() {
-    let w = World::new("fresh");
-    write_session(&w.default_projects(), "-work-proj", "defaultsess");
+    let w = world("fresh");
+    write_session(&default_projects(&w), "-work-proj", "defaultsess");
     let extra = w.base.join("extra/projects");
     write_session(&extra, "-work-proj", "extrasess");
     let seats = w.base.join("seats");

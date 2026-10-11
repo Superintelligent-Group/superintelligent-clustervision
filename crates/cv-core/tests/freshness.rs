@@ -2,77 +2,27 @@
 //! cold-catalog transparency, new-file / appended-file / vanished-dir detection, and the
 //! staleness-backstop escape hatch.
 //!
-//! These tests mutate process-global env (`HOME`, `CLUSTERVISION_HOME`), so every test holds a
-//! static mutex for its whole body (the `World` guard). They also `sleep` past the probe's 2s
+//! These tests mutate process-global env (`HOME`, `CLUSTERVISION_HOME`), so every test holds the
+//! testkit's process lock for its whole body (`cv_testkit::World::in_process`). They also `sleep` past the probe's 2s
 //! watch-fudge window where a test needs recorded (non-zero) watch mtimes to be the thing that
 //! detects a change.
 
 use cv_core::ir::{Harness, SessionRef};
+use cv_testkit::World;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
-
-static ENV: Mutex<()> = Mutex::new(());
 
 /// How long the recorded-watch fudge window is (catalog's WATCH_FUDGE = 2s) plus margin.
 const FUDGE: std::time::Duration = std::time::Duration::from_millis(2100);
 
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    _guard: MutexGuard<'static, ()>,
-}
-
-impl World {
-    fn new(tag: &str) -> World {
-        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let base = std::env::temp_dir().join(format!(
-            "cv-fresh-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        fs::create_dir_all(home.join(".claude/projects/-work-proj")).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        std::env::set_var("HOME", &home);
-        std::env::set_var("CLUSTERVISION_HOME", &cv_home);
-        std::env::set_var("XDG_CACHE_HOME", home.join(".cache"));
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-        std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
-        std::env::remove_var("CLUSTERVISION_MAX_STALE_SECS");
-        std::env::remove_var("CURSOR_USER_DIR");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
-        std::env::remove_var("CLUSTERVISION_CLAUDE_ROOTS");
-        World {
-            base,
-            home,
-            _guard: guard,
-        }
-    }
-
-    fn proj_dir(&self, proj: &str) -> PathBuf {
-        self.home.join(".claude/projects").join(proj)
-    }
-
-    /// Write a claude-format session of `n` user messages under project dir `proj`.
-    fn write_session(&self, proj: &str, name: &str, n: usize) -> PathBuf {
-        let dir = self.proj_dir(proj);
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{name}.jsonl"));
-        let body: String = (0..n).map(|i| user_line(name, i)).collect();
-        fs::write(&path, body).unwrap();
-        path
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).ok();
-    }
+/// Write a claude-format session of `n` user messages under project dir `proj`.
+fn write_session(w: &World, proj: &str, name: &str, n: usize) -> PathBuf {
+    let dir = w.home.join(".claude/projects").join(proj);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.jsonl"));
+    let body: String = (0..n).map(|i| user_line(name, i)).collect();
+    fs::write(&path, body).unwrap();
+    path
 }
 
 fn user_line(sid: &str, i: usize) -> String {
@@ -108,9 +58,9 @@ fn ids(refs: &[SessionRef]) -> Vec<String> {
 /// immediately-following warm read must agree exactly.
 #[test]
 fn cold_catalog_matches_discover_all() {
-    let w = World::new("cold");
-    w.write_session("-work-proj", "alphasess", 2);
-    w.write_session("-work-proj", "betasess", 3);
+    let w = World::in_process("cold");
+    write_session(&w, "-work-proj", "alphasess", 2);
+    write_session(&w, "-work-proj", "betasess", 3);
 
     let cold = cv_core::sessions(); // cold: no last_full_sync stamp yet
     assert_eq!(ids(&cold), vec!["alphasess", "betasess"], "cold read = full discovery");
@@ -129,14 +79,14 @@ fn cold_catalog_matches_discover_all() {
 /// A new *project directory* changes the root's mtime → also detected.
 #[test]
 fn new_session_files_detected() {
-    let w = World::new("new");
-    w.write_session("-work-proj", "alphasess", 2);
+    let w = World::in_process("new");
+    write_session(&w, "-work-proj", "alphasess", 2);
     cv_core::discover_all();
     std::thread::sleep(FUDGE); // age past the watch fudge…
     cv_core::sessions(); // …and re-record real (non-zero) watch mtimes
 
-    w.write_session("-work-proj", "betasess", 1); // new file in a watched dir
-    w.write_session("-work-other", "gammasess", 1); // new dir under the watched root
+    write_session(&w, "-work-proj", "betasess", 1); // new file in a watched dir
+    write_session(&w, "-work-other", "gammasess", 1); // new dir under the watched root
     let refs = cv_core::sessions();
     assert_eq!(ids(&refs), vec!["alphasess", "betasess", "gammasess"]);
 }
@@ -145,8 +95,8 @@ fn new_session_files_detected() {
 /// (against the scan cache's recorded `(mtime, size)`) must catch it.
 #[test]
 fn append_in_top_k_detected() {
-    let w = World::new("append");
-    let path = w.write_session("-work-proj", "alphasess", 2);
+    let w = World::in_process("append");
+    let path = write_session(&w, "-work-proj", "alphasess", 2);
     cv_core::discover_all();
     std::thread::sleep(FUDGE);
     cv_core::sessions(); // stabilize watches
@@ -165,9 +115,9 @@ fn append_in_top_k_detected() {
 /// must drop those sessions from the read path.
 #[test]
 fn vanished_sessions_dropped() {
-    let w = World::new("vanish");
-    let alpha_path = w.write_session("-work-proj", "alphasess", 2);
-    w.write_session("-work-other", "gammasess", 1);
+    let w = World::in_process("vanish");
+    let alpha_path = write_session(&w, "-work-proj", "alphasess", 2);
+    write_session(&w, "-work-other", "gammasess", 1);
     cv_core::discover_all();
     std::thread::sleep(FUDGE);
     cv_core::sessions();
@@ -178,7 +128,7 @@ fn vanished_sessions_dropped() {
 
     std::thread::sleep(FUDGE);
     cv_core::sessions();
-    fs::remove_dir_all(w.proj_dir("-work-other")).unwrap(); // watched dir itself vanishes
+    fs::remove_dir_all(w.home.join(".claude/projects/-work-other")).unwrap(); // watched dir itself vanishes
     let refs = cv_core::sessions();
     assert_eq!(
         ids(&refs),
@@ -191,8 +141,8 @@ fn vanished_sessions_dropped() {
 /// full discovery — what `cv ls --fresh` and `CLUSTERVISION_MAX_STALE_SECS=0` do — heals it.
 #[test]
 fn warm_path_reads_catalog_and_full_discovery_heals() {
-    let w = World::new("warm");
-    w.write_session("-work-proj", "alphasess", 2);
+    let w = World::in_process("warm");
+    write_session(&w, "-work-proj", "alphasess", 2);
     cv_core::discover_all();
     std::thread::sleep(FUDGE);
     cv_core::sessions();
@@ -234,7 +184,7 @@ fn warm_path_reads_catalog_and_full_discovery_heals() {
 /// keeps it (a scan-cache hit while the file is unchanged), so `cv ls` shows the real number.
 #[test]
 fn a_full_parse_fills_a_not_counted_catalog_row() {
-    let w = World::new("fill");
+    let w = World::in_process("fill");
     std::env::remove_var("CODEX_HOME");
     let dir = w.home.join(".codex/sessions/2026/01/01");
     fs::create_dir_all(&dir).unwrap();
@@ -313,11 +263,11 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
 /// resumed. Here `sessions()` still reports the old count while the watcher reports the append.
 #[test]
 fn a_follower_sees_an_append_the_catalog_probe_misses() {
-    let w = World::new("follow");
+    let w = World::in_process("follow");
     for k in 0..50 {
-        w.write_session("-work-proj", &format!("busy{k:02}"), 9); // updated 2026-01-09
+        write_session(&w, "-work-proj", &format!("busy{k:02}"), 9); // updated 2026-01-09
     }
-    let quiet = w.write_session("-work-proj", "quietsess", 1); // updated 2026-01-01: rank 51
+    let quiet = write_session(&w, "-work-proj", "quietsess", 1); // updated 2026-01-01: rank 51
     cv_core::discover_all();
     std::thread::sleep(FUDGE);
     cv_core::sessions();

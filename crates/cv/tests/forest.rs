@@ -3,109 +3,30 @@
 //! (transcript + the `<sid>/workflows/` state/scripts + `<sid>/subagents/` agent transcripts +
 //! journal) under a temp `$HOME`, then drives the real binary and asserts on its output.
 //!
-//! Mirrors `cli.rs`'s hermetic World (own `$HOME` + `$CLUSTERVISION_HOME`, env-only, parallel-safe).
+//! Hermetic through `cv_testkit::World` (own `$HOME` + `$CLUSTERVISION_HOME`, env-only, parallel-safe).
 
+use cv_testkit::{jsonl, World};
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
 
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    cv_home: PathBuf,
-    proj: PathBuf,
+/// A workflow *state* file `<sid>/workflows/<run>.json` + its script.
+fn write_workflow(w: &World, sid: &str, run: &str, state: &serde_json::Value, script: &str) {
+    let wdir = w.proj.join(sid).join("workflows");
+    let sdir = wdir.join("scripts");
+    fs::create_dir_all(&sdir).unwrap();
+    fs::write(wdir.join(format!("{run}.json")), serde_json::to_string(state).unwrap()).unwrap();
+    fs::write(sdir.join(format!("script-{run}.js")), script).unwrap();
 }
 
-impl World {
-    fn new(tag: &str) -> World {
-        let base = std::env::temp_dir().join(format!(
-            "cv-forest-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        let proj = home.join(".claude/projects/-work-proj");
-        fs::create_dir_all(&proj).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        World {
-            base,
-            home,
-            cv_home,
-            proj,
-        }
-    }
-
-    /// Write the parent transcript at `<sid>.jsonl`.
-    fn write_session(&self, sid: &str, lines: &[serde_json::Value]) {
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(self.proj.join(format!("{sid}.jsonl")), body).unwrap();
-    }
-
-    /// The sidecar dir `<sid>/` next to the transcript.
-    fn sidecar(&self, sid: &str) -> PathBuf {
-        self.proj.join(sid)
-    }
-
-    /// Write a workflow *state* file `<sid>/workflows/wf_<run>.json` + its script.
-    fn write_workflow(&self, sid: &str, run: &str, state: &serde_json::Value, script: &str) {
-        let wdir = self.sidecar(sid).join("workflows");
-        let sdir = wdir.join("scripts");
-        fs::create_dir_all(&sdir).unwrap();
-        fs::write(wdir.join(format!("{run}.json")), serde_json::to_string(state).unwrap()).unwrap();
-        fs::write(sdir.join(format!("script-{run}.js")), script).unwrap();
-    }
-
-    /// Write a workflow *agent* transcript + its meta + a journal under
-    /// `<sid>/subagents/workflows/<run>/`.
-    fn write_workflow_agent(&self, sid: &str, run: &str, agent_id: &str, lines: &[serde_json::Value]) {
-        let dir = self.sidecar(sid).join("subagents").join("workflows").join(run);
-        fs::create_dir_all(&dir).unwrap();
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(dir.join(format!("agent-{agent_id}.jsonl")), body).unwrap();
-        fs::write(
-            dir.join(format!("agent-{agent_id}.meta.json")),
-            r#"{"agentType":"workflow-subagent"}"#,
-        )
-        .unwrap();
-    }
-
-    fn cv(&self, args: &[&str]) -> (bool, i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_cv"))
-            .args(args)
-            .current_dir(&self.base)
-            .env("HOME", &self.home)
-            .env("CLUSTERVISION_HOME", &self.cv_home)
-            // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CLUSTERVISION_CLAUDE_ROOTS")
-            .env("XDG_CACHE_HOME", self.home.join(".cache"))
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("XDG_DATA_HOME", self.home.join(".local/share"))
-            .output()
-            .expect("cv should run");
-        (
-            out.status.success(),
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    fn cv_ok(&self, args: &[&str]) -> (String, String) {
-        let (ok, code, out, err) = self.cv(args);
-        assert!(ok, "cv {args:?} exited {code}\nstdout:\n{out}\nstderr:\n{err}");
-        (out, err)
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).ok();
-    }
+/// A workflow *agent* transcript + its meta under `<sid>/subagents/workflows/<run>/`.
+fn write_workflow_agent(w: &World, sid: &str, run: &str, agent_id: &str, lines: &[serde_json::Value]) {
+    let dir = w.proj.join(sid).join("subagents").join("workflows").join(run);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("agent-{agent_id}.jsonl")), jsonl(lines)).unwrap();
+    fs::write(
+        dir.join(format!("agent-{agent_id}.meta.json")),
+        r#"{"agentType":"workflow-subagent"}"#,
+    )
+    .unwrap();
 }
 
 fn user(uuid: &str, parent: Option<&str>, text: &str) -> serde_json::Value {
@@ -185,7 +106,8 @@ fn build_world(tag: &str) -> World {
 
     // One workflow run: 2 phases, 2 agents.
     let run = "wf_test-0001";
-    w.write_workflow(
+    write_workflow(
+        &w,
         sid,
         run,
         &serde_json::json!({
@@ -221,7 +143,8 @@ fn build_world(tag: &str) -> World {
     );
 
     // The two agents' transcripts (their tool calls become per-agent histograms).
-    w.write_workflow_agent(
+    write_workflow_agent(
+        &w,
         sid,
         run,
         "aBUILD",
@@ -241,7 +164,8 @@ fn build_world(tag: &str) -> World {
             ),
         ],
     );
-    w.write_workflow_agent(
+    write_workflow_agent(
+        &w,
         sid,
         run,
         "aVERIFY",

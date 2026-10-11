@@ -2,181 +2,121 @@
 //! `cv serve` HTTP endpoints (status codes, JSON shapes, query parsing) — all hermetic via a
 //! temp `$HOME` + `$CLUSTERVISION_HOME` passed only to child processes.
 
+use cv_testkit::World;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    cv_home: PathBuf,
+/// A world with the two-session fixture corpus every test starts from.
+fn world(tag: &str) -> World {
+    let w = World::new(tag);
+    write_fixtures(&w);
+    w
 }
 
-impl World {
-    fn new(tag: &str) -> World {
-        let base = std::env::temp_dir().join(format!(
-            "cv-serve-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        fs::create_dir_all(home.join(".claude/projects/-work-proj")).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        let w = World { base, home, cv_home };
-        w.write_fixtures();
-        w
-    }
-
-    fn session_path(&self, name: &str) -> PathBuf {
-        self.home
-            .join(".claude/projects/-work-proj")
-            .join(format!("{name}.jsonl"))
-    }
-
-    fn write_fixtures(&self) {
-        let alpha = [
-            json!({"type": "ai-title", "aiTitle": "alpha adventures"}),
-            json!({"type": "user", "uuid": "u1", "timestamp": "2026-01-01T10:00:00Z",
-                   "cwd": "/work/proj",
-                   "message": {"role": "user", "content": "please fix the zebrafish migration"}}),
-            json!({"type": "assistant", "uuid": "a1", "timestamp": "2026-01-02T10:00:00Z",
-                   "message": {"role": "assistant", "content": [
-                       {"type": "text", "text": "done"}]}}),
-        ];
-        let beta = [
-            json!({"type": "user", "uuid": "b1", "timestamp": "2026-03-01T09:00:00Z",
-                   "cwd": "/work/proj",
-                   "message": {"role": "user", "content": "quokka census"}}),
-            json!({"type": "assistant", "uuid": "b2", "timestamp": "2026-03-01T09:05:00Z",
-                   "message": {"role": "assistant", "content": [
-                       {"type": "text", "text": "seventeen"}]}}),
-        ];
-        for (name, lines) in [("alphasess", &alpha[..]), ("betasess", &beta[..])] {
-            let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-            fs::write(self.session_path(name), body).unwrap();
-        }
-    }
-
-    fn cv_cmd(&self) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_cv"));
-        c.current_dir(&self.base)
-            .env("HOME", &self.home)
-            .env_remove("CV_SERVE_TOKEN") // hermetic: a token in the ambient env must not gate tests
-            .env_remove("CVD_TOKEN")
-            .env("CLUSTERVISION_HOME", &self.cv_home)
-            // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CLUSTERVISION_CLAUDE_ROOTS")
-            .env("XDG_CACHE_HOME", self.home.join(".cache"))
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("XDG_DATA_HOME", self.home.join(".local/share"));
-        c
-    }
-
-    /// A third, tool-heavy session (separate from `write_fixtures` so the sync tests' "2
-    /// discovered" counts hold): 6 messages with an Edit, a failing Bash, a clean Bash, and a
-    /// closing text — the raw material for the messages/events/touched endpoint tests.
-    fn write_gamma(&self) {
-        let lines = [
-            json!({"type": "user", "uuid": "g1", "timestamp": "2026-04-01T08:00:00Z",
-                   "cwd": "/work/proj",
-                   "message": {"role": "user", "content": "please refactor the pelican module"}}),
-            json!({"type": "assistant", "uuid": "g2", "timestamp": "2026-04-01T08:01:00Z",
-                   "message": {"role": "assistant", "content": [
-                       {"type": "tool_use", "id": "t1", "name": "Edit",
-                        "input": {"file_path": "src/pelican.rs", "old_string": "a", "new_string": "b"}}]}}),
-            json!({"type": "user", "uuid": "g3", "timestamp": "2026-04-01T08:02:00Z",
-                   "message": {"role": "user", "content": [
-                       {"type": "tool_result", "tool_use_id": "t1",
-                        "content": "error[E0308]: mismatched types", "is_error": true}]}}),
-            json!({"type": "assistant", "uuid": "g4", "timestamp": "2026-04-01T08:03:00Z",
-                   "message": {"role": "assistant", "content": [
-                       {"type": "tool_use", "id": "t2", "name": "Bash",
-                        "input": {"command": "cargo test -p pelican"}}]}}),
-            json!({"type": "user", "uuid": "g5", "timestamp": "2026-04-01T08:04:00Z",
-                   "message": {"role": "user", "content": [
-                       {"type": "tool_result", "tool_use_id": "t2",
-                        "content": "all tests pass", "is_error": false}]}}),
-            json!({"type": "assistant", "uuid": "g6", "timestamp": "2026-04-01T08:05:00Z",
-                   "message": {"role": "assistant", "content": [
-                       {"type": "text", "text": "done refactoring"}]}}),
-        ];
+fn write_fixtures(w: &World) {
+    let alpha = [
+        json!({"type": "ai-title", "aiTitle": "alpha adventures"}),
+        json!({"type": "user", "uuid": "u1", "timestamp": "2026-01-01T10:00:00Z",
+               "cwd": "/work/proj",
+               "message": {"role": "user", "content": "please fix the zebrafish migration"}}),
+        json!({"type": "assistant", "uuid": "a1", "timestamp": "2026-01-02T10:00:00Z",
+               "message": {"role": "assistant", "content": [
+                   {"type": "text", "text": "done"}]}}),
+    ];
+    let beta = [
+        json!({"type": "user", "uuid": "b1", "timestamp": "2026-03-01T09:00:00Z",
+               "cwd": "/work/proj",
+               "message": {"role": "user", "content": "quokka census"}}),
+        json!({"type": "assistant", "uuid": "b2", "timestamp": "2026-03-01T09:05:00Z",
+               "message": {"role": "assistant", "content": [
+                   {"type": "text", "text": "seventeen"}]}}),
+    ];
+    for (name, lines) in [("alphasess", &alpha[..]), ("betasess", &beta[..])] {
         let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(self.session_path("gammasess"), body).unwrap();
-    }
-
-    /// A session with a compaction boundary (a `compact_boundary` system record carrying
-    /// `compactMetadata`), so the `/compactions` endpoint has a boundary to surface.
-    fn write_compacted(&self) {
-        let lines = [
-            json!({"type": "user", "uuid": "c1", "timestamp": "2026-05-01T08:00:00Z",
-                   "message": {"role": "user", "content": "long conversation begins"}}),
-            json!({"type": "assistant", "uuid": "c2", "timestamp": "2026-05-01T08:01:00Z",
-                   "message": {"role": "assistant", "content": [{"type": "text", "text": "working"}]}}),
-            json!({"type": "system", "uuid": "c3", "subtype": "compact_boundary",
-                   "timestamp": "2026-05-01T08:02:00Z", "content": "Conversation compacted",
-                   "compactMetadata": {"trigger": "manual", "preTokens": 900000, "postTokens": 12000,
-                                       "durationMs": 120000, "preCompactDiscoveredTools": ["Bash", "Read"]}}),
-            // The seed of the next window: an `isCompactSummary` message whose parentUuid is the
-            // boundary's uuid — its body is the summary detect() pairs and keeps.
-            json!({"type": "user", "uuid": "c4", "parentUuid": "c3", "isCompactSummary": true,
-                   "timestamp": "2026-05-01T08:03:00Z",
-                   "message": {"role": "user", "content": "Summary: the user asked for X; we did Y."}}),
-            json!({"type": "assistant", "uuid": "c5", "timestamp": "2026-05-01T08:04:00Z",
-                   "message": {"role": "assistant", "content": [{"type": "text", "text": "resumed"}]}}),
-        ];
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(self.session_path("compactsess"), body).unwrap();
-    }
-
-    /// Plant a workflow driving-script sidecar for `alphasess` so the `/workflow/{wf}/script`
-    /// endpoint has something to serve: `<session>/workflows/scripts/<slug>-<wf>.js`.
-    fn write_workflow_script(&self, wf: &str, body: &str) {
-        let dir = self
-            .home
-            .join(".claude/projects/-work-proj/alphasess/workflows/scripts");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(format!("my-cool-flow-{wf}.js")), body).unwrap();
-    }
-
-    /// Build a tiny static web root (mirroring the repo's `web/`) so `serve --web` can be tested:
-    /// an `index.html`, a JS asset under a subdir, and a "secret" file *outside* the root that a
-    /// path-traversal attempt must never reach.
-    fn write_web_root(&self) -> PathBuf {
-        let web = self.base.join("web");
-        fs::create_dir_all(web.join("components")).unwrap();
-        fs::write(web.join("index.html"), "<!doctype html><title>cv dash</title>").unwrap();
-        fs::write(web.join("components/cv-forest.js"), "export const FOREST = 1;\n").unwrap();
-        // A file a `../` escape would try to read; it lives beside (not under) the web root.
-        fs::write(self.base.join("secret.txt"), "TOP SECRET").unwrap();
-        web
-    }
-
-    /// Run a cv subcommand to completion; returns (stdout, stderr), asserting success.
-    fn cv(&self, args: &[&str]) -> (String, String) {
-        let out = self.cv_cmd().args(args).output().expect("cv should run");
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert!(
-            out.status.success(),
-            "cv {args:?} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        (stdout, stderr)
+        fs::write(w.transcript(name), body).unwrap();
     }
 }
 
-impl Drop for World {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).ok();
-    }
+/// A third, tool-heavy session (separate from `write_fixtures` so the sync tests' "2
+/// discovered" counts hold): 6 messages with an Edit, a failing Bash, a clean Bash, and a
+/// closing text — the raw material for the messages/events/touched endpoint tests.
+fn write_gamma(w: &World) {
+    let lines = [
+        json!({"type": "user", "uuid": "g1", "timestamp": "2026-04-01T08:00:00Z",
+               "cwd": "/work/proj",
+               "message": {"role": "user", "content": "please refactor the pelican module"}}),
+        json!({"type": "assistant", "uuid": "g2", "timestamp": "2026-04-01T08:01:00Z",
+               "message": {"role": "assistant", "content": [
+                   {"type": "tool_use", "id": "t1", "name": "Edit",
+                    "input": {"file_path": "src/pelican.rs", "old_string": "a", "new_string": "b"}}]}}),
+        json!({"type": "user", "uuid": "g3", "timestamp": "2026-04-01T08:02:00Z",
+               "message": {"role": "user", "content": [
+                   {"type": "tool_result", "tool_use_id": "t1",
+                    "content": "error[E0308]: mismatched types", "is_error": true}]}}),
+        json!({"type": "assistant", "uuid": "g4", "timestamp": "2026-04-01T08:03:00Z",
+               "message": {"role": "assistant", "content": [
+                   {"type": "tool_use", "id": "t2", "name": "Bash",
+                    "input": {"command": "cargo test -p pelican"}}]}}),
+        json!({"type": "user", "uuid": "g5", "timestamp": "2026-04-01T08:04:00Z",
+               "message": {"role": "user", "content": [
+                   {"type": "tool_result", "tool_use_id": "t2",
+                    "content": "all tests pass", "is_error": false}]}}),
+        json!({"type": "assistant", "uuid": "g6", "timestamp": "2026-04-01T08:05:00Z",
+               "message": {"role": "assistant", "content": [
+                   {"type": "text", "text": "done refactoring"}]}}),
+    ];
+    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(w.transcript("gammasess"), body).unwrap();
+}
+
+/// A session with a compaction boundary (a `compact_boundary` system record carrying
+/// `compactMetadata`), so the `/compactions` endpoint has a boundary to surface.
+fn write_compacted(w: &World) {
+    let lines = [
+        json!({"type": "user", "uuid": "c1", "timestamp": "2026-05-01T08:00:00Z",
+               "message": {"role": "user", "content": "long conversation begins"}}),
+        json!({"type": "assistant", "uuid": "c2", "timestamp": "2026-05-01T08:01:00Z",
+               "message": {"role": "assistant", "content": [{"type": "text", "text": "working"}]}}),
+        json!({"type": "system", "uuid": "c3", "subtype": "compact_boundary",
+               "timestamp": "2026-05-01T08:02:00Z", "content": "Conversation compacted",
+               "compactMetadata": {"trigger": "manual", "preTokens": 900000, "postTokens": 12000,
+                                   "durationMs": 120000, "preCompactDiscoveredTools": ["Bash", "Read"]}}),
+        // The seed of the next window: an `isCompactSummary` message whose parentUuid is the
+        // boundary's uuid — its body is the summary detect() pairs and keeps.
+        json!({"type": "user", "uuid": "c4", "parentUuid": "c3", "isCompactSummary": true,
+               "timestamp": "2026-05-01T08:03:00Z",
+               "message": {"role": "user", "content": "Summary: the user asked for X; we did Y."}}),
+        json!({"type": "assistant", "uuid": "c5", "timestamp": "2026-05-01T08:04:00Z",
+               "message": {"role": "assistant", "content": [{"type": "text", "text": "resumed"}]}}),
+    ];
+    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(w.transcript("compactsess"), body).unwrap();
+}
+
+/// Plant a workflow driving-script sidecar for `alphasess` so the `/workflow/{wf}/script`
+/// endpoint has something to serve: `<session>/workflows/scripts/<slug>-<wf>.js`.
+fn write_workflow_script(w: &World, wf: &str, body: &str) {
+    let dir = w.home.join(".claude/projects/-work-proj/alphasess/workflows/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("my-cool-flow-{wf}.js")), body).unwrap();
+}
+
+/// Build a tiny static web root (mirroring the repo's `web/`) so `serve --web` can be tested:
+/// an `index.html`, a JS asset under a subdir, and a "secret" file *outside* the root that a
+/// path-traversal attempt must never reach.
+fn write_web_root(w: &World) -> PathBuf {
+    let web = w.base.join("web");
+    fs::create_dir_all(web.join("components")).unwrap();
+    fs::write(web.join("index.html"), "<!doctype html><title>cv dash</title>").unwrap();
+    fs::write(web.join("components/cv-forest.js"), "export const FOREST = 1;\n").unwrap();
+    // A file a `../` escape would try to read; it lives beside (not under) the web root.
+    fs::write(w.base.join("secret.txt"), "TOP SECRET").unwrap();
+    web
 }
 
 fn count_lines(p: &Path) -> usize {
@@ -191,10 +131,10 @@ fn count_lines(p: &Path) -> usize {
 
 #[test]
 fn sync_is_idempotent() {
-    let w = World::new("sync");
+    let w = world("sync");
 
     // First sync archives both sessions.
-    let (out, _) = w.cv(&["archive", "sync"]);
+    let (out, _) = w.cv_ok(&["archive", "sync"]);
     assert!(
         out.contains("2 archived, 0 skipped (unchanged) of 2 discovered"),
         "{out}"
@@ -204,7 +144,7 @@ fn sync_is_idempotent() {
     assert_eq!(count_lines(&w.cv_home.join("catalog.jsonl")), 2);
 
     // Second sync: nothing changed → nothing rewritten, no duplicate catalog rows.
-    let (out, _) = w.cv(&["archive", "sync"]);
+    let (out, _) = w.cv_ok(&["archive", "sync"]);
     assert!(
         out.contains("0 archived, 2 skipped (unchanged) of 2 discovered"),
         "{out}"
@@ -212,27 +152,27 @@ fn sync_is_idempotent() {
     assert_eq!(count_lines(&w.cv_home.join("catalog.jsonl")), 2, "no dupes on resync");
 
     // ls shows each session exactly once.
-    let (out, _) = w.cv(&["archive", "ls"]);
+    let (out, _) = w.cv_ok(&["archive", "ls"]);
     assert!(out.contains("2 session(s)"), "{out}");
     assert_eq!(out.matches("alphases").count(), 1, "{out}");
     assert!(out.contains("alpha adventures"), "{out}");
 
     // Append a turn to one session: only that one re-archives; the catalog dedupes by key.
-    let mut body = fs::read_to_string(w.session_path("alphasess")).unwrap();
+    let mut body = fs::read_to_string(w.transcript("alphasess")).unwrap();
     body.push_str(
         &json!({"type": "user", "uuid": "u9", "timestamp": "2026-06-02T10:00:00Z",
                 "message": {"role": "user", "content": "one more thing"}})
         .to_string(),
     );
     body.push('\n');
-    fs::write(w.session_path("alphasess"), body).unwrap();
+    fs::write(w.transcript("alphasess"), body).unwrap();
 
-    let (out, _) = w.cv(&["archive", "sync"]);
+    let (out, _) = w.cv_ok(&["archive", "sync"]);
     assert!(
         out.contains("1 archived, 1 skipped (unchanged) of 2 discovered"),
         "{out}"
     );
-    let (out, _) = w.cv(&["archive", "ls"]);
+    let (out, _) = w.cv_ok(&["archive", "ls"]);
     assert!(
         out.contains("2 session(s)"),
         "changed session must not duplicate:\n{out}"
@@ -249,10 +189,10 @@ fn sync_is_idempotent() {
 
 #[test]
 fn ls_and_path_on_empty_archive() {
-    let w = World::new("empty");
-    let (out, _) = w.cv(&["archive", "ls"]);
+    let w = world("empty");
+    let (out, _) = w.cv_ok(&["archive", "ls"]);
     assert!(out.contains("archive empty"), "{out}");
-    let (out, _) = w.cv(&["archive", "path"]);
+    let (out, _) = w.cv_ok(&["archive", "path"]);
     assert_eq!(out.trim(), w.cv_home.display().to_string(), "{out}");
 }
 
@@ -349,7 +289,7 @@ fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Re
     let mut args: Vec<String> = vec!["serve".into(), "--port".into(), "0".into()];
     args.extend(extra.iter().map(|s| s.to_string()));
     let mut child = w
-        .cv_cmd()
+        .cv_command()
         .args(&args)
         .envs(envs.iter().copied())
         .stdout(Stdio::piped())
@@ -433,7 +373,7 @@ fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Re
 
 #[test]
 fn serve_endpoints() {
-    let w = World::new("serve");
+    let w = world("serve");
     let (port, _reaper) = spawn_serve(&w);
 
     // health
@@ -563,8 +503,8 @@ fn serve_endpoints() {
 /// end), per-session events with on-the-spot ingest, and the touched lookup.
 #[test]
 fn serve_messages_events_touched() {
-    let w = World::new("window");
-    w.write_gamma();
+    let w = world("window");
+    write_gamma(&w);
     let (port, _reaper) = spawn_serve(&w);
 
     // A middle window [2, 4): exactly 2 messages, indices echoed back, more beyond it, and the
@@ -713,8 +653,12 @@ fn serve_messages_events_touched() {
 /// run, and rejects a path-y run id.
 #[test]
 fn serve_workflow_script() {
-    let w = World::new("wfscript");
-    w.write_workflow_script("wf_abc123", "// drive the swarm\nconst phases = ['plan','build'];\n");
+    let w = world("wfscript");
+    write_workflow_script(
+        &w,
+        "wf_abc123",
+        "// drive the swarm\nconst phases = ['plan','build'];\n",
+    );
     let (port, _reaper) = spawn_serve(&w);
 
     // Found by run-id suffix (filename is `my-cool-flow-wf_abc123.js`).
@@ -749,8 +693,8 @@ fn serve_workflow_script() {
 /// never reached. It also pins the §3 row keys, so this door and `cv ls --json` agree.
 #[test]
 fn serve_session_head() {
-    let w = World::new("head");
-    w.write_fixtures();
+    let w = world("head");
+    write_fixtures(&w);
     let (port, _reaper) = spawn_serve(&w);
 
     let (status, v) = get_json(port, "/api/session/claude/alphasess/head");
@@ -788,9 +732,9 @@ fn serve_session_head() {
 /// which reads like a server misconfiguration rather than a missing file.
 #[test]
 fn serve_static_missing_asset_is_404_not_the_index() {
-    let w = World::new("static");
-    w.write_fixtures();
-    let webroot = w.write_web_root();
+    let w = world("static");
+    write_fixtures(&w);
+    let webroot = write_web_root(&w);
     let (port, _reaper) = spawn_serve_with(&w, &["--web", webroot.to_str().unwrap()]);
 
     let (status, ct, _) = get_raw(port, "/pkg/cv_web.js");
@@ -810,8 +754,8 @@ fn serve_static_missing_asset_is_404_not_the_index() {
 
 #[test]
 fn serve_compactions() {
-    let w = World::new("compact");
-    w.write_compacted();
+    let w = world("compact");
+    write_compacted(&w);
     let (port, _reaper) = spawn_serve(&w);
 
     // The dedicated scan (built on cv_core::compaction::detect) finds the one boundary, pairs it
@@ -875,8 +819,8 @@ fn serve_compactions() {
 /// path-traversal confined to the web root and an SPA `index.html` fallback for unknown paths.
 #[test]
 fn serve_static_web_hub() {
-    let w = World::new("webhub");
-    let web = w.write_web_root();
+    let w = world("webhub");
+    let web = write_web_root(&w);
     let (port, _reaper) = spawn_serve_with(&w, &["--web", web.to_str().unwrap()]);
 
     // `/` serves index.html with an HTML content type.
@@ -927,7 +871,7 @@ fn serve_static_web_hub() {
 /// the user happens to visit can't read the corpus cross-origin.
 #[test]
 fn serve_cors_allowlist() {
-    let w = World::new("cors");
+    let w = world("cors");
     let (port, _reaper) = spawn_serve(&w);
 
     for origin in [
@@ -984,7 +928,7 @@ fn serve_cors_allowlist() {
 fn serve_tasks_routes() {
     use cv_core::task::{new_event, TaskEventKind, TaskStore};
 
-    let w = World::new("tasks");
+    let w = world("tasks");
     let store = TaskStore::at(w.cv_home.join("tasks"));
     let opened = store
         .append_agent_event(new_event(
@@ -1092,7 +1036,7 @@ fn serve_tasks_routes() {
 /// pass, a rebound domain is a 403 before any route logic runs.
 #[test]
 fn serve_host_validation() {
-    let w = World::new("host");
+    let w = world("host");
     let (port, _reaper) = spawn_serve(&w);
 
     for host in [
@@ -1117,7 +1061,7 @@ fn serve_host_validation() {
 /// credential-less OPTIONS preflight stays exempt. Both `--token` and `$CV_SERVE_TOKEN` wire it up.
 #[test]
 fn serve_token_auth() {
-    let w = World::new("token");
+    let w = world("token");
     let (port, _reaper) = spawn_serve_with(&w, &["--token", "opensesame"]);
 
     let raw = raw_request(port, "GET", "/api/sessions", &[]);
@@ -1145,9 +1089,9 @@ fn serve_token_auth() {
 /// exposure demands a token or an explicit `--insecure-expose`.
 #[test]
 fn serve_refuses_bare_public_bind() {
-    let w = World::new("expose");
+    let w = world("expose");
     let out = w
-        .cv_cmd()
+        .cv_command()
         .args(["serve", "--host", "0.0.0.0", "--port", "0"])
         .output()
         .expect("cv should run");
@@ -1203,7 +1147,7 @@ const SEARCH_ROW_KEYS: [&str; 14] = [
 /// and SAY it degraded.
 #[test]
 fn serve_search() {
-    let w = World::new("search");
+    let w = world("search");
     let (port, _reaper) = spawn_serve(&w);
 
     // A word only `alphasess` says. One row, and the row is the §3 search row.
@@ -1292,8 +1236,8 @@ fn serve_search() {
 /// rather than over whatever the dashboard happened to have open.
 #[test]
 fn serve_stats() {
-    let w = World::new("stats");
-    w.write_gamma();
+    let w = world("stats");
+    write_gamma(&w);
     let (port, _reaper) = spawn_serve(&w);
 
     let (status, v) = get_json(port, "/api/stats");
@@ -1420,7 +1364,7 @@ fn raw_post(port: u16, path: &str, body: &str, headers: &[(&str, &str)]) -> Stri
 #[test]
 fn serve_carries_the_inbox_and_guards_its_writes() {
     use cv_core::task::{new_event, TaskEventKind, TaskStore};
-    let w = World::new("inbox");
+    let w = world("inbox");
     let store = TaskStore::at(w.cv_home.join("tasks"));
     let opened = store
         .append_agent_event(new_event(
@@ -1496,22 +1440,26 @@ fn serve_carries_the_inbox_and_guards_its_writes() {
 /// The removed names answer with a pointer and exit 2, never silently.
 #[test]
 fn removed_server_spellings_point_at_cv_serve() {
-    let w = World::new("removed");
+    let w = world("removed");
     let out = w
-        .cv_cmd()
+        .cv_command()
         .args(["task", "serve", "--bind", "0.0.0.0:7777"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("`cv serve`"));
     let out = w
-        .cv_cmd()
+        .cv_command()
         .args(["serve", "--port", "0"])
         .env("CVD_TOKEN", "x")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("CV_SERVE_TOKEN"));
-    let out = w.cv_cmd().args(["watch", "--verify-interval", "60"]).output().unwrap();
+    let out = w
+        .cv_command()
+        .args(["watch", "--verify-interval", "60"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }

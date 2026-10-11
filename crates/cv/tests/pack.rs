@@ -1,103 +1,17 @@
 //! End-to-end `cv pack`: a hermetic temp-HOME claude corpus with distinct topics + events, then
-//! the actual binary is run against it (same pattern as tests/cli.rs — env is only ever passed to
-//! the spawned process, so tests parallelize safely).
+//! the actual binary is run against it through `cv_testkit::World` (env is only ever passed to the
+//! spawned process, so tests parallelize safely).
 
+use claude::user as user_line;
+use cv_testkit::{claude, World};
 use std::path::PathBuf;
-use std::process::Command;
 use std::{fs, str};
 
-/// One temp world: a fake `$HOME` (with `.claude/projects` fixtures) + a `$CLUSTERVISION_HOME`.
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    cv_home: PathBuf,
-}
-
-impl World {
-    fn new(tag: &str) -> World {
-        let base = std::env::temp_dir().join(format!(
-            "cv-pack-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        fs::create_dir_all(home.join(".claude/projects/-work-proj")).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        World { base, home, cv_home }
-    }
-
-    fn write_session(&self, name: &str, lines: &[serde_json::Value]) -> PathBuf {
-        let path = self
-            .home
-            .join(".claude/projects/-work-proj")
-            .join(format!("{name}.jsonl"));
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(&path, body).unwrap();
-        path
-    }
-
-    fn cv(&self, args: &[&str]) -> (bool, i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_cv"))
-            .args(args)
-            .current_dir(&self.base)
-            .env("HOME", &self.home)
-            .env("CLUSTERVISION_HOME", &self.cv_home)
-            // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CLUSTERVISION_CLAUDE_ROOTS")
-            .env_remove("CV_PACK_LLM") // tests must exercise the zero-network digest
-            .env("XDG_CACHE_HOME", self.home.join(".cache"))
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("XDG_DATA_HOME", self.home.join(".local/share"))
-            .output()
-            .expect("cv should run");
-        (
-            out.status.success(),
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    fn cv_ok(&self, args: &[&str]) -> (String, String) {
-        let (ok, code, out, err) = self.cv(args);
-        assert!(ok, "cv {args:?} exited {code}\nstdout:\n{out}\nstderr:\n{err}");
-        (out, err)
-    }
-
-    fn cv_fails(&self, args: &[&str]) -> (String, String) {
-        let (ok, code, out, err) = self.cv(args);
-        assert!(!ok, "cv {args:?} unexpectedly succeeded\nstdout:\n{out}");
-        assert_ne!(code, -1, "cv {args:?} died by signal (panic/abort?)\nstderr:\n{err}");
-        assert!(!err.contains("panicked"), "cv {args:?} panicked:\n{err}");
-        (out, err)
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).ok();
-    }
-}
-
-fn user_line(uuid: &str, ts: &str, text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "user", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "cwd": "/work/proj",
-        "message": {"role": "user", "content": text}
-    })
-}
-
 fn assistant_line(uuid: &str, ts: &str, blocks: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "type": "assistant", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "cwd": "/work/proj",
-        "message": {"role": "assistant", "model": "claude-test-1", "content": blocks}
-    })
+    claude::with(
+        claude::assistant(uuid, ts, "claude-test-1", blocks),
+        serde_json::json!({"cwd": "/work/proj"}),
+    )
 }
 
 /// Three tiny sessions with distinct topics:

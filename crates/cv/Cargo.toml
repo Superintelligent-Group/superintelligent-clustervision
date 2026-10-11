@@ -35,3 +35,6 @@ ureq = { version = "2", features = ["json"] }
 # the query-string encoder its banner uses.
 tiny_http = { version = "0.12", default-features = false }
 urlencoding = "2"
+
+[dev-dependencies]
+cv-testkit = { path = "../cv-testkit" }

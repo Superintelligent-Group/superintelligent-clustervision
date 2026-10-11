@@ -315,6 +315,7 @@ dependencies = [
  "clap",
  "clustervision-core",
  "cv-search",
+ "cv-testkit",
  "libc",
  "regex",
  "serde",
@@ -331,6 +332,7 @@ version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "cv-testkit",
  "dirs 5.0.1",
  "fs4",
  "memmap2",
@@ -453,6 +455,13 @@ dependencies = [
  "serde_json",
  "tantivy",
  "uuid",
+]
+
+[[package]]
+name = "cv-testkit"
+version = "0.14.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

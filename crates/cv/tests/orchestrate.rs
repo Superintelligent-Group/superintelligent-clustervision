@@ -3,158 +3,43 @@
 //! prompts, slash-command bookkeeping rows, an `AskUserQuestion` answer, a compaction, deferral
 //! phrases in the replies and the `queue-operation` notifications the harness writes when a child
 //! stops — plus a `subagents/` dir with one completed, one stranded and one running lane — and
-//! drives the real binary. Mirrors `forest.rs`'s World (own `$HOME` + `$CLUSTERVISION_HOME`).
+//! drives the real binary through `cv_testkit::World` (own `$HOME` + `$CLUSTERVISION_HOME`).
 
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use cv_testkit::claude::{self, compact_summary, notification, subagent_stop, tool_result, tool_use, user};
+use cv_testkit::World;
+use serde_json::json;
 
-struct World {
-    base: PathBuf,
-    home: PathBuf,
-    cv_home: PathBuf,
-    proj: PathBuf,
-}
-
-impl World {
-    fn new(tag: &str) -> World {
-        let base = std::env::temp_dir().join(format!(
-            "cv-orch-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        let proj = home.join(".claude/projects/-work-proj");
-        fs::create_dir_all(&proj).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
-        World {
-            base,
-            home,
-            cv_home,
-            proj,
-        }
-    }
-
-    fn write_session(&self, sid: &str, lines: &[serde_json::Value]) {
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(self.proj.join(format!("{sid}.jsonl")), body).unwrap();
-    }
-
-    /// A directly-spawned (`Agent`-tool) sub-agent: `<sid>/subagents/agent-<id>.jsonl` + meta.
-    fn write_agent(&self, sid: &str, agent_id: &str, description: &str, lines: &[serde_json::Value]) {
-        let dir = self.proj.join(sid).join("subagents");
-        fs::create_dir_all(&dir).unwrap();
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        fs::write(dir.join(format!("agent-{agent_id}.jsonl")), body).unwrap();
-        fs::write(
-            dir.join(format!("agent-{agent_id}.meta.json")),
-            serde_json::json!({
-                "agentType": "general-purpose",
-                "description": description,
-                "toolUseId": format!("toolu_{agent_id}"),
-                "model": "opus"
-            })
-            .to_string(),
-        )
-        .unwrap();
-    }
-
-    fn cv(&self, args: &[&str]) -> (bool, i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_cv"))
-            .args(args)
-            .current_dir(&self.base)
-            .env("HOME", &self.home)
-            .env("CLUSTERVISION_HOME", &self.cv_home)
-            .env("XDG_CACHE_HOME", self.home.join(".cache"))
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("XDG_DATA_HOME", self.home.join(".local/share"))
-            .env_remove("CV_ENDPOINT")
-            .output()
-            .expect("cv should run");
-        (
-            out.status.success(),
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    fn cv_ok(&self, args: &[&str]) -> (String, String) {
-        let (ok, code, out, err) = self.cv(args);
-        assert!(ok, "cv {args:?} exited {code}\nstdout:\n{out}\nstderr:\n{err}");
-        (out, err)
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.base).ok();
-    }
-}
-
-fn user(uuid: &str, ts: &str, text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "user", "uuid": uuid, "sessionId": "s", "timestamp": ts, "cwd": "/work/proj",
-        "message": {"role": "user", "content": text}
-    })
+/// A directly-spawned (`Agent`-tool) sub-agent of `sid` with its meta.
+fn write_agent(w: &World, sid: &str, agent_id: &str, description: &str, lines: &[serde_json::Value]) {
+    let meta = json!({
+        "agentType": "general-purpose",
+        "description": description,
+        "toolUseId": format!("toolu_{agent_id}"),
+        "model": "opus"
+    });
+    w.write_agent(sid, agent_id, &meta, lines);
 }
 
 fn assistant(uuid: &str, ts: &str, text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "assistant", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "message": {"role": "assistant", "model": "claude-opus-4-1-20250805", "id": format!("msg_{uuid}"),
-            "content": [{"type": "text", "text": text}],
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 1000}}
-    })
+    claude::reply(
+        uuid,
+        ts,
+        json!([{"type": "text", "text": text}]),
+        json!({"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 1000}),
+    )
 }
 
 fn assistant_tool(uuid: &str, ts: &str, name: &str, input: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "type": "assistant", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "message": {"role": "assistant", "model": "claude-opus-4-1-20250805", "id": format!("msg_{uuid}"),
-            "content": [{"type": "tool_use", "id": format!("toolu_{uuid}"), "name": name, "input": input}],
-            "usage": {"input_tokens": 10, "output_tokens": 5}}
-    })
-}
-
-fn tool_result(uuid: &str, ts: &str, tool_use_id: &str, content: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "user", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": content}]}
-    })
-}
-
-fn subagent_stop(uuid: &str, ts: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "attachment", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "attachment": {"type": "hook_success", "hookName": "SubagentStop", "hookEvent": "SubagentStop", "content": ""}
-    })
-}
-
-fn notification(ts: &str, agent_id: &str, status: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "queue-operation", "operation": "enqueue", "timestamp": ts, "sessionId": "s",
-        "content": format!("<task-notification>\n<task-id>{agent_id}</task-id>\n<status>{status}</status>\n<summary>done</summary>\n</task-notification>")
-    })
+    claude::reply(
+        uuid,
+        ts,
+        json!([tool_use(&format!("toolu_{uuid}"), name, input)]),
+        json!({"input_tokens": 10, "output_tokens": 5}),
+    )
 }
 
 fn boundary(uuid: &str, ts: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "system", "subtype": "compact_boundary", "uuid": uuid, "sessionId": "s", "timestamp": ts,
-        "content": "Conversation compacted",
-        "compactMetadata": {"trigger": "manual", "preTokens": 900000, "durationMs": 1000}
-    })
-}
-
-fn compact_summary(uuid: &str, ts: &str, body: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "user", "uuid": uuid, "isCompactSummary": true, "sessionId": "s", "timestamp": ts,
-        "message": {"role": "user", "content": body}
-    })
+    claude::boundary(uuid, ts, "manual", 900_000)
 }
 
 const SID: &str = "orchsess";
@@ -184,7 +69,8 @@ fn build_world(tag: &str) -> World {
         ],
     );
     // aaa1: finished cleanly.
-    w.write_agent(
+    write_agent(
+        &w,
         SID,
         "aaa1",
         "LANE-A: the first lane",
@@ -206,7 +92,8 @@ fn build_world(tag: &str) -> World {
         ],
     );
     // bbb2: stopped on a promise — the strand class.
-    w.write_agent(
+    write_agent(
+        &w,
         SID,
         "bbb2",
         "LANE-B: waits on a build",
@@ -228,7 +115,8 @@ fn build_world(tag: &str) -> World {
         ],
     );
     // ccc3: still running (no stop, no notification), mid tool call.
-    w.write_agent(
+    write_agent(
+        &w,
         SID,
         "ccc3",
         "LANE-C: still at it",
@@ -245,7 +133,8 @@ fn build_world(tag: &str) -> World {
     );
     // ddd4: finished — the transcript ends in a final report — but no SubagentStop and no
     // <task-notification> ever recorded it (the harness restarted). It must not read as running.
-    w.write_agent(
+    write_agent(
+        &w,
         SID,
         "ddd4",
         "LANE-D: lost notification",
@@ -587,7 +476,7 @@ fn lanes_failure_cause_from_the_transcript() {
             tool_result(&format!("{id}2"), "2026-10-01T19:01:00Z", &format!("toolu_{id}1"), "ok"),
         ];
         lines.extend(tail);
-        w.write_agent(SID, id, desc, &lines);
+        write_agent(&w, SID, id, desc, &lines);
     };
     run(
         "eee5",
@@ -682,7 +571,8 @@ fn lanes_endpoint_comes_from_the_lanes_own_shell_exports_only() {
         ],
     );
     let brief = "You are lane CHILD. First: export CV_ENDPOINT=lane:child; cv task claim 01a0";
-    w.write_agent(
+    write_agent(
+        &w,
         SID,
         "ppp1",
         "PARENT: briefs a child, then works",
@@ -712,7 +602,8 @@ fn lanes_endpoint_comes_from_the_lanes_own_shell_exports_only() {
             assistant("p7", "2026-10-01T10:29:00Z", "Done."),
         ],
     );
-    w.write_agent(
+    write_agent(
+        &w,
         SID,
         "qqq2",
         "ONLYBRIEF: spawns and stops",

@@ -1,0 +1,12 @@
+[package]
+name = "cv-testkit"
+description = "The integration tests' one hermetic world: a temp $HOME, the real binary, Claude record builders."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true

@@ -6,11 +6,12 @@
 //! re-runs for a generated tool). The argv a generated call builds is pinned by `mcp_tools`' unit
 //! tests; these check the round trip through the real commands.
 
+use cv_testkit::World;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -20,24 +21,12 @@ struct Server {
     child: Child,
     stdin: ChildStdin,
     lines: mpsc::Receiver<String>,
-    base: PathBuf,
+    world: World,
 }
 
 impl Server {
     fn spawn(tag: &str) -> Server {
-        let base = std::env::temp_dir().join(format!(
-            "cv-mcp-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = base.join("home");
-        let cv_home = base.join("cvhome");
-        let proj = home.join(".claude/projects/-work-proj");
-        fs::create_dir_all(&proj).unwrap();
-        fs::create_dir_all(&cv_home).unwrap();
+        let world = World::new(tag);
 
         // Fixture corpus: two tiny claude sessions.
         let alpha = [
@@ -57,25 +46,15 @@ impl Server {
                    "message": {"role": "assistant", "content": [
                        {"type": "text", "text": "seventeen quokkas"}]}}),
         ];
-        for (name, lines) in [("alphasess", &alpha[..]), ("betasess", &beta[..])] {
-            let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
-            fs::write(proj.join(format!("{name}.jsonl")), body).unwrap();
-        }
+        world.write_session("alphasess", &alpha);
+        world.write_session("betasess", &beta);
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_cv"))
+        let mut child = world
+            .cv_command()
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .env("HOME", &home)
-            .env("CLUSTERVISION_HOME", &cv_home)
-            // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("CLUSTERVISION_CLAUDE_ROOTS")
-            .env_remove("CV_ENDPOINT") // hermetic: ambient identity must not leak into the tests
-            .env("XDG_CACHE_HOME", home.join(".cache"))
-            .env("XDG_CONFIG_HOME", home.join(".config"))
-            .env("XDG_DATA_HOME", home.join(".local/share"))
             .spawn()
             .expect("cv mcp should spawn");
 
@@ -93,7 +72,7 @@ impl Server {
             child,
             stdin,
             lines: rx,
-            base,
+            world,
         }
     }
 
@@ -148,7 +127,6 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        fs::remove_dir_all(&self.base).ok();
     }
 }
 
@@ -310,10 +288,7 @@ fn tool_calls_against_fixture_corpus() {
             "{name} must point at the replacement: {text}"
         );
     }
-    assert!(
-        !s.base.join("cvhome").join("board").exists(),
-        "nothing wrote a board dir"
-    );
+    assert!(!s.world.cv_home.join("board").exists(), "nothing wrote a board dir");
 }
 
 /// The task tools are `cv task <sub>` and drive the durable store end-to-end over the protocol:
@@ -561,7 +536,7 @@ fn observe_stream_bounded_read_only_tail() {
     assert_eq!(v["count"], 0, "no new activity → nothing drained: {text}");
 
     // 4) Append a NEW message to the alpha session on disk; the next cursor call drains exactly it.
-    let proj = s.base.join("home/.claude/projects/-work-proj");
+    let proj = s.world.proj.clone();
     let extra = json!({"type": "assistant", "uuid": "a2",
                        "timestamp": "2026-06-19T12:00:00Z",
                        "message": {"role": "assistant", "content": [
@@ -662,7 +637,7 @@ fn observe_stream_bounded_read_only_tail() {
 
     // 6) READ-ONLY: observe_stream writes nothing under $CLUSTERVISION_HOME but the index.
     assert!(
-        !s.base.join("cvhome").join("tasks").exists(),
+        !s.world.cv_home.join("tasks").exists(),
         "observe_stream must not write the task log"
     );
 }
