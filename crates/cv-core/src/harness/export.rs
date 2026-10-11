@@ -11,10 +11,10 @@
 //!   via `parent_message_uuid`; `sender` ∈ human/assistant; `content[]` blocks are
 //!   text/thinking/tool_use/tool_result.
 //!
-//! Distinct from `claude` (Claude Code JSONL). Exports have
-//! no fixed home, so discovery scans `$CV_EXPORTS` (`:`-separated dirs/files) or, by default,
-//! `~/Downloads` — for `conversations*.json` files. Set `CV_EXPORTS` to a tighter dir if scanning
-//! Downloads is slow.
+//! Distinct from `claude` (Claude Code JSONL). Exports have no fixed home, so discovery is
+//! **opt-in**: the sources registered with `cv config --add-export <path>`, unioned with
+//! `$CV_EXPORTS` (`:`-separated dirs/files), scanned for `conversations*.json`. With nothing
+//! registered no scan happens (see [`export_dirs`]).
 
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
