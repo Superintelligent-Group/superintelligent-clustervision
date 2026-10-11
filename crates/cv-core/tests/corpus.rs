@@ -195,7 +195,7 @@ const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "hermes",
         adapter: hermes,
-        children: None,
+        children: Some(cv_core::harness::hermes::subagent_refs),
     },
 ];
 

@@ -300,6 +300,31 @@ fn latest_of(stamps: [Option<f64>; 3]) -> Option<DateTime<Utc>> {
 /// user-visible conversations and stay listed. An untitled compression tip takes its root's title,
 /// as Hermes's listing does (`COALESCE(tip.title, s.title)`, `hermes_state_sessions.py:1137`).
 fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
+    refs_conn(conn, path, None)
+}
+
+/// The delegate sub-agent runs of one conversation (`model_config._delegate_from` naming it, or any
+/// segment of its compression chain, since a delegate records the session id live when it was
+/// spawned), as [`SessionRef`]s of the same shape discovery gives a session in that db, sorted by
+/// id. Discovery leaves them out (Hermes's picker hides them too); this is how a caller reaches
+/// them from their parent. Empty when the db cannot be opened.
+pub fn subagent_refs(parent: &SessionRef) -> Vec<SessionRef> {
+    let Ok(conn) = open_ro(&parent.path) else {
+        return Vec::new();
+    };
+    let chain: HashSet<String> = if columns(&conn, "sessions").contains("parent_session_id") {
+        session_lineage_root_to_tip(&conn, &parent.id).into_iter().collect()
+    } else {
+        HashSet::from([parent.id.clone()])
+    };
+    let mut out = refs_conn(&conn, &parent.path, Some(&chain)).unwrap_or_default();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Session refs in one db: with `delegates_of` unset, every listed conversation (see
+/// [`discover_conn`]); with it set, only the delegate runs whose `_delegate_from` is in the set.
+fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<String>>) -> Result<Vec<SessionRef>> {
     // Older schemas may lack `title`, `parent_session_id`, …: select what exists, NULL for the rest.
     let scols = columns(conn, "sessions");
     let expr = |col: &str| {
@@ -347,8 +372,14 @@ fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
         if compression_parents.contains(&id) {
             continue;
         }
-        if lineage_markers(model_config.as_deref()).contains_key("_delegate_from") {
-            continue;
+        let delegate_from = lineage_markers(model_config.as_deref())
+            .get("_delegate_from")
+            .map(|v| v.as_str().unwrap_or_default().to_string());
+        match (delegates_of, &delegate_from) {
+            (None, Some(_)) => continue,
+            (Some(set), Some(from)) if set.contains(from) => {}
+            (Some(_), _) => continue,
+            (None, None) => {}
         }
         let title = title.filter(|t| !t.is_empty()).or_else(|| {
             has_parent
@@ -1752,6 +1783,51 @@ mod tests {
             .unwrap();
         let s = parse_conn(&old, &sref("s")).unwrap();
         assert_eq!(s.system_prompt.as_deref(), Some("legacy prompt"));
+    }
+
+    #[test]
+    fn subagent_refs_are_the_delegates_of_the_whole_compression_chain() {
+        let conn = mk_conn("schema-v30.sql");
+        // `r` compressed into `t`; one delegate was spawned from each segment, one from elsewhere.
+        insert_session(&conn, "r", None, Some("compression"), 1000.0, Some(1100.0));
+        insert_session(&conn, "t", Some("r"), None, 1100.0, None);
+        insert_session(&conn, "x", None, None, 1200.0, None);
+        for (id, from, at) in [("d1", "r", 1050.0), ("d2", "t", 1150.0), ("dx", "x", 1250.0)] {
+            insert_session(&conn, id, Some(from), Some("agent_close"), at, Some(at + 1.0));
+            conn.execute(
+                "UPDATE sessions SET model_config = json_object('_delegate_from', ?2), source = 'subagent' WHERE id = ?1",
+                [id, from],
+            )
+            .unwrap();
+            insert_v30(&conn, id, "user", "delegated", at, 1, 0);
+        }
+        let dir = std::env::temp_dir().join(format!("cv-hermes-subagent-refs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state.db");
+        let _ = std::fs::remove_file(&db);
+        conn.execute("VACUUM INTO ?1", [db.to_str().unwrap()]).unwrap();
+
+        let refs = Hermes::with_db(db.clone()).discover().unwrap();
+        let mut ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["t", "x"],
+            "discovery lists conversations, not delegates or ancestors"
+        );
+        let tip = refs.iter().find(|r| r.id == "t").unwrap();
+        let kids = subagent_refs(tip);
+        assert_eq!(kids.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["d1", "d2"]);
+        assert!(kids.iter().all(|k| k.path == db && k.harness == Harness::Hermes));
+        let x = refs.iter().find(|r| r.id == "x").unwrap();
+        assert_eq!(
+            subagent_refs(x).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["dx"]
+        );
+        // a child parses as its own conversation that names its parent
+        let d1 = Hermes::with_db(db.clone()).parse(&kids[0]).unwrap();
+        assert_eq!(d1.lineage.parent.as_deref(), Some("r"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
