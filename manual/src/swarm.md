@@ -81,46 +81,5 @@ inbox item posed without options (a lane tagged `decision` instead of posing one
 Not caught, and now rules: the page's "needs discussion" left the decision owed, so the human
 clicked an option to clear it — three resolutions that were clicks (fixed 10-01: discussing is its
 own inbox state); notes on a terminal task are refused, so lanes that marked `done` before writing
-their note lost the evidence (write the note first; see the edits below); two lanes opened a task
+their note lost the evidence (since fixed: a post-close note appends and says so); two lanes opened a task
 that already existed under another title.
-
-## Edits to `cv` that this session asks for
-
-Ranked by how often the gap bit:
-
-1. ~~**Notes on terminal tasks.** Terminal is about *state*, not about the record: `cv task note` on a
-   done or resolved task should append (marked post-close), and `cv task done --note FILE` should be
-   one event. Four lanes and the orchestrator lost or re-homed notes on this.~~ **Landed:** a note on
-   a terminal task appends with `post_close: true` ("(after close)" on every surface) and never moves
-   the state; `done` / `abandon` take `--note` / `--note-file` and append note + close as one unit.
-2. ~~**Provisional resolutions.** `cv task decide … --provisional` resolves a decision on its default *by
-   the orchestrator* with a veto window; the inbox shows it under "made for you — veto?" and the
-   decider's `resolve` overrides. Today this is prose on a note.~~ **Landed:** `decide --provisional` /
-   `resolve --accept-default --provisional`; inbox group "made for you (veto?)" (not owed); the
-   decider's `resolve --confirm | --choice` replaces it — the one state-bearing event a terminal task
-   accepts, and only from the decision's assignee.
-3. ~~**One way to pose a decision.** A task tagged `decision` with no options should be refused or
-   upgraded to a `decide` with a required default.~~ **Landed:** `open --tags decision` and `tag <id>
-   decision` on an unposed task refuse, naming `cv task decide … --default …`; old tag-only decisions
-   still show (not migrated).
-4. ~~**Lanes joined to tasks.** `cv lanes --tasks`: the lane table knows the agent and its description;
-   the store knows which `lane:<name>` endpoint claimed which task. Join them, and the page's Lanes
-   pane shows each lane's task and last note.~~ **Landed:** the endpoint is read from the lane's own
-   `CV_ENDPOINT=` export (else its description's leading token); `--tasks` lists what it holds with
-   the last note; `/api/lanes` carries `tasks` and the page has a task column. On this session, 113
-   of 295 lanes join (the rest predate the `lane:` convention).
-5. ~~**A pinned STATUS note.** `cv task status ID --file F` replaces a task's current-state note (shown at
-   the top of `show`), so a relay's hand-off is a field, not the newest of a hundred notes.~~
-   **Landed:** `status_set` replaces `TaskProjection.status` (history in the events), by the assignee
-   or the opener, refused when terminal; `show` leads with it, `--brief` is title + STATUS, `--status`
-   is the text alone.
-6. ~~**Failure cause from the transcript.** A lane that died of an API rate limit, a context-length
-   error, or a stop should show as `rate-limited` / `context` / `stopped`, not all as `failed`: the
-   remedy differs (resume vs relaunch).~~ **Landed:** `Lane.failure_cause` (+ `resets_at`,
-   `failure_detail`) from the last uncleared `isApiErrorMessage` notice; `failed:rate-limited` in the
-   table with the resume hint, `failed:context` with the relaunch hint. On this session the two
-   `failed` lanes (S3 R4, the STANDING INTEGRATOR) read `failed:context`; the eleven session-limit
-   kills of 10-01/02 were all resumed, so their notices are history and they read `completed`.
-7. **`show` defaults.** `cv task show` prints the body and the last three notes with a count; `--all`
-   dumps. The dump is what killed the integrator.
-8. **Dedupe on open.** `cv task open` warns when an open task's title is near the new one.
