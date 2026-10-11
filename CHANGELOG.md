@@ -2,282 +2,93 @@
 
 ## Unreleased
 
-- **`web:<who>` is `<who>` to the token gate.** Identity bindings resolve the alias; `cv task serve
-  --token`/`$CV_TOKEN` presents it on every page action.
-- **`posed`/`resolved` refuse over a live revision**, as `done` does: no decision closes a task whose
-  reviewed code has not landed.
-- **`cv rewind`** — an agent as of a past moment, resumable. `cv rewind <id> --at <MSG_IDX|SHA>`
-  copies the source's raw records from the last compaction before the cut (moved back to the
-  boundary's preserved segment; `--full` from the top) through the cut into a new session id,
-  `parentUuid` chains intact, plus a `<new-id>.rewind.json` provenance sidecar (source bytes +
-  sha256, cut, start, omitted tail, cv version). A sha resolves to the tool result whose `git
-  commit`/`git push` output names it; open parallel calls at the cut run on to their results.
-  Sub-agent transcripts (`agent-<id>`, `--agent`, or a path) come out as standalone top-level
-  sessions in the parent's project dir. The resume line uses the launch dir Claude files the
-  session under. Streams: a 0.9 GB session rewinds in ~13 s at ~37 MB RSS.
-- **`cv blame` exact evidence** — a candidate session whose own tool output shows the commit
-  being made (or pushed) ranks above every time-window match as `exact: commit created here`,
-  with a `cv rewind <id> --at <sha>` hint. Read from the transcripts (byte prefilter, then the
-  stream), so it needs no fresh index; sub-agent edit rows now bring their parent session along
-  as a candidate.
-- **`cv splice` of a sub-agent span** joins the new main thread: the `isSidechain`/`agentId`
-  markers that made Claude skip the emitted records are dropped.
-- **Seekable real Claude transcripts** — rendered-attachment messages were never stamped with
-  their byte offset under `lazy_offsets`, so any session with one (current Claude Code writes
-  them constantly) recorded no seek row and `cv show --range` fell back to a full stream.
-- `cv_core::digest::Sha256` — the vendored SHA-256, now incremental.
-- **`cv adopt` rescues sub-agents stranded by a dead Claude Code session.** `cv adopt <agent-id>…
-  [--into <live>] [--from <dead>] [--dry-run] [--force]` copies `subagents/agent-<id>.jsonl` into
-  the live session's `subagents/` with the top-level `sessionId` restamped on every line, by byte
-  offset, so no other byte changes. A `sessionId` quoted inside a tool output is left alone. It
-  copies the `.meta.json` verbatim and prints the `SendMessage` call that resumes each agent. `--into`
-  defaults to the project's newest session other than the agent's own and is printed first; agents
-  and sessions are looked up across every Claude root cv reads, not only `~/.claude`. It refuses an existing target
-  file unless `--force`, checking every agent before it writes any. `--list <session>` lists a
-  session's agents. `--orphans` lists unfinished agents of recent non-live sessions: `running`
-  (no completion recorded), `stopped` (an exiting session sends one `stopped` notice naming every
-  lane it abandons), `killed`, `failed`, or stranded. Persisted outputs and prune sidecars stay
-  with the dead session, and the command says so.
-- **Copies of one agent no longer make its id ambiguous.** After an adoption, `cv show`/`cv cat
-  agent-<id>` read the newest session's copy instead of erroring that two sessions hold it.
-- **`cv distill` — a transcript as a reshapeable lane context** (`docs/design/DISTILL.md`). It
-  compresses a long session, typically a sub-agent lane at 500K–900K tokens, into a pack. The pack
-  holds verbatim: the brief, every message to the agent, everything the agent said, sent or wrote
-  down, and the documents its instructions named that it read. It also holds an index of commits,
-  branch tips, repository heads, hosts, paths, build verdicts and tool errors, a one-line ledger
-  per tool call, and the last N tool calls as real turns. It is deterministic, with no model calls.
-  Elided outputs go to a prune-format sidecar that `cv cat <new> <tool_use_id>` reads. Three
-  emissions: the markdown pack (stdout or `--pack`); `--session`, a new resumable session
-  (`claude -p --resume <id>`); and `--agent-of <root>`, a new sub-agent transcript in the root's
-  `subagents/`, which the root resumes with `SendMessage` to the printed id. That last route was
-  measured to work for a transcript the root never spawned, even one planted mid-run. `--upto N`
-  distills the session as of message N; `--with <other>` injects another lane's findings.
-  Measured on three real lanes, the distilled context loads 5.4–6.7× fewer tokens than the source
-  and answers 28 of 30 probe questions, against 29.5 for the full transcript.
-- **`cv fork <id> --at N (--session | --agent-of <root>)`** branches a session's verbatim context at
-  message N, to run variants from one point.
-- **The name `distill` returns with a new meaning.** The 0.11 stub that pointed `cv distill` at
-  `cv pack` is gone. `pack` still builds context from the corpus; `distill` reshapes one session.
-- **Reshaped sessions thread linearly.** Claude Code resumes by walking `parentUuid` back from the
-  newest record and silently stops at the first missing link. A lane's turns often point at hook
-  attachments the IR does not carry, so a session emitted with source parents resumed with only
-  its last record or two. `distill` and `fork` clear parents and let the emitter chain records in
-  order. (`port`/`splice`/`loom` keep source parents and may share this; not yet checked.)
+## 0.14.0 — 2026-10-10
 
-- **Devin CLI (Cognition) parses** — `~/.local/share/devin/cli/sessions.db` (refinery schema 17, cli
-  3000.11.3), read-only and PRAGMA-probed like the other SQLite stores. `message_nodes` is a
-  *forest* — every context rebuild rewrites the transcript as a fresh chain of copies — so the
-  parse is the `main_chain_id`→root walk (NULL falls back to the max `node_id`, flagged
-  `extra["devin"]["main_chain_fallback"]`), and superseded branches are dropped with
-  `node_count`/`chain_len` kept in `extra["devin"]`. `is_system_prefix` nodes become
-  `Session::system_prompt`; thinking blocks (with `sealed.v1` signatures), parallel tool calls,
-  per-call metrics → `Usage`, and `generation_model` (which also rescues the session model when
-  `sessions.model` is `''`) all survive. `cv resume` prints `devin --resume <id>`.
-  `subagent_heads` rows are **child sessions** — `<session_id>/<agent_id>`
-  (`atom-telephone/sidekick`) walking the same forest from `chain_node_id`, with
-  `lineage.parent`/`agent_path`, `[<agent_id>]` titles, the lead's handoff prompt as
-  `Prompt`/`Subagent` (`lead_model` from `chisel/fusion_lead_model_uid`), and `rules_loaded`/
-  `skills_loaded` extras; dangling heads are skipped and counted
-  (`dangling_subagent_heads`). `cv lanes`/`cv tools`/`cv show` all see them.
-  Compaction pairs (`summarized_from` = old head, an assistant summary + a system wrapper
-  pointing at `summaries/<agent>/history_*.md`) synthesize a `CompactionBoundary` carrying
-  `source`/`history_path`/`edited_files`/`todo_list`, so `cv compaction` detects Devin
-  compactions; `chisel/tool_failure` marks failed tool results,
-  `chisel/user_question_answers` surfaces in `cv prompts`, and the parent's
-  `subagent/*` completion rows fill `extra["devin"]["subagent"]` +
-  `lineage.spawned_by_tool_use`.
-- **Claude Code sessions outside `~/.claude` are read.** Claude Code writes to
-  `$CLAUDE_CONFIG_DIR/projects` when that variable is set, and tools that run many agents give each
-  agent its own config dir, so cv could not list, search or read those sessions. The Claude adapter
-  now reads a list of roots: `$CLAUDE_CONFIG_DIR/projects`, `~/.claude/projects`, each entry of
-  `$CLUSTERVISION_CLAUDE_ROOTS`, and each line of `$CLUSTERVISION_HOME/claude-roots` (blank lines
-  and `#` comments skipped). An entry can be a config dir or a `projects/` dir, can start with `~`,
-  and can hold `*` segments (`~/.agents/*/claude`, `~/.agents/*/instances/*/claude`) that are
-  expanded on every scan, so an agent added later is found. Missing roots are skipped, a directory named twice is read once, and a
-  config dir with no `projects/` yet is skipped rather than read as one. `storage_root()` is the
-  first root that exists. `Adapter` gains `storage_roots()` (default: the one storage root); the
-  catalog watches every root and re-discovers the harness when a root appears that it does not
-  watch yet.
-  - *One session id in two roots.* A transcript copied into a second config dir and continued there
-    is two files with one id. Both are listed; `find` (so `cv show` and the MCP `read_session`)
-    returns the most recently updated copy instead of an arbitrary one, and a prefix of that id is
-    no longer reported as ambiguous.
-  - The test harnesses that fake `$HOME` now also clear `CLAUDE_CONFIG_DIR` and
-    `CLUSTERVISION_CLAUDE_ROOTS`, so a test run inside an agent that has its own config dir stays
-    hermetic.
+0.12.0 and 0.13.0 were bumped in `Cargo.toml` but never tagged or published; tags and crates.io
+stopped at v0.11.2. Everything since ships here. Every change is in the manual; this is the index.
 
-### The swarm's edits
+### Read
 
-Six of the eight edits `manual/src/swarm.md` asks for, from a forty-hour swarm session.
+- **`cv prompts <session>`**: only what the person typed and every `AskUserQuestion` answer, with indices; `--pre-compaction [N]`, `--json`.
+- **`cv lanes <session>`**: the sub-agent forest as a status table (model, duration, tokens, calls, last line); `--running`, `--done`, `--json`.
+- `cv lanes --stranded`: lanes that completed saying they are waiting; each row carries `→ resume: SendMessage to <agentId>`; never counts as done.
+- `cv lanes`: status source named in JSON (`Workflow` journal, parent notification, `SubagentStop`, else `running`).
+- `cv lanes --since 2h`; a quiet lane whose transcript ends in text reads `returned`; a running lane quiet an hour says `⚠ quiet`.
+- `cv lanes` failure cause from the transcript's last API-error notice: `failed:rate-limited` (with `resets_at`), `failed:context`, `stopped`.
+- `cv lanes --tasks`: each lane's endpoint (its own `CV_ENDPOINT=` export, else its description's first token) joined to the tasks it holds.
+- **`cv deferrals <session>`**: every deferral phrase with index and context; `--open-tasks` cross-references the store and exits 1 while any is unmatched; `--since`.
+- `cv blame`: a session whose own tool output shows the commit ranks first as `exact: commit created here`, with a `cv rewind` hint.
+- `cv blame`: sub-agent edit rows bring their parent session along as a candidate; reads transcripts directly, needs no fresh index.
+- `cv show`/`cv cat agent-<id>` read the newest copy when two sessions hold one agent (after `adopt`) instead of erroring.
+- `cv schema --json` publishes `prompt_row`, `lane` and `deferral`; `cv recipes` has three more entries.
 
-- **Notes on terminal tasks.** A `noted` on a done/resolved/abandoned/superseded task appends with
-  `post_close: true` ("(after close)" on `show`, the inbox and the page) and never changes state;
-  tags stay refused. `cv task done|abandon --note TEXT|--note-file F` append the note and the
-  terminal event as one unit (`TaskStore::append_agent_events`: all or none).
-- **Provisional resolutions.** `cv task decide … --provisional` / `resolve --accept-default
-  --provisional`: resolved on the default by the poser; the decider's inbox shows it under "made for
-  you (veto?)" (`InboxReason::Provisional`, not owed); `resolve --confirm | --choice` by the
-  decision's assignee replaces it (kept as `decision.superseded_provisional`) — the one state-bearing
-  event a terminal task accepts. The page has confirm/veto buttons.
-- **One way to pose a decision.** `open --tags decision` / `tag <id> decision` on an unposed task
-  refuse, naming `cv task decide … --default …`. Old tag-only decisions still show.
-- **`cv lanes --tasks`.** Each lane's endpoint (its own first `CV_ENDPOINT=<kind>:<name>` export,
-  else its description's leading token) joined to the tasks it holds, with the last note;
-  `/api/lanes` and the page's Lanes pane carry them.
-- **A pinned STATUS.** New event `status_set` (identity-bearing; assignee or opener; refused when
-  terminal) replaces `TaskProjection.status`; `show` leads with it, `--brief` is title + STATUS,
-  `--status` is the text.
-- **Why a lane died.** `failed:rate-limited` (with `resets_at`) / `failed:context` / `stopped`, from
-  the transcript's last uncleared API-error notice; the header counts the causes.
-- ⚠ **Wire.** One new event tag, `status_set`; one new optional event field, `resolved.provisional`
-  (omitted when false); and one reducer-rule change, a `noted` line may now follow a terminal event
-  (`post_close` is a projection field, not on the wire). What an **older cv** does with a log this
-  cv wrote, exactly:
-  - a `status_set` line does not parse — a read warning, the line skipped, and **every append
-    refused** (fail-closed on a degraded log);
-  - a `noted` after a terminal event parses but its reducer refuses it — quarantined on read, every
-    append refused;
-  - a `resolved` with `provisional: true` parses and is **silently accepted as a firm resolution**:
-    no warning, the task shows as decided on the default, its inbox never shows the "veto?" row,
-    and the older cv **keeps appending** — until the decider's override `resolved` lands, which its
-    reducer refuses (terminal) and from then on it fails closed.
-  Install this cv on every writer before using `--provisional` or `status`; a mixed fleet misreads
-  provisional decisions as final until the override. This cv reads older logs unchanged (every
-  addition defaults); the golden log gained specimen task E (additive; every earlier line
-  byte-identical).
-- Not yet: `show` defaults (last three notes; `--all`) and dedupe-on-open — tasks
-  `01a0fab1-9b64` and `01a0fab1-9b7a` hold the next steps.
+### Reshape
 
-## 0.13.0 — decisions are a kind; a human can drain the inbox
+- **`cv rewind <id> --at <MSG_IDX|SHA>`**: a new resumable session as of a message or the commit a tool result shows; `.rewind.json` provenance alongside.
+- `cv rewind` starts at the last compaction before the cut (`--full` from the top); open parallel tool calls run on to their results.
+- `cv rewind agent-<id>` / `--agent`: a sub-agent comes out as a standalone top-level session in the parent's project dir.
+- **`cv distill <id>`**: a long lane as a compact deterministic context: brief, every message to it, its own words, an index, its last N calls.
+- `cv distill` emits the markdown pack (`--pack`), a resumable session (`--session`), or a new sub-agent of a root (`--agent-of`); `--upto N`, `--with <other>`.
+- **`cv fork <id> --at N (--session | --agent-of <root>)`**: the verbatim prefix as a new session or sub-agent, to run variants from one point.
+- The name `distill` returns with a new meaning; the 0.11 stub pointing `cv distill` at `cv pack` is gone.
+- `distill` and `fork` clear `parentUuid` so Claude Code resumes the whole context (it stops silently at the first missing parent).
+- `cv splice` of a sub-agent span joins the new main thread: `isSidechain`/`agentId` markers dropped.
+- **`cv adopt <agent-id>… [--into <live>] [--from <dead>]`**: moves sub-agents of a dead Claude session into a live one; `sessionId` restamped by byte offset.
+- `cv adopt --list <session>`, `--orphans` (running/stopped/killed/failed/stranded agents of recent dead sessions), `--dry-run`, `--force`.
+- `cv adopt --into` defaults to the project's newest session other than the agent's own and is printed first; looks across every Claude root.
 
-Written from the first day a human was on the other end of `cv task`: an orchestrator had filed
-~15 "DECIDE (…, default stands if silent): …" items as free-text notes on one assigned task, and
-the person asked "how do I access this inbox?" and "is there a web interface where I can see these
-and drain them?".
+### Fleet & live
 
-- **Decisions.** Two new event kinds, `posed {options, default, deadline?, source?}` and
-  `resolved {choice, note?}`, and a terminal `TaskState::Resolved`. A task with a `posed` event is
-  of kind `decision`: `done` is refused on it ("answer it with resolve"), a second `posed` is
-  refused (amend by posing anew), the choice must be one of the posed options, and `resolved` is
-  identity-bearing — who decided is the fact, so it is never a shared sink. `cv task decide --for
-  <who> --default … [--option …]… [--by <when>]` poses one (`opened` + `tagged decision` +
-  `posed`); `cv task resolve <id> --accept-default | --choice "…" [--note …]` answers it; with no
-  identity the error prints the exact command with the decision's owner filled in.
-- **`cv task split <id>`** turns every leading-`DECIDE` note on a task into its own decision:
-  title = the parenthetical label + the question's first clause (parentheticals dropped), default
-  = the `Default =` / `Default if silent:` / `Recommend:` clause (several are joined; none means
-  "as proposed"), options = the `alternative =` clauses; each is assigned like the parent, carries
-  the note as its body and `source`, and blocks the parent. The notes stay; `show` points each at
-  its decision; a second run creates nothing; mid-text `DECIDE`s are counted, not split.
-- **`cv task inbox <who>`** now leads with decisions, each with `⇒ default: … · alt: … · by …` on
-  the next line, then assigned actions, claimed work, reviews, unlanded. `--md` renders the whole
-  inbox as a Markdown page (every body, the first line of every note, a resolve command per
-  decision). `--unread` keeps items whose last event is not `<who>`'s (`web:<who>` counts as
-  `<who>`). `--json` carries the decision facet.
-- **`cv task serve [--bind 127.0.0.1:7777] [--assignee <who>] [--open]`**: a web inbox served by
-  cv itself — one inline page, no external JS/CSS, theme-aware, phone-width — with the decisions'
-  options as buttons (Accept default / each alternative / Needs discussion), Done/Claim/Release on
-  actions, notes with a Save box, Open/Resolved/All filters and a counter line. Every button
-  records the same event the CLI would, as `web:<who>`, through `/api/task/<id>/{resolve,done,
-  note,discuss,claim,release,reopen}`; `/api/inbox?who=` and `/api/events?since=` are the CLI's
-  own queries. Loopback only unless `--bind 0.0.0.0:…` is passed; a DNS-named `Host` is refused
-  (rebinding), an IP literal is accepted (a phone on the LAN). Uses `tiny_http`, already in the
-  workspace through cvd. "Reopen" on a closed item opens a NEW task (terminal stays terminal).
-- **The feed.** `cv task events [--since <when|event-id>] [--kind resolved,done,noted] [--by]
-  [--not-by] [--assignee] [--task]` prints one JSON line per event (the event's fields plus
-  `title`, `task_state`, `assignee`) and the next cursor on stderr; `--text` for people. `cv task
-  watch --assignee <who> --since …` is that minus the caller's own events. No push channel: poll.
-- **Scope.** Bare `cv task list` / `inbox` show tasks touched in the last 14 days or involving
-  `$CV_ENDPOINT` (opener, assignee, note author, reviewer, resolver), and print the hidden count
-  on the last line; `--all` lifts it, `--since 90d` widens it. MCP and HTTP still see everything.
-- **`cv task show`**: `--brief` (one line per note, the body's first line), `--notes-last N`,
-  `--notes-grep PATTERN`; a decision block (default, options, resolution or the resolve command).
-- **stdin.** `cv task note <id> -`, `--body -`, `--note -` read stdin (zsh eats backticks inside
-  double quotes; a heredoc does not).
-- **Paths.** `--issue` is absolutized at open time (cwd, else the task's `--repo`, else cwd
-  lexically); handles and URLs pass through. `--repo` was already canonicalized.
-- **`cv lanes`**: `--since 2h` keeps lanes active in the window; a lane with no stop recorded
-  anywhere whose transcript ends in a text-only final turn and has been quiet ≥ 10 min reads
-  `returned` (status source `transcript`) — a lost notification — and counts as done; a running
-  lane quiet for an hour or more says so (`⚠ quiet 14h`).
-- Board notifications now carry the task's title, so `cv board read tasks` reads as a timeline.
-- Golden fixture: additive only (a decision specimen task; every prior task serializes
-  byte-identically).
+- **Decisions are a kind of task**: `cv task decide "<q>" --for <who> --default … [--option …]… [--by <when>]`; `done` is refused on one.
+- `cv task resolve <id> --accept-default | --choice "<option>" [--note …]`: answers it; identity-bearing, so it needs `--from` or `CV_ENDPOINT`.
+- `cv task decide … --provisional` / `resolve --accept-default --provisional`: resolved on the default by the poser; the decider's `resolve --confirm | --choice` replaces it.
+- `open --tags decision` and `tag <id> decision` on an unposed task refuse, naming `cv task decide … --default …`.
+- **`cv task split <id>`**: every leading-`DECIDE` note becomes its own decision, assigned like the parent and blocking it; a second run creates nothing.
+- **`cv task inbox <who>`** leads with decisions (default, alternatives, deadline), then actions, claimed, reviews, unlanded; `--md`, `--unread`, `--json`.
+- **`cv task serve [--bind] [--assignee] [--open]`**: a web inbox served by cv; every button records the CLI's event as `web:<who>`; loopback unless `--bind 0.0.0.0`.
+- **`cv task events [--since <when|id>] [--kind] [--by] [--not-by] [--assignee] [--task] [--text]`**: one JSON line per event, next cursor on stderr.
+- `cv task watch --assignee <who> --since …`: `events` minus the caller's own.
+- **`cv task status <id>`**: a pinned STATUS (`status_set`), by assignee or opener, refused when terminal; `show` leads with it; `--brief`, `--status`.
+- Notes on terminal tasks append with `post_close: true` ("(after close)"); `done|abandon --note|--note-file` append note and close as one unit.
+- Bare `cv task list` / `inbox` show 14 days or anything involving `$CV_ENDPOINT`, and print the hidden count; `--all`, `--since 90d`.
+- `cv task show --brief`, `--notes-last N`, `--notes-grep PATTERN`; a decision block with the resolve command.
+- `cv task open --body-file`, `note --file`; `note <id> -`, `--body -`, `--note -` read stdin.
+- `open --tags a,b`, `cv task tag <id> a,b`, `list --tag <t>`.
+- `open --blocked-by <id>` / `--blocks <id>`, `cv task block <id> --by <id>`: blocked-ness computed from the blocker's live state; `list` marks `⊘`.
+- `list --tsv`, `list --wide`.
+- **`cv task sweep --repo <path>`**: tasks git and the filesystem say are probably done (missing `--issue` path, merged branch); never closes one.
+- `--issue` is absolutized at open time.
+- Every list renders the shortest id prefix that keeps ids distinct; a batch opened within one second rendered as one prefix.
+- Board notifications carry the task's title, so `cv board read tasks` reads as a timeline.
+- ⚠ **Wire, additive.** New events `tagged`, `blocked_by`, `posed`, `resolved`, `status_set`; optional `resolved.provisional`; a `noted` may follow a terminal event.
+- ⚠ **Older cv on a 0.14 log**: `status_set` or post-close `noted` → warning, appends refused; provisional `resolved` → silently firm. Upgrade every writer first.
+- Projection fields `tags`, `blocked_by` (omitted when empty); `TaskFilter.tag` on MCP `task_list` and `GET /api/tasks`; `InboxReason::decision_owed` / `provisional`.
+- 0.14 reads every older log unchanged; the golden log gained specimens of each new event, every earlier line byte-identical.
 
-## 0.12.0 — the orchestrator's instruments
+### Harnesses
 
-Three commands for a session that is running a swarm, written from a day of running one with
-twenty lanes and doing each of these by hand (a thirty-line Python over `cv show --json`, three
-times). All three are in the Read group, take `harness:id` or a prefix, have `--json`, and reach
-MCP through the generated tool list like every other command.
+- **Devin CLI (Cognition) parses**: `~/.local/share/devin/cli/sessions.db` (schema 17) read-only; the `main_chain_id`→root walk of the message forest.
+- Devin: thinking (`sealed.v1`), parallel tool calls, per-call `Usage`, `generation_model`, system prefix, failed-tool marks, `cv prompts` answers; `cv resume` prints `devin --resume <id>`.
+- Devin: `subagent_heads` rows are child sessions (`<session>/<agent>`) with lineage; compaction pairs become `CompactionBoundary`, so `cv compaction` sees them.
+- **Claude Code sessions outside `~/.claude` are read**: `$CLAUDE_CONFIG_DIR/projects`, each `$CLUSTERVISION_CLAUDE_ROOTS` entry, each line of `$CLUSTERVISION_HOME/claude-roots`.
+- A root entry may be a config dir or a `projects/` dir, use `~`, and hold `*` segments expanded every scan; the catalog watches all.
+- One session id in two roots: both listed; `cv show` and MCP `show` read the most recently updated copy; the prefix is not ambiguous.
+- Claude Code ≥ 2.1 slash-command bookkeeping (`<command-name>…`, `<local-command-stdout>…`) classifies as `notice`/`harness`; the typed `/compact` stays a prompt.
 
-- **`cv prompts <session>`** prints only what the person said: every human-typed prompt and every
-  `AskUserQuestion` answer, in order, with message indices and timestamps. `--pre-compaction [N]`
-  narrows to the span the Nth compaction discarded, the same window `cv show --pre-compaction`
-  reads. Prompts are printed whole. On the session this was built against, 38 lines and 6 answers
-  out of 10,297 records.
-- **`cv lanes <session>`** is the sub-agent forest as a status table: one row per lane with its
-  model, start, duration, tokens (deduplicated by API `message.id`, as `cv stats --tokens`
-  counts), tool calls, status and either the last line of its return or — for a running lane —
-  its last tool call. `--running` / `--done` / `--stranded` filter. **Stranded** is the class that
-  parked four lanes in one day: the harness reports the lane *completed* and its final text says
-  it is waiting (`Waiting on notifications`, `I'll continue when the monitor fires`); nothing will
-  wake it. Each stranded row carries `→ resume: SendMessage to <agentId>`, and a stranded lane
-  never counts as done. Status comes from the most authoritative source and the JSON names it:
-  a `Workflow` journal, else the parent's last `<task-notification>` for the agent, else the
-  child's `SubagentStop` hook, else `running`.
-- **`cv deferrals <session>`** is a linter for promises: every place the assistant put something
-  off ("later lane", "follow-up", "not tonight", "queued for", "ember's call", "when X lands",
-  "after FINAL", …) with message index and context. `--open-tasks` cross-references every task in
-  the store (three or more shared significant words is a MATCH; the words are printed so the
-  match can be judged) and **exits 1 while any deferral is UNMATCHED**, so a closeout can gate on
-  it. `--since <msg>` restricts to the post-compaction region.
+### Fixes
+- `web:<who>` resolves to `<who>` at the token gate; `cv task serve --token`/`$CV_TOKEN` presents it on every page action.
+- `posed`/`resolved` refuse over a live revision, as `done` does: no decision closes unlanded reviewed code.
 
-### `cv task` ergonomics
-
-- `open --body-file <path>` and `note --file <path>` (`-` for stdin). Bodies were 500-character
-  shell strings.
-- `open --tags a,b`, `cv task tag <id> a,b`, `list --tag <t>`. The `decision` tag on an assigned
-  task is a decision owed, and `inbox` lists it first.
-- `open --blocked-by <id>` / `open --blocks <id>` and `cv task block <id> --by <id>`: relations
-  stored as `blocked_by` events on the blocked task. Blocked-ness is computed at read time from the
-  blocker's live state — a blocker finishing or being abandoned unblocks with no further event.
-  `list` marks blocked rows `⊘`; `show` prints `blocked by:` and `blocks:`. Relations are resolved
-  before the open is written, so a typo refuses the command instead of opening a half-related task.
-- `inbox <who>` groups: decisions owed · claimed · reviews · unlanded · assigned, unclaimed.
-- `list --tsv` (full id, state, assignee, repo basename, age, title, blocked_by) and `list --wide`
-  (a second line with tags, repo, blockers, the body's first line).
-- **`cv task sweep --repo <path>`** lists the tasks git and the filesystem say are probably done —
-  an `--issue` path that no longer exists, a title/body naming a branch now merged into main, a
-  proposed revision whose branch is merged — and never closes one.
-- **Task ids no longer collide in every list.** UUID v7 ids opened within one second share their
-  first eight hex digits; `list`/`inbox`/`debt` printed 8-char prefixes, so a batch of 23 tasks
-  rendered as 23 copies of `01a0f52e` and `show` refused every one. Every list now renders the
-  shortest prefix that keeps the ids distinct.
-
-### Wire
-
-- Two new task event kinds, `tagged { tags }` and `blocked_by { task }`, and two projection
-  fields, `tags` and `blocked_by`, on `TaskProjection` and `TaskRow` (every surface). Both are
-  omitted when empty, so a log that never used them serializes byte-for-byte as before; the golden
-  fixture gained specimens of both (`GOLDEN_REGEN=1`, snapshot diff reviewed: only the specimen
-  task changed). `TaskFilter` gained `tag`; `task_list` (MCP) and `GET /api/tasks` (cvd) accept it.
-  `InboxReason` gained `decision_owed`.
-- **Claude adapter:** Claude Code ≥ 2.1 writes a slash command's bookkeeping (`<command-name>…`,
-  `<local-command-stdout>…`) as `user` records; they now classify as `notice`/`harness`, as the
-  older `system`/`local_command` records always did. The typed `/compact` line stays a human
-  prompt. Text is untouched.
-- `cv schema --json` publishes the `prompt_row`, `lane` and `deferral` shapes. `cv recipes` has
-  three more entries.
+- Rendered-attachment messages were never stamped with a byte offset, so any current Claude session fell back to a full stream under `cv show --range`.
+- `cv_core::digest::Sha256` (the vendored SHA-256) is incremental.
+- The clap-tree unit tests run on a 16 MB thread: `Cli::command()` overflowed the 2 MB test stack in a debug build.
+- Test harnesses that fake `$HOME` also clear `CLAUDE_CONFIG_DIR` and `CLUSTERVISION_CLAUDE_ROOTS`, so a run inside an agent with its own config dir stays hermetic.
 
 ### Build
 
-- `make install` (= `cargo install --path crates/cv --force --target-dir target`, plus `cv-mcp`
-  and `cvd`) and `make version`, so the installed binary and the checkout can be compared in one
-  line. The installed `cv` on the machine this was written on was two releases behind the
-  checkout; `cv --version` had said so all along.
-- The clap-tree unit tests run on a 16 MB thread: `Cli::command()` for the grown enum overflows
-  the default 2 MB test-thread stack in a debug build (the binary's main thread is fine).
+- `make install` (`cargo install --path … --target-dir target` for `cv`, `cv-mcp`, `cvd`) and `make version` compare the installed binary with the checkout.
+- `cargo fmt --check` and `cargo clippy -- -D warnings` are CI gates, run before the build; both were advisory. Toolchain pinned to 1.99.0 (`rust-toolchain.toml`).
+- CI runs `dist plan`: the misconfiguration that produced zero artifacts for every tag from v0.9.22 to 0.11.0 now fails before a tag.
 
 ## 0.11.2 — `cv stats --tokens`
 
