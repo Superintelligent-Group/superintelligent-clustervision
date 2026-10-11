@@ -896,8 +896,8 @@ mod db {
         let Ok(mut stmt) = conn.prepare(&sql) else {
             return Vec::new();
         };
-        // rusqlite binds by position; an unused `?2` is simply never referenced by the SQL.
-        let rows = stmt.query_map(params![abs, suffix.unwrap_or("")], |row| {
+        // rusqlite refuses a parameter the SQL never references, so bind exactly what it names.
+        let map = |row: &rusqlite::Row| {
             Ok(TouchedSession {
                 harness: row.get(0)?,
                 session_id: row.get(1)?,
@@ -909,7 +909,11 @@ mod db {
                 agent_id: row.get(7)?,
                 workflow: row.get(8)?,
             })
-        });
+        };
+        let rows = match suffix {
+            Some(sfx) => stmt.query_map(params![abs, sfx], map),
+            None => stmt.query_map(params![abs], map),
+        };
         match rows {
             Ok(rows) => rows.flatten().collect(),
             Err(_) => Vec::new(),
@@ -1353,6 +1357,11 @@ mod tests {
         assert_eq!(by_suffix.len(), 1, "suffix match + edits_only should still hit");
         // A file nobody touched stays quiet.
         assert!(sessions_touching("src/nonexistent.rs", false).is_empty());
+        // The edit guard's exact lookup: the absolute path hits, a suffix never does.
+        let exact = sessions_editing("/repo/src/parser.rs");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].session_id, "evt-e2e");
+        assert!(sessions_editing("src/parser.rs").is_empty());
 
         // blame's edit query: abs + repo-relative-suffix matching, session metadata joined in.
         crate::catalog::sync(std::slice::from_ref(&r));
