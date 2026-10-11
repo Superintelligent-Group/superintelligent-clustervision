@@ -4,6 +4,8 @@
 
 - Manual: `distill`, `fork`, `adopt` documented and a "Reshaping a lane" page; MCP tools and `cvd` routes match the binaries; harness counts corrected.
 - `integrations/` is gone (its recipes called MCP tools removed in 0.11); the manual's [Hooking a harness in](manual/src/integrations.md) replaces it.
+- `cv show`, `cv export --format md` and `cv share` spell a turn's label one way (`system · injected_context/hook_success`); the md header gains `- started:`, cwd is home-relative.
+- `cv show --subagents` lists each agent on `cv tree`'s one line (id, type, status, count, summary or task) plus its return; both sanitized.
 - **`-q` sheds its sub-languages**: `thread:` paths, the `~` regex operator and the field-name typo guard are gone; `thread:`/`~` exit 2 with a pointer.
 - A malformed `-q` query is a caller mistake: exit 2, not 1.
 - **Removed `cv diff`** (a role+text prefix compare): `cv export <id> --format md` each session and diff the files; the name exits 2 with that pointer.

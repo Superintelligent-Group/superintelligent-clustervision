@@ -196,7 +196,7 @@ cv show da9174f4 --subagents           # the sub-agent forest instead of the tra
 cv show da9174f4 --agent af19c2f1      # one sub-agent's transcript
 ```
 
-The header line gives you harness, full id and cwd; then each message is printed turn by turn with tool calls and results inlined. A turn's label carries its [`kind`](architecture.md#the-unified-ir) when that is more than its role says — `── system · injected_context · bash_output_audience_note ──` tells you at a glance that the harness put this in the model's input and which reminder it was.
+The header line gives you harness, full id and cwd; then each message is printed turn by turn with tool calls and results inlined. A turn's label carries its [`kind`](architecture.md#the-unified-ir) when that is more than its role says — `── system · injected_context/bash_output_audience_note ──` tells you at a glance that the harness put this in the model's input and which reminder it was.
 
 - `--json` — the unified IR as pretty JSON: session metadata including `system_prompt` and `lineage`, then `messages[]` with `role`, `kind`, `origin`, `content[]` (each block tagged by `type`), `usage`, and any harness-specific facts under `extra["<harness>"]`.
 - the five [window flags](#message-windows).

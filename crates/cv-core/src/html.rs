@@ -577,7 +577,7 @@ pub fn share_message(m: &Message, idx: usize, out: &mut String) {
     let role = role_class(m.role);
     let _ = writeln!(out, "<section class=\"msg msg-{role}\" id=\"m{idx}\">");
     out.push_str("<div class=\"msg-head\"><span class=\"role\">");
-    out.push_str(role);
+    out.push_str(&escape(&crate::render::turn_label(m)));
     out.push_str("</span>");
     if let Some(t) = &m.timestamp {
         let _ = write!(out, "<span class=\"ts\">{}</span>", t.format("%Y-%m-%d %H:%M UTC"));

@@ -1,33 +1,62 @@
 //! Rendering an IR [`Session`] to human/LLM-friendly text. Shared by the `cv` CLI and `cv-mcp`.
 
 use crate::ir::*;
+use chrono::{DateTime, Utc};
+use std::path::Path;
 
-/// Render a session as Markdown (good for sharing / feeding to another model).
+/// Render a session as Markdown (good for sharing / feeding to another model). The streaming
+/// `cv export --format md` renders the same header and sections one message at a time through
+/// [`md_header`] and [`md_message`].
 pub fn to_markdown(s: &Session) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# {}\n\n", s.label()));
-    out.push_str(&format!("- harness: {}\n- id: {}\n", s.harness, s.id));
-    if let Some(cwd) = &s.cwd {
-        out.push_str(&format!("- cwd: {}\n", cwd.display()));
-    }
-    if let Some(m) = &s.model {
-        out.push_str(&format!("- model: {m}\n"));
-    }
-    if let Some(t) = &s.created_at {
-        out.push_str(&format!("- started: {}\n", t.to_rfc3339()));
-    }
-    out.push('\n');
+    let mut out = md_header(
+        &s.label(),
+        s.harness,
+        &s.id,
+        s.cwd.as_deref(),
+        s.model.as_deref(),
+        s.created_at,
+    );
     for m in &s.messages {
-        let who = turn_label(m);
-        out.push_str(&format!("## {who}\n\n"));
-        for b in &m.content {
-            render_block_md(b, &mut out);
-        }
+        md_message(m, &mut out);
     }
     out
 }
 
-fn render_block_md(b: &Block, out: &mut String) {
+/// The Markdown front-matter: title, harness, id, cwd (home-relative), model and start time, each
+/// only when known, then a blank line.
+pub fn md_header(
+    label: &str,
+    harness: Harness,
+    id: &str,
+    cwd: Option<&Path>,
+    model: Option<&str>,
+    started: Option<DateTime<Utc>>,
+) -> String {
+    let mut out = format!("# {label}\n\n- harness: {harness}\n- id: {id}\n");
+    if let Some(cwd) = cwd {
+        out.push_str(&format!("- cwd: {}\n", home_rel(cwd)));
+    }
+    if let Some(m) = model {
+        out.push_str(&format!("- model: {m}\n"));
+    }
+    if let Some(t) = started {
+        out.push_str(&format!("- started: {}\n", t.to_rfc3339()));
+    }
+    out.push('\n');
+    out
+}
+
+/// One Markdown section per turn: `## <turn label>` then every block through [`md_block`].
+pub fn md_message(m: &Message, out: &mut String) {
+    out.push_str(&format!("## {}\n\n", turn_label(m)));
+    for b in &m.content {
+        md_block(b, out);
+    }
+}
+
+/// One block as Markdown: text verbatim, thinking as a quoted `🧠` aside, a tool call as a fenced
+/// JSON input, a result as a fenced (4000-char) excerpt, files and images as italic placeholders.
+pub fn md_block(b: &Block, out: &mut String) {
     match b {
         Block::Text { text } => {
             out.push_str(text);

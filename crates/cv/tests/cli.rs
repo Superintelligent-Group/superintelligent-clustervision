@@ -665,7 +665,7 @@ fn export_formats() {
     assert!(out.contains("# alpha adventures"), "{out}");
     assert!(out.contains("- harness: claude"), "{out}");
     assert!(out.contains("- id: alphasess"), "{out}");
-    assert!(out.contains("## User"), "{out}");
+    assert!(out.contains("## user"), "{out}");
     assert!(out.contains("zebrafish migration"), "{out}");
     assert!(out.contains("**🔧 Edit**"), "{out}");
 
@@ -1180,13 +1180,25 @@ fn error_paths_exit_nonzero_with_stderr() {
             "cv cat <session> <tool_use_id>",
         ),
         // `--to`/`--to-dir` say where; the flags now say what.
-        (&["port", "alphasess", "--to", "codex"], "0.11.0", "use `--harness <harness>`"),
-        (&["port", "alphasess", "--to-dir", "/tmp/nope"], "0.11.0", "use `--cwd <dir>`"),
+        (
+            &["port", "alphasess", "--to", "codex"],
+            "0.11.0",
+            "use `--harness <harness>`",
+        ),
+        (
+            &["port", "alphasess", "--to-dir", "/tmp/nope"],
+            "0.11.0",
+            "use `--cwd <dir>`",
+        ),
         // `prune --thinking` was a boolean "snip reasoning too"; `--thinking <mode>` now names what
         // an EMIT does with reasoning, and one word may not mean two things.
         (&["prune", "alphasess", "--thinking"], "0.11.0", "use `--drop-thinking`"),
         // `diff` was a role+text prefix compare; export both and use a real diff.
-        (&["diff", "alphasess", "betasess"], "0.15.0", "cv export <id> --format md"),
+        (
+            &["diff", "alphasess", "betasess"],
+            "0.15.0",
+            "cv export <id> --format md",
+        ),
     ];
     for (args, version, pointer) in removed {
         let (ok, code, out, err) = w.cv(args);

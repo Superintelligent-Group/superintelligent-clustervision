@@ -7,6 +7,7 @@ use crate::util::{
 };
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{truncate, Block, Harness, Message, MessageKind, Role, Session, SessionRef};
+use cv_core::render::turn_label;
 use cv_core::Adapter;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -330,33 +331,15 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
     println!("# sub-agents of {}\n", short_id(&r.id));
     for s in &subs {
         let wf = s.workflow.as_deref().map(|w| format!("  ⟐{w}")).unwrap_or_default();
-        let status = s
-            .result_status
-            .as_deref()
-            .map(|st| format!(" [{st}]"))
-            .unwrap_or_default();
-        println!(
-            "── {}  {}{}{} · {} msg ──",
-            short_id(s.agent_id()),
-            s.agent_type.as_deref().unwrap_or("agent"),
-            status,
-            wf,
-            s.session.message_count,
-        );
-        // Task descriptions and returns are transcript-derived (untrusted) — sanitize at the
-        // terminal seam (G5); the `--json` path stays raw.
-        if let Some(d) = &s.description {
-            println!("  task: {}", truncate(&cv_core::sanitize::sanitize_line(d), 200));
+        println!("• {}{wf}", subagent_line(s));
+        // A direct agent has no journaled summary (the line showed its task): add its real return,
+        // the last text turn of its transcript. Transcript-derived, so sanitized at the seam (G5);
+        // the `--json` path stays raw.
+        if s.result_summary.is_none() {
+            if let Some(ret) = cv_core::harness::claude::subagent_return(&s.session.path) {
+                println!("  ↩ {}", truncate(&cv_core::sanitize::sanitize_line(&ret), 400));
+            }
         }
-        // The real return value: the journaled summary (workflow) or the agent's last text turn.
-        let ret = s
-            .result_summary
-            .clone()
-            .or_else(|| cv_core::harness::claude::subagent_return(&s.session.path));
-        if let Some(ret) = ret {
-            println!("  ↩ {}", truncate(&cv_core::sanitize::sanitize_line(&ret), 400));
-        }
-        println!();
     }
     Ok(())
 }
@@ -577,8 +560,9 @@ fn render_subagent_forest(r: &SessionRef) {
     }
 }
 
-/// One line describing a sub-agent for the forest view: its short id, type, the journaled status
-/// (workflow agents), and the human task description — capped.
+/// One line describing a sub-agent — `cv tree`'s forest and `cv show --subagents` share it: short
+/// id, type, the journaled status (workflow agents), message count, and the journaled summary or,
+/// failing that, the task description — capped and sanitized (both are transcript-derived).
 fn subagent_line(s: &cv_core::SubagentInfo) -> String {
     let id = short_id(s.agent_id());
     let kind = s.agent_type.as_deref().unwrap_or("agent");
@@ -592,7 +576,7 @@ fn subagent_line(s: &cv_core::SubagentInfo) -> String {
         .result_summary
         .as_deref()
         .or(s.description.as_deref())
-        .map(|t| truncate(t, 88))
+        .map(|t| truncate(&cv_core::sanitize::sanitize_line(t), 88))
         .unwrap_or_default();
     format!("{id}  {kind}{status}  {} msg  {blurb}", s.session.message_count)
 }
@@ -637,7 +621,7 @@ fn render_tree_dag(session: &Session) {
 /// One-line preview of a message for the tree: role (with its kind when that says more than the
 /// role), markers for tool turns / sub-agent spawns, and a text preview.
 fn tree_line(m: &Message) -> String {
-    let role = role_tag(m);
+    let role = turn_label(m);
     let mut tags = Vec::new();
     let has_tool_use = m.content.iter().any(|b| matches!(b, Block::ToolUse { .. }));
     let has_tool_result = m.content.iter().any(|b| matches!(b, Block::ToolResult { .. }));
@@ -693,6 +677,7 @@ pub(crate) struct HeaderInfo {
     cwd: Option<PathBuf>,
     label: String,
     model: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// What to render: an optional `[start, end)` message window and an optional byte budget.
@@ -735,6 +720,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
         cwd: Option<PathBuf>,
         title: Option<String>,
         model: Option<String>,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
         first_user: Option<String>,
         header: H,
         render_msg: R,
@@ -769,6 +755,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
                 cwd: self.cwd.clone(),
                 label: cv_core::label_from(self.title.as_deref(), self.first_user.as_deref()),
                 model: self.model.clone(),
+                created_at: self.created_at,
             };
             let head = (self.header)(&info);
             self.bytes += head.len();
@@ -793,6 +780,9 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
             }
             if self.cwd.is_none() {
                 self.cwd = s.cwd.clone();
+            }
+            if self.created_at.is_none() {
+                self.created_at = s.created_at;
             }
         }
         fn message(&mut self, m: Message) -> Flow {
@@ -871,6 +861,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
         cwd: r.cwd.clone(),
         title: r.title.clone(),
         model: None,
+        created_at: r.created_at,
         first_user: None,
         header,
         render_msg,
@@ -935,7 +926,7 @@ pub(crate) fn show_header(h: &HeaderInfo) -> String {
 
 /// One rendered `cv show` message block (the String form of the old `print_message`).
 pub(crate) fn show_message(m: &Message) -> String {
-    let mut s = format!("── {} ──\n", role_tag(m));
+    let mut s = format!("── {} ──\n", turn_label(m));
     for b in &m.content {
         match b {
             Block::Text { text } => {
@@ -976,104 +967,28 @@ pub(crate) fn show_message(m: &Message) -> String {
     s
 }
 
-/// The turn label: the role, plus the message `kind` whenever it says more than the role does. A
-/// System turn always carries its kind (`system · injected_context`, `system · error`, …) and,
-/// for Claude attachments, the attachment kind from `extra["claude"]["attachment_type"]`
-/// (`system · injected_context · hook_success`). Other roles add the kind only when it differs
-/// from the role's default (`user · compaction_summary`, `assistant · error`).
-fn role_tag(m: &Message) -> String {
-    match m.role {
-        Role::System => {
-            let attachment = m
-                .harness_extra(Harness::Claude)
-                .and_then(|c| c.get("attachment_type"))
-                .and_then(|v| v.as_str());
-            match attachment {
-                Some(a) => format!("system · {} · {a}", kind_name(m.kind)),
-                None => format!("system · {}", kind_name(m.kind)),
-            }
-        }
-        role => {
-            let base = match role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                _ => "tool",
-            };
-            if m.kind == MessageKind::for_role(role) {
-                base.to_string()
-            } else {
-                format!("{base} · {}", kind_name(m.kind))
-            }
-        }
-    }
-}
-
-/// `MessageKind` as serde spells it (`injected_context`, `compaction_boundary`, …).
-fn kind_name(k: MessageKind) -> String {
-    match serde_json::to_value(k) {
-        Ok(serde_json::Value::String(s)) => s,
-        _ => format!("{k:?}").to_ascii_lowercase(),
-    }
-}
-
 /// Where a persisted (too-large) tool output lives on disk, when the adapter recorded it — the
 /// transcript holds only the stub the model saw.
 fn persisted_path(details: Option<&serde_json::Value>) -> Option<&str> {
     details?.pointer("/persistedOutput/path")?.as_str()
 }
 
-/// Header for `cv export md`.
+/// Header for `cv export md`: [`cv_core::render::md_header`] from the streamed header facts.
 fn md_header(h: &HeaderInfo) -> String {
-    let model = h.model.as_ref().map(|m| format!("- model: {m}\n")).unwrap_or_default();
-    format!(
-        "# {}\n\n- harness: {}\n- id: {}\n- cwd: {}\n{}\n",
-        h.label,
+    cv_core::render::md_header(
+        &h.label,
         h.harness,
-        h.id,
-        h.cwd.as_deref().map(home_rel).unwrap_or_else(|| "?".into()),
-        model,
+        &h.id,
+        h.cwd.as_deref(),
+        h.model.as_deref(),
+        h.created_at,
     )
 }
 
-/// One rendered `cv export md` message section.
+/// One `cv export md` section: [`cv_core::render::md_message`] as a `String`.
 fn md_message(m: &Message) -> String {
-    let who = match m.role {
-        Role::System => format!("System · {}", kind_name(m.kind)),
-        Role::User => "User".to_string(),
-        Role::Assistant => "Assistant".to_string(),
-        Role::Tool => "Tool".to_string(),
-    };
-    let mut out = format!("## {who}\n\n");
-    for b in &m.content {
-        match b {
-            Block::Text { text } => {
-                out.push_str(text);
-                out.push_str("\n\n");
-            }
-            Block::Thinking { text, .. } => {
-                out.push_str("> 🧠 ");
-                out.push_str(&text.replace('\n', "\n> "));
-                out.push_str("\n\n");
-            }
-            Block::ToolUse { name, input, .. } => {
-                out.push_str(&format!("**🔧 {name}**\n\n```json\n{input}\n```\n\n"));
-            }
-            Block::ToolResult { content, is_error, .. } => {
-                out.push_str(&format!(
-                    "**↩ result{}**\n\n```\n{}\n```\n\n",
-                    if *is_error { " (error)" } else { "" },
-                    truncate(content, 4000)
-                ));
-            }
-            Block::File { path, source, .. } => {
-                out.push_str(&format!(
-                    "_[file: {}]_\n\n",
-                    path.as_deref().or(source.as_deref()).unwrap_or("?")
-                ));
-            }
-            Block::Image { .. } => out.push_str("_[image]_\n\n"),
-        }
-    }
+    let mut out = String::new();
+    cv_core::render::md_message(m, &mut out);
     out
 }
 
@@ -1262,28 +1177,52 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// System turns are labelled by `kind` (plus Claude's attachment kind when present); other
-    /// roles add the kind only when it says more than the role.
+    /// One label spelling and one block text on every door: `cv show`, `cv export --format md`
+    /// and `cv share` label a turn with `render::turn_label` and carry its text blocks verbatim.
     #[test]
-    fn turn_labels_come_from_kind_not_flat_extra_keys() {
-        let mut m = Message::new(Role::System);
-        m.kind = MessageKind::InjectedContext;
-        assert_eq!(role_tag(&m), "system · injected_context");
-        m.harness_extra_mut(Harness::Claude)
+    fn show_export_and_share_agree_on_labels_and_block_text() {
+        let mut sys = Message::new(Role::System);
+        sys.kind = MessageKind::InjectedContext;
+        sys.harness_extra_mut(Harness::Claude)
             .insert("attachment_type".into(), serde_json::json!("hook_success"));
-        assert_eq!(role_tag(&m), "system · injected_context · hook_success");
-        // A flat legacy key is ignored: only the nested harness bag counts.
+        sys.content.push(Block::Text {
+            text: "reminder: run the gate".into(),
+        });
+        let mut summary = Message::new(Role::User);
+        summary.kind = MessageKind::CompactionSummary;
+        summary.content.push(Block::Text {
+            text: "earlier we fixed the parser".into(),
+        });
+        let mut reply = Message::new(Role::Assistant);
+        reply.content.push(Block::Text {
+            text: "on it, editing ir.rs".into(),
+        });
+        for (m, label) in [
+            (&sys, "system · injected_context/hook_success"),
+            (&summary, "user · compaction_summary"),
+            (&reply, "assistant"),
+        ] {
+            assert_eq!(turn_label(m), label);
+            let text = m.text().unwrap();
+            let shown = show_message(m);
+            assert!(
+                shown.starts_with(&format!("── {label} ──\n")) && shown.contains(&text),
+                "{shown}"
+            );
+            let md = md_message(m);
+            assert!(md.starts_with(&format!("## {label}\n\n")) && md.contains(&text), "{md}");
+            let mut html = String::new();
+            cv_core::html::share_message(m, 0, &mut html);
+            assert!(
+                html.contains(&format!("<span class=\"role\">{label}</span>")) && html.contains(&text),
+                "{html}"
+            );
+        }
+        // A flat legacy key is not an attachment kind: only a nested harness bag counts.
         let mut legacy = Message::new(Role::System);
         legacy.kind = MessageKind::Error;
         legacy.extra.insert("subtype".into(), serde_json::json!("api_error"));
-        assert_eq!(role_tag(&legacy), "system · error");
-        // Defaults stay bare; a non-default kind on a user turn is surfaced.
-        assert_eq!(role_tag(&Message::new(Role::User)), "user");
-        assert_eq!(role_tag(&Message::new(Role::Assistant)), "assistant");
-        let mut summary = Message::new(Role::User);
-        summary.kind = MessageKind::CompactionSummary;
-        assert_eq!(role_tag(&summary), "user · compaction_summary");
-        assert!(show_message(&summary).starts_with("── user · compaction_summary ──\n"));
+        assert_eq!(turn_label(&legacy), "system · error");
     }
 
     /// Same contract for codex, whose metadata comes from the recorded `meta()` snapshot (the
