@@ -228,3 +228,80 @@ fn warm_path_reads_catalog_and_full_discovery_heals() {
     let refs = cv_core::discover_all();
     assert_eq!(ids(&refs), vec!["alphasess"]);
 }
+
+/// A Codex rollout over the discovery scan cap lists with `message_count` 0 ("not counted": the
+/// middle was never read). The first full parse writes the true count back, and the next discovery
+/// keeps it (a scan-cache hit while the file is unchanged), so `cv ls` shows the real number.
+#[test]
+fn a_full_parse_fills_a_not_counted_catalog_row() {
+    let w = World::new("fill");
+    std::env::remove_var("CODEX_HOME");
+    let dir = w.home.join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&dir).unwrap();
+    let id = "019a0000-0000-7000-8000-00000000f111";
+    let msg = |ts: &str, role: &str, kind: &str, text: &str| {
+        serde_json::json!({"timestamp": ts, "type": "response_item",
+            "payload": {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}})
+        .to_string()
+    };
+    let mut lines = vec![
+        serde_json::json!({"timestamp": "2026-01-01T10:00:00Z", "type": "session_meta",
+            "payload": {"id": id, "cwd": "/work/proj", "timestamp": "2026-01-01T10:00:00Z"}})
+        .to_string(),
+        msg("2026-01-01T10:00:01Z", "user", "input_text", "first"),
+        msg("2026-01-01T10:00:02Z", "assistant", "output_text", "one"),
+    ];
+    // Nine MiB of reply in the middle: past the 8 MiB full-scan cap, out of the sampled head/tail.
+    lines.push(msg(
+        "2026-01-01T10:00:03Z",
+        "assistant",
+        "output_text",
+        &"x".repeat(9 << 20),
+    ));
+    lines.push(msg("2026-01-01T10:00:04Z", "user", "input_text", "second"));
+    lines.push(msg("2026-01-01T10:00:05Z", "assistant", "output_text", "two"));
+    let path = dir.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+    let row = |refs: Vec<SessionRef>| refs.into_iter().find(|r| r.id == id).expect("codex row listed");
+    assert_eq!(
+        row(cv_core::discover_all()).message_count,
+        0,
+        "over the cap: not counted"
+    );
+    assert_eq!(row(cv_core::sessions()).message_count, 0);
+
+    let (r, adapter) = cv_core::find(id, Some(Harness::Codex)).unwrap().expect("resolves");
+    // A stream that stops early (`cv show --range 0..1`) read a prefix: it proves nothing.
+    let mut head = |_m: cv_core::Message| cv_core::Flow::Stop;
+    cv_core::stream::stream_counted(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy(), &mut head).unwrap();
+    assert_eq!(
+        row(cv_core::sessions()).message_count,
+        0,
+        "a partial read fills nothing"
+    );
+    // A stream that reaches the end (`cv show`, `cv index`) fills the row with the parse's count.
+    let mut all = |_m: cv_core::Message| cv_core::Flow::Continue;
+    cv_core::stream::stream_counted(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy(), &mut all).unwrap();
+    assert_eq!(row(cv_core::sessions()).message_count, 5, "the streamed count");
+    // `parse` (Codex's whole-text path) agrees, and a filled row is never rewritten.
+    let parsed = adapter.parse(&r).unwrap();
+    let turns = parsed.messages.iter().filter(|m| m.is_turn()).count();
+    assert_eq!(
+        turns,
+        5,
+        "{:#?}",
+        parsed.messages.iter().map(|m| (m.role, m.kind)).collect::<Vec<_>>()
+    );
+
+    assert_eq!(
+        row(cv_core::sessions()).message_count,
+        5,
+        "the catalog row holds the parse's count"
+    );
+    assert_eq!(
+        row(cv_core::discover_all()).message_count,
+        5,
+        "and a re-discovery keeps it (scan-cache hit)"
+    );
+}

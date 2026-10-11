@@ -177,7 +177,9 @@ impl Adapter for Codex {
         // Concrete full parse (used directly for full-fidelity ops, and by `stream`'s legacy-JSON
         // branch). `stream` is the memory-light path for the bulk consumers.
         let text = read_rollout_to_string(&r.path)?;
-        Ok(parse_str(&r.id, &text, is_jsonl_path(&r.path), Some(r.path.clone())))
+        let s = parse_str(&r.id, &text, is_jsonl_path(&r.path), Some(r.path.clone()));
+        crate::stream::note_turns(r, s.messages.iter().filter(|m| m.is_turn()).count());
+        Ok(s)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {

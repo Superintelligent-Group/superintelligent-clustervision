@@ -250,7 +250,7 @@ pub(crate) fn stream_corpus(mut f: impl FnMut(Doc) -> Result<()>) -> Result<usiz
             first_user_text: None,
             resolver: cv_core::Resolver::new(Some(r.path.clone())),
         };
-        let meta = match adapter.stream(&r, &ParseOptions::lazy(), &mut sink) {
+        let meta = match cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), &mut sink) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("cv-search: parse failed for {} ({}): {e:#}", r.id, r.harness);

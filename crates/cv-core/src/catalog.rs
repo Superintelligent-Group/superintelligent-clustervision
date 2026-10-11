@@ -411,6 +411,24 @@ mod imp {
         );
     }
 
+    /// A full parse counted `n` turns in `r`: write it into `r`'s catalog row and its scan-cache
+    /// entry where they hold `0` ("not counted"), so listings show it and the next discovery (a
+    /// scan-cache hit while the file is unchanged) keeps it. A row with a count is never touched:
+    /// discovery's number stays the authority wherever it has one. Never creates the catalog.
+    pub fn fill_count(r: &SessionRef, n: usize) {
+        if !db_path().is_some_and(|p| p.exists()) {
+            return;
+        }
+        let Some(conn) = open() else { return };
+        let path = r.path.to_string_lossy();
+        let _ = conn.execute(
+            "UPDATE sessions SET message_count=?1
+             WHERE harness=?2 AND id=?3 AND path=?4 AND message_count=0",
+            params![n as i64, r.harness.as_str(), r.id, path],
+        );
+        crate::discover_cache::fill_count(&conn, &r.path, r.harness, &r.id, n);
+    }
+
     /// All catalog rows whose id equals `id` or starts with it, optionally constrained to one
     /// harness. Order: exact-id matches first. Empty on any error or a cold catalog.
     pub fn lookup(id: &str, harness: Option<Harness>) -> Vec<SessionRef> {
@@ -439,11 +457,13 @@ pub(crate) use imp::{
     all_sessions, last_full_sync, open_db, probe_stale, replace_harness, stamp_full_sync, watches_for,
 };
 #[cfg(feature = "sqlite")]
-pub use imp::{lookup, sync};
+pub use imp::{fill_count, lookup, sync};
 
 /// No-op fallbacks when sqlite is disabled — `find`/`sessions` simply always take the scan path.
 #[cfg(not(feature = "sqlite"))]
 pub fn sync(_refs: &[SessionRef]) {}
+#[cfg(not(feature = "sqlite"))]
+pub fn fill_count(_r: &SessionRef, _n: usize) {}
 #[cfg(not(feature = "sqlite"))]
 pub fn lookup(_id: &str, _harness: Option<Harness>) -> Vec<SessionRef> {
     Vec::new()

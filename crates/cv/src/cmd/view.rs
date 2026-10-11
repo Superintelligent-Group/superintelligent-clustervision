@@ -929,7 +929,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
         }
         sink.idx = 0;
     }
-    adapter.stream(r, &parse_opts, &mut sink)?;
+    cv_core::stream::stream_counted(adapter, r, &parse_opts, &mut sink)?;
     sink.flush_header(); // short sessions (no assistant turn / < HOLDBACK msgs) flush here
     sink.result?;
     Ok(RenderOutcome {

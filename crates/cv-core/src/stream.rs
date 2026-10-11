@@ -242,9 +242,57 @@ pub fn collect(adapter: &dyn Adapter, r: &SessionRef) -> Result<Session> {
 /// Use [`collect`] (or call `.materialize()`) when you need owned inline content.
 pub fn collect_with(adapter: &dyn Adapter, r: &SessionRef, opts: &ParseOptions) -> Result<Session> {
     let mut sink = CollectSink::default();
-    let mut session = adapter.stream(r, opts, &mut sink)?;
+    let mut session = stream_counted(adapter, r, opts, &mut sink)?;
     session.messages = sink.messages;
     Ok(session)
+}
+
+/// `adapter.stream(r, opts, sink)`, plus what a pass that read the whole session learned: when the
+/// sink never said [`Flow::Stop`], the parse's own turn count ([`Message::is_turn`]) is written back
+/// to the catalog for a row that holds `0` ("not counted" — a Codex rollout over the discovery scan
+/// cap, an adapter that cannot count cheaply), so `cv ls` shows the real number from the first full
+/// read on. The full-read doors (`collect`/`parse`, `cv show`, `cv index`) stream through this.
+pub fn stream_counted(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    struct Counting<'a> {
+        inner: &'a mut dyn MessageSink,
+        turns: usize,
+        stopped: bool,
+    }
+    impl MessageSink for Counting<'_> {
+        fn meta(&mut self, s: &Session) {
+            self.inner.meta(s);
+        }
+        fn message(&mut self, m: Message) -> Flow {
+            self.turns += usize::from(m.is_turn());
+            let flow = self.inner.message(m);
+            self.stopped |= flow == Flow::Stop;
+            flow
+        }
+    }
+    let mut counting = Counting {
+        inner: sink,
+        turns: 0,
+        stopped: false,
+    };
+    let session = adapter.stream(r, opts, &mut counting)?;
+    if !counting.stopped {
+        note_turns(r, counting.turns);
+    }
+    Ok(session)
+}
+
+/// A whole-session read of `r` counted `turns`: fill a "not counted" catalog row (see
+/// [`stream_counted`]). For the adapters whose `parse` is its own whole-text path rather than
+/// `collect` (Codex), which call it on the session they built.
+pub fn note_turns(r: &SessionRef, turns: usize) {
+    if r.message_count == 0 && turns > 0 {
+        crate::catalog::fill_count(r, turns);
+    }
 }
 
 #[cfg(test)]

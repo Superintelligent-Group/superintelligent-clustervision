@@ -816,6 +816,18 @@ pub struct SessionRef {
     pub message_count: usize,
 }
 
+impl Message {
+    /// Whether this message is a conversational turn in [`SessionRef::message_count`]'s sense: a
+    /// typed prompt or a model reply. Tool results, injected context, notices, errors and carriers
+    /// are not. The count a full parse writes back to the catalog ([`crate::catalog::fill_count`]).
+    pub fn is_turn(&self) -> bool {
+        matches!(
+            (self.role, self.kind),
+            (Role::User, MessageKind::Prompt) | (Role::Assistant, MessageKind::Reply)
+        )
+    }
+}
+
 impl SessionRef {
     /// A ref for a transcript named by path alone: the id is the file stem, the harness is the
     /// caller's, and nothing else is known (no cwd/title/timestamps, `message_count` 0). The one

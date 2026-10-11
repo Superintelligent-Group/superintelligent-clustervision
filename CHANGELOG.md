@@ -10,6 +10,7 @@
 - `cv lanes` reads the hook ledger (`lanes.jsonl`): a lane whose stop only the `SubagentStop` hook saw reads `stopped`, `status_source: hook_ledger`.
 - `cv doctor` prints whether the hooks are installed and the compaction policy in force (settings and environment).
 - cv-mcp runs generated tools with stdin closed, so a command that reads stdin never consumes the JSON-RPC stream.
+- `cv ls` shows the real turn count for Codex rollouts over 8 MiB after their first full read (`show`, `index`, any parse); before, 0.
 - **Removed `cv fork` and `cv loom`**: `cv splice <id>:..N --session|--agent-of <root>` is the fork, `cv splice <base>:..N <other>:M..` the graft; both names exit 2 with that pointer.
 - The Claude emitter owns resumability: dangling `parentUuid` re-linked, unanswered `tool_use` dropped, one sidechain identity — for `distill`, `splice`, `port` and `pack` alike; `emit_verified` asserts it.
 - `cv distill`'s pack shows a trailing call that never got its result (the lane stopped mid-call); the emitted session still drops it.

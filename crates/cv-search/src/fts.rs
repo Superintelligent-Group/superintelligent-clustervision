@@ -248,10 +248,10 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
             let res = match (events.as_mut(), offsets.as_mut()) {
                 (Some(es), Some(os)) => {
                     let mut tee = cv_core::TeeSink::new(es, os);
-                    adapter.stream(&r, &opts, &mut tee)
+                    cv_core::stream::stream_counted(&*adapter, &r, &opts, &mut tee)
                 }
-                (Some(es), None) => adapter.stream(&r, &opts, es),
-                (None, Some(os)) => adapter.stream(&r, &opts, os),
+                (Some(es), None) => cv_core::stream::stream_counted(&*adapter, &r, &opts, es),
+                (None, Some(os)) => cv_core::stream::stream_counted(&*adapter, &r, &opts, os),
                 (None, None) => unreachable!("skip above covers fresh+fresh"),
             };
             match res {
@@ -381,18 +381,18 @@ fn index_session(
         (Some(es), Some(os)) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
             let mut tee = cv_core::TeeSink::new(&mut tee, os);
-            adapter.stream(r, &opts, &mut tee)?;
+            cv_core::stream::stream_counted(adapter, r, &opts, &mut tee)?;
         }
         (Some(es), None) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
-            adapter.stream(r, &opts, &mut tee)?;
+            cv_core::stream::stream_counted(adapter, r, &opts, &mut tee)?;
         }
         (None, Some(os)) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, os);
-            adapter.stream(r, &opts, &mut tee)?;
+            cv_core::stream::stream_counted(adapter, r, &opts, &mut tee)?;
         }
         (None, None) => {
-            adapter.stream(r, &opts, &mut sink)?;
+            cv_core::stream::stream_counted(adapter, r, &opts, &mut sink)?;
         }
     }
     sink.finish()?;
@@ -502,13 +502,13 @@ fn index_one_subagent(
         match (events.as_mut(), offsets.as_mut()) {
             (Some(es), Some(os)) => {
                 let mut tee = cv_core::TeeSink::new(es, os);
-                adapter.stream(sr, &opts, &mut tee)?;
+                cv_core::stream::stream_counted(&*adapter, sr, &opts, &mut tee)?;
             }
             (Some(es), None) => {
-                adapter.stream(sr, &opts, es)?;
+                cv_core::stream::stream_counted(&*adapter, sr, &opts, es)?;
             }
             (None, Some(os)) => {
-                adapter.stream(sr, &opts, os)?;
+                cv_core::stream::stream_counted(&*adapter, sr, &opts, os)?;
             }
             (None, None) => return Ok(0),
         }
@@ -1207,7 +1207,7 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         buf: String::new(),
         resolver: cv_core::Resolver::new(Some(PathBuf::from(path))),
     };
-    adapter.stream(&sref, &ParseOptions::lazy(), &mut acc).ok()?;
+    cv_core::stream::stream_counted(&*adapter, &sref, &ParseOptions::lazy(), &mut acc).ok()?;
     Some(make_snippet(&acc.buf, query))
 }
 

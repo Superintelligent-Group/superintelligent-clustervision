@@ -210,3 +210,45 @@ pub(crate) fn persist(prune: bool) {
         let _ = tx.commit();
     }
 }
+
+/// [`crate::catalog::fill_count`]'s scan-cache half: set `message_count = n` on the cached ref for
+/// `(path, harness, id)` where it is `0`, both in the persisted row (left at its recorded
+/// `(mtime, size)`, so a changed file still misses and re-scans) and in this process's copy.
+#[cfg(feature = "sqlite")]
+pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crate::ir::Harness, id: &str, n: usize) {
+    let fill = |refs: &mut [SessionRef]| {
+        let mut hit = false;
+        for r in refs
+            .iter_mut()
+            .filter(|r| r.harness == harness && r.id == id && r.message_count == 0)
+        {
+            r.message_count = n;
+            hit = true;
+        }
+        hit
+    };
+    if let Some(cache) = CACHE.get() {
+        if let Some(e) = cache.entries.write().unwrap().get_mut(path) {
+            fill(&mut e.refs);
+        }
+    }
+    let key = path.to_string_lossy();
+    let Ok(json) = conn.query_row(
+        "SELECT refs FROM scan_cache WHERE path=?1",
+        rusqlite::params![key],
+        |row| row.get::<_, String>(0),
+    ) else {
+        return;
+    };
+    let Ok(mut refs) = serde_json::from_str::<Vec<SessionRef>>(&json) else {
+        return;
+    };
+    if fill(&mut refs) {
+        if let Ok(json) = serde_json::to_string(&refs) {
+            let _ = conn.execute(
+                "UPDATE scan_cache SET refs=?1 WHERE path=?2",
+                rusqlite::params![json, key],
+            );
+        }
+    }
+}
