@@ -15,3 +15,6 @@ app/src-tauri/gen/
 # Python bytecode from the fixture generators under tools/
 __pycache__/
 *.pyc
+# sqlite sidecars a reader leaves next to a corpus store; the store itself is the record
+crates/cv-core/tests/corpus/**/*-wal
+crates/cv-core/tests/corpus/**/*-shm

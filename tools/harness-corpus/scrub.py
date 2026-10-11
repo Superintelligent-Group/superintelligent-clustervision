@@ -190,6 +190,8 @@ def scrub_sqlite(path, reps):
         con.execute(f'INSERT INTO "{v}"("{v}") VALUES (\'rebuild\')')
     con.commit()
     con.execute("VACUUM")
+    # A WAL-mode file makes every reader (the golden test included) create -wal/-shm beside it.
+    con.execute("PRAGMA journal_mode=DELETE")
     con.close()
 
 
