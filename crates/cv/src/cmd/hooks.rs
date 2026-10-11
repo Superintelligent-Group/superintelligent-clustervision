@@ -28,8 +28,9 @@ use serde_json::{json, Map, Value};
 use crate::short_id;
 use crate::util::fmt_int;
 
-/// The skill installed beside the hooks (`skills/cv/SKILL.md` in the repo).
-const SKILL: &str = include_str!("../../../../skills/cv/SKILL.md");
+/// The skill installed beside the hooks. It lives inside this crate (`crates/cv/skill/SKILL.md`) so the
+/// published package carries it; a path outside the crate builds in the repo and nowhere else.
+const SKILL: &str = include_str!("../../skill/SKILL.md");
 
 /// A session whose transcript changed within this many minutes is *live* for the edit guard.
 const LIVE_MINUTES: i64 = 30;

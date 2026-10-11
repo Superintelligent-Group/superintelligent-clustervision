@@ -74,6 +74,12 @@ jobs:
       # A bad `publish-jobs` value sat in that file from v0.9.22 until 0.11.0 and every tag in
       # between produced zero artifacts, because the only thing that ever ran `dist plan` was the
       # release workflow itself, after the tag. Same installer and version as release.yml.
+      # Every crate we publish must build from its own tarball: a file outside the crate (an
+      # include_str! up the tree) builds here and nowhere else, and 0.15.0's CLI crate never
+      # reached crates.io because of one.
+      - name: Package the published crates
+        run: cargo package --workspace --exclude cv-web --exclude cv-testkit
+
       - name: Install dist
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"

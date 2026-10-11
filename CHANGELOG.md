@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.15.1 — 2026-10-11
+
+- The `clustervision` crate packages: the `cv` skill file lives inside the crate, so `cargo install clustervision` builds (0.15.0's CLI crate never reached crates.io).
+- CI packages every publishable crate on each push, so a file the published tarball lacks fails before a tag.
+
 ## 0.15.0 — 2026-10-11 — the clean break, part two
 
 cv went from 110K lines to the shape in `docs/INTERFACE-V2.md` "The shape": one binary, one read

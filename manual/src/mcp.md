@@ -285,7 +285,7 @@ at 8 MiB), and 10 ms on the tail path at 190 MB.
 
 ### The skill
 
-`skills/cv/SKILL.md` in the repository, which `install` copies into place: when `rewind`,
+`crates/cv/skill/SKILL.md` in the repository, which `install` copies into place: when `rewind`,
 `show --pre-compaction`, `distill`, `splice`, `adopt` and `lanes` apply, and the table above. The
 copy is byte-for-byte what this `cv` binary embeds, so `cv hooks show` marks a stale copy and
 `install` rewrites it.
