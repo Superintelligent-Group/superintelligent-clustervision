@@ -260,7 +260,7 @@ class CvTranscript extends HTMLElement {
         ? shortPath(e.target, 4)
         : e.target)
       : "";
-    const when = e.ts ? fmtTime(e.ts * 1000) : "";
+    const when = e.ts ? fmtTime(e.ts) : "";
     return `
       <div class="ev-row ev-${esc(e.kind)}">
         <span class="ev-glyph" aria-hidden="true">${glyph}</span>

@@ -203,6 +203,20 @@ pub fn pre_compaction_span(boundaries: &[Compaction], n: usize) -> Option<(usize
     Some((start.min(b.boundary_msg_idx), b.boundary_msg_idx))
 }
 
+/// The Nth boundary as `cv compaction --json` and `GET /api/session/{h}/{id}/compactions` emit it:
+/// the [`Compaction`] struct's own serialization plus `pre_compaction_span` under that one name,
+/// so the same fact never has two spellings depending on the door.
+pub fn row(boundaries: &[Compaction], n: usize) -> Value {
+    let Some(c) = boundaries.get(n) else { return Value::Null };
+    let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
+    if let Some(obj) = v.as_object_mut() {
+        if let Some((s, e)) = pre_compaction_span(boundaries, n) {
+            obj.insert("pre_compaction_span".into(), serde_json::json!([s, e]));
+        }
+    }
+    v
+}
+
 /// A [`Session`]-level convenience (used by tests / whole-session consumers): detect compactions
 /// from an already-parsed session's messages, without re-streaming. Mirrors [`CompactionSink`]'s
 /// logic on `session.messages`.

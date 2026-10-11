@@ -147,18 +147,15 @@ export async function getCompactions(session) {
       if (!resp.ok) return null;
       raw = await resp.json();
     }
-    if (Array.isArray(raw)) return raw;
-    // A bare array, like every other list the API serves. Older daemons wrapped it in
-    // `{harness, id, compactions}`; accept both so an older cvd still lights up the panel.
-    if (Array.isArray(raw)) return raw;
-    return raw && Array.isArray(raw.compactions) ? raw.compactions : null;
+    // A bare array, like every other list the API serves.
+    return Array.isArray(raw) ? raw : null;
   } catch {
     return null;
   }
 }
 
 /** Which sessions touched a file (by exact or suffix path match). Returns an array of
- *  `{ harness, session_id, title, edits, reads, last_ts }` rows, or `null` when the lookup
+ *  `{ harness, session_id, title, edits, reads, last_ts (RFC 3339) }` rows, or `null` when the lookup
  *  isn't available (older cvd / no cvd) so the UI can say so instead of showing "no results". */
 export async function getTouched(path, editsOnly = false) {
   if (!path) return [];

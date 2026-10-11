@@ -137,7 +137,7 @@ class CvProjects extends HTMLElement {
       return;
     }
     out.innerHTML = rows.map((t) => {
-      const date = t.last_ts ? new Date(t.last_ts * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+      const date = t.last_ts ? new Date(t.last_ts).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
       const counts = [
         t.edits ? `${t.edits} edit${t.edits === 1 ? "" : "s"}` : "",
         t.reads ? `${t.reads} read${t.reads === 1 ? "" : "s"}` : "",

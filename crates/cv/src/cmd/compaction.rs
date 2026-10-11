@@ -15,19 +15,9 @@ pub(crate) fn cmd_compaction(id: &str, harness: Option<String>, summaries: bool,
     let comps = cv_core::compaction::detect(&r, true)?;
 
     if json {
-        // Attach each boundary's pre-compaction span for machine consumers.
-        let rows: Vec<serde_json::Value> = comps
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let mut v = serde_json::to_value(c).unwrap_or(serde_json::Value::Null);
-                if let Some(obj) = v.as_object_mut() {
-                    if let Some((s, e)) = cv_core::compaction::pre_compaction_span(&comps, i) {
-                        obj.insert("pre_compaction_span".into(), serde_json::json!([s, e]));
-                    }
-                }
-                v
-            })
+        // `compaction::row`: the same row `/api/session/{h}/{id}/compactions` serves.
+        let rows: Vec<serde_json::Value> = (0..comps.len())
+            .map(|i| cv_core::compaction::row(&comps, i))
             .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());

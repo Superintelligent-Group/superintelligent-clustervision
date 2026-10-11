@@ -663,6 +663,8 @@ fn serve_messages_events_touched() {
     let edit = events.iter().find(|e| e["kind"] == "file_edit").unwrap();
     assert_eq!(edit["target"], "/work/proj/src/pelican.rs", "{v}");
     assert_eq!(edit["tool"], "Edit", "{v}");
+    // One spelling of an instant on every door: RFC 3339, as `cv events --json` prints it.
+    assert!(edit["ts"].as_str().is_some_and(|t| t.ends_with("+00:00")), "{v}");
     let errev = events.iter().find(|e| e["kind"] == "error").unwrap();
     assert!(errev["detail"].as_str().unwrap().contains("E0308"), "{v}");
 
@@ -682,6 +684,10 @@ fn serve_messages_events_touched() {
     assert_eq!(rows.len(), 1, "{v}");
     assert_eq!(rows[0]["session_id"], "gammasess", "{v}");
     assert_eq!(rows[0]["edits"], 1, "{v}");
+    assert!(
+        rows[0]["last_ts"].as_str().is_some_and(|t| t.ends_with("+00:00")),
+        "{v}"
+    );
     // Same keys as `cv touched --json`, provenance included: without `agent_id`/`parent_id`/
     // `workflow` a caller cannot tell a top-level run from one lane of a workflow, and the trio
     // was dropped here even though `events::Touched` has always carried it.

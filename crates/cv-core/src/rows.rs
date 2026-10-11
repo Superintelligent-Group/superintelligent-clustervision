@@ -12,6 +12,7 @@
 //! winning over the catalog's) keeps its original position, which is why the overlays below read
 //! as "fill in, then append".
 
+use crate::events::{EventRow, TouchedSession};
 use crate::ir::{Harness, SessionRef};
 use serde_json::{json, Value};
 
@@ -122,6 +123,39 @@ pub fn live_search_row(r: &SessionRef, title: &str, snippet: &str) -> Value {
     obj.insert("parent_id".into(), Value::Null);
     obj.insert("workflow".into(), Value::Null);
     row
+}
+
+/// One extracted tool event as `cv events --json` and `GET /api/session/{h}/{id}/events` emit it:
+/// the catalog row with `ts` spelled RFC 3339 (the catalog stores unix seconds) and the sub-agent
+/// provenance trio always present (null for a top-level session).
+pub fn event_row(e: &EventRow) -> Value {
+    json!({
+        "msg_idx": e.msg_idx,
+        "ts": rfc3339(e.ts),
+        "kind": e.kind,
+        "tool": e.tool,
+        "target": e.target,
+        "detail": e.detail,
+        "agent_id": e.agent_id,
+        "parent_id": e.parent_id,
+        "workflow": e.workflow,
+    })
+}
+
+/// One `cv touched --json` / `GET /api/touched` row: who touched the file, how often, when last
+/// (RFC 3339), and which lane of which workflow if it was a sub-agent.
+pub fn touched_row(t: &TouchedSession) -> Value {
+    json!({
+        "harness": t.harness,
+        "session_id": t.session_id,
+        "title": t.title,
+        "edits": t.edits,
+        "reads": t.reads,
+        "last_ts": rfc3339(t.last_ts),
+        "agent_id": t.agent_id,
+        "parent_id": t.parent_id,
+        "workflow": t.workflow,
+    })
 }
 
 /// The keys a §3 session row carries, in order — for tests and `cv schema`.

@@ -26,38 +26,28 @@ pub(crate) fn cmd_events(
     let rows = events::events_for(r.harness.as_str(), &r.id, kind.as_deref());
     if json {
         // One array: the session's own events, then (with --subagents) each sub-agent's, tagged.
-        let mut out: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|e| {
-                event_json(
-                    e.msg_idx,
-                    e.ts,
-                    &e.kind,
-                    e.tool.as_deref(),
-                    e.target.as_deref(),
-                    e.detail.as_deref(),
-                    e.agent_id.as_deref(),
-                    e.parent_id.as_deref(),
-                    e.workflow.as_deref(),
-                )
-            })
-            .collect();
+        // Every row is `rows::event_row` — the same function `/api/session/{h}/{id}/events` prints
+        // with, so the two doors cannot drift.
+        let mut out: Vec<serde_json::Value> = rows.iter().map(cv_core::rows::event_row).collect();
         if subagents {
             out.extend(subagent_events(&r, kind.as_deref())?.into_iter().flat_map(|(s, evs)| {
                 let agent_id = s.agent_id().to_string();
                 let parent = r.id.clone();
+                let harness = r.harness.as_str().to_string();
                 evs.into_iter().map(move |e| {
-                    event_json(
-                        e.msg_idx as i64,
-                        e.ts,
-                        e.kind,
-                        e.tool.as_deref(),
-                        e.target.as_deref(),
-                        e.detail.as_deref(),
-                        Some(&agent_id),
-                        Some(&parent),
-                        s.workflow.as_deref(),
-                    )
+                    cv_core::rows::event_row(&events::EventRow {
+                        harness: harness.clone(),
+                        session_id: parent.clone(),
+                        msg_idx: e.msg_idx as i64,
+                        ts: e.ts,
+                        kind: e.kind.to_string(),
+                        tool: e.tool,
+                        target: e.target,
+                        detail: e.detail,
+                        parent_id: Some(parent.clone()),
+                        agent_id: Some(agent_id.clone()),
+                        workflow: s.workflow.clone(),
+                    })
                 })
             }));
         }
@@ -96,31 +86,6 @@ pub(crate) fn cmd_events(
         print_subagent_events(&r, kind.as_deref())?;
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn event_json(
-    msg_idx: i64,
-    ts: Option<i64>,
-    kind: &str,
-    tool: Option<&str>,
-    target: Option<&str>,
-    detail: Option<&str>,
-    agent_id: Option<&str>,
-    parent_id: Option<&str>,
-    workflow: Option<&str>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "msg_idx": msg_idx,
-        "ts": ts.and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.to_rfc3339()),
-        "kind": kind,
-        "tool": tool,
-        "target": target,
-        "detail": detail,
-        "agent_id": agent_id,
-        "parent_id": parent_id,
-        "workflow": workflow,
-    })
 }
 
 /// Stream every sub-agent of `r` through an [`EventSink`] and collect its events (filtered by
@@ -221,22 +186,8 @@ fn print_event_row(
 pub(crate) fn cmd_touched(path: &str, edits_only: bool, json: bool) -> Result<()> {
     let rows = cv_core::events::sessions_touching(path, edits_only);
     if json {
-        let out: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "harness": t.harness,
-                    "session_id": t.session_id,
-                    "title": t.title,
-                    "edits": t.edits,
-                    "reads": t.reads,
-                    "last_ts": t.last_ts.and_then(|s| chrono::DateTime::from_timestamp(s, 0)).map(|d| d.to_rfc3339()),
-                    "agent_id": t.agent_id,
-                    "parent_id": t.parent_id,
-                    "workflow": t.workflow,
-                })
-            })
-            .collect();
+        // `rows::touched_row`: the same row `/api/touched` serves.
+        let out: Vec<serde_json::Value> = rows.iter().map(cv_core::rows::touched_row).collect();
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }

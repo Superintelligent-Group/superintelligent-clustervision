@@ -15,6 +15,7 @@
 - The Claude emitter owns resumability: dangling `parentUuid` re-linked, unanswered `tool_use` dropped, one sidechain identity — for `distill`, `splice`, `port` and `pack` alike; `emit_verified` asserts it.
 - `cv distill`'s pack shows a trailing call that never got its result (the lane stopped mid-call); the emitted session still drops it.
 - `cv distill` token estimates count bytes (not chars) at its 2.4/token, a call's `input` only and encrypted thinking: one estimator with `doctor`.
+- One read API (`cv_core::api::route_json`) behind every HTTP door; `/events` `ts` and `/touched` `last_ts` are RFC 3339 like the CLI's; `/subagents` rows are §3 session rows.
 - **`cv-llm` is gone**: `crates/cv/src/llm.rs` on `ureq` (no reqwest/hyper/tokio stack; 381 → 346 lock entries); its `distill` is now `digest`. The app loses native distill/generate; the loom's OpenRouter path stays.
 - Manual: `distill`, `fork`, `adopt` documented and a "Reshaping a lane" page; MCP tools and `cvd` routes match the binaries; harness counts corrected.
 - `integrations/` is gone (its recipes called MCP tools removed in 0.11); the manual's [Hooking a harness in](manual/src/integrations.md) replaces it.

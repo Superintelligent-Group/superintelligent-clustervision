@@ -26,4 +26,3 @@ clap.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 tiny_http = { version = "0.12", default-features = false }
-urlencoding = "2"
