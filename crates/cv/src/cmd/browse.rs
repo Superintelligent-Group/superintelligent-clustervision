@@ -27,6 +27,25 @@ fn json_rows<'a>(refs: impl Iterator<Item = &'a SessionRef>, limit: usize) -> Ve
         .collect()
 }
 
+/// What `ls --enrich` reads from a transcript: the session metadata (`git`, `title`) and its user
+/// turns, the only messages `synth_title` looks at. A lazy stream that keeps just those holds a
+/// few prompts instead of the whole session (assistant turns and tool output are most of it).
+fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<cv_core::Session> {
+    struct Users(Vec<cv_core::Message>);
+    impl cv_core::MessageSink for Users {
+        fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
+            if m.role == cv_core::Role::User {
+                self.0.push(m);
+            }
+            cv_core::Flow::Continue
+        }
+    }
+    let mut users = Users(Vec::new());
+    let mut session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy(), &mut users).ok()?;
+    session.messages = users.0;
+    Some(session)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_ls(
     harness: Option<String>,
@@ -88,8 +107,8 @@ pub(crate) fn cmd_ls(
                     // content on disk (memory-safe on the multi-MB "single-exchange giants" sesh
                     // warns about) while still carrying the session's git metadata and enough of the
                     // first user turn to synthesize a title.
-                    if let Some(session) = cv_core::harness::for_harness(r.harness)
-                        .and_then(|a| cv_core::stream::collect_with(a.as_ref(), r, &cv_core::ParseOptions::lazy()).ok())
+                    if let Some(session) =
+                        cv_core::harness::for_harness(r.harness).and_then(|a| enrich_head(a.as_ref(), r))
                     {
                         let map = obj.as_object_mut().expect("json object");
                         // `git`: the same object `cv show --json` emits (branch/commit/remote,
