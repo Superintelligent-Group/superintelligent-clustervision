@@ -139,8 +139,11 @@ impl CliTools {
             .find(tool)
             .ok_or_else(|| anyhow!("unknown generated tool: {tool}"))?;
         let argv = build_argv(cmd, args)?;
+        // stdin is this server's JSON-RPC channel: a child that reads stdin (`cv hook`, a `-`
+        // body) must see EOF, never protocol bytes.
         let out = std::process::Command::new(&self.bin)
             .args(&argv)
+            .stdin(std::process::Stdio::null())
             .output()
             .with_context(|| format!("running {} {}", self.bin.display(), argv.join(" ")))?;
         if !out.status.success() {
