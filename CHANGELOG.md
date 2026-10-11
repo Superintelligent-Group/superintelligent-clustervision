@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`web:<who>` is `<who>` to the token gate.** Identity bindings resolve the alias; `cv task serve
+  --token`/`$CV_TOKEN` presents it on every page action.
+- **`posed`/`resolved` refuse over a live revision**, as `done` does: no decision closes a task whose
+  reviewed code has not landed.
 - **`cv rewind`** — an agent as of a past moment, resumable. `cv rewind <id> --at <MSG_IDX|SHA>`
   copies the source's raw records from the last compaction before the cut (moved back to the
   boundary's preserved segment; `--full` from the top) through the cut into a new session id,
