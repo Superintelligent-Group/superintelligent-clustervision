@@ -6,16 +6,41 @@
 
 harness = "qwen"
 source_files = ["harness/qwen.rs"]
-ignore_literals = ["json", "jsonl"]
+ignore_literals = ["json", "jsonl", "chats"]
 store = [
-  "~/.qwen/tmp/<project>/{chats/session-*.json|jsonl, checkpoint-*.json, logs.json}",
+  "~/.qwen/projects/<sanitized cwd>/chats/<sessionId>.jsonl",
+  "~/.qwen/projects/<sanitized cwd>/subagents/<parentSessionId>/agent-<agentId>.jsonl (+ .meta.json)",
+  "~/.qwen/tmp/<projectHash>/{chats/session-*.json|jsonl, checkpoint-*.json, logs.json} (gemini-cli shape)",
 ]
 
 [upstream]
-repo = "gemini-cli fork (not checked out)"
-commit = "unknown"
-date = "2026-05-29"
+repo = "https://github.com/QwenLM/qwen-code (scratch clone; npm @qwen-code/qwen-code)"
+commit = "v0.25.1"
+date = "2026-10-11"
 
 [types]
-"record.user" = { status = "generic", note = "delegates to gemini" }
-"record.gemini" = { status = "generic", note = "delegates to gemini" }
+"record.user" = { status = "generic", note = "real_user prompt; any other user subtype/provenance is injected context" }
+"record.assistant" = { status = "generic", note = "Gemini Content parts" }
+"record.tool_result" = { status = "generic", note = "functionResponse parts + toolCallResult status" }
+"part.text" = { status = "generic", note = "" }
+"part.thought" = { status = "generic", note = "text with thought: true" }
+"part.functionCall" = { status = "generic", note = "tool_call {name, arguments} unwrapped, namespace tool_call" }
+"part.functionResponse" = { status = "generic", note = "" }
+"part.inlineData" = { status = "generic", note = "image" }
+"part.fileData" = { status = "generic", note = "file" }
+"user.notification" = { status = "generic", note = "injected context" }
+"user.goal_runtime" = { status = "generic", note = "injected context" }
+"system.ui_telemetry" = { status = "ignored", note = "request/tool lifecycle telemetry; about a third of a store's bytes" }
+"system.attribution_snapshot" = { status = "ignored", note = "commit-attribution file states" }
+"system.file_history_snapshot" = { status = "ignored", note = "" }
+"system.user_text_elements" = { status = "ignored", note = "" }
+"system.session_source" = { status = "ignored", note = "" }
+"system.session_execution_engine" = { status = "ignored", note = "" }
+"system.session_approval_mode" = { status = "ignored", note = "" }
+"system.session_artifact_event" = { status = "ignored", note = "" }
+"system.session_artifact_snapshot" = { status = "ignored", note = "" }
+"system.session_sources_snapshot" = { status = "ignored", note = "" }
+"system.branch_checkpoint" = { status = "ignored", note = "" }
+"system.goal_turn_end" = { status = "ignored", note = "" }
+"system.omni_recall" = { status = "ignored", note = "" }
+"system.managed_session_*" = { status = "ignored", note = "managed-session protocol" }

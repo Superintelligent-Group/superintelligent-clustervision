@@ -1,35 +1,57 @@
-//! Qwen Code CLI adapter — Qwen Code is a fork of gemini-cli and uses the **same** on-disk
-//! session/checkpoint format, just rooted at `~/.qwen` instead of `~/.gemini`:
+//! Qwen Code CLI adapter. Qwen Code began as a gemini-cli fork and has two on-disk shapes; both are
+//! read:
 //!
-//! - `~/.qwen/tmp/<projectHash>/logs.json` — readable fallback array of
-//!   `{sessionId, messageId, type, message, timestamp}` entries (many sessions per file).
-//! - `~/.qwen/tmp/<projectHash>/chats/session-<ts>-<id>.json` (legacy whole-file `ConversationRecord`)
-//!   or `.jsonl` (modern append-only: metadata line + message records + `$set`/`$rewindTo` controls),
-//!   plus subagent recordings under `chats/<parentId>/<id>.jsonl`.
-//! - `~/.qwen/tmp/<projectHash>/checkpoint-<tag>.json` — `{history: Content[]}` or a bare `Content[]`.
+//! 1. **Session JSONL** (current; verified on 0.25.1) —
+//!    `~/.qwen/projects/<sanitized cwd>/chats/<sessionId>.jsonl`, one `ChatRecord` per line
+//!    (`packages/core/src/services/chatRecordingService.ts`): `{uuid, parentUuid, sessionId,
+//!    timestamp, type, subtype?, cwd, version, gitBranch, provenance, message?: Content, model?,
+//!    usageMetadata?, toolCallResult?, systemPayload?, forkedFrom?}` with `type` one of `user`,
+//!    `assistant`, `tool_result`, `system`. `message` is a Gemini `Content` (`{role, parts}`: `text`,
+//!    `thought`, `functionCall`, `functionResponse`, `inlineData`). Sub-agent transcripts are
+//!    `projects/<cwd>/subagents/<parentSessionId>/agent-<agentId>.jsonl` (+ `.meta.json`), the same
+//!    record shape. `<sanitized cwd>` is the cwd with every non-alphanumeric byte a dash.
+//! 2. **gemini-cli recordings** (the fork's original layout) — `~/.qwen/tmp/<projectHash>/{logs.json,
+//!    chats/session-*.json|jsonl, checkpoint-*.json}`, byte-identical to Gemini's: delegated to
+//!    [`crate::harness::gemini`] and re-tagged [`Harness::Qwen`].
 //!
-//! Because the format is identical, this adapter delegates all parsing to
-//! [`crate::harness::gemini::parse_all_str`] (and streaming to
-//! [`crate::harness::gemini::stream_for`]) and then rewrites the resulting sessions'
-//! `harness` to [`Harness::Qwen`]. Missing dirs degrade gracefully to empty results.
+//! Missing dirs degrade gracefully to empty results.
 
-use super::Adapter;
+use super::{parse_ts, Adapter};
 use crate::ir::*;
-use crate::stream::{MessageSink, ParseOptions};
-use anyhow::Result;
+use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
+use anyhow::{Context, Result};
+use serde_json::{Map, Value};
+use std::collections::HashSet;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub struct Qwen {
+    /// `~/.qwen/tmp`: the gemini-cli-shaped recordings.
     root: Option<PathBuf>,
+    /// `~/.qwen/projects`: the session JSONL.
+    projects: Option<PathBuf>,
 }
 
 impl Qwen {
     pub fn detect() -> Self {
-        let root = dirs::home_dir()
-            .map(|h| h.join(".qwen").join("tmp"))
-            .filter(|p| p.exists());
-        Qwen { root }
+        match dirs::home_dir() {
+            Some(h) => Qwen::with_home(&h.join(".qwen")),
+            None => Qwen {
+                root: None,
+                projects: None,
+            },
+        }
+    }
+
+    /// Rooted at one Qwen home (`~/.qwen` or a `QWEN_HOME`): reads `<dir>/projects` and `<dir>/tmp`.
+    /// For tests and the corpus; never consults the process environment.
+    pub fn with_home(qwen_dir: &Path) -> Self {
+        let existing = |p: PathBuf| p.exists().then_some(p);
+        Qwen {
+            root: existing(qwen_dir.join("tmp")),
+            projects: existing(qwen_dir.join("projects")),
+        }
     }
 }
 
@@ -39,41 +61,57 @@ impl Adapter for Qwen {
     }
 
     fn roots(&self) -> Vec<PathBuf> {
-        self.root.clone().into_iter().collect()
+        self.projects.iter().chain(self.root.iter()).cloned().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        let Some(root) = &self.root else {
-            return Ok(vec![]);
-        };
-        // Same per-file scan Gemini uses (shared machinery, re-tagged Qwen) — crucially including
-        // the filename-derived `checkpoint-<tag>` ids, so discover ids match what `parse`/`stream`
-        // produce. (The old path scanned via the filename-blind pure parser, which gave every
-        // checkpoint the same generic id "checkpoint".)
-        let paths: Vec<_> = WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .map(|e| e.into_path())
-            .filter(|p| is_session_file(p))
-            .collect();
+        let mut paths: Vec<PathBuf> = Vec::new();
+        if let Some(projects) = &self.projects {
+            paths.extend(
+                WalkDir::new(projects)
+                    .max_depth(4)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.into_path())
+                    .filter(|p| is_session_jsonl(p)),
+            );
+        }
+        if let Some(root) = &self.root {
+            // Same per-file scan Gemini uses (shared machinery, re-tagged Qwen), including the
+            // filename-derived `checkpoint-<tag>` ids, so discover ids match what `parse`/`stream`
+            // produce.
+            paths.extend(
+                WalkDir::new(root)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.into_path())
+                    .filter(|p| is_session_file(p)),
+            );
+        }
         Ok(crate::par_flat_map(paths, |path| {
             crate::discover_cache::cached_scan_many(&path, || {
-                crate::harness::gemini::scan_session_file(&path, Harness::Qwen)
+                if is_session_jsonl(&path) {
+                    scan_session_jsonl(&path).into_iter().collect()
+                } else {
+                    crate::harness::gemini::scan_session_file(&path, Harness::Qwen)
+                }
             })
         }))
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // The on-disk format is identical to Gemini's, so the streaming machinery (mmap +
-        // RawValue for legacy whole-file JSON, line streaming for modern JSONL recordings) is
-        // shared; it re-tags the resulting session as Qwen — the same retag `parse_qwen_str`
-        // applies on the materializing path.
+        if is_session_jsonl(&r.path) {
+            return stream_session_jsonl(&r.path, sink);
+        }
+        // The gemini-cli shape: the streaming machinery (mmap + RawValue for legacy whole-file
+        // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
         crate::harness::gemini::stream_for(Harness::Qwen, r, opts, sink)
     }
 }
 
-/// Whether a file under `~/.qwen/tmp` is one of the shapes we parse: `logs.json`, a chat recording
+/// Whether a file under `~/.qwen/tmp` is one of the gemini-cli shapes: `logs.json`, a chat recording
 /// (`chats/…json|jsonl`), or a `checkpoint-*.json`.
 fn is_session_file(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
@@ -87,6 +125,497 @@ fn is_session_file(path: &Path) -> bool {
         .components()
         .any(|c| c.as_os_str() == std::ffi::OsStr::new("chats"));
     in_chats && matches!(path.extension().and_then(|e| e.to_str()), Some("json") | Some("jsonl"))
+}
+
+/// Whether `path` is a session JSONL under `projects/`: `<cwd>/chats/<id>.jsonl` or
+/// `<cwd>/subagents/<parent>/agent-<id>.jsonl`.
+fn is_session_jsonl(path: &Path) -> bool {
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return false;
+    }
+    let dir_name = |p: Option<&Path>| {
+        p.and_then(|d| d.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+    };
+    let parent = path.parent();
+    let grand = parent.and_then(Path::parent);
+    let in_projects = |p: Option<&Path>| dir_name(p.and_then(Path::parent)).as_deref() == Some("projects");
+    match dir_name(parent).as_deref() {
+        Some("chats") => in_projects(grand),
+        _ => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("agent-")
+                && dir_name(grand).as_deref() == Some("subagents")
+                && in_projects(grand.and_then(Path::parent))
+        }
+    }
+}
+
+/// The parent session of a sub-agent transcript, from its `subagents/<parent>/` dir.
+fn subagent_parent(path: &Path) -> Option<String> {
+    let dir = path.parent()?;
+    (dir.parent()?.file_name()? == "subagents")
+        .then(|| dir.file_name()?.to_str().map(str::to_string))
+        .flatten()
+}
+
+fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
+    let mut sink = CollectSink::default();
+    let s = stream_session_jsonl(path, &mut sink).ok()?;
+    if sink.messages.is_empty() && s.created_at.is_none() {
+        return None;
+    }
+    let mut r = SessionRef::new(s.id.clone(), Harness::Qwen, path.to_path_buf());
+    r.cwd = s.cwd.clone();
+    r.title = s.title.clone();
+    r.created_at = s.created_at;
+    r.updated_at = s.updated_at;
+    r.message_count = sink
+        .messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+        .count();
+    Some(r)
+}
+
+/// Cross-record state of one session file's emission.
+#[derive(Default)]
+struct ReplayState {
+    session_model: Option<String>,
+    first_prompt: Option<String>,
+    title: Option<String>,
+    /// `functionCall` ids of `agent` calls: their `tool_result` is a sub-agent's return.
+    spawn_calls: HashSet<String>,
+    /// `functionCall` id → the tool's name (unwrapped from `tool_call`), for the results.
+    call_names: std::collections::HashMap<String, String>,
+}
+
+/// Stream one session JSONL into `sink`, returning the session's metadata.
+fn stream_session_jsonl(path: &Path, sink: &mut dyn MessageSink) -> Result<Session> {
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let parent = subagent_parent(path);
+    let mut s = Session::new(stem.clone(), Harness::Qwen);
+    s.source_path = Some(path.to_path_buf());
+    s.lineage.parent = parent.clone();
+    if parent.is_some() {
+        // The `agent-<id>.meta.json` sidecar: the spawning call and the agent type.
+        let meta = std::fs::read_to_string(path.with_extension("meta.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        if let Some(meta) = meta {
+            let get = |k: &str| meta.get(k).and_then(Value::as_str).map(str::to_string);
+            s.lineage.spawned_by_tool_use = get("toolUseId");
+            s.lineage.agent_path = get("subagentName").or_else(|| get("agentType"));
+        }
+    }
+    let mut st = ReplayState::default();
+    let mut stopped = false;
+    let skipped = super::for_each_json_line(BufReader::new(file), |rec| {
+        let Value::Object(rec) = rec else { return Flow::Continue };
+        session_facts(&mut s, &rec, parent.is_some());
+        if stopped {
+            return Flow::Continue; // keep reading metadata (titles, last timestamp) after a Stop
+        }
+        if emit_record(&rec, &mut s, &mut st, sink) == Flow::Stop {
+            stopped = true;
+        }
+        Flow::Continue
+    });
+    s.model = st.session_model.take();
+    s.title = st.title.take().or(st.first_prompt.take());
+    super::note_skipped_lines(&mut s, skipped);
+    Ok(s)
+}
+
+/// Session-level facts every record carries: id, cwd, branch, version, time span, fork origin.
+fn session_facts(s: &mut Session, rec: &Map<String, Value>, is_subagent: bool) {
+    let str_of = |k: &str| rec.get(k).and_then(Value::as_str);
+    if !is_subagent {
+        if let Some(id) = str_of("sessionId") {
+            if s.id != id {
+                s.id = id.to_string();
+            }
+        }
+    }
+    if s.cwd.is_none() {
+        s.cwd = str_of("cwd").map(PathBuf::from);
+    }
+    if let Some(branch) = str_of("gitBranch") {
+        if s.git.as_ref().and_then(|g| g.branch.as_deref()) != Some(branch) {
+            s.git = Some(GitInfo {
+                branch: Some(branch.to_string()),
+                ..GitInfo::default()
+            });
+        }
+    }
+    if let Some(v) = str_of("version") {
+        s.harness_extra_mut(Harness::Qwen)
+            .insert("version".into(), Value::String(v.to_string()));
+    }
+    if let Some(ts) = str_of("timestamp").and_then(parse_ts) {
+        if s.created_at.is_none_or(|c| ts < c) {
+            s.created_at = Some(ts);
+        }
+        if s.updated_at.is_none_or(|u| ts > u) {
+            s.updated_at = Some(ts);
+        }
+    }
+    if s.lineage.forked_from.is_none() {
+        if let Some(from) = rec
+            .get("forkedFrom")
+            .and_then(|f| f.get("sessionId"))
+            .and_then(Value::as_str)
+        {
+            s.lineage.forked_from = Some(from.to_string());
+        }
+    }
+}
+
+/// The deferred-tool invoker (`ToolNames.TOOL_CALL`).
+const TOOL_CALL: &str = "tool_call";
+
+/// The text part a `UserPromptSubmit` hook's `additionalContext` arrives in, appended to the prompt.
+const HOOK_CONTEXT_TAG: &str = "<qwen:user-prompt-submit-context>";
+
+/// IR blocks for a Gemini `Content`'s parts (`message.parts`).
+fn content_blocks(rec: &Map<String, Value>) -> Vec<Block> {
+    let mut out = Vec::new();
+    let parts = rec
+        .get("message")
+        .and_then(|m| m.get("parts"))
+        .and_then(Value::as_array);
+    for p in parts.into_iter().flatten() {
+        if let Some(fc) = p.get("functionCall") {
+            let name = fc.get("name").and_then(Value::as_str).unwrap_or("tool");
+            let args = fc.get("args").cloned().unwrap_or(Value::Null);
+            let id = fc.get("id").and_then(Value::as_str).unwrap_or(name).to_string();
+            // `tool_call` invokes a deferred tool (one `tool_search` loaded) by name:
+            // `{name, arguments}`. The call is that tool's, namespaced `tool_call`.
+            let inner = (name == TOOL_CALL)
+                .then(|| args.get("name").and_then(Value::as_str))
+                .flatten();
+            out.push(match inner {
+                Some(inner) => Block::ToolUse {
+                    id,
+                    name: inner.to_string(),
+                    input: args.get("arguments").cloned().unwrap_or(Value::Null),
+                    namespace: Some(TOOL_CALL.to_string()),
+                },
+                None => Block::ToolUse {
+                    id,
+                    name: name.to_string(),
+                    input: args,
+                    namespace: None,
+                },
+            });
+        } else if let Some(fr) = p.get("functionResponse") {
+            let name = fr.get("name").and_then(Value::as_str).unwrap_or("tool");
+            let resp = fr.get("response");
+            let text = match resp {
+                Some(Value::Object(o)) => o
+                    .get("output")
+                    .or_else(|| o.get("error"))
+                    .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
+                    .unwrap_or_else(|| Value::Object(o.clone()).to_string()),
+                Some(Value::String(t)) => t.clone(),
+                Some(v) => v.to_string(),
+                None => String::new(),
+            };
+            out.push(Block::ToolResult {
+                tool_use_id: fr.get("id").and_then(Value::as_str).unwrap_or(name).to_string(),
+                content: text.into(),
+                is_error: resp.and_then(|r| r.get("error")).is_some(),
+                tool_name: Some(name.to_string()),
+                status: None,
+                details: None,
+            });
+        } else if let Some(inline) = p.get("inlineData") {
+            out.push(Block::Image {
+                media_type: inline.get("mimeType").and_then(Value::as_str).map(str::to_string),
+                data_ref: None,
+            });
+        } else if let Some(fd) = p.get("fileData") {
+            out.push(Block::File {
+                mime: fd.get("mimeType").and_then(Value::as_str).map(str::to_string),
+                path: None,
+                source: fd.get("fileUri").and_then(Value::as_str).map(str::to_string),
+            });
+        } else if let Some(t) = p.get("text").and_then(Value::as_str) {
+            if t.is_empty() {
+                continue;
+            }
+            if p.get("thought").and_then(Value::as_bool) == Some(true) {
+                out.push(Block::Thinking {
+                    text: t.to_string().into(),
+                    signature: p.get("thoughtSignature").and_then(Value::as_str).map(str::to_string),
+                    encrypted: None,
+                    redacted: false,
+                });
+            } else {
+                out.push(Block::Text {
+                    text: t.to_string().into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Gemini usage metadata: `promptTokenCount` includes `cachedContentTokenCount`; the IR's input is
+/// the disjoint remainder.
+fn usage_of(v: &Value) -> Option<Usage> {
+    let get = |k: &str| v.get(k).and_then(Value::as_u64);
+    let cached = get("cachedContentTokenCount");
+    let u = Usage {
+        input_tokens: get("promptTokenCount").map(|p| p.saturating_sub(cached.unwrap_or(0))),
+        output_tokens: get("candidatesTokenCount"),
+        cache_read_tokens: cached.filter(|c| *c > 0),
+        reasoning_tokens: get("thoughtsTokenCount").filter(|t| *t > 0),
+        ..Usage::default()
+    };
+    (u.input_tokens.is_some() || u.output_tokens.is_some()).then_some(u)
+}
+
+/// A `systemPayload` string field, for notice text.
+fn payload_str<'a>(rec: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+    let p = rec.get("systemPayload")?;
+    keys.iter().find_map(|k| p.get(*k).and_then(Value::as_str))
+}
+
+/// Translate one `ChatRecord` into 0..1 IR messages.
+fn emit_record(rec: &Map<String, Value>, s: &mut Session, st: &mut ReplayState, sink: &mut dyn MessageSink) -> Flow {
+    let ty = rec.get("type").and_then(Value::as_str).unwrap_or("");
+    let subtype = rec.get("subtype").and_then(Value::as_str);
+    let provenance = rec.get("provenance").and_then(Value::as_str);
+    let m = match (ty, subtype) {
+        ("user", None | Some("mid_turn_user_message")) if provenance.is_none_or(|p| p == "real_user") => {
+            // A sub-agent transcript's prompt was written by the parent agent, not a person.
+            let origin = if rec.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                Origin::Subagent
+            } else {
+                Origin::Human
+            };
+            let mut m = Message::of_kind(Role::User, MessageKind::Prompt, origin);
+            let (hooked, rest): (Vec<Block>, Vec<Block>) = content_blocks(rec)
+                .into_iter()
+                .partition(|b| matches!(b, Block::Text { text } if text.trim_start().starts_with(HOOK_CONTEXT_TAG)));
+            m.content = rest;
+            if st.first_prompt.is_none() {
+                st.first_prompt = m.text().map(|t| crate::ir::truncate(&t, 80));
+            }
+            if !hooked.is_empty() {
+                // A UserPromptSubmit hook's `additionalContext`: its own Hook turn, after the prompt.
+                let mut hook = Message::of_kind(Role::System, MessageKind::InjectedContext, Origin::Hook);
+                hook.content = hooked;
+                hook.timestamp = rec.get("timestamp").and_then(Value::as_str).and_then(parse_ts);
+                if finish(m, rec, subtype, sink) == Flow::Stop {
+                    return Flow::Stop;
+                }
+                return sink.message(hook);
+            }
+            m
+        }
+        ("user", sub) => {
+            // Model-facing input the harness (or a scheduler, or another agent) wrote: notifications,
+            // cron fires, goal runtime turns, agent mentions/messages.
+            let origin = match sub {
+                Some("cron") => Origin::Scheduler,
+                Some("agent_mention" | "agent_message") => Origin::Subagent,
+                _ => Origin::Harness,
+            };
+            let mut m = Message::of_kind(Role::System, MessageKind::InjectedContext, origin);
+            m.content = content_blocks(rec);
+            m
+        }
+        ("assistant", _) => {
+            let mut m = Message::of_kind(Role::Assistant, MessageKind::Reply, Origin::Model);
+            m.content = content_blocks(rec);
+            if let Some(model) = rec.get("model").and_then(Value::as_str) {
+                match st.session_model.as_deref() {
+                    None => st.session_model = Some(model.to_string()),
+                    Some(m0) if m0 != model => m.model = Some(model.to_string()),
+                    _ => {}
+                }
+            }
+            m.usage = rec.get("usageMetadata").and_then(usage_of);
+            for b in &m.content {
+                if let Block::ToolUse { id, name, .. } = b {
+                    st.call_names.insert(id.clone(), name.clone());
+                    if name == "agent" {
+                        st.spawn_calls.insert(id.clone());
+                    }
+                }
+            }
+            if m.content
+                .iter()
+                .any(|b| matches!(b, Block::ToolUse { id, .. } if st.spawn_calls.contains(id)))
+            {
+                m.kind = MessageKind::SubagentSpawn;
+            }
+            m
+        }
+        ("tool_result", _) => {
+            let mut m = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
+            m.content = content_blocks(rec);
+            let tcr = rec.get("toolCallResult");
+            let status = tcr.and_then(|t| t.get("status")).and_then(Value::as_str);
+            let mut spawned = false;
+            for b in &mut m.content {
+                if let Block::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    status: st_field,
+                    tool_name,
+                    ..
+                } = b
+                {
+                    *is_error |= status == Some("error");
+                    *st_field = status.map(str::to_string);
+                    if let Some(n) = st.call_names.get(tool_use_id.as_str()) {
+                        *tool_name = Some(n.clone());
+                    }
+                    spawned |= st.spawn_calls.contains(tool_use_id.as_str());
+                }
+            }
+            if spawned {
+                m.kind = MessageKind::SubagentReturn;
+                m.origin = Origin::Subagent;
+            }
+            m
+        }
+        ("system", Some("chat_compression")) => {
+            // `{info: {originalTokenCount, newTokenCount, triggerReason, ...}, compressedHistory:
+            // Content[]}`: the boundary, then the summary turn that seeds the new window.
+            let payload = rec.get("systemPayload");
+            let mut m = Message::of_kind(Role::System, MessageKind::CompactionBoundary, Origin::Harness);
+            m.content.push(Block::Text {
+                text: "[conversation compressed]".to_string().into(),
+            });
+            if let Some(info) = payload.and_then(|p| p.get("info")).and_then(Value::as_object) {
+                let bag = m.harness_extra_mut(Harness::Qwen);
+                for k in ["triggerReason", "originalTokenCount", "newTokenCount"] {
+                    if let Some(v) = info.get(k) {
+                        bag.insert(k.into(), v.clone());
+                    }
+                }
+            }
+            let summary: String = payload
+                .and_then(|p| p.get("compressedHistory"))
+                .and_then(Value::as_array)
+                .and_then(|h| h.first())
+                .and_then(|c| c.get("parts"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if finish(m, rec, subtype, sink) == Flow::Stop {
+                return Flow::Stop;
+            }
+            if summary.is_empty() {
+                return Flow::Continue;
+            }
+            let mut sm = Message::of_kind(Role::System, MessageKind::CompactionSummary, Origin::Harness);
+            sm.content.push(Block::Text { text: summary.into() });
+            sm.timestamp = rec.get("timestamp").and_then(Value::as_str).and_then(parse_ts);
+            return sink.message(sm);
+        }
+        ("system", Some("goal_state")) => {
+            // A goal's lifecycle (`/goal`): `{cause, snapshot: {goal: {objective, status, ...}}}`.
+            let payload = rec.get("systemPayload");
+            let goal = payload.and_then(|p| p.get("snapshot")).and_then(|s| s.get("goal"));
+            let objective = goal.and_then(|g| g.get("objective")).and_then(Value::as_str);
+            let status = goal
+                .and_then(|g| g.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let cause = payload
+                .and_then(|p| p.get("cause"))
+                .and_then(Value::as_str)
+                .unwrap_or("update");
+            let Some(objective) = objective else {
+                return Flow::Continue;
+            };
+            let mut m = Message::of_kind(Role::System, MessageKind::Notice, Origin::Harness);
+            m.content.push(Block::Text {
+                text: format!("[goal {cause}] {objective} ({status})").into(),
+            });
+            m
+        }
+        ("system", Some("slash_command" | "at_command" | "notification" | "background_task_completed")) => {
+            let mut m = Message::of_kind(Role::System, MessageKind::Notice, Origin::Harness);
+            let text = payload_str(rec, &["rawCommand", "userText", "text", "message", "summary"])
+                .map(str::to_string)
+                .unwrap_or_else(|| rec.get("systemPayload").map(Value::to_string).unwrap_or_default());
+            if !text.is_empty() {
+                m.content.push(Block::Text { text: text.into() });
+            }
+            m
+        }
+        ("system", Some("rewind")) => {
+            let mut m = Message::of_kind(Role::System, MessageKind::Branch, Origin::Harness);
+            m.content.push(Block::Text {
+                text: "[rewound]".to_string().into(),
+            });
+            m
+        }
+        ("system", Some("session_model")) => {
+            let model = payload_str(rec, &["model", "modelId"]).map(str::to_string);
+            let mut m = Message::of_kind(Role::System, MessageKind::ModelChange, Origin::Harness);
+            m.model = model;
+            m
+        }
+        ("system", Some("custom_title")) => {
+            if let Some(t) = payload_str(rec, &["title", "customTitle"]) {
+                st.title = Some(t.to_string());
+            }
+            return Flow::Continue;
+        }
+        ("system", Some("parent_session")) => {
+            if let Some(p) = payload_str(rec, &["parentSessionId", "sessionId"]) {
+                s.lineage.forked_from = Some(p.to_string());
+            }
+            return Flow::Continue;
+        }
+        ("system", Some("turn_result")) => {
+            let Some(err) = rec
+                .get("systemPayload")
+                .and_then(|p| p.get("error"))
+                .filter(|e| !e.is_null())
+            else {
+                return Flow::Continue;
+            };
+            let mut m = Message::of_kind(Role::System, MessageKind::Error, Origin::Harness);
+            let text = err
+                .get("message")
+                .and_then(Value::as_str)
+                .map_or_else(|| err.to_string(), str::to_string);
+            m.content.push(Block::Text { text: text.into() });
+            m
+        }
+        // Telemetry, attribution and file-history snapshots, session settings echoes, artifacts,
+        // goal bookkeeping and the managed-session protocol: not conversation.
+        _ => return Flow::Continue,
+    };
+    finish(m, rec, subtype, sink)
+}
+
+/// Stamp a message with its record's identity and hand it to the sink (an empty one is dropped).
+fn finish(mut m: Message, rec: &Map<String, Value>, subtype: Option<&str>, sink: &mut dyn MessageSink) -> Flow {
+    if m.content.is_empty() && m.kind != MessageKind::ModelChange {
+        return Flow::Continue;
+    }
+    m.id = rec.get("uuid").and_then(Value::as_str).map(str::to_string);
+    m.parent_id = rec.get("parentUuid").and_then(Value::as_str).map(str::to_string);
+    m.timestamp = rec.get("timestamp").and_then(Value::as_str).and_then(parse_ts);
+    if let Some(sub) = subtype {
+        m.harness_extra_mut(Harness::Qwen)
+            .insert("subtype".into(), Value::String(sub.to_string()));
+    }
+    sink.message(m)
 }
 
 #[cfg(test)]
@@ -251,7 +780,12 @@ mod tests {
         assert!(refs1.iter().all(|r| r.harness == Harness::Qwen));
 
         // parse() (= collect(stream)) agrees with the discovered id and re-tags as Qwen.
-        let s = Qwen { root: None }.parse(&refs1[0]).expect("parse checkpoint");
+        let s = Qwen {
+            root: None,
+            projects: None,
+        }
+        .parse(&refs1[0])
+        .expect("parse checkpoint");
         assert_eq!(s.id, "checkpoint-alpha");
         assert_eq!(s.harness, Harness::Qwen);
         assert!(!s.messages.is_empty());
@@ -268,5 +802,129 @@ mod tests {
         assert!(is_session_file(Path::new("/x/tmp/h/chats/parent/child.jsonl")));
         assert!(!is_session_file(Path::new("/x/tmp/h/other.json")));
         assert!(!is_session_file(Path::new("/x/tmp/h/notes.txt")));
+    }
+
+    /// The 0.25.1 session JSONL, as the corpus shows it: a hooked prompt, a deferred `agent` call
+    /// through `tool_call`, its sub-agent transcript, a compression, a goal, telemetry, a fork.
+    #[test]
+    fn reads_session_jsonl_and_subagent_transcripts() {
+        let home = std::env::temp_dir().join(format!("cv-qwen-modern-{}", uuid::Uuid::new_v4()));
+        let proj = home.join("projects").join("-home-corpus-project");
+        fs::create_dir_all(proj.join("chats")).unwrap();
+        fs::create_dir_all(proj.join("subagents").join("s1")).unwrap();
+        let base = r#""sessionId":"s1","cwd":"/home/corpus/project","version":"0.25.1","gitBranch":"main""#;
+        let rec = |uuid: &str, ts: u32, body: &str| {
+            format!(
+                r#"{{"uuid":"{uuid}","parentUuid":null,{base},"timestamp":"2026-10-11T00:00:{ts:02}.000Z",{body}}}"#
+            )
+        };
+        let lines = [
+            rec(
+                "u1",
+                1,
+                r#""type":"user","provenance":"real_user","message":{"role":"user","parts":[{"text":"spawn one"},{"text":"<qwen:user-prompt-submit-context>\nteal\n</qwen:user-prompt-submit-context>"}]}"#,
+            ),
+            rec(
+                "t0",
+                2,
+                r#""type":"system","subtype":"ui_telemetry","systemPayload":{"uiEvent":{}}}"#,
+            ),
+            rec(
+                "a1",
+                3,
+                r#""type":"assistant","model":"glm-5.3-flash","message":{"role":"model","parts":[{"text":"hm","thought":true},{"functionCall":{"id":"c1","name":"tool_call","args":{"name":"agent","arguments":{"prompt":"say ok"}}}}]},"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"cachedContentTokenCount":40,"thoughtsTokenCount":2}"#,
+            ),
+            rec(
+                "r1",
+                4,
+                r#""type":"tool_result","message":{"role":"user","parts":[{"functionResponse":{"id":"c1","name":"tool_call","response":{"output":"ok"}}}]},"toolCallResult":{"callId":"c1","status":"success"}"#,
+            ),
+            rec(
+                "c1",
+                5,
+                r#""type":"system","subtype":"chat_compression","systemPayload":{"info":{"originalTokenCount":9,"newTokenCount":7,"triggerReason":"manual"},"compressedHistory":[{"role":"user","parts":[{"text":"<state_snapshot>sum</state_snapshot>"}]}]}"#,
+            ),
+            rec(
+                "g1",
+                6,
+                r#""type":"system","subtype":"goal_state","systemPayload":{"cause":"create","snapshot":{"goal":{"objective":"say goal","status":"active"}}}"#,
+            ),
+            rec(
+                "a2",
+                7,
+                r#""type":"assistant","model":"glm-4.7-flash","message":{"role":"model","parts":[{"text":"ok"}]}"#,
+            ),
+        ];
+        fs::write(proj.join("chats").join("s1.jsonl"), lines.join("\n") + "\n").unwrap();
+        let fork = rec("u9", 8, r#""type":"user","provenance":"real_user","forkedFrom":{"sessionId":"s0","messageUuid":"u9"},"message":{"role":"user","parts":[{"text":"forked"}]}"#)
+            .replace(r#""sessionId":"s1""#, r#""sessionId":"s2""#);
+        fs::write(proj.join("chats").join("s2.jsonl"), fork + "\n").unwrap();
+        let sub = proj.join("subagents").join("s1");
+        fs::write(
+            sub.join("agent-general-purpose-c1.jsonl"),
+            rec(
+                "x1",
+                3,
+                r#""type":"user","isSidechain":true,"message":{"role":"user","parts":[{"text":"say ok"}]}"#,
+            ) + "\n",
+        )
+        .unwrap();
+        fs::write(
+            sub.join("agent-general-purpose-c1.meta.json"),
+            r#"{"agentId":"general-purpose-c1","toolUseId":"c1","subagentName":"general-purpose"}"#,
+        )
+        .unwrap();
+
+        let q = Qwen::with_home(&home);
+        let mut refs = q.discover().unwrap();
+        refs.sort_by(|a, b| a.id.cmp(&b.id));
+        let ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["agent-general-purpose-c1", "s1", "s2"]);
+
+        let s = q.parse(&refs[1]).unwrap();
+        let kinds: Vec<(Role, MessageKind, Origin)> = s.messages.iter().map(|m| (m.role, m.kind, m.origin)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (Role::User, MessageKind::Prompt, Origin::Human),
+                (Role::System, MessageKind::InjectedContext, Origin::Hook),
+                (Role::Assistant, MessageKind::SubagentSpawn, Origin::Model),
+                (Role::Tool, MessageKind::SubagentReturn, Origin::Subagent),
+                (Role::System, MessageKind::CompactionBoundary, Origin::Harness),
+                (Role::System, MessageKind::CompactionSummary, Origin::Harness),
+                (Role::System, MessageKind::Notice, Origin::Harness),
+                (Role::Assistant, MessageKind::Reply, Origin::Model),
+            ]
+        );
+        assert_eq!(s.title.as_deref(), Some("spawn one"));
+        assert_eq!(s.cwd.as_deref(), Some(Path::new("/home/corpus/project")));
+        assert_eq!(s.model.as_deref(), Some("glm-5.3-flash"));
+        assert_eq!(
+            s.messages[7].model.as_deref(),
+            Some("glm-4.7-flash"),
+            "the switch is per message"
+        );
+        match &s.messages[2].content[1] {
+            Block::ToolUse {
+                name, namespace, input, ..
+            } => {
+                assert_eq!(name, "agent");
+                assert_eq!(namespace.as_deref(), Some("tool_call"));
+                assert_eq!(input["prompt"], "say ok");
+            }
+            b => panic!("expected the unwrapped call, got {b:?}"),
+        }
+        let u = s.messages[2].usage.as_ref().unwrap();
+        assert_eq!(
+            (u.input_tokens, u.cache_read_tokens, u.reasoning_tokens),
+            (Some(60), Some(40), Some(2))
+        );
+
+        let child = q.parse(&refs[0]).unwrap();
+        assert_eq!(child.lineage.parent.as_deref(), Some("s1"));
+        assert_eq!(child.lineage.spawned_by_tool_use.as_deref(), Some("c1"));
+        assert_eq!(child.messages[0].origin, Origin::Subagent);
+        assert_eq!(q.parse(&refs[2]).unwrap().lineage.forked_from.as_deref(), Some("s0"));
+        fs::remove_dir_all(&home).ok();
     }
 }
