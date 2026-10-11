@@ -14,6 +14,9 @@ authors.workspace = true
 # `clustervision-core` (renamed off the taken `cv-core`). Dependents already
 # alias it via `package = "clustervision-core"`, and this keeps the crate's own
 # `tests/` (which `use cv_core::…`) compiling.
+# The harness corpus is test data that grows with every harness version; it is not part of the
+# published library.
+exclude = ["tests/corpus"]
 [lib]
 name = "cv_core"
 
