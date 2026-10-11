@@ -45,6 +45,13 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace
 
+      # Every `cv <cmd>` and MCP tool name the manual mentions exists in `cv schema --commands` or
+      # a live `tools/list`. The roster is generated from the clap tree so the binary cannot skew;
+      # the manual could, and did (a `formats` tool that is really `formats_census`/`formats_check`;
+      # no `task_stats`).
+      - name: Manual names exist
+        run: tools/check-manual-names.sh target/debug/cv target/debug/cv-mcp
+
       - name: Build cv-core for wasm config (no default features)
         run: cargo build -p clustervision-core --no-default-features
 

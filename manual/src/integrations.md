@@ -3,8 +3,8 @@
 clustervision reads every harness's own on-disk store, so nothing has to be wired for it to
 *see* your sessions. Two small hooks and one MCP registration make a harness *use* it while it
 runs. This page lists only what works today, in the one harness we have checked against its
-documentation and binary (Claude Code 2.1.x). A `cv hooks install <harness>` / `cv hooks remove`
-command that writes these entries idempotently is planned; until it lands, paste them by hand.
+documentation and binary (Claude Code 2.1.x). A **hooks** subcommand (install / remove, idempotent, per harness)
+is planned; until it lands, paste these entries by hand.
 
 ## Claude Code
 
@@ -61,4 +61,4 @@ Nothing to install. `cvd watch` follows every harness's store and archives sessi
 `cv ls`, `cv search` and the MCP tools read the stores directly. Harnesses with their own hook or
 plugin systems (Codex `~/.codex/hooks.json`, Gemini CLI extensions, OpenCode plugins, Hermes
 plugins, OpenClaw hooks) can run the same two commands at the same two moments; clustervision
-ships no configuration for them until `cv hooks install` does it from one tested source.
+ships no configuration for them until the hooks subcommand writes it from one tested source.
