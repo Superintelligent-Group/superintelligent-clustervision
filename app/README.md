@@ -48,43 +48,21 @@ Invoke from JS with `window.__TAURI__.core.invoke("<name>", { ... })`:
 | `redact`        | `{ sessionJson: string }`                     | redacted Session as JSON string | `cv_core::redact`      |
 | `ingest_zip`    | `{ path: string }`                            | `Session[]` as a JSON string    | `cv_core::ingest::ingest_files` |
 
-### Reading the machine's sessions — the `local_*` commands
+### Reading the machine's sessions — one `api` command
 
-The desktop app answers session reads **natively**, out of `cv_core`, instead of fetching
-`http://localhost:7777` (the webview's cross-origin fetch to localhost is unreliable). Every
-shape below is the one `cvd serve` returns for the same thing (`crates/cvd/src/serve.rs`), so a
-session is indistinguishable between the daemon's HTTP API and this app — verified against both
-`cv <cmd> --json` and a live `cvd` across all 12 harnesses present on a real machine.
+The desktop app answers session reads **natively** instead of fetching `http://localhost:7777`
+(the webview's cross-origin fetch to localhost is unreliable). It has exactly one read command:
 
-| Command                 | Args                                                                   | Returns |
-|-------------------------|------------------------------------------------------------------------|---------|
-| `local_sessions`        | `{ limit?: number, harness?: string, cwd?: string }`                    | `SessionRow[]` |
-| `local_session`         | `{ harness, id }`                                                       | the IR `Session` (identical to `cv show --json`) |
-| `local_session_head`    | `{ harness, id }`                                                       | `SessionRow` + `model, git, system_prompt, lineage, extra, total` |
-| `local_messages`        | `{ harness, id, start?, end?, extra?: boolean }`                        | `{ harness, id, start, end, has_more, total_known, total, message_count, session, messages }` |
-| `local_events`          | `{ harness, id, kind?: string }`                                        | `{ msg_idx, ts, kind, tool, target, detail }[]` |
-| `local_compactions`     | `{ harness, id }`                                                       | `{ harness, id, compactions: { index, summary_index, trigger, pre_tokens, duration_ms, summary, headline, pre_span }[] }` |
-| `local_touched`         | `{ path, editsOnly?: boolean }`                                         | `{ harness, session_id, title, edits, reads, last_ts }[]` |
-| `local_subagents`       | `{ harness, id }`                                                       | `SessionRow[]` + `agent_id, agent_type, description, tool_use_id, workflow, result_status, result_summary` |
-| `local_subagent`        | `{ harness, parent, agent }`                                            | the sub-agent's IR `Session` |
-| `local_workflow_script` | `{ harness, id, workflow }`                                             | `{ workflow, name, source }` |
+| Command | Args | Returns |
+|---------|------|---------|
+| `api`   | `{ path: string, query?: string }` | the JSON body (a string to `JSON.parse`), or rejects with `"<status>: <error>"` |
 
-Each returns a **JSON string** (`JSON.parse` it), or rejects with a readable message.
-
-A **`SessionRow`** is `INTERFACE-V2.md` §3's session row, exactly as `cv ls --json` prints it:
-`{ id, harness, path, cwd, title, created_at, updated_at, message_count, size_bytes }` —
-timestamps RFC 3339, `null` when unknown.
-
-Two IR-v2 notes for the UI:
-
-- **`local_messages`' `extra: true`** keeps each message's harness `extra` bag *and* the
-  structured `Block::ToolResult.details` sidecar (both gated on `ParseOptions::extra`, because the
-  sidecar routinely dwarfs the transcript). Bulk paging leaves it off; a structure/detail view
-  turns it on.
-- **`local_session_head`** is the cheap way to get the session-level fields 0.11 added —
-  `system_prompt` and `lineage` (`forked_from`, `parent`, `spawned_by_tool_use`, `continued_in`,
-  `continues`, `agent_path`) — plus `git`, `model` and the exact message `total`, in one pass that
-  keeps no messages. It is the only way to get them for Claude, whose stream emits no `meta()`.
+`path` is any read-API path (`/api/sessions`, `/api/session/claude/<id>/messages`, …) and
+`query` its raw query string. It calls `cv_core::api::route_json`, the same function `cv serve`
+answers `/api/*` with, so a session cannot look different between the server and the app; the
+routes and shapes are the ones in the manual's [server chapter](../manual/src/daemon.md#routes).
+The web UI calls it through `apiGet(path, params)` in `web/components/hydrate.js`, which uses
+`fetch` against `cv serve` in a browser instead.
 
 `redact` and `ingest_zip` are pure and offline (no key needed). Both take/return the **same
 Session IR JSON** the web UI already speaks (`serde_json` round-trip of `cv_core::Session`).

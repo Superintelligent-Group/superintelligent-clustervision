@@ -44,10 +44,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 cv-core = { path = "../../crates/cv-core", package = "clustervision-core" }
 cv-search = { path = "../../crates/cv-search" }
 
-[dev-dependencies]
-# Fixture transcripts for the `local_*` JSON-shaping tests live in a scratch dir, never the store.
-tempfile = "3"
-
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -68,7 +68,7 @@ There are three ways sessions get into the pool, and they all merge into one sea
 
 On startup the app loads the machine's real on-disk sessions — **everything**, every harness, with zero configuration:
 
-- **Desktop:** via the native `local_sessions` command. No HTTP, no CORS, no mixed-content surprises.
+- **Desktop:** via the native `api` command (the server's read API, in-process). No HTTP, no CORS, no mixed-content surprises.
 - **Browser:** by trying a local `cvd` over HTTP (`/api/sessions`). If `cvd` isn't running — the normal case for the static web deploy — it falls back to the bundled sample.
 
 ### 2. Lazy hydration (metadata stubs → full transcripts on demand)
@@ -109,7 +109,7 @@ Press **?** anytime for the in-app cheat sheet.
 
 The browser build is fully capable, but the Tauri desktop shell adds the things a sandboxed web page can't do:
 
-- **Native access to all your local sessions** — no zip, no `cvd` HTTP round-trip, no upload — via the `local_sessions` / `local_session` / `local_subagents` / `local_subagent` commands.
+- **Native access to all your local sessions** — no zip, no `cvd` HTTP round-trip, no upload — via one native `api` command that runs the server's read API in-process.
 - **A bundled `cvd serve`** launched on startup (and toggleable from **View → Toggle cvd serve**), so the Fleet dashboard is live out of the box. It's reaped when you quit.
 - **Native distill / redact / generate** — these call straight into `cv_llm` / `cv_core`, so LLM API keys live in the desktop process's environment (or a local LM Studio server), never shipped into JavaScript. Redaction is pure and offline; no key needed.
 - **Native zip ingest** — File → Open zip… and drag-and-drop both work without the WASM module.

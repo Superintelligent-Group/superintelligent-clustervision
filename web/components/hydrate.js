@@ -1,14 +1,14 @@
-// Shared lazy hydration: the session pool is metadata-only stubs (from cvd `/api/sessions` or the
-// native `local_sessions` command) until a transcript is actually needed. Any view (transcript,
-// compare, loom) calls `hydrateSession(stub)` to pull the full message tree on demand — native
-// command in the desktop, HTTP to a local cvd in the browser. Already-full sessions pass through.
+// Shared lazy hydration: the session pool is metadata-only stubs (`/api/sessions`) until a
+// transcript is actually needed. Any view (transcript, compare, loom) calls `hydrateSession(stub)`
+// to pull the full message tree on demand through `apiGet` — the native `api` command in the
+// desktop, HTTP to a local `cv serve` in the browser. Already-full sessions pass through.
 import { invoke, canInvokeNative } from "../tauri.js";
 import { normalizeSession } from "./util.js";
 
-// Where the cvd JSON API lives. Resolution order:
+// Where the `cv serve` JSON API lives. Resolution order:
 //   1) an explicit `window.__CVD_BASE__` override (set it before the app loads to point elsewhere);
 //   2) the page's own origin when the dashboard is served over http(s) — this is the case when you
-//      run `cvd serve --web ./web`, so the API is right here regardless of which port you chose;
+//      run `cv serve --web ./web`, so the API is right here regardless of which port you chose;
 //   3) the classic localhost:7777 default (file:// / tauri:// origins, or a static deploy).
 export const CVD_BASE = (() => {
   try {
@@ -24,53 +24,53 @@ export function isStub(s) {
   return !!(s && s._stub && !(s.messages && s.messages.length));
 }
 
+const enc = encodeURIComponent;
+
+/** `/api/session/{harness}/{id}` plus an optional tail, encoded. */
+function sessionPath(harness, id, tail = "") {
+  return `/api/session/${enc(harness)}/${enc(id)}${tail}`;
+}
+
+/**
+ * GET one route of the read API. In the desktop app it is the native `api` command (the same
+ * `route_json` the server runs, in-process: no HTTP, no CORS); in a browser it is `fetch` against a
+ * local `cv serve`. Same paths, same JSON, one function per noun on the other side. Throws on a
+ * non-2xx answer or an unreachable server; callers decide what absence means.
+ * @param {string} path      e.g. `/api/sessions`
+ * @param {object} [params]  query parameters (null/undefined values are dropped)
+ */
+export async function apiGet(path, params = {}) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v != null && v !== false) q.set(k, String(v === true ? 1 : v));
+  const query = q.toString();
+  if (canInvokeNative()) return JSON.parse(await invoke("api", { path, query }));
+  const resp = await fetch(`${CVD_BASE}${path}${query ? `?${query}` : ""}`, { headers: { Accept: "application/json" } });
+  if (!resp.ok) throw new Error(`cv serve ${resp.status}`);
+  return resp.json();
+}
+
 /** Resolve a stub to a full session (with messages). Full sessions are returned unchanged. */
 export async function hydrateSession(stub) {
   if (!isStub(stub)) return stub;
-  let raw;
-  if (canInvokeNative()) {
-    raw = JSON.parse(await invoke("local_session", { harness: stub.harness, id: stub.id }));
-  } else {
-    const url = `${CVD_BASE}/api/session/${encodeURIComponent(stub.harness)}/${encodeURIComponent(stub.id)}`;
-    const resp = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!resp.ok) throw new Error(`cvd ${resp.status}`);
-    raw = await resp.json();
-  }
-  const full = normalizeSession(raw);
+  const full = normalizeSession(await apiGet(sessionPath(stub.harness, stub.id)));
   full._stub = false;
   return full;
 }
 
-const enc = encodeURIComponent;
-
 /** Window size for paged transcript loads. */
 export const PAGE = 200;
 
-/** Fetch the message window [start, end) of a session without loading the whole transcript
- *  (cvd ≥0.9.12's `/messages` endpoint / the desktop's `local_messages` command). Returns
- *  `{ messages, start, end, has_more, total_known, total, message_count, session }`, or `null`
- *  when the windowed path isn't available (older cvd, no cvd, older app) — callers fall back to
- *  a full `hydrateSession`.
+/** Fetch the message window [start, end) of a session without loading the whole transcript.
+ *  Returns `{ messages, start, end, has_more, total_known, total, message_count, session }`, or
+ *  `null` when the windowed read isn't available — callers fall back to a full `hydrateSession`.
  *
  *  `opts.extra` keeps each message's harness `extra` map (subtype / compactMetadata / the
  *  toolUseResult sidecar) — needed to find compaction boundaries; off by default so ordinary
  *  transcript paging stays lean. */
 export async function getMessages(stub, start, end, opts = {}) {
   if (!stub || !stub.harness || !stub.id) return null;
-  const wantExtra = !!opts.extra;
   try {
-    let raw;
-    if (canInvokeNative()) {
-      raw = JSON.parse(await invoke("local_messages", {
-        harness: stub.harness, id: stub.id, start, end, extra: wantExtra,
-      }));
-    } else {
-      const ex = wantExtra ? "&extra=1" : "";
-      const url = `${CVD_BASE}/api/session/${enc(stub.harness)}/${enc(stub.id)}/messages?start=${start}&end=${end}${ex}`;
-      const resp = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!resp.ok) return null; // 404 = older cvd (or unknown session): take the full path
-      raw = await resp.json();
-    }
+    const raw = await apiGet(sessionPath(stub.harness, stub.id, "/messages"), { start, end, extra: !!opts.extra });
     return raw && Array.isArray(raw.messages) ? raw : null;
   } catch {
     return null;
@@ -82,23 +82,12 @@ export async function getMessages(stub, start, end, opts = {}) {
  *
  *  Why this is a separate call and not part of `getMessages`: a windowed read stops streaming
  *  once its window is full, so a session-level fact recorded LATER in the transcript is never
- *  reached — Claude writes its system prompt well after the opening turns, so opening a
- *  transcript at the top could never learn it. One cheap pass that keeps no messages answers it.
- *
- *  `null` on an older cvd or app that has no head endpoint; callers just show less. */
+ *  reached — Claude writes its system prompt well after the opening turns. One cheap pass that
+ *  keeps no messages answers it. `null` when unavailable; callers just show less. */
 export async function getSessionHead(stub) {
   if (!stub || !stub.harness || !stub.id) return null;
   try {
-    let raw;
-    if (canInvokeNative()) {
-      raw = JSON.parse(await invoke("local_session_head", { harness: stub.harness, id: stub.id }));
-    } else {
-      const resp = await fetch(`${CVD_BASE}/api/session/${enc(stub.harness)}/${enc(stub.id)}/head`, {
-        headers: { Accept: "application/json" },
-      });
-      if (!resp.ok) return null;
-      raw = await resp.json();
-    }
+    const raw = await apiGet(sessionPath(stub.harness, stub.id, "/head"));
     return raw && typeof raw === "object" ? raw : null;
   } catch {
     return null;
@@ -106,166 +95,95 @@ export async function getSessionHead(stub) {
 }
 
 /** The session's extracted tool events (file edits/reads, commands, errors), in transcript
- *  order, optionally filtered by kind. Empty on any error or an older cvd — the events panel
- *  simply doesn't appear. */
+ *  order, optionally filtered by kind. Empty on any error — the events panel simply doesn't
+ *  appear. Each row's `ts` is an RFC 3339 string. */
 export async function getEvents(session, kind) {
   if (!session || !session.harness || !session.id) return [];
   try {
-    let raw;
-    if (canInvokeNative()) {
-      raw = JSON.parse(await invoke("local_events", { harness: session.harness, id: session.id, kind: kind ?? null }));
-    } else {
-      const q = kind ? `?kind=${enc(kind)}` : "";
-      const resp = await fetch(`${CVD_BASE}/api/session/${enc(session.harness)}/${enc(session.id)}/events${q}`, {
-        headers: { Accept: "application/json" },
-      });
-      if (!resp.ok) return [];
-      raw = await resp.json();
-    }
+    const raw = await apiGet(sessionPath(session.harness, session.id, "/events"), { kind });
     return Array.isArray(raw) ? raw : [];
   } catch {
     return [];
   }
 }
 
-/** Every compaction boundary in a session (cvd ≥0.9.12's `/compactions` endpoint): an array of
- *  `{ index, ts, trigger, pre_tokens, post_tokens, duration_ms, pre_discovered_tools, metadata }`
- *  in transcript order, where `index` is the message index `/messages` uses. Scans the whole
- *  transcript server-side (complete coverage) but returns only the tiny boundary records. Returns
- *  `null` when unavailable (older cvd / no cvd) so the caller can fall back to scanning a window. */
+/** Every compaction boundary in a session, as `cv compaction --json` rows plus a `headline`:
+ *  `{ boundary_msg_idx, summary_msg_idx, trigger, pre_tokens, duration_ms, summary,
+ *  pre_compaction_span, headline }`, in the index space `/messages` uses. `null` when unavailable
+ *  so the caller can fall back to scanning a window. */
 export async function getCompactions(session) {
   if (!session || !session.harness || !session.id) return null;
   try {
-    let raw;
-    if (canInvokeNative()) {
-      raw = JSON.parse(await invoke("local_compactions", { harness: session.harness, id: session.id }));
-    } else {
-      const resp = await fetch(
-        `${CVD_BASE}/api/session/${enc(session.harness)}/${enc(session.id)}/compactions`,
-        { headers: { Accept: "application/json" } },
-      );
-      if (!resp.ok) return null;
-      raw = await resp.json();
-    }
-    // A bare array, like every other list the API serves.
+    const raw = await apiGet(sessionPath(session.harness, session.id, "/compactions"));
     return Array.isArray(raw) ? raw : null;
   } catch {
     return null;
   }
 }
 
-/** Which sessions touched a file (by exact or suffix path match). Returns an array of
- *  `{ harness, session_id, title, edits, reads, last_ts (RFC 3339) }` rows, or `null` when the lookup
- *  isn't available (older cvd / no cvd) so the UI can say so instead of showing "no results". */
+/** Which sessions touched a file (by exact or suffix path match): `{ harness, session_id, title,
+ *  edits, reads, last_ts (RFC 3339), agent_id, parent_id, workflow }` rows, or `null` when the
+ *  lookup isn't available so the UI can say so instead of showing "no results". */
 export async function getTouched(path, editsOnly = false) {
   if (!path) return [];
   try {
-    if (canInvokeNative()) {
-      const raw = JSON.parse(await invoke("local_touched", { path, editsOnly: !!editsOnly }));
-      return Array.isArray(raw) ? raw : null;
-    }
-    const resp = await fetch(`${CVD_BASE}/api/touched?path=${enc(path)}${editsOnly ? "&edits_only=true" : ""}`, {
-      headers: { Accept: "application/json" },
-    });
-    if (!resp.ok) return null;
-    const raw = await resp.json();
+    const raw = await apiGet("/api/touched", { path, edits_only: !!editsOnly });
     return Array.isArray(raw) ? raw : null;
   } catch {
     return null;
   }
 }
 
-/** The sub-agents a session spawned (Claude Code Task sub-agents), as metadata-only stubs. Empty on
- *  any error or for harnesses without sub-agents. */
+/** The raw `/subagents` rows: the forest a session spawned (directly-spawned `Agent`/`Task`
+ *  sub-agents AND the workflow tier), each a session row plus `agent_id`, `agent_type`,
+ *  `description`, `tool_use_id`, `workflow`, `result_status`, `result_summary`. */
+async function subagentRows(session) {
+  if (!session || !session.harness || !session.id) return [];
+  try {
+    const raw = await apiGet(sessionPath(session.harness, session.id, "/subagents"));
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The sub-agents a session spawned, as metadata-only stubs. Empty on any error or for harnesses
+ *  without sub-agents. */
 export async function getSubagents(session) {
-  if (!session || !session.harness || !session.id) return [];
-  try {
-    let raw;
-    if (canInvokeNative()) {
-      raw = JSON.parse(await invoke("local_subagents", { harness: session.harness, id: session.id }));
-    } else {
-      const resp = await fetch(`${CVD_BASE}/api/session/${enc(session.harness)}/${enc(session.id)}/subagents`, {
-        headers: { Accept: "application/json" },
-      });
-      if (!resp.ok) return [];
-      raw = await resp.json();
-    }
-    if (!Array.isArray(raw)) return [];
-    return raw.map((s) => {
-      const n = normalizeSession(s);
-      n._stub = true;
-      n._parentId = session.id;
-      n._parentHarness = session.harness;
-      return n;
-    });
-  } catch {
-    return [];
-  }
+  return (await subagentRows(session)).map((s) => {
+    const n = normalizeSession(s);
+    n._stub = true;
+    n._parentId = session.id;
+    n._parentHarness = session.harness;
+    return n;
+  });
 }
 
-/** The full sub-agent **forest** a session spawned: directly-spawned (`Agent`/`Task`) sub-agents
- *  AND workflow sub-agents (one tier deeper), each with its enrichment sidecar fields preserved —
- *  `agent_type`, `description`, `tool_use_id`, `workflow`, `result_status`, `result_summary` —
- *  which `getSubagents`' normalize pass drops. Returns an array of objects shaped like
- *  `{ ...sessionStub, agent_id, agent_type, description, tool_use_id, workflow, result_status,
- *  result_summary, _parentId, _parentHarness }`. Empty on any error / harness without sub-agents.
- *
- *  This shares the same `/subagents` endpoint as `getSubagents`, but keeps the forest metadata that
- *  the forest view groups and labels by. */
+/** The full sub-agent **forest**, keeping the enrichment fields `getSubagents`' normalize pass
+ *  drops — what the forest view groups and labels by. Empty on any error. */
 export async function getSubagentTree(session) {
-  if (!session || !session.harness || !session.id) return [];
-  try {
-    let raw;
-    if (canInvokeNative()) {
-      raw = JSON.parse(await invoke("local_subagents", { harness: session.harness, id: session.id }));
-    } else {
-      const resp = await fetch(`${CVD_BASE}/api/session/${enc(session.harness)}/${enc(session.id)}/subagents`, {
-        headers: { Accept: "application/json" },
-      });
-      if (!resp.ok) return [];
-      raw = await resp.json();
-    }
-    if (!Array.isArray(raw)) return [];
-    return raw.map((s) => {
-      const n = normalizeSession(s);
-      n._stub = true;
-      n._parentId = session.id;
-      n._parentHarness = session.harness;
-      // Carry the forest enrichment the normalizer doesn't model.
-      n.agent_id = s.agent_id ?? n.id;
-      n.agent_type = s.agent_type ?? null;
-      n.description = s.description ?? null;
-      n.tool_use_id = s.tool_use_id ?? null;
-      n.workflow = s.workflow ?? null;
-      n.result_status = s.result_status ?? null;
-      n.result_summary = s.result_summary ?? null;
-      return n;
-    });
-  } catch {
-    return [];
-  }
+  return (await subagentRows(session)).map((s) => {
+    const n = normalizeSession(s);
+    n._stub = true;
+    n._parentId = session.id;
+    n._parentHarness = session.harness;
+    n.agent_id = s.agent_id ?? n.id;
+    n.agent_type = s.agent_type ?? null;
+    n.description = s.description ?? null;
+    n.tool_use_id = s.tool_use_id ?? null;
+    n.workflow = s.workflow ?? null;
+    n.result_status = s.result_status ?? null;
+    n.result_summary = s.result_summary ?? null;
+    return n;
+  });
 }
 
-/** The driving script Claude Code recorded for a workflow run (cvd ≥0.9.12's
- *  `/workflow/{wf}/script` endpoint). Returns `{ workflow, name, source }`, or `null` when no script
- *  is recorded / the endpoint is unavailable (older cvd, native desktop without the command). */
+/** The driving script Claude Code recorded for a workflow run: `{ workflow, name, source }`, or
+ *  `null` when no script is recorded. */
 export async function getWorkflowScript(session, workflow) {
   if (!session || !session.harness || !session.id || !workflow) return null;
   try {
-    let raw;
-    if (canInvokeNative()) {
-      // Optional native command; absent on older desktops → caught below.
-      raw = JSON.parse(await invoke("local_workflow_script", {
-        harness: session.harness, id: session.id, workflow,
-      }));
-    } else {
-      const resp = await fetch(
-        `${CVD_BASE}/api/session/${enc(session.harness)}/${enc(session.id)}/workflow/${enc(workflow)}/script`,
-        { headers: { Accept: "application/json" } },
-      );
-      if (!resp.ok) return null;
-      raw = await resp.json();
-    }
+    const raw = await apiGet(sessionPath(session.harness, session.id, `/workflow/${enc(workflow)}/script`));
     return raw && typeof raw.source === "string" ? raw : null;
   } catch {
     return null;
@@ -274,17 +192,7 @@ export async function getWorkflowScript(session, workflow) {
 
 /** Full transcript of one sub-agent, loaded relative to its parent. */
 export async function getSubagent(parentHarness, parentId, agentId) {
-  let raw;
-  if (canInvokeNative()) {
-    raw = JSON.parse(await invoke("local_subagent", { harness: parentHarness, parent: parentId, agent: agentId }));
-  } else {
-    const resp = await fetch(`${CVD_BASE}/api/session/${enc(parentHarness)}/${enc(parentId)}/subagent/${enc(agentId)}`, {
-      headers: { Accept: "application/json" },
-    });
-    if (!resp.ok) throw new Error(`cvd ${resp.status}`);
-    raw = await resp.json();
-  }
-  const full = normalizeSession(raw);
+  const full = normalizeSession(await apiGet(sessionPath(parentHarness, parentId, `/subagent/${enc(agentId)}`)));
   full._stub = false;
   return full;
 }

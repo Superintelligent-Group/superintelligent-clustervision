@@ -20,14 +20,15 @@ import "./cv-forest.js";
 import "./cv-loom.js";
 import "./cv-fleet.js";
 import { esc, normalizeSession, normalizeSessions, randomId } from "./util.js";
-import { isTauri, listen, invoke, canInvokeNative } from "../tauri.js";
+import { isTauri, listen, canInvokeNative } from "../tauri.js";
 import {
-  getMessages, getSessionHead, searchSessions, probeSearch, PAGE, CVD_BASE,
+  apiGet, getMessages, getSessionHead, searchSessions, probeSearch, PAGE, CVD_BASE,
 } from "./hydrate.js";
 
-// A running `cvd serve` (always the case inside the desktop app) exposes the machine's real local
-// sessions. The main viewer prefers these over the bundled sample; `CVD_BASE` (from hydrate.js)
-// resolves to the page's own origin when the dashboard is served by `cvd serve --web`, else
+// The read API (the native `api` command in the desktop app, a local `cv serve` in a browser)
+// exposes the machine's real local sessions. The main viewer prefers these over the bundled
+// sample; `CVD_BASE` (from hydrate.js) resolves to the page's own origin when the dashboard is
+// served by `cv serve --web`, else
 // localhost:7777 — the same base every data fetch uses.
 
 const VIEWS = [
@@ -97,7 +98,7 @@ class CvApp extends HTMLElement {
         this._isSample = true;
         this._refreshViews();
         this._setStatus(isTauri()
-          ? "Showing the bundled sample — couldn't reach a local cvd. Use File → Open, or drop .zip / .json files, to load your own."
+          ? "Showing the bundled sample — couldn't reach a local cv serve. Use File → Open, or drop .zip / .json files, to load your own."
           : "Showing the bundled sample dataset — drop one or more .zip / .json files to load your own.");
       }
     } catch (e) {
@@ -111,16 +112,12 @@ class CvApp extends HTMLElement {
   // with thousands of sessions. Returns true if it populated the pool.
   async _tryLoadLocal() {
     try {
-      let refs;
-      if (canInvokeNative()) {
-        // Desktop: ask the native side directly — no HTTP, no CORS, no mixed-content surprises.
-        // No limit: show every session the user has (stubs are tiny; the list filters/searches them).
-        refs = JSON.parse(await invoke("local_sessions", {}));
-      } else {
-        // Browser: a user may be running `cvd serve`. Try it, but never block startup on it.
-        refs = await this._fetchJsonWithTimeout(`${CVD_BASE}/api/sessions`, 4000);
-        if (!refs) return false;
-      }
+      // Desktop: the native `api` command (no HTTP). Browser: a user may be running `cv serve`;
+      // try it, but never block startup on it. No limit: stubs are tiny, the list filters them.
+      const refs = canInvokeNative()
+        ? await apiGet("/api/sessions")
+        : await this._fetchJsonWithTimeout(`${CVD_BASE}/api/sessions`, 4000);
+      if (!refs) return false;
       if (!Array.isArray(refs) || !refs.length) return false;
       const sessions = normalizeSessions(refs).map((s) => ((s._stub = true), s));
       if (!sessions.length) return false;
@@ -185,15 +182,7 @@ class CvApp extends HTMLElement {
     }
 
     // Whole-session path (older cvd, or anything the windowed endpoint couldn't serve).
-    let raw;
-    if (canInvokeNative()) {
-      raw = JSON.parse(await invoke("local_session", { harness: stub.harness, id: stub.id }));
-    } else {
-      const url = `${CVD_BASE}/api/session/${encodeURIComponent(stub.harness)}/${encodeURIComponent(stub.id)}`;
-      const resp = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!resp.ok) throw new Error(`cvd ${resp.status}`);
-      raw = await resp.json();
-    }
+    const raw = await apiGet(`/api/session/${encodeURIComponent(stub.harness)}/${encodeURIComponent(stub.id)}`);
     const full = normalizeSession(raw);
     full._stub = false;
     const i = this._sessions.findIndex((x) => x.id === stub.id && x.harness === stub.harness);

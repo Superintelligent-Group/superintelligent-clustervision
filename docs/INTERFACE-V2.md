@@ -333,24 +333,23 @@ future session mid-work makes a different choice knowing it.*
 
 cv keeps discovering the same idea and giving it a new name each time: **two representations of the
 same thing disagree, and something must judge whether that is expected.** It is now implemented
-seven times, in four different shapes and three shapeless ones:
+six times, in four different shapes and two shapeless ones:
 
 | the pair | the mechanism | the shape it reports in |
 |---|---|---|
 | manifest ↔ adapter source | `cargo test -p clustervision-core --test formats_manifest` | `formats::Finding { harness, kind, item, detail }` |
 | manifest ↔ real on-disk data | `cv formats` | its own `RecordStat` |
 | source IR ↔ emitted output | `emit_verified` | `emit::Delta { field, before, after, expected }` |
-| CLI JSON ↔ daemon JSON | `cvd tests/parity.rs` | ad-hoc `missing`/`extra` vectors |
 | render ↔ IR | `web/selftest.html` | `{ group, name, why }` |
 | `extra` bags ↔ the namespacing rule | `assert_no_flat_keys` | a panic |
 | manifest ↔ upstream checkout | `tools/harness-drift.sh` | printed lines |
 
 Each checks a genuinely different pair, so none of them is redundant — this is not a call to delete
-one. The cost is that **adding a surface means writing an eighth bespoke checker**, and that the
-seven cannot be read, filtered or rendered together even though they answer the same question.
+one. The cost is that **adding a surface means writing a seventh bespoke checker**, and that the
+six cannot be read, filtered or rendered together even though they answer the same question.
 
 **The end-state:** one `Divergence { what, a, b, expected, where }` and one renderer, so
-`--strict`, `formats_manifest`, the parity test and the dashboard all speak the same words, and adding
+`--strict`, `formats_manifest` and the dashboard all speak the same words, and adding
 a surface means *declaring a pair* rather than writing a checker. `Finding` and `Delta` are already
 that type with two different spellings; unifying them is the down-payment and the rest can adopt it
 incrementally.

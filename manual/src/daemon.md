@@ -131,8 +131,8 @@ Two things worth noting up front:
 ### Routes
 
 All routes are `GET` and live under `/api`. Unknown paths return `404`; a bad `harness` name returns
-`400`. This table is the route match in `crates/cvd/src/serve.rs` on this branch;
-`crates/cvd/tests/parity.rs` keeps the JSON shapes equal to the CLI's.
+`400`. The routes are `cv_core::api::route_json` (plus `/api/search` and `/api/stats`); its rows are the
+functions `cv <cmd> --json` prints with, so the two doors cannot disagree.
 
 #### `GET /api/health`
 
