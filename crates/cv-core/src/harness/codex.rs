@@ -97,14 +97,20 @@ fn note(kind: MessageKind, ts: Option<DateTime<Utc>>, text: String) -> Message {
 
 /// Under `ParseOptions::complete`, a record with no conversational shape — one no arm knows, or a
 /// lifecycle marker the lean passes drop — becomes a [`MessageKind::Carrier`]: the verbatim line
-/// under the top-level `_record` key and its top-level `type` in `extra["codex"]["record_type"]`
-/// (the `payload.type` stays inside `_record`), so a same-harness round-trip loses nothing and
-/// `cv formats` can count what the adapter does not model.
+/// under the top-level `_record` key and its type in `extra["codex"]["record_type"]`, so a
+/// same-harness round-trip loses nothing and `cv formats` can count what the adapter does not
+/// model. The type is spelled as `formats/codex.toml` names it: the top-level `type`, qualified by
+/// `payload.type` for the two envelopes that have one (`event_msg.task_started`,
+/// `response_item.additional_tools`) — a bare `event_msg` would match no manifest entry.
 fn carry_record(v: &Value, ts: Option<DateTime<Utc>>, out: &mut Vec<Message>) {
     let mut m = Message::of_kind(Role::System, MessageKind::Carrier, Origin::Harness);
     m.timestamp = ts;
     let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
-    bag(&mut m).insert("record_type".into(), Value::String(ty.to_string()));
+    let ty = match v.pointer("/payload/type").and_then(Value::as_str) {
+        Some(sub) if matches!(ty, "event_msg" | "response_item") => format!("{ty}.{sub}"),
+        _ => ty.to_string(),
+    };
+    bag(&mut m).insert("record_type".into(), Value::String(ty));
     m.extra.insert(super::claude::CARRIER_KEY.into(), v.clone());
     out.push(m);
 }
@@ -3409,9 +3415,9 @@ mod tests {
         assert_eq!(
             carriers,
             vec![
-                ("event_msg", "task_started"),
+                ("event_msg.task_started", "task_started"),
                 ("world_state", "world_state"),
-                ("event_msg", "task_complete"),
+                ("event_msg.task_complete", "task_complete"),
             ],
             "lifecycle markers and unmodelled record types ride verbatim; represented records do not"
         );

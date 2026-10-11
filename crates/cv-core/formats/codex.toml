@@ -27,6 +27,7 @@ retained_context = { status = "carried", note = "" }
 realtime_item = { status = "carried", note = "paginated only" }
 "response_item.configuration_update" = { status = "carried", note = "new at HEAD, unobserved" }
 "event_msg.task_started" = { status = "carried", note = "" }
+"event_msg.task_complete" = { status = "carried", note = "last_agent_message read into the session bag; the record itself is carried" }
 "event_msg.thread_goal_updated" = { status = "carried", note = "" }
 "event_msg.agent_reasoning" = { status = "ignored", note = "legacy twin of response_item reasoning" }
 "event_msg.agent_reasoning_raw_content" = { status = "ignored", note = "legacy twin of response_item reasoning (raw CoT)" }
