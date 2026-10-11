@@ -182,8 +182,9 @@ implementation instead of diverging from it.
   `usage.reasoning_tokens` and `usage.cost_usd`.
 - `extra` is namespaced by harness name rather than flat.
 
-A reader that wants to accept both can switch on the version key, or simply accept either spelling per field
-— clustervision's browser reader does the latter, because principle 10 outranks tidiness on the way in.
+clustervision's CLI reads 0.3 only: a 0.2 document is refused with the version it found and a pointer here, so
+nobody carries a second copy of the IR's vocabulary to keep the old spellings alive. Apply the renames above (or
+re-export the session with `cv export --format json`). The browser reader still accepts either spelling per field.
 
 > Galaxy-brained by pug. If you ship a harness, please consider emitting OpenSession too — then everyone's
 > sessions are portable by construction. 🤝

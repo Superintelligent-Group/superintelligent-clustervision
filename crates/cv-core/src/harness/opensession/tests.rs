@@ -1,9 +1,9 @@
-//! The OpenSession adapter: the document boundary, the real-data round trip, the 0.2 tolerance
-//! rules, and discovery over registered sources.
+//! The OpenSession adapter: the document boundary, the byte-identical 0.3 round trip (synthetic
+//! and on real data), the refusal of every other version, and discovery over registered sources.
 
 use super::*;
 use crate::harness::{claude, codex, Adapter};
-use serde_json::json;
+use serde_json::{json, Map};
 
 fn tmpdir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("cv-opensession-{tag}-{}", uuid::Uuid::new_v4()));
@@ -210,170 +210,159 @@ fn round_trips_a_real_session_through_a_document() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-// ── tolerance on the way in (spec principle 10) ───────────────────────────────
+// ── one version, read back exactly ────────────────────────────────────────────
 
-/// A document written by the PREVIOUS version still loads: `openSession`, camelCase session and
-/// usage keys, blocks tagged `kind` with `toolUse`/`toolResult` and their camelCase fields.
-#[test]
-fn reads_a_0_2_document() {
-    let doc = json!({
-        "openSession": "0.2",
-        "harness": "claude",
-        "id": "old-1",
-        "cwd": "/work/proj",
-        "title": "an older document",
-        "createdAt": "2026-05-29T21:00:00Z",
-        "updatedAt": "2026-05-29T22:00:00Z",
-        "model": "claude-opus-4-8",
-        "systemPrompt": "be excellent",
-        "lineage": { "forkedFrom": "older-0", "spawnedByToolUse": "call_0" },
-        "messages": [
-            { "id": "m1", "role": "human", "content": [{ "kind": "text", "text": "hi" }] },
-            {
-                "id": "m2", "parentId": "m1", "role": "assistant", "messageKind": "reply",
-                "usage": { "inputTokens": 10, "outputTokens": 3, "cacheReadTokens": 7, "costUsd": 0.5 },
-                "content": [
-                    { "kind": "thinking", "text": "hmm", "signature": "sig" },
-                    { "kind": "toolUse", "id": "call_1", "name": "Bash", "input": { "command": "ls" } },
-                    { "kind": "image", "mediaType": "image/png", "dataRef": "ref-1" }
-                ]
-            },
-            {
-                "role": "tool",
-                "content": [{ "kind": "toolResult", "toolUseId": "call_1", "content": "ok", "isError": true,
-                              "toolName": "Bash" }]
-            }
-        ]
+/// A session touching every block type, message kind/origin, usage field, lineage pointer, git
+/// info and both `extra` bags — written as a document and read back, the bytes are the same.
+fn every_field_session() -> Session {
+    let mut user = Message::new(Role::User);
+    user.id = Some("m1".into());
+    user.timestamp = Some(
+        chrono::DateTime::parse_from_rfc3339("2026-05-29T21:00:00Z")
+            .unwrap()
+            .into(),
+    );
+    user.content = vec![
+        Block::Text { text: "hi".into() },
+        Block::Image {
+            media_type: Some("image/png".into()),
+            data_ref: Some("ref-1".into()),
+        },
+        Block::File {
+            mime: Some("text/plain".into()),
+            path: Some("/x/notes.txt".into()),
+            source: None,
+        },
+    ];
+    let mut asst = Message::new(Role::Assistant);
+    asst.id = Some("m2".into());
+    asst.parent_id = Some("m1".into());
+    asst.model = Some("claude-opus-4-8".into());
+    asst.usage = Some(Usage {
+        input_tokens: Some(10),
+        output_tokens: Some(3),
+        cache_read_tokens: Some(7),
+        cache_creation_tokens: Some(1),
+        reasoning_tokens: Some(2),
+        cost_usd: Some(0.5),
     });
-    let s = from_str(&doc.to_string()).unwrap();
+    asst.content = vec![
+        Block::Thinking {
+            text: "hmm".into(),
+            signature: Some("sig".into()),
+            encrypted: Some("enc".into()),
+            redacted: false,
+        },
+        Block::Thinking {
+            text: "".into(),
+            signature: None,
+            encrypted: Some("blob".into()),
+            redacted: true,
+        },
+        Block::ToolUse {
+            id: "call_1".into(),
+            name: "Bash".into(),
+            input: json!({ "command": "ls" }),
+            namespace: Some("mcp".into()),
+        },
+    ];
+    asst.harness_extra_mut(Harness::Claude)
+        .insert("request_id".into(), json!("req_1"));
+    let mut tool = Message::new(Role::Tool);
+    tool.content = vec![Block::ToolResult {
+        tool_use_id: "call_1".into(),
+        content: "ok".into(),
+        is_error: true,
+        tool_name: Some("Bash".into()),
+        status: Some("error".into()),
+        details: Some(json!({ "exit": 1 })),
+    }];
+    let mut notice = Message::new(Role::System);
+    notice.kind = MessageKind::Notice;
+    notice.origin = Origin::Harness;
+    notice.content = vec![Block::Text {
+        text: "rate limited".into(),
+    }];
 
-    assert_eq!(s.harness, Harness::Claude);
-    assert_eq!(s.id, "old-1");
-    assert_eq!(s.cwd.as_deref(), Some(Path::new("/work/proj")));
-    assert_eq!(s.title.as_deref(), Some("an older document"));
-    assert_eq!(s.created_at.unwrap().to_rfc3339(), "2026-05-29T21:00:00+00:00");
-    assert_eq!(s.updated_at.unwrap().to_rfc3339(), "2026-05-29T22:00:00+00:00");
-    assert_eq!(s.system_prompt.as_deref(), Some("be excellent"));
-    assert_eq!(s.lineage.forked_from.as_deref(), Some("older-0"));
-    assert_eq!(s.lineage.spawned_by_tool_use.as_deref(), Some("call_0"));
-
-    // `human` is a user turn, and with no `kind` the role-implied default applies.
-    assert_eq!(s.messages[0].role, Role::User);
-    assert_eq!(s.messages[0].kind, MessageKind::Prompt);
-    assert_eq!(s.messages[0].origin, Origin::Human);
-
-    let a = &s.messages[1];
-    assert_eq!(a.parent_id.as_deref(), Some("m1"));
-    assert_eq!(a.kind, MessageKind::Reply, "messageKind is the 0.2 spelling of kind");
-    let u = a.usage.as_ref().unwrap();
-    assert_eq!(
-        (u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cost_usd),
-        (Some(10), Some(3), Some(7), Some(0.5))
-    );
-    assert!(matches!(&a.content[0], Block::Thinking { text, signature, .. }
-        if text == "hmm" && signature.as_deref() == Some("sig")));
-    assert!(matches!(&a.content[1], Block::ToolUse { id, name, input, .. }
-        if id == "call_1" && name == "Bash" && input["command"] == "ls"));
-    assert!(matches!(&a.content[2], Block::Image { media_type, data_ref }
-        if media_type.as_deref() == Some("image/png") && data_ref.as_deref() == Some("ref-1")));
-
-    let t = &s.messages[2];
-    assert_eq!(t.role, Role::Tool);
-    assert!(
-        matches!(&t.content[0], Block::ToolResult { tool_use_id, content, is_error, tool_name, .. }
-        if tool_use_id == "call_1" && content == "ok" && *is_error && tool_name.as_deref() == Some("Bash"))
-    );
+    let mut s = Session {
+        id: "s1".into(),
+        harness: Harness::Claude,
+        cwd: Some(PathBuf::from("/work/proj")),
+        title: Some("every field".into()),
+        created_at: Some(
+            chrono::DateTime::parse_from_rfc3339("2026-05-29T21:00:00Z")
+                .unwrap()
+                .into(),
+        ),
+        updated_at: Some(
+            chrono::DateTime::parse_from_rfc3339("2026-05-29T22:00:00Z")
+                .unwrap()
+                .into(),
+        ),
+        model: Some("claude-opus-4-8".into()),
+        git: Some(GitInfo {
+            branch: Some("main".into()),
+            commit: Some("abc123".into()),
+            remote: Some("git@example.com:x/y.git".into()),
+        }),
+        system_prompt: Some("be excellent".into()),
+        lineage: Lineage {
+            forked_from: Some("s0".into()),
+            parent: Some("p0".into()),
+            spawned_by_tool_use: Some("call_0".into()),
+            continued_in: Some("s2".into()),
+            continues: None,
+            agent_path: Some("agent-1".into()),
+        },
+        messages: vec![user, asst, tool, notice],
+        source_path: None,
+        extra: Map::new(),
+    };
+    s.harness_extra_mut(Harness::Claude)
+        .insert("custom_title".into(), json!("x"));
+    s
 }
 
-/// Nothing out of vocabulary is fatal: an unknown block type, an unknown message kind and an
-/// unknown origin all load, with the original spellings kept in cv's own namespace. A record that
-/// is not a message at all is skipped and counted.
+/// The gate for this reader: a 0.3 document is `document()` → `from_str` → `document()` with not
+/// one byte changed. There is no canonicalizer to drift; the reader IS the IR's `Deserialize`.
 #[test]
-fn unknown_vocabulary_is_carried_never_fatal() {
-    let doc = json!({
-        "open_session": "0.3",
-        "harness": "claude",
-        "id": "new-1",
-        "messages": [
-            {
-                "role": "assistant",
-                "kind": "hologram",
-                "origin": "oracle",
-                "content": [
-                    { "type": "text", "text": "kept" },
-                    { "type": "video", "src": "movie.mp4" }
-                ]
-            },
-            "not a message at all",
-            { "role": "user", "content": [{ "type": "text", "text": "fine" }] }
-        ]
-    });
-    let s = from_str(&doc.to_string()).unwrap();
-
-    assert_eq!(s.messages.len(), 2, "the junk record is skipped, the rest survive");
-    let m = &s.messages[0];
+fn a_0_3_document_round_trips_byte_identical() {
+    let original = every_field_session();
+    let written = serde_json::to_string_pretty(&document(&original)).unwrap();
+    let back = from_str(&written).expect("a document cv wrote reads back");
+    let rewritten = serde_json::to_string_pretty(&document(&back)).unwrap();
     assert_eq!(
-        m.kind,
-        MessageKind::Reply,
-        "an unknown kind falls back to the role's default"
+        written, rewritten,
+        "the document is not byte-identical after one round trip"
     );
-    assert_eq!(m.origin, Origin::Model, "so does an unknown origin");
-    assert_eq!(
-        m.content.len(),
-        1,
-        "the unknown block type is dropped, the known one kept"
-    );
-    let cv = m.extra.get(CV_NAMESPACE).expect("the spellings are remembered");
-    assert_eq!(cv["unknown_kind"], "hologram");
-    assert_eq!(cv["unknown_origin"], "oracle");
-    assert_eq!(cv["unknown_blocks"], json!(["video"]));
-    assert_eq!(
-        s.cv_extra().unwrap()["skipped_lines"],
-        json!(1),
-        "the unreadable record is counted like any other adapter's corrupt line"
-    );
-    crate::harness::assert_no_flat_keys(&s);
+    assert_eq!(back.harness, Harness::Claude, "the document names its origin harness");
 }
 
-/// A document that names no harness (or one this build has never heard of) is an `opensession`
-/// session rather than a parse failure — and every harness cv itself writes is recognized, which
-/// includes the IR's serde spelling (`claudeapp`) as well as the canonical name (`claude-app`).
+/// A 0.2 document (`openSession`, the pre-0.11 spelling) is refused, and the error says which
+/// version was found and where the renames are documented. So is any version that is not 0.3.
 #[test]
-fn harness_names_round_trip_including_the_serde_spelling() {
-    for h in Harness::ALL {
-        let serde_name = serde_json::to_value(h).unwrap();
-        let serde_name = serde_name.as_str().unwrap();
-        assert_eq!(harness_from(serde_name), Some(h), "serde spelling {serde_name}");
-        assert_eq!(harness_from(h.as_str()), Some(h), "canonical name {}", h.as_str());
-    }
-    assert_eq!(harness_from("chronovisor"), None);
+fn other_versions_error_with_a_pointer() {
+    let v02 = json!({ "openSession": "0.2", "harness": "claude", "id": "old-1", "messages": [] });
+    let e = from_str(&v02.to_string()).expect_err("0.2 is not read").to_string();
+    assert!(e.contains("OpenSession 0.2 document"), "{e}");
+    assert!(e.contains("cv reads 0.3 only"), "{e}");
+    assert!(e.contains("docs/OPENSESSION.md"), "{e}");
+
+    let v04 = json!({ "open_session": "0.4", "harness": "claude", "id": "new", "messages": [] });
+    let e = from_str(&v04.to_string()).expect_err("0.4 is not read").to_string();
+    assert!(e.contains("OpenSession 0.4 document"), "{e}");
+}
+
+/// A document that names no harness, or one this build cannot name, is an `opensession` session;
+/// a document without the marker at all (a bare `Session`, what `cv show --json` prints) reads.
+#[test]
+fn no_or_unknown_harness_is_an_opensession_session() {
     let s = from_str(&json!({ "id": "x", "messages": [] }).to_string()).unwrap();
     assert_eq!(s.harness, Harness::OpenSession);
-}
-
-/// Content that a store spelled as an Anthropic-style part array still reads as text.
-#[test]
-fn tool_result_content_shapes_are_flattened() {
-    let b = block_from(&json!({
-        "type": "tool_result", "tool_use_id": "c1",
-        "content": [{ "type": "text", "text": "line one" }, { "type": "text", "text": "line two" }]
-    }))
-    .unwrap();
-    assert!(matches!(&b, Block::ToolResult { content, .. } if content == "line one\nline two"));
-
-    // A tool call missing its id is still a tool call (lossy but honest), not a dropped block.
-    let b = block_from(&json!({ "type": "tool_use", "name": "Bash" })).unwrap();
-    assert!(matches!(&b, Block::ToolUse { id, name, .. } if id.is_empty() && name == "Bash"));
-}
-
-#[test]
-fn snake_normalizes_every_tag_spelling() {
-    assert_eq!(snake("toolUse"), "tool_use");
-    assert_eq!(snake("toolResult"), "tool_result");
-    assert_eq!(snake("TOOL_RESULT"), "tool_result");
-    assert_eq!(snake("InjectedContext"), "injected_context");
-    assert_eq!(snake("compaction-boundary"), "compaction_boundary");
-    assert_eq!(snake("text"), "text");
+    let s =
+        from_str(&json!({ "open_session": "0.3", "harness": "chronovisor", "id": "x", "messages": [] }).to_string())
+            .unwrap();
+    assert_eq!(s.harness, Harness::OpenSession);
 }
 
 // ── discovery ─────────────────────────────────────────────────────────────────
