@@ -104,17 +104,12 @@ fn count(r: &SessionRef) -> Option<usize> {
 }
 
 /// What a full parse of `r` returns past the first `skip` messages: `(total, messages[skip..])`,
-/// keeping at most `keep` of them. Every adapter's `parse` is its `stream` into a collecting sink,
-/// so streaming and keeping only the tail gives the same messages while holding O(tail) instead of
-/// the whole transcript — what a follower needs, since it only reports what was appended. Codex is
-/// the exception: its `parse` is a separate whole-text path, so it is parsed and sliced as before.
+/// keeping at most `keep` of them. Every adapter's `parse` is its `stream` into a collecting sink
+/// ([`crate::stream::collect`]), so streaming and keeping only the tail gives the same messages
+/// while holding O(tail) instead of the whole transcript — what a follower needs, since it only
+/// reports what was appended.
 pub fn tail(r: &SessionRef, skip: usize, keep: usize) -> Option<(usize, Vec<Message>)> {
     let adapter = harness::for_harness(r.harness)?;
-    if r.harness == Harness::Codex {
-        let messages = adapter.parse(r).ok()?.messages;
-        let total = messages.len();
-        return Some((total, messages.into_iter().skip(skip).take(keep).collect()));
-    }
     let mut total = 0usize;
     let mut kept = Vec::new();
     let mut sink = |m: Message| {

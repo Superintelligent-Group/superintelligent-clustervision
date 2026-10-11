@@ -7,6 +7,7 @@
 - `cv index` merges its segments itself, by size, to completion: no more abandoned ~1 GB background merge on long runs.
 - `cv show --last N` and `cv export --last N` read the session once instead of counting it first: about half the time.
 - Kimi discovery reuses the scan cache: an unchanged transcript costs a stat, not a full read.
+- A follower of a Codex session holds only the new messages, not the whole parsed rollout (595 MB to 124 MB on a 708 MB rollout).
 
 ## 0.15.1 — 2026-10-11
 
