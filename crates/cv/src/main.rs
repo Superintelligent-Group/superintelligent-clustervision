@@ -627,6 +627,11 @@ enum Cmd {
         /// Emit a new sub-agent transcript owned by this ROOT session (id or transcript path).
         #[arg(long, value_name = "ROOT")]
         agent_of: Option<String>,
+        /// With --agent-of: the model the new sub-agent runs on, written to its meta (`opus`,
+        /// `sonnet`, a full model id, or `inherit`: the root's current model, which is also what
+        /// a meta without `model` means). Default: the source's meta value.
+        #[arg(long, value_name = "ID", requires = "agent_of")]
+        model: Option<String>,
         /// With --session: rehome the new session to this working directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -648,8 +653,7 @@ enum Cmd {
         #[arg(required_unless_present_any = ["list", "orphans"])]
         agents: Vec<String>,
         /// The live session that adopts them (default: the newest session in the agent's
-        /// project other than the one holding it, printed before acting). With --orphans: the
-        /// live session to exclude.
+        /// project other than the one holding it, printed before acting).
         #[arg(long, value_name = "SESSION")]
         into: Option<String>,
         /// The dead session that holds them (default: search every session's `subagents/`;
@@ -662,6 +666,11 @@ enum Cmd {
         /// Replace an agent file already present in the live session.
         #[arg(long)]
         force: bool,
+        /// The model the adopted sub-agent runs on when resumed, written to its `agent-<id>.meta.json`
+        /// (`opus`, `sonnet`, a full model id, or `inherit`: the root's current model, which is
+        /// also what a meta without `model` means). Default: the copied meta's own value.
+        #[arg(long, value_name = "ID")]
+        model: Option<String>,
         // Removed in 0.15.0 — hidden so the old spellings error with a pointer (exit 2).
         #[arg(long, hide = true, value_name = "SESSION")]
         list: Option<String>,
@@ -1418,6 +1427,7 @@ fn run() -> Result<()> {
             pack,
             session,
             agent_of,
+            model,
             cwd,
             out,
             json,
@@ -1430,7 +1440,7 @@ fn run() -> Result<()> {
                 ledger: !no_ledger,
                 retrieve_ref: None,
             };
-            let target = cmd::distill::target(session, agent_of, cwd, out)?;
+            let target = cmd::distill::target(session, agent_of, model, cwd, out)?;
             cmd::distill::cmd_distill(&id, harness, opts, upto, &with, pack, target, json)
         }
         Cmd::Adopt {
@@ -1439,6 +1449,7 @@ fn run() -> Result<()> {
             from,
             dry_run,
             force,
+            model,
             list,
             orphans,
             json,
@@ -1460,6 +1471,7 @@ fn run() -> Result<()> {
                 from,
                 dry_run,
                 force,
+                model,
                 json,
             })
         }
@@ -1479,7 +1491,7 @@ fn run() -> Result<()> {
             // `--session` / `--agent-of` take the distill destinations (`--out`/`--cwd` ride along
             // with `--session`); without them `--out`/`--cwd` keep their harness-emit meaning.
             let resumable = if session || agent_of.is_some() {
-                Some(cmd::distill::target(session, agent_of, cwd.clone(), out.clone())?)
+                Some(cmd::distill::target(session, agent_of, None, cwd.clone(), out.clone())?)
             } else {
                 None
             };

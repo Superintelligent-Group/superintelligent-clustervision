@@ -30,23 +30,28 @@ pub(crate) enum Target {
     PackOnly,
     /// A new main-thread session under the harness store (or `--out`), rehomed to `cwd` if given.
     Session { cwd: Option<PathBuf>, out: Option<PathBuf> },
-    /// A new sub-agent transcript of this root session.
-    AgentOf { root: String },
+    /// A new sub-agent transcript of this root session; `model` overrides its meta's `model`.
+    AgentOf { root: String, model: Option<String> },
 }
 
 /// The destination the flags name.
 pub(crate) fn target(
     session: bool,
     agent_of: Option<String>,
+    model: Option<String>,
     cwd: Option<PathBuf>,
     out: Option<PathBuf>,
 ) -> Result<Target> {
+    if model.is_some() && agent_of.is_none() {
+        // clap's `requires` yields to `--session`'s conflict with `--agent-of`, so say it here.
+        return usage("--model sets the new sub-agent's meta; it needs --agent-of");
+    }
     match (session, agent_of) {
         (_, Some(root)) => {
             if cwd.is_some() || out.is_some() {
                 return usage("--cwd/--out apply to --session; --agent-of writes next to the root transcript");
             }
-            Ok(Target::AgentOf { root })
+            Ok(Target::AgentOf { root, model })
         }
         (true, None) => Ok(Target::Session { cwd, out }),
         (false, None) => {
@@ -162,7 +167,7 @@ pub(crate) fn emit_to(
                 resume: Some(resume),
             })
         }
-        Target::AgentOf { root } => {
+        Target::AgentOf { root, model } => {
             let root = root_transcript(root)?;
             let sub = root
                 .path
@@ -193,6 +198,9 @@ pub(crate) fn emit_to(
             if let Some(o) = meta.as_object_mut() {
                 o.insert("description".into(), json!(description));
                 o.remove("toolUseId");
+                if let Some(m) = model {
+                    o.insert("model".into(), json!(m));
+                }
             }
             std::fs::write(sub.join(format!("agent-{agent}.meta.json")), meta.to_string())?;
             let sidecar = write_sidecar(&res.path, elided)?;

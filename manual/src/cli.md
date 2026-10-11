@@ -676,11 +676,13 @@ cv lanes --recent 20 --unfinished       # find them: unfinished agents of the pr
 cv adopt a5d8 b81e                      # into the project's newest session other than the one holding them (printed first)
 cv adopt a5d8 --into 7b2e19a4 --from c1e4d723
 cv adopt a5d8 --dry-run --json
+cv adopt a5d8 --model sonnet            # resume it on another model
 ```
 
 Without `--into`, the adopter is the project's newest session other than the one holding the
 agent, printed before acting; without `--from`, every session's `subagents/` is searched and the
-newest copy wins.
+newest copy wins. The meta keeps the agent's own `model` unless `--model <id>` replaces it;
+`inherit` (what a meta without `model` also means) runs it on the live root's current model.
 
 Claude Code only; the dead session's files are never modified.
 

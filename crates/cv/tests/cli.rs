@@ -2421,6 +2421,26 @@ fn distill_emits_a_whole_resumable_session_and_a_sub_agent() {
         "distill must never modify the source"
     );
 
+    // `--model` rewrites the new agent's meta `model`; it needs `--agent-of` (exit 2 without).
+    let (out, _) = w.cv_ok(&[
+        "distill",
+        agent_s,
+        "--agent-of",
+        "rootsess",
+        "--model",
+        "inherit",
+        "--json",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let meta = sub.join(format!(
+        "agent-{}.meta.json",
+        v["emitted"]["agent_id"].as_str().unwrap()
+    ));
+    let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(meta).unwrap()).unwrap();
+    assert_eq!(meta["model"], "inherit", "{meta}");
+    let (ok, code, _, _) = w.cv(&["distill", agent_s, "--session", "--model", "opus"]);
+    assert!(!ok && code == 2);
+
     // A fork is a splice of the verbatim prefix, to the same two destinations. `..2` strands `t1`
     // (its result is message 2) and the emitter drops the call, so the session resumes whole.
     let spec = format!("{agent_s}:..2");
@@ -2568,6 +2588,17 @@ fn adopt_moves_a_stranded_lane_into_the_live_session() {
     assert!(fs::read_to_string(live_sub.join(format!("agent-{aid}.jsonl")))
         .unwrap()
         .contains("livesess"));
+
+    // `--model` rewrites the copied meta's `model` and keeps the rest of it.
+    w.cv_ok(&[
+        "adopt", aid, "--from", dead, "--into", live, "--force", "--model", "sonnet",
+    ]);
+    let m: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(live_sub.join(format!("agent-{aid}.meta.json"))).unwrap()).unwrap();
+    assert_eq!(
+        (m["model"].as_str(), m["description"].as_str()),
+        (Some("sonnet"), Some("Lane TEST"))
+    );
 
     // The agent now has two copies; reading it by id takes the newest instead of erroring.
     let (out, _) = w.cv_ok(&["cat", &format!("agent-{aid}"), "t1"]);

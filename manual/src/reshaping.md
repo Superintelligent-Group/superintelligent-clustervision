@@ -92,7 +92,8 @@ Claude does.
 ## Three ways to run the result
 
 - **As a sub-agent of a root** — `cv distill <lane> --agent-of <root-session-id>` writes a new
-  `agent-*.jsonl` (+ meta, `description: distilled: <label>`, the source's model) into the root's
+  `agent-*.jsonl` (+ meta, `description: distilled: <label>`, the source's model unless
+  `--model <id>` names another; `inherit` is the root's current model) into the root's
   `subagents/`; the root sends the next quest with `SendMessage` to the printed id and the reply
   comes back as an ordinary task notification. No new process, no result file. Only the root should
   plant into its own `subagents/`: the file is a new lane in that root's world.

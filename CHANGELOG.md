@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv adopt --model <id>` and `cv distill --agent-of … --model <id>` set the new agent meta's `model` (`inherit`: the root's current model).
 - Web UI: the Loom tab is **Splice** (`<cv-splice>`, `＋ splice`, `⑂ branch from here`), the browser face of `cv splice`.
 - Desktop app: the unused native `redact` and `ingest_zip` commands and the `cv-search` dependency are gone (116 lock entries); File → Open zip is unchanged.
 - **`cv tree`, `cv prompts`, `cv compaction` are `show` views**: `show --tree`, `show --kind prompt,answer`, `show --kind compaction_boundary,compaction_summary [--summaries]`; old names exit 2.

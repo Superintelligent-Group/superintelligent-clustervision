@@ -46,7 +46,21 @@ pub(crate) struct AdoptArgs {
     pub from: Option<String>,
     pub dry_run: bool,
     pub force: bool,
+    /// Written to each adopted agent's meta `model` (see `Cmd::Adopt`).
+    pub model: Option<String>,
     pub json: bool,
+}
+
+/// Set `model` in a sub-agent's meta sidecar, creating the sidecar when the source had none.
+fn set_meta_model(path: &std::path::Path, model: &str) -> Result<()> {
+    let mut meta: serde_json::Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({"agentType": "general-purpose"}));
+    if let Some(o) = meta.as_object_mut() {
+        o.insert("model".into(), json!(model));
+    }
+    std::fs::write(path, meta.to_string()).with_context(|| format!("writing {}", path.display()))
 }
 
 pub(crate) fn cmd_adopt(a: AdoptArgs) -> Result<()> {
@@ -133,6 +147,13 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
         let g = &p.agent;
         // A dry run still restamps in memory, so its line counts are the real ones.
         let r = adopt::execute(p, !a.dry_run, a.force || a.dry_run)?;
+        let meta_dest = p
+            .dest_meta
+            .clone()
+            .unwrap_or_else(|| p.dest.with_extension("meta.json"));
+        if let (Some(m), false) = (&a.model, a.dry_run) {
+            set_meta_model(&meta_dest, m)?;
+        }
         let verb = if a.dry_run { "would adopt" } else { "adopted" };
         let _ = writeln!(
             h,
@@ -173,12 +194,18 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
             (Some(src), Some(dest)) => {
                 let _ = writeln!(h, "  ↳ {} → {}", home_rel(src), home_rel(dest));
             }
+            _ if a.model.is_some() => {
+                let _ = writeln!(h, "  ↳ {} (new: the source had none)", home_rel(&meta_dest));
+            }
             _ => {
                 let _ = writeln!(
                     h,
                     "  ⚠ no .meta.json in the source — the agent's type/model/description are not carried"
                 );
             }
+        }
+        if let Some(m) = &a.model {
+            let _ = writeln!(h, "  ↳ model: {m}");
         }
         if p.exists {
             let _ = writeln!(
