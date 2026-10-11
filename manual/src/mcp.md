@@ -58,7 +58,7 @@ command in the **Read**, **Reshape**, **Export** and **System** groups becomes o
 tool:
 
 - the **tool name is the command name** (`ls`, `show`, `cat`, …; a subcommand joins with
-  an underscore, `formats_census` — a command that only has subcommands, like `formats`, is not a tool itself);
+  an underscore, `task_open`);
 - the **tool description is clap's `about`**;
 - **every argument becomes a JSON-schema property named after the argument** —
   positionals included, so `cat` takes `session` and `tool_use_id` as properties — with
@@ -170,8 +170,7 @@ Each produces a **new** session id; the source is never touched.
 | `index` | — | no | Build/refresh the full-text index that makes `search` instant. |
 | `config` | — | no | View the user config and manage the export-source index. |
 | `schema` | — | yes | The reference: query calculus, and the machine-readable schema of every shape cv emits. |
-| `formats_census` | — | yes | Unknown record/part/column vocabulary seen in real data, per harness (`cv formats census`). |
-| `formats_check` | — | yes | Each adapter against its `formats/<harness>.toml` manifest (`cv formats check`). |
+| `formats` | — | yes | The format census and manifest check. |
 | `recipes` | — | no | The agent quickstart: the ten things agents do with cv. |
 
 ## What was removed in 0.11.0

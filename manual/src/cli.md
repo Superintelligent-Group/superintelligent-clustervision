@@ -165,7 +165,7 @@ grok      7c0b1a3e  26-05-26 14:02 → 14:09            19 msg  ~/scratch/throwa
 
 Each row shows the session's `created → last-active` span in **local time** (same-day sessions compress the right side to a bare time). The span is what separates a long-lived orchestrator from a one-shot — and, after a crash, the resumed sessions from the dropped ones. When a session has no title, `cv` falls back to a dimmed cwd so the row still tells you *where* it happened.
 
-- `--asc` — print the shown rows oldest → newest. It flips the order of the window, never its membership: `--limit N --asc` is still the newest N sessions, read like a chat log ("what was I doing last Tuesday, across all my tools"). This replaces `cv timeline`.
+- `--asc` — print the shown rows oldest → newest. It flips the order of the window, never its membership: `--limit N --asc` is still the newest N sessions, read like a chat log ("what was I doing last Tuesday, across all my tools"). This replaces the former `timeline` command.
 - `--json` — the rows as one JSON array on stdout and nothing else, so it pipes cleanly. Keys are the shared [session row](#things-that-work-everywhere): `id`, `harness`, `path`, `cwd`, `title`, `created_at`, `updated_at`, `message_count`, `size_bytes`. Transcript-derived text (`title`) is emitted **raw** — the machine contract, not the sanitized terminal view.
 - `--enrich` (with `--json`) — add two transcript-derived fields to each row:
   - `git` — the same object `cv show --json` emits (`branch`/`commit`/`remote`, each omitted when absent), read from the transcript's recorded git context. This is the branch the session *ran on*, a historical fact stored in the transcript — **not** the cwd's current branch.
@@ -775,7 +775,7 @@ cv export da9174f4 --redact > safe.md         # secrets/PII scrubbed first; coun
 ```
 
 - `--format <md|json>` — output format (default `md`). For a self-contained HTML page, [`cv share`](#cv-share) is the renderer: it streams and redacts.
-- `--redact` — scrub secrets and PII before rendering: API keys, private keys, JWTs, emails, opaque blobs, `KEY=value` assignments. The same pass [`cv share`](#cv-share) runs; the per-class tally goes to stderr so stdout stays the document. The thing to reach for before you paste a transcript into an issue. (This replaces `cv redact`.)
+- `--redact` — scrub secrets and PII before rendering: API keys, private keys, JWTs, emails, opaque blobs, `KEY=value` assignments. The same pass [`cv share`](#cv-share) runs; the per-class tally goes to stderr so stdout stays the document. The thing to reach for before you paste a transcript into an issue. (This replaces the former `redact` command.)
 - the five [window flags](#message-windows) — identical to `cv show`'s.
 
 (`show` and `export` are siblings: `show` is for your terminal, `export` is for a file or a pipe.)

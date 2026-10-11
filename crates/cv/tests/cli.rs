@@ -1123,7 +1123,7 @@ fn export_redact_scrubs_planted_secret() {
     let (out, err) = w.cv_ok(&["export", "alphasess", "--redact"]);
     assert!(!out.contains(SECRET), "export --redact leaked the secret:\n{out}");
     assert!(out.contains("[REDACTED:api_key]"), "{out}");
-    assert!(out.contains("## User"), "still the export rendering: {out}");
+    assert!(out.contains("## user"), "still the export rendering: {out}");
     assert!(err.contains("redacted") && err.contains("1 api_key"), "{err}");
 
     // json: the whole OpenSession document is clean, and still the document (marker led).
@@ -1193,7 +1193,7 @@ fn error_paths_exit_nonzero_with_stderr() {
         ),
         (&["formats", "census"], "cv formats"),
     ];
-    for (args, version, pointer) in removed {
+    for (args, pointer) in removed {
         let (ok, code, out, err) = w.cv(args);
         assert!(!ok, "cv {args:?} must not still work\nstdout:\n{out}");
         assert_eq!(code, 2, "cv {args:?} must exit 2 (caller mistake)\nstderr:\n{err}");
