@@ -128,20 +128,27 @@ impl Default for PruneOptions {
     }
 }
 
-/// What a prune did (or, in `dry_run`, would do).
-#[derive(Debug, Clone)]
+/// What a prune did (or, in `dry_run`, would do). Serializes as the `cv prune --json` report (the
+/// renamed keys are that report's spelling); the three `--revive` details are folded by the CLI
+/// into its `revived` object.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PruneResult {
     pub source_id: String,
     pub new_id: String,
     pub new_path: PathBuf,
     pub sidecar_path: Option<PathBuf>,
     pub copied_resources: Option<PathBuf>,
+    #[serde(rename = "snipped_payloads")]
     pub pruned_count: usize,
     pub image_blocks: usize,
+    #[serde(rename = "before_bytes")]
     pub original_size: u64,
+    #[serde(rename = "after_bytes")]
     pub new_size: u64,
+    #[serde(rename = "tokens_freed")]
     pub est_context_tokens_saved: u64,
     /// `--revive`: how many `message.usage` records were corrected.
+    #[serde(skip)]
     pub usage_rewritten: usize,
     /// `--window`/`--range`: conversational turns dropped from the head/tail by the selection (0 if
     /// neither was used). The kept turns form the new session; the source keeps everything.
@@ -151,8 +158,10 @@ pub struct PruneResult {
     /// the session had no usage records and the byte-estimate fallback was used.
     pub window_real_tokens: Option<u64>,
     /// `--revive`: the honest post-prune context-token figure written (None if revive off / nothing to do).
+    #[serde(skip)]
     pub revive_tokens: Option<u64>,
     /// `--revive`: the stale figure it replaced — the largest pre-revive usage total in the loaded window.
+    #[serde(skip)]
     pub revive_old_tokens: Option<u64>,
     /// Data-safety warnings (e.g. a `--window` tail that exceeds its budget because a single turn is
     /// bigger than the whole budget). Also echoed to stderr.

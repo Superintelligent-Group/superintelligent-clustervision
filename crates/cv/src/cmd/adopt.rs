@@ -5,11 +5,12 @@
 //! Human report on stderr; `--json` puts one JSON value on stdout. `--list` and `--orphans` print
 //! their table on stdout.
 
-use crate::util::{fmt_local, home_rel, short_id, usage};
+use crate::util::{fmt_local, home_rel, report, short_id, usage};
 use anyhow::{Context, Result};
 use cv_core::adopt::{self, AgentFile, Plan, SessionFile};
 use cv_core::ir::{human_bytes, Harness};
 use serde_json::json;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 /// Where this environment's Claude Code writes (`$CLAUDE_CONFIG_DIR/projects` or
@@ -276,21 +277,24 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
     }
 
     let mut done = Vec::new();
+    let mut h = String::new();
     for p in &plans {
         let g = &p.agent;
         // A dry run still restamps in memory, so its line counts are the real ones.
         let r = adopt::execute(p, !a.dry_run, a.force || a.dry_run)?;
         let verb = if a.dry_run { "would adopt" } else { "adopted" };
-        eprintln!(
+        let _ = writeln!(
+            h,
             "✦ {verb} {} — {} ({}, {})",
             g.agent_id,
             g.description.as_deref().unwrap_or("(no description)"),
             short_model(g.model.as_deref()),
             human_bytes(g.bytes)
         );
-        eprintln!("  from {} ({})", g.session_id, home_rel(&g.project_dir));
+        let _ = writeln!(h, "  from {} ({})", g.session_id, home_rel(&g.project_dir));
         if !p.other_copies.is_empty() {
-            eprintln!(
+            let _ = writeln!(
+                h,
                 "  (older copies also in: {} — took the newest)",
                 p.other_copies
                     .iter()
@@ -300,12 +304,14 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
             );
         }
         if into.project_dir.file_name() != g.project_dir.file_name() {
-            eprintln!(
+            let _ = writeln!(
+                h,
                 "  ⚠ crossing projects: the agent's cwd stays {} as recorded in its transcript",
                 home_rel(&g.project_dir)
             );
         }
-        eprintln!(
+        let _ = writeln!(
+            h,
             "  ↳ {} → {}  (sessionId restamped on {} of {} lines)",
             home_rel(&g.path),
             home_rel(&p.dest),
@@ -313,17 +319,26 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
             r.lines
         );
         match (&g.meta_path, &p.dest_meta) {
-            (Some(src), Some(dest)) => eprintln!("  ↳ {} → {}", home_rel(src), home_rel(dest)),
-            _ => eprintln!("  ⚠ no .meta.json in the source — the agent's type/model/description are not carried"),
+            (Some(src), Some(dest)) => {
+                let _ = writeln!(h, "  ↳ {} → {}", home_rel(src), home_rel(dest));
+            }
+            _ => {
+                let _ = writeln!(
+                    h,
+                    "  ⚠ no .meta.json in the source — the agent's type/model/description are not carried"
+                );
+            }
         }
         if p.exists {
-            eprintln!(
+            let _ = writeln!(
+                h,
                 "  {} {} already exists",
                 if a.force { "↳ replacing:" } else { "✗ would refuse:" },
                 home_rel(&p.dest)
             );
         }
-        eprintln!(
+        let _ = writeln!(
+            h,
             "  ↳ resume, from session {}: SendMessage {{\"to\": \"{}\", \"message\": \"<next instruction>\"}}",
             short_id(&into.session_id),
             g.agent_id
@@ -332,20 +347,19 @@ fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {
     }
     let deads: std::collections::BTreeSet<&str> = plans.iter().map(|p| p.agent.session_id.as_str()).collect();
     for dead in &deads {
-        eprintln!(
+        let _ = writeln!(
+            h,
             "  ⚑ keep {dead}'s directory: these agents' persisted outputs stay in its tool-results/ \
              (named by absolute path), and what `cv prune` snipped from it stays in its sidecar — \
              `cv cat {dead} <tool_use_id>`; an agent's own calls: `cv cat agent-<id> <tool_use_id>`"
         );
     }
     if a.dry_run {
-        eprintln!("  (dry run: nothing was written)");
+        let _ = writeln!(h, "  (dry run: nothing was written)");
     }
-    if a.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({"into": into.session_id, "dry_run": a.dry_run, "agents": done}))?
-        );
-    }
-    Ok(())
+    report(
+        a.json,
+        &h,
+        &json!({"into": into.session_id, "dry_run": a.dry_run, "agents": done}),
+    )
 }

@@ -13,12 +13,13 @@
 //! Neither command ever writes to the source session. Elided tool outputs go to a sidecar next to
 //! the new transcript (`<stem>.flat.jsonl`), which `cv cat <new> <tool_use_id>` reads.
 
-use crate::util::{parse_harness, resolve, short_id, usage};
+use crate::util::{parse_harness, report, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::distill::{distill, findings, resumable_session, DistillOptions, Distilled};
 use cv_core::ir::{Block, Harness, Role, Session, SessionRef};
 use cv_core::EmitOptions;
 use serde_json::{json, Value};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Where a reshaped session goes.
@@ -279,7 +280,9 @@ fn root_transcript(root: &str) -> Result<(PathBuf, String)> {
     Ok((r.path, r.id))
 }
 
-fn print_report(d: &Distilled, e: &Emitted) {
+/// The human report (stderr side of [`report`]).
+fn report_text(d: &Distilled, e: &Emitted) -> String {
+    let mut h = String::new();
     let s = &d.stats;
     let before = s.recorded_context_tokens.unwrap_or(s.source_est_tokens);
     let ratio = if s.distilled_est_tokens > 0 {
@@ -287,7 +290,8 @@ fn print_report(d: &Distilled, e: &Emitted) {
     } else {
         0.0
     };
-    eprintln!(
+    let _ = writeln!(
+                h,
         "✦ distilled {} · {} msg, {} tool calls · context {}{} → ~{} tokens (pack ~{}, tail ~{} over {} calls) · {:.1}× smaller",
         short_id(&s.source_id),
         s.messages,
@@ -300,19 +304,21 @@ fn print_report(d: &Distilled, e: &Emitted) {
         s.tail_tool_calls,
         ratio,
     );
-    eprintln!(
+    let _ = writeln!(
+        h,
         "  ↳ kept: brief, {} timeline entries, {} commits, {} errors; elided {} tool outputs",
         s.timeline_entries, s.commits, s.errors, s.elided_outputs
     );
     if let Some(p) = &e.path {
-        eprintln!("  ↳ wrote {}", p.display());
+        let _ = writeln!(h, "  ↳ wrote {}", p.display());
     }
     if let Some(p) = &e.sidecar_path {
-        eprintln!("  ↳ sidecar {}", p.display());
+        let _ = writeln!(h, "  ↳ sidecar {}", p.display());
     }
     if let Some(r) = &e.resume {
-        eprintln!("  ↳ resume: {r}");
+        let _ = writeln!(h, "  ↳ resume: {r}");
     }
+    h
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -359,15 +365,17 @@ pub(crate) fn cmd_distill(
             emit_to(&ir, &target, &d.elided, &src_path, &description)?
         }
     };
+    let mut h = report_text(&d, &emitted);
     if let Some(p) = &pack {
         std::fs::write(p, d.pack()).with_context(|| format!("writing {}", p.display()))?;
-        eprintln!("  ↳ pack {}", p.display());
+        let _ = writeln!(h, "  ↳ pack {}", p.display());
     }
-    print_report(&d, &emitted);
-    if json_out {
-        let v = json!({"stats": d.stats, "emitted": emitted, "pack_path": pack});
-        println!("{}", serde_json::to_string_pretty(&v)?);
-    } else if pack.is_none() && matches!(target, Target::PackOnly) {
+    report(
+        json_out,
+        &h,
+        &json!({"stats": d.stats, "emitted": emitted, "pack_path": pack}),
+    )?;
+    if !json_out && pack.is_none() && matches!(target, Target::PackOnly) {
         print!("{}", d.pack());
     }
     Ok(())
@@ -408,19 +416,18 @@ pub(crate) fn cmd_fork(spec: &str, harness: Option<String>, at: usize, target: T
         .map(String::from)
         .unwrap_or_else(|| s.label());
     let e = emit_to(&s, &target, &[], &src_path, &format!("fork@{at}: {label}"))?;
-    eprintln!(
+    let mut h = String::new();
+    let _ = writeln!(
+        h,
         "✦ forked {} at message {at} ({} messages kept)",
         short_id(&s.id),
         s.messages.len()
     );
     if let Some(p) = &e.path {
-        eprintln!("  ↳ wrote {}", p.display());
+        let _ = writeln!(h, "  ↳ wrote {}", p.display());
     }
     if let Some(r) = &e.resume {
-        eprintln!("  ↳ resume: {r}");
+        let _ = writeln!(h, "  ↳ resume: {r}");
     }
-    if json_out {
-        println!("{}", serde_json::to_string_pretty(&e)?);
-    }
-    Ok(())
+    report(json_out, &h, &serde_json::to_value(&e)?)
 }

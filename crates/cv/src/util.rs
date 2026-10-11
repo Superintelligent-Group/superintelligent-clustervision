@@ -326,6 +326,43 @@ pub(crate) fn dirs_home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
+// ---------- compose-family reports ----------
+
+/// The compose-family report (`prune`, `rewind`, `distill`, `fork`, `adopt`): the human account on
+/// stderr and, under `--json`, ONE JSON object on stdout — so stdout carries only the JSON and pipes
+/// cleanly.
+pub(crate) fn report(json: bool, human: &str, value: &serde_json::Value) -> Result<()> {
+    eprint!("{human}");
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    }
+    Ok(())
+}
+
+/// Dry-run honesty for a `--json` report: nothing was written, so every `paths` key is null, and
+/// the `minted` keys (the new id and what derives from it) are null too unless `--to` pinned the
+/// id — the core mints a throwaway id a real run would NOT reuse. `note` says which.
+pub(crate) fn dry_run_nulls(v: &mut serde_json::Value, pinned: bool, paths: &[&str], minted: &[&str]) {
+    v["note"] = serde_json::Value::Null;
+    if v["dry_run"] != true {
+        return;
+    }
+    for k in paths {
+        v[*k] = serde_json::Value::Null;
+    }
+    if !pinned {
+        for k in minted {
+            v[*k] = serde_json::Value::Null;
+        }
+    }
+    v["note"] = if pinned {
+        "dry run — nothing written"
+    } else {
+        "dry run — nothing written; a real run mints a fresh session id (pass --to to pin one)"
+    }
+    .into();
+}
+
 /// `--thinking <native|text|drop>`: what an emit does with the model's reasoning on the way out.
 /// Shared by every command that writes a session into a harness (`port`, `splice`, `loom`,
 /// `pack --format session`), because a flag means the same thing everywhere it appears.

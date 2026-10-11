@@ -1,10 +1,11 @@
 //! `cv prune` / `cv rewind` / `cv splice` / `cv loom` / `cv dataset` — reshaping sessions into new ones.
 
 use crate::cmd::port::emit_session;
-use crate::util::{parse_harness, parse_range, resolve, short_id, usage};
+use crate::util::{dry_run_nulls, parse_harness, parse_range, report, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{human_bytes, Block, Harness, Message, Role, Session};
 use cv_core::EmitOptions;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
@@ -58,66 +59,40 @@ pub(crate) fn cmd_prune(
     };
     let res = cv_core::prune::prune_session(&r.path, &opts)?;
 
-    if json {
-        // Machine-readable prune report: ONE snake_case JSON object on stdout — the human report
-        // below stays on stderr (compose-family convention: status → stderr, data → stdout), so
-        // stdout carries only the JSON and pipes cleanly. Dry-run honesty: nothing was written,
-        // so new_path/sidecar_path/copied_resources are null, and new_id is null too unless --to
-        // pinned it — the core mints a throwaway UUID a real run would NOT reuse (see `note`).
-        let report_id = (!res.dry_run || pinned_id).then(|| res.new_id.clone());
-        let note = match (res.dry_run, pinned_id) {
-            (false, _) => None,
-            (true, true) => Some("dry run — nothing written".to_string()),
-            (true, false) => Some(
-                "dry run — nothing written; a real run mints a fresh session id (pass --to to pin one)".to_string(),
-            ),
-        };
-        // revived: false when revive is off or the recorded usage was already honest; else the
-        // stale → honest rewrite detail (what the human report prints as "revived: …k → …k").
-        let revived = match (res.revive_tokens, res.revive_old_tokens) {
-            (Some(honest), Some(stale)) => serde_json::json!({
-                "recorded_tokens_before": stale,
-                "recorded_tokens_after": honest,
-                "usage_records_rewritten": res.usage_rewritten,
-            }),
-            _ => serde_json::Value::Bool(false),
-        };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "source_id": res.source_id,
-                "new_id": report_id,
-                "harness": r.harness.as_str(),
-                "before_bytes": res.original_size,
-                "after_bytes": res.new_size,
-                "snipped_payloads": res.pruned_count,
-                "image_blocks": res.image_blocks,
-                "tokens_freed": res.est_context_tokens_saved,
-                "dropped_turns": res.dropped_turns,
-                "window_real_tokens": res.window_real_tokens,
-                "revived": revived,
-                "warnings": res.warnings,
-                "new_path": (!res.dry_run).then(|| res.new_path.display().to_string()),
-                "sidecar_path": (!res.dry_run)
-                    .then(|| res.sidecar_path.as_ref().map(|p| p.display().to_string()))
-                    .flatten(),
-                "copied_resources": (!res.dry_run)
-                    .then(|| res.copied_resources.as_ref().map(|p| p.display().to_string()))
-                    .flatten(),
-                "dry_run": res.dry_run,
-                "note": note,
-            }))?
-        );
-    }
+    let mut v = serde_json::to_value(&res)?;
+    v["harness"] = r.harness.as_str().into();
+    // revived: false when revive is off or the recorded usage was already honest; else the
+    // stale → honest rewrite detail (what the human report prints as "revived: …k → …k").
+    v["revived"] = match (res.revive_tokens, res.revive_old_tokens) {
+        (Some(honest), Some(stale)) => serde_json::json!({
+            "recorded_tokens_before": stale,
+            "recorded_tokens_after": honest,
+            "usage_records_rewritten": res.usage_rewritten,
+        }),
+        _ => serde_json::Value::Bool(false),
+    };
+    dry_run_nulls(
+        &mut v,
+        pinned_id,
+        &["new_path", "sidecar_path", "copied_resources"],
+        &["new_id"],
+    );
 
+    let mut h = String::new();
     let pct = if res.original_size > 0 {
         100.0 * res.bytes_saved() as f64 / res.original_size as f64
     } else {
         0.0
     };
     let tag = if dry_run { " (dry run — nothing written)" } else { "" };
-    eprintln!("✦ pruned {} → {}{tag}", short_id(&res.source_id), short_id(&res.new_id));
-    eprintln!(
+    let _ = writeln!(
+        h,
+        "✦ pruned {} → {}{tag}",
+        short_id(&res.source_id),
+        short_id(&res.new_id)
+    );
+    let _ = writeln!(
+        h,
         "  {} payload(s) snipped ({} image(s)) · {} → {} on disk (−{:.0}%) · ~{} context tokens freed",
         res.pruned_count,
         res.image_blocks,
@@ -134,40 +109,50 @@ pub(crate) fn cmd_prune(
             ),
             None => " (sized by byte estimate — no usage records)".to_string(),
         };
-        eprintln!(
+        let _ = writeln!(
+            h,
             "  sliding window: dropped {} older turn(s){} — the source keeps the full history",
             res.dropped_turns, sized
         );
     }
     if revive {
         match (res.revive_tokens, res.revive_old_tokens) {
-            (Some(honest), Some(stale)) => eprintln!(
-                "  revived: recorded context {}k → {}k across {} usage record(s) — resume gate will let you back in",
-                stale / 1000,
-                honest / 1000,
-                res.usage_rewritten,
-            ),
-            _ => eprintln!("  revive: recorded usage already honest (≤ loaded content) — nothing to rewrite"),
+            (Some(honest), Some(stale)) => {
+                let _ = writeln!(
+                    h,
+                    "  revived: recorded context {}k → {}k across {} usage record(s) — resume gate will let you back in",
+                    stale / 1000,
+                    honest / 1000,
+                    res.usage_rewritten,
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    h,
+                    "  revive: recorded usage already honest (≤ loaded content) — nothing to rewrite"
+                );
+            }
         }
     }
     for w in &res.warnings {
-        eprintln!("  ⚠ {w}");
+        let _ = writeln!(h, "  ⚠ {w}");
     }
     if !dry_run {
-        eprintln!("  new session: {}", res.new_path.display());
+        let _ = writeln!(h, "  new session: {}", res.new_path.display());
         if let Some(sc) = &res.sidecar_path {
-            eprintln!(
+            let _ = writeln!(
+                h,
                 "  sidecar:     {} (fetch an original: cv cat {} <tool_use_id>)",
                 sc.display(),
                 short_id(&res.new_id)
             );
         }
         if let Some(rc) = &res.copied_resources {
-            eprintln!("  resources:   copied subagents/workflows → {}", rc.display());
+            let _ = writeln!(h, "  resources:   copied subagents/workflows → {}", rc.display());
         }
-        eprintln!("  resume with: claude --resume {}", res.new_id);
+        let _ = writeln!(h, "  resume with: claude --resume {}", res.new_id);
     }
-    Ok(())
+    report(json, &h, &v)
 }
 
 // ---------- rewind ----------
@@ -259,33 +244,19 @@ pub(crate) fn cmd_rewind(
     let home = cv_core::rewind::project_dir(&r.path);
     let relocate = res.new_path.parent().is_some_and(|d| d != home);
 
-    if json {
-        // Compose-family convention: ONE JSON object on stdout, the human report on stderr.
-        // Dry-run honest, like `prune --json`: nothing written ⇒ null paths, and a null new_id
-        // unless --to pinned it.
-        let mut v = serde_json::to_value(&res)?;
-        v["harness"] = "claude".into();
-        v["resume"] = serde_json::json!(resume);
-        v["note"] = serde_json::Value::Null;
-        if res.dry_run {
-            for k in ["new_path", "provenance_path"] {
-                v[k] = serde_json::Value::Null;
-            }
-            if !pinned {
-                v["new_id"] = serde_json::Value::Null;
-                v["resume"] = serde_json::Value::Null;
-            }
-            v["note"] = "dry run — nothing written".into();
-        }
-        println!("{}", serde_json::to_string_pretty(&v)?);
-    }
+    let mut v = serde_json::to_value(&res)?;
+    v["harness"] = "claude".into();
+    v["resume"] = serde_json::json!(resume);
+    dry_run_nulls(&mut v, pinned, &["new_path", "provenance_path"], &["new_id", "resume"]);
 
+    let mut h = String::new();
     let tag = if res.dry_run {
         " (dry run — nothing written)"
     } else {
         ""
     };
-    eprintln!(
+    let _ = writeln!(
+        h,
         "✦ rewound {} → {}{tag}",
         short_id(&res.source_id),
         short_id(&res.new_id)
@@ -294,7 +265,8 @@ pub(crate) fn cmd_rewind(
         (true, Some(p)) => format!(" · sub-agent of {} → emitted as a top-level session", short_id(p)),
         _ => String::new(),
     };
-    eprintln!(
+    let _ = writeln!(
+        h,
         "  source:  {} ({}, sha256 {}…){of}",
         res.source_path.display(),
         human_bytes(res.source_bytes),
@@ -304,14 +276,15 @@ pub(crate) fn cmd_rewind(
         Some(e) => format!(" · {} — `{}`", e.kind.label(), cv_core::ir::truncate(&e.command, 80)),
         None => String::new(),
     };
-    eprintln!("  cut:     msg {} · line {}{why}", res.cut_msg_idx, res.cut_line);
+    let _ = writeln!(h, "  cut:     msg {} · line {}{why}", res.cut_msg_idx, res.cut_line);
     let from = match (res.start_mode, res.boundary_msg_idx, res.preserved_head) {
         ("full", ..) => "the first record (--full)".to_string(),
         (_, None, _) => "the first record (no compaction before the cut)".to_string(),
         (_, Some(b), true) => format!("the compaction at msg {b}, from its preserved segment"),
         (_, Some(b), false) => format!("the compaction at msg {b}"),
     };
-    eprintln!(
+    let _ = writeln!(
+        h,
         "  start:   msg {} · line {} · {from}",
         res.start_msg_idx, res.start_line
     );
@@ -323,7 +296,8 @@ pub(crate) fn cmd_rewind(
     } else {
         String::new()
     };
-    eprintln!(
+    let _ = writeln!(
+        h,
         "  copied:  lines {}..={} — {} line(s), {}{closed} · omitted the {} line(s) after it",
         res.start_line,
         res.end_line,
@@ -332,26 +306,27 @@ pub(crate) fn cmd_rewind(
         res.omitted_lines,
     );
     for w in &res.warnings {
-        eprintln!("  ⚠ {w}");
+        let _ = writeln!(h, "  ⚠ {w}");
     }
     if res.cut_cwd.is_some() && res.cut_cwd != res.cwd {
-        eprintln!(
+        let _ = writeln!(
+            h,
             "  at the cut the agent was working in {}",
             res.cut_cwd.as_deref().unwrap_or_default()
         );
     }
     if !res.dry_run {
-        eprintln!("  new session: {}", res.new_path.display());
-        eprintln!("  provenance:  {}", res.provenance_path.display());
+        let _ = writeln!(h, "  new session: {}", res.new_path.display());
+        let _ = writeln!(h, "  provenance:  {}", res.provenance_path.display());
         if relocate {
-            eprintln!("  ⚠ claude resumes from {} — copy it there first", home.display());
+            let _ = writeln!(h, "  ⚠ claude resumes from {} — copy it there first", home.display());
         }
-        eprintln!("  resume with (add --fork-session to keep the rewind reusable):");
+        let _ = writeln!(h, "  resume with (add --fork-session to keep the rewind reusable):");
         for line in &resume {
-            eprintln!("    {line}");
+            let _ = writeln!(h, "    {line}");
         }
     }
-    Ok(())
+    report(json, &h, &v)
 }
 
 // ---------- splice / loom ----------
