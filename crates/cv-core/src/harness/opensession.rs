@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 ///
 /// It lives at the **document boundary** ([`document`]), not as a field on
 /// [`Session`](crate::ir::Session): a `Session` is cv's in-memory IR and is serialized raw by
-/// `cv show --json`, the MCP payloads and cvd, whose key sets are pinned by tests. A version
+/// `cv show --json`, the MCP payloads and `cv serve`, whose key sets are pinned by tests. A version
 /// marker is a fact about a *document* someone wrote to disk or to a wire, not about a value in
 /// memory — so it is added exactly where a document is produced, and stripped (ignored) where one
 /// is read.

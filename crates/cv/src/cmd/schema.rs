@@ -1,6 +1,6 @@
 //! `cv schema` — the reference. Bare: the `-q` query-calculus reference (`cv_core::query`).
 //! `--json`: the machine-readable schema of every shape cv emits (session row, session, message,
-//! block, query). `--commands`: the command tree — with `--json` in the exact shape `cv-mcp`
+//! block, query). `--commands`: the command tree — with `--json` in the exact shape `cv mcp`
 //! generates its tools from (docs/INTERFACE-V2.md §6), produced from clap's own introspection so
 //! names, flags, and help can't drift from the binary.
 

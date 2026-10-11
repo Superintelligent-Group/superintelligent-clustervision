@@ -1,4 +1,4 @@
-//! The composite task operations and read views the CLI verbs and `cv task serve` share, so the
+//! The composite task operations and read views the CLI verbs and `cv serve`'s inbox share, so the
 //! page and the shell are one store: posing a decision (`opened` + `posed`, one unit), resolving
 //! one, the event feed (`cv task events` ≡ `GET /api/events`), and the inbox page
 //! (`cv task inbox` ≡ `GET /api/inbox`).

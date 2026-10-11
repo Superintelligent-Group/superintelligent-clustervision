@@ -12,7 +12,7 @@
 
 # The fleet
 
-- [The daemon: `cvd`](daemon.md)
+- [The server and archive](daemon.md)
 - [MCP — agents reading each other's minds](mcp.md)
 - [Hooking a harness in](integrations.md)
 - [The task substrate](tasks.md)

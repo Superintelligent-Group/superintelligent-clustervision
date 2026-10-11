@@ -20,7 +20,7 @@ app/
     ├── icons/           ← app icon set (crystal-ball theme)
     └── src/
         ├── main.rs      ← thin binary entry point
-        └── lib.rs       ← Tauri runtime: native commands + cvd-serve lifecycle
+        └── lib.rs       ← Tauri runtime: native commands + cv-serve lifecycle
 ```
 
 ### Why its own workspace
@@ -87,7 +87,7 @@ The app installs a native [`Menu`](https://docs.rs/tauri/2/tauri/menu/) in `setu
 - **File → Quit** — predefined quit item.
 - **View → Reload** (`Cmd/Ctrl+R`) reloads the webview, **Toggle DevTools** (`Cmd/Ctrl+Alt+I`;
   the `tauri` `devtools` feature is enabled so this works in release bundles too),
-  **Toggle Fullscreen**, and **Toggle cvd serve** (start/stop the sidecar at runtime).
+  **Toggle Fullscreen**, and **Toggle cv serve** (start/stop the sidecar at runtime).
 - **Help → About clustervision** (predefined, with name/version/description) and
   **Open the web demo** (opens the public demo in the default browser via `shell:allow-open`).
 
@@ -103,32 +103,32 @@ Window size/position (and maximized/fullscreen flags) persist across launches vi
 the app config dir, restores on startup, and saves on close automatically. No manual save/restore
 code needed.
 
-## cvd serve wiring
+## cv serve wiring
 
-On startup the app **spawns `cvd serve --port 7777`** so the bundled fleet dashboard (which
+On startup the app **spawns `cv serve --port 7777`** so the bundled fleet dashboard (which
 fetches `http://localhost:7777`) works unchanged. The child handle is stored in Tauri managed
 state and **killed on app exit** (`RunEvent::Exit`).
 
 **Approach chosen: `std::process::Command`** (not a bundled sidecar) — simplest thing that
 compiles and runs with no extra bundling step. Binary resolution order:
 
-1. the repo's build output: `../../target/release/cvd`, then `../../target/debug/cvd`
-2. `cvd` on `PATH`
+1. the repo's build output: `../../target/release/cv`, then `../../target/debug/cv`
+2. `cv` on `PATH`
 
 So in dev you only need:
 
 ```sh
-cargo build -p cvd            # from the repo root → target/debug/cvd
-# or: cargo build -p cvd --release
+cargo build -p clustervision   # from the repo root → target/debug/cv
+# or: cargo build -p clustervision --release
 ```
 
-If `cvd` can't be found, the app still runs; only the live fleet dashboard is unavailable
+If `cv` can't be found, the app still runs; only the live fleet dashboard is unavailable
 (a clear note is logged to stderr). You can also start/stop the sidecar at runtime from
-**View → Toggle cvd serve**. The child is always killed on app exit (`RunEvent::Exit`).
+**View → Toggle cv serve**. The child is always killed on app exit (`RunEvent::Exit`).
 
-> **Optional: make it a real sidecar for a self-contained bundle.** Build `cvd`
-> (`cargo build -p cvd --release`), copy it to `app/src-tauri/binaries/cvd-<target-triple>`
-> (e.g. `cvd-aarch64-apple-darwin`), add `"externalBin": ["binaries/cvd"]` under `bundle` in
+> **Optional: make it a real sidecar for a self-contained bundle.** Build `cv`
+> (`cargo build -p clustervision --release`), copy it to `app/src-tauri/binaries/cv-<target-triple>`
+> (e.g. `cv-aarch64-apple-darwin`), add `"externalBin": ["binaries/cv"]` under `bundle` in
 > `tauri.conf.json`, add the `shell:allow-execute`/sidecar permission to `capabilities/default.json`,
 > and spawn it via `tauri_plugin_shell`'s sidecar API instead of `std::process::Command`. The
 > `std::process` path above is intentionally the default because it needs no bundle prep.
@@ -141,7 +141,7 @@ From `app/src-tauri/`:
 # Compile-check the Rust (fast; no bundling, no system bundler deps):
 cargo build
 
-# Run the app in dev (opens the window, loads web/, launches cvd serve):
+# Run the app in dev (opens the window, loads web/, launches cv serve):
 cargo tauri dev
 
 # Produce a distributable bundle (.app / .dmg on macOS, etc.):
@@ -152,7 +152,7 @@ Requirements:
 - **Rust** (stable or nightly) + `tauri-cli` v2 (`cargo install tauri-cli --version '^2'`).
 - A **WebKit-based webview**: macOS uses the system WebKit (already present); Linux needs
   `libwebkit2gtk-4.1-dev` + `libgtk-3-dev` etc.; Windows uses WebView2.
-- For the live fleet dashboard: a built `cvd` (see [cvd serve wiring](#cvd-serve-wiring)).
+- For the live fleet dashboard: a built `cv` (see [cv serve wiring](#cv-serve-wiring)).
 
 ## Verified in this environment
 

@@ -14,7 +14,7 @@
 //     placed at its own offset, so the scrollbar still measures the corpus, not the window.
 //
 //  2. It searches two different ways and says which. With a daemon, `/api/search` reads every
-//     message in the archive. Without one (the static demo, an older cvd), all this page has is
+//     message in the archive. Without one (the static demo, an older server), all this page has is
 //     the metadata stubs it downloaded, so it filters those — which cannot match a message it
 //     never had. The placeholder names whichever is true.
 import {

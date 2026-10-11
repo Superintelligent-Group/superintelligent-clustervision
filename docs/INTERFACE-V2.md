@@ -279,25 +279,25 @@ delta; classify each as **expected for this target** (from a per-emitter table o
 format cannot carry, e.g. vendor-bound thinking, per-message ids) or **unexpected**.
 `port --strict` fails on any unexpected delta; the default prints them under `⚠ lost`.
 
-## 6. MCP (`cv-mcp`)
+## 6. MCP (`cv mcp`)
 
 Tools are **generated from the CLI**, not hand-written, so names, flags, harness lists and output
-shapes cannot drift. Mechanism (no shared crate; the clap tree lives in the `cv` binary):
+shapes cannot drift. Mechanism (the server is `cv mcp`, so the clap tree is in-process):
 
 - `cv schema --commands --json` dumps the command tree: for every visible command and subcommand,
   `{ name, group, about, args: [{ name, kind: "flag"|"option"|"positional", value_type:
   "string"|"integer"|"number"|"boolean"|"path", possible_values?, default?, help, required }] }`,
   produced from clap's `Command` introspection (`CommandFactory`), including the window flags.
-- `cv-mcp` runs that once at startup (the `cv` binary is looked up next to `cv-mcp`, then on
-  `PATH`, overridable with `CV_BIN`) and registers one tool per Read/Reshape/Export/System command
-  with the same name (`ls`, `show`, `search`, `cat`, …); each argument becomes a JSON-schema
+- `cv mcp` reads that tree from its own clap `Command` at startup (no binary to look up, so none
+  to be stale) and registers one tool per Read/Reshape/Export/System command and per `cv task`
+  subcommand, with the same name (`ls`, `show`, `search`, `cat`, …); each argument becomes a JSON-schema
   property with the clap help as its description. Positionals map to properties named after the
-  argument. A call runs `cv <cmd> <args> --json` (or without `--json` for commands that have no
+  argument. A call runs the same executable as `cv <cmd> <args> --json` (or without `--json` for commands that have no
   JSON form, returning text) and returns stdout; a non-zero exit returns stderr as the error.
 - Over MCP, `show` defaults to `last: 50` and `max_bytes: 200000` (a full transcript is never the
   default there); `ls`/`search` default `limit` stays the CLI default.
-- MCP-only tools keep their names and hand-written schemas: `observe_stream`, `await_omen`,
-  `task_*` (which mirror `cv task <sub>`). `read_session`, `search_sessions`,
+- MCP-only tools keep their names and hand-written schemas: `observe_stream`, `await_omen` (one
+  blocks, one holds a cursor). `read_session`, `search_sessions`,
   `list_sessions`, `project_sessions`, `recall`, `prune_session`, `prune_retrieve` are removed
   (their replacements are `show`, `search`, `ls`, `ls --cwd`, `pack`, `prune`, `cat`).
 

@@ -1,24 +1,23 @@
-# The daemon: `cvd`
+# The server and the archive: `cv serve`, `cv watch`, `cv archive`
 
-`cvd` is the clustervision daemon — the piece that turns a pile of per-machine, per-harness session
-files into a single durable **archive** and a live **fleet view**. Where [`cv`](cli.md) is your
-interactive map of *this* machine, `cvd` is the long-running thing that watches every harness's
-on-disk storage, snapshots sessions into a central store, and (optionally) serves that state as JSON
-so [the app](app.md)'s fleet dashboard can render it. 🔮
+Where most of [`cv`](cli.md) is your interactive map of *this* machine, three commands are the
+long-running side of it: the pieces that turn a pile of per-machine, per-harness session files into
+a single durable **archive**, and serve the live state as JSON so [the app](app.md)'s dashboard and
+[the task inbox](tasks.md) can render it. 🔮 (They were the `cvd` binary until 0.15.0; `cvd` is a
+one-release shim that prints the new spelling and runs it.)
 
-It has three jobs worth knowing:
+- **`cv archive sync`** — one-shot: snapshot every discovered session into the archive, then exit.
+- **`cv watch`** — long-running: follow live activity and archive sessions as they change.
+- **`cv serve`** — one local HTTP server: the read API, the task inbox, and optionally the dashboard.
 
-- **`cvd sync`** — one-shot: snapshot every discovered session into the archive, then exit.
-- **`cvd watch`** — long-running: follow live activity and archive sessions as they change.
-- **`cvd serve`** — a tiny local HTTP API that exposes fleet state as JSON.
-
-Plus two small utilities: `cvd ls` (list what's in the archive) and `cvd path` (print the archive location).
+Plus two small utilities: `cv archive ls` (list what's in the archive) and `cv archive path` (print
+the archive location).
 
 ## The archive
 
-Everything `cvd` persists lands under one **archive home**, resolved in this order:
+Everything the archive holds lives under one **archive home**, resolved in this order:
 
-1. the `--home <DIR>` flag (global — works on every subcommand),
+1. the `--home <DIR>` flag (on `cv archive …` and `cv watch`),
 2. the `$CLUSTERVISION_HOME` environment variable,
 3. otherwise `~/.clustervision`.
 
@@ -34,21 +33,21 @@ Inside it:
 `catalog.jsonl` is an append-only JSONL index — lightweight rows for listings and search — while the
 full transcript for each session lives in `archive/<harness>/<id>.json` as clustervision's unified
 representation. Storing is **idempotent**: if a session's serialized bytes are byte-identical to
-what's already on disk, `cvd` skips the write entirely. The catalog dedupes by `(harness, id)` with
+what's already on disk, the write is skipped entirely. The catalog dedupes by `(harness, id)` with
 the newest `archived_at` winning, and self-compacts once it's carrying too many superseded lines.
 
 Point several machines at the same archive home (a synced folder, a network share) and you get one
 centralized, harness-agnostic store of every agent session you've ever run.
 
 ```sh
-cvd path     # print the archive location
-cvd ls       # list archived sessions, newest activity first
+cv archive path   # print the archive location
+cv archive ls     # list archived sessions, newest activity first
 ```
 
-## `cvd sync` — snapshot everything once
+## `cv archive sync` — snapshot everything once
 
 ```sh
-cvd sync
+cv archive sync
 ```
 
 `sync` discovers every session across every supported harness, parses each into the unified
@@ -64,45 +63,48 @@ is cheap. Parse/store failures are logged to stderr per-session and don't abort 
 command to put on a cron / launchd timer if you just want periodic backups without a resident
 process.
 
-## `cvd watch` — follow live + archive as it happens
+## `cv watch` — follow live + archive as it happens
 
 ```sh
-cvd watch                          # follow everything
-cvd watch --interval 5             # poll every 5s (default 3)
-cvd watch --harness claude         # only one harness
-cvd watch --cwd clustervision       # only sessions whose cwd contains this substring
+cv watch                           # follow everything
+cv watch --interval 5              # poll every 5s (default 3)
+cv watch --harness claude          # only one harness
+cv watch --cwd clustervision       # only sessions whose cwd contains this substring
 ```
 
-`watch` is the resident counterpart to `sync`. On its first poll it archives whatever already
+`cv watch` is the resident counterpart to `sync` (`cv scry` is the same live feed printed, without the archive). On its first poll it archives whatever already
 exists (so it's self-sufficient — no need to `sync` first), then it follows live activity and
 re-archives each session as it changes. It runs until you kill it.
 
 Every time it archives a changed session it logs the delta to stderr:
 
 ```text
-cvd: watching (interval 3s) -> /Users/you/.clustervision
+cv watch: watching (interval 3s) -> /Users/you/.clustervision
 [new] claude   a1b2c3d4  +12 msgs  ~/code/clustervision
 [archived] codex    9f8e7d6c  +3 msgs  ~/code/other-project
 ```
 
-## `cvd serve` — the local HTTP API
+## `cv serve` — the local HTTP server
 
 ```sh
-cvd serve                      # http://127.0.0.1:7777
-cvd serve --port 8080          # pick a port
-cvd serve --token s3cret       # require `Authorization: Bearer s3cret` on /api/* ($CVD_TOKEN works too)
-cvd serve --host 0.0.0.0 --token s3cret   # expose beyond loopback (demands a token or --insecure-expose)
+cv serve                       # http://127.0.0.1:7777 — the inbox at /, the API at /api/*
+cv serve --web ./web           # also host the dashboard at / (the inbox moves to /inbox)
+cv serve --who ember --open    # whose inbox the page opens on; open it in a browser
+cv serve --port 8080           # pick a port
+cv serve --token s3cret        # require `Authorization: Bearer s3cret` on /api/* ($CV_SERVE_TOKEN works too)
+cv serve --host 0.0.0.0 --token s3cret   # expose beyond loopback (demands a token or --insecure-expose)
 ```
 
-`serve` is a tiny synchronous HTTP server (a small worker pool, no async stack) that exposes fleet
-state as JSON. This is exactly what [the app](app.md)'s live **fleet dashboard** polls. It binds
+`serve` is a tiny synchronous HTTP server (a small worker pool, no async stack). It answers the
+read API [the app](app.md)'s dashboard polls (and the desktop app calls in-process), serves the
+[task inbox](tasks.md) page with the routes its buttons use, and with `--web` hosts the dashboard. It binds
 `127.0.0.1:7777` by default and runs until killed.
 
 `--port 0` binds an **ephemeral port**, and the startup banner always carries the *real* bound
 port — so a script or test harness can parse the address instead of racing to guess a free one:
 
 ```text
-cvd serve on http://127.0.0.1:54573 — API at /api/* (no --web; JSON only)
+cv serve on http://127.0.0.1:54573 — inbox at /, API at /api/* (no --web)
 ```
 
 Two things worth noting up front:
@@ -120,13 +122,17 @@ Two things worth noting up front:
   - **The `Host` header must name this machine** (`127.0.0.1`, `localhost`, `[::1]`, or your
     `--host`) — anything else is a `403`. This defeats DNS rebinding, where a hostile page points
     its own domain at `127.0.0.1` to sidestep CORS entirely.
-  - **Optional bearer token.** Set `--token <t>` (or `$CVD_TOKEN`) and every `/api/*` request must
-    carry `Authorization: Bearer <t>` or get a `401`.
+  - **Optional bearer token.** Set `--token <t>` (or `$CV_SERVE_TOKEN`) and every `/api/*` request
+    must carry `Authorization: Bearer <t>` or get a `401`.
+  - **Writes are JSON from a local origin.** The inbox's `POST /api/task/<id>/<verb>` must be
+    `application/json` and, when it carries an `Origin`, an allowed one; anything else is a `403`
+    before the store is touched. (A `text/plain` POST needs no CORS preflight, so the allow-list
+    alone would only hide the response after the event was written.)
   - **Non-loopback binds demand an opt-in.** `--host 0.0.0.0` (or any non-loopback address) is
     refused unless you set a token or pass `--insecure-expose`, and warns loudly either way —
     anyone who can reach the port can read every transcript.
 
-  Only `GET` is supported; anything else is a `405`.
+  Only `GET` is supported, plus `POST` on the inbox's write routes; anything else is a `405`.
 
 ### Routes
 
@@ -233,19 +239,21 @@ seek store has one, else streams and stops at `end`. The reply carries the actua
 #### `GET /api/session/{harness}/{id}/events`
 
 The session's extracted tool events (file edits/reads, commands, errors) in transcript order, as
-`cv events --json`; optional `kind=`. A stale or missing catalog row is re-ingested on the spot.
+`cv events --json` rows (`ts` RFC 3339, plus the sub-agent provenance trio); optional `kind=`. A
+stale or missing catalog row is re-ingested on the spot.
 
 #### `GET /api/session/{harness}/{id}/compactions`
 
-Every compaction boundary in transcript order, each
-`{ index, summary_index, ts, trigger, pre_tokens, duration_ms, summary, pre_span: [start, end] }`
-— `cv compaction --json`. `summary` is the text that seeded the next window; `pre_span` is the
+Every compaction boundary in transcript order, as `cv compaction --json` rows (`boundary_msg_idx,
+summary_msg_idx, trigger, pre_tokens, duration_ms, summary, pre_compaction_span`) plus a
+`headline`. `summary` is the text that seeded the next window; `pre_compaction_span` is the
 message range compacted away, in the numbering `/messages` uses.
 
 #### `GET /api/session/{harness}/{id}/subagents`
 
-Lightweight refs (same shape as `/api/sessions` rows) for the sub-agents this session spawned — for
-example Claude Code `Task` sub-agents — newest first. Returns an empty array if there are none.
+The sub-agent forest this session spawned (directly-spawned `Agent`/`Task` agents and the workflow
+tier): each a session row plus `agent_id, agent_type, description, tool_use_id, workflow,
+result_status, result_summary`. An empty array if there are none.
 
 ```sh
 curl 'http://127.0.0.1:7777/api/session/claude/a1b2c3d4.../subagents'
@@ -287,7 +295,6 @@ warnings ride every response, so a corrupted coordination log is visible from an
         "effective_state": "claimed",
         "assignee": "agent:mira",
         "repo": "/Users/you/code/demo",
-        "channel": "tasks",
         "opened_at": "2026-07-17T04:17:46.694052Z",
         "last_ts": "2026-07-17T04:18:05.206768Z"
       }
@@ -303,10 +310,11 @@ warnings ride every response, so a corrupted coordination log is visible from an
 - **`GET /api/task/{id}/events`** — the raw durable history, `{ "events": [...], "warnings": [] }`,
   each event carrying `id`, `task_id`, `ts`, `by`, and its tagged `event` payload
   (`opened`, `claimed`, `noted`, `posed`, `resolved`, …; a pre-0.15.0 log's land-facet kinds
-  read through unchanged).
+  read through unchanged). `GET /api/task/{id}?events=1` returns the projection with the history
+  beside it.
 - **`GET /api/tasks/inbox/{who}`** — what needs this endpoint, stalest first:
   `{ "inbox": [ … ], "warnings": [] }`, each row the one inbox row every surface serves (`cv task
-  inbox --json`'s `items`, MCP `task_inbox`, `cv task serve`'s page): `id`, `short`, `title`,
+  inbox --json`'s `items`, MCP `task_inbox`, the `/inbox` page): `id`, `short`, `title`,
   `kind`, `reason`, `effective_state`, `since` (the aging anchor), `age`, `stale`, `assignee`,
   `opened_by`, `opened_at`, `body`, `blocked`, `last_by`, `last_ts`, `unread`, `notes`, and when
   present `tags`, `repo`, `issue`, `decision` (default, options, alternatives, deadline and its
@@ -315,13 +323,30 @@ warnings ride every response, so a corrupted coordination log is visible from an
 - `GET /api/tasks/debt` and `GET /api/tasks/stats` were removed in 0.15.0 with the task land
   facet; they answer `410` with a pointer.
 
+#### Inbox endpoints
+
+The routes the inbox page (`/inbox`) uses — what `cv task serve` served until 0.15.0. Every write
+records the same event the CLI would, stamped `web:<who>` (`who` from the body, else `?who=`, else
+`--who`).
+
+- **`GET /api/inbox?who=`** — the inbox page model (`cv task inbox --json`'s items plus counts and
+  the closed ones); `all=1` lifts the 14-day window, `since=` narrows it.
+- **`GET /api/events?since=&kind=&by=&not_by=&assignee=&task=`** — JSON lines, the same query as
+  `cv task events`.
+- **`GET /api/lanes?session=<id>`** — a session's sub-agent forest joined to the tasks each lane
+  holds (`cv lanes --tasks`).
+- **`GET /api/backlog?repo=&state=&tag=&all=1`** — every open task, newest activity first.
+- **`POST /api/task/{id}/{resolve,done,note,discuss,claim,release,reopen}`** — `{choice}` |
+  `{accept_default: true}` | `{confirm: true}` for `resolve` (with an optional `note`),
+  `{observed}` for `done`, `{text}` for `note`/`discuss`.
+
 ## Putting it together
 
 A common setup on a workstation that's part of a fleet:
 
 ```sh
-cvd watch &                    # archive + feed #fleet, forever
-cvd serve --port 7777          # let the app's dashboard poll live state
+cv watch &                     # archive every session as it changes, forever
+cv serve --web ./web           # the dashboard, the inbox and the API on :7777
 ```
 
 …with the archive home on a synced folder so every machine contributes to one corpus. From there:

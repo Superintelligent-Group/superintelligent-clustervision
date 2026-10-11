@@ -1,6 +1,6 @@
 //! The no-index live scan: substring search over the corpus with no search index at all.
 //!
-//! This is the *degraded* path — `cv search` takes it before `cv index` has ever run, and `cvd`'s
+//! This is the *degraded* path — `cv search` takes it before `cv index` has ever run, and `cv serve`'s
 //! `/api/search` takes it when the tantivy index is missing or unreadable, so a fresh machine and
 //! a broken index both still answer a query instead of erroring. It is slower than the index by
 //! orders of magnitude (it streams every session) and it only sees each session's capped head, so
@@ -28,7 +28,7 @@ pub const LIVE_HAY_BYTES: usize = 256 * 1024;
 /// [`ParseOptions::lazy`] so large content arrives as spans resolved only up to the remaining
 /// budget — peak per session is O(cap), never O(session).
 ///
-/// The no-index live path for `cv pack`, `cv search` and `cvd`'s `/api/search` alike.
+/// The no-index live path for `cv pack`, `cv search` and `cv serve`'s `/api/search` alike.
 pub struct CapSink {
     pub hay: String,
     pub first_user: Option<String>,

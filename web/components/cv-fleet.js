@@ -1,6 +1,6 @@
 // <cv-fleet> — the Fleet Dashboard. 📡
 //
-// Connects to a running `cvd serve` HTTP API and live-displays the agent fleet
+// Connects to a running `cv serve` HTTP API and live-displays the agent fleet
 // by polling every ~2s. CORS is enabled server-side, so plain cross-origin
 // `fetch` works from this static page.
 //
@@ -9,7 +9,7 @@
 //   GET /api/sessions?limit=N       → Session[] (IR) — recent activity feed
 //
 // Renders the recent-sessions activity feed, auto-refreshing with a pause
-// toggle. If the API is unreachable, a friendly "start `cvd serve`" hint (and a
+// toggle. If the API is unreachable, a friendly "start `cv serve`" hint (and a
 // static sessions .json loader) is shown instead. (The board, claims and
 // presence panels went with the coordination board in 0.15.0; the task log is
 // the fleet's record — `cv task events`.)
@@ -218,13 +218,13 @@ class CvFleet extends HTMLElement {
     this.innerHTML = `
       <div class="view-head">
         <h2>📡 Fleet</h2>
-        <span class="muted">Live view of a running <code>cvd serve</code> — recent sessions across every harness.</span>
+        <span class="muted">Live view of a running <code>cv serve</code> — recent sessions across every harness.</span>
       </div>
       <div class="fleet-toolbar">
         <span class="fleet-dot" title="connection"></span>
         <label class="fleet-field">
           <span class="muted">base URL</span>
-          <input class="fleet-base" type="text" placeholder="${DEFAULT_BASE}" aria-label="cvd serve base URL" />
+          <input class="fleet-base" type="text" placeholder="${DEFAULT_BASE}" aria-label="cv serve base URL" />
         </label>
         <button type="button" class="mini-btn" data-fleet-connect>reconnect</button>
         <button type="button" class="mini-btn" data-fleet-pause aria-pressed="false">⏸ pause</button>
@@ -281,7 +281,7 @@ class CvFleet extends HTMLElement {
         <h3>Can't reach the fleet API</h3>
         <p class="fo-err muted"></p>
         <p>Start the daemon's HTTP API and make sure CORS is enabled:</p>
-        <pre><code>cvd serve --addr 127.0.0.1:7777</code></pre>
+        <pre><code>cv serve</code></pre>
         <p class="muted">Then click <strong>reconnect</strong>. The dashboard polls
         <code>/api/health</code> and <code>/api/sessions</code> every ${POLL_MS / 1000}s.</p>
         <div class="fo-static">

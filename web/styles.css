@@ -1021,7 +1021,7 @@ cv-session-picker { position: relative; display: inline-flex; min-width: 0; }
 /* ---------- Projects view ---------- */
 /* Responsive grid: compact cards tile when there's width, collapse to one column when narrow.
    align-items:start so an expanded card grows down without stretching its row-mates. */
-/* "Touched" lookup — which sessions touched a file (cvd's event catalog). */
+/* "Touched" lookup — which sessions touched a file (cv serve's event catalog). */
 .touched-box {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin: 0 4px 14px;

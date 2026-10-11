@@ -129,7 +129,7 @@
   </div>
 </header>
 <main id="main"></main>
-<footer>served by <code>cv task serve</code> · every button records the same event the CLI would, as <code>web:&lt;who&gt;</code> · <kbd>?</kbd> keys</footer>
+<footer>served by <code>cv serve</code> · every button records the same event the CLI would, as <code>web:&lt;who&gt;</code> · <kbd>?</kbd> keys</footer>
 <div class="toast" id="toast"></div>
 <script>
 (function () {
@@ -196,7 +196,7 @@
       S.page = page;
       if (!S.who) { S.who = page.who; $('#who').value = page.who; persist(); }
       counters();
-    }).catch((e) => { $('#counter').textContent = 'cannot reach cv task serve: ' + e; });
+    }).catch((e) => { $('#counter').textContent = 'cannot reach cv serve: ' + e; });
   }
   function loadLanes() {
     if (!S.lanesSession) { S.lanes = null; return Promise.resolve(); }

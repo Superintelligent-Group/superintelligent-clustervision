@@ -2,7 +2,7 @@
 
 Everything `cv` does on the command line, clustervision also does with pixels. 🔮 The app is one static web UI — a header, a drop zone, a row of view tabs, and the active view — that runs two ways, with no code differences between them:
 
-- **The Tauri desktop app.** A thin native shell around that same UI. It reads **all** of your real local sessions natively (no zip, no upload, zero setup), bundles a `cvd serve` for the live Fleet dashboard, and adds native distill / redact / generate so your LLM keys never touch JavaScript. This is the one to install if it's your machine.
+- **The Tauri desktop app.** A thin native shell around that same UI. It reads **all** of your real local sessions natively (no zip, no upload, zero setup), bundles a `cv serve` for the live Fleet dashboard, and adds native redaction and zip ingest. This is the one to install if it's your machine.
 - **The browser build.** Zero-install, hosted at the GitHub Pages site (<https://emberian.github.io/clustervision/>). You **drop a harness `.zip`** (or an OpenSession `.json`) onto the page and explore. Nothing is uploaded — parsing happens in your browser via WASM. Great for a session a teammate sent you, or for poking around without installing anything.
 
 Both open on a small **bundled sample** so the app is never empty, then quietly try to load your real sessions (see [Loading your sessions](#loading-your-sessions) below).
@@ -45,16 +45,13 @@ The headline. A three-pane workspace for **weaving new transcripts** out of old 
 
 Beyond rearranging, the Loom can actually *loom*: **⚡ generate continuation** sends the current composition to an LLM and appends the model's reply as a new assistant turn (streamed in live). Combined with fork, that grows a transcript into **alternate futures** — a branch tree you can navigate and then drop into [Compare](#-compare--side-by-side-aligned). Export the active branch as OpenSession `.json` or `.md`, entirely client-side.
 
-Where the generation runs depends on how you're running the app:
-
-- **Desktop:** generation routes through the native `generate` command — **no API key in the browser**, and it works with a free local `LMSTUDIO_API_BASE` server if you have one. The gen bar shows `🖥 native`.
-- **Browser:** generation calls **OpenRouter** directly. Open **⚙ generation** to paste an API key (stored only in this device's `localStorage`, sent only to `openrouter.ai`) and choose a model.
+Generation calls **OpenRouter** directly, in the desktop app and the browser alike. Open **⚙ generation** to paste an API key (stored only in this device's `localStorage`, sent only to `openrouter.ai`) and choose a model. For a free local model, `cv splice --generate` with `LMSTUDIO_API_BASE=local` is the CLI's path.
 
 ### 📡 Fleet — the live dashboard
 
-A live window onto a running [`cvd serve`](daemon.md). It polls the daemon's HTTP API (default `http://localhost:7777`) every ~2 seconds and shows a **recent-sessions** feed across every harness. Pause/resume and reconnect controls live in the toolbar.
+A live window onto a running [`cv serve`](daemon.md). It polls the server's HTTP API (default `http://localhost:7777`) every ~2 seconds and shows a **recent-sessions** feed across every harness. Pause/resume and reconnect controls live in the toolbar.
 
-In the **desktop app** this Just Works — it bundles and launches `cvd serve` on startup, so the Fleet tab is live the moment you open the app. In a **browser** it works too, as long as you have `cvd serve` running locally. If the API is unreachable, Fleet shows a friendly "start `cvd serve`" hint and lets you load a **static sessions `.json`** export instead. See [the daemon chapter](daemon.md) for what `cvd` exposes; what the agents are committing to lives in [tasks](tasks.md).
+In the **desktop app** this Just Works — it bundles and launches `cv serve` on startup, so the Fleet tab is live the moment you open the app. In a **browser** it works too, as long as you have `cv serve` running locally. If the API is unreachable, Fleet shows a friendly "start `cv serve`" hint and lets you load a **static sessions `.json`** export instead. See [the server chapter](daemon.md) for what `cv serve` exposes; what the agents are committing to lives in [tasks](tasks.md).
 
 ### 🧬 OpenSession — the standard
 
@@ -69,7 +66,7 @@ There are three ways sessions get into the pool, and they all merge into one sea
 On startup the app loads the machine's real on-disk sessions — **everything**, every harness, with zero configuration:
 
 - **Desktop:** via the native `api` command (the server's read API, in-process). No HTTP, no CORS, no mixed-content surprises.
-- **Browser:** by trying a local `cvd` over HTTP (`/api/sessions`). If `cvd` isn't running — the normal case for the static web deploy — it falls back to the bundled sample.
+- **Browser:** by trying a local `cv serve` over HTTP (`/api/sessions`). If it isn't running — the normal case for the static web deploy — it falls back to the bundled sample.
 
 ### 2. Lazy hydration (metadata stubs → full transcripts on demand)
 
@@ -79,7 +76,7 @@ Loading thousands of sessions stays fast because the pool is filled with lightwe
 
 Drag one or more **`.zip`** harness exports or OpenSession **`.json`** files onto the drop zone — multiple at once, both formats, all merging into the pool. In the **browser** the zip is unpacked and parsed by the WASM module; in the **desktop app** zips are ingested natively in Rust (no WASM needed), and there's a native **File → Open zip…** menu item (`Cmd/Ctrl+O`) that runs a real file dialog and surfaces errors in a native message box. (For the gory details of how exports become OpenSession, see [Cross-harness conversion](conversion.md).)
 
-The drop zone shows a **source chip** per loaded source ("local (cvd) **1203**", "myexport.zip **8**") so you always know what's in your pool. Dropping your first real data clears the sample automatically.
+The drop zone shows a **source chip** per loaded source ("local (cv serve) **1203**", "myexport.zip **8**") so you always know what's in your pool. Dropping your first real data clears the sample automatically.
 
 ## Sub-agent trees
 
@@ -109,9 +106,9 @@ Press **?** anytime for the in-app cheat sheet.
 
 The browser build is fully capable, but the Tauri desktop shell adds the things a sandboxed web page can't do:
 
-- **Native access to all your local sessions** — no zip, no `cvd` HTTP round-trip, no upload — via one native `api` command that runs the server's read API in-process.
-- **A bundled `cvd serve`** launched on startup (and toggleable from **View → Toggle cvd serve**), so the Fleet dashboard is live out of the box. It's reaped when you quit.
-- **Native distill / redact / generate** — these call straight into `cv_llm` / `cv_core`, so LLM API keys live in the desktop process's environment (or a local LM Studio server), never shipped into JavaScript. Redaction is pure and offline; no key needed.
+- **Native access to all your local sessions** — no zip, no HTTP round-trip, no upload — via one native `api` command that runs the server's read API in-process.
+- **A bundled `cv serve`** launched on startup (and toggleable from **View → Toggle cv serve**), so the Fleet dashboard is live out of the box. It's reaped when you quit.
+- **Native redact** — pure and offline; no key needed. (Generation in the loom is the OpenRouter path in both the app and the browser.)
 - **Native zip ingest** — File → Open zip… and drag-and-drop both work without the WASM module.
 - A **native menu** (File / Edit / View / Help — Edit so `Cmd+C`/`Cmd+V` work in the transcript, which is the whole point of a viewer), DevTools, and **window state persistence** across launches.
 

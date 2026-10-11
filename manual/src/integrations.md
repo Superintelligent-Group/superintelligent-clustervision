@@ -52,7 +52,7 @@ Details that matter:
   pre-compaction records never leave the jsonl: [`cv show --pre-compaction`](cli.md#cv-show)
   reads them and [`cv rewind --at`](cli.md#cv-rewind) resumes from before them.
 - **start** reads the catalog as it stands, without a freshness probe. A session newer than the
-  last `cv ls` / `cvd sync` is missing until one runs. The commit sha comes from the last
+  last `cv ls` / `cv archive sync` is missing until one runs. The commit sha comes from the last
   `[branch sha]` line in each transcript's final 512 KiB.
 - **lane** writes the ledger [`cv lanes`](swarm.md) reads. A `stop` row at or after a lane's last
   turn makes it read `stopped` with `status_source: hook_ledger`, even before the transcript
@@ -86,17 +86,18 @@ No hook can supply or replace the compaction summary (`PreCompact` can only bloc
 ## The MCP server
 
 ```sh
-claude mcp add clustervision -- /abs/path/to/cv-mcp
+claude mcp add clustervision -- /abs/path/to/cv mcp
 ```
 
-`cv-mcp` finds `cv` next to itself, then on `$PATH` (`$CV_BIN` overrides), and generates one tool
-per CLI command from `cv schema --commands --json`, plus the hand-written `await_omen`,
-`observe_stream` and `task_*` tools. The roster, with arguments, is in
+`cv mcp` generates one tool per CLI command from its own clap tree (what `cv schema --commands
+--json` prints): `ls`, `show`, `cat`, `search`, `pack`, `doctor`, `lanes`, `prune`, `rewind`,
+`distill`, the `task_*` tools, … plus the hand-written `await_omen` and `observe_stream`. The
+roster, with arguments, is in
 [MCP](mcp.md); the live `tools/list` reply is the authority.
 
 ## Every other harness
 
-Nothing to install for reading: `cvd watch` follows every harness's store, and `cv ls`, `cv
+Nothing to install for reading: `cv watch` follows every harness's store, and `cv ls`, `cv
 search` and the MCP tools read the stores directly. cv ships no hook configuration for any other
 harness until one has been checked against that harness's own documentation the way Claude Code's
 was.

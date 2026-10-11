@@ -5,7 +5,7 @@
 //! state, the compaction scan — with one exception: `text:` needs a full-text index, which lives
 //! in cv-search (and cv-search depends on cv-core, so the dependency cannot point that way). So
 //! `text:` arrives pre-resolved as a [`TextSets`], built by whichever door is asking: `cv -q` and
-//! `cvd`'s `/api/stats?q=` both hand in the tantivy index, and a caller with no index hands in
+//! `cv serve`'s `/api/stats?q=` both hand in the tantivy index, and a caller with no index hands in
 //! nothing and `text:` matches nothing. That keeps one implementation of the calculus behind both
 //! doors, which is the point — a `-q` that means something different on the daemon than on the
 //! CLI is a silent wrong answer, not a missing feature.
@@ -198,7 +198,7 @@ pub fn matches_full(query: &SessionQuery, r: &SessionRef, session: &Session, tex
 
 /// Apply a parsed query to a ref list in place: prune with the catalog-cheap prefilter, then — if
 /// the query has any parse/index/events/forest term — parse each survivor and keep only full
-/// matches. `cv ls`/`stats` and `cvd`'s `/api/stats?q=` all go through here, so `-q`
+/// matches. `cv ls`/`stats` and `cv serve`'s `/api/stats?q=` all go through here, so `-q`
 /// means the same thing on every door.
 pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) {
     refs.retain(|r| query.prefilter(r));

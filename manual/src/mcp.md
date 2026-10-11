@@ -1,6 +1,6 @@
 # MCP — agents reading each other's minds
 
-Most of clustervision is about *you* reading sessions after the fact. `cv-mcp` is the
+Most of clustervision is about *you* reading sessions after the fact. `cv mcp` is the
 other direction: it hands the same powers to a **running coding agent** so it can read
 *other* agents' sessions — within this project, back through time, and across harnesses
 — and coordinate with siblings live. 🔮
@@ -27,34 +27,32 @@ for live coordination.
 
 ## Registering it
 
-Build the binaries, then register the server with your host. For Claude Code:
+The server is a `cv` subcommand. Register it with your host; for Claude Code:
 
 ```sh
-cargo build -p clustervision -p cv-mcp --release
-claude mcp add clustervision -- /absolute/path/to/cv-mcp
+claude mcp add clustervision -- /absolute/path/to/cv mcp
 ```
 
-Any MCP host works — give it the absolute path to the `cv-mcp` binary as the command (no
-arguments needed). **stdout is the protocol channel**, so all diagnostics go to stderr. It
-implements `initialize`, `ping`, `tools/list` and `tools/call` against protocol version
-`2025-06-18`, and every tool returns its result as a single text content block.
-
-`cv-mcp` needs the `cv` binary at runtime (see below), so build and install them together.
+Any MCP host works — give it the absolute path to `cv` as the command and `mcp` as its one
+argument. **stdout is the protocol channel**, so all diagnostics go to stderr. It implements
+`initialize`, `ping`, `tools/list` and `tools/call` against protocol version `2025-06-18`, and
+every tool returns its result as a single text content block. (Until 0.15.0 this was a separate
+`cv-mcp` binary; `cv-mcp` is now a one-release shim that runs `cv mcp`.)
 
 ## The tools are generated from the CLI
 
-There is no hand-maintained list of what cv can do inside `cv-mcp`. At startup the server
-runs, once:
+There is no hand-maintained list of what cv can do inside `cv mcp`. At startup the server
+reads its own command tree, in-process — exactly what
 
 ```sh
 cv schema --commands --json
 ```
 
-which dumps clap's own introspection of the command tree — every visible command and
+prints: clap's own introspection of the command tree — every visible command and
 subcommand with its group, `about`, and each argument's kind (`flag` / `option` /
 `positional`), value type, possible values, default, help text and required-ness. Each
-command in the **Read**, **Reshape**, **Export** and **System** groups becomes one MCP
-tool:
+command in the **Read**, **Reshape**, **Export** and **System** groups, and every `cv task`
+subcommand, becomes one MCP tool:
 
 - the **tool name is the command name** (`ls`, `show`, `cat`, …; a subcommand joins with
   an underscore, `task_open`);
@@ -63,34 +61,24 @@ tool:
   positionals included, so `cat` takes `session` and `tool_use_id` as properties — with
   clap's help as the property description, `possible_values` as an `enum`, and the CLI
   default as `default`;
-- **required arguments land in the schema's `required` list.**
+- **required arguments land in the schema's `required` list** (an argument in a one-of
+  group, like `task resolve`'s `choice` / `accept_default` / `confirm`, is not required alone);
+- a **list value** repeats a repeatable option (`blocked_by: ["a", "b"]`) or fills a repeatable
+  positional (`splice`'s `specs`).
 
-A call shells out: `cv <command> <args…> --json`, and the child's stdout comes back as the
-tool result. The `--json` is appended only for commands that have the flag (so `cat`,
+A call runs the same `cv` executable as `cv <command> <args…> --json`, and its stdout comes
+back as the tool result. The `--json` is appended only for commands that have the flag (so `cat`,
 `tree`, `export`, `blame`, `resume`, … return text), and `json` is therefore *not* a
 property you set. A **non-zero exit is an MCP tool error** (`isError: true`) carrying the
 child's stderr, so `cv`'s exit-2 "no session matching …" reaches the agent verbatim. A
 malformed or unknown argument never reaches `cv` at all: it comes back as JSON-RPC
 `-32602 Invalid params`.
 
-Because the schema is the binary's own, **tool names, flags, harness lists and output
-shapes cannot drift from the CLI**. Add a command or a flag to `cv` and it appears over
+Because the schema is the running binary's own, **tool names, flags, harness lists and
+output shapes cannot drift from the CLI** — there is no second binary to find, and so none to
+be stale. Add a command or a flag to `cv` and it appears over
 MCP with no change here. The page you are reading is the one place that can go stale: if
 it and a live `tools/list` ever disagree, the live reply is the authority.
-
-### Finding the `cv` binary
-
-In order, first one that actually answers `cv schema --commands --json`:
-
-1. **`$CV_BIN`** — an explicit absolute path. Set this when `cv` is somewhere unusual, or
-   to pin a specific build.
-2. **A `cv` next to the running `cv-mcp`** (via `std::env::current_exe`). The two are
-   built and installed together, so the sibling is the matching version.
-3. **`cv` on `$PATH`.**
-
-If none answers, the server logs the failure to stderr and **serves only the MCP-only
-tools** — it does not die. `tools/list` is then short, and calling a command tool returns
-an error telling you to set `$CV_BIN`.
 
 ## Windows: `show` never dumps a whole transcript by default
 
@@ -106,7 +94,7 @@ properties on the `show` tool (and on `export`, which has them too):
 | `max_bytes` | stop after N bytes of rendered output, then print a `… continue with --range <next>..` line |
 
 Over MCP — and **only** over MCP — `show` gets a default window: when the caller passes
-**none** of those five, cv-mcp adds `--last 50 --max-bytes 200000`. A 400-message session
+**none** of those five, `cv mcp` adds `--last 50 --max-bytes 200000`. A 400-message session
 would otherwise land in the agent's context in one shot, which is exactly the problem
 `doctor` exists to diagnose. Naming any selector (including `max_bytes` alone, or
 `pre_compaction`, which sets its own window) suppresses the defaults entirely — asking for
@@ -115,7 +103,7 @@ defaults are the CLI's, unchanged.
 
 ## The generated tools
 
-Exactly the CLI's Read / Reshape / Export / System groups. Arguments are listed in full by
+The CLI's Read / Reshape / Export / System groups, plus the task tools (below). Arguments are listed in full by
 the live `tools/list`; only the **required** ones are shown here. "JSON" says whether the
 call gets `--json` appended (and so returns machine output rather than rendered text).
 
@@ -156,7 +144,7 @@ Each produces a **new** session id; the source is never touched.
 
 | Tool | Required | JSON | What it does |
 |---|---|---|---|
-| `export` | `id` | no | Export a session to markdown, JSON, or self-contained HTML. Takes the window flags. |
+| `export` | `id` | no | Export a session to markdown or OpenSession JSON (`redact` scrubs it first). Takes the window flags. |
 | `dataset` | — | no | The corpus as a fine-tuning dataset (JSONL, one session per line). |
 | `pack` | `task` | no | Compile a context bundle for a new task out of the whole corpus. |
 
@@ -167,8 +155,8 @@ Each produces a **new** session id; the source is never touched.
 | `index` | — | no | Build/refresh the full-text index that makes `search` instant. |
 | `config` | — | no | View the user config and manage the export-source index. |
 | `schema` | — | yes | The reference: query calculus, and the machine-readable schema of every shape cv emits. |
-| `formats` | — | yes | The format census and manifest check. |
-| `recipes` | — | no | The agent quickstart: the ten things agents do with cv. |
+| `formats` | — | yes | The format census: what recent sessions contain, per harness, and what the manifest does not name. |
+| `recipes` | — | no | The agent quickstart: the things agents do with cv, each as one command line. |
 
 ## What was removed in 0.11.0
 
@@ -190,8 +178,8 @@ same `id` and returns the same report plus everything the CLI has grown since.
 
 ## The MCP-only tools
 
-These have **no CLI equivalent** and stay hand-written, because they block, hold a cursor,
-or arbitrate between agents — things a one-shot subprocess cannot do.
+These two have **no CLI equivalent** and stay hand-written, because one blocks and the other
+holds a cursor across calls — things a one-shot command cannot do.
 
 ### `await_omen`
 
@@ -211,7 +199,7 @@ On a match returns `{ matched: true, harness, id, cwd, role, matched_text, event
 (`event` is `new_session` or `appended`); on timeout returns
 `{ matched: false, timed_out: true, waited_secs }`. *When to use:* wait on a sibling
 agent's raw transcript — e.g. `await_omen(regex='BUILD (PASSED|FAILED)', cwd_contains='/myproj')`.
-For explicit, structured coordination, use the `task_*` tools (below).
+For explicit, structured coordination, use the task tools (below).
 
 ### `observe_stream`
 
@@ -235,33 +223,26 @@ head-of-line-blocks a `show` issued after it.
 
 ## The task substrate over MCP
 
-The [task substrate](tasks.md) — durable dispatch objects whose landing state is *observed
-from git*, never asserted — is fully drivable over MCP. The `task_*` tools wrap the same
-core paths as the `cv task` CLI, and results come back as pretty JSON in the same shared row
-shapes. Two things to know up front:
+The [task substrate](tasks.md) is fully drivable over MCP, and the tools are **generated
+from `cv task`** like every other command tool: `task_open`, `task_list`, `task_show`,
+`task_claim`, `task_release`, `task_note`, `task_done`, `task_status`, `task_abandon`,
+`task_supersede`, `task_tag`, `task_block`, `task_decide`, `task_resolve`, `task_events`,
+`task_sweep`, `task_inbox` — the same names, arguments and help as `cv task
+<sub> --help`. What comes back is what the CLI prints:
 
-- **Identity.** The MCP server inherits the agent's environment, so a spawner-set
-  `CV_ENDPOINT=agent:<name>` makes every bare call record the right actor. Identity-*bearing*
-  tools (`task_claim`, `task_release`, and `task_inbox`'s default `who`) **error** when neither
-  `from` nor `CV_ENDPOINT` is set; bookkeeping tools fall back to the `"agent"` sink.
+- a write answers with its confirmation line (`✦ claimed 01a1… → claimed`; `task_open` puts the
+  new task's full id on its own last line), and a refused one is a tool error carrying the
+  reducer's reason (`event rejected: … cannot apply claimed` for the loser of a claim race);
+- `task_list` and `task_show` answer with `--json` (the full task projection), and `task_inbox`
+  with the one inbox page `cv serve` serves too (`{who, items, closed, hidden, counts}`, each item
+  carrying `reason`, `effective_state`, `since` and `age`); `task_list` has the CLI's default scope (non-terminal,
+  the last 14 days or involving you), and `all: true` lifts it;
+- `task_events` answers with JSON lines, the poll surface.
 
-| Tool | Required args | Optional args | Purpose / when to use |
-|------|---------------|---------------|------------------------|
-| `task_open` | `title` | `body`, `repo`, `issue`, `assignee`, `from` | Open a durable task. |
-| `task_list` | — | `state`, `assignee`, `repo`, `tag`, `all` (`false`) | List tasks (non-terminal by default). An unknown `state` is an error naming the vocabulary, never a silent `[]`. |
-| `task_show` | `id` | — | One task's full projection: state, assignee, notes, tags, blockers, the decision facet, the pinned STATUS. |
-| `task_claim` | `id` | `from`* | Claim an open task — durable, race-free, first writer wins. |
-| `task_release` | `id` | `from`* | Release your claim back to open. |
-| `task_note` | `id`, `text` | `session_ref`, `from` | Progress note; never changes state. |
-| `task_done` | `id` | `observed`, `from` | Complete a task. Self-reported and labeled so; `observed` is free text. Refused on a decision. |
-| `task_abandon` | `id` | `reason`, `from` | Kill a task (always allowed on a non-terminal task). |
-| `task_inbox` | — | `who` (default `$CV_ENDPOINT`) | What needs `who`, stalest first: decisions owed, in discussion, made for them (veto?), assigned, claimed — the same rows as `cv task inbox --json`'s `items`. |
-
-\* identity-bearing: defaults to `$CV_ENDPOINT`, errors when neither is set.
-
-This table is transcribed from the hand-written list in `crates/cv-mcp/src/main.rs` as it stands
-on this branch; CI greps every tool name on this page against a live `tools/list`, and if the two
-ever disagree the live reply is the authority.
+**Identity.** The server inherits the agent's environment, so a spawner-set
+`CV_ENDPOINT=agent:<name>` makes every bare call record the right actor. Identity-*bearing*
+tools (`task_claim`, `task_release`, `task_status`, `task_resolve`) **error** when neither
+`from` nor `CV_ENDPOINT` is set, naming the cure.
 
 ## A typical flow
 

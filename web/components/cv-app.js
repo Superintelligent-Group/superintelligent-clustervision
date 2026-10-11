@@ -9,7 +9,7 @@
 //   stats      — dashboard (<cv-stats>)
 //   forest     — session-structure explorer: agent forest, workflow lanes, tools, compaction (<cv-forest>)
 //   loom       — splice/loom composer (<cv-loom>)
-//   fleet      — live cvd serve dashboard (<cv-fleet>)
+//   fleet      — live `cv serve` dashboard (<cv-fleet>)
 import "./cv-session-list.js";
 import "./cv-transcript.js";
 import "./cv-projects.js";
@@ -50,7 +50,7 @@ class CvApp extends HTMLElement {
     this._wasmState = "loading";
     this._view = "sessions";
     this._isSample = true;     // true until the user loads their own data
-    this._daemon = false;      // a cvd answered: the archive is already here
+    this._daemon = false;      // a server answered: the archive is already here
     this._searchMode = "local";
   }
 
@@ -73,7 +73,7 @@ class CvApp extends HTMLElement {
 
     // Load sessions FIRST, before the wasm gate — wasm is only needed for .zip ingest, and a stalled
     // wasm import under the tauri:// scheme must never block showing the user's real sessions.
-    // First choice: the machine's real local sessions (native command in the desktop; a local cvd
+    // First choice: the machine's real local sessions (native command in the desktop; a local `cv serve`
     // over HTTP in a browser). Only if that's unreachable/empty do we fall back to the sample.
     const loadedLocal = await this._tryLoadLocal();
 
@@ -106,7 +106,7 @@ class CvApp extends HTMLElement {
     }
   }
 
-  // ---- Local sessions via cvd ------------------------------------------------
+  // ---- Local sessions via the read API ------------------------------------------------
   // Load the real on-disk sessions as lightweight *stubs* (metadata, no messages). The full
   // transcript is fetched lazily in `_showSession` when a row is opened, so startup is fast even
   // with thousands of sessions. Returns true if it populated the pool.
@@ -122,7 +122,7 @@ class CvApp extends HTMLElement {
       const sessions = normalizeSessions(refs).map((s) => ((s._stub = true), s));
       if (!sessions.length) return false;
       this._sessions = sessions;
-      this._sources = [{ name: "local (cvd)", count: sessions.length }];
+      this._sources = [{ name: "local (cv serve)", count: sessions.length }];
       this._isSample = false;
       this._daemon = true;
       // The archive is already here, so the dropzone stops being the way in and folds to one
@@ -136,8 +136,8 @@ class CvApp extends HTMLElement {
       );
       return true;
     } catch (e) {
-      // cvd not running (normal for the static web deploy) — caller falls back to the sample.
-      console.info("[clustervision] no local cvd, using fallback:", e?.message ?? e);
+      // cv serve not running (normal for the static web deploy) — caller falls back to the sample.
+      console.info("[clustervision] no local cv serve, using fallback:", e?.message ?? e);
       return false;
     }
   }
@@ -150,7 +150,7 @@ class CvApp extends HTMLElement {
   /** Fetch and swap in the transcript for a stub. Preferred: the *windowed* endpoint — load
    *  just the first PAGE messages so a 30k-message session opens instantly; the transcript's
    *  "load more" pages in the rest (`_loadMoreMessages`). Falls back to the classic whole-session
-   *  fetch when the windowed path isn't available (older cvd). Returns the hydrated session. */
+   *  fetch when the windowed path isn't available (older server). Returns the hydrated session. */
   async _hydrate(stub) {
     // Both at once: the first window, and the session-level facts a window can never learn. A
     // windowed read stops when its window is full, so anything the transcript records LATER —
@@ -163,7 +163,7 @@ class CvApp extends HTMLElement {
       const present = (o) => Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v != null));
       const meta = { ...present(head), ...present(win.session) };
       // The stream's parsed metadata (when delivered) beats the discovery-time stub's. Spread the
-      // whole meta rather than three named fields: cvd decides what a session-level fact is, and a
+      // whole meta rather than three named fields: the server decides what a session-level fact is, and a
       // fact it starts sending (`system_prompt`, `lineage`) should reach the UI without a change
       // here. Nulls in the meta must not clobber the stub, so drop them first.
       const live = Object.fromEntries(Object.entries(meta).filter(([, v]) => v != null));
@@ -181,7 +181,7 @@ class CvApp extends HTMLElement {
       return full;
     }
 
-    // Whole-session path (older cvd, or anything the windowed endpoint couldn't serve).
+    // Whole-session path (older server, or anything the windowed endpoint couldn't serve).
     const raw = await apiGet(`/api/session/${encodeURIComponent(stub.harness)}/${encodeURIComponent(stub.id)}`);
     const full = normalizeSession(raw);
     full._stub = false;
@@ -226,7 +226,7 @@ class CvApp extends HTMLElement {
     }
   }
 
-  /** Show a session in the transcript, hydrating from cvd first if it's only a stub.
+  /** Show a session in the transcript, hydrating from the read API first if it's only a stub.
    *
    *  Holding `j` asks for a new session every few milliseconds, and the fetches come back in
    *  whatever order they finish — so each one checks that it is still the session the user is
@@ -244,7 +244,7 @@ class CvApp extends HTMLElement {
       } catch (e) {
         if (token !== this._showToken) return;
         console.error("[clustervision] hydrate failed:", e);
-        this._setStatus(`Couldn't load that transcript from cvd (${e?.message ?? e}).`, "error");
+        this._setStatus(`Couldn't load that transcript from the read API (${e?.message ?? e}).`, "error");
         return;
       }
       if (token !== this._showToken) return;   // the cursor has moved on
@@ -485,7 +485,7 @@ class CvApp extends HTMLElement {
 
   /** A lineage chip was clicked: open the session it points at. The pool holds stubs for every
    *  local session, so an id usually resolves there (ids are full, but a harness may record a
-   *  prefix, so accept one). Failing that, ask cvd for it directly — a forked-from or
+   *  prefix, so accept one). Failing that, ask the read API for it directly — a forked-from or
    *  continued-in id can name a session the current filter never listed. */
   async _openById({ id, harness }) {
     if (!id) return;

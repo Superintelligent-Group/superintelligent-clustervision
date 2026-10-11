@@ -1,7 +1,7 @@
 //! CLI glue for the query calculus: parse `-q` strings and resolve the one external predicate
 //! cv-core cannot (`text:`, which needs the tantivy index) into the [`TextSets`] the core's
 //! [`SessionFacts`] resolver consults. Everything else — the events/forest/compaction predicates
-//! and the two-phase ref filter — lives in `cv_core::query::facts`, so `cv -q` and `cvd`'s
+//! and the two-phase ref filter — lives in `cv_core::query::facts`, so `cv -q` and `cv serve`'s
 //! `/api/stats?q=` evaluate the same calculus. The reference itself is `cv schema`
 //! (`cmd/schema.rs`).
 

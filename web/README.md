@@ -75,7 +75,7 @@ A tab bar (`<cv-app>`) switches between views, all reading from the merged pool:
   composition as you build it. **Download** it as an OpenSession `.json` or
   Markdown — pure client-side. Now it also *looms*: see **Generation & the branch
   tree** below.
-- **📡 Fleet** (`<cv-fleet>`) — a live dashboard over a running `cvd serve` HTTP
+- **📡 Fleet** (`<cv-fleet>`) — a live dashboard over a running `cv serve` HTTP
   API. See **Fleet dashboard** below.
 
 The OpenSession format itself is documented in the manual (`manual/src/opensession.md`); the
@@ -105,9 +105,8 @@ re-parents its children so the tree stays connected.
   text/thinking/tool blocks flattened to text) and **appends** the model's reply
   as a new IR `assistant` message in the lane. The reply **streams** in
   (`fetch` + `ReadableStream` over SSE) when the provider supports it, with a
-  **stop** button; otherwise it awaits the full response. Inside the desktop
-  shell this routes through the native `generate` command instead (no key — the
-  bar shows **🖥 native**).
+  **stop** button; otherwise it awaits the full response. The desktop shell
+  uses the same OpenRouter path.
 - **Branches.** The branch tree holds multiple named variants, each with its own
   lane. **＋ branch** duplicates the active branch into a child; **⑂** on any lane
   message forks a *child branch* from that prefix. Switch branches, generate
@@ -152,14 +151,14 @@ and a strip of sub-views:
 The outcome vocabulary across workflows is wild (`done`, `GREEN`, `welded`,
 `partial`, `YELLOW`, `blocked`, plain strings, nothing) — it's folded onto five
 semantic buckets (good · warn · bad · open · neutral) so the whole forest reads at
-a glance. Data comes from cvd's `/subagents`, `/messages`, `/compactions`, and
+a glance. Data comes from cv serve's `/subagents`, `/messages`, `/compactions`, and
 `/workflow/<wf>/script` endpoints (or the desktop's native commands); the heavy
 work (the full-transcript compaction scan) is server-side, so even a
 12k-message / 940-agent session stays responsive.
 
 ## 📡 Fleet dashboard
 
-`<cv-fleet>` connects to a running **`cvd serve`** HTTP API and live-displays the
+`<cv-fleet>` connects to a running **`cv serve`** HTTP API and live-displays the
 fleet by **polling every ~2s** (CORS is enabled server-side, so cross-origin
 `fetch` from this static page works). Enter a **base URL** (default
 `http://localhost:7777`).
@@ -169,7 +168,7 @@ It renders a **recent-sessions** activity feed — `/api/sessions?limit=N` (IR
 
 Polled endpoints: `/api/health`, `/api/sessions?limit=`.
 
-If the API is unreachable it shows a friendly **"start `cvd serve`"** hint and
+If the API is unreachable it shows a friendly **"start `cv serve`"** hint and
 lets you **load a static sessions export** (`.json`: an array of sessions, or an
 object `{ sessions? }`) to explore the layout offline. (The board, claims and
 presence panels went with the coordination board in 0.15.0.)
@@ -180,7 +179,7 @@ All are plain native custom elements (no framework, no build step), in `componen
 
 - **`<cv-app>`** — shell: header, theme toggle, **multi-file** dropzone (with
   per-source counts), view tabs, and the active view. Merges all sources into one
-  de-duplicated pool. When a `cvd` is answering, the dropzone **folds to one
+  de-duplicated pool. When a `cv serve` is answering, the dropzone **folds to one
   line** — the archive is already here, so the invitation stops charging every
   view ~110px; the fold keeps the source chip, still takes a drop (anywhere in
   the app), reopens from `+ add .zip / .json`, and remembers which way you left
@@ -320,7 +319,7 @@ to the local filter; the stats view never mixes a corpus number with a
 one-session number. No build step, no dependencies; it does need a static server,
 because browsers refuse ES modules over `file://`:
 
-    cvd serve --web ./web      # then open /selftest.html
+    cv serve --web ./web      # then open /selftest.html
     # or, from web/:
     python3 -m http.server     # then open /selftest.html
 
@@ -349,15 +348,15 @@ python3 -m http.server --directory web 8080
 ```
 
 It starts in demo mode (sample dataset, which includes an OpenSession-format
-session to exercise the normalizer) unless a local **`cvd serve`** is reachable
+session to exercise the normalizer) unless a local **`cv serve`** is reachable
 on `http://localhost:7777` (then the viewer loads your real on-disk sessions).
 
-**One-command hub.** `cvd serve --web` hosts *both* the dashboard and the JSON API
+**One-command hub.** `cv serve --web` hosts *both* the dashboard and the JSON API
 from a single origin — your real sessions, the live **Fleet** view, and the
 **Structure** explorer with zero extra setup:
 
 ```sh
-cvd serve --web ./web        # UI at http://localhost:7777/ , API at /api/*
+cv serve --web ./web        # UI at http://localhost:7777/ , API at /api/*
 ```
 
 Served this way, the frontend talks to the API at its own origin automatically
@@ -388,7 +387,7 @@ wasm-pack build crates/cv-web --target web --out-dir ../../web/pkg --no-default-
 Run the daemon's HTTP API alongside the static site:
 
 ```sh
-cvd serve --host 127.0.0.1 --port 7777   # CORS for local origins only
+cv serve --host 127.0.0.1 --port 7777   # CORS for local origins only
 ```
 
 Open the **📡 Fleet** tab (base URL `http://localhost:7777`). The recent-sessions

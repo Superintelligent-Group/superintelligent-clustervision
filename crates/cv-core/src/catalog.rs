@@ -70,7 +70,7 @@ mod imp {
 
     fn open() -> Option<Connection> {
         let conn = Connection::open(db_path()?).ok()?;
-        // WAL + a busy timeout so concurrent cv/cvd processes don't error each other out.
+        // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;

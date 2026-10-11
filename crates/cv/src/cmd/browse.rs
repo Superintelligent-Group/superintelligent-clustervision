@@ -9,7 +9,7 @@ use cv_core::ir::{truncate, SessionRef};
 use cv_core::sanitize::sanitize_line;
 
 /// Apply a parsed query to a ref list in place. The two-phase filter itself is
-/// [`cv_core::query::filter_refs`] — shared with `cvd`'s `/api/stats?q=`, so `ls`/`stats` and
+/// [`cv_core::query::filter_refs`] — shared with `cv serve`'s `/api/stats?q=`, so `ls`/`stats` and
 /// the daemon all speak exactly the same `-q`; the CLI only supplies the `text:`
 /// resolution, which needs the tantivy index cv-core cannot depend on.
 fn apply_query(refs: &mut Vec<SessionRef>, query: &Option<cv_core::SessionQuery>) {
@@ -146,7 +146,7 @@ pub(crate) fn cmd_stats(query: Option<String>, json: bool, tokens: bool) -> Resu
     let mut refs = cv_core::sessions();
     apply_query(&mut refs, &query);
     // The aggregation and the `--json` payload both live in `cv_core::stats`, so `cv stats --json`
-    // and `cvd`'s `/api/stats` are the same six numbers computed once — the dashboard used to
+    // and `cv serve`'s `/api/stats` are the same six numbers computed once — the dashboard used to
     // accumulate its own from whichever sessions the user had happened to open.
     let s = cv_core::stats::CorpusStats::compute(&refs);
     let total = s.sessions;

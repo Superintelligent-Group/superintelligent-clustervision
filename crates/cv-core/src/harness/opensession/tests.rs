@@ -25,7 +25,7 @@ fn block_type(b: &Block) -> &'static str {
 // ── the document boundary ─────────────────────────────────────────────────────
 
 /// The version marker is the document's FIRST key — and it is *only* on the document. A `Session`
-/// serialized on its own (what `cv show --json`, the MCP payloads and cvd emit) has no
+/// serialized on its own (what `cv show --json`, the MCP payloads and `cv serve` emit) has no
 /// `open_session` key, which is the whole reason the marker lives at this boundary.
 #[test]
 fn document_leads_with_the_version_and_session_never_carries_it() {

@@ -4,7 +4,7 @@
 //! same keys (`id, harness, path, cwd, title, created_at, updated_at, message_count, size_bytes`)
 //! and a **search row** is that row plus what the search itself contributed (`score`, `snippet`,
 //! and the sub-agent provenance trio). The rule only holds if there is one implementation: `cv
-//! search --json` and `cvd`'s `/api/search` are two doors onto the same index, and a consumer must
+//! search --json` and `cv serve`'s `/api/search` are two doors onto the same index, and a consumer must
 //! not be able to tell which one it came through. Both call these functions.
 //!
 //! Key ORDER is part of the shape here: the workspace enables serde_json's `preserve_order`, so
@@ -16,7 +16,7 @@ use crate::events::{EventRow, TouchedSession};
 use crate::ir::{Harness, SessionRef};
 use serde_json::{json, Value};
 
-/// THE session row (§3): the same nine keys `cv ls --json`, `cv search --json`, `cvd`'s
+/// THE session row (§3): the same nine keys `cv ls --json`, `cv search --json`, `cv serve`'s
 /// `/api/sessions` and the desktop app's `local_sessions` emit. `size_bytes` is passed in because
 /// only the caller knows whether it already has the `stat` in hand.
 pub fn session_row(r: &SessionRef, size_bytes: Option<u64>) -> Value {

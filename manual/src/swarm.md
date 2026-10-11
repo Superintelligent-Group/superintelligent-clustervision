@@ -19,7 +19,7 @@ forest, the deferral linter is the closeout gate, and the inbox is what the huma
 |---|---|---|
 | `cv task open/claim/note/done` | every obligation is a task before the reply that mentions it | "a *later* in chat is a dropped obligation" — `cv deferrals <session> --open-tasks` exits 1 on any unmatched one |
 | `cv task decide --for <who> --default … --option …` | a decision for the human, with a default the swarm can proceed on | the orchestrator may *act on the default* and say so; the inbox shows it as owed until resolved |
-| `cv task inbox <who>` / `cv task serve --open` | what the human owes, drained in one sitting | pose decisions with defaults *before* the human arrives; poll `cv task events --by <who>` at every check-in |
+| `cv task inbox <who>` / `cv serve --open` (the inbox page) | what the human owes, drained in one sitting | pose decisions with defaults *before* the human arrives; poll `cv task events --by <who>` at every check-in |
 | `cv lanes <session> --running` | the forest as a status table: model, start, tokens, calls, last tool, stranded | a row whose token count is frozen for an hour is DEAD even if it says running: stop it, relaunch from its clone |
 | `cv lanes --stranded` | lanes that stopped saying they are waiting for a notification nothing will send | brief lanes to FOREGROUND-wait; resume a stranded lane with one message naming what finished |
 | `cv deferrals <session> --open-tasks` | every promise in the transcript, matched against the store | run it at every closeout; an UNMATCHED line is a task to open now |

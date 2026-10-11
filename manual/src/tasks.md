@@ -12,7 +12,7 @@ crash-safe flock. Every state you ever see is **replay-derived**: fold the
 events through a pure reducer and you get the truth; there is no second store to drift out of
 sync. The substrate is exposed three ways, all rendering the same shapes: the `cv task` CLI
 (this page), the [MCP `task_*` tools](mcp.md#the-task-substrate-over-mcp), and
-[`cvd serve`'s task routes](daemon.md#task-endpoints).
+[`cv serve`'s task routes](daemon.md#task-endpoints), whose inbox page (`/inbox`) is the human's door.
 
 ## The three laws
 

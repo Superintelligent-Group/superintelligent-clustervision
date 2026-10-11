@@ -102,7 +102,7 @@ export function truncate(s, max) {
   return s.slice(0, Math.max(0, max - 1)) + "…";
 }
 
-/** Message count that works for hydrated sessions and metadata-only stubs (cvd `/api/sessions`). */
+/** Message count that works for hydrated sessions and metadata-only stubs (`/api/sessions`). */
 export function msgCount(session) {
   return session.messages?.length || session.message_count || 0;
 }

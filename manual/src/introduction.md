@@ -22,6 +22,6 @@ It's open source (MIT/Apache-2.0) and runs **entirely locally** — nothing is u
 
 - New here? Start with **[Install & quick start](getting-started.md)**.
 - Living in the terminal? **[The CLI](cli.md)** is your map.
-- Running a fleet of agents? See **[`cvd`](daemon.md)**, **[MCP](mcp.md)**, and **[tasks](tasks.md)**.
+- Running a fleet of agents? See **[`cv serve` / `cv watch`](daemon.md)**, **[MCP](mcp.md)**, and **[tasks](tasks.md)**.
 - Want the pretty pictures? **[The app](app.md)**.
 - Curious how it all works? **[Architecture](architecture.md)**.

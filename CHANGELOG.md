@@ -16,8 +16,8 @@
 - `cv distill`'s pack shows a trailing call that never got its result (the lane stopped mid-call); the emitted session still drops it.
 - `cv distill` token estimates count bytes (not chars) at its 2.4/token, a call's `input` only and encrypted thinking: one estimator with `doctor`.
 - MCP: every `task_*` tool is generated from `cv task` (17, was 9 hand-written); results are the CLI's output. Only `await_omen`/`observe_stream` are hand-written.
+- Manual, README and web/app docs name `cv serve`, `cv watch`, `cv archive` and `cv mcp`; the daemon chapter documents the inbox routes.
 - Web UI reads and writes OpenSession 0.3 only; a dropped 0.2 document errors with the CLI's pointer instead of being half-read.
-- MCP: every `task_*` tool is generated from `cv task` (18, was 9 hand-written); results are the CLI's output. Only `await_omen`/`observe_stream` are hand-written.
 - `cv schema --commands --json`: an argument in a one-of group is no longer `required` (`task resolve --choice`).
 - **`cv-mcp` is `cv mcp`**: the roster comes from the in-process clap tree (no `$CV_BIN`, no stale `cv` on PATH); `cv-mcp` is a one-release shim. No tokio.
 - **`cvd` is `cv archive sync|ls|path`, `cv watch`, `cv serve`**; `cvd` is a one-release shim that execs `cv`. `$CVD_TOKEN` is `$CV_SERVE_TOKEN`.

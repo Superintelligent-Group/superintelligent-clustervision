@@ -2,7 +2,7 @@
 
 ### The app shows the sample data, not my real sessions
 
-The desktop app reads your local sessions via a bundled `cvd serve` and a native bridge. If you see
+The desktop app reads your local sessions through a native `api` command and runs a `cv serve` for the Fleet dashboard. If you see
 the bundled sample, the app couldn't reach them — make sure you're running the **desktop app** (not
 the plain browser build, which is zip-drop only), and that nothing else is occupying its port.
 
@@ -37,8 +37,8 @@ labeled by task prompt). There can be thousands, so they're never dumped into th
 
 ### The MCP server isn't responding
 
-`cv-mcp` speaks JSON-RPC over **stdio**, and **stdout is the protocol channel** — all diagnostics go
-to stderr. Register it with `claude mcp add clustervision -- /abs/path/to/cv-mcp`. See [MCP](mcp.md).
+`cv mcp` speaks JSON-RPC over **stdio**, and **stdout is the protocol channel** — all diagnostics go
+to stderr. Register it with `claude mcp add clustervision -- /abs/path/to/cv mcp`. See [MCP](mcp.md).
 
 ### Still stuck?
 

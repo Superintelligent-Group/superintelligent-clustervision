@@ -1,5 +1,5 @@
-//! One shape, one identity: the task-list row every task read surface (CLI, MCP tools, cvd HTTP
-//! routes) renders from (the inbox's row is [`super::inbox::InboxItem`]). Field names and declaration order here ARE the wire
+//! One shape, one identity: the task-list row every task read surface (CLI, MCP tools,
+//! `cv serve` HTTP routes) renders from (the inbox's row is [`super::inbox::InboxItem`]). Field names and declaration order here ARE the wire
 //! contract — the workspace builds serde_json with `preserve_order`, so struct field order is the
 //! emitted key order, and all three surfaces must stay byte-identical to what they shipped.
 //!

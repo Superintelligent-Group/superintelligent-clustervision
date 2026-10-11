@@ -271,7 +271,7 @@ class CvCompare extends HTMLElement {
 
   _errHtml(side, id) {
     return `<div class="cmp-error">
-      <b>⚠ Side ${esc(side)}: couldn't load transcript</b> (cvd unreachable?)
+      <b>⚠ Side ${esc(side)}: couldn't load transcript</b> (cv serve unreachable?)
       <div><code>${esc(id || "")}</code></div>
     </div>`;
   }

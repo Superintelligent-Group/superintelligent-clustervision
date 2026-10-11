@@ -1,5 +1,5 @@
 //! Corpus-wide statistics over a set of discovered sessions — what `cv stats` prints and what
-//! `cvd`'s `/api/stats` serves.
+//! `cv serve`'s `/api/stats` serves.
 //!
 //! The numbers come from the catalog row alone (harness, message count, cwd, dates), so a whole
 //! fleet costs one catalog read and no transcript parsing. Both doors call [`CorpusStats::compute`]

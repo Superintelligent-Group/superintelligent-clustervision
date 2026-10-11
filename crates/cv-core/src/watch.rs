@@ -1,4 +1,4 @@
-//! Live session following — the one loop behind `cv scry`, `cvd watch`, and the MCP `await_omen`
+//! Live session following — the one loop behind `cv scry`, `cv watch`, and the MCP `await_omen`
 //! and `observe_stream` tools (the last one across processes, through a [`Cursor`]).
 //!
 //! It polls discovery on an interval, diffs each session's message tail against what it saw last,
@@ -345,7 +345,7 @@ impl Watcher {
     pub fn poll_bounded(&mut self, max_messages: usize, mut take: impl FnMut(SessionEvent) -> usize) -> bool {
         let refs = self.discover();
         // Prune entries for sessions that vanished from discovery (deleted/pruned transcripts),
-        // so a long-lived watcher (cvd) doesn't grow `seen` without bound. The size check skips
+        // so a long-lived watcher (`cv watch`) doesn't grow `seen` without bound. The size check skips
         // building the key set on the common nothing-vanished poll.
         if self.seen.len() > refs.len() {
             let live: std::collections::HashSet<String> = refs.iter().map(Self::key).collect();

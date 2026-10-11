@@ -96,7 +96,7 @@ class CvTranscript extends HTMLElement {
     // messages exist) we render the first screenful synchronously, then append the rest in
     // rAF-scheduled chunks — instant open, no freeze, and scrolling works as chunks fill in.
     // `_pump` renders from `_cursor` up to `_limit` (a window over `s.messages`), so both paged
-    // loads (cvd's windowed endpoint via cv-app) and big in-memory sessions (dropped .zip/.json)
+    // loads (cv serve's windowed endpoint via cv-app) and big in-memory sessions (dropped .zip/.json)
     // go through the same "load more" footer instead of rendering 30k messages up front.
     this.innerHTML = `${this._headerHtml(s)}${this._filterHtml()}<div class="turns ${this._filterClasses()}"></div>`;
     this._wireHeader(s);
@@ -141,7 +141,7 @@ class CvTranscript extends HTMLElement {
   }
 
   // ---- paged loading ("load more") ----------------------------------------
-  // Two sources of "more messages": (a) the session came from cvd's windowed `/messages`
+  // Two sources of "more messages": (a) the session came from cv serve's windowed `/messages`
   // endpoint and `session._paged` marks that more exist server-side; (b) the session is fully
   // in memory (dropped .zip/.json) but longer than the rendered window `_limit`. Either way we
   // show a "load more" footer that also fires when it scrolls into view. For (a) the host
@@ -213,9 +213,9 @@ class CvTranscript extends HTMLElement {
   }
 
   // ---- events panel --------------------------------------------------------
-  // What the session DID: file edits/commands/errors from the event catalog (cvd's `/events`
+  // What the session DID: file edits/commands/errors from the event catalog (cv serve's `/events`
   // endpoint / the desktop's `local_events`). Collapsible, below the header, mirroring the
-  // sub-agents panel. Sessions without events (or an older cvd) simply get no panel.
+  // sub-agents panel. Sessions without events (or an older server) simply get no panel.
   async _mountEvents(session) {
     if (!session || session._isSubagent) return;
     const events = await getEvents(session);

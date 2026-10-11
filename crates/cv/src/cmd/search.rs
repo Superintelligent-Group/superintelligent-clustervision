@@ -145,7 +145,7 @@ fn render_search_hits(
 }
 
 /// One `--json` object for an index/semantic hit — [`cv_core::rows::SearchRow`] does the shaping,
-/// so `cv search --json` and `cvd`'s `/api/search` emit the identical row for the identical hit.
+/// so `cv search --json` and `cv serve`'s `/api/search` emit the identical row for the identical hit.
 fn hit_json(h: &cv_search::Hit) -> serde_json::Value {
     cv_core::rows::SearchRow {
         id: &h.id,
@@ -179,7 +179,7 @@ fn index_days_behind() -> Option<u64> {
 
 fn cmd_search_live(query: &str, want: Option<Harness>, limit: usize, json: bool) -> Result<()> {
     // The scan itself is [`cv_core::scan::live_search`] (head-capped per session, so peak memory is
-    // O(cap) not O(session)) — the same call `cvd`'s `/api/search` degrades to when the index is
+    // O(cap) not O(session)) — the same call `cv serve`'s `/api/search` degrades to when the index is
     // missing, so the no-index answer is identical through both doors.
     let found = cv_core::scan::live_search(query, want, limit)?;
     if json {

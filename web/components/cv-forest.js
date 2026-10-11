@@ -9,7 +9,7 @@
 // API:  forest.sessions = Session[]     (the pool; the view lets you pick one root session)
 //       forest.session  = Session       (optional: pin a specific root)
 //
-// Data sources (all via hydrate.js → cvd / native):
+// Data sources (all via hydrate.js → cv serve / native api):
 //   getSubagentTree(session)   → the forest (direct + workflow agents, enrichment preserved)
 //   getMessages(session,…)     → the root transcript (for tool + compaction analysis)
 //   getSubagent(…)             → one agent's full transcript (drill-down)
@@ -322,7 +322,7 @@ class CvForest extends HTMLElement {
         _windowTotal: win.total_known ? win.total : null,
         _windowHasMore: !!win.has_more };
     } else {
-      // Fall back to a full hydrate (older cvd) — still bounded by the parse.
+      // Fall back to a full hydrate (older server) — still bounded by the parse.
       try {
         const full = isStub(stub) ? await hydrateSession(stub) : stub;
         if (this._loadedFor === stub.id) this._root = full;
@@ -602,7 +602,7 @@ class CvForest extends HTMLElement {
   // ── Forest (tree) ──────────────────────────────────────────────────────────
   _forestHtml({ stub, direct, groups }) {
     if (!this._tree?.length) {
-      return `<div class="fr-empty">This session spawned no sub-agents.${this._root ? "" : " (Forest data needs a running <code>cvd serve</code>.)"}</div>`;
+      return `<div class="fr-empty">This session spawned no sub-agents.${this._root ? "" : " (Forest data needs a running <code>cv serve</code>.)"}</div>`;
     }
     const rootRow = `
       <div class="node-row is-root">
@@ -831,7 +831,7 @@ class CvForest extends HTMLElement {
     const bodyEl = overlay.querySelector(".scr-body");
     if (!bodyEl) return;
     if (!data) {
-      bodyEl.innerHTML = `<div class="fr-empty" style="padding:20px">No driving script recorded for this run${this._root ? "" : ", or it needs a running <code>cvd serve</code>"}.</div>`;
+      bodyEl.innerHTML = `<div class="fr-empty" style="padding:20px">No driving script recorded for this run${this._root ? "" : ", or it needs a running <code>cv serve</code>"}.</div>`;
     } else {
       const head = overlay.querySelector(".scr-name");
       if (head && data.name) head.textContent = data.name;
@@ -842,7 +842,7 @@ class CvForest extends HTMLElement {
   // ── Tools ───────────────────────────────────────────────────────────────────
   _toolsHtml({ tools, toolTotal }) {
     if (!this._root) {
-      return `<div class="fr-empty">Tool analysis needs the session transcript (a running <code>cvd serve</code> or the desktop app).</div>`;
+      return `<div class="fr-empty">Tool analysis needs the session transcript (a running <code>cv serve</code> or the desktop app).</div>`;
     }
     if (!tools.length) return `<div class="fr-empty">No tool calls in the sampled transcript.</div>`;
     const max = tools[0][1];
@@ -919,7 +919,7 @@ class CvForest extends HTMLElement {
   _compactionHtml({ compactions }) {
     if (!compactions.length) {
       if (!this._root && this._compactions == null) {
-        return `<div class="fr-empty">Compaction data needs a running <code>cvd serve</code> or the desktop app.</div>`;
+        return `<div class="fr-empty">Compaction data needs a running <code>cv serve</code> or the desktop app.</div>`;
       }
       return `<div class="fr-empty">No compaction boundaries in this session — the context was never compacted.</div>`;
     }

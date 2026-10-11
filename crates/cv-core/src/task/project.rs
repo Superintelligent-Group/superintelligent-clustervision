@@ -95,7 +95,7 @@ pub fn in_scope(t: &TaskProjection, since: Option<DateTime<Utc>>, endpoint: Opti
 }
 
 /// Is `endpoint` a party to this task: its opener, assignee, a note's author, or the decision's
-/// poser/resolver? `web:<name>` is `<name>` acting through `cv task serve`, so it matches
+/// poser/resolver? `web:<name>` is `<name>` acting through `cv serve`'s inbox, so it matches
 /// `<name>` too.
 pub fn involves(t: &TaskProjection, endpoint: &str) -> bool {
     let is = |by: &str| same_actor(by, endpoint);

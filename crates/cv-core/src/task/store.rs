@@ -111,7 +111,7 @@ impl TaskStore {
     ///
     /// Events the reducer refuses are **quarantined**: skipped with a loud warning (line number +
     /// reason) and counted, so one poisoned interior line degrades the model instead of bricking
-    /// the CLI, cvd, and every append at once.
+    /// the CLI, `cv serve`, and every append at once.
     pub fn replay(&self) -> Result<ReplayOutcome> {
         let (raw, mut warnings) = self.read_events()?;
         let path = self.events_path();

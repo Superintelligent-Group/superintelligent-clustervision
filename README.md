@@ -105,15 +105,15 @@ cv scry
   - a **Structure** explorer (`<cv-forest>`) — Overview / Forest / Workflows / Tools / Compaction tabs that turn a run's anatomy into something you can drill through.
 
   The browser build is zero-install — drop a harness zip, nothing uploaded (all WASM).
-- **🔌 Hooks** — two Claude Code hooks make a harness use clustervision while it runs: SessionEnd → `cvd sync` archives everything, SessionStart → `cv ls --cwd` surfaces this project's prior sessions. Recipe in the manual's [Hooking a harness in](manual/src/integrations.md).
+- **🔌 Hooks** — two Claude Code hooks make a harness use clustervision while it runs: SessionEnd → `cv archive sync` archives everything, SessionStart → `cv ls --cwd` surfaces this project's prior sessions. Recipe in the manual's [Hooking a harness in](manual/src/integrations.md).
 
 ## 📖 Manual
 
-Full docs — every CLI command, the MCP tools, the daemon's HTTP API, the app, cross-harness conversion, and the harness table — live in the **[user manual](https://emberian.github.io/clustervision/manual/)** (mdBook, also under `manual/`).
+Full docs — every CLI command, the MCP tools, the HTTP API, the app, cross-harness conversion, and the harness table — live in the **[user manual](https://emberian.github.io/clustervision/manual/)** (mdBook, also under `manual/`).
 
 ## 🛠️ Install
 
-**Prebuilt binaries** for macOS / Linux / Windows (arm64 · x64 · x86) ship on every release — grab the latest from **[Releases](https://github.com/emberian/cv/releases/latest)** (`cv` · `cv-mcp` · `cvd`), or one-line it:
+**Prebuilt binaries** for macOS / Linux / Windows (arm64 · x64 · x86) ship on every release — grab the latest from **[Releases](https://github.com/emberian/cv/releases/latest)** (`cv`, plus the one-release `cv-mcp`/`cvd` shims), or one-line it:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/emberian/cv/releases/latest/download/cv-installer.sh | sh
@@ -122,7 +122,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/emberian/cv/releases/la
 Or from source:
 
 ```sh
-cargo build --release          # → target/release/{cv, cv-mcp, cvd}
+cargo build --release          # → target/release/cv
 make install                   # = cargo install --path crates/cv --force --target-dir target  → ~/.cargo/bin/cv
 cv --version                   # cv 0.14.0 (<git sha>) — compare against `git rev-parse --short=12 HEAD`
 ```
@@ -134,7 +134,7 @@ workspace's `target/release` instead of rebuilding from scratch in a temp dir.
 ## 🧠 Let agents read each other's minds (MCP)
 
 ```sh
-claude mcp add clustervision -- /path/to/target/release/cv-mcp
+claude mcp add clustervision -- /path/to/target/release/cv mcp
 ```
 
 The MCP tools are **generated from the CLI** — same names, same flags, same JSON — so they can't drift from what `cv` actually does. Plus the live-coordination primitives that only make sense over MCP: `await_omen` (block until a sibling agent's message matches a regex), `observe_stream` (its non-blocking sibling — poll a junior agent's live message tail on your own cadence), and the task tools. The current roster is in the manual's **[MCP chapter](https://emberian.github.io/clustervision/manual/mcp.html)**, or run `cv schema --commands` to see the tree they're generated from.
@@ -144,7 +144,7 @@ The MCP tools are **generated from the CLI** — same names, same flags, same JS
 **If you are the human the fleet is waiting on**, these are the commands you run:
 
 ```sh
-cv task serve --open                                   # a web inbox served by cv itself: decisions as buttons, notes, Done
+cv serve --open                                        # a web inbox served by cv itself: decisions as buttons, notes, Done
 cv task inbox ember                                    # what needs you: decisions first (default + options), then actions
 cv task show <id> --brief                              # one task, one line per note
 cv task resolve <id> --accept-default --from ember     # answer a decision (or --choice "<option>"; --note - reads stdin)
@@ -177,17 +177,18 @@ cv task done <id> --observed "tests green in <sid>"    # self-reported, labeled 
 cv task sweep --repo ~/proj                            # what git says is probably done; closes nothing
 ```
 
-Same substrate over MCP (`task_open` … `task_inbox`), cvd HTTP (`/api/tasks`,
-`/api/tasks/inbox/{who}`) and `cv task serve` (`/api/inbox`, `/api/task/<id>/{resolve,done,note,
-discuss,claim,release,reopen}`, `/api/events` — the same query as `cv task events`). State lives in
+Same substrate over MCP (`task_open` … `task_inbox`, generated from `cv task`) and `cv serve`
+(`/api/tasks`, `/api/tasks/inbox/{who}`, and the inbox page's `/api/inbox`, `/api/task/<id>/{resolve,
+done,note,discuss,claim,release,reopen}`, `/api/events` — the same query as `cv task events`). State lives in
 a replayed event log (`~/.clustervision/tasks/events.jsonl`) that refuses events its own reducer
 would reject; every append is one event, never an edit.
 
-## 📡 Archive your whole fleet (`cvd`)
+## 📡 Archive your whole fleet (`cv watch`)
 
 ```sh
-cvd sync     # snapshot every session into ~/.clustervision
-cvd watch    # follow live + archive as sessions change → a fleet activity feed
+cv archive sync   # snapshot every session into ~/.clustervision
+cv watch          # follow live + archive as sessions change → a fleet activity feed
+cv serve --web web  # the dashboard, the task inbox and the read API on :7777
 ```
 
 ## 🧬 The OpenSession standard
@@ -196,7 +197,7 @@ After staring into seven different transcript formats, we wrote down the one the
 
 ## 🏗️ Under the hood
 
-One IR (`Session → Message → Block{Text|Thinking|ToolUse|ToolResult|File|Image}`), one `Adapter` per harness (`discover` + `parse` + `emit`), plus `loom` / `redact` / `prune` / `watch` / `ingest` modules — and small crates on top: **`cv`** (CLI) · **`cv-mcp`** (MCP) · **`cvd`** (daemon + `serve`) · **`cv-search`** (tantivy + `model2vec`) · **`cv-llm`** (LLM digests for `pack`, `--generate` for the loom) · **`cv-web`** (WASM) · **`app/`** (Tauri desktop).
+One IR (`Session → Message → Block{Text|Thinking|ToolUse|ToolResult|File|Image}`), one `Adapter` per harness (`discover` + `parse` + `emit`), plus `loom` / `redact` / `prune` / `watch` / `ingest` modules — and small crates on top: **`cv`** (the one binary: the CLI, `cv mcp`, `cv serve`, `cv watch`, and the LLM digests for `pack` and `splice --generate`) · **`cv-search`** (tantivy + `model2vec`) · **`cv-web`** (WASM) · **`app/`** (Tauri desktop).
 
 ```
 parse(any harness) → 🔮 unified IR → search · port · prune · loom · pack · archive · view

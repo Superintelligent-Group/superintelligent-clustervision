@@ -55,7 +55,7 @@ class CvStats extends HTMLElement {
 
   /** Ask the daemon for the numbers no browser-side tally can reach — chiefly the real message
    *  total, which is 3.9 million here and would need every transcript downloaded to compute.
-   *  Once; a null answer (static demo, older cvd) just leaves the pool's own figures in place.
+   *  Once; a null answer (static demo, older server) just leaves the pool's own figures in place.
    *
    *  `/api/stats` also takes `q=`, the session-filter expression of `cv stats --query`. That is a
    *  different language from the search box's free text, so nothing forwards one as the other. */

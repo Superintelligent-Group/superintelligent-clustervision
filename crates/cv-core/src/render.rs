@@ -1,4 +1,4 @@
-//! Rendering an IR [`Session`] to human/LLM-friendly text. Shared by the `cv` CLI and `cv-mcp`.
+//! Rendering an IR [`Session`] to human/LLM-friendly text. Shared by the `cv` CLI and `cv mcp`.
 
 use crate::ir::*;
 use chrono::{DateTime, Utc};

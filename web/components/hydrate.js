@@ -201,7 +201,7 @@ export async function getSubagent(parentHarness, parentId, agentId) {
 // Corpus-wide reads. These two ask the daemon a question the browser cannot answer for itself:
 // the pool the UI holds is session *stubs*, so it can match a title but never a message body,
 // and it can count sessions but never messages it has not downloaded. Both return `null` when
-// the endpoint isn't there (the static demo, an older cvd) — every caller keeps a local answer
+// the endpoint isn't there (the static demo, an older server) — every caller keeps a local answer
 // for that case and says which one it is showing.
 // ---------------------------------------------------------------------------
 
@@ -209,7 +209,7 @@ export async function getSubagent(parentHarness, parentId, agentId) {
  *  every session's content, returning the rows `cv search --json` emits: the §3 session row plus
  *  `score`, `snippet`, and the sub-agent provenance `agent_id` / `parent_id` / `workflow`.
  *
- *  `null` means "this deployment cannot search" (404 / unreachable / no cvd), which is a
+ *  `null` means "this deployment cannot search" (404 / unreachable / no server), which is a
  *  different answer from `[]` ("searched, found nothing") — the caller falls back to filtering
  *  the loaded stubs and says so in the placeholder. */
 export async function searchSessions(q, opts = {}) {

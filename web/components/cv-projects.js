@@ -100,8 +100,8 @@ class CvProjects extends HTMLElement {
   }
 
   // ---- "touched" lookup ----------------------------------------------------
-  // Who touched a file, across the whole corpus — cvd's `/api/touched` (or the desktop's
-  // `local_touched`). Degrades to an explanatory note when no capable cvd is reachable.
+  // Who touched a file, across the whole corpus — the server's `/api/touched` (or the desktop's
+  // `api` command). Degrades to an explanatory note when no capable server is reachable.
   _wireTouched() {
     const input = this.querySelector(".touched-input");
     const go = () => {
@@ -129,7 +129,7 @@ class CvProjects extends HTMLElement {
     const rows = await getTouched(path, this._touchedEdits);
     if (out !== this.querySelector(".touched-results")) return; // re-rendered meanwhile
     if (rows === null) {
-      out.innerHTML = `<div class="muted">Touched lookup needs a local <code>cvd serve</code> (0.9.12+) — none was reachable.</div>`;
+      out.innerHTML = `<div class="muted">Touched lookup needs a local <code>cv serve</code> — none was reachable.</div>`;
       return;
     }
     if (!rows.length) {

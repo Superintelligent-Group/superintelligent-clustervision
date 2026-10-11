@@ -6,7 +6,7 @@
 //! that: a hit returns the stored [`SessionRef`]s without touching the file, so steady-state
 //! discovery costs one `stat` per file instead of a full read+parse.
 //!
-//! It's process-global and shared by `cv`, `cvd`, and the desktop app via the `scan_cache` table in
+//! It's process-global and shared by `cv` and the desktop app via the `scan_cache` table in
 //! the shared catalog db (see [`crate::catalog`], which owns the DDL; the rows also feed the
 //! freshness probe's append detection). Earlier releases kept a whole-loaded `discover.json`
 //! instead — a second, redundant representation of the same facts that every command paid to parse;

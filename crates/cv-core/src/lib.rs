@@ -397,7 +397,7 @@ pub fn find_cheap(id: &str, harness: Option<Harness>) -> Result<Option<(SessionR
 /// The sub-agent fallback behind [`find`]/[`find_cheap`]: an `agent-…` id no pool/catalog session
 /// carries is resolved as a workflow/`Task` sub-agent transcript (those live in `subagents/`
 /// sidecars, never the main pool), so every front-end that resolves session ids — MCP
-/// `read_session`, cvd routes, exports — can drill into an agent id directly.
+/// `read_session`, `cv serve` routes, exports — can drill into an agent id directly.
 ///
 /// Cost discipline: gated on the literal `agent-` prefix (and a non-Claude harness constraint),
 /// so a normal session-id miss pays **zero** extra work; only agent-shaped ids pay the same

@@ -7,7 +7,7 @@
 //!
 //! The digest is extractive by design: titles, dates, cwds, excerpts, and event-catalog facts are
 //! all things the corpus already states, so the bundle never hallucinates. Set `CV_PACK_LLM=1`
-//! (or `CV_PACK_LLM=<model-id>`) to additionally route each span through `cv-llm` for an
+//! (or `CV_PACK_LLM=<model-id>`) to additionally route each span through `llm::digest` for an
 //! abstractive digest; without it, `cv pack` does zero network and loads zero models.
 //!
 //! Streaming discipline: recall works off the index (or a head-capped live scan), excerpts are
@@ -316,7 +316,7 @@ struct PackSource {
     reads: BTreeMap<String, i64>,
     /// Distinct commands run, in first-seen order (capped).
     commands: Vec<String>,
-    /// Abstractive digest when `CV_PACK_LLM` routed this span through cv-llm.
+    /// Abstractive digest when `CV_PACK_LLM` routed this span through `llm::digest`.
     llm_digest: Option<String>,
 }
 

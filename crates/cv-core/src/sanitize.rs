@@ -6,7 +6,7 @@
 //! corrupt every terminal that ever runs `cv task list`, eternally.
 //!
 //! Scope decision: this is applied at **terminal render sites only** (CLI print paths, cockpit
-//! rows). cvd serves JSON, where escaping is the transport's job — serde_json escapes control
+//! rows). cv serves JSON, where escaping is the transport's job — serde_json escapes control
 //! characters into harmless `\uXXXX` — so JSON responses stay raw and lossless for foreign
 //! clients to sanitize at *their* render sites.
 

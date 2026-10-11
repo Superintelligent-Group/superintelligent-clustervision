@@ -47,7 +47,7 @@
     <p>Runs the components in <code>web/components</code> against <code>web/sample.js</code> and checks
        the invariants an IR change breaks first. Run it after touching the IR. It needs a static
        server, because browsers refuse ES modules over <code>file://</code> —
-       <code>cvd serve --web ./web</code> then <code>/selftest.html</code>, or
+       <code>cv serve --web ./web</code> then <code>/selftest.html</code>, or
        <code>python3 -m http.server</code> in <code>web/</code>.</p>
     <span class="st-score" id="score">running…</span>
   </header>
@@ -491,7 +491,7 @@ function makeList(rows) {
   el.sessions = rows;
   return el;
 }
-/** N metadata-only stubs, shaped exactly like cvd's `/api/sessions` rows. */
+/** N metadata-only stubs, shaped exactly like cv serve's `/api/sessions` rows. */
 function stubs(n) {
   return normalizeSessions(Array.from({ length: n }, (_, i) => ({
     id: `s-${String(i).padStart(4, "0")}`,
@@ -732,7 +732,7 @@ check("the folded dropzone is one line high", () => {
   dz.style.cssText = "position:fixed;left:-10000px;top:0;width:900px";
   dz.innerHTML = `<div class="dz-inner"><span class="dz-glyph">x</span>
     <div class="dz-text"><strong>Drop files</strong><span class="muted">a long paragraph of invitation</span></div></div>
-    <div class="dz-sources"><span class="src-chip">local (cvd) <b>6873</b></span></div>
+    <div class="dz-sources"><span class="src-chip">local (cv serve) <b>6873</b></span></div>
     <div class="dz-status muted">ready</div><button class="dz-expand">+ add</button>`;
   document.body.appendChild(dz);
   const h = dz.getBoundingClientRect().height;

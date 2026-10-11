@@ -31,7 +31,7 @@ uuid.workspace = true
 # `llm.rs`: two blocking POSTs (OpenRouter / Anthropic / a local OpenAI-compatible server). `ureq`
 # is already in the tree through cv-search's embedding stack, so this adds no HTTP stack of its own.
 ureq = { version = "2", features = ["json"] }
-# `cv task serve`: the same tiny synchronous HTTP server cvd uses (no async stack for a page one
-# person reads), plus the query-string decoder it pairs with.
+# `cv serve`: a tiny synchronous HTTP server (no async stack for pages a few pollers read), plus
+# the query-string encoder its banner uses.
 tiny_http = { version = "0.12", default-features = false }
 urlencoding = "2"

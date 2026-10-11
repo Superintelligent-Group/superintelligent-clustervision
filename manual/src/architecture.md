@@ -203,7 +203,7 @@ crate::discover_cache::cached_scan(&path, || match scan(&path) {
 Some careful properties make it safe to lean on:
 
 - **Correctness never depends on it.** An entry is reused *only* when `(mtime, size)` match exactly, so any real change misses and re-scans. A missing or corrupt cache just means everything is re-scanned (and the cache rebuilt).
-- **It's process-global and shared** by `cv`, `cvd`, and the desktop app via one JSON file.
+- **It's process-global and shared** by `cv` and the desktop app via one JSON file.
 - **Writes are atomic** (temp file + rename). `persist()` runs after a full `discover_all()`, flushes only if something changed, and drops entries whose files no longer exist so the cache can't grow without bound.
 - **Empty results aren't cached** — a non-transcript path is cheap to re-reject, and caching it would bloat the file.
 
@@ -226,33 +226,29 @@ Sub-agent sessions (currently Claude Code's `Task` sub-agents) are **not** in th
 clustervision is a Rust workspace. `cv-core` is the library every other crate is built on; the rest are thin front-ends over it.
 
 ```text
-                         ┌─────────────────────────────────────────────┐
-                         │                  cv-core                     │
-                         │  IR · Adapter registry · discover_all +      │
-                         │  cache · emit/convert · loom · tasks ·       │
-                         │  render/html · ingest · redact · watch       │
-                         └─────────────────────────────────────────────┘
-                            ▲    ▲    ▲    ▲    ▲    ▲     ▲     ▲
-            ┌───────────────┘    │    │    │    │    │     │     └──────────┐
-            │             ┌──────┘    │    │    │    │     └────┐           │
-         ┌──┴──┐      ┌───┴──┐   ┌────┴─┐ ┌┴───┐ ┌─┴──┐  ┌───┴───┐   ┌───┴───┐
-         │ cv  │      │cv-mcp│   │ cvd  │ │ cv │ │ cv │  │  cv   │   │  app/ │
-         │(CLI)│      │(MCP) │   │(daem │ │-sea│ │-llm│  │ -web  │   │(Tauri)│
-         │     │      │      │   │+serve│ │rch │ │    │  │(WASM) │   │       │
-         └─────┘      └──────┘   └──────┘ └────┘ └────┘  └───────┘   └───────┘
+                 ┌─────────────────────────────────────────────┐
+                 │                  cv-core                     │
+                 │  IR · Adapter registry · discover_all +      │
+                 │  cache · emit/convert · loom · tasks · the   │
+                 │  read API · render · ingest · redact · watch │
+                 └─────────────────────────────────────────────┘
+                     ▲              ▲              ▲          ▲
+          ┌──────────┴─────┐   ┌────┴─────┐  ┌─────┴────┐ ┌───┴────┐
+          │       cv       │   │cv-search │  │  cv-web  │ │  app/  │
+          │ CLI · mcp ·    │──▶│ (tantivy,│  │  (WASM)  │ │(Tauri) │
+          │ serve · watch  │   │ model2vec│  │          │ │        │
+          └────────────────┘   └──────────┘  └──────────┘ └────────┘
 ```
 
 | Crate | Responsibility |
 |-------|----------------|
-| **`cv`** | The CLI — read, search, reshape, and port sessions across harnesses. |
-| **`cv-mcp`** | An MCP server: lets a *running* agent search and read *other* agents' sessions (same project, across time, across harnesses). |
-| **`cvd`** | The daemon — watches every harness's storage root and archives sessions (incl. cloud-fleet logs) into a central store; also hosts the `serve` HTTP API. |
+| **`cv`** | The one binary: the CLI (read, search, reshape, port), `cv mcp` (the MCP server, its tools generated from the CLI's own clap tree), `cv serve` (the HTTP read API, the task inbox, the dashboard), `cv watch` / `cv archive` (the central archive), and the optional LLM digests and `--generate` continuations (`llm.rs`, via OpenRouter / Anthropic / a local LM Studio). |
 | **`cv-search`** | Pure-Rust search: full-text via [tantivy](https://github.com/quickwit-oss/tantivy) (BM25 + snippets) and semantic via embeddings (model2vec). |
-| **`cv-llm`** | LLM-backed features — the optional abstractive digests behind `cv pack` and the `--generate` continuations for `splice`, via OpenRouter / Anthropic / a local LM Studio. |
 | **`cv-web`** | WASM bindings — ingest an uploaded harness `.zip` entirely in-browser and hand back sessions as JSON. |
-| **`app/`** | The desktop app — a Tauri v2 shell around the web UI with native `cv-core`/`cv-llm` power. |
+| **`app/`** | The desktop app — a Tauri v2 shell around the web UI, reading through `cv_core::api` in-process. |
+| `cv-mcp`, `cvd` | One-release shims that print the new spelling and exec `cv mcp` / `cv archive`, `cv watch`, `cv serve`. |
 
-The shape to take away: **`cv-core` owns the IR, the adapters, and discovery; everything else is a lens onto it.** A bug fixed in an adapter improves the CLI, the daemon, the web UI, and the app at once — because they all see the same `Session`.
+The shape to take away: **`cv-core` owns the IR, the adapters, and discovery; everything else is a lens onto it.** A bug fixed in an adapter improves the CLI, the server, the web UI, and the app at once — because they all see the same `Session`.
 
 ## Where to go next
 
