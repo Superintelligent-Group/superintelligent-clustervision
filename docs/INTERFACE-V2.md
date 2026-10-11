@@ -374,4 +374,5 @@ The documents that argued their way to this contract live in git, not in `docs/`
 - `git show 5abb404:docs/REARCH.md` — streaming parse, lazy spans, the seek store (REARCH Phase 2), the withdrawn "IR diet".
 - `git show ffcbefb:docs/PORTABILITY-REVIEW.md` — the source-backed harness audit that became `port --strict` / `emit_verified`.
 - `git show c04695b:docs/DESIGN-GAP-AUDIT.md` — the task-substrate gap audit (G1–G11); what landed is in `manual/src/tasks.md`.
+- `git show ffc3ef0:docs/design/DISTILL.md` — the distill/fork measurements on three real lanes; the rules are in `manual/src/reshaping.md`.
 - The 0.11.0 work-package roster (WP 0–6, file ownership) is in this file's history: `git log -p -- docs/INTERFACE-V2.md`.

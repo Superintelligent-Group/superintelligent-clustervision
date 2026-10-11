@@ -19,7 +19,7 @@ cv recipes         # the agent quickstart: ten command lines and the JSON they r
 | `cv convert <id> --to <h>` | `cv port <id> --harness <h>` |
 | `cv port --to <h>` / `--to-dir <d>` | `cv port --harness <h>` / `--cwd <d>` |
 | `cv query` | [`cv schema`](#cv-schema) |
-| `cv recall`, `cv distill` | removed — [`cv search`](#cv-search) to find content, [`cv pack`](#cv-pack) to build context |
+| `cv recall` | removed — [`cv search`](#cv-search) to find content, [`cv pack`](#cv-pack) to build context. (`cv distill` went with it and came back in 0.14 with a new meaning: a deterministic lane reshaping, see [`cv distill`](#cv-distill).) |
 | `cv prune <id> --retrieve <tool_use_id>` | [`cv cat <session> <tool_use_id>`](#cv-cat) |
 | `cv prune --range A..B` | [`cv prune --keep A..B`](#cv-prune) |
 | `cv show --range <start>-<end>` / `--range -N` | the [window flags](#message-windows): `--range A..B`, `--first N`, `--last N` |
@@ -36,7 +36,7 @@ The principle behind all of it: **one name, one meaning, no grammar to memorize.
 | Group | What they have in common | Commands |
 | --- | --- | --- |
 | **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`timeline`](#cv-timeline) [`stats`](#cv-stats) [`diff`](#cv-diff) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
-| **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`splice`](#cv-splice) [`loom`](#cv-loom) [`port`](#cv-port) [`redact`](#cv-redact) [`resume`](#cv-resume) |
+| **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`fork`](#cv-fork) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`loom`](#cv-loom) [`port`](#cv-port) [`redact`](#cv-redact) [`resume`](#cv-resume) |
 | **[Export](#export)** | produce something that is *not* a session | [`export`](#cv-export) [`dataset`](#cv-dataset) [`pack`](#cv-pack) |
 | **[Fleet & live](#fleet--live)** | multi-agent coordination and live views | [`task`](#cv-task) [`board`](#cv-board) [`scry`](#cv-scry) [`share`](#cv-share) |
 | **[System](#system)** | cv's own state and reference | [`index`](#cv-index) [`config`](#cv-config) [`schema`](#cv-schema) [`formats`](#cv-formats) [`recipes`](#cv-recipes) |
@@ -135,7 +135,7 @@ Two relatives use the same `A..B` grammar without being read-windows: [`cv prune
 
 ## Read
 
-Fifteen commands that only ever read. None of them writes to a session store.
+The commands that only ever read. None of them writes to a session store.
 
 ### `cv ls`
 
@@ -585,7 +585,7 @@ The fixed overhead is *sized*, not itemized, and the report says so: the transcr
 
 ## Reshape
 
-Seven commands that produce a **new** session id from existing ones. The source session is never modified — not by `prune`, not by `port`, not by anything. (`resume` is the odd one out: it launches an existing session rather than making a new one, but it belongs with the "get me back into this" verbs.)
+The commands that produce a **new** session id from existing ones. The source session is never modified — not by `prune`, not by `port`, not by anything. (`resume` is the odd one out: it launches an existing session rather than making a new one, but it belongs with the "get me back into this" verbs.)
 
 ### `cv prune`
 
@@ -647,6 +647,51 @@ claude --resume <new-id> --fork-session -p "Another agent changed the code you j
 The derived session is the source's raw records `[start, cut]` with every `sessionId` rewritten and `parentUuid` chains untouched, so everything Claude-specific survives. Next to it goes `<new-id>.rewind.json`, the provenance: source id, path, bytes and sha256 (of the prefix read — a live transcript keeps growing), the cut and start (message index, byte offset, line), the commit evidence, how many lines of the source come after the cut, when, and which cv. The resume line `cd`s to the directory Claude files the session under (the launch dir), which is not always where the agent was working at the cut — cv prints both.
 
 Claude Code only (it copies raw records). The source is never modified.
+
+### `cv distill`
+
+Distill a long session — typically a sub-agent lane — into a compact context the same agent can resume: the brief and every message *to* the agent verbatim, its own words (text, messages sent, notes written) verbatim, an index of commits/branches/hosts/paths/verdicts/errors, a one-line-per-call ledger, and its last N tool calls as real turns. Deterministic, no model calls; elided outputs go to a sidecar [`cv cat`](#cv-cat) reads. The rules, and why they are what they are, are in [Reshaping a lane](reshaping.md).
+
+```sh
+cv distill agent-a5e2da77f3df2384b                      # the markdown pack on stdout
+cv distill agent-a5e2da77 --pack lane.md                # …to a file
+cv distill agent-a5e2da77 --session --cwd ~/work/repo   # a resumable session: claude -p --resume <id>
+cv distill agent-a5e2da77 --agent-of c1e4d723           # a new sub-agent of that root; SendMessage to the printed id
+cv distill agent-a5e2da77 --upto 400 --with agent-a04ff45c --json
+```
+
+- `<id>` — a session id, an agent id (`agent-…`), `harness:id`, or a path to a transcript file; `--harness` disambiguates.
+- `--keep-last N` (12) — tool calls kept verbatim at the tail; `--tail-result-max` (6000) and `--note-max` (6000) cap one result / one note in bytes; `--keep-tail-thinking` keeps the tail's thinking blocks; `--no-ledger` omits the ledger.
+- `--upto N` — distill the session as it stood at message N (exclusive): a distilled fork. `--with <session>` (repeatable) — inject another session's findings into the pack.
+- Output: the pack on stdout, or `--pack FILE`; `--session` emits a resumable main-thread session (`--cwd` rehomes it, `--out` writes outside the Claude store); `--agent-of <root>` emits a new sub-agent of that root. `--json` reports stats and what was written.
+
+### `cv fork`
+
+The verbatim prefix `[0, N)` of a session as a new resumable session or a new sub-agent of a root, to branch a lane at a decision point and run variants. Calls whose results fall after the cut are dropped and the `parentUuid` chain is linearized (see [the dangling-parent trap](reshaping.md#the-dangling-parent-trap)).
+
+```sh
+cv fork agent-a5e2da77 --at 400 --session
+cv fork agent-a5e2da77 --at 400 --agent-of c1e4d723
+```
+
+- `--at N` — keep messages `[0, N)`. `--session` | `--agent-of <root>` as for `distill`; `--cwd`, `--out`, `--json`, `--harness` likewise.
+
+### `cv adopt`
+
+Rescue the sub-agents of a dead Claude Code session into a live one, so the live session can `SendMessage` them and they resume with their whole transcript. It copies `subagents/agent-<id>.jsonl` (with `sessionId` restamped on every line, nothing else changed) and its `.meta.json` into the live session's `subagents/`.
+
+```sh
+cv adopt a5d8 b81e                      # into the project's newest session other than the one holding them (printed first)
+cv adopt a5d8 --into 7b2e19a4 --from c1e4d723
+cv adopt --list c1e4d723                # a session's sub-agents: status, model, size, description, meta?
+cv adopt --orphans --recent 20          # unfinished agents of the project's recent dead sessions
+cv adopt a5d8 --dry-run --json
+```
+
+- `<agents>…` — agent ids (`a5d8…` or `agent-a5d8…`, unique prefix ok). `--into <session>` the adopter (default: the project's newest session other than the agent's own, printed before acting; with `--orphans`, the live session to exclude). `--from <session>` the dead holder (default: every session's `subagents/`, newest copy wins).
+- `--dry-run` prints what would be copied; `--force` replaces an agent file already present. `--list <session>` and `--orphans [--recent N]` (10) only list. `--json`.
+
+Claude Code only; the dead session's files are never modified.
 
 ### `cv splice`
 
@@ -797,7 +842,7 @@ cv dataset -q "harness:claude" --redact-only private_key     # strip PEM keys, k
 
 ### `cv pack`
 
-Compile a context bundle for a new task out of your whole corpus — the one "build context from the corpus" verb, and the command that absorbed the old `recall` and `distill`.
+Compile a context bundle for a new task out of your whole corpus — the one "build context from the corpus" verb, and the command that absorbed the old `recall`.
 
 ```sh
 cv pack "tantivy chunked indexing"                       # CLAUDE.md-style bundle → stdout

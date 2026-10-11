@@ -45,7 +45,7 @@ cv pack "migrate the daemon" --limit 3                  # draw from at most 3 pa
 Set `CV_PACK_LLM=1` (or `CV_PACK_LLM=<model-id>`) to additionally route each
 recalled span through the configured LLM provider (`OPENROUTER_API_KEY`,
 `ANTHROPIC_API_KEY`, or `LMSTUDIO_API_BASE=local` for free local inference —
-the plumbing that used to be `cv distill`, folded into `pack` in 0.11.0) for an abstractive per-span digest on top of
+the LLM digest folded into `pack` in 0.11.0) for an abstractive per-span digest on top of
 the extractive one. Unset, `cv pack` is fully offline.
 
 ## Flags

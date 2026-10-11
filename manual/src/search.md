@@ -150,7 +150,7 @@ cv pack "how did we handle retry backoff"        # a CLAUDE.md-style context bun
 cv pack "auth token refresh" --limit 3
 ```
 
-`pack` is where the old `cv recall` and `cv distill` went in 0.11.0: one verb for
+`pack` is where the old `cv recall` went in 0.11.0: one verb for
 "build context from the corpus." It degrades honestly too — no index means a live
 scan with a stderr note, and no embeddings means full-text-only ranking.
 
