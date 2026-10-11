@@ -27,6 +27,8 @@ for line in sys.stdin:
     elif meth == "tools/call":
         args = m.get("params", {}).get("arguments") or {}
         s = int(args.get("a", 0)) + int(args.get("b", 0))
-        reply(i, {"content": [{"type": "text", "text": str(s)}], "isError": False})
+        # structuredContent as an object: Gemini CLI's MCP client otherwise parses the text "5" as JSON
+        # and rejects the number ("expected record").
+        reply(i, {"content": [{"type": "text", "text": str(s)}], "structuredContent": {"sum": s}, "isError": False})
     else:
         reply(i, {})
