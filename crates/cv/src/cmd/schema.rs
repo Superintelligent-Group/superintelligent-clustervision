@@ -79,7 +79,7 @@ pub(crate) const ROLES: &[&str] = &["system", "user", "assistant", "tool"];
 pub(crate) fn data_schema_json() -> Value {
     json!({
         "session_row": {
-            "description": "one session in a list — identical across `ls --json`, `search --json`, `timeline --json`",
+            "description": "one session in a list — identical across `ls --json` and `search --json`",
             "keys": ["id", "harness", "path", "cwd", "title", "created_at", "updated_at", "message_count", "size_bytes"],
             "enrich_keys": ["display_title", "git"],
             "search_extra_keys": ["score", "snippet", "agent_id", "parent_id", "workflow"],

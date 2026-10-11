@@ -35,8 +35,8 @@ The principle behind all of it: **one name, one meaning, no grammar to memorize.
 
 | Group | What they have in common | Commands |
 | --- | --- | --- |
-| **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`timeline`](#cv-timeline) [`stats`](#cv-stats) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
-| **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`fork`](#cv-fork) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`loom`](#cv-loom) [`port`](#cv-port) [`redact`](#cv-redact) [`resume`](#cv-resume) |
+| **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`stats`](#cv-stats) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
+| **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`fork`](#cv-fork) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`loom`](#cv-loom) [`port`](#cv-port) [`resume`](#cv-resume) |
 | **[Export](#export)** | produce something that is *not* a session | [`export`](#cv-export) [`dataset`](#cv-dataset) [`pack`](#cv-pack) |
 | **[Fleet & live](#fleet--live)** | multi-agent coordination and live views | [`task`](#cv-task) [`board`](#cv-board) [`scry`](#cv-scry) [`share`](#cv-share) |
 | **[System](#system)** | cv's own state and reference | [`index`](#cv-index) [`config`](#cv-config) [`schema`](#cv-schema) [`formats`](#cv-formats) [`recipes`](#cv-recipes) |
@@ -57,11 +57,11 @@ An **ambiguous** prefix is never resolved by guessing: cv lists the candidates a
 
 | flag | meaning | on |
 | --- | --- | --- |
-| `--harness <h>` | filter to, or target, one harness — never spelled `--to` | `ls` `show` `cat` `search` `events` `tools` `tree` `workflow` `compaction` `timeline` `doctor` `prune` `rewind` `splice` `loom` `port` `redact` `resume` `export` `dataset` `pack` `scry` `share` |
-| `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping | `ls` `timeline` `splice` `loom` `port` `scry` |
+| `--harness <h>` | filter to, or target, one harness — never spelled `--to` | `ls` `show` `cat` `search` `events` `tools` `tree` `workflow` `compaction` `doctor` `prune` `rewind` `splice` `loom` `port` `resume` `export` `dataset` `pack` `scry` `share` |
+| `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping | `ls` `splice` `loom` `port` `scry` |
 | `--out <dir\|file>` | write somewhere other than the real store | `rewind` `splice` `loom` `port` `dataset` `pack` `share` |
-| `--json` | machine output | `ls` `show` `search` `events` `touched` `tools` `workflow` `compaction` `timeline` `stats` `doctor` `prune` `rewind` `schema` `task list/show/inbox/debt/stats` `board read/unanswered` |
-| `--limit <n>` | how many rows/records | `ls` `search` `timeline` `dataset` `pack` `board read` |
+| `--json` | machine output | `ls` `show` `search` `events` `touched` `tools` `workflow` `compaction` `stats` `doctor` `prune` `rewind` `schema` `task list/show/inbox/debt/stats` `board read/unanswered` |
+| `--limit <n>` | how many rows/records | `ls` `search` `dataset` `pack` `board read` |
 | `--fresh` | bypass the catalog and re-discover | `ls` |
 | `--all` | include what is hidden by default | `task list` `task verify` |
 | `--thinking <mode>` | what an emit does with the model's reasoning: `native` (default), `text`, `drop` | `port` `splice` `loom` `pack` |
@@ -86,7 +86,7 @@ Note that `cv prune --drop-thinking` is a different thing: it flattens old reaso
 session you intend to resume. It was spelled `--thinking` before 0.11.0, and was renamed precisely
 so that one word does not mean two things.
 
-**JSON is snake_case, everywhere.** Every `--json` output and every MCP payload uses snake_case keys, and timestamps are RFC 3339 strings. There is **one** session-row shape, and `ls`, `search`, `timeline` and the MCP tools all emit it:
+**JSON is snake_case, everywhere.** Every `--json` output and every MCP payload uses snake_case keys, and timestamps are RFC 3339 strings. There is **one** session-row shape, and `ls`, `search` and the MCP tools all emit it:
 
 ```json
 { "id": "…", "harness": "claude", "path": "…", "cwd": "…", "title": "…",
@@ -96,7 +96,7 @@ so that one word does not mean two things.
 
 `ls --enrich` adds `display_title` and `git`; `search --json` adds `score`, `snippet` and the sub-agent provenance trio `agent_id`/`parent_id`/`workflow`. A **message** is the IR `Message` (`role`, `kind`, `origin`, `content`, `usage`, …) and a **block** is the IR `Block`, tagged by `type` — see [the IR vocabulary](architecture.md#the-unified-ir), which is the one place the words are defined. [`cv schema --json`](#cv-schema) publishes all of it machine-readably.
 
-**`-q`, the query calculus.** [`ls`](#cv-ls), [`timeline`](#cv-timeline), [`stats`](#cv-stats) and [`dataset`](#cv-dataset) take a `-q`/`--query` selector — one small boolean language for picking sessions: `harness:claude (model:fable OR model:opus) msgs>=50 -title:test`. The full reference lives under [`cv schema`](#cv-schema).
+**`-q`, the query calculus.** [`ls`](#cv-ls), [`stats`](#cv-stats) and [`dataset`](#cv-dataset) take a `-q`/`--query` selector — one small boolean language for picking sessions: `harness:claude (model:fable OR model:opus) msgs>=50 -title:test`. The full reference lives under [`cv schema`](#cv-schema).
 
 ## Message windows
 
@@ -147,6 +147,7 @@ cv ls --harness claude        # only Claude Code sessions
 cv ls --cwd flux              # only sessions whose cwd contains "flux"
 cv ls --limit 100
 cv ls --sort-by messages      # updated (default) | created | messages
+cv ls --asc --limit 80        # the newest 80, printed oldest-first: the corpus as a feed
 cv ls -q "harness:claude msgs>=50"
 cv ls --json                  # the same rows as one JSON array
 cv ls --json --enrich         # + display_title and git per row
@@ -164,6 +165,7 @@ grok      7c0b1a3e  26-05-26 14:02 → 14:09            19 msg  ~/scratch/throwa
 
 Each row shows the session's `created → last-active` span in **local time** (same-day sessions compress the right side to a bare time). The span is what separates a long-lived orchestrator from a one-shot — and, after a crash, the resumed sessions from the dropped ones. When a session has no title, `cv` falls back to a dimmed cwd so the row still tells you *where* it happened.
 
+- `--asc` — print the shown rows oldest → newest. It flips the order of the window, never its membership: `--limit N --asc` is still the newest N sessions, read like a chat log ("what was I doing last Tuesday, across all my tools"). This replaces `cv timeline`.
 - `--json` — the rows as one JSON array on stdout and nothing else, so it pipes cleanly. Keys are the shared [session row](#things-that-work-everywhere): `id`, `harness`, `path`, `cwd`, `title`, `created_at`, `updated_at`, `message_count`, `size_bytes`. Transcript-derived text (`title`) is emitted **raw** — the machine contract, not the sanitized terminal view.
 - `--enrich` (with `--json`) — add two transcript-derived fields to each row:
   - `git` — the same object `cv show --json` emits (`branch`/`commit`/`remote`, each omitted when absent), read from the transcript's recorded git context. This is the branch the session *ran on*, a historical fact stored in the transcript — **not** the cwd's current branch.
@@ -440,28 +442,6 @@ cv deferrals 0c315aee --open-tasks --json  # [{index, timestamp, phrase, context
 ```
 
 `--open-tasks` scores each deferral's sentence against every task's title, body and issue (terminal tasks included — a deferral may already be done): three or more shared significant words is a MATCH, the task with the most wins, ties to the newer task. It is a heuristic and says so (`shared:` lists the words), so a closeout reads the matches rather than trusting them. The non-zero exit is the point: `cv deferrals <id> --open-tasks || echo "open the rest first"`.
-
-### `cv timeline`
-
-The same corpus, but read as a *feed*: oldest → newest, grouped by day. Good for "what was I doing last Tuesday, across all my tools."
-
-```sh
-cv timeline
-cv timeline --harness codex --cwd clustervision --limit 80
-cv timeline -q "msgs>=50" --json
-```
-
-```text
-── 2026-05-27 ──
-  09:14  codex     019e75e0  ~/pug/clustervision       porting the parser to nom
-  16:40  claude    4f2a0c11  ~/pug/clustervision       wiring up the MCP server
-── 2026-05-28 ──
-  11:02  claude    da9174f4  ~/pug/clustervision       the flux inference refactor
-
-2245 session(s)
-```
-
-It shows the most-recent `--limit` rows (default `60`) but prints them oldest-first, like a chat log. Each row sits at the session's **last activity** (local time); a session that started on an earlier day carries a `⇠ since 05-25` marker so a long-lived orchestrator isn't mistaken for one that just began. `--json` emits the same feed as [session rows](#things-that-work-everywhere), oldest first.
 
 ### `cv stats`
 
@@ -1007,7 +987,7 @@ This command used to be called `cv query`, which read like it ran one. It doesn'
 
 #### The query calculus
 
-`ls`, `timeline`, `stats` and `dataset` take `-q`. The language is a boolean conjunction of terms — implicit `AND`, plus `OR`/`|`, `NOT`/`-`, and `( )` grouping:
+`ls`, `stats` and `dataset` take `-q`. The language is a boolean conjunction of terms — implicit `AND`, plus `OR`/`|`, `NOT`/`-`, and `( )` grouping:
 
 ```sh
 cv ls -q "harness:claude model:fable"                 # fable sessions from Claude

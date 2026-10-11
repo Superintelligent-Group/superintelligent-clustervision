@@ -106,7 +106,7 @@ pub fn discover_all() -> Vec<SessionRef> {
 
 /// Every known session, served from the catalog when it's provably fresh — the **fast read path**
 /// (~ms against a warm catalog, vs ~seconds for [`discover_all`]'s stat-the-fleet scan). This is
-/// what `cv ls`/`timeline`/`stats` read; other consumers (cvd, mcp, tui, indexers) should adopt it
+/// what `cv ls`/`stats` read; other consumers (cvd, mcp, tui, indexers) should adopt it
 /// as they shed their need for a guaranteed full scan.
 ///
 /// Freshness model, in order:

@@ -198,7 +198,7 @@ pub fn matches_full(query: &SessionQuery, r: &SessionRef, session: &Session, tex
 
 /// Apply a parsed query to a ref list in place: prune with the catalog-cheap prefilter, then — if
 /// the query has any parse/index/events/forest term — parse each survivor and keep only full
-/// matches. `cv ls`/`timeline`/`stats` and `cvd`'s `/api/stats?q=` all go through here, so `-q`
+/// matches. `cv ls`/`stats` and `cvd`'s `/api/stats?q=` all go through here, so `-q`
 /// means the same thing on every door.
 pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) {
     refs.retain(|r| query.prefilter(r));

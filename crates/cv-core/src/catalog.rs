@@ -7,7 +7,7 @@
 //! here, and `find` consults it first (O(1)/O(log n)), falling back to a full scan only on a miss
 //! (which then re-warms the catalog).
 //!
-//! The same rows now also serve [`crate::sessions`], which answers `cv ls`/`timeline`/`stats`
+//! The same rows now also serve [`crate::sessions`], which answers `cv ls`/`stats`
 //! without touching the fleet at all. Correctness rests on the **freshness probe**
 //! ([`probe_stale`]): every full discovery records, per harness, the directories that directly
 //! contain session files (plus all ancestors up to the harness root) and — for the SQLite-backed

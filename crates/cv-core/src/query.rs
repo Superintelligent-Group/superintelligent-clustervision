@@ -1,5 +1,5 @@
 //! A **query calculus** for selecting sessions across the corpus — one boolean DSL that every
-//! corpus-spanning command (`ls`, `dataset`, `timeline`, `stats`, …) accepts via `-q`, instead of
+//! corpus-spanning command (`ls`, `dataset`, `stats`, …) accepts via `-q`, instead of
 //! each growing its own ad-hoc flags.
 //!
 //! The whole language is driven by one table — [`FIELDS`] — which is the single source of truth for
@@ -1016,7 +1016,7 @@ fn split_op(w: &str) -> Result<Option<(&str, Op, &str)>, String> {
 /// parse-error help so an agent crawling the CLI discovers the whole calculus from one place.
 pub fn reference() -> String {
     let mut s = String::new();
-    s.push_str("cv query calculus — one DSL for selecting sessions (used by `-q` on ls/dataset/timeline/stats).\n\n");
+    s.push_str("cv query calculus — one DSL for selecting sessions (used by `-q` on ls/dataset/stats).\n\n");
     s.push_str("GRAMMAR\n");
     s.push_str("  terms combine with implicit AND; also: OR (or |), NOT (or a leading -), and ( ) grouping.\n");
     s.push_str("  a term is  field<op>value  — or a bare word, which matches title/cwd/id.\n");

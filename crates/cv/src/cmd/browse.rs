@@ -1,4 +1,4 @@
-//! `cv ls` / `cv timeline` / `cv stats` — browsing the discovered corpus.
+//! `cv ls` / `cv stats` — browsing the discovered corpus.
 //!
 //! These read [`cv_core::sessions`] (the probed catalog — milliseconds warm, transparently a full
 //! discovery when cold/stale); `cv ls --fresh` forces [`cv_core::discover_all`]'s full scan.
@@ -9,8 +9,8 @@ use cv_core::ir::{truncate, SessionRef};
 use cv_core::sanitize::sanitize_line;
 
 /// Apply a parsed query to a ref list in place. The two-phase filter itself is
-/// [`cv_core::query::filter_refs`] — shared with `cvd`'s `/api/stats?q=`, so `ls`/`timeline`/
-/// `stats` and the daemon all speak exactly the same `-q`; the CLI only supplies the `text:`
+/// [`cv_core::query::filter_refs`] — shared with `cvd`'s `/api/stats?q=`, so `ls`/`stats` and
+/// the daemon all speak exactly the same `-q`; the CLI only supplies the `text:`
 /// resolution, which needs the tantivy index cv-core cannot depend on.
 fn apply_query(refs: &mut Vec<SessionRef>, query: &Option<cv_core::SessionQuery>) {
     let Some(q) = query else { return };
@@ -34,6 +34,7 @@ pub(crate) fn cmd_ls(
     query: Option<String>,
     limit: usize,
     sort_by: &str,
+    asc: bool,    // print the shown window oldest-first (the feed order)
     fresh: bool,  // force a full re-discovery instead of trusting the probed catalog
     json: bool,   // emit the rows as one JSON array of session rows instead of the table
     enrich: bool, // --json only: add transcript-derived git + display_title (one parse per emitted row)
@@ -64,6 +65,12 @@ pub(crate) fn cmd_ls(
     }
 
     let total = refs.len();
+    if asc {
+        // The SAME newest `limit` rows, read oldest → newest like a feed: select first, then flip,
+        // so `--asc` never changes which sessions are shown — only the order they print in.
+        refs.truncate(limit);
+        refs.reverse();
+    }
     if json {
         // Machine-readable listing: the SAME rows the table below would print (same filters, sort,
         // exists() guard, and limit), as one JSON array on stdout — no header/footer, so it pipes
@@ -129,92 +136,6 @@ pub(crate) fn cmd_ls(
     if total > limit {
         println!("\n… {} more (use --limit)", total - limit);
     }
-    Ok(())
-}
-
-// ---------- timeline ----------
-
-/// A unified chronological feed across all harnesses (oldest → newest, like a feed). Grouped by day.
-pub(crate) fn cmd_timeline(
-    harness: Option<String>,
-    cwd: Option<String>,
-    query: Option<String>,
-    limit: usize,
-    json: bool, // the shown window as one JSON array of session rows, oldest first
-) -> Result<()> {
-    let want = parse_harness(&harness)?;
-    let query = crate::cmd::query::build(query)?;
-    let mut refs: Vec<SessionRef> = cv_core::sessions()
-        .into_iter()
-        .filter(|r| want.is_none_or(|h| r.harness == h))
-        .filter(|r| match &cwd {
-            None => true,
-            Some(c) => r.cwd.as_ref().map(|p| p.to_string_lossy().contains(c)).unwrap_or(false),
-        })
-        .collect();
-    apply_query(&mut refs, &query);
-
-    // Sort ascending by updated_at (falling back to created_at), so the feed reads oldest → newest.
-    let key = |r: &SessionRef| r.updated_at.or(r.created_at);
-    refs.sort_by_key(key);
-
-    let total = refs.len();
-    // A feed shows the *most recent* window; keep the last `limit` rows but still oldest → newest.
-    let shown = if total > limit {
-        &refs[total - limit..]
-    } else {
-        &refs[..]
-    };
-    if json {
-        let rows: Vec<serde_json::Value> = json_rows(shown.iter(), limit).into_iter().map(|(_, v)| v).collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-        return Ok(());
-    }
-    if total > limit {
-        println!("… {} older (use --limit)\n", total - limit);
-    }
-
-    let mut last_day: Option<String> = None;
-    // exists(): same catalog-read guard as `cmd_ls` — O(shown window), not O(fleet).
-    for r in shown.iter().filter(|r| r.path.exists()) {
-        let when = key(r);
-        // The feed instant is the session's LAST activity (its `updated_at`), local time — a
-        // long-lived session appears at where it went quiet, with a `⇠ since` start marker.
-        let day = when
-            .map(|d| crate::util::fmt_local(d, "%Y-%m-%d"))
-            .unwrap_or_else(|| "----------".into());
-        if last_day.as_deref() != Some(day.as_str()) {
-            println!("── {day} ──");
-            last_day = Some(day.clone());
-        }
-        let time = when
-            .map(|d| crate::util::fmt_local(d, "%H:%M"))
-            .unwrap_or_else(|| "--:--".into());
-        // Transcript-derived text — sanitize at the terminal seam (G5).
-        let title = r
-            .title
-            .as_deref()
-            .map(|t| truncate(&sanitize_line(t), 50))
-            .unwrap_or_else(|| sanitize_line(&dim_cwd(r.cwd.as_deref())).into_owned());
-        let since = match (r.created_at, when) {
-            (Some(c), Some(u))
-                if c.with_timezone(&chrono::Local).date_naive() != u.with_timezone(&chrono::Local).date_naive() =>
-            {
-                format!("  ⇠ since {}", crate::util::fmt_local(c, "%m-%d"))
-            }
-            _ => String::new(),
-        };
-        println!(
-            "  {}  {:8}  {:8}  {:24}  {}{}",
-            time,
-            r.harness.as_str(),
-            short_id(&r.id),
-            truncate(&sanitize_line(&dim_cwd(r.cwd.as_deref())), 24),
-            title,
-            since,
-        );
-    }
-    println!("\n{total} session(s)");
     Ok(())
 }
 

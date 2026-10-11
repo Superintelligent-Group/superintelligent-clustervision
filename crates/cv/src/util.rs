@@ -271,7 +271,7 @@ pub(crate) fn continue_hint(next: usize) -> String {
 
 // ---------- the session row ----------
 
-/// The one JSON shape for a session in a list (`ls`, `search`, `timeline`): snake_case, always
+/// The one JSON shape for a session in a list (`ls`, `search`): snake_case, always
 /// these keys. It lives in cv-core because the CLI is not the only door onto it — `cvd`'s
 /// `/api/search` emits the same row, and §3 only holds if there is one implementation.
 pub(crate) use cv_core::rows::session_row;

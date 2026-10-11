@@ -79,7 +79,6 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
             "prompts",
             "lanes",
             "deferrals",
-            "timeline",
             "stats",
             "blame",
             "doctor",
@@ -164,6 +163,10 @@ enum Cmd {
         /// Sort key: updated (default), created, or messages.
         #[arg(long = "sort-by", default_value = "updated", value_parser = ["updated", "created", "messages"])]
         sort_by: String,
+        /// Print the shown rows oldest-first (ascending): the same newest `--limit` rows, read as
+        /// a feed. `cv ls --sort-by updated --asc` is what `cv timeline` used to print.
+        #[arg(long)]
+        asc: bool,
         /// Force a full fleet re-discovery instead of trusting the catalog's staleness probe.
         #[arg(long)]
         fresh: bool,
@@ -407,22 +410,6 @@ enum Cmd {
         #[arg(long)]
         open_tasks: bool,
         /// Emit the deferrals as one JSON array (`index, timestamp, phrase, context, matched?`).
-        #[arg(long)]
-        json: bool,
-    },
-    /// Unified chronological feed across all harnesses (oldest → newest).
-    Timeline {
-        #[arg(long)]
-        harness: Option<String>,
-        /// Only sessions whose cwd contains this substring.
-        #[arg(long)]
-        cwd: Option<String>,
-        /// Restrict the feed to sessions matching this query (see `cv schema`).
-        #[arg(long, short = 'q')]
-        query: Option<String>,
-        #[arg(long, default_value_t = 60)]
-        limit: usize,
-        /// Emit the feed as one JSON array of session rows (same shape as `ls --json`), oldest first.
         #[arg(long)]
         json: bool,
     },
@@ -1004,7 +991,12 @@ enum Cmd {
     /// JSON keys it returns.
     Recipes,
 
-    // ───────────────────────────── Removed in 0.11.0 (hidden stubs) ─────────────────────────────
+    // ───────────────────────────── Removed (hidden stubs: error with a pointer, exit 2) ─────────────────────────────
+    #[command(hide = true)]
+    Timeline {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
     #[command(hide = true)]
     Convert {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
@@ -1068,10 +1060,11 @@ fn run() -> Result<()> {
             query,
             limit,
             sort_by,
+            asc,
             fresh,
             json,
             enrich,
-        } => browse::cmd_ls(harness, cwd, query, limit, &sort_by, fresh, json, enrich),
+        } => browse::cmd_ls(harness, cwd, query, limit, &sort_by, asc, fresh, json, enrich),
         Cmd::Search {
             query,
             harness,
@@ -1349,13 +1342,6 @@ fn run() -> Result<()> {
         } => doctor::cmd_doctor(id, harness, recent, json),
         Cmd::Board { action } => live::cmd_board(action),
         Cmd::Task { action } => task::cmd_task(action),
-        Cmd::Timeline {
-            harness,
-            cwd,
-            query,
-            limit,
-            json,
-        } => browse::cmd_timeline(harness, cwd, query, limit, json),
         Cmd::Distill {
             id,
             harness,
@@ -1463,6 +1449,10 @@ fn run() -> Result<()> {
             )
         }
         // Removed commands: one line each, pointing at the replacement; exit 2.
+        Cmd::Timeline { .. } => usage(
+            "`cv timeline` was removed in 0.15.0 — use `cv ls --sort-by updated --asc` (the newest --limit rows, \
+             oldest first; `--json` gives the same session rows)",
+        ),
         Cmd::Convert { .. } => usage(
             "`cv convert` was removed in 0.11.0 — use `cv port <id> --harness <harness>` \
              (`--cwd <dir>` to rehome, `--out <dir>` for a dry run)",

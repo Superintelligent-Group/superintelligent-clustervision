@@ -123,7 +123,15 @@ mod tests {
         for n in 1..=14 {
             assert!(r.contains(&format!("{n:>2}. ")), "recipe {n} missing");
         }
-        for old in ["cv convert", "cv query", "cv recall", "--retrieve", "--to-dir", "--to "] {
+        for old in [
+            "cv convert",
+            "cv query",
+            "cv recall",
+            "--retrieve",
+            "--to-dir",
+            "--to ",
+            "cv timeline",
+        ] {
             assert!(!r.contains(old), "recipes mention the removed {old:?}");
         }
     }

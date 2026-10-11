@@ -1265,10 +1265,10 @@ fn tree_renders() {
     assert!(out.contains("3 msg"), "{out}");
 }
 
-// ───────────────────────────── stats / timeline ─────────────────────────────
+// ───────────────────────────── stats / ls --asc ─────────────────────────────
 
 #[test]
-fn stats_and_timeline() {
+fn stats_and_ls_asc() {
     let w = World::new("stats");
     standard_corpus(&w);
 
@@ -1276,10 +1276,23 @@ fn stats_and_timeline() {
     assert!(out.contains("2 session(s) · 7 message(s)"), "{out}");
     assert!(out.contains("claude"), "{out}");
 
-    let (out, _) = w.cv_ok(&["timeline"]);
+    // `ls` is newest first; `--asc` prints the same rows oldest → newest (the old `timeline` feed).
+    let (out, _) = w.cv_ok(&["ls"]);
+    assert!(pos(&out, "alphases") < pos(&out, "betasess"), "{out}");
+    let (out, _) = w.cv_ok(&["ls", "--sort-by", "updated", "--asc"]);
     assert!(out.contains("2 session(s)"), "{out}");
-    // Oldest → newest: beta's last-activity day precedes alpha's.
     assert!(pos(&out, "betasess") < pos(&out, "alphases"), "{out}");
+    // `--asc` flips the order of the shown window, never its membership: `--limit 1` is still
+    // the newest session, printed alone.
+    let (out, _) = w.cv_ok(&["ls", "--asc", "--limit", "1", "--json"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(rows.len(), 1, "{out}");
+    assert_eq!(rows[0]["id"], "alphasess", "{out}");
+
+    // The removed command errors with the replacement, exit 2.
+    let (ok, code, _, err) = w.cv(&["timeline"]);
+    assert!(!ok && code == 2, "{err}");
+    assert!(err.contains("cv ls --sort-by updated --asc"), "{err}");
 }
 
 #[test]
