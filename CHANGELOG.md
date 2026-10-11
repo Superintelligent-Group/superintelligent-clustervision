@@ -28,6 +28,8 @@
 - Corpora for Cline 3.0.70, Roo CLI 0.1.17, Continue cn 1.5.47 and Devin 3000.11.3; schema snapshots for Zed 1.16.1 and LM Studio 0.4.21.
 - Claude Code 2.1.296: `ScheduleWakeup` turns read as `origin: scheduler`; its corpus (18 sessions, 6 sub-agents, a workflow) joins the golden test.
 - Grok 1.0.50: reasoning records read as thinking; forks and sub-agents carry their parent; its corpus joins the golden test.
+- Goose: a real compaction (agent-visibility flip plus agent-only summary) reads as a compaction boundary; delegate results keep the child session id.
+- Goose corpus: real stores from Goose 1.51.0 and 1.54.0, covering every persisted affordance a headless run can drive.
 
 ## 0.15.1 — 2026-10-11
 

@@ -16,8 +16,8 @@ store = [
 
 [upstream]
 repo = "https://github.com/block/goose (~/pug/goose)"
-commit = "2090ad1c"
-date = "2026-09-19"
+commit = "cd643d21 (tag v1.54.0, schema 16; also read: v1.51.0 1a4249ac, main 3bd85200 at schema 17)"
+date = "2026-10-11"
 
 [types]
 "block.document" = { status = "handled", note = "" }

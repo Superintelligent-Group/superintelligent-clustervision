@@ -721,8 +721,13 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
 
 ## Goose (Block) — modern SQLite + legacy `.jsonl`
 
-Re-verified 2026-09-19 at `2090ad1c` (1.51.0). Ground truth: `crates/goose/src/session/session_manager.rs`
-(schema + writers), `crates/goose-provider-types/src/conversation/message.rs` (content blocks).
+Re-verified 2026-09-19 at `2090ad1c` (1.51.0), and 2026-10-11 against the release tags `v1.51.0`
+(`1a4249ac`) and `v1.54.0` (`cd643d21`), both schema 16, whose real stores are the corpus in
+`crates/cv-core/tests/corpus/goose/` (affordance list: `tools/harness-corpus/goose/AFFORDANCES.md`).
+Ground truth: `crates/goose/src/session/session_manager.rs` (schema + writers),
+`crates/goose-provider-types/src/conversation/message.rs` (content blocks). Unreleased on main
+(`3bd85200`): schema 17 adds `sessions.system_prompt_override`, `system_prompt_extras_json`,
+`container_id`.
 
 - Data dir: Linux `~/.local/share/goose/sessions/`; macOS `~/Library/Application Support/Block.block.goose/sessions/`;
   Windows `%APPDATA%\Block\goose\data\sessions\` (one `Block`; `$GOOSE_PATH_ROOT` (absolute only) /
@@ -746,11 +751,20 @@ Re-verified 2026-09-19 at `2090ad1c` (1.51.0). Ground truth: `crates/goose/src/s
   timeToFirstTokenMs, isCompaction}, operations}` — the only per-message usage; Goose hides rows with
   `userVisible = 0`. `created_timestamp` is seconds (values > 10_000_000_000 are milliseconds). Legacy:
   per-session `<name>.jsonl` (header line + one message per line), unchanged.
+- **Compaction, as written** (both releases): every earlier row's `agentVisible` is flipped to
+  `false` in place, then three agent-only rows follow: the summary (user), a continuation note
+  (assistant), and a copy of the prompt (user). None of them carries `usage`: `isCompaction` is set
+  only on the `usage_ledger` row, and the "Exceeded auto-compact threshold" notice is not stored. A
+  tool-pair summary is also an agent-only user row, but it hides only its own pair.
+- **Sub-agents:** summon's `delegate` makes a child session (`session_type = sub_agent`,
+  `parent_session_id`), and the parent's `toolResponse.value._meta.subagent_session_id` names it.
+  A `--fork` copy stores no link to its source. MCP tools are named `<extension>__<tool>`.
 - **IR mapping:** `usage` → `Usage`, with `cost` → **`Usage::cost_usd`** (Goose reports no
   reasoning-token count). `userVisible = 0` is not a drop: the row becomes a `Role::System` turn —
-  `kind: compaction_summary` when `usage.isCompaction` (cv synthesizes the paired
-  `compaction_boundary` in front of it), else `kind: injected_context` — so turn counts and
-  `cv show` stay honest. A row holding an `error` block is `kind: error`; a row holding only control
+  `kind: compaction_summary` for the agent-only user row with nothing agent-visible before it (or
+  a `usage.isCompaction` row; cv synthesizes the paired `compaction_boundary` in front of it), else
+  `kind: injected_context` — so turn counts and `cv show` stay honest. A `toolResponse`'s
+  `structuredContent` and `_meta` ride verbatim in `ToolResult::details`. A row holding an `error` block is `kind: error`; a row holding only control
   blocks (`systemNotification`, `actionRequired`, `toolConfirmationRequest`) is `kind: notice`.
   `sessions.parent_session_id` (v15) → **`Session::lineage.parent`**. The checked block/action/column
   vocabulary, including the `session_type` values, is `formats/goose.toml`.
