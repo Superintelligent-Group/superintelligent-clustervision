@@ -18,10 +18,10 @@ is just:
 ```
 
 Because the IR sits in the middle, you don't need an N×N matrix of converters — you need
-N parsers and a handful of emitters. **20 harnesses can be parsed** _into_ the IR
+N parsers and a handful of emitters. **23 harnesses can be parsed** _into_ the IR
 ([harnesses](harnesses.md)); of those, **12 can also be conversion _targets_** that the IR
 can be emitted back _out_ to. Any emit-capable target can receive a session that originated
-in *any* of the 20, so the practical conversion space is "20 sources × 12 targets". 🔮
+in *any* of the 23, so the practical conversion space is "23 sources × 12 targets". 🔮
 
 The IR itself is defined in `crates/cv-core/src/ir.rs`; the emit side lives in
 `crates/cv-core/src/emit.rs`. For the broader picture of how parsers and emitters fit
@@ -47,7 +47,7 @@ These are the harnesses `emit()` can currently write — the authoritative list 
 | Continue | `continue` | `~/.continue/sessions` JSON |
 | Qwen Code | `qwen` | reuses Gemini's `ConversationRecord` emitter |
 
-> The other eight parseable harnesses — **Cursor**, **Goose**, **Zed**, **Kimi CLI** (its
+> The other eleven parseable harnesses — **Cursor**, **Goose**, **Zed**, **Devin CLI**, **Kimi Code**, **OpenSession**, **Kimi CLI** (its
 > `~/.kimi` store is frozen; kimi-cli migrates it to `~/.kimi-code` on open), the **Claude
 > desktop app**, the **ChatGPT desktop app**, and the **ChatGPT/Claude.ai account data
 > exports** — are parse-only. You can read, search, and port *away* from them, but

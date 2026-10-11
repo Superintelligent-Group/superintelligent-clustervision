@@ -28,7 +28,8 @@ All paths are the real ones the adapters look at. `~` is your home dir; `<AppSup
 | **OpenClaw** | `~/.openclaw/agents/<agentId>/sessions/<sid>.jsonl` | ✓ | ✓ | `sessions.json` index + JSONL transcripts. Header `version` v1/v2 linear → **v3 parent-linked** (migrated in place). ACP-bridged sessions are text-only echoes. |
 | **Gemini / Antigravity** | `~/.gemini/tmp/<projectHash>/chats/session-*.json\|jsonl` | ✓ | ✓ | Multi-format, best-effort. Rich chat recordings + `checkpoint-*.json` + `logs.json` fallback. **Sub-agents** nested at `chats/<parentId>/<id>.jsonl`. Antigravity `*.pb` protobufs are opaque (not parsed). |
 | **Hermes (Nous)** | `~/.hermes/state.db` (**SQLite**) | ✓ | ✓ | One DB, all sessions; `$HERMES_HOME` overrides. cwd is *not* persisted. Schema drifts live (probe `PRAGMA table_info`). Compression chains linked by `parent_session_id`. |
-| **Kimi CLI** | `~/.kimi/sessions/<md5(cwd)>/<uuid>/context.jsonl` | ✓ | ✓ | `$KIMI_SHARE_DIR` overrides. Project dir = `md5(cwd)`; cwd recovered from `kimi.json` `work_dirs[]`. **Legacy** flat form `<hash>/<uuid>.jsonl`. `wire.jsonl` sidecar enriches. |
+| **Kimi CLI** | `~/.kimi/sessions/<md5(cwd)>/<uuid>/context.jsonl` | ✓ | — | Store **frozen since 2026-06** (kimi-cli migrates it to `~/.kimi-code` on open), so it stopped being a port target in 0.14. `$KIMI_SHARE_DIR` overrides. Project dir = `md5(cwd)`; cwd recovered from `kimi.json` `work_dirs[]`. **Legacy** flat form `<hash>/<uuid>.jsonl`. `wire.jsonl` sidecar enriches. |
+| **Kimi Code** | `~/.kimi-code/sessions/wd_<slug>_<sha256(cwd)[:12]>/session_<uuid>/` | ✓ | — | Moonshot's successor to kimi-cli; `$KIMI_CODE_HOME` overrides. `state.json` stores cwd, title and the agent map; one `agents/<agentId>/wire.jsonl` per agent (`main` + `Agent`-tool sub-agents); oversized outputs in `tool-results/`. |
 | **LM Studio** | `~/.lmstudio/conversations/<ms-epoch>.conversation.json` | ✓ | ✓ | Plaintext JSON, one file per chat. No cwd (chat app). Keeps every regenerated variant; we read the selected one. No first-class tool calls. |
 | **Cline** | `<AppSupport>/<Editor>/User/globalStorage/saoudrizwan.claude-dev/tasks/<taskId>/` | ✓ | ✓ | VS Code extension; `api_conversation_history.json` is a raw Anthropic-Messages array (≈1:1 with Claude). Also `~/.cline/tasks/`. cwd from first user msg's `<environment_details>`. |
 | **Roo Code** | `<AppSupport>/<Editor>/User/globalStorage/rooveterinaryinc.roo-cline\|roo-code/tasks/<taskId>/` | ✓ | ✓ | A **Cline fork** — identical per-task layout, different namespace. Also `~/.roo/tasks/`. Reuses the Cline parser/emitter, tagged `Harness::Roo`. |
@@ -41,17 +42,20 @@ All paths are the real ones the adapters look at. `~` is your home dir; `<AppSup
 | **Claude app** | `<AppSupport>/Claude/` | ✓\* | — | **Detected, not readable.** Transcripts are **server-side** (claude.ai); local store holds only auth/UI state. `claude-code-sessions/*.json` are stubs pointing at `~/.claude/projects/` (handled by Claude Code). |
 | **ChatGPT app** | `<AppSupport>/com.openai.chat/conversations-v3-<acct>/<uuid>.data` | ✓\* | — | **Detected, not readable.** History *is* local but **encrypted at rest** with an app-held key (not in a readable Keychain). We count conversations but can't decrypt. |
 | **ChatGPT export** | a `conversations.json` you register with `cv config --add-export <path>` | ✓ | — | The "Export data" archive. One file = many conversations; each is a `mapping` DAG (we walk root→`current_node`). Opt-in (no fixed home); deduped by id. |
+| **OpenSession** | `*.opensession.json` (or a `*.json` with an `open_session` key) under a dir you register with `cv config --add-export <path>` | ✓ | — | cv's own interchange format, written by `cv export --format json` and read back in. 0.3 *is* the IR; 0.2 spellings are accepted on the way in. See [OpenSession](opensession.md). |
 | **Claude.ai export** | a `conversations.json` you register with `cv config --add-export <path>` | ✓ | — | The claude.ai "Export data" archive. One file = many conversations; linear `chat_messages[]` (text/thinking/tool_use/tool_result). Opt-in; deduped by id. |
 
 `✓` = supported · `—` = not supported · `✓\*` = installation is detected (`storage_root`) but
 `discover()` returns empty, for the reasons in the notes.
 
-**13 harnesses are emit-capable** (conversion targets): Claude Code, Codex, Grok, OpenCode, OpenClaw,
-Gemini, Hermes, Kimi, LM Studio, Cline, Roo, Continue, Qwen.
+**12 harnesses are emit-capable** (conversion targets): Claude Code, Codex, Grok, OpenCode, OpenClaw,
+Gemini, Hermes, LM Studio, Cline, Roo, Continue, Qwen. The authoritative list is
+`supported_targets()` in `emit.rs`.
 
-**8 are parse-only**: Cursor, Goose, Zed, and Devin CLI (closed-source / read-only stores we
-deliberately don't write back to), the two desktop apps below, and the two account-data **exports**
-(`chatgpt-export` / `claude-export`, registered via `cv config --add-export`).
+**11 are parse-only**: Cursor, Goose, Zed, Devin CLI and Kimi Code (closed-source / read-only stores we
+deliberately don't write back to), Kimi CLI (a frozen store), OpenSession (an export, not a harness
+to resume in), the two desktop apps, and the two account-data **exports** (`chatgpt-export` /
+`claude-export`, registered via `cv config --add-export`).
 
 ## Claude Code sessions outside `~/.claude`
 

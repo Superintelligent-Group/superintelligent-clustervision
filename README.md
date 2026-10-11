@@ -71,7 +71,7 @@ cv scry
 | | Harness | Parse | Port *to* | | | Harness | Parse | Port *to* |
 |---|---|:--:|:--:|---|---|---|:--:|:--:|
 | ✅ | **Claude Code** | ✅ | ✅ | | ✅ | **Cursor** | ✅ | — |
-| ✅ | **Codex CLI** | ✅ | ✅ | | ✅ | **Kimi CLI** | ✅ | ✅ |
+| ✅ | **Codex CLI** | ✅ | ✅ | | ✅ | **Kimi CLI** | ✅ | —² |
 | ✅ | **Grok CLI** | ✅ | ✅ | | ✅ | **Qwen Code** | ✅ | ✅ |
 | ✅ | **OpenCode** | ✅ | ✅ | | ✅ | **LM Studio** | ✅ | ✅ |
 | ✅ | **Gemini / Antigravity** | ✅ | ✅ | | ✅ | **Cline** | ✅ | ✅ |
@@ -79,8 +79,10 @@ cv scry
 | ✅ | **OpenClaw** | ✅ | ✅ | | ✅ | **Continue** | ✅ | ✅ |
 | 🔒 | **Claude / ChatGPT apps** | detected¹ | — | | ✅ | **Goose** (Block) | ✅ | — |
 | ✅ | **Zed** (agent panel) | ✅ | — | | ✅ | **Devin CLI** (Cognition) | ✅ | — |
+| ✅ | **Kimi Code** | ✅ | — | | ✅ | **OpenSession** (`cv export --format json`) | ✅ | — |
+| ✅ | **ChatGPT / Claude.ai exports** | ✅ | — | | | | | |
 
-<sub>¹ The Claude app keeps transcripts server-side; the ChatGPT app keeps them locally but encrypted at rest. We detect the install and document exactly why neither is readable — see [`docs/FORMATS.md`](docs/FORMATS.md).</sub>
+<sub>¹ The Claude app keeps transcripts server-side; the ChatGPT app keeps them locally but encrypted at rest. We detect the install and document exactly why neither is readable — see [`docs/FORMATS.md`](docs/FORMATS.md). ² Kimi CLI's `~/.kimi` store has been frozen since 2026-06 (kimi-cli migrates it to `~/.kimi-code`), so cv stopped writing there in 0.14.</sub>
 
 **Conversion is N-way** among the 12 emit-capable harnesses: any → any, mediated by one unified IR. Every format reverse-engineered in [`docs/FORMATS.md`](docs/FORMATS.md). Bringing your own? → [Adding a harness](manual/src/adding-a-harness.md) 💛
 
@@ -217,7 +219,7 @@ parse(any harness) → 🔮 unified IR → search · port · prune · loom · pa
 
 Built in a wild few sessions, much of it by a swarm of agents working disjoint files. ✨ Honest about the edges:
 
-- **23 harnesses parse**; 13 also **emit** (N-way conversion). The rest — Cursor, Goose, Zed, Devin CLI, the Claude/ChatGPT desktop apps, and the ChatGPT/Claude.ai **account data exports** (`chatgpt-export`/`claude-export` — register their location with `cv config --add-export <path>`) — are parse-only for now.
+- **23 harnesses parse**; 12 also **emit** (N-way conversion). The rest — Cursor, Goose, Zed, Devin CLI, Kimi CLI (frozen store), Kimi Code, OpenSession, the Claude/ChatGPT desktop apps, and the ChatGPT/Claude.ai **account data exports** (`chatgpt-export`/`claude-export` — register their location with `cv config --add-export <path>`) — are parse-only for now.
 - **Robustness:** 2000+ real sessions parse with **0 panics**; parsers are fuzz-tested against hostile input.
 - The full-text index trades disk for speed; Gemini's protobuf `.pb` is opaque; a few sidecar tool-call streams aren't merged yet.
 - Historical format variants are an explicit goal — see [Adding a harness](manual/src/adding-a-harness.md), and **please send your own harness logs** (we can only test what we can see).
