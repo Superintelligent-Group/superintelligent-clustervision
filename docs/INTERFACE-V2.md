@@ -18,7 +18,7 @@ Grouped help (`cv --help` shows every command under these headings; nothing is h
 | group | commands | what they have in common |
 |---|---|---|
 | **Read** | `ls` `show` `cat` `search` `events` `touched` `tools` `tree` `workflow` `compaction` `prompts` `lanes` `deferrals` `timeline` `stats` `diff` `blame` `doctor` | read-only over existing sessions |
-| **Reshape** | `prune` `rewind` `splice` `loom` `port` `redact` `resume` | produce a NEW session id from existing ones (the source is never touched); `resume` launches one |
+| **Reshape** | `prune` `rewind` `distill` `fork` `adopt` `splice` `loom` `port` `redact` `resume` | produce a NEW session id from existing ones (the source is never touched); `resume` launches one |
 | **Export** | `export` `dataset` `pack` | produce something that is not a session |
 | **Fleet & live** | `task` `board` `scry` `share` | multi-agent coordination and live views |
 | **System** | `index` `config` `schema` `formats` `recipes` | cv's own state and reference |
@@ -30,7 +30,7 @@ Renames and removals (old → new; the old name is GONE, it errors with a pointe
 | `convert <id> --to <h>` | `port <id> --harness <h>` | convert and port were the same act (produce a copy that runs elsewhere); one verb |
 | `port --to <h>` / `--to-dir <d>` | `port --harness <h>` / `--cwd <d>` | say what the value is, not where it goes |
 | `query` | `schema` | `query` prints the field/operator reference; it does not run a query |
-| `recall`, `distill` | removed | superseded by `pack` (`pack` is the one "build context from the corpus" verb) |
+| `recall` | removed | superseded by `pack` (`pack` is the one "build context from the corpus" verb). `distill` was removed with it in 0.11 and returned in 0.14 with a new meaning (a deterministic lane reshaping, not an LLM digest) |
 | `prune --retrieve <id>` | `cat <session> <tool_use_id>` | fetching a tool's output is a Read, not a prune option |
 | `prune --range` | `prune --keep A..B` | it selects what to KEEP; `--range` is the read-window flag elsewhere |
 | `show --range -N` | `show --first N` | `-N` looked like "last N" to everyone who used it |
@@ -367,21 +367,11 @@ Two further steps toward it, both real debt found in the same pass:
   say — the `[upstream]` pin, and the `generic`/`carried`/`ignored` judgments — and let `handled`
   be inferred. That is roughly 60% of `formats/`'s hand-maintained surface.
 
-## 9. Work packages and file ownership
+## 9. Design history
 
-| WP | owner | files | depends on |
-|---|---|---|---|
-| 0 IR core + compile | coordinator | `cv-core/src/ir.rs`, minimal shims in every crate | — |
-| 1 CLI surface | fork | `cv/src/main.rs`, `cv/src/cmd/*` (incl. `schema --commands --json`, `cat`, `recipes`, window flags, snake_case JSON, `view.rs` kind labels), `manual/src/cli.md`, `README.md`, sesh consumers | 0 |
-| 2a adapters: claude, claude_workflow + the shared core modules that key off Claude fields today: `compaction.rs`, `events.rs`, `doctor.rs`, `tools.rs`, `render.rs`, `html.rs` | fork | those files | 0 |
-| 2b adapters: codex | fork | `codex.rs` | 0 |
-| 2c adapters: kimi, kimi_code, opencode, openclaw | fork | those files | 0 |
-| 2d adapters: gemini, qwen, hermes, goose | fork | those files | 0 |
-| 2e adapters: grok, cursor, zed, cline, roo, continuedev, lmstudio, claude_app, chatgpt_app, export | fork | those files | 0 |
-| 3 emitters + verifier v2 + OpenCode sqlite emitter | fork | `cv-core/src/emit.rs` only | 0 (contract), verified after 2 |
-| 4 MCP generation + windows | fork | `cv-mcp/src/*` | 1 (`cv schema --commands --json`) |
-| 5 formats census/manifests/drift/generators | fork | `cv-core/src/formats.rs`, `formats/*.toml`, `tools/*`, `cv/src/cmd/formats.rs` (wired by WP1) | 0 |
-| 6 docs + FORMATS + CHANGELOG + version 0.11.0 | coordinator | docs, manual, Cargo versions | all |
+The documents that argued their way to this contract live in git, not in `docs/`:
 
-Rules for every fork: only your files; no commits; no `git stash`/checkout; filtered tests only
-(`-E 'test(/<area>/)'`); if the crate fails to compile in a file you do not own, wait and retry.
+- `git show 5abb404:docs/REARCH.md` — streaming parse, lazy spans, the seek store (REARCH Phase 2), the withdrawn "IR diet".
+- `git show ffcbefb:docs/PORTABILITY-REVIEW.md` — the source-backed harness audit that became `port --strict` / `emit_verified`.
+- `git show c04695b:docs/DESIGN-GAP-AUDIT.md` — the task-substrate gap audit (G1–G11); what landed is in `manual/src/tasks.md`.
+- The 0.11.0 work-package roster (WP 0–6, file ownership) is in this file's history: `git log -p -- docs/INTERFACE-V2.md`.
