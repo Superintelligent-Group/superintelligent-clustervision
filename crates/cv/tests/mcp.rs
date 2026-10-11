@@ -1,22 +1,20 @@
-//! Protocol-level integration tests for the cv-mcp stdio JSON-RPC server: spawn the real binary,
+//! Protocol-level integration tests for `cv mcp`, the stdio JSON-RPC server: spawn the real binary,
 //! run the MCP handshake, list tools, and call them against a temp-home fixture corpus.
 //!
 //! Hermetic: a fake `$HOME` carries the claude fixtures and `$CLUSTERVISION_HOME` the index/task
-//! state; both are passed only to the child process's environment. `$CV_BIN` points at a **stub
-//! `cv`** written into the same temp tree, so the CLI-generated half of the toolset is exercised
-//! end-to-end (schema dump → tool registration → argv → exit code) without depending on a built
-//! `clustervision` binary being present. What the real commands *do* is the CLI crate's business;
-//! what this crate owes is the translation.
+//! state; both are passed only to the child process's environment (and from it to the `cv` it
+//! re-runs for a generated tool). The argv a generated call builds is pinned by `mcp_tools`' unit
+//! tests; these check the round trip through the real commands.
 
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// A running cv-mcp server over stdio, with a line reader on a side thread so a hung server
+/// A running `cv mcp` server over stdio, with a line reader on a side thread so a hung server
 /// fails the test with a timeout instead of wedging the run.
 struct Server {
     child: Child,
@@ -64,14 +62,12 @@ impl Server {
             fs::write(proj.join(format!("{name}.jsonl")), body).unwrap();
         }
 
-        let cv_bin = write_stub_cv(&base);
-
-        let mut child = Command::new(env!("CARGO_BIN_EXE_cv-mcp"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cv"))
+            .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env("HOME", &home)
-            .env("CV_BIN", &cv_bin)
             .env("CLUSTERVISION_HOME", &cv_home)
             // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -81,7 +77,7 @@ impl Server {
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_DATA_HOME", home.join(".local/share"))
             .spawn()
-            .expect("cv-mcp should spawn");
+            .expect("cv mcp should spawn");
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -103,7 +99,7 @@ impl Server {
 
     /// Send one raw line to the server.
     fn send_raw(&mut self, line: &str) {
-        writeln!(self.stdin, "{line}").expect("write to cv-mcp stdin");
+        writeln!(self.stdin, "{line}").expect("write to cv mcp stdin");
         self.stdin.flush().unwrap();
     }
 
@@ -120,7 +116,7 @@ impl Server {
         let line = self
             .lines
             .recv_timeout(Duration::from_secs(60))
-            .expect("timed out waiting for a cv-mcp response");
+            .expect("timed out waiting for a cv mcp response");
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("non-JSON response {line:?}: {e}"))
     }
 
@@ -146,66 +142,6 @@ impl Server {
         let is_error = result["isError"].as_bool().unwrap_or(false);
         (text, is_error)
     }
-}
-
-/// The command tree the stub `cv` reports: a faithful (abridged) copy of the real
-/// `cv schema --commands --json` shape, including `show`'s window flags, a help-less `--harness`,
-/// a command with no `--json` form (`cat`), two positionals in order, and a `Fleet & live` entry
-/// that must NOT become a tool.
-const STUB_COMMANDS: &str = r#"[
-  {"name":"ls","group":"Read","about":"List discovered sessions across all harnesses","args":[
-    {"name":"harness","kind":"option","value_type":"string","help":"Only this harness","required":false},
-    {"name":"cwd","kind":"option","value_type":"string","help":"Only sessions whose cwd contains this substring","required":false},
-    {"name":"limit","kind":"option","value_type":"integer","help":"Max rows to show","required":false,"default":"40"},
-    {"name":"sort_by","kind":"option","value_type":"string","help":"Sort key","required":false,"possible_values":["updated","created","messages"],"default":"updated"},
-    {"name":"json","kind":"flag","value_type":"boolean","help":"Emit the rows as JSON","required":false}]},
-  {"name":"show","group":"Read","about":"Print a single session","args":[
-    {"name":"id","kind":"positional","value_type":"string","help":"Session id","required":true},
-    {"name":"harness","kind":"option","value_type":"string","help":"","required":false},
-    {"name":"json","kind":"flag","value_type":"boolean","help":"Emit the raw unified IR as JSON","required":false},
-    {"name":"first","kind":"option","value_type":"integer","help":"The first N messages","required":false},
-    {"name":"last","kind":"option","value_type":"integer","help":"The last N messages","required":false},
-    {"name":"range","kind":"option","value_type":"string","help":"Messages A..B","required":false},
-    {"name":"around","kind":"option","value_type":"integer","help":"Message N with context either side","required":false},
-    {"name":"context","kind":"option","value_type":"integer","help":"How many either side","required":false,"default":"5"},
-    {"name":"max_bytes","kind":"option","value_type":"integer","help":"Stop after N bytes","required":false},
-    {"name":"subagents","kind":"flag","value_type":"boolean","help":"List the sub-agent forest","required":false}]},
-  {"name":"cat","group":"Read","about":"Print one tool call's full output","args":[
-    {"name":"session","kind":"positional","value_type":"string","help":"The pruned session id","required":true},
-    {"name":"tool_use_id","kind":"positional","value_type":"string","help":"The tool_use id","required":true},
-    {"name":"input","kind":"flag","value_type":"boolean","help":"Print the call's arguments instead","required":false}]},
-  {"name":"search","group":"Read","about":"Search across session transcripts","args":[
-    {"name":"query","kind":"positional","value_type":"string","help":"Text to search for","required":true},
-    {"name":"limit","kind":"option","value_type":"integer","help":"Max results","required":false,"default":"20"},
-    {"name":"json","kind":"flag","value_type":"boolean","help":"Emit rows as JSON","required":false}]},
-  {"name":"task","group":"Fleet & live","about":"Durable fleet tasks","args":[]},
-  {"name":"task open","group":"Fleet & live","about":"Open a task","args":[
-    {"name":"title","kind":"positional","value_type":"string","help":"Title","required":true}]}
-]"#;
-
-/// Write a stub `cv` that answers the schema dump from a file, echoes its argv for every other
-/// call, and fails loudly on a session id of `nosuch` (the non-zero-exit path).
-fn write_stub_cv(base: &Path) -> PathBuf {
-    let bin_dir = base.join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
-    fs::write(bin_dir.join("commands.json"), STUB_COMMANDS).unwrap();
-    let cv = bin_dir.join("cv");
-    fs::write(
-        &cv,
-        "#!/bin/sh\n\
-         if [ \"$1\" = schema ]; then cat \"$(dirname \"$0\")/commands.json\"; exit 0; fi\n\
-         case \"$*\" in *nosuch*) echo 'cv: no session found for id \"nosuch\"' >&2; exit 2;; esac\n\
-         printf 'ARGV'\n\
-         for a in \"$@\"; do printf ' %s' \"$a\"; done\n\
-         echo\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&cv, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    cv
 }
 
 impl Drop for Server {
@@ -264,7 +200,7 @@ fn handshake_and_tool_schemas() {
             }
         }
     }
-    // Generated from the stub CLI's Read group…
+    // Generated from the CLI's Read group…
     for expected in ["ls", "show", "cat", "search"] {
         assert!(
             names.contains(expected),
@@ -282,6 +218,10 @@ fn handshake_and_tool_schemas() {
         task_open["description"].as_str().unwrap().contains("dispatch object"),
         "task_open must be the hand-written tool, not a generated `cv task open`: {task_open}"
     );
+    // Fleet & live commands (`serve`, `watch`, `mcp`) are never tools: they block or hold a socket.
+    for gone in ["serve", "watch", "archive_sync", "mcp", "scry"] {
+        assert!(!names.contains(gone), "{gone} must not be a generated tool: {names:?}");
+    }
     // The 0.11.0 removals stay removed: their replacements are show/search/ls/pack/prune/cat.
     for gone in [
         "list_sessions",
@@ -308,50 +248,36 @@ fn handshake_and_tool_schemas() {
     assert_eq!(show["inputSchema"]["required"], json!(["id"]), "{show}");
 }
 
-/// The generated tools are real subprocess calls: the argv cv-mcp builds is what `cv` receives,
-/// and a non-zero exit comes back as an MCP tool error carrying the child's stderr.
+/// The generated tools run the real commands: `show` with no window gets the MCP default and
+/// returns the IR as JSON, `cat` (no JSON form) returns text, a non-zero exit is a tool error
+/// carrying stderr, and a protocol mistake is -32602 before anything runs.
 #[test]
-fn generated_tools_shell_out_to_cv() {
+fn generated_tools_run_the_real_commands() {
     let mut s = Server::spawn("generated");
     s.request(1, "initialize", json!({}));
 
-    // No window selector → the MCP defaults, and `--json` because `show` has the flag.
     let (text, is_err) = s.call_tool(2, "show", json!({"id": "alphasess"}));
     assert!(!is_err, "{text}");
-    assert_eq!(
-        text.trim(),
-        "ARGV show alphasess --last 50 --max-bytes 200000 --json",
-        "{text}"
-    );
+    let v: Value = serde_json::from_str(&text).expect("show returns the IR as JSON");
+    assert_eq!(v["id"], "alphasess", "{text}");
+    assert_eq!(v["messages"].as_array().map(Vec::len), Some(2), "{text}");
 
-    // An explicit selector wins; a clap id becomes its kebab-case long flag.
-    let (text, _) = s.call_tool(3, "show", json!({"id": "alphasess", "around": 12, "context": 2}));
-    assert_eq!(
-        text.trim(),
-        "ARGV show alphasess --around 12 --context 2 --json",
-        "{text}"
-    );
-    let (text, _) = s.call_tool(4, "show", json!({"id": "alphasess", "max_bytes": 4096}));
-    assert_eq!(text.trim(), "ARGV show alphasess --max-bytes 4096 --json", "{text}");
+    // An explicit window is passed through (a clap id becomes its kebab-case flag).
+    let (text, is_err) = s.call_tool(3, "show", json!({"id": "alphasess", "first": 1}));
+    assert!(!is_err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["messages"].as_array().map(Vec::len), Some(1), "{text}");
 
-    // A boolean flag is present only when true; positionals lead in declaration order; `cat` has
-    // no JSON form, so no `--json` is appended.
-    let (text, _) = s.call_tool(
-        5,
-        "cat",
-        json!({"tool_use_id": "toolu_42", "session": "alphasess", "input": true}),
-    );
-    assert_eq!(text.trim(), "ARGV cat alphasess toolu_42 --input", "{text}");
-    let (text, _) = s.call_tool(6, "cat", json!({"session": "alphasess", "tool_use_id": "toolu_42"}));
-    assert_eq!(text.trim(), "ARGV cat alphasess toolu_42", "{text}");
+    // `ls` filters through to the same rows `cv ls --json` prints.
+    let (text, is_err) = s.call_tool(4, "ls", json!({"cwd": "/work/proj"}));
+    assert!(!is_err, "{text}");
+    let rows: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rows.as_array().map(Vec::len), Some(2), "{text}");
 
     // A non-zero exit becomes an isError tool result carrying stderr.
-    let (text, is_err) = s.call_tool(7, "show", json!({"id": "nosuch"}));
+    let (text, is_err) = s.call_tool(5, "show", json!({"id": "nosuch"}));
     assert!(is_err, "a failing `cv` must be a tool error: {text}");
-    assert!(
-        text.contains("no session found"),
-        "stderr must reach the caller: {text}"
-    );
+    assert!(text.contains("nosuch"), "stderr must reach the caller: {text}");
 
     // A missing required positional and an unknown argument are the caller's protocol mistakes.
     let resp = s.request(8, "tools/call", json!({"name": "cat", "arguments": {"session": "a"}}));
@@ -576,9 +502,9 @@ fn malformed_numeric_args_are_invalid_params() {
     );
     assert!(!is_err, "{text}");
     // …and on the generated path, which renders it for clap without the `.0`.
-    let (text, is_err) = s.call_tool(9, "show", json!({"id": "a", "last": 20.0}));
+    let (text, is_err) = s.call_tool(9, "show", json!({"id": "alphasess", "last": 20.0}));
     assert!(!is_err, "{text}");
-    assert_eq!(text.trim(), "ARGV show a --last 20 --json", "{text}");
+    assert!(serde_json::from_str::<Value>(&text).is_ok(), "{text}");
 
     // Other tools route through the same guard (spot-check a long-poll's timeout).
     let resp = s.request(

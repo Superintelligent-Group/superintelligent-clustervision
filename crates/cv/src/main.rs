@@ -91,7 +91,10 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
         &["prune", "rewind", "distill", "adopt", "splice", "port", "resume"],
     ),
     ("Export", &["export", "dataset", "pack"]),
-    ("Fleet & live", &["task", "scry", "watch", "archive", "serve", "share"]),
+    (
+        "Fleet & live",
+        &["task", "scry", "watch", "archive", "serve", "mcp", "share"],
+    ),
     (
         "System",
         &["index", "config", "schema", "formats", "recipes", "hooks", "hook"],
@@ -920,6 +923,10 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
+    /// The MCP server (stdio JSON-RPC): every Read/Reshape/Export/System command as a tool, built
+    /// from this binary's own clap tree, plus `await_omen`, `observe_stream` and the task tools.
+    /// Register it with `claude mcp add clustervision -- /abs/path/to/cv mcp`.
+    Mcp,
     /// Redact a session and emit a single self-contained HTML artifact anyone can open.
     Share {
         id: String,
@@ -1359,6 +1366,7 @@ fn run() -> Result<()> {
             json,
         } => doctor::cmd_doctor(id, harness, recent, json),
         Cmd::Task { action } => task::cmd_task(action),
+        Cmd::Mcp => cmd::mcp::cmd_mcp(&build_cli()),
         Cmd::Watch {
             interval,
             harness,

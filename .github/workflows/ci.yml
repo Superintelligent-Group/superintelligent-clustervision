@@ -50,7 +50,7 @@ jobs:
       # the manual could, and did (a `formats` tool that is really `formats_census`/`formats_check`;
       # no `task_stats`).
       - name: Manual names exist
-        run: tools/check-manual-names.sh target/debug/cv target/debug/cv-mcp
+        run: tools/check-manual-names.sh target/debug/cv
 
       - name: Build cv-core for wasm config (no default features)
         run: cargo build -p clustervision-core --no-default-features

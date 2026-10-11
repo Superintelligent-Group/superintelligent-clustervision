@@ -1,6 +1,6 @@
 [package]
 name = "cv-mcp"
-description = "MCP server exposing clustervision — lets a running agent search and read other agents' sessions (this project, across time, across harnesses)."
+description = "Deprecated shim: the clustervision MCP server is `cv mcp` now; this execs it for one release."
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -15,10 +15,3 @@ name = "cv-mcp"
 path = "src/main.rs"
 
 [dependencies]
-cv-core = { path = "../cv-core", version = "0.14", package = "clustervision-core" }
-serde.workspace = true
-serde_json.workspace = true
-anyhow.workspace = true
-chrono.workspace = true
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
-regex = "1"

@@ -15,6 +15,7 @@
 - The Claude emitter owns resumability: dangling `parentUuid` re-linked, unanswered `tool_use` dropped, one sidechain identity — for `distill`, `splice`, `port` and `pack` alike; `emit_verified` asserts it.
 - `cv distill`'s pack shows a trailing call that never got its result (the lane stopped mid-call); the emitted session still drops it.
 - `cv distill` token estimates count bytes (not chars) at its 2.4/token, a call's `input` only and encrypted thinking: one estimator with `doctor`.
+- **`cv-mcp` is `cv mcp`**: the roster comes from the in-process clap tree (no `$CV_BIN`, no stale `cv` on PATH); `cv-mcp` is a one-release shim. No tokio.
 - **`cvd` is `cv archive sync|ls|path`, `cv watch`, `cv serve`**; `cvd` is a one-release shim that execs `cv`. `$CVD_TOKEN` is `$CV_SERVE_TOKEN`.
 - **`cv task serve` is gone**: `cv serve` carries the inbox at `/inbox` (`/` without `--web`) under its Host/CORS/token model; writes must be JSON from a local origin.
 - Desktop app: the ten `local_*` commands are one `api(path, query)` over the server's read API; `cvd/tests/parity.rs` goes (both doors call the same functions).

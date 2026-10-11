@@ -13,6 +13,8 @@ pub(crate) mod events;
 pub(crate) mod formats;
 pub(crate) mod hooks;
 pub(crate) mod live;
+pub(crate) mod mcp;
+pub(crate) mod mcp_tools;
 pub(crate) mod orchestrate;
 pub(crate) mod pack;
 pub(crate) mod port;

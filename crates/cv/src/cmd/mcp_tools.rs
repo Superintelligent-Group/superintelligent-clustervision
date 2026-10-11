@@ -2,27 +2,26 @@
 //!
 //! The `cv` CLI is the single source of truth for what cv can do. Rather than hand-copying its
 //! surface into `json!` literals — where names, flags, harness lists and help text drift the
-//! moment the CLI moves — cv-mcp shells out to `cv schema --commands --json` **once at startup**
-//! and builds one MCP tool per command from clap's own introspection.
+//! moment the CLI moves — `cv mcp` builds one MCP tool per command from the **in-process** clap
+//! tree, through the same `commands_json` that `cv schema --commands --json` prints. There is no
+//! second binary to find, so the roster cannot skew from the CLI by construction.
 //!
 //! - **Which commands.** Everything clap shows under the **Read**, **Reshape**, **Export** and
-//!   **System** groups. `Fleet & live` (`task`, `scry`, `share`) is excluded: those have
-//!   hand-written MCP tools with long-poll/append semantics a subprocess can't offer.
-//! - **Which binary.** `$CV_BIN`, else a `cv` sitting next to the running `cv-mcp`, else `cv` on
-//!   `PATH`; the first candidate whose schema dump parses wins (see [`locate_cv`]).
-//! - **Calls** run `cv <command> <args…> --json` (the `--json` only for commands that have the
-//!   flag) and return stdout. A non-zero exit becomes a tool error carrying stderr.
+//!   **System** groups. `Fleet & live` is excluded: its MCP tools are the hand-written ones.
+//! - **Calls** run this same executable as `cv <command> <args…> --json` (the `--json` only for
+//!   commands that have the flag) and return stdout. A non-zero exit becomes a tool error
+//!   carrying stderr. (A subprocess, not a function call: every command prints to stdout.)
 //! - **Windows.** `show` is the one command whose MCP defaults differ from the CLI's: with no
 //!   window selector it gets `--last 50 --max-bytes 200000`, so a full transcript is never what an
 //!   agent accidentally pulls into its context.
 //!
-//! If the dump fails (no `cv`, an old `cv`, unparseable JSON) the failure is logged to stderr and
-//! the server still serves the hand-written tools.
 
 use anyhow::{anyhow, Context as _, Result};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use super::mcp::InvalidParams;
 
 /// The command groups that become MCP tools. `Fleet & live` is deliberately absent.
 const TOOL_GROUPS: [&str; 4] = ["Read", "Reshape", "Export", "System"];
@@ -97,27 +96,24 @@ impl CommandSpec {
     }
 }
 
-/// The generated half of the tool registry: a located `cv` binary plus the commands it advertises.
+/// The generated half of the tool registry: this executable plus the commands it advertises.
 pub(crate) struct CliTools {
     bin: PathBuf,
     commands: Vec<CommandSpec>,
 }
 
 impl CliTools {
-    /// Find a `cv`, dump its command tree, and keep the commands in the four tool groups.
-    /// Errors (rather than panicking or exiting) so `main` can degrade to the hand-written tools.
-    pub fn discover() -> Result<CliTools> {
-        let (bin, dump) = locate_cv()?;
-        let all: Vec<CommandSpec> = serde_json::from_str(&dump).context("parsing `cv schema --commands --json`")?;
+    /// The commands of the in-process clap tree in the four tool groups, run through this
+    /// executable.
+    pub fn from_tree(cli: &clap::Command) -> Result<CliTools> {
+        let all: Vec<CommandSpec> =
+            serde_json::from_value(super::schema::commands_json(cli)).context("reading the clap tree")?;
         let commands = select_tool_commands(all);
         if commands.is_empty() {
-            anyhow::bail!("`cv schema --commands --json` listed no Read/Reshape/Export/System commands");
+            anyhow::bail!("the clap tree has no Read/Reshape/Export/System commands");
         }
+        let bin = std::env::current_exe().context("locating this executable")?;
         Ok(CliTools { bin, commands })
-    }
-
-    pub fn bin(&self) -> &Path {
-        &self.bin
     }
 
     pub fn commands(&self) -> &[CommandSpec] {
@@ -172,67 +168,6 @@ fn select_tool_commands(all: Vec<CommandSpec>) -> Vec<CommandSpec> {
             !(has_children && c.args.is_empty())
         })
         .collect()
-}
-
-/// Locate a `cv` binary and return it with its command-tree dump.
-///
-/// Order: `$CV_BIN` (explicit wins outright), then a `cv` beside the running `cv-mcp` — the pair
-/// is built and shipped together, so the sibling is the matching version — then `cv` on `PATH`.
-/// A candidate counts only if it actually answers `schema --commands --json`, so an ancient `cv`
-/// earlier in the list can't shadow a good one later.
-fn locate_cv() -> Result<(PathBuf, String)> {
-    let exe_name = if cfg!(windows) { "cv.exe" } else { "cv" };
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let explicit = match std::env::var_os("CV_BIN").filter(|v| !v.is_empty()) {
-        Some(v) => {
-            candidates.push(PathBuf::from(v));
-            true
-        }
-        None => false,
-    };
-    if let Ok(me) = std::env::current_exe() {
-        if let Some(dir) = me.parent() {
-            candidates.push(dir.join(exe_name));
-        }
-    }
-    candidates.push(PathBuf::from(exe_name)); // PATH lookup
-
-    let mut errors = Vec::new();
-    for (i, cand) in candidates.iter().enumerate() {
-        match schema_dump(cand) {
-            Ok(dump) => return Ok((cand.clone(), dump)),
-            Err(e) => {
-                // An explicit `$CV_BIN` that does not work is a mistake worth hearing about: falling
-                // through to a sibling or `PATH` silently would hand back a DIFFERENT binary than
-                // the one that was asked for, which is exactly the kind of surprise that costs an
-                // afternoon when you set it to test one build.
-                if i == 0 && explicit {
-                    eprintln!(
-                        "cv-mcp: $CV_BIN is set but unusable ({}: {e:#}); falling back",
-                        cand.display()
-                    );
-                }
-                errors.push(format!("{}: {e:#}", cand.display()));
-            }
-        }
-    }
-    Err(anyhow!("no usable `cv` binary ({})", errors.join("; ")))
-}
-
-/// `<bin> schema --commands --json`, or an error explaining why that candidate is out.
-fn schema_dump(bin: &Path) -> Result<String> {
-    let out = std::process::Command::new(bin)
-        .args(["schema", "--commands", "--json"])
-        .output()
-        .context("spawn failed")?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "exited {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +398,7 @@ fn scalar(key: &str, v: &Value) -> Result<String> {
 }
 
 fn invalid(msg: String) -> anyhow::Error {
-    crate::InvalidParams(msg).into()
+    InvalidParams(msg).into()
 }
 
 #[cfg(test)]
@@ -632,14 +567,14 @@ mod tests {
     #[test]
     fn a_missing_required_positional_is_an_invalid_param() {
         let e = build_argv(&cat(), &json!({"session": "abc"})).unwrap_err();
-        assert!(e.downcast_ref::<crate::InvalidParams>().is_some(), "{e}");
+        assert!(e.downcast_ref::<InvalidParams>().is_some(), "{e}");
         assert!(format!("{e}").contains("tool_use_id"), "{e}");
     }
 
     #[test]
     fn an_unknown_argument_is_rejected_rather_than_silently_dropped() {
         let e = build_argv(&show(), &json!({"id": "a", "limit": 5})).unwrap_err();
-        assert!(e.downcast_ref::<crate::InvalidParams>().is_some(), "{e}");
+        assert!(e.downcast_ref::<InvalidParams>().is_some(), "{e}");
         assert!(format!("{e}").contains("limit"), "{e}");
         // …but an echoed `json` is tolerated, since the wrapper supplies it anyway.
         assert!(build_argv(&show(), &json!({"id": "a", "last": 1, "json": true})).is_ok());
@@ -648,6 +583,6 @@ mod tests {
     #[test]
     fn a_flag_given_a_non_boolean_is_an_invalid_param() {
         let e = build_argv(&show(), &json!({"id": "a", "last": 1, "subagents": "yes"})).unwrap_err();
-        assert!(e.downcast_ref::<crate::InvalidParams>().is_some(), "{e}");
+        assert!(e.downcast_ref::<InvalidParams>().is_some(), "{e}");
     }
 }
