@@ -62,6 +62,9 @@ pub struct Event {
     pub target: Option<String>,
     /// Small context, capped at [`DETAIL_MAX`] chars (e.g. the head of an error result).
     pub detail: Option<String>,
+    /// The first row of its `tool_use` block. One call can yield several rows (a patch sent through
+    /// the shell is a `command` row plus a `file_edit` per file); counting calls counts these.
+    pub call: bool,
 }
 
 /// A [`MessageSink`] that classifies each message's tool blocks into [`Event`]s as it streams past.
@@ -120,7 +123,7 @@ fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<E
     for b in &m.content {
         match b {
             Block::ToolUse { name, input, .. } => {
-                for (kind, target) in classify_tool(name, input, cwd) {
+                for (i, (kind, target)) in classify_tool(name, input, cwd).into_iter().enumerate() {
                     out.push(Event {
                         msg_idx,
                         ts,
@@ -128,6 +131,7 @@ fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<E
                         tool: Some(name.clone()),
                         target,
                         detail: None,
+                        call: i == 0,
                     });
                 }
             }
@@ -151,6 +155,7 @@ fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<E
                     tool: tool_name.clone(),
                     target: None,
                     detail,
+                    call: false,
                 });
             }
             _ => {}

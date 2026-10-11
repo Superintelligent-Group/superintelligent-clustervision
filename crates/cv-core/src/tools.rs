@@ -45,8 +45,9 @@ pub struct ToolHistogram {
 }
 
 impl ToolHistogram {
-    /// Fold a slice of classified [`Event`]s into a histogram. `tool_use`-derived rows
-    /// (`file_edit`/`file_read`/`command`/`tool`) increment their tool's tally; `error` rows
+    /// Fold a slice of classified [`Event`]s into a histogram. A tool's `calls` counts its
+    /// `tool_use` blocks ([`Event::call`]), as `cv doctor` does; the kind counts count rows, so a
+    /// three-file patch through the shell is one call, one command and three edits. `error` rows
     /// increment the error count for their tool (or the unknown-tool error total).
     pub fn from_events(evs: &[Event]) -> Self {
         let mut h = ToolHistogram::default();
@@ -61,8 +62,10 @@ impl ToolHistogram {
                 kind => {
                     let Some(name) = &e.tool else { continue };
                     let c = h.tools.entry(name.clone()).or_default();
-                    c.calls += 1;
-                    h.total_calls += 1;
+                    if e.call {
+                        c.calls += 1;
+                        h.total_calls += 1;
+                    }
                     match kind {
                         "file_edit" => c.edits += 1,
                         "file_read" => c.reads += 1,
@@ -346,6 +349,26 @@ mod tests {
         assert_eq!(ranked[0].0, "Bash");
         assert_eq!(ranked[1].0, "Edit");
         assert_eq!(ranked[2].0, "Read");
+    }
+
+    /// A tool's `calls` is its `tool_use` blocks, whatever its rows: a three-file patch through
+    /// the shell and through `apply_patch` are one call each, with every file still an edit.
+    #[test]
+    fn a_multi_file_patch_is_one_call() {
+        let patch = "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** Add File: b.rs\n+z\n\
+                     *** Delete File: c.rs\n*** End Patch";
+        let msgs = [asst(vec![
+            tool_use("shell", json!({"command": ["apply_patch", patch]})),
+            tool_use("apply_patch", json!({"input": patch})),
+            tool_use("shell", json!({"command": "ls"})),
+        ])];
+        let blocks = msgs[0].content.len();
+        let h = ToolHistogram::from_messages(msgs.iter(), Some(std::path::Path::new("/repo")));
+        assert_eq!(h.total_calls, blocks);
+        let shell = &h.tools["shell"];
+        assert_eq!((shell.calls, shell.commands, shell.edits), (2, 2, 3));
+        let ap = &h.tools["apply_patch"];
+        assert_eq!((ap.calls, ap.edits), (1, 3));
     }
 
     #[test]
