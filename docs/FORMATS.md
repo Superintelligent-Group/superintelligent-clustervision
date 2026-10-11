@@ -483,10 +483,13 @@ here means "unchanged across everything we have", not "unchanged since the file 
   - `tmp/<project>/<sessionId>/plans/*.md` (plan mode), `.../tracker/*.json` (task tracker) and
     `tmp/background-processes/background-<pid>.log` are written beside the recordings; cv reads none.
 
-## Hermes (Nous) — `~/.hermes/state.db` (SQLite, `SCHEMA_VERSION` 30 as of 2026-09-19; `$HERMES_HOME` overrides; per-profile `profiles/<name>/state.db`)
+## Hermes (Nous) — `~/.hermes/state.db` (SQLite, `SCHEMA_VERSION` 31 as of 0.21.6; `$HERMES_HOME` overrides; per-profile `profiles/<name>/state.db`)
 
-Re-verified 2026-09-19 at `6d8a8bebf7` (`~/pug/hermes-agent`). The checked column/`display_kind`/role
-vocabulary is `formats/hermes.toml`.
+Re-verified 2026-10-11 at tag `v0.21.6` (`818c13be1d`, schema 31), also diffed `v2026.8.31`
+(`29112bef09`, schema 26, the Homebrew release) against the 2026-09-19 pin `6d8a8bebf7` (schema 30).
+Both releases have a real-model corpus in `crates/cv-core/tests/corpus/hermes/` (generator:
+`tools/harness-corpus/hermes/`, affordance map: its `AFFORDANCES.md`). The checked
+column/`display_kind`/role vocabulary is `formats/hermes.toml`.
 
 - `sessions` + `messages` tables (OpenAI-shaped rows; roles `user|assistant|tool|system`). Multimodal content
   uses a `\x00json:` sentinel prefix. Reasoning spans several columns (`reasoning`, `reasoning_content`,
@@ -517,6 +520,27 @@ vocabulary is `formats/hermes.toml`.
   `parent_session_id` whose rows were not merged.
 - **Imports:** `sessions.origin_json.imported_from{tool: claude-code|codex-cli, …}` marks a foreign
   transcript Hermes ingested; every message of such a session carries `origin: import`.
+- **26 → 30 → 31** (2026.8.31 → pin → 0.21.6). `sessions`: + `compression_recovery_deadline`,
+  `transport_profile`, `tool_names` (≤30); + `compression_overload_streak` (28), `created_source`
+  (29, the immutable creating source; `source` is retaggable), `auto_archived` (30). `messages`: +
+  `display_identity`, `display_order` (≤30); + `message_uid` (one durable id shared by every copy of
+  a logical message: compaction generations, rotation children, branch copies), `absorbed_message_uids`
+  (a merged user row's absorbed uids), `tool_call_uids` (assistant row: `{provider call id: uid}`)
+  and `tool_call_uid` (tool row) — provider call ids repeat, these do not (31). New table
+  `conversation_generations` (gateway cache scope); `async_delegations.origin_session_id`. cv carries
+  the v29–v31 columns in `extra["hermes"]` (session bag for `created_source` / `auto_archived`).
+- **`display_kind = 'failed_turn'`** (0.21): the assistant row Hermes writes to close a turn that got no
+  reply ("Your request was not processed…" / "This turn did not complete…"). It is `kind: error`.
+  The pin writes the same text untyped; Hermes's reader matches the exact text, and so does cv.
+  2026.8.31 writes nothing (the user row is left unanswered).
+- **`async_delegation_complete`** arrives as a **`user`**-role row (0.21.6 corpus): still a System
+  `subagent_return`.
+- Not rows of their own: a `/model` switch is a `[Note: model was just switched …]` prefix in the next
+  user row's `api_content`; an image sent from one-shot mode is a `[Image attached at: <path>]` text
+  line; an `@file:` reference is expanded inline under `--- Attached Context ---`. 0.21.6 one-shot
+  sessions have `source = 'oneshot'` (was `cli`), and 0.21 defers most tools behind
+  `tool_search` / `tool_describe` / `tool_call` (a deferred or MCP tool runs as `tool_call{name,
+  arguments}`; only the tool row's `tool_name` names the real tool).
 
 ## OpenClaw — `$OPENCLAW_STATE_DIR` or `~/.openclaw/agents/<agentId>/`
 

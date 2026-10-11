@@ -112,25 +112,43 @@ const OPTIONAL_MSG_COLS: &[&str] = &[
     "api_content",
     "display_kind",
     "display_metadata",
+    // v31 (0.21.6, `hermes_state_identity.py`): the durable per-message id every copy of a logical
+    // message keeps (compaction generations, rotation children, branch copies), the uids a merged
+    // user row absorbed, and per-occurrence tool-call identity (provider ids repeat).
+    "message_uid",
+    "absorbed_message_uids",
+    "tool_call_uids",
+    "tool_call_uid",
 ];
 
 /// What a `display_kind` Hermes stamped on a row IT injected (not typed by the human) makes the
 /// turn: a hidden compaction handoff / diagnostic, auto-continue nudges and process notices are
 /// notices; a model switch is a [`MessageKind::ModelChange`]; a delegation delivery is the
-/// sub-agent's return. All read as System turns so titles, first-prompt previews and turn counts
-/// stay honest. `None` for `steer` (a human mid-turn message: a prompt) and for kinds Hermes has
+/// sub-agent's return; a `failed_turn` (the boundary row Hermes writes when a turn ends without a
+/// reply, `agent/turn_failure_copy.py`, 0.21+) is an [`MessageKind::Error`]. All read as System
+/// turns so titles, first-prompt previews and turn counts stay honest. `None` for `steer` (a human mid-turn message: a prompt) and for kinds Hermes has
 /// not documented (`personality_switch`, …), which keep their row role and carry the kind in
 /// `extra["hermes"]["display_kind"]` only.
 fn harness_display_kind(display_kind: &str) -> Option<(MessageKind, Origin)> {
     match display_kind {
         "model_switch" => Some((MessageKind::ModelChange, Origin::Harness)),
         "async_delegation_complete" => Some((MessageKind::SubagentReturn, Origin::Subagent)),
+        "failed_turn" => Some((MessageKind::Error, Origin::Harness)),
         "hidden" | "auto_continue" | "process_complete" | "internal_notification" => {
             Some((MessageKind::Notice, Origin::Harness))
         }
         _ => None,
     }
 }
+
+/// The two notices Hermes writes as the closing assistant row of a turn that got no reply
+/// (`FAILED_TURN_NOTICE` / `PARTIAL_FAILED_TURN_NOTICE`). Stores from before the row was typed
+/// `display_kind = 'failed_turn'` carry only the text; Hermes's own reader
+/// (`untyped_failed_turn_display_kind`) matches it exactly, so a reply quoting it stays a reply.
+const FAILED_TURN_NOTICES: &[&str] = &[
+    "Your request was not processed. Send it again if you still want me to carry it out.",
+    "This turn did not complete. Some actions may already have run; verify their effects before resending.",
+];
 
 /// The `model_config` lineage markers (`_branched_from` / `_reset_from` / `_delegate_from`,
 /// `hermes_state_common.py:151-216`).
@@ -165,23 +183,27 @@ impl Hermes {
         let home = std::env::var_os("HERMES_HOME")
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".hermes")));
+        match home {
+            Some(home) => Self::with_home(&home),
+            None => Hermes { dbs: Vec::new() },
+        }
+    }
+
+    /// An adapter over one Hermes home (what `HERMES_HOME` names): its top-level `state.db` and
+    /// every `profiles/<name>/state.db`. Tests and the corpus root it explicitly, never via env.
+    pub fn with_home(home: &Path) -> Self {
         let mut dbs = Vec::new();
-        if let Some(home) = home {
-            // Top-level DB (legacy / no-profile installs).
-            let top = home.join("state.db");
-            if top.exists() {
-                dbs.push(top);
-            }
-            // Every `profiles/<name>/state.db` — depth-1 read_dir, so pre-update
-            // `state-snapshots/**/state.db` are naturally skipped (never recurse).
-            if let Ok(rd) = std::fs::read_dir(home.join("profiles")) {
-                for e in rd.flatten() {
-                    let p = e.path().join("state.db");
-                    if p.exists() {
-                        dbs.push(p); // hermes-x, hermes-google, …
-                    }
-                }
-            }
+        // Top-level DB (legacy / no-profile installs).
+        let top = home.join("state.db");
+        if top.exists() {
+            dbs.push(top);
+        }
+        // Every `profiles/<name>/state.db` — depth-1 read_dir, so pre-update
+        // `state-snapshots/**/state.db` are naturally skipped (never recurse).
+        if let Ok(rd) = std::fs::read_dir(home.join("profiles")) {
+            let mut profiles: Vec<PathBuf> = rd.flatten().map(|e| e.path().join("state.db")).collect();
+            profiles.sort();
+            dbs.extend(profiles.into_iter().filter(|p| p.exists())); // hermes-x, hermes-google, …
         }
         Hermes { dbs }
     }
@@ -380,10 +402,15 @@ const SESSION_META_TEXT_COLS: &[&str] = &[
     "profile_name",
     "transport_profile",
     "git_repo_root",
+    // v29: the immutable source the row was created with (`source` is live routing state that later
+    // retags rewrite; Hermes checks both for kanban-owned worker transcripts).
+    "created_source",
 ];
 const SESSION_META_INT_COLS: &[&str] = &[
     // Listing flags (non-zero only, like the counters): the user tucked the session away or pinned it.
     "archived",
+    // v30: archived by the auto-archive sweep rather than by the user.
+    "auto_archived",
     "hidden",
     "pinned",
     "tool_call_count",
@@ -723,6 +750,10 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
                 api_content: get_str("api_content"),
                 display_kind: get_str("display_kind"),
                 display_metadata: get_str("display_metadata"),
+                message_uid: get_str("message_uid"),
+                absorbed_message_uids: get_str("absorbed_message_uids"),
+                tool_call_uids: get_str("tool_call_uids"),
+                tool_call_uid: get_str("tool_call_uid"),
             })
         })?;
 
@@ -910,6 +941,10 @@ struct MsgRow {
     api_content: Option<String>,
     display_kind: Option<String>,
     display_metadata: Option<String>,
+    message_uid: Option<String>,
+    absorbed_message_uids: Option<String>,
+    tool_call_uids: Option<String>,
+    tool_call_uid: Option<String>,
 }
 
 impl MsgRow {
@@ -940,7 +975,17 @@ impl MsgRow {
         };
         // Harness-injected rows (a hidden compaction handoff, auto-continue nudges, model-switch /
         // delegation / process notices) are System turns typed by what they are, never prompts.
-        if let Some((k, o)) = self.display_kind.as_deref().and_then(harness_display_kind) {
+        let untyped_failed_turn = self.display_kind.is_none()
+            && self.role == "assistant"
+            && self
+                .content
+                .as_deref()
+                .is_some_and(|c| FAILED_TURN_NOTICES.contains(&c.trim()));
+        let display_kind = self
+            .display_kind
+            .as_deref()
+            .or(untyped_failed_turn.then_some("failed_turn"));
+        if let Some((k, o)) = display_kind.and_then(harness_display_kind) {
             role = Role::System;
             kind = k;
             origin = o;
@@ -984,6 +1029,22 @@ impl MsgRow {
         if let Some(raw) = self.display_metadata.as_deref().filter(|s| !s.is_empty()) {
             let v = serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()));
             bag.insert("display_metadata".into(), v);
+        }
+        // v31 identity columns: plain strings stay strings, the JSON list/map columns are parsed.
+        for (key, raw, json) in [
+            ("message_uid", &self.message_uid, false),
+            ("tool_call_uid", &self.tool_call_uid, false),
+            ("absorbed_message_uids", &self.absorbed_message_uids, true),
+            ("tool_call_uids", &self.tool_call_uids, true),
+        ] {
+            if let Some(raw) = raw.as_deref().filter(|s| !s.is_empty()) {
+                let v = if json {
+                    serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+                } else {
+                    Value::String(raw.to_string())
+                };
+                bag.insert(key.into(), v);
+            }
         }
 
         // Per-message token_count → Usage. Hermes records a single combined count per message; we
@@ -1819,6 +1880,77 @@ mod tests {
         assert_eq!(smeta(&s)["git_repo_root"], "/work/proj");
         assert_eq!(smeta(&s)["profile_name"], "hermes-x");
         assert_nested_extra(&s);
+    }
+
+    #[test]
+    fn v31_identity_columns_and_v29_v30_session_columns_ride_in_extra() {
+        // 0.21.6 (schema 31) adds them by ALTER TABLE, as Hermes's reconcile does.
+        let conn = mk_conn("schema-v30.sql");
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN message_uid TEXT; \
+             ALTER TABLE messages ADD COLUMN absorbed_message_uids TEXT; \
+             ALTER TABLE messages ADD COLUMN tool_call_uids TEXT; \
+             ALTER TABLE messages ADD COLUMN tool_call_uid TEXT; \
+             ALTER TABLE sessions ADD COLUMN created_source TEXT; \
+             ALTER TABLE sessions ADD COLUMN auto_archived INTEGER NOT NULL DEFAULT 0;",
+        )
+        .unwrap();
+        insert_session(&conn, "s", None, None, 1000.0, None);
+        conn.execute_batch(
+            "UPDATE sessions SET created_source = 'oneshot', auto_archived = 1 WHERE id = 's'; \
+             INSERT INTO messages (session_id, role, content, timestamp, message_uid, absorbed_message_uids) \
+               VALUES ('s', 'user', 'hi', 1001.0, 'u1', '[\"u0\"]'); \
+             INSERT INTO messages (session_id, role, content, tool_calls, timestamp, message_uid, tool_call_uids) \
+               VALUES ('s', 'assistant', '', '[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"terminal\",\"arguments\":\"{}\"}}]', 1002.0, 'u2', '{\"call_1\":\"t1\"}'); \
+             INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp, message_uid, tool_call_uid) \
+               VALUES ('s', 'tool', 'ok', 'call_1', 'terminal', 1003.0, 'u3', 't1');",
+        )
+        .unwrap();
+        let s = parse_conn(&conn, &sref("s")).unwrap();
+        assert_eq!(bag(&s.messages[0])["message_uid"], "u1");
+        assert_eq!(bag(&s.messages[0])["absorbed_message_uids"], serde_json::json!(["u0"]));
+        assert_eq!(bag(&s.messages[1])["tool_call_uids"]["call_1"], "t1");
+        assert_eq!(bag(&s.messages[2])["tool_call_uid"], "t1");
+        assert_eq!(smeta(&s)["created_source"], "oneshot");
+        assert_eq!(smeta(&s)["auto_archived"], 1);
+    }
+
+    #[test]
+    fn a_failed_turn_boundary_is_an_error_typed_or_not() {
+        // 0.21 types the boundary row `failed_turn`; earlier stores carry only its exact text, and a
+        // reply that merely quotes the notice stays a reply.
+        let conn = mk_conn("schema-v30.sql");
+        insert_session(&conn, "s", None, None, 1000.0, None);
+        let notice = FAILED_TURN_NOTICES[0];
+        for (content, kind) in [
+            (notice, Some("failed_turn")),
+            (FAILED_TURN_NOTICES[1], None),
+            ("I said: Your request was not processed.", None),
+        ] {
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, display_kind) VALUES ('s', 'assistant', ?1, 1001.0, ?2)",
+                rusqlite::params![content, kind],
+            )
+            .unwrap();
+        }
+        let s = parse_conn(&conn, &sref("s")).unwrap();
+        let kinds: Vec<(Role, MessageKind, Origin)> = s.messages.iter().map(|m| (m.role, m.kind, m.origin)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (Role::System, MessageKind::Error, Origin::Harness),
+                (Role::System, MessageKind::Error, Origin::Harness),
+                (Role::Assistant, MessageKind::Reply, Origin::Model),
+            ]
+        );
+        assert_eq!(bag(&s.messages[0])["display_kind"], "failed_turn");
+        assert!(
+            s.messages[1]
+                .extra
+                .get("hermes")
+                .is_none_or(|b| b.get("display_kind").is_none()),
+            "an inferred kind is not written back as a column value"
+        );
     }
 
     #[test]

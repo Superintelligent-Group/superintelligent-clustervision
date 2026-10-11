@@ -14,11 +14,22 @@ store = [
 
 [upstream]
 repo = "https://github.com/NousResearch/hermes-agent (~/pug/hermes-agent)"
-commit = "6d8a8bebf7"
-date = "2026-09-19"
+commit = "818c13be1d (tag v0.21.6, SCHEMA_VERSION 31); also diffed v2026.8.31 29112bef09 (26) and 6d8a8bebf7 (30)"
+date = "2026-10-11"
 
 [types]
 "role.user" = { status = "generic", note = "the `_` arm of into_message: user and anything unknown" }
+"source.oneshot" = { status = "generic", note = "0.21: `hermes chat -q` sessions (was `cli`); source rides in extra" }
+"tool.tool_call" = { status = "generic", note = "meta-tool that calls a deferred/MCP tool by name; the tool row's tool_name is the real one" }
+"column.message_uid" = { status = "handled", note = "v31 durable message id, extra[hermes]" }
+"column.absorbed_message_uids" = { status = "handled", note = "v31, extra[hermes]" }
+"column.tool_call_uids" = { status = "handled", note = "v31 per-occurrence tool-call ids, extra[hermes]" }
+"column.tool_call_uid" = { status = "handled", note = "v31, extra[hermes]" }
+"column.created_source" = { status = "handled", note = "v29, session extra" }
+"column.auto_archived" = { status = "handled", note = "v30, session extra" }
+"column.compression_overload_streak" = { status = "ignored", note = "v28 compaction scheduler state" }
+"column.compression_recovery_deadline" = { status = "ignored", note = "v28 compaction scheduler state" }
+"table.conversation_generations" = { status = "ignored", note = "gateway prompt-cache generation counter" }
 "display_kind.steer" = { status = "generic", note = "no harness_display_kind arm: stays a user Prompt, kind kept in extra[hermes]" }
 "column.active" = { status = "handled", note = "visibility" }
 "column.compacted" = { status = "handled", note = "visibility" }

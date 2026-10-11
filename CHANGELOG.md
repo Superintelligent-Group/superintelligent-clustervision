@@ -33,6 +33,7 @@
 - OpenClaw 2026.10: zstd-compressed transcript events are read; before, every event of 1 KiB or more (most tool results) was silently dropped.
 - OpenClaw: sub-agent sessions name their parent (`lineage.parent`); cron and sub-agent prompts get scheduler/subagent origin; sub-agent announces are `subagent_return`.
 - OpenClaw corpus: real stores from 2026.1.29 (JSONL) and 2026.10.1 (sqlite), re-read by the golden test.
+- Hermes 0.21: a `failed_turn` row (a turn that got no reply) reads as an error; v29–v31 identity and source columns ride in `extra.hermes`.
 
 ## 0.15.1 — 2026-10-11
 
