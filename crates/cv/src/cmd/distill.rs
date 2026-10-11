@@ -62,19 +62,8 @@ fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
     let p = Path::new(spec);
     let (r, adapter) = if p.is_file() {
         let h = harness.unwrap_or(Harness::Claude);
-        let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("session").to_string();
-        let r = SessionRef {
-            id,
-            harness: h,
-            path: p.to_path_buf(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
         let a = cv_core::harness::for_harness(h).with_context(|| format!("no adapter for {h}"))?;
-        (r, a)
+        (SessionRef::from_path(p, h), a)
     } else {
         resolve(spec, harness)?
     };

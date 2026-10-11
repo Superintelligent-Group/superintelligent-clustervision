@@ -816,6 +816,31 @@ pub struct SessionRef {
     pub message_count: usize,
 }
 
+impl SessionRef {
+    /// A ref for a transcript named by path alone: the id is the file stem, the harness is the
+    /// caller's, and nothing else is known (no cwd/title/timestamps, `message_count` 0). The one
+    /// spelling for "read this file as a session" — a CLI given a path, a test over a fixture, a
+    /// reshape verb opening the file it just wrote.
+    pub fn from_path(path: impl Into<PathBuf>, harness: Harness) -> SessionRef {
+        let path: PathBuf = path.into();
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session")
+            .to_string();
+        SessionRef {
+            id,
+            harness,
+            path,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        }
+    }
+}
+
 /// A short human label from a title and/or first-user-text fallback — the projection
 /// [`Session::label`] makes, exposed so streaming consumers can build it without a whole `Session`.
 pub fn label_from(title: Option<&str>, first_user_text: Option<&str>) -> String {

@@ -199,16 +199,7 @@ pub(crate) fn cmd_rewind(
     let path = std::path::Path::new(id);
     let r = if path.is_file() {
         // A transcript path (a sub-agent file straight from `subagents/`, or a copy elsewhere).
-        cv_core::ir::SessionRef {
-            id: path.file_stem().and_then(|s| s.to_str()).unwrap_or(id).to_string(),
-            harness: Harness::Claude,
-            path: path.to_path_buf(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        cv_core::ir::SessionRef::from_path(path, Harness::Claude)
     } else {
         resolve(id, parse_harness(&harness)?)?.0
     };

@@ -120,16 +120,9 @@ fn session(dir: &Path) -> PathBuf {
 }
 
 fn sref(path: &Path, id: &str) -> SessionRef {
-    SessionRef {
-        id: id.into(),
-        harness: Harness::Claude,
-        path: path.to_path_buf(),
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        message_count: 0,
-    }
+    let r = SessionRef::from_path(path, Harness::Claude);
+    assert_eq!(r.id, id, "a fixture's id is its file stem");
+    r
 }
 
 /// The stream index (the `cv show --range` counting) of the message with this uuid.
