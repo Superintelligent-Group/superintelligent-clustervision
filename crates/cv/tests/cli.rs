@@ -1543,7 +1543,7 @@ fn board_is_removed_with_a_pointer() {
 // ───────────────────────── cv task ergonomics (0.12.0) ─────────────────────────
 
 /// `--body-file`, `--tags`/`list --tag`, `--blocked-by`/`--blocks` with the blocked marker and
-/// `show`'s relation lines, `note --file`, `--tsv`, `--wide`.
+/// `show`'s relation lines, `note --file`, `--tsv`.
 #[test]
 fn task_open_relations_tags_and_file_bodies() {
     let w = World::new("task-ergo");
@@ -1636,11 +1636,12 @@ fn task_open_relations_tags_and_file_bodies() {
     assert_eq!(cells[5], "DEPENDENT: needs the foundation");
     assert_eq!(cells[6], a);
 
-    // wide: a second line with tags, blockers and the body's first line.
-    let (out, _) = w.cv_ok(&["task", "list", "--wide"]);
+    // `--wide` went away in 0.15.0; the flag points at `show --brief`.
+    let (ok, code, _, err) = w.cv(&["task", "list", "--wide"]);
+    assert!(!ok && code == 2, "{err}");
     assert!(
-        out.contains("#lean · blocked by ") && out.contains("[open] · # The brief"),
-        "{out}"
+        err.contains("removed in 0.15.0") && err.contains("show <id> --brief"),
+        "{err}"
     );
 
     // note --file.

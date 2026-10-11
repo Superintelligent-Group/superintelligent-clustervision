@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use cv_core::ir::truncate;
 use cv_core::sanitize::sanitize_line;
-use cv_core::task::{self, TaskEventKind, TaskProjection, TaskReadModel, TaskRow, TaskStore};
+use cv_core::task::{self, TaskEventKind, TaskReadModel, TaskRow, TaskStore};
 
 use super::task_ops::{self, DecisionSpec, EventFilter, Since};
 use crate::util::{fmt_local, usage};
@@ -215,8 +215,8 @@ pub(crate) enum TaskCmd {
         /// blocked_by — no alignment, no truncation.
         #[arg(long, conflicts_with = "json")]
         tsv: bool,
-        /// Two lines per task: the row, then tags · repo · blockers · the body's first line.
-        #[arg(long, conflicts_with_all = ["json", "tsv"])]
+        // Removed in 0.15.0 — hidden so the old flag errors with a pointer (exit 2).
+        #[arg(long, hide = true)]
         wide: bool,
     },
     /// Show one task (id may be a unique prefix).
@@ -684,42 +684,6 @@ fn task_row_tsv(r: &TaskRow, now: DateTime<Utc>) -> String {
     .join("\t")
 }
 
-/// `--wide`: the row, then a second line with tags · repo · blockers · the body's first line.
-fn task_row_wide(t: &TaskProjection, model: &TaskReadModel, now: DateTime<Utc>, plen: usize) -> String {
-    let mut out = task_row(&TaskRow::full(t), now, plen, task::is_blocked(model, t));
-    let mut facts: Vec<String> = Vec::new();
-    if !t.tags.is_empty() {
-        facts.push(format!("#{}", t.tags.join(" #")));
-    }
-    if let Some(repo) = &t.repo {
-        facts.push(
-            repo.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        );
-    }
-    if !t.blocked_by.is_empty() {
-        let names: Vec<String> = t
-            .blocked_by
-            .iter()
-            .map(|b| match model.tasks.get(b) {
-                Some(bt) => format!("{} [{}]", prefix(b, plen), task::effective_display(bt)),
-                None => format!("{} [unknown]", prefix(b, plen)),
-            })
-            .collect();
-        facts.push(format!("blocked by {}", names.join(", ")));
-    }
-    let body = t.body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-    if !body.is_empty() {
-        facts.push(truncate(&sanitize_line(body), 160));
-    }
-    if !facts.is_empty() {
-        out.push_str("\n    ");
-        out.push_str(&sanitize_line(&facts.join(" · ")));
-    }
-    out
-}
-
 pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
     match action {
         TaskCmd::Open {
@@ -798,6 +762,12 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             tsv,
             wide,
         } => {
+            if wide {
+                return usage(
+                    "`cv task list --wide` was removed in 0.15.0 — `cv task show <id> --brief` has the tags, \
+                     blockers and body line per task; `list --tsv` has the blockers for scripts",
+                );
+            }
             let outcome = replay_loud()?;
             let now = Utc::now();
             let touched_since = scope_window(all, since.as_deref(), now)?;
@@ -846,14 +816,10 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             }
             let plen = prefix_len(&outcome.model);
             for t in &tasks {
-                if wide {
-                    println!("{}", task_row_wide(t, &outcome.model, now, plen));
-                } else {
-                    println!(
-                        "{}",
-                        task_row(&TaskRow::full(t), now, plen, task::is_blocked(&outcome.model, t))
-                    );
-                }
+                println!(
+                    "{}",
+                    task_row(&TaskRow::full(t), now, plen, task::is_blocked(&outcome.model, t))
+                );
             }
             if tasks.is_empty() {
                 println!("(no matching tasks)");

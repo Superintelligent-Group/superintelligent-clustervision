@@ -121,8 +121,7 @@ the default, and a second non-provisional resolve are all refused
   without another event. `list` marks blocked rows with `⊘`; `show` prints `blocked by:` (with
   each blocker's state) and `blocks:` (the reverse).
 - **`list --tsv`** prints one tab-separated row per task — full id, state, assignee, repo
-  basename, age, title, blocked_by — for `cut`/`awk`/`sort`; **`list --wide`** adds a second line
-  per task with its tags, repo, blockers and the body's first line.
+  basename, age, title, blocked_by — for `cut`/`awk`/`sort`.
 
 Tags and relations are events like everything else (`tagged`, `blocked_by`), folded by the
 reducer into `tags` / `blocked_by` on the projection; both are omitted from the wire when empty,
