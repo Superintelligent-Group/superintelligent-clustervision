@@ -19,10 +19,6 @@ version:
 	@echo "installed: $$(cv --version)"
 	@echo "checkout:  $$(git rev-parse --short=12 HEAD)$$(git status --porcelain | grep -q . && echo -dirty)"
 
-## The suites a change to the CLI, the Claude adapter or the task store must keep green.
+## CI's gate, exactly.
 test:
-	$(CARGO) test -p clustervision-core --lib
-	$(CARGO) test -p clustervision-core --test wire_golden
-	$(CARGO) test -p clustervision --bin cv
-	$(CARGO) test -p clustervision --test cli --test forest --test orchestrate
-	$(CARGO) test -p cv-mcp --test protocol
+	$(CARGO) test --workspace
