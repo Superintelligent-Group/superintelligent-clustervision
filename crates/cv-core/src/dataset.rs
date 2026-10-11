@@ -14,7 +14,6 @@
 //! models, and a downstream filter can strip it if a given run wants answer-only SFT.
 
 use crate::ir::{Block, Message, MessageKind, Role, Session};
-use serde_json::{json, Value};
 
 /// The training-role label for a message, or `None` when the turn was never part of what the model
 /// saw or said (a harness notice, an API error, a compaction boundary, a carrier record, …) and so
@@ -65,58 +64,8 @@ fn training_role(m: &Message, chat: bool) -> Option<&'static str> {
     })
 }
 
-/// Serialize a session as a ChatML record. Returns `None` if it has no non-empty turns.
-pub fn to_chatml(session: &Session) -> Option<Value> {
-    let resolver = session.resolver();
-    let messages: Vec<Value> = session
-        .messages
-        .iter()
-        .filter_map(|m| {
-            let role = training_role(m, true)?;
-            let content = render_blocks(&m.content, &resolver);
-            if content.trim().is_empty() {
-                return None;
-            }
-            Some(json!({ "role": role, "content": content }))
-        })
-        .collect();
-    if messages.is_empty() {
-        return None;
-    }
-    Some(json!({ "messages": messages }))
-}
-
-/// Serialize a session as a ShareGPT record. Returns `None` if it has no non-empty turns.
-pub fn to_sharegpt(session: &Session) -> Option<Value> {
-    let resolver = session.resolver();
-    let conversations: Vec<Value> = session
-        .messages
-        .iter()
-        .filter_map(|m| {
-            let from = training_role(m, false)?;
-            let value = render_blocks(&m.content, &resolver);
-            if value.trim().is_empty() {
-                return None;
-            }
-            Some(json!({ "from": from, "value": value }))
-        })
-        .collect();
-    if conversations.is_empty() {
-        return None;
-    }
-    Some(json!({ "conversations": conversations }))
-}
-
 /// Chunk size for streaming a span's content into the JSONL writer (bounds peak per giant field).
 const SPAN_CHUNK: usize = 1 << 20; // 1 MiB
-
-/// Flatten one message's blocks into a single training-text string (materializing — used by the
-/// `Value`-building [`to_chatml`]/[`to_sharegpt`] and tests). Prefer [`write_chatml`] for export.
-fn render_blocks(blocks: &[Block], resolver: &crate::lazy::Resolver) -> String {
-    let mut out = String::new();
-    render_blocks_into(blocks, resolver, &mut |s| out.push_str(s));
-    out
-}
 
 /// Stream one message's blocks as training text to `emit`, resolving span content **in chunks** (so a
 /// giant field is never materialized whole). Byte-identical to the old `parts.join("\n\n")`: the same
@@ -252,7 +201,7 @@ fn render_blocks_impl(
     }
 }
 
-/// Whether a message renders to no training text (so [`to_chatml`]/[`write_chatml`] drop it) — the
+/// Whether a message renders to no training text (so [`write_record`] drops it) — the
 /// cheap, no-resolve predicate matching [`render_blocks_into`]'s emptiness (only empty/redacted text
 /// turns are empty; any tool/image/file block, or any span, makes it non-empty).
 fn message_is_empty(m: &Message) -> bool {
@@ -274,9 +223,8 @@ pub enum Format {
 
 /// Write `session` as one JSONL record (no trailing newline) **streaming** — content (incl. giant
 /// span fields) is rendered straight to `w` in chunks and JSON-escaped per chunk, so the whole record
-/// is never held in memory. Returns `false` (writing nothing) when the session has no non-empty turns
-/// — matching [`to_chatml`]'s `None`. With `redact`, each message is scrubbed (one materialized
-/// message at a time) before rendering.
+/// is never held in memory. Returns `false` (writing nothing) when the session has no non-empty turns.
+/// With `redact`, each message is scrubbed (one materialized message at a time) before rendering.
 pub fn write_record<W: std::io::Write>(
     session: &Session,
     w: &mut W,
@@ -344,11 +292,6 @@ pub fn write_record<W: std::io::Write>(
     Ok(true)
 }
 
-/// Convenience: stream a ChatML record. See [`write_record`].
-pub fn write_chatml<W: std::io::Write>(session: &Session, w: &mut W) -> std::io::Result<bool> {
-    write_record(session, w, Format::Chatml, None)
-}
-
 /// Write `s` to `w` as the *body* of a JSON string (no surrounding quotes), JSON-escaped exactly as
 /// `serde_json` would. Escaping is context-free, so escaping each chunk and concatenating equals
 /// escaping the whole — keeping streamed output byte-identical to a one-shot `serde_json::to_string`.
@@ -365,6 +308,7 @@ fn write_json_escaped<W: std::io::Write>(w: &mut W, s: &str) -> std::io::Result<
 mod tests {
     use super::*;
     use crate::ir::{Harness, Message};
+    use serde_json::{json, Value};
 
     fn msg(role: Role, blocks: Vec<Block>) -> Message {
         Message {
@@ -379,6 +323,14 @@ mod tests {
             kind: crate::ir::MessageKind::for_role(role),
             origin: crate::ir::Origin::for_role(role),
         }
+    }
+
+    /// One record through the streaming writer — the only production path — parsed back.
+    fn record(s: &Session, fmt: Format) -> Option<Value> {
+        let mut buf = Vec::new();
+        write_record(s, &mut buf, fmt, None)
+            .unwrap()
+            .then(|| serde_json::from_slice(&buf).unwrap())
     }
 
     fn session(messages: Vec<Message>) -> Session {
@@ -437,7 +389,7 @@ mod tests {
                 }],
             ),
         ]);
-        let v = to_chatml(&s).expect("non-empty");
+        let v = record(&s, Format::Chatml).expect("non-empty");
         let msgs = v["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "user");
@@ -449,9 +401,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_session_is_none() {
-        assert!(to_chatml(&session(vec![])).is_none());
-        assert!(to_chatml(&session(vec![msg(Role::User, vec![Block::Text { text: "  ".into() }])])).is_none());
+    fn empty_session_writes_nothing() {
+        assert!(record(&session(vec![]), Format::Chatml).is_none());
+        let blank = session(vec![msg(Role::User, vec![Block::Text { text: "  ".into() }])]);
+        assert!(record(&blank, Format::Chatml).is_none());
     }
 
     /// The per-block redacting renderer must produce exactly what "redact the whole session first,
@@ -521,7 +474,7 @@ mod tests {
     #[test]
     fn sharegpt_uses_from_value() {
         let s = session(vec![msg(Role::User, vec![Block::Text { text: "hi".into() }])]);
-        let v = to_sharegpt(&s).unwrap();
+        let v = record(&s, Format::ShareGpt).unwrap();
         assert_eq!(v["conversations"][0]["from"], "human");
         assert_eq!(v["conversations"][0]["value"], "hi");
     }

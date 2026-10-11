@@ -1095,7 +1095,7 @@ fn subagents(harness: &str, id: &str) -> (u16, Value) {
         Ok(Some((r, _))) => {
             // The full forest (directly-spawned + Workflow sub-agents), each enriched with its
             // meta sidecar (agent type / task / spawning tool_use) and the workflow's journaled
-            // outcome — the flat `subagents_of` would miss the entire workflow tier.
+            // outcome — the flat `claude::subagent_refs` would miss the entire workflow tier.
             let out: Vec<Value> = cv_core::subagent_tree_of(&r)
                 .iter()
                 .map(|s| {

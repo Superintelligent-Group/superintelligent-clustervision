@@ -561,7 +561,7 @@ fn subagent_rows(r: &SessionRef) -> Vec<Value> {
 }
 
 /// The sub-agents a session spawned, as rows — the native equivalent of cvd's
-/// `/api/session/{h}/{id}/subagents`. The flat `subagents_of` this used to call missed the entire
+/// `/api/session/{h}/{id}/subagents`. The flat `claude::subagent_refs` this used to call missed the entire
 /// workflow tier (on a heavy session, the majority of the agents) and dropped every enrichment
 /// field, so the desktop forest view was structurally blind where the browser's was not.
 #[tauri::command]

@@ -616,7 +616,7 @@ impl Message {
 
     /// Append this message's searchable text to `out` — the single canonical projection behind
     /// both [`Session::searchable_text`] (whole session) and
-    /// [`append_searchable`](crate::stream::append_searchable) (streaming, per message).
+    /// [`Message::append_searchable`] (streaming, per message).
     /// Writes into the caller's buffer so neither path allocates intermediates.
     pub fn append_searchable(&self, out: &mut String) {
         use std::fmt::Write as _;

@@ -198,7 +198,7 @@ pub(crate) fn stream_corpus(mut f: impl FnMut(Doc) -> Result<()>) -> Result<usiz
             }
         }
 
-        /// The `cv_core::stream::append_searchable` projection, span-aware and head-capped.
+        /// The `Message::append_searchable` projection, span-aware and head-capped.
         fn append_searchable_capped(&mut self, m: &Message) {
             use std::fmt::Write as _;
             for b in &m.content {

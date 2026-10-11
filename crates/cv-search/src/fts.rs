@@ -723,7 +723,7 @@ impl<'w> ChunkSink<'w> {
     }
 
     /// Append one block's searchable text — identical projection to
-    /// [`cv_core::stream::append_searchable`], but chunk-resolving span content.
+    /// [`cv_core::ir::Message::append_searchable`], but chunk-resolving span content.
     fn append_block(&mut self, r: &cv_core::Resolver, b: &cv_core::Block) {
         use cv_core::Block;
         match b {
@@ -1158,7 +1158,7 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
     }
     impl MessageSink for Acc {
         fn message(&mut self, m: Message) -> Flow {
-            // Same projection as `cv_core::stream::append_searchable`, but span-aware.
+            // Same projection as `Message::append_searchable`, but span-aware.
             use std::fmt::Write as _;
             for b in &m.content {
                 match b {

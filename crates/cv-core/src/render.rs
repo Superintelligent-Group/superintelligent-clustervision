@@ -59,36 +59,6 @@ fn file_label(path: &Option<String>, source: &Option<String>) -> String {
     path.as_deref().or(source.as_deref()).unwrap_or("?").to_string()
 }
 
-/// Compact plain-text rendering (terminal `show`).
-pub fn to_plain(s: &Session, block_limit: usize) -> String {
-    let mut out = String::new();
-    for m in &s.messages {
-        out.push_str(&format!("── {} ──\n", turn_label(m)));
-        for b in &m.content {
-            match b {
-                Block::Text { text } => {
-                    out.push_str(text);
-                    out.push('\n');
-                }
-                Block::Thinking { text, .. } => out.push_str(&format!("[thinking] {}\n", truncate(text, block_limit))),
-                Block::ToolUse { name, input, .. } => out.push_str(&format!(
-                    "[tool_use {name}] {}\n",
-                    truncate(&input.to_string(), block_limit)
-                )),
-                Block::ToolResult { content, is_error, .. } => out.push_str(&format!(
-                    "[tool_result{}] {}\n",
-                    if *is_error { " error" } else { "" },
-                    truncate(content, block_limit)
-                )),
-                Block::File { path, source, .. } => out.push_str(&format!("[file: {}]\n", file_label(path, source))),
-                Block::Image { .. } => out.push_str("[image]\n"),
-            }
-        }
-        out.push('\n');
-    }
-    out
-}
-
 pub fn role_label(r: Role) -> &'static str {
     match r {
         Role::System => "system",

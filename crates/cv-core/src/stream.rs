@@ -247,13 +247,6 @@ pub fn collect_with(adapter: &dyn Adapter, r: &SessionRef, opts: &ParseOptions) 
     Ok(session)
 }
 
-/// Append a message's searchable text to `out` — the same projection [`Session::searchable_text`]
-/// makes, but per-message so the bulk indexer can build a body incrementally and drop each message.
-/// Thin alias for [`Message::append_searchable`], the single canonical projection.
-pub fn append_searchable(out: &mut String, m: &Message) {
-    m.append_searchable(out);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

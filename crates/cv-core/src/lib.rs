@@ -210,19 +210,6 @@ where
     }
 }
 
-/// The sub-agent sessions a given session spawned (lazily; not part of the main pool — there can be
-/// thousands). Currently Claude Code's Task sub-agents; other harnesses return empty for now.
-///
-/// This is the *flat* view (top-level `subagents/*.jsonl` only). For the full forest — including
-/// `Workflow` sub-agents and the meta/journal sidecars that carry each agent's purpose and outcome —
-/// use [`subagent_tree_of`].
-pub fn subagents_of(r: &SessionRef) -> Vec<SessionRef> {
-    match r.harness {
-        Harness::Claude => harness::claude::subagent_refs(&r.path),
-        _ => Vec::new(),
-    }
-}
-
 pub use harness::claude::SubagentInfo;
 
 /// The full sub-agent **forest** a session spawned: directly-spawned (`Agent`/`Task`) sub-agents
