@@ -17,8 +17,15 @@ use std::path::{Path, PathBuf};
 pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>, input: bool) -> Result<()> {
     let want = parse_harness(&harness)?;
     let (r, adapter) = resolve(session, want)?;
-    // Lazy parse: giant results stay on disk until the one block we print is resolved.
-    let parsed = cv_core::stream::collect_with(adapter.as_ref(), &r, &ParseOptions::lazy())?;
+    // Lazy stream to the first message holding the block, then stop: giant results stay on disk
+    // until the one block we print is resolved, and nothing before or after it is kept.
+    let mut found = First {
+        id: tool_use_id,
+        input,
+        hit: None,
+    };
+    let mut parsed = cv_core::stream::stream_counted(adapter.as_ref(), &r, &ParseOptions::lazy(), &mut found)?;
+    parsed.messages = found.hit.into_iter().collect();
     let resolver = parsed.resolver();
     let sidecar = sidecar_path(&r.path);
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -110,6 +117,29 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
         short_id(&r.id),
         short_id(&r.id)
     ))
+}
+
+/// Keeps the first message carrying the wanted block — the `ToolUse` with that id under
+/// `--input`, else the `ToolResult` for it — and stops the stream there.
+struct First<'a> {
+    id: &'a str,
+    input: bool,
+    hit: Option<cv_core::Message>,
+}
+
+impl cv_core::MessageSink for First<'_> {
+    fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
+        let wanted = m.content.iter().any(|b| match b {
+            Block::ToolUse { id, .. } => self.input && id == self.id,
+            Block::ToolResult { tool_use_id, .. } => !self.input && tool_use_id == self.id,
+            _ => false,
+        });
+        if !wanted {
+            return cv_core::Flow::Continue;
+        }
+        self.hit = Some(m);
+        cv_core::Flow::Stop
+    }
 }
 
 /// `<stem>.flat.jsonl` next to the transcript — where `cv prune` stashes snipped payloads.

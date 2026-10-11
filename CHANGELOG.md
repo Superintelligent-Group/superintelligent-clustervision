@@ -10,6 +10,7 @@
 - A follower of a Codex session holds only the new messages, not the whole parsed rollout (595 MB to 124 MB on a 708 MB rollout).
 - A `cv search` miss checks index staleness against the catalog instead of rescanning every harness: 0.53 s to 0.21 s.
 - `cv ls --enrich` keeps only each session's user turns while reading it: 720 MB to 80 MB peak on the largest sessions.
+- `cv cat` stops reading at the tool call it prints instead of holding the whole session.
 
 ## 0.15.1 — 2026-10-11
 
