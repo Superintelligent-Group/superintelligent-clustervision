@@ -4,8 +4,9 @@
 //! the per-command modules under `cmd/`; shared helpers live in `util.rs` and `cv blame` in `blame.rs`.
 //!
 //! Interface v2 (0.11.0, `docs/INTERFACE-V2.md`): one verb per act, the same flag means the same
-//! thing everywhere, snake_case JSON, no hidden commands. Old names are hidden stubs that error
-//! with a pointer and exit 2 — never aliases that work.
+//! thing everywhere, snake_case JSON, no hidden commands. A name removed in the current release is
+//! a hidden stub that errors with a pointer and exits 2 — never an alias that works — and the
+//! stub itself goes at the next release (the 0.11 tombstones left at 0.15).
 
 mod blame;
 mod cmd;
@@ -504,9 +505,6 @@ enum Cmd {
         /// `--thinking <native|text|drop>`, and one word may not mean two things.
         #[arg(long = "drop-thinking")]
         drop_thinking: bool,
-        // Renamed in 0.11.0 — hidden so the old spelling errors with a pointer (exit 2).
-        #[arg(long, hide = true)]
-        thinking: bool,
         /// Also copy the session's subagents/workflows dir under the new id (off by default; can be
         /// hundreds of MB for big sessions). Resume doesn't need it — only cv's forest features do.
         #[arg(long)]
@@ -555,11 +553,6 @@ enum Cmd {
         /// `--to` pinned it (see `note`).
         #[arg(long)]
         json: bool,
-        // Removed in 0.11.0 — kept hidden so the old spelling errors with a pointer (exit 2).
-        #[arg(long, hide = true, value_name = "TOOL_USE_ID")]
-        retrieve: Option<String>,
-        #[arg(long, hide = true, value_name = "RANGE")]
-        range: Option<String>,
     },
     /// Rewind a Claude session to a past moment: a NEW resumable session holding the source's
     /// records up to a message or the tool result that made a commit — the agent as it was when it
@@ -738,8 +731,6 @@ enum Cmd {
         /// Model for --generate (provider-specific; defaults to the provider's default).
         #[arg(long = "gen-model")]
         gen_model: Option<String>,
-        #[arg(long, hide = true)]
-        to: Option<String>,
     },
     /// Loom graft: take base[..N], then graft other[M..] into one new branched session.
     Loom {
@@ -775,8 +766,6 @@ enum Cmd {
         /// Model for --generate.
         #[arg(long = "gen-model")]
         gen_model: Option<String>,
-        #[arg(long, hide = true)]
-        to: Option<String>,
     },
     /// Produce a copy of a session that runs elsewhere: in another harness (`--harness`), from
     /// another working directory (`--cwd`, carrying CLAUDE.md/AGENTS.md/… along), or both. The
@@ -804,13 +793,6 @@ enum Cmd {
         /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
         #[arg(long, default_value = "native", value_parser = ["native", "text", "drop"])]
         thinking: String,
-        // Renamed in 0.11.0 — hidden so the old spellings error with a pointer (exit 2).
-        #[arg(long, hide = true)]
-        to: Option<String>,
-        #[arg(long = "to-dir", hide = true)]
-        to_dir: Option<PathBuf>,
-        #[arg(long, hide = true)]
-        from: Option<String>,
     },
     /// Print (or with --launch, run) the resume incantation for a session in its native harness.
     Resume {
@@ -895,8 +877,6 @@ enum Cmd {
         /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
         #[arg(long, default_value = "native", value_parser = ["native", "text", "drop"])]
         thinking: String,
-        #[arg(long, hide = true)]
-        to: Option<String>,
     },
 
     // ───────────────────────────── Fleet & live ─────────────────────────────
@@ -1016,22 +996,6 @@ enum Cmd {
         rest: Vec<String>,
     },
     #[command(hide = true)]
-    Convert {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-        rest: Vec<String>,
-    },
-    #[command(hide = true)]
-    Query {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-        rest: Vec<String>,
-    },
-    #[command(hide = true)]
-    Recall {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-        rest: Vec<String>,
-    },
-    // ───────────────────────────── Removed in 0.15.0 (hidden stubs) ─────────────────────────────
-    #[command(hide = true)]
     Diff {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         rest: Vec<String>,
@@ -1141,24 +1105,7 @@ fn run() -> Result<()> {
             no_context,
             strict,
             thinking,
-            to,
-            to_dir,
-            from,
-        } => {
-            if to.is_some() {
-                return usage("`cv port --to <harness>` was renamed in 0.11.0 — use `--harness <harness>`");
-            }
-            if to_dir.is_some() {
-                return usage("`cv port --to-dir <dir>` was renamed in 0.11.0 — use `--cwd <dir>`");
-            }
-            if from.is_some() {
-                return usage(
-                    "`cv port --from <harness>` was removed in 0.11.0 — the source harness rides on the id: \
-                     `cv port <harness>:<id>`",
-                );
-            }
-            port::cmd_port(&id, harness, cwd, out, no_context, strict, util::parse_thinking(&thinking)?)
-        }
+        } => port::cmd_port(&id, harness, cwd, out, no_context, strict, util::parse_thinking(&thinking)?),
         Cmd::Scry {
             harness,
             cwd,
@@ -1196,13 +1143,7 @@ fn run() -> Result<()> {
             limit,
             out,
             thinking,
-            to,
-        } => {
-            if to.is_some() {
-                return usage("`cv pack --to <harness>` was renamed in 0.11.0 — use `--harness <harness>`");
-            }
-            pack::cmd_pack(&task, &format, harness, limit, out, util::parse_thinking(&thinking)?)
-        }
+        } => pack::cmd_pack(&task, &format, harness, limit, out, util::parse_thinking(&thinking)?),
         Cmd::Stats { query, json, tokens } => browse::cmd_stats(query, json, tokens),
         Cmd::Prune {
             id,
@@ -1212,7 +1153,6 @@ fn run() -> Result<()> {
             to,
             drop,
             drop_thinking,
-            thinking,
             copy_resources,
             no_revive,
             window,
@@ -1222,32 +1162,13 @@ fn run() -> Result<()> {
             declassify_tokens_file,
             dry_run,
             json,
-            retrieve,
-            range,
         } => {
-            if retrieve.is_some() {
-                return usage(
-                    "`cv prune --retrieve <tool_use_id>` was removed in 0.11.0 — use `cv cat <session> <tool_use_id>`",
-                );
-            }
-            if range.is_some() {
-                return usage(
-                    "`cv prune --range A-B` was renamed in 0.11.0 — use `--keep A..B` (the turn indices to KEEP; \
-                     0-based, end-exclusive, `A..` through the last)",
-                );
-            }
             let keep_range = keep.as_deref().map(util::parse_range).transpose()?;
             let tokens = resolve_declassify_tokens(declassify_tokens, declassify_tokens_file)?;
             if declassify && tokens.is_empty() {
                 eprintln!(
                     "cv prune --declassify: no terms supplied (--declassify-tokens / \
                      --declassify-tokens-file) — nothing will be snipped. cv ships no built-in list."
-                );
-            }
-            if thinking {
-                return usage(
-                    "`cv prune --thinking` was renamed in 0.11.0 — use `--drop-thinking` (plain \
-                     `--thinking <native|text|drop>` now means what an EMIT does with reasoning)",
                 );
             }
             compose::cmd_prune(
@@ -1462,13 +1383,7 @@ fn run() -> Result<()> {
             generate,
             gen_model,
             thinking,
-            to,
-        } => {
-            if to.is_some() {
-                return usage("`cv splice --to <harness>` was renamed in 0.11.0 — use `--harness <harness>`");
-            }
-            compose::cmd_splice(&specs, harness, out, export, cwd, generate, gen_model, util::parse_thinking(&thinking)?)
-        }
+        } => compose::cmd_splice(&specs, harness, out, export, cwd, generate, gen_model, util::parse_thinking(&thinking)?),
         Cmd::Loom {
             base,
             at,
@@ -1481,11 +1396,7 @@ fn run() -> Result<()> {
             generate,
             gen_model,
             thinking,
-            to,
         } => {
-            if to.is_some() {
-                return usage("`cv loom --to <harness>` was renamed in 0.11.0 — use `--harness <harness>`");
-            }
             compose::cmd_loom(
                 &base, at, &graft, from, harness, out, export, cwd, generate, gen_model,
                 util::parse_thinking(&thinking)?,
@@ -1499,14 +1410,6 @@ fn run() -> Result<()> {
         Cmd::Redact { .. } => usage(
             "`cv redact <id> [--format md|json]` was removed in 0.15.0 — use `cv export <id> --redact [--format md|json]` \
              (the per-class counts print to stderr); `cv share <id>` for a redacted HTML artifact",
-        ),
-        Cmd::Convert { .. } => usage(
-            "`cv convert` was removed in 0.11.0 — use `cv port <id> --harness <harness>` \
-             (`--cwd <dir>` to rehome, `--out <dir>` for a dry run)",
-        ),
-        Cmd::Query { .. } => usage("`cv query` was renamed in 0.11.0 — use `cv schema` (`cv schema --json` for the machine schema)"),
-        Cmd::Recall { .. } => usage(
-            "`cv recall` was removed in 0.11.0 — use `cv search <query>` to find content, or `cv pack <task>` to build context",
         ),
         Cmd::Diff { .. } => usage(
             "`cv diff` was removed in 0.15.0 — `cv export <id> --format md` each session and diff the two files",
@@ -1591,8 +1494,8 @@ mod tests {
                 );
             }
         }
-        // Old names are hidden stubs, never visible commands.
-        for old in ["convert", "query", "recall", "diff"] {
+        // Names removed in this release are hidden stubs, never visible commands.
+        for old in ["timeline", "redact", "diff"] {
             assert!(!visible.contains(&old), "{old} must be hidden");
             assert!(
                 cmd.get_subcommands().any(|s| s.get_name() == old),
@@ -1617,7 +1520,7 @@ mod tests {
         }
         assert!(help.trim_end().ends_with(RECIPES_FOOTER), "footer:\n{help}");
         assert!(
-            !help.contains("    convert ") && !help.contains("    recall "),
+            !help.contains("    timeline ") && !help.contains("    redact "),
             "stubs leak:\n{help}"
         );
         // The flat clap list is gone — commands appear under their group only.
