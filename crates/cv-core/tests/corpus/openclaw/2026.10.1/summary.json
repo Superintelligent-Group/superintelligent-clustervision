@@ -1,0 +1,355 @@
+{
+  "sessions": [
+    {
+      "id": "312f15d6-e211-4b0b-850f-b0e15787a3e8",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 12,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "system/notice",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 4,
+        "tool_result": 4,
+        "tool_use": 4
+      },
+      "tools": [
+        "tool_search",
+        "exec",
+        "tool_describe",
+        "tool_call"
+      ],
+      "usage_messages": 4,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "367fc597-65e3-4e9e-bdef-d25244b59d07",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 9,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "system/notice",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 2,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "tool_search",
+        "tool_call"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "36d24063-c7fd-4a6b-894a-bd054c1befef",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 11,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "system/notice",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "system/notice",
+        "user/subagent_return",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "thinking": 3,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "tool_call",
+        "sessions_yield"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 1,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "3eeda6bf-56e9-4f03-9aac-a896d692209c",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 4,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "36d24063-c7fd-4a6b-894a-bd054c1befef"
+      },
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "4fdf3a25-320d-4a6a-8b79-00fd8ff4d17c",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 25,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 10,
+        "thinking": 4,
+        "tool_result": 8,
+        "tool_use": 8
+      },
+      "tools": [
+        "read",
+        "read",
+        "read",
+        "edit",
+        "exec",
+        "exec",
+        "exec",
+        "process"
+      ],
+      "usage_messages": 11,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "60d691aa-1391-454a-8b69-c556bb291470",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 4,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "88a5c8d2-c757-4848-94a2-37a379a52ba0",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 14,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "system/notice",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "system/notice",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "thinking": 5,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "tool_call",
+        "tool_call",
+        "exec"
+      ],
+      "usage_messages": 5,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "8fe632c8-9808-4efa-91e7-07ff79d1c84c",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 19,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "system/compaction_boundary",
+        "system/compaction_summary",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "system/compaction_boundary",
+        "system/compaction_summary",
+        "user/prompt",
+        "assistant/reply",
+        "system/branch",
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 17,
+        "thinking": 4,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "read"
+      ],
+      "usage_messages": 5,
+      "compaction_boundaries": [
+        4,
+        10
+      ],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "c44ac14f-8def-435c-ac9d-d96c34459bd6",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 10,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 10,
+        "thinking": 4
+      },
+      "tools": [],
+      "usage_messages": 4,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "d43a0e74-e0e6-4a70-a17c-513ca3c16c9c",
+      "path": "agents/main/agent/openclaw-agent.sqlite",
+      "messages": 6,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "image": 1,
+        "text": 4,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "view_image"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    }
+  ]
+}

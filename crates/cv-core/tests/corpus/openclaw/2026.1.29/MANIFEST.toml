@@ -1,0 +1,9 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "openclaw"
+version = "2026.1.29"
+generated = "2026-10-11"
+model = "glm-5.3-flash via Z.ai coding endpoint, through chat_shim.py (OpenClaw provider corpus, api openai-completions)"
+model_calls = 37
+scenarios = ["chat","tools","parallel_tools","tool_error","reasoning","background_process","image_tool_result","subagent","cron","memory","web_fetch","compaction","model_switch","thinking_level_change","reset"]
+skipped = ["resume: every 2026.1.x CLI turn continues the session its key points at (that is the chat scenario); an earlier session cannot be re-entered after a reset","mcp: this version has no mcp.servers config (MCP only through the mcporter skill)"]
+generator_commit = "b4298ba (run from the working tree before it was committed)"

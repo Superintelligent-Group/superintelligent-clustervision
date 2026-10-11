@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "e851e647-16d9-433e-9211-26a553ba65cb",
+      "agentId": "main",
+      "name": "corpus-ping",
+      "enabled": false,
+      "createdAtMs": 1791750463435,
+      "updatedAtMs": 1791750474533,
+      "schedule": {
+        "atMs": 1791751057000,
+        "kind": "at"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "next-heartbeat",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Reply with the word pong."
+      },
+      "state": {
+        "lastRunAtMs": 1791750474533,
+        "lastStatus": "ok",
+        "lastDurationMs": 5186
+      }
+    }
+  ]
+}

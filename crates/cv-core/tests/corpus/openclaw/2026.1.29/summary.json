@@ -1,0 +1,321 @@
+{
+  "sessions": [
+    {
+      "id": "28aa9586-8613-4ec8-bf4d-02549281e1f2",
+      "path": "agents/main/sessions/28aa9586-8613-4ec8-bf4d-02549281e1f2.jsonl",
+      "messages": 4,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "6e8a2344-c695-44ce-87e1-7bbcf642b032"
+      },
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "566dbb28-2c63-46f2-a5fe-af9e081f550c",
+      "path": "agents/main/sessions/566dbb28-2c63-46f2-a5fe-af9e081f550c.jsonl",
+      "messages": 4,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "6bf8c041-d1c8-4e50-a76b-2bef271d9e77",
+      "path": "agents/main/sessions/6bf8c041-d1c8-4e50-a76b-2bef271d9e77.jsonl",
+      "messages": 12,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "thinking": 4,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "memory_search",
+        "web_fetch",
+        "exec"
+      ],
+      "usage_messages": 5,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "6e8a2344-c695-44ce-87e1-7bbcf642b032",
+      "path": "agents/main/sessions/6e8a2344-c695-44ce-87e1-7bbcf642b032.jsonl",
+      "messages": 12,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "thinking": 3,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "sessions_spawn",
+        "exec",
+        "sessions_history"
+      ],
+      "usage_messages": 5,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "87cbbb1e-05f0-41ca-a555-f48949f598a9",
+      "path": "agents/main/sessions/87cbbb1e-05f0-41ca-a555-f48949f598a9.jsonl",
+      "messages": 8,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 2,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "exec",
+        "cron"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "92dc7210-0e49-4cd1-9f7b-455ff9012634",
+      "path": "agents/main/sessions/92dc7210-0e49-4cd1-9f7b-455ff9012634.jsonl",
+      "messages": 4,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "b6238da1-ebd3-4c55-a500-ac7135d43f70",
+      "path": "agents/main/sessions/b6238da1-ebd3-4c55-a500-ac7135d43f70.jsonl",
+      "messages": 5,
+      "sequence": [
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "system/compaction_boundary",
+        "system/compaction_summary"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "memory_search"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [
+        3
+      ],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash-tiny",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ca4c5957-1c3a-44f2-9d7f-72b0f204ff58",
+      "path": "agents/main/sessions/ca4c5957-1c3a-44f2-9d7f-72b0f204ff58.jsonl",
+      "messages": 8,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 8,
+        "thinking": 3
+      },
+      "tools": [],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ce299c37-9cb1-48c8-b685-944ce0b845fc",
+      "path": "agents/main/sessions/ce299c37-9cb1-48c8-b685-944ce0b845fc.jsonl",
+      "messages": 25,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 12,
+        "thinking": 7,
+        "tool_result": 7,
+        "tool_use": 7
+      },
+      "tools": [
+        "read",
+        "read",
+        "edit",
+        "exec",
+        "exec",
+        "exec",
+        "process"
+      ],
+      "usage_messages": 11,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "f82420fc-cec5-40b1-845d-17905857ef83",
+      "path": "agents/main/sessions/f82420fc-cec5-40b1-845d-17905857ef83.jsonl",
+      "messages": 6,
+      "sequence": [
+        "system/model_change",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "image": 1,
+        "text": 4,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "read"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    }
+  ]
+}

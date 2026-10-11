@@ -1,0 +1,9 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "openclaw"
+version = "2026.10.1"
+generated = "2026-10-11"
+model = "glm-5.3-flash via Z.ai coding endpoint, through chat_shim.py (OpenClaw provider corpus, api openai-completions)"
+model_calls = 45
+scenarios = ["chat","tools","parallel_tools","tool_error","reasoning","background_process","image_tool_result","subagent","cron","memory","web_fetch","mcp","compaction","model_switch","thinking_level_change","reset","resume"]
+skipped = []
+generator_commit = "b4298ba (run from the working tree before it was committed)"

@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "runs": {
+    "c14bb267-79ca-47d9-83b2-8e8243099e39": {
+      "runId": "c14bb267-79ca-47d9-83b2-8e8243099e39",
+      "childSessionKey": "agent:main:subagent:40223705-4ebc-4437-855c-e6a384c8c77a",
+      "requesterSessionKey": "agent:main:main",
+      "requesterOrigin": {
+        "channel": "whatsapp",
+        "to": "heartbeat"
+      },
+      "requesterDisplayKey": "agent:main:main",
+      "task": "Reply with the single word ok.",
+      "cleanup": "keep",
+      "createdAt": 1791750401751,
+      "startedAt": 1791750401779,
+      "archiveAtMs": 1791754001751,
+      "cleanupHandled": true,
+      "endedAt": 1791750406198,
+      "outcome": {
+        "status": "ok"
+      },
+      "cleanupCompletedAt": 1791750406215
+    }
+  }
+}

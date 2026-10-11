@@ -24,6 +24,7 @@ use cv_core::harness::goose::Goose;
 use cv_core::harness::grok::Grok;
 use cv_core::harness::kimi::Kimi;
 use cv_core::harness::kimi_code::KimiCode;
+use cv_core::harness::openclaw::OpenClaw;
 use cv_core::harness::opencode::OpenCode;
 use cv_core::harness::qwen::Qwen;
 use cv_core::harness::roo::Roo;
@@ -103,6 +104,12 @@ fn goose(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Goose::with_sessions_dir(&version_dir.join("sessions")))
 }
 
+/// The version dir IS the state dir: `agents/` (JSONL era and sqlite era alike), plus the
+/// sub-agent and cron registries the adapter does not read.
+fn openclaw(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(OpenClaw::with_state_dir(version_dir))
+}
+
 /// Harnesses that cannot be driven headless (desktop apps): their version dirs hold a schema
 /// snapshot of the store ember's installed version left on disk (`SNAPSHOT.toml` plus the
 /// `*.schema.txt` / `*.shape.txt` that `tools/harness-corpus/schema_snapshot.py` wrote), never
@@ -173,6 +180,11 @@ const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "goose",
         adapter: goose,
+        children: None,
+    },
+    CorpusHarness {
+        name: "openclaw",
+        adapter: openclaw,
         children: None,
     },
 ];
