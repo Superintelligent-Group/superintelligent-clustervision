@@ -524,20 +524,20 @@ fn serve_endpoints() {
     let (status, _) = get_json(port, "/api/session/claude/alphasess/subagent/ghost");
     assert_eq!(status, 404);
 
-    // board endpoints on an empty channel: empty arrays.
-    let (status, v) = get_json(port, "/api/board/fleet");
-    assert_eq!(status, 200);
-    assert_eq!(v.as_array().unwrap().len(), 0, "{v}");
-    // KNOWN cv-core BUG (handed off — see crates/cv-core/tests/board_fresh_home.rs): with no
-    // board/ dir at all, active_claims errors → 500. Pre-create the dir so this exercises cvd's
-    // routing rather than that bug; once cv-core is fixed the pre-create becomes a no-op.
-    fs::create_dir_all(w.cv_home.join("board")).unwrap();
-    let (status, v) = get_json(port, "/api/claims/fleet");
-    assert_eq!(status, 200);
-    assert!(v.as_array().unwrap().is_empty(), "{v}");
-    let (status, v) = get_json(port, "/api/who/fleet?within_secs=60");
-    assert_eq!(status, 200);
-    assert!(v.as_array().unwrap().is_empty(), "{v}");
+    // The board routes went away in 0.15.0: a 410 with a pointer, not a bare 404.
+    for route in [
+        "/api/board/fleet",
+        "/api/claims/fleet",
+        "/api/who/fleet?within_secs=60",
+        "/api/channels",
+    ] {
+        let (status, v) = get_json(port, route);
+        assert_eq!(status, 410, "{route}: {v}");
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("removed in 0.15.0"),
+            "{route}: {v}"
+        );
+    }
 
     // unknown route → 404; non-GET → 405; OPTIONS preflight → 204 with CORS.
     let (status, v) = get_json(port, "/api/definitely/not/a/route");

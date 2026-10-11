@@ -1,7 +1,7 @@
 //! Protocol-level integration tests for the cv-mcp stdio JSON-RPC server: spawn the real binary,
 //! run the MCP handshake, list tools, and call them against a temp-home fixture corpus.
 //!
-//! Hermetic: a fake `$HOME` carries the claude fixtures and `$CLUSTERVISION_HOME` the index/board
+//! Hermetic: a fake `$HOME` carries the claude fixtures and `$CLUSTERVISION_HOME` the index/task
 //! state; both are passed only to the child process's environment. `$CV_BIN` points at a **stub
 //! `cv`** written into the same temp tree, so the CLI-generated half of the toolset is exercised
 //! end-to-end (schema dump → tool registration → argv → exit code) without depending on a built
@@ -272,7 +272,7 @@ fn handshake_and_tool_schemas() {
         );
     }
     // …alongside the hand-written MCP-only tools, which have no CLI equivalent.
-    for expected in ["observe_stream", "await_omen", "board_post", "board_claim", "task_open"] {
+    for expected in ["observe_stream", "await_omen", "task_open", "task_inbox"] {
         assert!(names.contains(expected), "missing MCP-only tool {expected}");
     }
     // `Fleet & live` commands are NOT generated — their MCP tools are the hand-written ones.
@@ -374,47 +374,19 @@ fn tool_calls_against_fixture_corpus() {
     let mut s = Server::spawn("tools");
     s.request(1, "initialize", json!({}));
 
-    // board round-trip: post → read.
-    let (text, is_err) = s.call_tool(12, "board_post", json!({"channel": "testchan", "body": "hello fleet"}));
-    assert!(!is_err, "{text}");
-    let posted: Value = serde_json::from_str(&text).unwrap();
-    assert!(posted["id"].is_string(), "{text}");
-    let (text, _) = s.call_tool(13, "board_read", json!({"channel": "testchan"}));
-    let msgs: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(msgs.as_array().unwrap().len(), 1, "{text}");
-    assert_eq!(msgs[0]["body"], "hello fleet", "{text}");
-
-    // board_claim: granted, then contended for another owner, then released.
-    let (text, _) = s.call_tool(
-        14,
-        "board_claim",
-        json!({"channel": "testchan", "key": "taskA", "from": "me"}),
+    // The board tools went away in 0.15.0: a pointer at the task log, never a silent unknown-tool.
+    for name in ["board_post", "board_read", "board_await", "board_claim"] {
+        let (text, is_err) = s.call_tool(12, name, json!({"channel": "testchan", "body": "hello fleet"}));
+        assert!(is_err, "{name}: {text}");
+        assert!(
+            text.contains("removed in 0.15.0") && text.contains("task_note"),
+            "{name} must point at the replacement: {text}"
+        );
+    }
+    assert!(
+        !s.base.join("cvhome").join("board").exists(),
+        "nothing wrote a board dir"
     );
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["granted"], true, "{text}");
-    let (text, _) = s.call_tool(
-        15,
-        "board_claim",
-        json!({"channel": "testchan", "key": "taskA", "from": "other"}),
-    );
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["granted"], false, "{text}");
-    let (text, _) = s.call_tool(
-        16,
-        "board_release",
-        json!({"channel": "testchan", "key": "taskA", "from": "me"}),
-    );
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["released"], true, "{text}");
-    // Releasing a key you don't hold reports false (idempotent), never an error.
-    let (text, is_err) = s.call_tool(
-        17,
-        "board_release",
-        json!({"channel": "testchan", "key": "taskA", "from": "me"}),
-    );
-    assert!(!is_err, "{text}");
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["released"], false, "{text}");
 }
 
 /// The task tools drive the durable store end-to-end over the protocol: open → two claimants
@@ -539,8 +511,8 @@ fn protocol_error_handling() {
     assert!(resp["result"]["tools"].is_array(), "{resp}");
 }
 
-/// Requests are dispatched concurrently: a parked long-poll (board_await on a channel nobody
-/// posts to) must not head-of-line-block a fast request issued after it. Responses come back out
+/// Requests are dispatched concurrently: a parked long-poll (await_omen on a regex nothing
+/// emits) must not head-of-line-block a fast request issued after it. Responses come back out
 /// of order — the fast one first — and both complete well under the long-poll's timeout budget.
 #[test]
 fn slow_long_poll_does_not_block_other_requests() {
@@ -549,17 +521,17 @@ fn slow_long_poll_does_not_block_other_requests() {
 
     let start = std::time::Instant::now();
     s.send(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-        "name": "board_await",
-        "arguments": {"channel": "quiet", "regex": "NEVER_MATCHES", "timeout_secs": 6, "interval_secs": 1}}}));
+        "name": "await_omen",
+        "arguments": {"regex": "NEVER_MATCHES", "cwd_contains": "/nowhere", "timeout_secs": 6, "interval_secs": 1}}}));
     s.send(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-        "name": "board_read", "arguments": {"channel": "quiet"}}}));
+        "name": "task_list", "arguments": {}}}));
 
     let first = s.recv();
     let elapsed = start.elapsed();
     assert_eq!(first["id"], json!(3), "the fast request must answer first: {first}");
     assert!(
         elapsed < Duration::from_secs(4),
-        "board_read took {elapsed:?} — blocked behind the 6s long-poll?"
+        "task_list took {elapsed:?} — blocked behind the 6s long-poll?"
     );
     assert_eq!(first["result"]["isError"], false, "{first}");
 
@@ -582,18 +554,25 @@ fn malformed_numeric_args_are_invalid_params() {
         let resp = s.request(
             id,
             "tools/call",
-            json!({"name": "board_read", "arguments": {"channel": "c", "limit": bad}}),
+            json!({"name": "observe_stream", "arguments": {"cwd_contains": "/nowhere", "max_messages": bad}}),
         );
-        assert_eq!(resp["error"]["code"], -32602, "limit={bad}: {resp}");
+        assert_eq!(resp["error"]["code"], -32602, "max_messages={bad}: {resp}");
         assert!(
-            resp["error"]["message"].as_str().unwrap_or_default().contains("limit"),
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("max_messages"),
             "the error must name the offending argument: {resp}"
         );
         assert!(resp["result"].is_null(), "an error response carries no result: {resp}");
     }
 
     // Integral float: accepted, behaves like the integer — on the hand-written guard…
-    let (text, is_err) = s.call_tool(5, "board_read", json!({"channel": "c", "limit": 1.0}));
+    let (text, is_err) = s.call_tool(
+        5,
+        "observe_stream",
+        json!({"cwd_contains": "/nowhere", "max_messages": 1.0}),
+    );
     assert!(!is_err, "{text}");
     // …and on the generated path, which renders it for clap without the `.0`.
     let (text, is_err) = s.call_tool(9, "show", json!({"id": "a", "last": 20.0}));
@@ -604,7 +583,7 @@ fn malformed_numeric_args_are_invalid_params() {
     let resp = s.request(
         6,
         "tools/call",
-        json!({"name": "board_await", "arguments": {"channel": "c", "regex": ".", "timeout_secs": "soon"}}),
+        json!({"name": "await_omen", "arguments": {"regex": ".", "timeout_secs": "soon"}}),
     );
     assert_eq!(resp["error"]["code"], -32602, "{resp}");
 
@@ -616,7 +595,7 @@ fn malformed_numeric_args_are_invalid_params() {
 /// `observe_stream` is the non-blocking tail of `await_omen`: bounded, read-only, cursor-driven.
 /// Covers the spec's required cases — an absent/empty corpus yields a bounded EMPTY result, the
 /// baseline call emits no backlog, the cursor drains only newly-appended messages, max_messages
-/// bounds the batch (more_pending), and NO board side-effect is produced.
+/// bounds the batch (more_pending), and nothing is written anywhere.
 #[test]
 fn observe_stream_bounded_read_only_tail() {
     let mut s = Server::spawn("observe");
@@ -756,15 +735,10 @@ fn observe_stream_bounded_read_only_tail() {
         "more_pending must be drainable by polling the cursor"
     );
 
-    // 6) READ-ONLY: observe_stream must NEVER write the board. Reading the channel observe_stream
-    //    was scoped to ("/work/proj"/"fleet") returns nothing it could have posted. Assert the
-    //    board has no observe_stream-authored traffic on a fresh channel.
-    let (text, _) = s.call_tool(8, "board_read", json!({"channel": "fleet"}));
-    let msgs: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(
-        msgs.as_array().unwrap().len(),
-        0,
-        "observe_stream must not write the board (fleet channel must be empty): {text}"
+    // 6) READ-ONLY: observe_stream writes nothing under $CLUSTERVISION_HOME but the index.
+    assert!(
+        !s.base.join("cvhome").join("tasks").exists(),
+        "observe_stream must not write the task log"
     );
 }
 

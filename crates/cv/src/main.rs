@@ -19,7 +19,6 @@ pub(crate) use util::short_id;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-use cmd::live::BoardCmd;
 use cmd::task::TaskCmd;
 use cmd::{
     browse, cat, compose, config, doctor, formats, live, orchestrate, pack, port, provenance, recipes, schema, search,
@@ -92,7 +91,7 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Export", &["export", "dataset", "pack"]),
-    ("Fleet & live", &["task", "board", "scry", "share"]),
+    ("Fleet & live", &["task", "scry", "share"]),
     ("System", &["index", "config", "schema", "formats", "recipes"]),
 ];
 
@@ -891,11 +890,6 @@ enum Cmd {
         #[command(subcommand)]
         action: TaskCmd,
     },
-    /// Post to / read from the agent coordination board.
-    Board {
-        #[command(subcommand)]
-        action: BoardCmd,
-    },
     /// Follow live agent activity across harnesses (tail -f for sessions).
     Scry {
         #[arg(long)]
@@ -1003,6 +997,12 @@ enum Cmd {
     },
     #[command(hide = true)]
     Diff {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    // Removed in 0.15.0 (the coordination board) — same hidden-stub rule.
+    #[command(hide = true)]
+    Board {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         rest: Vec<String>,
     },
@@ -1308,7 +1308,6 @@ fn run() -> Result<()> {
             recent,
             json,
         } => doctor::cmd_doctor(id, harness, recent, json),
-        Cmd::Board { action } => live::cmd_board(action),
         Cmd::Task { action } => task::cmd_task(action),
         Cmd::Distill {
             id,
@@ -1421,6 +1420,10 @@ fn run() -> Result<()> {
         Cmd::Diff { .. } => usage(
             "`cv diff` was removed in 0.15.0 — `cv export <id> --format md` each session and diff the two files",
         ),
+        Cmd::Board { .. } => usage(
+            "`cv board` was removed in 0.15.0 — the task log is the fleet's record: `cv task note` to say something, \
+             `cv task events --since <id>` to follow it, `cv task claim` to hold work",
+        ),
     }
 }
 
@@ -1502,7 +1505,7 @@ mod tests {
             }
         }
         // Names removed in this release are hidden stubs, never visible commands.
-        for old in ["timeline", "redact", "diff"] {
+        for old in ["timeline", "redact", "diff", "board"] {
             assert!(!visible.contains(&old), "{old} must be hidden");
             assert!(
                 cmd.get_subcommands().any(|s| s.get_name() == old),

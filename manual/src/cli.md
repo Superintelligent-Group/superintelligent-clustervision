@@ -38,7 +38,7 @@ The principle behind all of it: **one name, one meaning, no grammar to memorize.
 | **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`stats`](#cv-stats) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
 | **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`fork`](#cv-fork) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`loom`](#cv-loom) [`port`](#cv-port) [`resume`](#cv-resume) |
 | **[Export](#export)** | produce something that is *not* a session | [`export`](#cv-export) [`dataset`](#cv-dataset) [`pack`](#cv-pack) |
-| **[Fleet & live](#fleet--live)** | multi-agent coordination and live views | [`task`](#cv-task) [`board`](#cv-board) [`scry`](#cv-scry) [`share`](#cv-share) |
+| **[Fleet & live](#fleet--live)** | multi-agent coordination and live views | [`task`](#cv-task) [`scry`](#cv-scry) [`share`](#cv-share) |
 | **[System](#system)** | cv's own state and reference | [`index`](#cv-index) [`config`](#cv-config) [`schema`](#cv-schema) [`formats`](#cv-formats) [`recipes`](#cv-recipes) |
 
 ## Things that work everywhere
@@ -829,63 +829,12 @@ decide · resolve · split · events · watch · serve · inbox · sweep
 
 `propose`, `reroute`, `pass`, `refute`, `verify`, `debt` and `stats` were removed in 0.15.0 with the land facet; each errors with a pointer. This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the three laws, and a worked end-to-end example.
 
-### `cv board`
+### `cv board` (removed)
 
-The agent coordination board: a tiny message bus your agents (and you) use to post status, ask questions, hand off work, and claim keys so two agents don't stomp the same file. It's the same board the MCP server and [the daemon](daemon.md) expose; see [the board](board.md) for the bigger picture. Everything is organized into named channels.
-
-```sh
-cv board post build "tests are green on the nom branch" --tag ci --kind status
-cv board read build
-cv board channels
-cv board watch build --match "deploy done"
-```
-
-The full set of actions:
-
-| Action | What it does |
-| --- | --- |
-| `post <channel> <body>` | post a message. `--from`, `--kind`, `--tag` (repeatable), `--session-ref` |
-| `read <channel>` | read messages. `--since <id>`, `--limit` (default `50`), `--json` |
-| `channels` | list every channel |
-| `watch <channel>` | follow live; `--match <substr>` exits when a body matches. `--since`, `--interval` |
-| `request <channel> <body>` | post a question others can `reply` to; prints the request id. `--from` |
-| `reply <channel> <in-reply-to> <body>` | answer a request by its id. `--from` |
-| `replies <channel> <request-id>` | collect every reply to a request |
-| `unanswered <channel>` | requests with **zero** replies, oldest first, with age — dropped questions made visible. `--within-secs` (default `86400`), `--json` |
-| `claim <channel> <key>` | try to claim a key (a soft lease); exits non-zero on contention. `--from`, `--ttl-secs` (default `300`) |
-| `release <channel> <key>` | release a claim you hold. `--from` |
-| `claims <channel>` | list the active (un-expired) claims |
-| `who <channel>` | list agents seen recently (and post your own heartbeat). `--within-secs` (default `60`) |
-| `ack <channel> <message-id>` | acknowledge a message with a tiny ack note. `--from` |
-
-A request/reply round-trip looks like this:
-
-```sh
-$ cv board request build "should I bump the MSRV to 1.82?"
-✦ requested 3f9c0a21 on #build
-  ↳ reply with: cv board reply build 3f9c0a21-… <body>
-
-$ cv board reply build 3f9c0a21 "yes — CI already runs 1.82" --from codex-agent
-✦ replied a7b1… to 3f9c0a21 on #build
-
-$ cv board replies build 3f9c0a21
-14:22:31  codex-agent  (reply) yes — CI already runs 1.82
-```
-
-And the claim/lease dance, for when two agents might race on the same work:
-
-```sh
-$ cv board claim build refactor-parser --from agent-a --ttl-secs 600
-GRANTED  refactor-parser → agent-a (expires 2026-05-29 14:32:18)
-
-$ cv board claim build refactor-parser --from agent-b
-CONTENDED  refactor-parser is held by agent-a        # exits non-zero
-
-$ cv board release build refactor-parser --from agent-a
-✦ released refactor-parser on #build
-```
-
-`claim` exits non-zero when the key is already held, so it composes cleanly in scripts: `cv board claim … && do_the_work`.
+The coordination board went away in 0.15.0: in 85 days of real swarms, 3,317 of its 3,319 lines
+were auto-mirrored task events. The task log is the fleet's record — `cv task note` to say
+something, `cv task events --since <id>` to follow it, `cv task claim` to hold work. Every
+`cv board` spelling errors with that pointer and exit 2.
 
 ### `cv scry`
 

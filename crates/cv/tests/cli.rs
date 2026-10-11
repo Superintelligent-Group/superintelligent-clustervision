@@ -1520,20 +1520,24 @@ fn task_land_facet_verbs_and_flags_are_removed_with_pointers() {
     );
 }
 
-/// G5 on the board: message bodies and senders are stripped at `cv board read`.
+/// `cv board` went away in 0.15.0: every spelling errors with a pointer at the task log, exit 2.
 #[test]
-fn board_read_sanitizes_and_from_defaults_to_cv_endpoint() {
-    let w = World::new("board-ansi");
-
-    let (ok, ..) = w.cv_env(
-        &["board", "post", "general", "hi \u{1b}[31mthere\u{1b}]0;x\u{7}!"],
-        &[("CV_ENDPOINT", "agent:board\u{1b}[0m")],
-    );
-    assert!(ok);
-    let (out, _) = w.cv_ok(&["board", "read", "general"]);
-    assert!(!out.contains('\u{1b}'), "board read leaks ESC:\n{out:?}");
-    assert!(out.contains("hi there!"), "{out}");
-    assert!(out.contains("agent:board"), "CV_ENDPOINT is the default sender:\n{out}");
+fn board_is_removed_with_a_pointer() {
+    let w = World::new("board-removed");
+    for args in [
+        &["board", "post", "general", "hi"][..],
+        &["board", "read", "general"],
+        &["board", "channels"],
+    ] {
+        let (ok, code, out, err) = w.cv(args);
+        assert!(!ok, "cv {args:?} must not still work\nstdout:\n{out}");
+        assert_eq!(code, 2, "cv {args:?} must exit 2\nstderr:\n{err}");
+        assert!(
+            err.contains("removed in 0.15.0") && err.contains("cv task events"),
+            "{err}"
+        );
+    }
+    assert!(!w.cv_home.join("board").exists(), "nothing wrote a board dir");
 }
 
 // ───────────────────────── cv task ergonomics (0.12.0) ─────────────────────────

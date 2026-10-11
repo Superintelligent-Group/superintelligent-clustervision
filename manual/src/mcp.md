@@ -19,10 +19,9 @@ for live coordination.
   said; `pack(task=…)` compiles a whole context bundle out of the corpus. See
   [search](search.md).
 - **"What's my sibling agent doing right now?"** — `ls` surfaces live sessions;
-  `observe_stream` tails their output; `board_who` shows who's present on a channel.
+  `observe_stream` tails their output; `lanes` shows a session's sub-agent forest.
 - **"Block until another session prints X."** — `await_omen(regex=…)` watches live
-  message streams and returns when one matches; `board_await` does the same for explicit
-  [board](board.md) posts.
+  message streams and returns when one matches.
 - **"Why does my own context keep filling up?"** — `doctor(id=…)` attributes the pressure
   by source. Point it at your *own* session id.
 
@@ -214,7 +213,7 @@ On a match returns `{ matched: true, harness, id, cwd, role, matched_text, event
 (`event` is `new_session` or `appended`); on timeout returns
 `{ matched: false, timed_out: true, waited_secs }`. *When to use:* wait on a sibling
 agent's raw transcript — e.g. `await_omen(regex='BUILD (PASSED|FAILED)', cwd_contains='/myproj')`.
-For explicit, structured coordination, prefer the board (below).
+For explicit, structured coordination, use the `task_*` tools (below).
 
 ### `observe_stream`
 
@@ -231,60 +230,10 @@ and returns no backlog.
 | `max_messages` | number | `50` | Max messages this call; the rest are flagged `more_pending`. |
 | `char_cap` | number | `16000` | Cap on total characters returned; the last message is truncated to fit. |
 
-Read-only — it never writes the board.
+Read-only — it writes nothing.
 
-Requests are dispatched concurrently, so a parked `await_omen` or `board_await` never
+Requests are dispatched concurrently, so a parked `await_omen` never
 head-of-line-blocks a `show` issued after it.
-
-## The coordination board
-
-The board is a lightweight pub/sub + locking layer agents use to talk to each other
-directly. Full conceptual treatment is in [the board](board.md); here are the MCP tools.
-Most take a `channel` (a room name, often a project path or topic) and an optional `from`
-(who's posting, default `"agent"`). Results come back as pretty JSON.
-
-### Messaging
-
-| Tool | Required args | Optional args | Purpose / when to use |
-|------|---------------|---------------|------------------------|
-| `board_post` | `channel`, `body` | `from`, `kind` (`msg`\|`status`\|`event`, default `msg`), `tags[]`, `session_ref` | Broadcast status, leave a note, or hand off work so other agents see it. |
-| `board_read` | `channel` | `since` (id cursor), `limit` (default `50`, `0`=all) | Read recent posts; pass `since` to get only newer ones. |
-| `board_await` | `channel`, `regex` | `since` (default: current tail), `timeout_secs` (`120`), `interval_secs` (`2`) | Block until a **new** post matches the regex (or timeout). The clean way to wait on a sibling: `board_await(channel='myproj', regex='BUILD (PASSED|FAILED)')`. |
-| `board_ack` | `channel`, `message_id` | `from` | Acknowledge a message by id with a tiny ack note, so the sender knows it was seen. |
-
-`board_await` returns `{ matched, message?, cursor }` on a hit, or
-`{ matched: false, timed_out: true, cursor }` on timeout.
-
-### Request / reply
-
-A small Q&A protocol layered on the board, correlated by message id.
-
-| Tool | Required args | Optional args | Purpose / when to use |
-|------|---------------|---------------|------------------------|
-| `board_request` | `channel`, `body` | `from` | Post a question other agents can answer. Returns the message **including its `id`** — keep it to collect answers. |
-| `board_reply` | `channel`, `in_reply_to`, `body` | `from` | Answer a prior request, correlated by its id. |
-| `board_replies` | `channel`, `request_id` | — | Collect all replies to a request id, in chronological order. |
-| `board_unanswered` | `channel` | `within_secs` (`86400`) | Requests with **zero** replies, oldest first, each with its age in seconds — the dropped-questions view. Any reply excludes a request. |
-
-### Claims (soft distributed locks)
-
-So two agents don't grab the same task.
-
-| Tool | Required args | Optional args | Purpose / when to use |
-|------|---------------|---------------|------------------------|
-| `board_claim` | `channel`, `key` | `from`, `ttl_secs` (`300`) | Try to claim a task `key`. Returns `{granted: bool, lease?}`; if `granted` is false someone else holds it, so pick a different task. Renews your own claim if you already hold it. |
-| `board_release` | `channel`, `key` | `from` | Release a key you claimed, freeing it for others. Idempotent; only releases a claim you own (returns `{released: false, reason}` otherwise). |
-| `board_claims` | `channel` | — | List active (un-expired) claims as `{key, owner, expires_at}` — see who's working on what. |
-
-A claimed `key` is typically a file path or task id. Always `board_release` when done
-(or let the `ttl_secs` lease expire so it can be stolen).
-
-### Presence
-
-| Tool | Required args | Optional args | Purpose / when to use |
-|------|---------------|---------------|------------------------|
-| `board_heartbeat` | `channel`, `from` | — | Announce you're alive on a channel. Call periodically to stay "active". |
-| `board_who` | `channel` | `within_secs` (`60`) | List agents that heartbeat within the window — active presence. |
 
 ## The task substrate over MCP
 
@@ -324,15 +273,19 @@ ever disagree the live reply is the authority.
 
 ## A typical flow
 
-1. An agent starts work in `/myproj`. It calls `ls(cwd='/myproj')` to see prior history,
-   and `board_who(channel='myproj')` to see which siblings are live.
-2. It `board_heartbeat`s, then `board_claim(channel='myproj', key='src/auth.rs')` so no
-   one else touches that file.
+1. An agent starts work in `/myproj`. It calls `ls(cwd='/myproj')` to see prior history, and
+   `task_inbox()` to see what is assigned to it.
+2. It `task_claim`s its task so no sibling picks it up, and `task_note`s what it is about to do.
 3. Mid-task it hits a wall and calls `pack(task='refresh token rotation')` to compile
    prior work on it from the whole corpus, then `show(id=…, around=…)` on the winner to
    read the span in context — or `cat(session, tool_use_id)` to pull one tool output back
    in full.
-4. It hands off: `board_post(channel='myproj', kind='status', body='auth done, tests green')`
-   and `board_release(channel='myproj', key='src/auth.rs')`.
-5. A sibling that ran `board_await(channel='myproj', regex='auth done')` unblocks and
-   picks up the next task.
+4. It hands off: `task_done(id=…, observed='auth done, tests green in <session>')` — recorded as its
+   own word, labeled self-reported.
+5. A sibling that ran `await_omen(regex='auth done', cwd_contains='/myproj')` unblocks and picks
+   up the next task; the orchestrator sees the close in `cv task events --since <id>`.
+
+`board_post`, `board_read`, `board_await`, `board_request`, `board_reply`, `board_replies`,
+`board_unanswered`, `board_claim`, `board_release`, `board_claims`, `board_who`,
+`board_heartbeat` and `board_ack` were removed in 0.15.0 with the coordination board; calling
+one errors with a pointer at the task tools.

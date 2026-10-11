@@ -755,5 +755,4 @@ are sniffed by content (a file's first conversation): `mapping` ⇒ ChatGPT, `ch
 - `trail-cli`, Contextify, Automagik, `claude_codex_bridge` — Python, 2–3 harnesses, mostly read/HTML.
 
 Gap clustervision fills: one **Rust** IR across **all of them** (21 harnesses — `Harness::COUNT`, one
-manifest each under `formats/`) with **index + search + port + live-follow + an MCP server + a
-coordination board**.
+manifest each under `formats/`) with **index + search + port + live-follow + an MCP server**.

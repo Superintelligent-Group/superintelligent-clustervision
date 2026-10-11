@@ -1,14 +1,14 @@
 # The task substrate
 
-The [board](board.md) lets a fleet *talk*. Tasks let a fleet **commit to work** — and let a
-human see what has been said about that work, by whom, when. 🔮
+Tasks let a fleet **commit to work** — and let a human see what has been said about that work,
+by whom, when. 🔮
 
 A **task** is a durable dispatch object: open it, claim it, note progress on it, finish it. A
 **decision** is a task with a posed question: one event poses it (with the default that stands if
 nobody speaks), one event answers it.
 
-Storage is one append-only event log — `$CLUSTERVISION_HOME/tasks/events.jsonl` — with the same
-crash-safe flock recipe as the board. Every state you ever see is **replay-derived**: fold the
+Storage is one append-only event log — `$CLUSTERVISION_HOME/tasks/events.jsonl` — under a
+crash-safe flock. Every state you ever see is **replay-derived**: fold the
 events through a pure reducer and you get the truth; there is no second store to drift out of
 sync. The substrate is exposed three ways, all rendering the same shapes: the `cv task` CLI
 (this page), the [MCP `task_*` tools](mcp.md#the-task-substrate-over-mcp), and
@@ -239,5 +239,4 @@ is cheap for a long time, but it does grow monotonically. Compaction is planned 
 tail as raw events, and retire the prefix to an archive file — preserving the audit prefix
 (retired events stay on disk and verifiable; they just stop being replayed on every read).
 Until that lands, the log is a single file you can archive by hand, and replay cost grows
-linearly with event count. The board's channels have the same property; see
-[the board chapter](board.md#growth--retention).
+linearly with event count.

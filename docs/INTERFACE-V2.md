@@ -20,7 +20,7 @@ Grouped help (`cv --help` shows every command under these headings; nothing is h
 | **Read** | `ls` `show` `cat` `search` `events` `touched` `tools` `tree` `workflow` `compaction` `prompts` `lanes` `deferrals` `stats` `blame` `doctor` | read-only over existing sessions |
 | **Reshape** | `prune` `rewind` `distill` `fork` `adopt` `splice` `loom` `port` `resume` | produce a NEW session id from existing ones (the source is never touched); `resume` launches one |
 | **Export** | `export` `dataset` `pack` | produce something that is not a session |
-| **Fleet & live** | `task` `board` `scry` `share` | multi-agent coordination and live views |
+| **Fleet & live** | `task` `scry` `share` | multi-agent coordination and live views |
 | **System** | `index` `config` `schema` `formats` `recipes` | cv's own state and reference |
 
 Renames and removals (old → new; the old name is GONE, it errors with a pointer):
@@ -297,7 +297,7 @@ shapes cannot drift. Mechanism (no shared crate; the clap tree lives in the `cv`
 - Over MCP, `show` defaults to `last: 50` and `max_bytes: 200000` (a full transcript is never the
   default there); `ls`/`search` default `limit` stays the CLI default.
 - MCP-only tools keep their names and hand-written schemas: `observe_stream`, `await_omen`,
-  `board_*`, `task_*` (which mirror `cv task <sub>`). `read_session`, `search_sessions`,
+  `task_*` (which mirror `cv task <sub>`). `read_session`, `search_sessions`,
   `list_sessions`, `project_sessions`, `recall`, `prune_session`, `prune_retrieve` are removed
   (their replacements are `show`, `search`, `ls`, `ls --cwd`, `pack`, `prune`, `cat`).
 

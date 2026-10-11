@@ -162,28 +162,17 @@ work (the full-transcript compaction scan) is server-side, so even a
 `<cv-fleet>` connects to a running **`cvd serve`** HTTP API and live-displays the
 fleet by **polling every ~2s** (CORS is enabled server-side, so cross-origin
 `fetch` from this static page works). Enter a **base URL** (default
-`http://localhost:7777`) and a **channel** (default `fleet`, i.e. the `#fleet`
-activity channel the daemon mirrors into).
+`http://localhost:7777`).
 
-It renders, all auto-refreshing with a **pause** toggle:
+It renders a **recent-sessions** activity feed — `/api/sessions?limit=N` (IR
+`Session[]`), harness-badged — auto-refreshing with a **pause** toggle.
 
-- an **active-agents** strip — present agents from `/api/who/<channel>`
-  (recent heartbeats), harness-colored;
-- a **claims table** — the distributed locks from `/api/claims/<channel>`
-  (`key → owner → expires`), with soon/expired highlighting;
-- a **#channel board feed** — messages from `/api/board/<channel>`
-  (`{id,channel,from,ts,kind,body,tags,session_ref}`), newest first, colored by
-  `kind` (`status`/`event`/`request`/`reply`/`presence`/`claim`);
-- a **recent-sessions** activity feed — `/api/sessions?limit=N` (IR `Session[]`),
-  harness-badged.
-
-Polled endpoints: `/api/health`, `/api/sessions?limit=`, `/api/channels`,
-`/api/board/<channel>`, `/api/claims/<channel>`, `/api/who/<channel>`.
+Polled endpoints: `/api/health`, `/api/sessions?limit=`.
 
 If the API is unreachable it shows a friendly **"start `cvd serve`"** hint and
-lets you **load a static board export** (`.json`: an array of `BoardMessage`s, or
-an object `{ board?, claims?, who?, sessions?, channels?, channel? }`) to explore
-the layout offline.
+lets you **load a static sessions export** (`.json`: an array of sessions, or an
+object `{ sessions? }`) to explore the layout offline. (The board, claims and
+presence panels went with the coordination board in 0.15.0.)
 
 ## Components
 
@@ -402,10 +391,9 @@ Run the daemon's HTTP API alongside the static site:
 cvd serve --host 127.0.0.1 --port 7777   # CORS for local origins only
 ```
 
-Open the **📡 Fleet** tab (base URL `http://localhost:7777`, channel `fleet`).
-The active-agents strip, claims table, board feed, and recent-sessions feed
-refresh every ~2s; use **⏸ pause** to freeze. No server? The offline panel lets
-you load a static board `.json` to explore the layout.
+Open the **📡 Fleet** tab (base URL `http://localhost:7777`). The recent-sessions
+feed refreshes every ~2s; use **⏸ pause** to freeze. No server? The offline panel
+lets you load a static sessions `.json` to explore the layout.
 
 ## Deployment
 

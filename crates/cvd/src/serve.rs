@@ -17,7 +17,6 @@ use cv_core::{Flow, Harness, Message, MessageSink, ParseOptions, Session};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tiny_http::{Header, Method, Request, Response, Server};
 
 /// What one request handler needs to know beyond the request itself.
@@ -258,18 +257,12 @@ fn route_json(parts: &[&str], query: &str) -> (u16, Value) {
 
         ["api", "session", harness, id, "workflow", wf, "script"] => workflow_script(harness, id, wf),
 
-        ["api", "board", channel] => board(channel, query),
-
-        ["api", "board", channel, "unanswered"] => board_unanswered(channel, query),
-
-        ["api", "claims", channel] => claims(channel),
-
-        ["api", "who", channel] => who(channel, query),
-
-        ["api", "channels"] => match cv_core::board::channels() {
-            Ok(c) => ok(json!(c)),
-            Err(e) => err(500, &e.to_string()),
-        },
+        // Removed in 0.15.0 with the coordination board: a pointer, not a silent 404.
+        ["api", "board", ..] | ["api", "claims", _] | ["api", "who", _] | ["api", "channels"] => err(
+            410,
+            "removed in 0.15.0 with the coordination board — the task log is the fleet's record: \
+             /api/tasks, /api/tasks/inbox/{who}, /api/task/{id}/events",
+        ),
 
         ["api", "tasks"] => tasks(query),
 
@@ -1146,64 +1139,6 @@ fn workflow_script(harness: &str, id: &str, wf: &str) -> (u16, Value) {
             "source": source,
         })),
         Err(e) => err(500, &format!("could not read script: {e}")),
-    }
-}
-
-/// `GET /api/board/{channel}?since=&limit=` — board messages.
-fn board(channel: &str, query: &str) -> (u16, Value) {
-    let params = Query::parse(query);
-    let since = params.get("since");
-    let limit = params.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(0); // 0 == unlimited in cv_core::board::read.
-    match cv_core::board::read(channel, since.as_deref(), limit) {
-        Ok(msgs) => ok(json!(msgs)),
-        Err(e) => err(500, &e.to_string()),
-    }
-}
-
-/// `GET /api/board/{channel}/unanswered?within_secs=` — requests with zero replies, oldest
-/// first, each with its age in seconds (default window 24h).
-fn board_unanswered(channel: &str, query: &str) -> (u16, Value) {
-    let params = Query::parse(query);
-    let within = params
-        .get("within_secs")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(86_400);
-    match cv_core::board::unanswered_requests(channel, Duration::from_secs(within)) {
-        Ok(rows) => {
-            let out: Vec<Value> = rows
-                .iter()
-                .map(|(m, age)| json!({ "message": m, "age_secs": age.num_seconds() }))
-                .collect();
-            ok(json!(out))
-        }
-        Err(e) => err(500, &e.to_string()),
-    }
-}
-
-/// `GET /api/claims/{channel}` — active leases as `{key, owner, expires_at}`.
-fn claims(channel: &str) -> (u16, Value) {
-    match cv_core::board::active_claims(channel) {
-        Ok(claims) => {
-            let out: Vec<Value> = claims
-                .into_iter()
-                .map(|(key, owner, expires_at)| json!({ "key": key, "owner": owner, "expires_at": expires_at }))
-                .collect();
-            ok(json!(out))
-        }
-        Err(e) => err(500, &e.to_string()),
-    }
-}
-
-/// `GET /api/who/{channel}?within_secs=` — recently-present agents.
-fn who(channel: &str, query: &str) -> (u16, Value) {
-    let params = Query::parse(query);
-    let within = params
-        .get("within_secs")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(cv_core::board::WHO_WINDOW_SECS);
-    match cv_core::board::who(channel, Duration::from_secs(within)) {
-        Ok(names) => ok(json!(names)),
-        Err(e) => err(500, &e.to_string()),
     }
 }
 

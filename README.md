@@ -137,7 +137,7 @@ workspace's `target/release` instead of rebuilding from scratch in a temp dir.
 claude mcp add clustervision -- /path/to/target/release/cv-mcp
 ```
 
-The MCP tools are **generated from the CLI** — same names, same flags, same JSON — so they can't drift from what `cv` actually does. Plus the live-coordination primitives that only make sense over MCP: `await_omen` (block until a sibling agent's message matches a regex), `observe_stream` (its non-blocking sibling — poll a junior agent's live message tail on your own cadence), and the board/task tools. The current roster is in the manual's **[MCP chapter](https://emberian.github.io/clustervision/manual/mcp.html)**, or run `cv schema --commands` to see the tree they're generated from.
+The MCP tools are **generated from the CLI** — same names, same flags, same JSON — so they can't drift from what `cv` actually does. Plus the live-coordination primitives that only make sense over MCP: `await_omen` (block until a sibling agent's message matches a regex), `observe_stream` (its non-blocking sibling — poll a junior agent's live message tail on your own cadence), and the task tools. The current roster is in the manual's **[MCP chapter](https://emberian.github.io/clustervision/manual/mcp.html)**, or run `cv schema --commands` to see the tree they're generated from.
 
 ## 📋 Dispatch work you can trust (`cv task`)
 
@@ -184,12 +184,6 @@ Same substrate over MCP (`task_open` … `task_inbox`), cvd HTTP (`/api/tasks`,
 discuss,claim,release,reopen}`, `/api/events` — the same query as `cv task events`). State lives in
 a replayed event log (`~/.clustervision/tasks/events.jsonl`) that refuses events its own reducer
 would reject; every append is one event, never an edit.
-
-**`task` and `board`:** the board is the fleet's chat; tasks are its commitments. Every task event
-posts a one-line notification (`task 01a0f54c: resolved — K-PORTAL: who births…`) to the task's
-channel (`tasks` by default), so `cv board read tasks` is the task store as a timeline — the
-human-readable twin of `cv task events`, which is the same history as JSON lines with a cursor.
-The board never holds task state; the event log does.
 
 ## 📡 Archive your whole fleet (`cvd`)
 

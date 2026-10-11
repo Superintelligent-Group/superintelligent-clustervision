@@ -6,8 +6,8 @@
 //! and builds one MCP tool per command from clap's own introspection.
 //!
 //! - **Which commands.** Everything clap shows under the **Read**, **Reshape**, **Export** and
-//!   **System** groups. `Fleet & live` (`task`, `board`, `scry`, `share`) is excluded: those have
-//!   hand-written MCP tools with long-poll/claim semantics a subprocess can't offer.
+//!   **System** groups. `Fleet & live` (`task`, `scry`, `share`) is excluded: those have
+//!   hand-written MCP tools with long-poll/append semantics a subprocess can't offer.
 //! - **Which binary.** `$CV_BIN`, else a `cv` sitting next to the running `cv-mcp`, else `cv` on
 //!   `PATH`; the first candidate whose schema dump parses wins (see [`locate_cv`]).
 //! - **Calls** run `cv <command> <args…> --json` (the `--json` only for commands that have the

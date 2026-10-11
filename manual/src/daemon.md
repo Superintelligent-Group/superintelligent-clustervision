@@ -1,7 +1,7 @@
 # The daemon: `cvd`
 
 `cvd` is the clustervision daemon — the piece that turns a pile of per-machine, per-harness session
-files into a single durable **archive** and a live **fleet feed**. Where [`cv`](cli.md) is your
+files into a single durable **archive** and a live **fleet view**. Where [`cv`](cli.md) is your
 interactive map of *this* machine, `cvd` is the long-running thing that watches every harness's
 on-disk storage, snapshots sessions into a central store, and (optionally) serves that state as JSON
 so [the app](app.md)'s fleet dashboard can render it. 🔮
@@ -9,7 +9,7 @@ so [the app](app.md)'s fleet dashboard can render it. 🔮
 It has three jobs worth knowing:
 
 - **`cvd sync`** — one-shot: snapshot every discovered session into the archive, then exit.
-- **`cvd watch`** — long-running: follow live activity and archive sessions as they change, emitting a fleet activity feed.
+- **`cvd watch`** — long-running: follow live activity and archive sessions as they change.
 - **`cvd serve`** — a tiny local HTTP API that exposes fleet state as JSON.
 
 Plus two small utilities: `cvd ls` (list what's in the archive) and `cvd path` (print the archive location).
@@ -85,16 +85,6 @@ cvd: watching (interval 3s) -> /Users/you/.clustervision
 [archived] codex    9f8e7d6c  +3 msgs  ~/code/other-project
 ```
 
-### The fleet feed 🔮
-
-Beyond stderr logging, `watch` mirrors each archive event onto [the board](board.md)'s **`#fleet`**
-channel — a live, centralized activity feed. Run `cvd watch` on several machines pointed at the same
-board and `#fleet` becomes a cross-machine stream of "who's doing what right now." You can tail it
-with `cv scry` (see [scry / cv](cli.md)) or read it over HTTP via `GET /api/board/fleet` below.
-
-Each event is posted with the harness as a tag and the session id attached, so the feed stays
-filterable.
-
 ## `cvd serve` — the local HTTP API
 
 ```sh
@@ -120,7 +110,7 @@ Two things worth noting up front:
 - **It reads *live* sessions, not the archive.** `serve`'s session endpoints call into the same
   discovery/parse engine `cv` uses, so they reflect the current on-disk state of each harness in
   real time. (The archive is what `sync`/`watch` build for durability and search; `serve` is the
-  live window.) The board endpoints read [the board](board.md) directly.
+  live window.)
 - **Every response is JSON, and the API is locked to local callers.** Your transcripts can contain
   secrets, so `serve` treats them that way:
   - **CORS is an allow-list, never `*`.** Only local origins (`http://localhost:*`,
@@ -274,27 +264,9 @@ The driving script Claude Code recorded for a `Workflow` run, as `{ workflow, na
 
 #### Board endpoints
 
-These read [the board](board.md) directly (see that chapter for the data model):
-
-- **`GET /api/board/{channel}`** — board messages. Optional `?since=<id>` and `?limit=<n>` (where
-  `limit=0`, the default, means unlimited). Try `/api/board/fleet` for the live fleet feed `cvd
-  watch` writes.
-- **`GET /api/board/{channel}/unanswered`** — requests with **zero** replies, oldest first, each
-  as `{ "message": {...}, "age_secs": n }`. Optional `?within_secs=<n>` (default `86400` = 24h).
-- **`GET /api/claims/{channel}`** — active leases on the channel, each as `{ "key", "owner", "expires_at" }`.
-- **`GET /api/who/{channel}`** — agents recently present on the channel. Optional `?within_secs=<n>`
-  (default `60`).
-- **`GET /api/channels`** — the list of known board channels.
-
-```sh
-curl 'http://127.0.0.1:7777/api/claims/fleet'
-```
-
-```json
-[
-  { "key": "deploy", "owner": "claude:a1b2c3d4", "expires_at": "2026-05-30T18:50:00Z" }
-]
-```
+`GET /api/board/{channel}`, `/api/board/{channel}/unanswered`, `/api/claims/{channel}`,
+`/api/who/{channel}` and `/api/channels` were removed in 0.15.0 with the coordination board;
+they answer `410` with a pointer at the task routes below.
 
 #### Task endpoints
 
@@ -386,4 +358,4 @@ cvd serve --port 7777          # let the app's dashboard poll live state
 
 - browse and visualize it all in [the app](app.md),
 - tail the live feed with `cv scry` (see [the CLI](cli.md)),
-- and coordinate running agents through [the board](board.md).
+- and coordinate running agents through [tasks](tasks.md).

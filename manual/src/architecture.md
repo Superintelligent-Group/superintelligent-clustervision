@@ -229,7 +229,7 @@ clustervision is a Rust workspace. `cv-core` is the library every other crate is
                          ┌─────────────────────────────────────────────┐
                          │                  cv-core                     │
                          │  IR · Adapter registry · discover_all +      │
-                         │  cache · emit/convert · loom · board ·       │
+                         │  cache · emit/convert · loom · tasks ·       │
                          │  render/html · ingest · redact · watch       │
                          └─────────────────────────────────────────────┘
                             ▲    ▲    ▲    ▲    ▲    ▲     ▲     ▲

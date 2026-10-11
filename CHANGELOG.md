@@ -22,6 +22,7 @@
 - `cvd --version` no longer goes stale on a branch (its build.rs watches the resolved ref, as `cv`'s does); cv-mcp's unknown-harness error names all 23 harnesses.
 - **`cv deferrals --phrases-file`** (or `~/.config/clustervision/deferrals.txt`): the phrase table is yours; the built-in default carries no maintainer's name.
 - Web: the OpenSession tab and `openSession.html` are gone; the format's home is the manual chapter, which the footer links.
+- `cv board` (13 verbs), the 13 MCP `board_*` tools and cvd's `/api/board|claims|who|channels` are gone; each errors with a pointer at the task log. The fleet pane shows sessions only.
 - Task log: the nine land-facet event kinds replay as state-neutral events; `show --json`/`list --json` lose `revisions` and `done_check`. Old logs still read.
 - `cv task propose/reroute/pass/refute/verify/debt/stats`, `--token`/`CV_TOKEN` and `done --check-*` are gone; each errors with a pointer. `done` is labeled `self-reported`.
 - MCP: `task_propose`, `task_pass`, `task_refute`, `task_verify`, `task_debt`, `task_stats` and the `token`/`check_*` params are gone; calls error with a pointer.

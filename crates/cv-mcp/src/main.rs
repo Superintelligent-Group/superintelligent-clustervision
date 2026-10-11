@@ -32,9 +32,7 @@
 //!    - `observe_stream(cwd_contains?, harness?, since_cursor?, max_messages=50, char_cap?)` — the
 //!      non-blocking sibling: drains the *newly-appended* messages since an opaque cursor and
 //!      returns immediately with a fresh cursor, so a senior agent can poll a junior's activity on
-//!      its own cadence. Bounded + read-only (no board write).
-//!    - `board_*` — the coordination board: post/read/await, request/reply, claim/release,
-//!      presence and acks.
+//!      its own cadence. Bounded + read-only.
 //!    - `task_*` — durable fleet tasks, mirroring `cv task <sub>`.
 //!
 //! `show` is windowed by default over MCP (`--last 50 --max-bytes 200000`) so a whole transcript is
@@ -66,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("cv-mcp: clustervision MCP server starting (stdio JSON-RPC)");
 
     // Generate the command tools from the CLI itself. A failure here is loud but not fatal: the
-    // hand-written coordination tools (board/task/omen) don't need `cv` on disk.
+    // hand-written coordination tools (task/omen) don't need `cv` on disk.
     let generated = match CliTools::discover() {
         Ok(c) => {
             eprintln!(
@@ -90,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     let mut buf: Vec<u8> = Vec::new();
 
     // Every response funnels through one writer task: requests are handled *concurrently* (a
-    // parked long-poll like await_omen/board_await must not head-of-line-block an `ls`
+    // parked long-poll like await_omen must not head-of-line-block an `ls`
     // issued after it), but stdout is a shared byte stream, so a single consumer serializes the
     // frames. Responses may therefore complete out of order — JSON-RPC ties a reply to its request
     // by `id`, so that's fine.
@@ -238,7 +236,7 @@ fn instructions() -> String {
          `port` and `redact` produce NEW sessions from existing ones without touching the source \
          (`rewind` = an agent as of a past message or commit, resumable). \
          To coordinate with sibling agents live, use `await_omen`/`observe_stream` (watch another \
-         agent's output) and the `board_*` / `task_*` tools. \
+         agent's output) and the `task_*` tools. \
          Harnesses cv reads: {}.",
         harnesses.join(", ")
     )
@@ -276,7 +274,7 @@ fn task_tool_list() -> Value {
     json!([
         {
             "name": "task_open",
-            "description": "Open a durable fleet task (dispatch object). Unlike a board message, a task has a lifecycle: open → claimed → done; completion is self-reported and labeled so. Returns the new task.",
+            "description": "Open a durable fleet task (dispatch object): a lifecycle open → claimed → done, notes, tags, blockers; completion is self-reported and labeled so. Returns the new task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -423,176 +421,6 @@ fn base_tool_list() -> Value {
                     "char_cap": { "type": "number", "description": "Optional cap on total characters of message text returned; the last message is truncated to fit (default 16000)." }
                 }
             }
-        },
-        {
-            "name": "board_post",
-            "description": "Post a message to a coordination-board channel so OTHER agents can see it. Use to broadcast status, leave a note, or hand off work (e.g. channel='myproj', body='done: migrated auth, tests green').",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name (often a project path or topic)." },
-                    "body": { "type": "string", "description": "The message text." },
-                    "from": { "type": "string", "description": "Who's posting (agent/session name). Defaults to $CV_ENDPOINT, else 'agent'." },
-                    "kind": { "type": "string", "description": "msg | status | event (default msg)." },
-                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags." },
-                    "session_ref": { "type": "string", "description": "Optional session id this message is about." }
-                },
-                "required": ["channel", "body"]
-            }
-        },
-        {
-            "name": "board_read",
-            "description": "Read recent messages from a coordination-board channel — see what other agents have posted. Pass `since` (a message id cursor) to get only newer messages.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "since": { "type": "string", "description": "Return only messages after this message id." },
-                    "limit": { "type": "number", "description": "Max messages (default 50, 0 = all)." }
-                },
-                "required": ["channel"]
-            }
-        },
-        {
-            "name": "board_await",
-            "description": "Block until a NEW message on a board channel matches a regex (or timeout). The way to wait on a sibling agent: board_await(channel='myproj', regex='BUILD (PASSED|FAILED)').",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "regex": { "type": "string", "description": "Rust regex matched against message bodies." },
-                    "since": { "type": "string", "description": "Start cursor (default: current tail — only new posts)." },
-                    "timeout_secs": { "type": "number", "description": "Give up after this many seconds (default 120)." },
-                    "interval_secs": { "type": "number", "description": "Poll interval (default 2)." }
-                },
-                "required": ["channel", "regex"]
-            }
-        },
-        {
-            "name": "board_request",
-            "description": "Post a REQUEST (a question/ask) on a board channel that other agents can answer with board_reply. Returns the posted message including its `id` — keep that id to collect answers via board_replies(channel, request_id) or to board_await replies.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "body": { "type": "string", "description": "The question / ask." },
-                    "from": { "type": "string", "description": "Who's asking. Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["channel", "body"]
-            }
-        },
-        {
-            "name": "board_reply",
-            "description": "Reply to a prior board_request, correlated by its message id. The reply records the request id so board_replies(channel, request_id) collects it.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "in_reply_to": { "type": "string", "description": "The id of the request message being answered." },
-                    "body": { "type": "string", "description": "The answer text." },
-                    "from": { "type": "string", "description": "Who's replying. Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["channel", "in_reply_to", "body"]
-            }
-        },
-        {
-            "name": "board_replies",
-            "description": "Collect all replies to a request id on a channel (the answers to a board_request), in chronological order.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "request_id": { "type": "string", "description": "The id of the original request message." }
-                },
-                "required": ["channel", "request_id"]
-            }
-        },
-        {
-            "name": "board_unanswered",
-            "description": "Requests on a channel with ZERO replies, oldest first, each with its age in seconds — the dropped-questions view. A request that got any board_reply is excluded.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "within_secs": { "type": "number", "description": "Only requests posted within this window (default 86400 = 24h)." }
-                },
-                "required": ["channel"]
-            }
-        },
-        {
-            "name": "board_claim",
-            "description": "Try to CLAIM a task `key` on a channel — a soft distributed lock so two agents don't grab the same task. Returns {granted: bool, lease?}. If granted is false another agent holds it; branch on that to pick a different task. Renews your own claim if you already hold it. Release with board_release when done.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "key": { "type": "string", "description": "The task key to claim (e.g. a file path or task id)." },
-                    "from": { "type": "string", "description": "Who's claiming. Defaults to $CV_ENDPOINT, else 'agent'." },
-                    "ttl_secs": { "type": "number", "description": "How long the claim is held before it can be stolen (default 300)." }
-                },
-                "required": ["channel", "key"]
-            }
-        },
-        {
-            "name": "board_release",
-            "description": "Release a task `key` you claimed on a channel, freeing it for other agents. Idempotent and only releases a claim you own.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "key": { "type": "string", "description": "The claimed task key to release." },
-                    "from": { "type": "string", "description": "Who's releasing (must match the claimant). Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["channel", "key"]
-            }
-        },
-        {
-            "name": "board_claims",
-            "description": "List the currently-active (un-expired) task claims on a channel as {key, owner, expires_at}. See who's working on what.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." }
-                },
-                "required": ["channel"]
-            }
-        },
-        {
-            "name": "board_who",
-            "description": "List agents that have recently sent a board_heartbeat on a channel (active presence) within the last `within_secs` seconds (default 60).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "within_secs": { "type": "number", "description": "Presence window in seconds (default 60)." }
-                },
-                "required": ["channel"]
-            }
-        },
-        {
-            "name": "board_heartbeat",
-            "description": "Announce your presence on a channel by posting a heartbeat. Other agents see you via board_who. Call periodically to stay 'active'.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "from": { "type": "string", "description": "Who's present (agent/session name)." }
-                },
-                "required": ["channel", "from"]
-            }
-        },
-        {
-            "name": "board_ack",
-            "description": "Acknowledge a board message by id with a tiny ack note (correlated to the target message), so the sender can confirm it was seen.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel/room name." },
-                    "message_id": { "type": "string", "description": "The id of the message being acknowledged." },
-                    "from": { "type": "string", "description": "Who's acking. Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["channel", "message_id"]
-            }
         }
     ])
 }
@@ -653,19 +481,11 @@ fn call_tool(name: &str, args: &Value) -> anyhow::Result<String> {
     match name {
         "await_omen" => await_omen(args),
         "observe_stream" => observe_stream(args),
-        "board_post" => board_post(args),
-        "board_read" => board_read(args),
-        "board_await" => board_await(args),
-        "board_request" => board_request(args),
-        "board_reply" => board_reply(args),
-        "board_replies" => board_replies(args),
-        "board_unanswered" => board_unanswered(args),
-        "board_claim" => board_claim(args),
-        "board_release" => board_release(args),
-        "board_claims" => board_claims(args),
-        "board_who" => board_who(args),
-        "board_heartbeat" => board_heartbeat(args),
-        "board_ack" => board_ack(args),
+        // Removed in 0.15.0 (the coordination board): a pointer, never a silent "unknown tool".
+        n if n.starts_with("board_") => anyhow::bail!(
+            "{n} was removed in 0.15.0 with the coordination board — the task log is the fleet's record: \
+             `task_note` to say something, `task_claim` to hold work, `await_omen`/`observe_stream` to wait on a sibling"
+        ),
         "task_open" => task_open(args),
         "task_list" => task_list(args),
         "task_show" => task_show(args),
@@ -694,229 +514,16 @@ fn call_tool(name: &str, args: &Value) -> anyhow::Result<String> {
     }
 }
 
-/// Board identity (G4), same resolution as the CLI: explicit `from`, else the spawner-set
-/// `CV_ENDPOINT`, else the legacy "agent" sink. The board is chat — an unresolvable identity is
-/// never an error; the env var just makes the bare call attribute correctly.
-fn board_from(args: &Value) -> String {
-    cv_core::task::actor(arg_str(args, "from").map(String::from), "agent")
-}
-
-/// Post a message to a coordination-board channel (so other agents can see it).
-fn board_post(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let from = board_from(args);
-    let body = arg_str(args, "body").context("`body` is required")?;
-    let kind = arg_str(args, "kind");
-    let tags = args
-        .get("tags")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    let session_ref = arg_str(args, "session_ref").map(String::from);
-    let msg = cv_core::board::post(channel, &from, body, kind, tags, session_ref)?;
-    Ok(serde_json::to_string_pretty(&msg)?)
-}
-
-/// Read recent messages from a board channel (optionally only those after a cursor id).
-fn board_read(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let since = arg_str(args, "since");
-    let limit = arg_usize(args, "limit", 50)?;
-    let msgs = cv_core::board::read(channel, since, limit)?;
-    Ok(serde_json::to_string_pretty(&msgs)?)
-}
-
-/// Block until a board message body matches a regex (or timeout). The polling loop runs on a
-/// blocking worker thread (tools dispatch via spawn_blocking), so blocking here is fine.
-fn board_await(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let pattern = arg_str(args, "regex").context("`regex` is required")?;
-    let re = regex::Regex::new(pattern).with_context(|| format!("invalid regex: {pattern:?}"))?;
-    let timeout = Duration::from_secs(arg_usize(args, "timeout_secs", 120)? as u64);
-    let interval = Duration::from_secs(arg_usize(args, "interval_secs", 2)?.max(1) as u64);
-    // Start the cursor at the current tail so we only react to *new* posts (unless caller gives one).
-    let mut cursor = arg_str(args, "since").map(String::from).or_else(|| {
-        cv_core::board::read(channel, None, 0)
-            .ok()
-            .and_then(|m| m.last().map(|x| x.id.clone()))
-    });
-    let start = Instant::now();
-    loop {
-        let fresh = cv_core::board::read(channel, cursor.as_deref(), 0)?;
-        for m in &fresh {
-            cursor = Some(m.id.clone());
-            if re.is_match(&m.body) {
-                return Ok(serde_json::to_string_pretty(&json!({
-                    "matched": true,
-                    "message": m,
-                    "cursor": m.id,
-                }))?);
-            }
-        }
-        if start.elapsed() >= timeout {
-            return Ok(serde_json::to_string_pretty(&json!({
-                "matched": false,
-                "timed_out": true,
-                "cursor": cursor,
-            }))?);
-        }
-        std::thread::sleep(interval);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Board coordination primitives (request/reply, claim/lease, presence, ack)
 // ---------------------------------------------------------------------------
-
-/// Post a request (a question others can `board_reply` to). Returns the message incl. its id.
-fn board_request(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let from = board_from(args);
-    let body = arg_str(args, "body").context("`body` is required")?;
-    let msg = cv_core::board::request(channel, &from, body)?;
-    Ok(serde_json::to_string_pretty(&msg)?)
-}
-
-/// Reply to a prior request, correlated by its message id.
-fn board_reply(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let from = board_from(args);
-    let in_reply_to = arg_str(args, "in_reply_to").context("`in_reply_to` is required")?;
-    let body = arg_str(args, "body").context("`body` is required")?;
-    let msg = cv_core::board::reply(channel, &from, in_reply_to, body)?;
-    Ok(serde_json::to_string_pretty(&msg)?)
-}
-
-/// Collect all replies to a request id on a channel.
-fn board_replies(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let request_id = arg_str(args, "request_id").context("`request_id` is required")?;
-    let msgs = cv_core::board::replies(channel, request_id)?;
-    Ok(serde_json::to_string_pretty(&msgs)?)
-}
-
-/// Requests with zero replies on a channel, oldest first, with age in seconds.
-fn board_unanswered(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let within = Duration::from_secs(arg_usize(args, "within_secs", 86_400)? as u64);
-    let rows = cv_core::board::unanswered_requests(channel, within)?;
-    let out: Vec<Value> = rows
-        .iter()
-        .map(|(m, age)| json!({ "message": m, "age_secs": age.num_seconds() }))
-        .collect();
-    Ok(serde_json::to_string_pretty(&json!(out))?)
-}
-
-/// Try to claim a task `key` (soft distributed lock). Returns `{granted, lease?}`.
-fn board_claim(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let from = board_from(args);
-    let key = arg_str(args, "key").context("`key` is required")?;
-    let ttl = Duration::from_secs(arg_usize(args, "ttl_secs", 300)?.max(1) as u64);
-    match cv_core::board::claim(channel, &from, key, ttl)? {
-        Some(lease) => Ok(serde_json::to_string_pretty(&json!({
-            "granted": true,
-            "lease": lease_json(&lease),
-        }))?),
-        None => Ok(serde_json::to_string_pretty(&json!({
-            "granted": false,
-        }))?),
-    }
-}
-
-/// Release a task `key` previously claimed by `from`. Idempotent; only releases a claim you own.
-///
-/// `board::release` takes a `Lease`, whose dir/channel fields are private — the only way to obtain
-/// one is via `claim`. So we re-claim the key (which renews/returns our own lease, or returns None
-/// if another agent holds it) and then release that lease. If someone else owns the key, claim
-/// returns None and we leave their claim untouched (a no-op, which is the correct semantics).
-fn board_release(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let from = board_from(args);
-    let key = arg_str(args, "key").context("`key` is required")?;
-    // Guard before re-claiming: claiming a *free* key just to release it would falsely report
-    // `released: true` for a lock we never held. Only proceed if the caller already owns a live
-    // claim. Transition note: before `from` routed through CV_ENDPOINT, every default-identity
-    // claim was owned by the literal "agent" — a defaulted release (no explicit `from`) still
-    // accepts that owner this release, so pre-upgrade claims stay releasable by their taker.
-    let defaulted = arg_str(args, "from").is_none();
-    let owner = cv_core::board::active_claims(channel)?
-        .into_iter()
-        .find(|(k, owner, _)| k == key && (*owner == from || (defaulted && owner == "agent")))
-        .map(|(_, owner, _)| owner);
-    let Some(owner) = owner else {
-        return Ok(serde_json::to_string_pretty(&json!({
-            "released": false,
-            "key": key,
-            "reason": "you don't hold this key; nothing released",
-        }))?);
-    };
-    // Re-acquire under the owning identity (renews our own lease) then release it.
-    match cv_core::board::claim(channel, &owner, key, Duration::from_secs(1))? {
-        Some(lease) => {
-            cv_core::board::release(&lease)?;
-            Ok(serde_json::to_string_pretty(&json!({
-                "released": true,
-                "key": key,
-                "owner": owner,
-            }))?)
-        }
-        None => Ok(serde_json::to_string_pretty(&json!({
-            "released": false,
-            "key": key,
-            "reason": "key is held by another agent; nothing released",
-        }))?),
-    }
-}
-
-/// List active (un-expired) claims on a channel as `{key, owner, expires_at}`.
-fn board_claims(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let claims = cv_core::board::active_claims(channel)?;
-    let out: Vec<Value> = claims
-        .into_iter()
-        .map(|(key, owner, expires_at)| {
-            json!({
-                "key": key,
-                "owner": owner,
-                "expires_at": expires_at.to_rfc3339(),
-            })
-        })
-        .collect();
-    Ok(serde_json::to_string_pretty(&json!(out))?)
-}
-
-/// List agents that heartbeat on a channel within the last `within_secs` (default 120).
-fn board_who(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let within = Duration::from_secs(arg_usize(args, "within_secs", cv_core::board::WHO_WINDOW_SECS as usize)? as u64);
-    let who = cv_core::board::who(channel, within)?;
-    Ok(serde_json::to_string_pretty(&json!(who))?)
-}
-
-/// Announce presence on a channel by posting a heartbeat.
-fn board_heartbeat(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let from = arg_str(args, "from").context("`from` is required")?;
-    let msg = cv_core::board::heartbeat(channel, from)?;
-    Ok(serde_json::to_string_pretty(&msg)?)
-}
-
-/// Acknowledge a message by id with a tiny ack note.
-fn board_ack(args: &Value) -> anyhow::Result<String> {
-    let channel = arg_str(args, "channel").context("`channel` is required")?;
-    let from = board_from(args);
-    let message_id = arg_str(args, "message_id").context("`message_id` is required")?;
-    let msg = cv_core::board::ack(channel, &from, message_id)?;
-    Ok(serde_json::to_string_pretty(&msg)?)
-}
 
 // ---------------------------------------------------------------------------
 // task_* tools — thin wrappers over cv_core::task.
 // ---------------------------------------------------------------------------
 
 /// Identity resolution (G4) for verbs where the actor is bookkeeping, not semantics
-/// (open/note/done/abandon, board chat): explicit `from` param, else the spawner-set
+/// (open/note/done/abandon): explicit `from` param, else the spawner-set
 /// `CV_ENDPOINT` (the MCP server inherits the agent's environment), else the legacy "agent"
 /// sink. Shared logic lives in [`cv_core::task::actor`]; only MCP's default sink is chosen here.
 fn task_from_or_agent(args: &Value) -> String {
@@ -1084,15 +691,6 @@ fn task_inbox(args: &Value) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(
         &json!({ "inbox": entries, "warnings": warnings }),
     )?)
-}
-
-/// Build a JSON view of a `Lease` from its public fields (the struct isn't directly Serialize).
-fn lease_json(lease: &cv_core::board::Lease) -> Value {
-    json!({
-        "key": lease.key,
-        "owner": lease.owner,
-        "expires_at": lease.expires_at.to_rfc3339(),
-    })
 }
 
 /// Block until a newly-emitted message matches `regex` (or `timeout_secs` elapses). The polling loop

@@ -52,9 +52,9 @@ Where the generation runs depends on how you're running the app:
 
 ### 📡 Fleet — the live dashboard
 
-A live window onto a running [`cvd serve`](daemon.md). It polls the daemon's HTTP API (default `http://localhost:7777`) every ~2 seconds and shows your **active agents** (presence heartbeats), the live **coordination board** for a channel, the **claims** table (distributed locks, with live expiry countdowns), and a **recent-sessions** feed. Pause/resume and reconnect controls live in the toolbar; pick a channel from the dropdown.
+A live window onto a running [`cvd serve`](daemon.md). It polls the daemon's HTTP API (default `http://localhost:7777`) every ~2 seconds and shows a **recent-sessions** feed across every harness. Pause/resume and reconnect controls live in the toolbar.
 
-In the **desktop app** this Just Works — it bundles and launches `cvd serve` on startup, so the Fleet tab is live the moment you open the app. In a **browser** it works too, as long as you have `cvd serve` running locally. If the API is unreachable, Fleet shows a friendly "start `cvd serve`" hint and lets you load a **static board `.json`** export instead. See [the daemon chapter](daemon.md) for what `cvd` exposes and the board chapter for what agents are saying to each other.
+In the **desktop app** this Just Works — it bundles and launches `cvd serve` on startup, so the Fleet tab is live the moment you open the app. In a **browser** it works too, as long as you have `cvd serve` running locally. If the API is unreachable, Fleet shows a friendly "start `cvd serve`" hint and lets you load a **static sessions `.json`** export instead. See [the daemon chapter](daemon.md) for what `cvd` exposes; what the agents are committing to lives in [tasks](tasks.md).
 
 ### 🧬 OpenSession — the standard
 
