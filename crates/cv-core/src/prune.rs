@@ -7,13 +7,13 @@
 //!
 //! The approach is adapted from the validated `flatten-mcp` flattener: we operate on the **raw
 //! JSONL lines**, never on our IR — so every Claude-specific field survives a round-trip and the
-//! result resumes cleanly with `claude --resume <new-id>`. Fidelity is *value-level*, not
-//! byte-level: lines we rewrite (anything carrying a `sessionId`, or with a snipped payload) go
-//! through serde_json, which may normalize key order and whitespace; the JSON **values** — and the
-//! payloads stashed in the sidecar — are preserved verbatim. What we add on top of the flattener: a
-//! fresh session id stamped across every line (so it's a genuinely new session, not an in-place
-//! rewrite), a copy of the session's sidecar resources (`subagents/`, `workflows/`) under the new
-//! id, and a **keep-last** window so only *old* payloads are snipped.
+//! result resumes cleanly with `claude --resume <new-id>`. An untouched line is byte-identical to
+//! its source except for the session id ([`crate::restamp_line`]'s byte surgery); a line with a
+//! snipped payload goes through serde_json, which may normalize key order and whitespace, with the
+//! JSON **values** — and the payloads stashed in the sidecar — preserved verbatim. What we add on
+//! top of the flattener: a fresh session id stamped across every line (so it's a genuinely new
+//! session, not an in-place rewrite), a copy of the session's sidecar resources (`subagents/`,
+//! `workflows/`) under the new id, and a **keep-last** window so only *old* payloads are snipped.
 //!
 //! Two payload sites are handled, exactly as Claude Code records them:
 //!  1. `tool_result` blocks inside a user message's `message.content` — the bytes the model re-reads
@@ -488,8 +488,6 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             continue;
         };
 
-        let had_session_id = stamp_session_id(&mut v, &new_id);
-
         let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
         let is_turn_line = ty == "user" || ty == "assistant";
         let is_turn = turn_kind(&v).is_some();
@@ -580,13 +578,11 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             );
         }
 
-        // Untouched lines without a sessionId stay byte-identical; anything stamped or snipped is
-        // re-serialized (values preserved; key order/whitespace may normalize).
-        out_lines.push(if modified || had_session_id {
-            v.to_string()
-        } else {
-            (*line).to_string()
-        });
+        // An untouched line is the source's bytes with only its session id replaced
+        // ([`crate::restamp_line`]); a snipped line is re-serialized (values preserved; key order
+        // and whitespace may normalize) and then stamped the same way.
+        let out = if modified { v.to_string() } else { (*line).to_string() };
+        out_lines.push(crate::restamp_line(&out, &new_id).unwrap_or(out));
     }
 
     // Re-root the first surviving main-thread turn: its parentUuid points at a now-dropped message,
@@ -1234,21 +1230,6 @@ pub fn retrieve(sidecar_path: &Path, id: &str) -> Result<Value> {
 
 pub(crate) fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
-}
-
-/// Stamp `new_id` on a record that carries a session id — Claude Code writes both spellings
-/// (`sessionId` on every record, `session_id` on most since ~2.1.25x). Returns whether the record
-/// had one (and so must be re-serialized). Shared with [`crate::rewind`], which derives sessions
-/// from the same raw records.
-pub(crate) fn stamp_session_id(v: &mut Value, new_id: &str) -> bool {
-    let mut had = false;
-    for key in ["sessionId", "session_id"] {
-        if v.get(key).is_some() {
-            v[key] = Value::String(new_id.to_string());
-            had = true;
-        }
-    }
-    had
 }
 
 fn build_tool_name_map(parsed: &[Option<Value>]) -> HashMap<String, (String, Value)> {

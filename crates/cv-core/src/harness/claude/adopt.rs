@@ -8,10 +8,9 @@
 //! the session id restamped, and copy the meta verbatim. Nothing else changes — the `cwd`,
 //! `agentId`, uuids and every tool output stay as they were.
 //!
-//! The restamp is byte surgery, not a re-serialization: only the top-level `sessionId` /
-//! `session_id` string values are replaced, located by offset, so every other byte of every line
-//! is the source's. A `sessionId` nested inside content (a tool output quoting a transcript) is
-//! content and is not touched.
+//! The restamp is [`crate::restamp`]'s byte surgery, not a re-serialization: only the top-level
+//! `sessionId` / `session_id` string values are replaced, so every other byte of every line is the
+//! source's.
 //!
 //! What stays behind: persisted tool outputs (`<dead>/tool-results/*.txt`, named in the transcript
 //! by absolute path) and anything `cv prune` stashed in the dead session's sidecar. Both remain
@@ -20,9 +19,9 @@
 //! The functions here take the projects root explicitly so they run against fixtures; the CLI
 //! passes Claude Code's real store.
 
+use crate::restamp::restamp;
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
+use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -251,74 +250,6 @@ pub fn find_agent(roots: &[PathBuf], spec: &str, from: Option<&SessionFile>) -> 
     Ok(hits)
 }
 
-#[derive(Deserialize)]
-struct TopIds<'a> {
-    #[serde(borrow, rename = "sessionId")]
-    session_id: Option<&'a RawValue>,
-    #[serde(borrow, rename = "session_id")]
-    session_id_snake: Option<&'a RawValue>,
-}
-
-/// Restamp one transcript line: replace the top-level `sessionId` (and `session_id`, the other
-/// spelling Claude Code writes) string value with `new_id`, leaving every other byte as it was.
-/// Returns `None` when the line carries no top-level session id (it is then kept verbatim).
-pub fn restamp_line(line: &str, new_id: &str) -> Option<String> {
-    let ids: TopIds = serde_json::from_str(line).ok()?;
-    let mut spans: Vec<(usize, usize)> = [ids.session_id, ids.session_id_snake]
-        .into_iter()
-        .flatten()
-        .map(RawValue::get)
-        .filter(|raw| raw.starts_with('"'))
-        .map(|raw| {
-            let start = raw.as_ptr() as usize - line.as_ptr() as usize;
-            (start, start + raw.len())
-        })
-        .collect();
-    if spans.is_empty() {
-        return None;
-    }
-    spans.sort();
-    let quoted = serde_json::to_string(new_id).expect("a string serializes");
-    let mut out = String::with_capacity(line.len() + 8);
-    let mut at = 0;
-    for (s, e) in spans {
-        out.push_str(&line[at..s]);
-        out.push_str(&quoted);
-        at = e;
-    }
-    out.push_str(&line[at..]);
-    Some(out)
-}
-
-/// A restamped transcript and what the restamp touched.
-pub struct Restamped {
-    pub body: String,
-    pub lines: usize,
-    pub stamped: usize,
-}
-
-/// Restamp a whole transcript. Line endings and blank lines are preserved as they were.
-pub fn restamp(text: &str, new_id: &str) -> Restamped {
-    let mut body = String::with_capacity(text.len() + 64);
-    let (mut lines, mut stamped) = (0, 0);
-    for piece in text.split_inclusive('\n') {
-        let (line, end) = match piece.strip_suffix('\n') {
-            Some(l) => (l, "\n"),
-            None => (piece, ""),
-        };
-        lines += usize::from(!line.trim().is_empty());
-        match restamp_line(line, new_id) {
-            Some(new) => {
-                stamped += 1;
-                body.push_str(&new);
-            }
-            None => body.push_str(line),
-        }
-        body.push_str(end);
-    }
-    Restamped { body, lines, stamped }
-}
-
 /// One agent's adoption, planned.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
@@ -530,16 +461,5 @@ mod tests {
         assert_ne!(newest_session(&proj, &[newest.as_str()]).unwrap().session_id, newest);
         assert!(find_session(std::slice::from_ref(&root), &format!("agent-{AGENT}")).is_err());
         std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn restamp_line_ignores_lines_without_a_top_level_id() {
-        assert_eq!(restamp_line("not json", LIVE), None);
-        assert_eq!(restamp_line(r#"{"a":{"sessionId":"x"}}"#, LIVE), None);
-        assert_eq!(restamp_line(r#"{"sessionId":null}"#, LIVE), None);
-        assert_eq!(
-            restamp_line(r#"{"sessionId":"x","session_id":"x","k":"x"}"#, "y").unwrap(),
-            r#"{"sessionId":"y","session_id":"y","k":"x"}"#
-        );
     }
 }

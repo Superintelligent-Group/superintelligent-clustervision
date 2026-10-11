@@ -59,7 +59,7 @@
 use crate::ir::{Block, Harness, Message, MessageKind, SessionRef};
 use crate::lazy::Resolver;
 use crate::offsets::OFFSET_KEY;
-use crate::prune::{is_sidechain, new_uuid, stamp_session_id, turn_kind};
+use crate::prune::{is_sidechain, new_uuid, turn_kind};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -626,7 +626,7 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
                 if source_session_id.is_none() {
                     source_session_id = v.get("sessionId").and_then(Value::as_str).map(String::from);
                 }
-                let mut modified = stamp_session_id(&mut v, &new_id);
+                let mut modified = false;
                 if subagent && is_sidechain(&v) {
                     v["isSidechain"] = Value::Bool(false);
                     modified = true;
@@ -657,17 +657,16 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
                         cwds.push(c.to_string());
                     }
                 }
-                if modified {
-                    let mut s = v.to_string().into_bytes();
-                    s.push(b'\n');
-                    s
+                // The source's bytes with the session id replaced ([`crate::restamp_line`]); a
+                // line whose sidechain markers changed is re-serialized first.
+                let text = if modified {
+                    v.to_string()
                 } else {
-                    let mut s = buf[..n].to_vec();
-                    if s.last() != Some(&b'\n') {
-                        s.push(b'\n');
-                    }
-                    s
-                }
+                    String::from_utf8_lossy(buf[..n].strip_suffix(b"\n").unwrap_or(&buf[..n])).into_owned()
+                };
+                let mut s = crate::restamp_line(&text, &new_id).unwrap_or(text).into_bytes();
+                s.push(b'\n');
+                s
             }
         };
         if let Some(w) = writer.as_mut() {

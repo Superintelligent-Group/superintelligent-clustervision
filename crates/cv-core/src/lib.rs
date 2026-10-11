@@ -30,6 +30,7 @@ pub mod prune;
 pub mod query;
 pub mod redact;
 pub mod render;
+pub mod restamp;
 pub mod rewind;
 pub mod rows;
 pub mod sanitize;
@@ -45,6 +46,7 @@ pub use harness::{Adapter, EmitResult};
 pub use ir::*;
 pub use lazy::{Resolver, Span, Text, INLINE_MAX};
 pub use query::SessionQuery;
+pub use restamp::{restamp, restamp_line, Restamped};
 pub use stream::{collect, CollectSink, Flow, MessageSink, ParseOptions, TeeSink};
 
 use anyhow::Result;
