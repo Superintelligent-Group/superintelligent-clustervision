@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Manual: a command reference and the MCP roster generated from the binary at build time; `cli.md` keeps examples and reasons, no flag lists.
+- Manual: twenty chapters are fifteen (intro, app, share, daemon, integrations, opensession merged into neighbours); the old page URLs redirect.
 - One inbox row: `cv task inbox --json` prints the page `serve` serves; MCP `task_inbox` and cvd's inbox route return its `items` (`since`, `age`, decision, notes).
 - **Removed `cv task split`** (it mined `DECIDE:` notes); `cv task decide … --blocks <id>` poses the question. Exit 2 with that pointer.
 - `cv task decide` writes `opened` + `posed` only — no `decision` tag; the bare-tag refusal moved into the reducer, so MCP `task_open` gets it too.
@@ -26,7 +28,7 @@
 - One read API (`cv_core::api::route_json`) behind every HTTP door; `/events` `ts` and `/touched` `last_ts` are RFC 3339 like the CLI's; `/subagents` rows are §3 session rows.
 - **`cv-llm` is gone**: `crates/cv/src/llm.rs` on `ureq` (no reqwest/hyper/tokio stack; 381 → 346 lock entries); its `distill` is now `digest`. The app loses native distill/generate; the loom's OpenRouter path stays.
 - Manual: `distill`, `fork`, `adopt` documented and a "Reshaping a lane" page; MCP tools and `cvd` routes match the binaries; harness counts corrected.
-- `integrations/` is gone (its recipes called MCP tools removed in 0.11); the manual's [Hooking a harness in](manual/src/integrations.md) replaces it.
+- `integrations/` is gone (its recipes called MCP tools removed in 0.11); the manual's [hooks section](manual/src/mcp.md#hooks-cv-inside-a-running-session) replaces it.
 - `cv show`, `cv export --format md` and `cv share` spell a turn's label one way (`system · injected_context/hook_success`); the md header gains `- started:`, cwd is home-relative.
 - `cv show --subagents` lists each agent on `cv tree`'s one line (id, type, status, count, summary or task) plus its return; both sanitized.
 - **`-q` sheds its sub-languages**: `thread:` paths, the `~` regex operator and the field-name typo guard are gone; `thread:`/`~` exit 2 with a pointer.
