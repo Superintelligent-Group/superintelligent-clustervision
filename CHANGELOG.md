@@ -34,6 +34,7 @@
 - OpenClaw: sub-agent sessions name their parent (`lineage.parent`); cron and sub-agent prompts get scheduler/subagent origin; sub-agent announces are `subagent_return`.
 - OpenClaw corpus: real stores from 2026.1.29 (JSONL) and 2026.10.1 (sqlite), re-read by the golden test.
 - Hermes 0.21: a `failed_turn` row (a turn that got no reply) reads as an error; v29–v31 identity and source columns ride in `extra.hermes`.
+- Hermes corpus: real `state.db` stores from Hermes 2026.8.31 and 0.21.6, re-read by the golden test.
 
 ## 0.15.1 — 2026-10-11
 

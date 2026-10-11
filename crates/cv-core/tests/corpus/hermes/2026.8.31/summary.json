@@ -1,0 +1,434 @@
+{
+  "sessions": [
+    {
+      "id": "20261011_175254_5dd951",
+      "path": ".hermes/state.db",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6,
+        "thinking": 3
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175309_c9955c",
+      "path": ".hermes/state.db",
+      "messages": 15,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6,
+        "thinking": 3,
+        "tool_result": 5,
+        "tool_use": 5
+      },
+      "tools": [
+        "read_file",
+        "read_file",
+        "patch",
+        "terminal",
+        "terminal"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175343_681050",
+      "path": ".hermes/state.db",
+      "messages": 23,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 10,
+        "thinking": 6,
+        "tool_result": 7,
+        "tool_use": 7
+      },
+      "tools": [
+        "todo",
+        "memory",
+        "cronjob",
+        "execute_code",
+        "terminal",
+        "process",
+        "session_search"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175434_97214b",
+      "path": ".hermes/state.db",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "skill_manage"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175447_eab182",
+      "path": ".hermes/state.db",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175452_1868fe",
+      "path": ".hermes/state.db",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 3,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "delegate_task",
+        "terminal"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175527_744b0b",
+      "path": ".hermes/state.db",
+      "messages": 8,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 3,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "tool_describe",
+        "tool_call"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175543_3df15d",
+      "path": ".hermes/state.db",
+      "messages": 1,
+      "sequence": [
+        "user/prompt"
+      ],
+      "blocks": {
+        "text": 1
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175553_c6e362",
+      "path": ".hermes/state.db",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "terminal"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175610_2ad29c",
+      "path": ".hermes/state.db",
+      "messages": 3,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt"
+      ],
+      "blocks": {
+        "text": 3
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_175610_2e9cca",
+      "path": ".hermes/state.db",
+      "messages": 22,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "system/compaction_boundary",
+        "system/compaction_summary",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 20,
+        "thinking": 9,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "read_file"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [
+        18
+      ],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_180443_b0d636",
+      "path": ".hermes/state.db",
+      "messages": 10,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 10,
+        "thinking": 4
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "forked_from": "20261011_175610_2e9cca"
+      },
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_180504_6229e7",
+      "path": ".hermes/state.db",
+      "messages": 12,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 10,
+        "thinking": 5,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "delegate_task"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "bg_180618_f0e1e7",
+      "path": ".hermes/state.db",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    }
+  ]
+}

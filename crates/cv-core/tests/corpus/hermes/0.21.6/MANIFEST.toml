@@ -1,0 +1,20 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "hermes"
+version = "0.21.6"
+upstream_commit = "818c13be1d"
+generated = "2026-10-11"
+model = "glm-5.3-flash (switch: glm-4.5-air) via Z.ai coding endpoint, through chat_shim.py"
+model_calls = 85
+injected_provider_errors = 23
+scenarios = ["chat","resume","reasoning","tools","parallel_tools","tool_error","todo","memory","cronjob","execute_code","background_process","session_search","skill_manage","skill_preload","subagent","image","mcp","provider_error","hooks","import","context_reference","model_switch","title","retry","undo","queue","branch","goal","loop","heartbeat","btw","bg","background_subagent","pin","rename","archive"]
+skipped = ["steer","clarify","web_search","rollback","kanban","cron_run","compaction"]
+generator_commit = "98e826f"
+notes = [
+  "image: one-shot mode sends images through the text pipeline, so the user row holds '[Image attached at: <path>]' and no image part",
+  "model_switch: no row of its own; the next user row's api_content starts '[Note: model was just switched from ...]'",
+  "mcp: called through the tool_call meta-tool; only the tool row's tool_name says mcp__corpus__add",
+  "injected_provider_errors: shim 500s for the provider_error prompt (Hermes retries), never sent upstream",
+  "compaction: /compress here 1 ran and Hermes refused it (anti-growth guard: ~15.6K -> ~17.2K tokens); 0.21's lean tail keeps the essays verbatim",
+  "tools: 0.21 defers most tools behind tool_search / tool_describe, and renames todo/cronjob/process to todo_list/cronjob_manage/process_manage",
+  "provider_error: the turn closes with an assistant row display_kind='failed_turn'",
+]

@@ -22,6 +22,7 @@ use cv_core::harness::devin::Devin;
 use cv_core::harness::gemini::Gemini;
 use cv_core::harness::goose::Goose;
 use cv_core::harness::grok::Grok;
+use cv_core::harness::hermes::Hermes;
 use cv_core::harness::kimi::Kimi;
 use cv_core::harness::kimi_code::KimiCode;
 use cv_core::harness::openclaw::OpenClaw;
@@ -110,6 +111,10 @@ fn openclaw(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(OpenClaw::with_state_dir(version_dir))
 }
 
+fn hermes(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Hermes::with_home(&version_dir.join(".hermes")))
+}
+
 /// Harnesses that cannot be driven headless (desktop apps): their version dirs hold a schema
 /// snapshot of the store ember's installed version left on disk (`SNAPSHOT.toml` plus the
 /// `*.schema.txt` / `*.shape.txt` that `tools/harness-corpus/schema_snapshot.py` wrote), never
@@ -185,6 +190,11 @@ const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "openclaw",
         adapter: openclaw,
+        children: None,
+    },
+    CorpusHarness {
+        name: "hermes",
+        adapter: hermes,
         children: None,
     },
 ];
