@@ -1,4 +1,5 @@
-//! Live session following — the engine behind `cv scry`, the `cvd` daemon, and MCP `await_omen`.
+//! Live session following — the one loop behind `cv scry`, `cvd watch`, and the MCP `await_omen`
+//! and `observe_stream` tools (the last one across processes, through a [`Cursor`]).
 //!
 //! It polls discovery on an interval, diffs each session's message tail against what it saw last,
 //! and emits [`SessionEvent`]s for new sessions and newly-appended messages. Polling (rather than
@@ -6,6 +7,7 @@
 
 use crate::harness;
 use crate::ir::{Harness, Message, SessionRef};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -145,31 +147,142 @@ pub fn resolve(r: &SessionRef, mark: Mark) -> Option<usize> {
     }
 }
 
+/// Where a follower stands in one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct State {
     /// Cheap change signal from discovery (no full parse needed to detect change).
     trigger: (usize, Option<i64>),
     /// How far we've already reported.
     mark: Mark,
+    /// Messages past `mark` were left unread when a bounded poll's budget ran out: the next poll
+    /// reads this session again even if its trigger has not moved, or the rest would wait for the
+    /// session's next append.
+    pending: bool,
 }
 
-/// A stateful poller. Call [`poll`](Watcher::poll) repeatedly, or [`run`](Watcher::run) to loop.
+/// One session's position, as the cursor carries it. The field names are the wire: `t` the
+/// trigger, `n` the parsed count, `b` a byte baseline not yet resolved (see [`Mark::Bytes`]),
+/// `more` the pending flag. Optional fields keep a cursor issued before they existed decoding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct Pos {
+    t: (usize, Option<i64>),
+    n: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    b: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    more: bool,
+}
+
+impl From<State> for Pos {
+    fn from(s: State) -> Pos {
+        let (n, b) = match s.mark {
+            Mark::Messages(n) => (n, None),
+            Mark::Bytes(len) => (0, Some(len)),
+        };
+        Pos {
+            t: s.trigger,
+            n,
+            b,
+            more: s.pending,
+        }
+    }
+}
+
+impl From<Pos> for State {
+    fn from(p: Pos) -> State {
+        State {
+            trigger: p.t,
+            mark: match p.b {
+                Some(len) => Mark::Bytes(len),
+                None => Mark::Messages(p.n),
+            },
+            pending: p.more,
+        }
+    }
+}
+
+/// A [`Watcher`]'s whole position, serializable: the `seen` map as a compact JSON string, so a
+/// stateless caller (the MCP `observe_stream`, one `tools/call` at a time) hands it back on its
+/// next call and resumes exactly where an in-memory watcher would have. Versioned: a cursor from
+/// another schema decodes to `None`, and the caller starts a fresh baseline — an unusable cursor
+/// is NOT "no prior positions" (that would make every session look new and dump its history).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cursor {
+    v: u32,
+    o: HashMap<String, Pos>,
+}
+
+const CURSOR_VERSION: u32 = 1;
+
+impl Cursor {
+    /// The compact string a caller carries between polls.
+    pub fn encode(&self) -> String {
+        serde_json::to_string(self).expect("a cursor serializes")
+    }
+
+    /// `None` when `s` is not a cursor this build issued (unparseable, or another version).
+    pub fn decode(s: &str) -> Option<Cursor> {
+        serde_json::from_str::<Cursor>(s).ok().filter(|c| c.v == CURSOR_VERSION)
+    }
+
+    /// How many sessions the cursor positions.
+    pub fn len(&self) -> usize {
+        self.o.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.o.is_empty()
+    }
+}
+
+/// A stateful poller. Call [`poll`](Watcher::poll) repeatedly, or [`run`](Watcher::run) to loop;
+/// [`to_cursor`](Watcher::to_cursor) / [`from_cursor`](Watcher::from_cursor) carry the state
+/// across processes. Every poller in cv (`cv scry`, `cvd watch`, MCP `await_omen` and
+/// `observe_stream`) is this one loop: discover → cheap trigger → resolve the mark → stream the
+/// tail — so every one of them compares against a parsed count, never a row count.
 pub struct Watcher {
     filter: Filter,
     seen: HashMap<String, State>,
+    /// Where sessions come from: [`crate::discover_all`] (stat the fleet, the default) or
+    /// [`crate::sessions`] (the catalog fast path, for a poller that runs every few seconds).
+    discover: fn() -> Vec<SessionRef>,
 }
 
 impl Watcher {
     /// Create a watcher. If `emit_existing` is false, the current sessions are recorded silently so
     /// only activity *after* construction is reported (the usual `tail -f` feel).
     pub fn new(filter: Filter, emit_existing: bool) -> Self {
+        Self::with_discovery(filter, emit_existing, crate::discover_all)
+    }
+
+    /// [`Watcher::new`] over another session source (see [`Watcher::discover`]).
+    pub fn with_discovery(filter: Filter, emit_existing: bool, discover: fn() -> Vec<SessionRef>) -> Self {
         let mut w = Watcher {
             filter,
             seen: HashMap::new(),
+            discover,
         };
         if !emit_existing {
             w.prime();
         }
         w
+    }
+
+    /// Resume from a [`Cursor`]: the watcher stands exactly where the one that issued it stood.
+    pub fn from_cursor(filter: Filter, cursor: Cursor, discover: fn() -> Vec<SessionRef>) -> Self {
+        Watcher {
+            filter,
+            seen: cursor.o.into_iter().map(|(k, p)| (k, State::from(p))).collect(),
+            discover,
+        }
+    }
+
+    /// Where this watcher stands, to hand to [`Watcher::from_cursor`] later.
+    pub fn to_cursor(&self) -> Cursor {
+        Cursor {
+            v: CURSOR_VERSION,
+            o: self.seen.iter().map(|(k, s)| (k.clone(), Pos::from(*s))).collect(),
+        }
     }
 
     fn key(r: &SessionRef) -> String {
@@ -193,21 +306,39 @@ impl Watcher {
                 State {
                     trigger: Self::trigger_of(&r),
                     mark,
+                    pending: false,
                 },
             );
         }
     }
 
+    /// The sessions to follow, oldest-touched first, so a bounded poll yields a chronological
+    /// slice.
     fn discover(&self) -> Vec<SessionRef> {
-        crate::discover_all()
+        let mut refs: Vec<SessionRef> = (self.discover)()
             .into_iter()
             .filter(|r| self.filter.matches(r))
-            .collect()
+            .collect();
+        refs.sort_by_key(|r| r.updated_at.or(r.created_at));
+        refs
     }
 
     /// Poll once and return any events since the previous poll.
     pub fn poll(&mut self) -> Vec<SessionEvent> {
         let mut events = Vec::new();
+        self.poll_bounded(usize::MAX, |ev| {
+            let n = ev.new_messages.len();
+            events.push(ev);
+            n
+        });
+        events
+    }
+
+    /// Poll once, offering each session's newly appended messages to `take` — at most
+    /// `max_messages` across the call — which returns how many of them it consumed. What it
+    /// leaves (and every message past the budget) stays pending: the next poll re-reads that
+    /// session even if its cheap trigger has not moved. Returns whether anything is pending.
+    pub fn poll_bounded(&mut self, max_messages: usize, mut take: impl FnMut(SessionEvent) -> usize) -> bool {
         let refs = self.discover();
         // Prune entries for sessions that vanished from discovery (deleted/pruned transcripts),
         // so a long-lived watcher (cvd) doesn't grow `seen` without bound. The size check skips
@@ -216,43 +347,52 @@ impl Watcher {
             let live: std::collections::HashSet<String> = refs.iter().map(Self::key).collect();
             self.seen.retain(|k, _| live.contains(k));
         }
+        let mut consumed = 0usize;
+        let mut pending = false;
         for r in refs {
             let key = Self::key(&r);
             let trigger = Self::trigger_of(&r);
-            match self.seen.get(&key) {
-                None => {
-                    let Some((total, messages)) = tail(&r, 0, usize::MAX) else {
-                        continue;
-                    };
-                    let mark = Mark::Messages(total);
-                    events.push(SessionEvent {
-                        kind: EventKind::New,
-                        reference: r,
-                        new_messages: messages,
-                    });
-                    self.seen.insert(key, State { trigger, mark });
-                }
-                Some(state) if state.trigger != trigger => {
+            let (kind, prev_len) = match self.seen.get(&key) {
+                None => (EventKind::New, 0),
+                Some(state) if state.trigger != trigger || state.pending => {
                     let Some(prev_len) = resolve(&r, state.mark) else {
-                        continue;
+                        continue; // unreadable right now: keep the position, a transient failure is not a skip
                     };
-                    let Some((total, new_messages)) = tail(&r, prev_len, usize::MAX) else {
-                        continue;
-                    };
-                    let mark = Mark::Messages(total);
-                    if !new_messages.is_empty() {
-                        events.push(SessionEvent {
-                            kind: EventKind::Updated,
-                            reference: r,
-                            new_messages,
-                        });
-                    }
-                    self.seen.insert(key, State { trigger, mark });
+                    (EventKind::Updated, prev_len)
                 }
-                Some(_) => {}
-            }
+                Some(_) => continue,
+            };
+            let room = max_messages.saturating_sub(consumed);
+            let Some((total, new_messages)) = tail(&r, prev_len, room) else {
+                continue;
+            };
+            // A mark past the end of a rewritten transcript: nothing to re-emit (see the tests).
+            let prev_len = prev_len.min(total);
+            let offered = new_messages.len();
+            let taken = if offered == 0 {
+                0
+            } else {
+                take(SessionEvent {
+                    kind,
+                    reference: r,
+                    new_messages,
+                })
+                .min(offered)
+            };
+            consumed += taken;
+            let seen_to = prev_len + taken;
+            let left = total > seen_to;
+            pending |= left;
+            self.seen.insert(
+                key,
+                State {
+                    trigger,
+                    mark: Mark::Messages(seen_to),
+                    pending: left,
+                },
+            );
         }
-        events
+        pending
     }
 
     /// Poll forever, invoking `on_event` for each event. Blocks the calling thread.
@@ -458,6 +598,90 @@ mod tests {
         // Missing file: no mark, as before.
         assert_eq!(baseline(&sref(Harness::Gemini, dir.join("absent.json"))), None);
         assert_eq!(resolve(&sref(Harness::Claude, jsonl), Mark::Messages(3)), Some(3));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The cursor is the watcher's state and nothing else: a bounded poll takes what the budget
+    /// allows and leaves the rest pending; a watcher resumed from the encoded cursor drains exactly
+    /// the remainder; an idle poll then yields nothing. The session source is pluggable so this
+    /// runs over one temp transcript instead of the machine's fleet.
+    #[test]
+    fn bounded_poll_leaves_the_rest_pending_and_a_cursor_resumes_it() {
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let dir = DIR
+            .get_or_init(|| std::env::temp_dir().join(format!("cv-watch-cursor-{}", std::process::id())))
+            .clone();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        fn discover() -> Vec<SessionRef> {
+            let path = DIR.get().unwrap().join("s.jsonl");
+            let len = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or(0);
+            let mut r = sref(Harness::Claude, path);
+            r.id = "cursor-test".into();
+            r.message_count = len; // the cheap trigger: the file grew
+            vec![r]
+        }
+        let full = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/claude/rich_blocks.jsonl"
+        ))
+        .unwrap();
+        let cut = full[..full.len() / 2].iter().rposition(|b| *b == b'\n').unwrap() + 1;
+        std::fs::write(&path, &full[..cut]).unwrap();
+        let adapter = harness::for_harness(Harness::Claude).unwrap();
+        let r = discover().remove(0);
+        let before = adapter.parse(&r).unwrap().messages.len();
+
+        // Baseline: nothing emitted, one position recorded, as a byte mark (no parse).
+        let w = Watcher::with_discovery(Filter::default(), false, discover);
+        let cursor = w.to_cursor();
+        assert_eq!(cursor.len(), 1);
+        let encoded = cursor.encode();
+        assert!(
+            encoded.contains("\"b\":"),
+            "a byte baseline rides the cursor: {encoded}"
+        );
+        assert!(
+            Cursor::decode("{\"v\":99,\"o\":{}}").is_none(),
+            "another schema is not a cursor"
+        );
+        assert!(Cursor::decode("garbage").is_none());
+
+        // The transcript grows; a budget of one takes one message and leaves the rest pending.
+        std::fs::write(&path, &full).unwrap();
+        let after = adapter.parse(&r).unwrap().messages.len();
+        assert!(
+            after > before + 1,
+            "fixture must grow by several messages ({before} → {after})"
+        );
+        let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover);
+        let mut got = Vec::new();
+        let pending = w.poll_bounded(1, |ev| {
+            assert_eq!(ev.kind, EventKind::Updated);
+            got.extend(ev.new_messages);
+            1
+        });
+        assert!(pending);
+        assert_eq!(got.len(), 1);
+        let encoded = w.to_cursor().encode();
+        assert!(encoded.contains("\"more\":true"), "{encoded}");
+
+        // Resumed from that cursor with no budget: exactly the remainder, nothing twice.
+        let mut w = Watcher::from_cursor(Filter::default(), Cursor::decode(&encoded).unwrap(), discover);
+        let events = w.poll();
+        assert_eq!(events.len(), 1);
+        got.extend(events.into_iter().next().unwrap().new_messages);
+        assert_eq!(got.len(), after - before, "the appended tail, once");
+        let want = adapter.parse(&r).unwrap().messages;
+        assert_eq!(
+            serde_json::to_value(&got).unwrap(),
+            serde_json::to_value(&want[before..]).unwrap()
+        );
+        assert!(w.poll().is_empty(), "idle: nothing pending, trigger unchanged");
+        assert!(
+            !w.to_cursor().encode().contains("more"),
+            "nothing pending rides the cursor"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

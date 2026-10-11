@@ -42,8 +42,8 @@ mod cli_tools;
 
 use anyhow::Context as _;
 use cli_tools::CliTools;
-use cv_core::watch::{Filter, Mark, Watcher};
-use cv_core::{Block, Harness, SessionRef};
+use cv_core::watch::{Cursor, Filter, Watcher};
+use cv_core::{Block, Harness};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -747,78 +747,13 @@ fn await_omen(args: &Value) -> anyhow::Result<String> {
 // observe_stream — the non-blocking tail of await_omen
 // ---------------------------------------------------------------------------
 
-/// One session's position in the stream: the cheap discovery trigger we last saw (to skip an
-/// unchanged session without re-parsing) and how many parsed IR messages we've already reported.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
-struct StreamPos {
-    /// `(message_count, updated_at_millis)` — the same cheap change-signal `watch::Watcher` uses.
-    t: (usize, Option<i64>),
-    /// Parsed IR messages already reported for this session (meaningless while `b` is set).
-    n: usize,
-    /// A baseline taken without parsing: the transcript's byte length then (see
-    /// [`cv_core::watch::Mark::Bytes`]). Resolved to `n` the first time the session changes.
-    /// Optional so cursors issued before it existed still decode unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    b: Option<u64>,
-    /// Messages past `n` were left unread when the call's budget ran out (`more_pending`). The
-    /// next call must read this session again even if its trigger has not moved, or the rest
-    /// would wait for the session's next append.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    more: bool,
-}
-
-impl StreamPos {
-    fn mark(&self) -> Mark {
-        match self.b {
-            Some(len) => Mark::Bytes(len),
-            None => Mark::Messages(self.n),
-        }
-    }
-
-    fn at(t: (usize, Option<i64>), mark: Mark) -> Self {
-        match mark {
-            Mark::Messages(n) => StreamPos {
-                t,
-                n,
-                b: None,
-                more: false,
-            },
-            Mark::Bytes(len) => StreamPos {
-                t,
-                n: 0,
-                b: Some(len),
-                more: false,
-            },
-        }
-    }
-}
-
-/// The opaque `since_cursor`: a per-session offset map. Serialized to a compact JSON string and
-/// handed back to the caller, who replays it on the next call. This externalizes the in-memory
-/// state `watch::Watcher` keeps in its `seen` map, so the stateless MCP server can resume a tail
-/// across independent `tools/call` invocations.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct StreamCursor {
-    /// Schema version, so an older cursor from a future build degrades to a fresh baseline.
-    v: u32,
-    /// `"<harness>:<id>"` -> position.
-    o: std::collections::HashMap<String, StreamPos>,
-}
-
-const STREAM_CURSOR_VERSION: u32 = 1;
-
-fn session_key(r: &SessionRef) -> String {
-    format!("{}:{}", r.harness.as_str(), r.id)
-}
-
-fn discover_trigger(r: &SessionRef) -> (usize, Option<i64>) {
-    (r.message_count, r.updated_at.map(|t| t.timestamp_millis()))
-}
-
-/// Non-blocking incremental tail: returns the messages appended to matching sessions since
-/// `since_cursor` plus a fresh cursor, then returns immediately. Read-only — it parses sessions
-/// and emits their tail; it never touches the board. The first call (no cursor) records a baseline
-/// and returns no messages, so a caller starts following from "now" rather than dumping history.
+/// Non-blocking incremental tail: the messages appended to matching sessions since `since_cursor`
+/// plus a fresh cursor, returned at once. It is one `Watcher` poll with the watcher's state carried
+/// by the caller ([`cv_core::watch::Cursor`]) instead of by a process: the first call (no cursor)
+/// records a baseline and emits nothing, so a caller follows from "now" rather than dumping
+/// history. Read-only. Sessions come from the catalog fast path (`cv_core::sessions`, ~ms) rather
+/// than a stat-the-fleet scan (~s), because this is *polled*; the catalog's staleness probe
+/// re-stats the most recently updated transcripts, and an actively tailed session is one of them.
 fn observe_stream(args: &Value) -> anyhow::Result<String> {
     let filter = Filter {
         harness: parse_harness(args)?,
@@ -826,163 +761,50 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
     };
     let max_messages = arg_usize(args, "max_messages", 50)?.max(1);
     let char_cap = arg_usize(args, "char_cap", 16_000)?.max(1);
-
-    // Decode the prior cursor: a fresh baseline if absent / unparseable / from another schema. An
-    // unusable cursor is NOT "no prior positions": that would make every session look new and dump
-    // its whole history.
-    let prev: Option<StreamCursor> = arg_str(args, "since_cursor")
-        .and_then(|c| serde_json::from_str::<StreamCursor>(c).ok())
-        .filter(|c| c.v == STREAM_CURSOR_VERSION);
+    let prev = arg_str(args, "since_cursor").and_then(Cursor::decode);
     let baseline = prev.is_none();
-    let prev = prev.unwrap_or_default();
-
-    // `sessions()` is the catalog fast path (~ms) vs `discover_all`'s stat-the-fleet scan
-    // (~seconds) — it matters here because observe_stream is *polled*. Freshness is carried by the
-    // catalog's staleness probe, which re-stats the top-50 most-recently-updated session files
-    // (nanosecond mtime + size), and an actively-tailed session is by definition recently updated.
-    // Blind spot: an in-place append to a session outside that window is seen only at the ~900s
-    // backstop.
-    let mut refs: Vec<SessionRef> = cv_core::sessions().into_iter().filter(|r| filter.matches(r)).collect();
-    // Drain oldest-touched first so a bounded call yields a coherent chronological slice.
-    refs.sort_by(|a, b| {
-        let ka = a.updated_at.or(a.created_at);
-        let kb = b.updated_at.or(b.created_at);
-        ka.cmp(&kb)
-    });
-
-    let mut next = StreamCursor {
-        v: STREAM_CURSOR_VERSION,
-        o: std::collections::HashMap::new(),
+    let mut watcher = match prev {
+        Some(c) => Watcher::from_cursor(filter, c, cv_core::sessions),
+        None => Watcher::with_discovery(filter, false, cv_core::sessions),
     };
+
     let mut out_msgs: Vec<Value> = Vec::new();
     let mut chars_used = 0usize;
-    let mut budget_hit = false;
-    let mut more_pending = false;
-
-    for r in &refs {
-        let key = session_key(r);
-        let trigger = discover_trigger(r);
-        let prior = prev.o.get(&key).copied();
-
-        // Unchanged since last time (same cheap trigger): carry the position forward, no re-parse.
-        if let Some(p) = prior {
-            if p.t == trigger && !p.more {
-                next.o.insert(key, p);
-                continue;
-            }
-        }
-
-        // A baseline call emits nothing, so it only has to record where each session stands —
-        // without parsing it where the transcript is append-only (the parse moves to the first
-        // call that sees the session change). A session that can't be read gets no entry.
-        if baseline {
-            if let Some(mark) = cv_core::watch::baseline(r) {
-                next.o.insert(key, StreamPos::at(trigger, mark));
-            }
-            continue;
-        }
-        // The prior position as a parsed-message count (a byte baseline resolves here, once).
-        let prior_n = match prior.map(|p| (p, cv_core::watch::resolve(r, p.mark()))) {
-            Some((_, Some(n))) => Some(n),
-            Some((p, None)) => {
-                // Unreadable right now: keep the prior position so a transient failure isn't a skip.
-                next.o.insert(key, p);
-                continue;
-            }
-            None => None,
-        };
-
-        // Parse to find what was appended. The cheap discover `message_count` is NOT the parsed IR
-        // length for several harnesses (codex/claude add reasoning/tool/system turns), so the position
-        // compared against is always a parsed count — exactly as `watch::Watcher` keeps it. Only the
-        // messages past it are held, and no more than this call can still emit (+1 to see that the
-        // budget ran out, exactly as walking the whole tail would).
-        let skip = prior_n.unwrap_or(0);
-        let keep = if budget_hit {
-            0
-        } else {
-            max_messages.saturating_sub(out_msgs.len()) + 1
-        };
-        let Some((total, fresh)) = cv_core::find(&r.id, Some(r.harness))
-            .ok()
-            .flatten()
-            .and_then(|(sref, _)| cv_core::watch::tail(&sref, skip, keep))
-        else {
-            // Parse failed: keep the prior position (or none) so a transient failure isn't a skip.
-            if let Some(p) = prior {
-                next.o.insert(key, p);
-            }
-            continue;
-        };
-
-        // A session the cursor has never seen started after the caller did: all of it is new.
-        let already = skip.min(total);
-
-        if budget_hit {
-            // We've filled this call's budget; record where we are and flag the rest as pending.
-            let more = total > already;
-            next.o.insert(
-                key,
-                StreamPos {
-                    more,
-                    ..StreamPos::at(trigger, Mark::Messages(already))
-                },
-            );
-            more_pending |= more;
-            continue;
-        }
-
-        let mut emitted = already;
-        for m in &fresh {
-            if out_msgs.len() >= max_messages {
-                budget_hit = true;
-                break;
-            }
-            let text = message_text(m);
-            let text = if chars_used + text.len() > char_cap {
+    let more_pending = !baseline
+        && watcher.poll_bounded(max_messages, |ev| {
+            let r = &ev.reference;
+            let mut taken = 0;
+            for m in &ev.new_messages {
+                let text = message_text(m);
                 let room = char_cap.saturating_sub(chars_used);
                 if room == 0 {
-                    budget_hit = true;
                     break;
                 }
-                let end = floor_char_boundary(&text, room);
-                format!("{}…", &text[..end])
-            } else {
-                text
-            };
-            chars_used += text.len();
-            out_msgs.push(json!({
-                "harness": r.harness.as_str(),
-                "session_id": r.id,
-                "cwd": r.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
-                "role": cv_core::render::role_label(m.role),
-                "timestamp": m.timestamp.map(|t| t.to_rfc3339()),
-                "text": text,
-            }));
-            emitted += 1;
-            if chars_used >= char_cap {
-                budget_hit = true;
-                break;
+                let text = if text.len() > room {
+                    format!("{}…", &text[..floor_char_boundary(&text, room)])
+                } else {
+                    text
+                };
+                chars_used += text.len();
+                out_msgs.push(json!({
+                    "harness": r.harness.as_str(),
+                    "session_id": r.id,
+                    "cwd": r.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    "role": cv_core::render::role_label(m.role),
+                    "timestamp": m.timestamp.map(|t| t.to_rfc3339()),
+                    "text": text,
+                }));
+                taken += 1;
             }
-        }
-        let more = total > emitted;
-        more_pending |= more;
-        next.o.insert(
-            key,
-            StreamPos {
-                more,
-                ..StreamPos::at(trigger, Mark::Messages(emitted))
-            },
-        );
-    }
+            taken
+        });
 
-    let cursor = serde_json::to_string(&next)?;
     Ok(serde_json::to_string_pretty(&json!({
         "baseline": baseline,
         "messages": out_msgs,
         "count": out_msgs.len(),
         "more_pending": more_pending,
-        "cursor": cursor,
+        "cursor": watcher.to_cursor().encode(),
     }))?)
 }
 
