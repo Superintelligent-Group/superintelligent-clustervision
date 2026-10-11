@@ -60,7 +60,7 @@ is the model to copy. The steps:
    (`anthropic::assistant_blocks`, …) plus a store writer — re-exported as `yours::emit` and
    added to `emitter_for` in `emit.rs`. That one arm is the whole registration: the `--to` list
    and `round_trip_all_supported_targets` are derived from it, so the round trip runs the moment
-   the arm exists. Tell `target_holds` in `emit.rs` what your store can carry, so `port --strict`
+   the arm exists. Tell `target_holds` in `emit/fidelity.rs` what your store can carry, so `port --strict`
    knows an expected loss from an unexpected one.
 
 ## Three rules the IR asks of you

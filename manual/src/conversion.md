@@ -23,8 +23,9 @@ N parsers and a handful of emitters. **21 harnesses can be parsed** _into_ the I
 can be emitted back _out_ to. Any emit-capable target can receive a session that originated
 in *any* of the 21, so the practical conversion space is "21 sources × 12 targets". 🔮
 
-The IR itself is defined in `crates/cv-core/src/ir.rs`; the emit side lives in
-`crates/cv-core/src/emit.rs`. For the broader picture of how parsers and emitters fit
+The IR itself is defined in `crates/cv-core/src/ir.rs`. Each emitter lives beside its reader
+(`crates/cv-core/src/harness/<h>/emit.rs`); `crates/cv-core/src/emit.rs` holds the registry and
+`emit/fidelity.rs` the `--strict` verifier. For the broader picture of how parsers and emitters fit
 together, see [architecture](architecture.md).
 
 ## The 12 emit targets

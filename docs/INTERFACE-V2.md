@@ -246,7 +246,7 @@ Rules:
 - **Format-complete replay fields live in the harness bag too.** Under `ParseOptions::complete`
   the Claude adapter mirrors a record's non-first-class fields into `extra["claude"]` (same keys
   as today, including the `message.`-prefixed ones) and the verbatim carrier record stays at the
-  top-level `_record`. `emit_claude` reads them from `extra["claude"]`. Same pattern for every
+  top-level `_record`. the Claude emitter reads them from `extra["claude"]`. Same pattern for every
   other harness that round-trips.
 - **Shared core modules key off `kind`, not harness keys.** `compaction.rs` detects
   `MessageKind::CompactionBoundary`/`CompactionSummary`; `doctor.rs` buckets
