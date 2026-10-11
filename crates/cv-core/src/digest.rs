@@ -124,11 +124,10 @@ impl Sha256 {
             compress(&mut self.h, &block);
             self.buf_len = 0;
         }
-        let mut blocks = data.chunks_exact(64);
-        for block in &mut blocks {
+        let (blocks, rest) = data.as_chunks::<64>();
+        for block in blocks {
             compress(&mut self.h, block);
         }
-        let rest = blocks.remainder();
         self.buf[..rest.len()].copy_from_slice(rest);
         self.buf_len = rest.len();
     }
@@ -143,7 +142,7 @@ impl Sha256 {
             tail.push(0);
         }
         tail.extend_from_slice(&bit_len.to_be_bytes());
-        for block in tail.chunks_exact(64) {
+        for block in tail.as_chunks::<64>().0 {
             compress(&mut self.h, block);
         }
         let mut out = String::with_capacity(64);

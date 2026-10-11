@@ -407,7 +407,7 @@ fn apply_subagent_lineage(s: &mut Session, path: &std::path::Path) {
     };
     let dir_name = |p: &std::path::Path| p.file_name().and_then(|n| n.to_str()).map(str::to_string);
     // Peel an optional `workflows/<run>/` tier, then require `subagents/` under the parent's dir.
-    let (subagents, workflow_run) = match dir.parent().and_then(&dir_name).as_deref() {
+    let (subagents, workflow_run) = match dir.parent().and_then(dir_name).as_deref() {
         Some("workflows") => (dir.parent().and_then(|p| p.parent()), dir_name(dir)),
         _ => (Some(dir), None),
     };

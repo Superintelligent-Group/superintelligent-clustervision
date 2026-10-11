@@ -203,8 +203,10 @@ fn load_store(path: &Path) -> Result<Store> {
         );
     }
     let vectors: Vec<f32> = vec_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
     Ok(Store {
         model: meta.model,

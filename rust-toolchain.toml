@@ -1,0 +1,6 @@
+# CI's toolchain (`.github/workflows/ci.yml` pins the same). fmt and clippy are gates, and a
+# gate is only a stable predicate on a fixed toolchain: a floating `stable` turns a green tree
+# red the day a release adds a lint (1.99 added `chunks_exact_to_as_chunks`).
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

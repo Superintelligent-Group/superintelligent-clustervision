@@ -577,7 +577,7 @@ pub fn append_batch_and_notify(
     store: &TaskStore,
     from: &str,
     kinds: Vec<(Option<String>, TaskEventKind)>,
-    mut warnings: Vec<String>,
+    warnings: Vec<String>,
 ) -> anyhow::Result<BatchOutcome> {
     let candidates: Vec<TaskEvent> = kinds
         .into_iter()

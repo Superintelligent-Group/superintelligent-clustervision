@@ -231,12 +231,7 @@ mod imp {
         let mut paths: BTreeSet<PathBuf> = roots.iter().cloned().collect();
         let file_watch = matches!(
             h,
-            Harness::Cursor
-                | Harness::Goose
-                | Harness::Hermes
-                | Harness::Zed
-                | Harness::Devin
-                | Harness::OpenCode
+            Harness::Cursor | Harness::Goose | Harness::Hermes | Harness::Zed | Harness::Devin | Harness::OpenCode
         );
         for r in refs {
             if file_watch {

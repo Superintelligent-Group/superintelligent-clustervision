@@ -88,7 +88,9 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Reshape",
-        &["prune", "rewind", "distill", "fork", "adopt", "splice", "loom", "port", "redact", "resume"],
+        &[
+            "prune", "rewind", "distill", "fork", "adopt", "splice", "loom", "port", "redact", "resume",
+        ],
     ),
     ("Export", &["export", "dataset", "pack"]),
     ("Fleet & live", &["task", "board", "scry", "share"]),

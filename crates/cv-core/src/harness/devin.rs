@@ -257,9 +257,7 @@ struct Forest {
 
 fn load_forest(conn: &Connection, session_id: &str) -> Forest {
     let mut f = Forest::default();
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT node_id, parent_node_id FROM message_nodes WHERE session_id = ?1")
-    {
+    if let Ok(mut stmt) = conn.prepare("SELECT node_id, parent_node_id FROM message_nodes WHERE session_id = ?1") {
         if let Ok(rows) = stmt.query_map([session_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
         }) {
@@ -322,12 +320,11 @@ fn subagent_head_rows(conn: &Connection, session_id: &str) -> Vec<(String, i64, 
     if !table_exists(conn, "subagent_heads") {
         return Vec::new();
     }
-    let mut stmt = match conn.prepare(
-        "SELECT agent_id, chain_node_id, updated_at FROM subagent_heads WHERE session_id = ?1",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let mut stmt =
+        match conn.prepare("SELECT agent_id, chain_node_id, updated_at FROM subagent_heads WHERE session_id = ?1") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
     let Ok(rows) = stmt.query_map([session_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -442,7 +439,13 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude:
         return Vec::new();
     };
     let cols = columns(&conn, "sessions");
-    let sel = |c: &str| if cols.contains(c) { c.to_string() } else { "NULL".to_string() };
+    let sel = |c: &str| {
+        if cols.contains(c) {
+            c.to_string()
+        } else {
+            "NULL".to_string()
+        }
+    };
     let (wd, title, created, last): (Option<String>, Option<String>, Option<i64>, Option<i64>) = conn
         .query_row(
             &format!(
@@ -570,11 +573,7 @@ fn stream_session(
         }
         Some(a) => match heads.iter().find(|(id, _, _)| id == a) {
             None => anyhow::bail!("no devin sub-agent {a:?} in session {session_id:?}"),
-            Some((_, head, _)) => (
-                forest.parents.contains_key(head).then_some(*head),
-                false,
-                Some(*head),
-            ),
+            Some((_, head, _)) => (forest.parents.contains_key(head).then_some(*head), false, Some(*head)),
         },
     };
     let chain = head.map(|h| chain_to_root(&forest.parents, h)).unwrap_or_default();
@@ -597,9 +596,7 @@ fn stream_session(
     // Per-chain-node metadata column (added in `add_node_metadata` — probe before selecting).
     let node_meta: HashMap<i64, Value> = if columns(conn, "message_nodes").contains("metadata") {
         let mut m = HashMap::new();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT node_id, metadata FROM message_nodes WHERE session_id = ?1",
-        ) {
+        if let Ok(mut stmt) = conn.prepare("SELECT node_id, metadata FROM message_nodes WHERE session_id = ?1") {
             if let Ok(rows) = stmt.query_map([session_id], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
             }) {
@@ -741,11 +738,9 @@ fn stream_session(
     }
 
     let schema_version: Option<i64> = if table_exists(conn, "refinery_schema_history") {
-        conn.query_row("SELECT MAX(version) FROM refinery_schema_history", [], |row| {
-            row.get(0)
-        })
-        .ok()
-        .flatten()
+        conn.query_row("SELECT MAX(version) FROM refinery_schema_history", [], |row| row.get(0))
+            .ok()
+            .flatten()
     } else {
         None
     };
@@ -759,8 +754,16 @@ fn stream_session(
                 bag.insert(k.into(), v);
             }
         };
-        put(&mut bag, "backend_type", backend.filter(|s| !s.is_empty()).map(Value::String));
-        put(&mut bag, "agent_mode", agent_mode.filter(|s| !s.is_empty()).map(Value::String));
+        put(
+            &mut bag,
+            "backend_type",
+            backend.filter(|s| !s.is_empty()).map(Value::String),
+        );
+        put(
+            &mut bag,
+            "agent_mode",
+            agent_mode.filter(|s| !s.is_empty()).map(Value::String),
+        );
         if let Some(w) = &wdirs {
             put(
                 &mut bag,
@@ -867,9 +870,8 @@ fn stream_session(
     let mut last_msg_id: Option<String> = None;
     let mut last_sf: Option<i64> = None;
     let mut skipped = 0u64;
-    let mut stmt = conn.prepare(
-        "SELECT chat_message, created_at FROM message_nodes WHERE session_id = ?1 AND node_id = ?2",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT chat_message, created_at FROM message_nodes WHERE session_id = ?1 AND node_id = ?2")?;
     for &nid in &chain {
         let row: Option<(String, i64)> = stmt
             .query_row(rusqlite::params![session_id, nid], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -963,19 +965,12 @@ fn node_to_message(
         .unwrap_or(false);
     let is_user_input = mmeta.get("is_user_input").and_then(Value::as_bool).unwrap_or(false);
     // The lead's brief to a sub-agent is a `user` prompt typed by another agent.
-    let is_handoff = ext
-        .get("subagent/handoff")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let is_handoff = ext.get("subagent/handoff").and_then(Value::as_bool).unwrap_or(false);
 
     let mut m = match (role, is_prefix, is_user_input) {
         ("system", true, _) => Message::of_kind(Role::System, MessageKind::SystemPrompt, Origin::Harness),
-        ("system", false, _) => {
-            Message::of_kind(Role::System, MessageKind::InjectedContext, Origin::Harness)
-        }
-        ("user", _, true) if is_handoff => {
-            Message::of_kind(Role::User, MessageKind::Prompt, Origin::Subagent)
-        }
+        ("system", false, _) => Message::of_kind(Role::System, MessageKind::InjectedContext, Origin::Harness),
+        ("user", _, true) if is_handoff => Message::of_kind(Role::User, MessageKind::Prompt, Origin::Subagent),
         ("user", _, true) => Message::of_kind(Role::User, MessageKind::Prompt, Origin::Human),
         // A `user` row the human didn't type is harness-injected context (same modeling Goose
         // uses for `userVisible: false` rows).
@@ -986,14 +981,14 @@ fn node_to_message(
     };
     // Compaction marks the node, whatever the role it copied into (observed live: system nodes
     // carrying `subagent/handoff_history`/`compact/*`/`devin-rs/summary` extension sidecars).
-    if node_meta.and_then(|n| n.get("summarized_from")).is_some_and(|v| !v.is_null()) {
+    if node_meta
+        .and_then(|n| n.get("summarized_from"))
+        .is_some_and(|v| !v.is_null())
+    {
         m.kind = MessageKind::CompactionSummary;
     }
 
-    m.id = chat
-        .get("message_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    m.id = chat.get("message_id").and_then(Value::as_str).map(str::to_string);
     m.timestamp = mmeta
         .get("created_at")
         .and_then(Value::as_str)
@@ -1083,16 +1078,10 @@ fn node_to_message(
                     }
                 }
             }
-            if let Some(d) = ext
-                .get("chisel/tool_call_timing")
-                .and_then(|t| t.get("duration_ms"))
-            {
+            if let Some(d) = ext.get("chisel/tool_call_timing").and_then(|t| t.get("duration_ms")) {
                 details.insert("duration_ms".into(), d.clone());
             }
-            if let Some(k) = ext
-                .get("chisel/tool_result_meta")
-                .and_then(|v| v.get("kind"))
-            {
+            if let Some(k) = ext.get("chisel/tool_result_meta").and_then(|v| v.get("kind")) {
                 details.insert("kind".into(), k.clone());
             }
             m.content.push(Block::ToolResult {
@@ -1146,10 +1135,7 @@ fn node_to_message(
             bag.insert("cog_context".into(), v.clone());
         }
         // The tool row that answers an in-band question dialog (and `cv prompts` reads).
-        if let Some(v) = ext
-            .get("chisel/user_question_answers")
-            .filter(|v| !v.is_null())
-        {
+        if let Some(v) = ext.get("chisel/user_question_answers").filter(|v| !v.is_null()) {
             bag.insert("user_question_answers".into(), v.clone());
         }
         // Which sub-agent a completion row is about: the parent's `sidekick` tool result and the
@@ -1172,10 +1158,7 @@ fn node_to_message(
         }
         // Sub-agent wiring: the lead's model uid on a handoff prompt, and the rules/skills the
         // child's system prefix says it loaded (agent-ext/*).
-        if let Some(v) = ext
-            .get("chisel/fusion_lead_model_uid")
-            .filter(|v| !v.is_null())
-        {
+        if let Some(v) = ext.get("chisel/fusion_lead_model_uid").filter(|v| !v.is_null()) {
             bag.insert("lead_model".into(), v.clone());
         }
         if let Some(v) = ext.get("agent-ext/rules-loaded").filter(|v| !v.is_null()) {
@@ -1416,16 +1399,18 @@ mod tests {
         assert_eq!(found[0].summary_msg_idx, Some(9));
         assert_eq!(found[0].trigger.as_deref(), Some("async_file_compactor"));
         assert_eq!(found[0].pre_tokens, Some(48000));
-        assert!(found[0]
-            .summary
-            .as_deref()
-            .unwrap()
-            .contains("Summary of prior work"));
+        assert!(found[0].summary.as_deref().unwrap().contains("Summary of prior work"));
 
         // chisel/tool_failure → is_error + status + details.failure_reason (no tool_result_meta).
         let t = &s.messages[12];
         match &t.content[0] {
-            Block::ToolResult { is_error, status, details, tool_name, .. } => {
+            Block::ToolResult {
+                is_error,
+                status,
+                details,
+                tool_name,
+                ..
+            } => {
                 assert!(*is_error);
                 assert_eq!(status.as_deref(), Some("error"));
                 assert_eq!(details.as_ref().unwrap()["failure_reason"], "ValidationError");
@@ -1496,7 +1481,9 @@ mod tests {
 
         // Assistant turn 1: Thinking + Text + two exec ToolUse blocks, metrics → Usage.
         let a = &s.messages[10];
-        assert!(matches!(&a.content[0], Block::Thinking { signature, .. } if signature.as_deref() == Some("sealed.v1.fixture")));
+        assert!(
+            matches!(&a.content[0], Block::Thinking { signature, .. } if signature.as_deref() == Some("sealed.v1.fixture"))
+        );
         assert!(matches!(&a.content[1], Block::Text { text } if text == "I'll check both."));
         let tool_ids: Vec<&str> = a
             .content
