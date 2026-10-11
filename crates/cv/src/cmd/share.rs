@@ -66,16 +66,7 @@ pub(crate) fn cmd_share(id: &str, harness: Option<String>, out: Option<PathBuf>,
         human_bytes(size),
     );
     if !no_redact {
-        eprintln!(
-            "✦ redacted {} item(s): {} api_key, {} private_key, {} jwt, {} email, {} blob, {} assignment",
-            stats.total(),
-            stats.api_keys,
-            stats.private_keys,
-            stats.jwts,
-            stats.emails,
-            stats.blobs,
-            stats.assignments,
-        );
+        eprintln!("{}", crate::cmd::view::redaction_summary(&stats));
     }
     Ok(())
 }

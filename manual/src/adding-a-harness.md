@@ -92,4 +92,4 @@ out upstream shipped a new record type.
 
 The fastest way to get it right: **send us your transcripts.** We can only test what we can see, and
 historical format variants are an explicit goal. Open an issue or a PR with a few real (redacted, if
-you like — `cv redact` helps) session files. 💜
+you like — `cv export --redact` helps) session files. 💜

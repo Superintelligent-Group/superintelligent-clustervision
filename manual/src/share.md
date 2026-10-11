@@ -27,7 +27,7 @@ Every session-derived string is HTML-escaped on the way in — a transcript cont
 
 ## Redaction is the default
 
-Before anything is written, every message passes through the same scrubber as [`cv redact`](cli.md#cv-redact): API keys, private-key blocks, JWTs, emails, `password = "…"` assignments, and keyword-adjacent high-entropy blobs are replaced with `[REDACTED:kind]` placeholders. The artifact wears its provenance honestly:
+Before anything is written, every message passes through the same scrubber as [`cv export --redact`](cli.md#cv-export): API keys, private-key blocks, JWTs, emails, `password = "…"` assignments, and keyword-adjacent high-entropy blobs are replaced with `[REDACTED:kind]` placeholders. The artifact wears its provenance honestly:
 
 - redacted (the default): a **🛡 redacted** badge in the header, and a footer line — *"this transcript was redacted — N secrets scrubbed"*;
 - `--no-redact`: a **⚠ unredacted** badge, a *"shared without redaction"* footer, and a stderr warning at generation time.

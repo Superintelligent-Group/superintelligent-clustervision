@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::{fs, str};
 
-/// A planted secret that `cv redact` must scrub (matches cv_core::redact's sk- recognizer).
+/// A planted secret that `cv export --redact` must scrub (matches cv_core::redact's sk- recognizer).
 const SECRET: &str = "sk-abcDEF1234567890ghijkl";
 
 /// One temp world: a fake `$HOME` (with `.claude/projects` fixtures) + a `$CLUSTERVISION_HOME`.
@@ -1107,10 +1107,10 @@ fn events_and_touched() {
     assert!(err.contains("no session matching"), "{err}");
 }
 
-// ───────────────────────────── redact ─────────────────────────────
+// ───────────────────────────── export --redact ─────────────────────────────
 
 #[test]
-fn redact_scrubs_planted_secret() {
+fn export_redact_scrubs_planted_secret() {
     let w = World::new("redact");
     standard_corpus(&w);
 
@@ -1118,22 +1118,33 @@ fn redact_scrubs_planted_secret() {
     let (out, _) = w.cv_ok(&["show", "alphasess"]);
     assert!(out.contains(SECRET), "fixture sanity: secret present in show:\n{out}");
 
-    // redact md: gone from stdout, replaced by a placeholder; --stats reports it on stderr.
-    let (out, err) = w.cv_ok(&["redact", "alphasess", "--stats"]);
-    assert!(!out.contains(SECRET), "redact leaked the secret:\n{out}");
+    // md: gone from stdout, replaced by a placeholder; the per-class tally is on stderr.
+    let (out, err) = w.cv_ok(&["export", "alphasess", "--redact"]);
+    assert!(!out.contains(SECRET), "export --redact leaked the secret:\n{out}");
     assert!(out.contains("[REDACTED:api_key]"), "{out}");
-    assert!(err.contains("redacted"), "{err}");
+    assert!(out.contains("## User"), "still the export rendering: {out}");
+    assert!(err.contains("redacted") && err.contains("1 api_key"), "{err}");
+
+    // json: the whole OpenSession document is clean, and still the document (marker led).
+    let (out, err) = w.cv_ok(&["export", "alphasess", "--format", "json", "--redact"]);
+    assert!(
+        !out.contains(SECRET),
+        "export --format json --redact leaked the secret:\n{out}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["open_session"], "0.3", "{out}");
+    assert_eq!(v["id"], "alphasess");
     assert!(err.contains("1 api_key"), "{err}");
 
-    // redact json: the whole serialized session is clean.
-    let (out, _) = w.cv_ok(&["redact", "alphasess", "--format", "json"]);
-    assert!(!out.contains(SECRET), "redact --format json leaked the secret:\n{out}");
-    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-    assert_eq!(v["id"], "alphasess");
+    // Without the flag nothing is scrubbed and nothing is tallied.
+    let (out, err) = w.cv_ok(&["export", "alphasess"]);
+    assert!(out.contains(SECRET), "{out}");
+    assert!(!err.contains("redacted"), "{err}");
 
-    // Unknown format is an error.
-    let (_, err) = w.cv_fails(&["redact", "alphasess", "--format", "pdf"]);
-    assert!(err.contains("unknown format"), "{err}");
+    // The removed command errors with the replacement, exit 2.
+    let (ok, code, _, err) = w.cv(&["redact", "alphasess", "--stats"]);
+    assert!(!ok && code == 2, "{err}");
+    assert!(err.contains("cv export <id> --redact"), "{err}");
 }
 
 // ───────────────────────────── error-path honesty ─────────────────────────────

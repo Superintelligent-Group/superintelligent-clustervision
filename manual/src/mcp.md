@@ -153,7 +153,6 @@ Each produces a **new** session id; the source is never touched.
 | `splice` | `specs` | no | Compose a new session from spans of existing ones (`<id>:A..B`). |
 | `loom` | `base`, `at`, `graft`, `from` | no | Graft: `base[..N]` then `other[M..]`, as one new branched session. |
 | `port` | `id` | no | A copy that runs elsewhere — another harness (`harness`), another working directory (`cwd`), or both. |
-| `redact` | `id` | no | Scrub secrets/PII and export (safe to share). |
 | `resume` | `id` | no | The resume incantation for a session in its native harness. |
 
 ### Export

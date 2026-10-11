@@ -14,6 +14,7 @@
 - **Removed `cv-tui`**: its three views are `cv ls`, `cv show` and the web Sessions/Fleet tabs; one release binary fewer.
 - **Removed the `cv-search` demo binary**: `cv index` / `cv search [--semantic]` are the commands; the crate stays a library.
 - **Removed `cv timeline`**: `cv ls --sort-by updated --asc` prints the same rows oldest-first; the old name errors with that pointer.
+- **Removed `cv redact`**: `cv export <id> --redact [--format md|json]` runs the same scrub; counts go to stderr.
 
 ## 0.14.0 — 2026-10-10
 

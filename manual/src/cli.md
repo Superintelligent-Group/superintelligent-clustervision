@@ -725,23 +725,6 @@ By default it writes into the target harness's *real* storage root, so the sessi
 
 Every port re-parses its own output and diffs it against the source IR per message — role and `kind` sequences, block-type counts, thinking (text / signature-only / encrypted), tool names on results, `is_error`, `details`, usage, model, timestamps, ids, plus the session's title, cwd, model, `system_prompt` and `lineage`. Each delta is classified as *expected for this target* (from a per-emitter table of what the format cannot carry) or *unexpected*; `--strict` fails on the latter.
 
-### `cv redact`
-
-Scrub secrets and PII — API keys, private keys, JWTs, emails, opaque blobs, `KEY=value` assignments — then export the cleaned session. The thing to reach for before you paste a transcript into an issue.
-
-```sh
-cv redact da9174f4 > safe.md
-cv redact da9174f4 --format json --stats
-```
-
-```text
-✦ redacted 7 item(s): 2 api_key, 1 private_key, 0 jwt, 3 email, 1 blob, 0 assignment
-```
-
-- `--format <md|json>` — output format (default `md`). `--stats` — per-class counts to stderr.
-
-For a shareable artifact rather than a text dump, use [`cv share`](#cv-share).
-
 ### `cv resume`
 
 Print the exact incantation to resume a session in its native harness — or, with `--launch`, run it for you (cd-ing to the session's cwd first).
@@ -773,9 +756,15 @@ cv export da9174f4 > session.md               # markdown (default)
 cv export da9174f4 --format json > s.json
 cv export da9174f4 --format html > s.html     # one self-contained file
 cv export da9174f4 --last 100 --format md     # windows work here too
+cv export da9174f4 --redact > safe.md         # secrets/PII scrubbed first; counts on stderr
+```
+
+```text
+✦ redacted 7 item(s): 2 api_key, 1 private_key, 0 jwt, 3 email, 1 blob, 0 assignment
 ```
 
 - `--format <md|json|html>` — output format (default `md`). `html` is a single self-contained page you can open or send to someone.
+- `--redact` — scrub secrets and PII before rendering: API keys, private keys, JWTs, emails, opaque blobs, `KEY=value` assignments. The same pass [`cv share`](#cv-share) runs; the per-class tally goes to stderr so stdout stays the document. The thing to reach for before you paste a transcript into an issue. (This replaces `cv redact`.)
 - the five [window flags](#message-windows) — identical to `cv show`'s.
 
 (`show` and `export` are siblings: `show` is for your terminal, `export` is for a file or a pipe.)

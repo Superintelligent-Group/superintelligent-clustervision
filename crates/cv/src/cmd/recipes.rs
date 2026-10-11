@@ -131,6 +131,7 @@ mod tests {
             "--to-dir",
             "--to ",
             "cv timeline",
+            "cv redact",
         ] {
             assert!(!r.contains(old), "recipes mention the removed {old:?}");
         }

@@ -1,4 +1,4 @@
-//! `cv show` / `cv export` / `cv tree` / `cv redact` — reading sessions,
+//! `cv show` / `cv export` / `cv tree` — reading sessions,
 //! plus the streaming renderer (`stream_session_render`) and its header/message helpers.
 
 use crate::util::{
@@ -96,7 +96,7 @@ pub(crate) fn cmd_show(
     }
 
     if json {
-        return print_session_json(adapter.as_ref(), &r, range, window.max_bytes, false);
+        return print_session_json(adapter.as_ref(), &r, range, window.max_bytes, false, None).map(|_| ());
     }
     // The pipe guard applies only to a selector-less, budget-less render (an explicit window or
     // budget is the caller saying what they want).
@@ -118,8 +118,10 @@ fn print_session_json(
     range: Option<(usize, Option<usize>)>,
     max_bytes: Option<usize>,
     as_document: bool,
-) -> Result<()> {
+    redact: Option<&cv_core::redact::RedactOptions>,
+) -> Result<cv_core::redact::RedactStats> {
     let mut session = adapter.parse(r)?;
+    let mut stats = cv_core::redact::RedactStats::default();
     let start = range.map(|(s, _)| s).unwrap_or(0);
     if let Some(rg) = range {
         let (s, e) = clamp(rg, session.messages.len());
@@ -141,6 +143,11 @@ fn print_session_json(
             session.messages.truncate(keep);
         }
     }
+    if let Some(opts) = redact {
+        let (clean, st) = cv_core::redact::redact_with(&session, opts);
+        session = clean;
+        stats = st;
+    }
     if as_document {
         println!(
             "{}",
@@ -149,7 +156,7 @@ fn print_session_json(
     } else {
         println!("{}", serde_json::to_string_pretty(&session)?);
     }
-    Ok(())
+    Ok(stats)
 }
 
 /// The rendered-transcript path of `cv show`, with the pipe guard: a selector-less render to a
@@ -396,7 +403,7 @@ fn show_one_subagent(
     let range = window.bounds(|| count_messages(adapter, &sub.session))?;
 
     if json {
-        return print_session_json(adapter, &sub.session, range, window.max_bytes, false);
+        return print_session_json(adapter, &sub.session, range, window.max_bytes, false, None).map(|_| ());
     }
 
     // A small provenance banner so the reader knows which agent (and outcome) this is.
@@ -423,10 +430,22 @@ fn show_one_subagent(
     render_text(adapter, &sub.session, range, window.max_bytes, false)
 }
 
-pub(crate) fn cmd_export(id: &str, format: &str, harness: Option<String>, window: &WindowArgs) -> Result<()> {
+pub(crate) fn cmd_export(
+    id: &str,
+    format: &str,
+    harness: Option<String>,
+    window: &WindowArgs,
+    redact: bool,
+) -> Result<()> {
+    use cv_core::redact::{redact_message, redact_text, RedactOptions, RedactStats};
     let want = parse_harness(&harness)?;
     let (r, adapter) = resolve(id, want)?;
     let range = window.bounds(|| count_messages(adapter.as_ref(), &r))?;
+    // `--redact`: the same scrubber `cv share` runs (API keys, private keys, JWTs, emails,
+    // assignments, high-entropy blobs), applied per block before anything is rendered; the
+    // per-class counts go to stderr so stdout stays the document.
+    let opts = RedactOptions::default();
+    let stats = std::cell::RefCell::new(RedactStats::default());
     match format {
         "md" | "markdown" => {
             let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -434,8 +453,22 @@ pub(crate) fn cmd_export(id: &str, format: &str, harness: Option<String>, window
                 adapter.as_ref(),
                 &r,
                 &mut out,
-                md_header,
-                md_message,
+                |h| {
+                    let head = md_header(h);
+                    if redact {
+                        redact_text(&head)
+                    } else {
+                        head
+                    }
+                },
+                |m| {
+                    if !redact {
+                        return md_message(m);
+                    }
+                    let mut m = m.clone();
+                    redact_message(&mut m, &opts, &mut stats.borrow_mut());
+                    md_message(&m)
+                },
                 RenderOpts {
                     range,
                     max_bytes: window.max_bytes,
@@ -447,7 +480,17 @@ pub(crate) fn cmd_export(id: &str, format: &str, harness: Option<String>, window
             out.flush()?;
         }
         // `--format json` IS OpenSession 0.3: the IR, plus the version marker.
-        "json" => print_session_json(adapter.as_ref(), &r, range, window.max_bytes, true)?,
+        "json" => {
+            let st = print_session_json(
+                adapter.as_ref(),
+                &r,
+                range,
+                window.max_bytes,
+                true,
+                redact.then_some(&opts),
+            )?;
+            *stats.borrow_mut() = st;
+        }
         // HTML is one self-contained document: windowed, but never cut mid-page.
         "html" => {
             if window.max_bytes.is_some() {
@@ -458,39 +501,33 @@ pub(crate) fn cmd_export(id: &str, format: &str, harness: Option<String>, window
                 let (s, e) = clamp(rg, session.messages.len());
                 session.messages = session.messages.drain(s..e).collect();
             }
+            if redact {
+                let (clean, st) = cv_core::redact::redact_with(&session, &opts);
+                session = clean;
+                *stats.borrow_mut() = st;
+            }
             print!("{}", cv_core::html::to_html(&session));
         }
         other => bail!("unknown format {other:?} (use md, json, or html)"),
     }
+    if redact {
+        eprintln!("{}", redaction_summary(&stats.borrow()));
+    }
     Ok(())
 }
 
-pub(crate) fn cmd_redact(id: &str, harness: Option<String>, format: &str, stats: bool) -> Result<()> {
-    let want = parse_harness(&harness)?;
-    let (r, adapter) = resolve(id, want)?;
-    let session = adapter.parse(&r)?;
-
-    let (redacted, st) = cv_core::redact::redact_with(&session, &Default::default());
-
-    match format {
-        "json" => println!("{}", serde_json::to_string_pretty(&redacted)?),
-        "md" | "markdown" => print!("{}", cv_core::render::to_markdown(&redacted)),
-        other => bail!("unknown format {other:?} (use md or json)"),
-    }
-
-    if stats {
-        eprintln!(
-            "✦ redacted {} item(s): {} api_key, {} private_key, {} jwt, {} email, {} blob, {} assignment",
-            st.total(),
-            st.api_keys,
-            st.private_keys,
-            st.jwts,
-            st.emails,
-            st.blobs,
-            st.assignments,
-        );
-    }
-    Ok(())
+/// The one-line per-class tally `export --redact` and `share` print to stderr.
+pub(crate) fn redaction_summary(st: &cv_core::redact::RedactStats) -> String {
+    format!(
+        "✦ redacted {} item(s): {} api_key, {} private_key, {} jwt, {} email, {} blob, {} assignment",
+        st.total(),
+        st.api_keys,
+        st.private_keys,
+        st.jwts,
+        st.emails,
+        st.blobs,
+        st.assignments,
+    )
 }
 
 // ---------- tree ----------

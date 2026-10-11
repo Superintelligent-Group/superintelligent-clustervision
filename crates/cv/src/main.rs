@@ -87,7 +87,7 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
     (
         "Reshape",
         &[
-            "prune", "rewind", "distill", "fork", "adopt", "splice", "loom", "port", "redact", "resume",
+            "prune", "rewind", "distill", "fork", "adopt", "splice", "loom", "port", "resume",
         ],
     ),
     ("Export", &["export", "dataset", "pack"]),
@@ -802,17 +802,6 @@ enum Cmd {
         #[arg(long, hide = true)]
         from: Option<String>,
     },
-    /// Scrub secrets/PII from a session and export it (safe to share).
-    Redact {
-        id: String,
-        #[arg(long)]
-        harness: Option<String>,
-        #[arg(long, default_value = "md")]
-        format: String,
-        /// Also print redaction counts per class to stderr.
-        #[arg(long)]
-        stats: bool,
-    },
     /// Print (or with --launch, run) the resume incantation for a session in its native harness.
     Resume {
         id: String,
@@ -834,6 +823,10 @@ enum Cmd {
         harness: Option<String>,
         #[command(flatten)]
         window: WindowArgs,
+        /// Scrub secrets/PII first — API keys, private keys, JWTs, emails, `KEY=value` assignments,
+        /// high-entropy blobs — with the same pass `cv share` runs; per-class counts go to stderr.
+        #[arg(long)]
+        redact: bool,
     },
     /// Export the corpus as a fine-tuning dataset (JSONL, one session per line).
     /// `chatml`/`sharegpt` import directly into Unsloth Studio / TRL / HF — no adapter.
@@ -998,6 +991,11 @@ enum Cmd {
         rest: Vec<String>,
     },
     #[command(hide = true)]
+    Redact {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
     Convert {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         rest: Vec<String>,
@@ -1092,7 +1090,8 @@ fn run() -> Result<()> {
             format,
             harness,
             window,
-        } => view::cmd_export(&id, &format, harness, &window),
+            redact,
+        } => view::cmd_export(&id, &format, harness, &window, redact),
         Cmd::Dataset {
             format,
             harness,
@@ -1420,12 +1419,6 @@ fn run() -> Result<()> {
             }
             compose::cmd_splice(&specs, harness, out, export, cwd, generate, gen_model, util::parse_thinking(&thinking)?)
         }
-        Cmd::Redact {
-            id,
-            harness,
-            format,
-            stats,
-        } => view::cmd_redact(&id, harness, &format, stats),
         Cmd::Loom {
             base,
             at,
@@ -1452,6 +1445,10 @@ fn run() -> Result<()> {
         Cmd::Timeline { .. } => usage(
             "`cv timeline` was removed in 0.15.0 — use `cv ls --sort-by updated --asc` (the newest --limit rows, \
              oldest first; `--json` gives the same session rows)",
+        ),
+        Cmd::Redact { .. } => usage(
+            "`cv redact <id> [--format md|json]` was removed in 0.15.0 — use `cv export <id> --redact [--format md|json]` \
+             (the per-class counts print to stderr); `cv share <id>` for a redacted HTML artifact",
         ),
         Cmd::Convert { .. } => usage(
             "`cv convert` was removed in 0.11.0 — use `cv port <id> --harness <harness>` \
