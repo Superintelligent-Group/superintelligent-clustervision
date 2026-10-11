@@ -95,7 +95,7 @@ fn note(kind: MessageKind, ts: Option<DateTime<Utc>>, text: String) -> Message {
 /// lifecycle marker the lean passes drop — becomes a [`MessageKind::Carrier`]: the verbatim line
 /// under the top-level `_record` key and its top-level `type` in `extra["codex"]["record_type"]`
 /// (the `payload.type` stays inside `_record`), so a same-harness round-trip loses nothing and
-/// `cv formats census` can count what the adapter does not model.
+/// `cv formats` can count what the adapter does not model.
 fn carry_record(v: &Value, ts: Option<DateTime<Utc>>, out: &mut Vec<Message>) {
     let mut m = Message::of_kind(Role::System, MessageKind::Carrier, Origin::Harness);
     m.timestamp = ts;

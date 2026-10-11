@@ -1,119 +1,30 @@
-//! `cv formats` — the format census and the manifest check (docs/INTERFACE-V2.md §7).
+//! `cv formats` — the format census (docs/INTERFACE-V2.md §7): parse the most recent sessions per
+//! harness in format-complete mode and report what record vocabulary showed up, marking anything
+//! the manifest does not name as `NEW` — that is drift arriving on disk.
 //!
-//! Two questions about the same thing, from two directions:
-//!
-//! - `cv formats census` asks **real data**: parse the most recent sessions per harness in
-//!   format-complete mode and report what record vocabulary showed up, marking anything the
-//!   manifest does not name as `NEW` — that is drift arriving on disk.
-//! - `cv formats check` asks **the source**: does each adapter still do what `formats/<h>.toml`
-//!   promises, and does the manifest still name every literal the adapter matches on? The same
-//!   comparison `tests/formats_manifest.rs` runs in CI, available against any checkout.
+//! The other direction — does each adapter's source still do what `formats/<h>.toml` promises —
+//! needs a checkout, so it is a test, not a command: `cargo test -p clustervision-core --test
+//! formats_manifest`.
 
 use anyhow::Result;
-use clap::Subcommand;
 use cv_core::formats::{self, Status};
 use cv_core::ir::Harness;
-use serde_json::json;
-use std::path::PathBuf;
 
-use crate::util::parse_harness;
+use crate::util::{parse_harness, usage};
 
-#[derive(Subcommand)]
-pub(crate) enum FormatsCmd {
-    /// What the most recent sessions actually contain, per harness: message kinds, block types and
-    /// the record vocabulary the adapter did not interpret. Types the manifest does not name are
-    /// marked `NEW` — the drift signal.
-    Census {
-        /// Only this harness.
-        #[arg(long)]
-        harness: Option<String>,
-        /// How many recent sessions per harness to parse.
-        #[arg(long, default_value_t = 20, value_name = "N")]
-        recent: usize,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Compare every adapter's source against its manifest, both directions: a `handled` type that
-    /// no longer appears in the adapter, and a literal the adapter matches on that the manifest
-    /// does not name. Exit 1 if anything disagrees.
-    Check {
-        /// Adapter source root. Default: the `crates/cv-core/src` of the checkout cv was built in.
-        #[arg(long, value_name = "DIR")]
-        src: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-pub(crate) fn cmd_formats(action: FormatsCmd) -> Result<()> {
-    match action {
-        FormatsCmd::Census { harness, recent, json } => census(parse_harness(&harness)?, recent, json),
-        FormatsCmd::Check { src, json } => check(src, json),
-    }
-}
-
-/// `crates/cv-core/src` of the checkout this binary was built from.
-fn default_src_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("cv-core").join("src"))
-        .unwrap_or_else(|| PathBuf::from("crates/cv-core/src"))
-}
-
-fn check(src: Option<PathBuf>, json_out: bool) -> Result<()> {
-    let root = src.unwrap_or_else(default_src_root);
-    let findings = formats::check_all(&root);
-    if json_out {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "src_root": root,
-                "finding_count": findings.len(),
-                "findings": findings,
-            }))?
-        );
-    } else if findings.is_empty() {
-        println!(
-            "{} manifests agree with their adapters ({})",
-            formats::MANIFEST_SOURCES.len(),
-            root.display()
-        );
-    } else {
-        // A binary installed from a release has no cv checkout beside it, and `--src` defaults to
-        // the directory it was BUILT in — so the honest answer there is "point me at a checkout",
-        // not a wall of per-harness findings. Say that first, before the list.
-        if !root.is_dir() {
-            eprintln!("✦ {} is not a directory.", root.display());
-            eprintln!("  `formats check` reads the adapter sources, so it needs a cv checkout:");
-            eprintln!("  pass `--src <repo>/crates/cv-core/src`.");
-            eprintln!("  (`formats census` needs no source — it reads your real sessions.)");
+pub(crate) fn cmd_formats(harness: Option<String>, recent: usize, json: bool, legacy: Option<String>) -> Result<()> {
+    match legacy.as_deref() {
+        None => census(parse_harness(&harness)?, recent, json),
+        Some("census") => {
+            usage("`cv formats census` is now plain `cv formats` (same flags: --harness, --recent, --json)")
         }
-        for f in &findings {
-            println!(
-                "{:<15} {:<26} {:<34} {}",
-                f.harness,
-                kind_word(f.kind),
-                f.item,
-                f.detail
-            );
-        }
-        println!(
-            "\n{} disagreement(s) — fix formats/<harness>.toml, or the adapter",
-            findings.len()
-        );
-    }
-    if findings.is_empty() {
-        Ok(())
-    } else {
-        std::process::exit(1)
-    }
-}
-
-fn kind_word(k: formats::FindingKind) -> &'static str {
-    match k {
-        formats::FindingKind::HandledMissingInSource => "handled_missing_in_source",
-        formats::FindingKind::LiteralMissingInManifest => "literal_missing_in_manifest",
-        formats::FindingKind::SourceFileMissing => "source_file_missing",
+        Some("check") => usage(
+            "`cv formats check` was removed in 0.15.0 — it needs a source checkout, so it is the test: \
+             `cargo test -p clustervision-core --test formats_manifest`",
+        ),
+        Some(other) => usage(format!(
+            "`cv formats` takes no subcommand (got {other:?}); run `cv formats --help`"
+        )),
     }
 }
 

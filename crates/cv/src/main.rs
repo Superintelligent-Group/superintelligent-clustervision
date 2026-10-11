@@ -984,11 +984,21 @@ enum Cmd {
         #[arg(long)]
         commands: bool,
     },
-    /// Audit cv against the harnesses themselves: what recent sessions actually contain
-    /// (`census`), and whether each adapter still matches its pinned manifest (`check`).
+    /// The format census: what the most recent sessions actually contain, per harness — message
+    /// kinds, block types and the record vocabulary the adapter did not interpret. Types the
+    /// manifest does not name are marked `NEW`, the drift signal.
     Formats {
-        #[command(subcommand)]
-        action: cmd::formats::FormatsCmd,
+        /// Only this harness.
+        #[arg(long)]
+        harness: Option<String>,
+        /// How many recent sessions per harness to parse.
+        #[arg(long, default_value_t = 20, value_name = "N")]
+        recent: usize,
+        #[arg(long)]
+        json: bool,
+        // The 0.14 subcommands (`census`, `check`) — hidden so they error with a pointer (exit 2).
+        #[arg(hide = true)]
+        legacy: Option<String>,
     },
     /// The agent quickstart: the ten things agents do with cv, each as one command line with the
     /// JSON keys it returns.
@@ -1272,7 +1282,12 @@ fn run() -> Result<()> {
         } => compose::cmd_rewind(&id, harness, agent, at.as_deref(), out, to, full, dry_run, json, BUILD_VERSION),
         Cmd::Config { add_export, rm_export } => config::cmd_config(add_export, rm_export),
         Cmd::Schema { json, commands } => schema::cmd_schema(&build_cli(), json, commands),
-        Cmd::Formats { action } => formats::cmd_formats(action),
+        Cmd::Formats {
+            harness,
+            recent,
+            json,
+            legacy,
+        } => formats::cmd_formats(harness, recent, json, legacy),
         Cmd::Recipes => recipes::cmd_recipes(),
         Cmd::Resume { id, harness, launch } => port::cmd_resume(&id, harness, launch),
         Cmd::Tree { id, harness } => view::cmd_tree(&id, harness),

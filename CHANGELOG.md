@@ -17,6 +17,7 @@
 - **Removed `cv redact`**: `cv export <id> --redact [--format md|json]` runs the same scrub; counts go to stderr.
 - **Removed `cv export --format html`**: `cv share` is the one HTML renderer (streaming, redacted); the whole-session `to_html` goes.
 - **`cv lanes --recent N [--cwd DIR] --unfinished`** replaces `cv adopt --list` / `--orphans`: a project's recent forests in one table, each row tagged with its session.
+- **`cv formats` is flat** (the census); `formats check` is the `formats_manifest` test — it always needed a checkout.
 
 ## 0.14.0 — 2026-10-10
 

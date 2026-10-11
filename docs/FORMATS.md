@@ -21,7 +21,7 @@ verbatim only under `ParseOptions::complete`, `ignored` = known and deliberately
 
 - **The manifest is authoritative for the machine-checkable vocabulary**: which record types exist,
   what cv does with each, and which upstream commit that was pinned against. It is enforced in both
-  directions — `cv formats check` (and `crates/cv-core/tests/formats_manifest.rs`) fails when a
+  directions — `crates/cv-core/tests/formats_manifest.rs` fails when a
   `handled` type is no longer in the adapter, or when the adapter matches a literal the manifest
   does not name.
 - **This prose is authoritative for everything a table cannot hold**: where the store lives and how
@@ -33,8 +33,8 @@ A change in how the format *works* is an edit **here**. When the two disagree th
 vocabulary and this document wins on meaning — and one of them is then wrong and should be fixed.
 
 The per-harness type lists below are therefore **illustrative, not exhaustive**, and are not the
-checked list. For the current picture run `cv formats check` (drift against the pinned manifests)
-and `cv formats census [--harness h] [--recent N]` (what recent real sessions on this machine
+checked list. For the current picture run the `formats_manifest` test (drift against the pinned
+manifests) and `cv formats [--harness h] [--recent N]` (what recent real sessions on this machine
 actually contain: message kinds, block types, and record vocabulary the adapter did not interpret,
 with anything the manifest does not name marked `NEW`). `tools/harness-drift.sh` refreshes the
 `~/pug` checkouts and greps their persistence enums against the manifests.
@@ -87,7 +87,7 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
   `promptSource`, `turnOrigin`, `permissionMode`; assistant turns add `requestId`, `effort`,
   `apiBlockIndex` (one line per streamed content block, sharing `message.id`).
   `formats/claude.toml` `[types]` is the checked list and says which of these cv interprets and which
-  it merely carries under `ParseOptions::complete`; `cv formats census --harness claude` shows what a
+  it merely carries under `ParseOptions::complete`; `cv formats --harness claude` shows what a
   real store holds today.
 - **Attachments ARE prompt content (since ~2.1.23x).** The `<system-reminder>` text Claude Code appends to
   the prompt no longer lives inline in user content; each is an `attachment` record `{attachment:{type,…},
@@ -519,7 +519,7 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   That record list is **not exhaustive** and it moves fast — `formats/kimi-code.toml` names the
   checked set (including the `permission.*`, `tools.*`, `token_counting.*`, `swarm_mode.*`,
   `plan_mode.*`, `plugin.session_start`, `prompt.accepted`, `staleGuard.recorded` families that a
-  real store is full of but which cv only carries), and `cv formats census --harness kimi-code`
+  real store is full of but which cv only carries), and `cv formats --harness kimi-code`
   shows what is actually on this machine.
 - **Kimi Code IR mapping:** `profile.bind` is the system prompt (`kind: system_prompt`, and
   `Session::system_prompt`); `context.apply_compaction` is a `compaction_boundary` +

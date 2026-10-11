@@ -83,8 +83,8 @@ blanket rule, so no literal appears), `carried` (kept verbatim as a `carrier` me
 A test asserts the manifest and the adapter agree in **both** directions: every `handled` type
 appears in the adapter's match arms, and every type-like literal the adapter matches on appears in
 the manifest. So a new match arm fails the build until the manifest names it, and a manifest entry
-for a type you removed fails too. [`cv formats check`](cli.md#cv-formats) runs the same comparison
-on demand, and [`cv formats census`](cli.md#cv-formats) parses real sessions in complete mode and
+for a type you removed fails too (`cargo test -p clustervision-core --test formats_manifest`
+runs it alone), and [`cv formats`](cli.md#cv-formats) parses real sessions in complete mode and
 tells you what the harness is writing that your manifest has never heard of — which is how you find
 out upstream shipped a new record type.
 

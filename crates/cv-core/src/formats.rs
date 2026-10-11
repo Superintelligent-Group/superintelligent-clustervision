@@ -17,7 +17,7 @@
 //! 2. **[`check`]** — source vs manifest, both directions: every `handled` type must appear as a
 //!    string literal in the adapter's source, and every type-like literal in the adapter's match
 //!    arms must be in the manifest (or its explicit `ignore_literals`). Runs as an integration test
-//!    (`tests/formats_manifest.rs`) and as `cv formats check` on a source tree.
+//!    (`tests/formats_manifest.rs`) on a source tree.
 //!
 //! 3. **[`census`]** — real data vs manifest: parse the N most recent sessions per harness in
 //!    format-complete mode and tally message kinds, block types and — the point — the record

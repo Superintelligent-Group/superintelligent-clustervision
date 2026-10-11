@@ -1015,17 +1015,17 @@ Each `>` is a *direct* child (a reply), resolved via `parent_id`, so it follows 
 
 ### `cv formats`
 
-The format census and the manifest check — cv's own honesty about how much of each harness's on-disk vocabulary it actually understands.
+The format census — cv's own honesty about how much of each harness's on-disk vocabulary it actually understands.
 
 ```sh
-cv formats census                  # what real sessions hold, per harness
-cv formats census --harness codex  # just one
-cv formats check                   # every adapter against formats/<harness>.toml
+cv formats                         # what real sessions hold, per harness
+cv formats --harness codex         # just one
+cv formats --recent 50 --json
 ```
 
-**`census`** parses recent sessions per harness in *format-complete* mode, where every record an adapter doesn't interpret is carried through as a [`carrier`](architecture.md#the-unified-ir) message tagged with its record type. It then reports, per harness, the record/part/column vocabulary actually seen with counts — marking anything absent from the manifest as **new**. That "new" list is the drift signal: it's what a harness shipped since cv last looked.
+It parses recent sessions per harness in *format-complete* mode, where every record an adapter doesn't interpret is carried through as a [`carrier`](architecture.md#the-unified-ir) message tagged with its record type. It then reports, per harness, the record/part/column vocabulary actually seen with counts — marking anything the manifest (`formats/<harness>.toml`) does not name as `NEW`. That is drift arriving on disk: a harness started writing something cv has never seen.
 
-**`check`** compares each adapter's source against its manifest, `formats/<harness>.toml`, in both directions: a type the manifest calls `handled` that never appears in the adapter's match arms, and a type-like literal the adapter matches on that the manifest doesn't list. A manifest records the upstream it was verified against (`repo`, `commit`, `date`), the store paths, and every persisted type with a status:
+The other direction — does each adapter's source still do what its manifest promises — needs a checkout, so it is a test, not a command: `cargo test -p clustervision-core --test formats_manifest` compares both ways (a type the manifest calls `handled` that never appears in the adapter's match arms; a type-like literal the adapter matches on that the manifest doesn't list). A new match arm fails the build until the manifest names it — the check is a gate, not a report you can forget to read. The manifests ship embedded in the binary, so an installed `cv` carries the vocabulary it was built against.
 
 | status | meaning |
 | --- | --- |
@@ -1033,8 +1033,6 @@ cv formats check                   # every adapter against formats/<harness>.tom
 | `generic` | interpreted by a blanket rule, so no per-item literal exists |
 | `carried` | kept verbatim as a carrier under `ParseOptions::complete`, dropped otherwise |
 | `ignored` | known and deliberately skipped (transient, UI-only, or a duplicate) |
-
-The manifests ship embedded in the binary, so an installed `cv` carries the vocabulary it was built against. A test asserts the two directions agree, which means a new match arm in an adapter fails the build until the manifest names it — the check is a gate, not a report you can forget to read.
 
 ### `cv recipes`
 

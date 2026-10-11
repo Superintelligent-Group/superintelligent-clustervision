@@ -43,9 +43,9 @@ New:
   inline in the transcript, in a `prune` sidecar, or in a persisted-output file
   (`<session>/tool-results/…`, Kimi `tool-results/*.txt`). `--input` prints the call's arguments
   instead. Exit 2 if the id is unknown.
-- **`formats`** — the format census and manifest check (see §7). `formats census [--harness h]`
-  lists unknown record/part/column vocabulary seen in real data; `formats check` compares each
-  adapter against `formats/<harness>.toml`.
+- **`formats`** — the format census (see §7): `formats [--harness h] [--recent N] [--json]` lists
+  unknown record/part/column vocabulary seen in real data. The manifest ↔ source comparison is the
+  test `cargo test -p clustervision-core --test formats_manifest`, not a command.
 - **`recipes`** — the agent quickstart: the ten things agents do with cv, each as one command
   line with its JSON shape. Also printed by `cv --help`'s last line as "run `cv recipes`".
 
@@ -304,7 +304,7 @@ shapes cannot drift. Mechanism (no shared crate; the clap tree lives in the `cv`
 ## 7. Format census and manifests (`cv formats`)
 
 - **Census.** Under `ParseOptions::complete` every adapter carries unknown records as `Carrier`
-  messages with `extra[h]["record_type"]`. `cv formats census` parses recent sessions per harness
+  messages with `extra[h]["record_type"]`. `cv formats` parses recent sessions per harness
   in complete mode and reports, per harness, the record/part/column vocabulary seen with counts,
   marking anything absent from the manifest as **new**.
 - **Manifests.** `formats/<harness>.toml`: `upstream = { repo, commit, date }`, `store = [...]`
@@ -337,8 +337,8 @@ seven times, in four different shapes and three shapeless ones:
 
 | the pair | the mechanism | the shape it reports in |
 |---|---|---|
-| manifest ↔ adapter source | `cv formats check` | `formats::Finding { harness, kind, item, detail }` |
-| manifest ↔ real on-disk data | `cv formats census` | its own `RecordStat` |
+| manifest ↔ adapter source | `cargo test -p clustervision-core --test formats_manifest` | `formats::Finding { harness, kind, item, detail }` |
+| manifest ↔ real on-disk data | `cv formats` | its own `RecordStat` |
 | source IR ↔ emitted output | `emit_verified` | `emit::Delta { field, before, after, expected }` |
 | CLI JSON ↔ daemon JSON | `cvd tests/parity.rs` | ad-hoc `missing`/`extra` vectors |
 | render ↔ IR | `web/selftest.html` | `{ group, name, why }` |
@@ -350,7 +350,7 @@ one. The cost is that **adding a surface means writing an eighth bespoke checker
 seven cannot be read, filtered or rendered together even though they answer the same question.
 
 **The end-state:** one `Divergence { what, a, b, expected, where }` and one renderer, so
-`--strict`, `formats check`, the parity test and the dashboard all speak the same words, and adding
+`--strict`, `formats_manifest`, the parity test and the dashboard all speak the same words, and adding
 a surface means *declaring a pair* rather than writing a checker. `Finding` and `Delta` are already
 that type with two different spellings; unifying them is the down-payment and the rest can adopt it
 incrementally.

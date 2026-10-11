@@ -134,6 +134,8 @@ mod tests {
             "cv redact",
             "adopt --list",
             "--orphans",
+            "formats check",
+            "formats census",
         ] {
             assert!(!r.contains(old), "recipes mention the removed {old:?}");
         }
