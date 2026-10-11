@@ -58,7 +58,7 @@ command in the **Read**, **Reshape**, **Export** and **System** groups becomes o
 tool:
 
 - the **tool name is the command name** (`ls`, `show`, `cat`, …; a subcommand joins with
-  an underscore, `formats_census`);
+  an underscore, `formats_census` — a command that only has subcommands, like `formats`, is not a tool itself);
 - the **tool description is clap's `about`**;
 - **every argument becomes a JSON-schema property named after the argument** —
   positionals included, so `cat` takes `session` and `tool_use_id` as properties — with
@@ -172,7 +172,8 @@ Each produces a **new** session id; the source is never touched.
 | `index` | — | no | Build/refresh the full-text index that makes `search` instant. |
 | `config` | — | no | View the user config and manage the export-source index. |
 | `schema` | — | yes | The reference: query calculus, and the machine-readable schema of every shape cv emits. |
-| `formats` | — | yes | The format census and manifest check. |
+| `formats_census` | — | yes | Unknown record/part/column vocabulary seen in real data, per harness (`cv formats census`). |
+| `formats_check` | — | yes | Each adapter against its `formats/<harness>.toml` manifest (`cv formats check`). |
 | `recipes` | — | no | The agent quickstart: the ten things agents do with cv. |
 
 ## What was removed in 0.11.0
@@ -291,7 +292,7 @@ A claimed `key` is typically a file path or task id. Always `board_release` when
 ## The task substrate over MCP
 
 The [task substrate](tasks.md) — durable dispatch objects whose landing state is *observed
-from git*, never asserted — is fully drivable over MCP. Fourteen `task_*` tools wrap the same
+from git*, never asserted — is fully drivable over MCP. The `task_*` tools wrap the same
 core paths as the `cv task` CLI, and results come back as pretty JSON in the same shared row
 shapes. Two things to know up front:
 
@@ -319,12 +320,13 @@ shapes. Two things to know up front:
 | `task_verify` | — | `id` (else all), `fetch` (`false`) | Run the git verifier: observe landings/local merges/findings. The **only** way landing state changes. |
 | `task_inbox` | — | `who` (default `$CV_ENDPOINT`) | What needs `who`: assigned, claimed, awaiting-their-review, their unlanded work. Stalest first. |
 | `task_debt` | — | `repo` | Reviewed-but-unlanded work by repo, plus awaiting-review rows, SUSPECT lands, and the verifier heartbeat (`verified_as_of` / `verify_warning`). |
+| `task_stats` | — | `repo` | Fleet batting averages from observed events only: per-endpoint claim/propose/land/refute counts, per-reviewer verdicts with rubber-stamp signals, verifier freshness. Informational, never a gate. |
 
 \* identity-bearing: defaults to `$CV_ENDPOINT`, errors when neither is set.
 
-This table is transcribed from the server's own `tools/list` reply (the `task_tool_list()`
-function in `cv-mcp`); if this page and a live `tools/list` ever disagree, the live reply is
-the authority.
+This table is transcribed from the hand-written list in `crates/cv-mcp/src/main.rs` as it stands
+on this branch; CI greps every tool name on this page against a live `tools/list`, and if the two
+ever disagree the live reply is the authority.
 
 ## A typical flow
 
