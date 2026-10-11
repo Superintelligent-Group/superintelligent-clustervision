@@ -60,7 +60,7 @@ class CvTranscript extends HTMLElement {
   constructor() {
     super();
     this._session = null;
-    // When true, render a "+" affordance on each message so a host (the loom)
+    // When true, render a "+" affordance on each message so a host (the splice composer)
     // can collect messages. Hidden by default.
     this._pickMode = false;
     // What the reader wants out of the way. Hiding is pure CSS on `.turns`, so toggling never
@@ -233,7 +233,7 @@ class CvTranscript extends HTMLElement {
     panel.className = "sub-panel ev-panel";
     panel.innerHTML = `
       <button type="button" class="sub-panel-head" aria-expanded="false">
-        <span class="sub-fork" aria-hidden="true">⚡</span>
+        <span class="sub-glyph" aria-hidden="true">⚡</span>
         <b>${events.length}</b> event${events.length === 1 ? "" : "s"}${summary ? ` — ${esc(summary)}` : ""}
         <span class="sub-caret" aria-hidden="true">▸</span>
       </button>
@@ -284,7 +284,7 @@ class CvTranscript extends HTMLElement {
     panel.className = "sub-panel";
     panel.innerHTML = `
       <button type="button" class="sub-panel-head" aria-expanded="false">
-        <span class="sub-fork" aria-hidden="true">⑂</span>
+        <span class="sub-glyph" aria-hidden="true">⑂</span>
         <b>${subs.length}</b> sub-agent${subs.length === 1 ? "" : "s"} spawned
         <span class="sub-caret" aria-hidden="true">▸</span>
       </button>
@@ -569,7 +569,7 @@ class CvTranscript extends HTMLElement {
     const blocks = (m.content || []).map((b) => this._blockHtml(b)).join("")
       || '<div class="muted block-empty">(empty)</div>';
     const pick = this._pickMode
-      ? `<button type="button" class="pick-btn" data-pick="${idx}" title="Add this message to the loom">＋ loom</button>`
+      ? `<button type="button" class="pick-btn" data-pick="${idx}" title="Add this message to the splice">＋ splice</button>`
       : "";
     const cls = `turn turn-${esc(role)} turn-kind-${esc(kind || "unknown")}${known ? "" : " turn-unknown-kind"}`;
     const head = `

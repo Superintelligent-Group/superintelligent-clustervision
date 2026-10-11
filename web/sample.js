@@ -281,14 +281,14 @@ export const SAMPLE_SESSIONS = [
     ]
   },
   {
-    id: "claude-loom-branch-a",
+    id: "claude-splice-branch-a",
     harness: "claude",
     cwd: "/Users/ember/pug/clustervision",
     title: "Wire up the WASM ingest contract (branch A)",
     created_at: "2026-05-28T17:12:04Z",
     updated_at: "2026-05-28T17:30:00Z",
     model: "claude-opus-4-8",
-    git: { branch: "loom-a", commit: "a1b2c3d" },
+    git: { branch: "splice-a", commit: "a1b2c3d" },
     lineage: { forked_from: "c0ffee-claude-001" },
     messages: [
       { id: "m1", role: "user", kind: "prompt", origin: "human", timestamp: "2026-05-28T17:12:04Z",

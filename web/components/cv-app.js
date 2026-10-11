@@ -8,7 +8,7 @@
 //   compare    — side-by-side message diff (<cv-compare>)
 //   stats      — dashboard (<cv-stats>)
 //   forest     — session-structure explorer: agent forest, workflow lanes, tools, compaction (<cv-forest>)
-//   loom       — splice/loom composer (<cv-loom>)
+//   splice     — splice composer (<cv-splice>)
 //   fleet      — live `cv serve` dashboard (<cv-fleet>)
 import "./cv-session-list.js";
 import "./cv-transcript.js";
@@ -17,7 +17,7 @@ import "./cv-timeline.js";
 import "./cv-compare.js";
 import "./cv-stats.js";
 import "./cv-forest.js";
-import "./cv-loom.js";
+import "./cv-splice.js";
 import "./cv-fleet.js";
 import { esc, normalizeSession, normalizeSessions, randomId } from "./util.js";
 import { isTauri, listen, canInvokeNative } from "../tauri.js";
@@ -38,7 +38,7 @@ const VIEWS = [
   ["compare", "Compare", "🔍"],
   ["stats", "Stats", "📊"],
   ["forest", "Structure", "🌳"],
-  ["loom", "Loom", "✨"],
+  ["splice", "Splice", "✨"],
   ["fleet", "Fleet", "📡"],
 ];
 
@@ -285,7 +285,7 @@ class CvApp extends HTMLElement {
           <span class="logo" aria-hidden="true">🔮</span>
           <div class="brand-text">
             <h1>clustervision</h1>
-            <p class="tagline">Browse, splice &amp; loom agent sessions — entirely in your browser.</p>
+            <p class="tagline">Browse &amp; splice agent sessions — entirely in your browser.</p>
           </div>
         </div>
         <div class="header-actions">
@@ -406,7 +406,7 @@ class CvApp extends HTMLElement {
       case "compare": host.innerHTML = `<cv-compare></cv-compare>`; break;
       case "stats": host.innerHTML = `<cv-stats></cv-stats>`; break;
       case "forest": host.innerHTML = `<cv-forest></cv-forest>`; break;
-      case "loom": host.innerHTML = `<cv-loom></cv-loom>`; break;
+      case "splice": host.innerHTML = `<cv-splice></cv-splice>`; break;
       case "fleet": host.innerHTML = `<cv-fleet></cv-fleet>`; break;
     }
     this._refreshViews();
@@ -471,7 +471,7 @@ class CvApp extends HTMLElement {
     const c = this._host?.querySelector("cv-compare"); if (c) c.sessions = this._sessions;
     const st = this._host?.querySelector("cv-stats"); if (st) st.sessions = this._sessions;
     const fo = this._host?.querySelector("cv-forest"); if (fo) fo.sessions = this._sessions;
-    const lo = this._host?.querySelector("cv-loom"); if (lo) lo.sessions = this._sessions;
+    const lo = this._host?.querySelector("cv-splice"); if (lo) lo.sessions = this._sessions;
 
     // Timeline + Projects → open a session in the sessions view.
     for (const sel of ["cv-timeline", "cv-projects"]) {
@@ -594,7 +594,7 @@ class CvApp extends HTMLElement {
       overlay.setAttribute("aria-modal", "true");
       overlay.setAttribute("aria-label", "Keyboard shortcuts");
       const rows = [
-        ["1 – 9", "Switch view (Sessions, Projects, …, Structure, Loom, Fleet)"],
+        ["1 – 8", "Switch view (Sessions, Projects, …, Structure, Splice, Fleet)"],
         ["/", "Focus session search"],
         ["j / k  ·  ↓ / ↑", "Move selection in the session list"],
         ["Enter", "Open the focused session"],

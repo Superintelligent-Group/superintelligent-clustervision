@@ -1,5 +1,5 @@
 // openrouter.js — a tiny, dependency-free client for OpenRouter's
-// chat/completions endpoint, plus IR↔chat conversion helpers used by the loom.
+// chat/completions endpoint, plus IR↔chat conversion helpers used by the splice composer.
 //
 // The API key lives ONLY in localStorage and is sent ONLY to
 // https://openrouter.ai/api/v1/chat/completions (Bearer auth). Nothing else
@@ -113,7 +113,7 @@ export function messagesToChat(messages) {
  */
 export async function generate({ messages, model, key, signal, onToken } = {}) {
   const apiKey = key ?? getKey();
-  if (!apiKey) throw new Error("No OpenRouter API key set. Add one in the loom ⚙ settings.");
+  if (!apiKey) throw new Error("No OpenRouter API key set. Add one in the splice composer's ⚙ settings.");
   const useModel = model || getModel();
   const chat = messagesToChat(messages);
   if (!chat.length) throw new Error("Nothing to send — the composition has no text content.");

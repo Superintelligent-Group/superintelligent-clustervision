@@ -71,7 +71,7 @@ import "./components/cv-stats.js";
 import "./components/cv-session-list.js";
 import "./components/cv-compare.js";
 import "./components/cv-forest.js";
-import "./components/cv-loom.js";
+import "./components/cv-splice.js";
 
 // ---------------------------------------------------------------------------
 // Tiny harness. No dependencies, no build step: a check is a name and a body
@@ -468,8 +468,8 @@ check("cv-compare's message signature is built from block text", () => {
   has(sig, "Found it.", "text in the signature");
 });
 
-check("cv-loom previews a message from its blocks", () => {
-  const el = document.createElement("cv-loom");
+check("cv-splice previews a message from its blocks", () => {
+  const el = document.createElement("cv-splice");
   document.body.appendChild(el);
   el.style.display = "none";
   has(el._previewText(codex.messages[1]), "retry loop", "a text turn previews as its text");

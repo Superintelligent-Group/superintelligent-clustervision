@@ -1,22 +1,22 @@
-// <cv-loom> — the splice / loom composer. ✨ The headline.
+// <cv-splice> — the splice composer, `cv splice` in the browser. ✨ The headline.
 //
 // A three-pane workspace:
 //   1. Source picker  — choose any loaded session; its transcript renders with
-//      "＋ loom" buttons on each message (pickMode on <cv-transcript>).
+//      "＋ splice" buttons on each message (pickMode on <cv-transcript>).
 //   2. Composition lane — the messages you've collected, in order. Reorder
-//      (▲ ▼ or drag), remove (✕), and "fork from here" (drop everything after).
+//      (▲ ▼ or drag), remove (✕), and "branch from here" (a new branch with everything up to it).
 //   3. Live preview     — the composed transcript rendered as it will export.
 //
-// Beyond rearranging, the loom can actually *loom*: with an OpenRouter API key
+// Beyond rearranging, the composer can generate: with an OpenRouter API key
 // it GENERATES a continuation from the current composition and appends the
-// model's reply as a new assistant message. "Fork from here" + generate spawns
+// model's reply as a new assistant message. "Branch from here" + generate spawns
 // sibling BRANCHES (named variants) you can switch between — grow a transcript
 // into alternate futures and compare them in the Compare view.
 //
 // Export: download the active branch as an OpenSession JSON document (or .md) —
 // pure client-side, no wasm.
 //
-// API: loom.sessions = Session[]   (setter)
+// API: splice.sessions = Session[]   (setter)
 import "./cv-transcript.js";
 import "./cv-harness-badge.js";
 import "./cv-session-picker.js";
@@ -30,7 +30,7 @@ import {
 } from "../openrouter.js";
 import { hydrateSession, isStub } from "./hydrate.js";
 
-class CvLoom extends HTMLElement {
+class CvSplice extends HTMLElement {
   constructor() {
     super();
     this._sessions = [];
@@ -61,7 +61,7 @@ class CvLoom extends HTMLElement {
       lane,
       composedId: randomId(),
       parent: opts.parent ?? null,   // parent branch id (null for roots)
-      forkAt: opts.forkAt ?? 0,      // # of messages shared with the parent
+      branchAt: opts.branchAt ?? 0,      // # of messages shared with the parent
     };
     this._branches.push(b);
     this._activeBranchId = b.id;
@@ -101,7 +101,7 @@ class CvLoom extends HTMLElement {
       .then((full) => {
         this._hydratedSrc.set(id, full);
         this._pendingSrc.delete(id);
-        const srcT = this.querySelector(".loom-transcript");
+        const srcT = this.querySelector(".splice-transcript");
         if (srcT && this._sourceId === id) srcT.session = full;
       })
       .catch(() => { this._pendingSrc.delete(id); });
@@ -125,49 +125,49 @@ class CvLoom extends HTMLElement {
     }
     this.innerHTML = `
       <div class="view-head">
-        <h2>✨ Loom</h2>
+        <h2>✨ Splice</h2>
         <span class="muted">Splice messages from any session — or ⚡ generate continuations with OpenRouter — and weave alternate branches.</span>
-        <button type="button" class="mini-btn loom-settings-btn" data-settings title="OpenRouter generation settings">⚙ generation</button>
+        <button type="button" class="mini-btn splice-settings-btn" data-settings title="OpenRouter generation settings">⚙ generation</button>
       </div>
       ${this._settingsHtml()}
       ${this._branchBarHtml()}
-      <div class="loom-grid">
-        <section class="loom-source">
-          <div class="loom-pane-head">
+      <div class="splice-grid">
+        <section class="splice-source">
+          <div class="splice-pane-head">
             <strong>Source</strong>
-            <cv-session-picker class="loom-source-pick" aria-label="Source session"></cv-session-picker>
+            <cv-session-picker class="splice-source-pick" aria-label="Source session"></cv-session-picker>
           </div>
-          <div class="loom-source-body">
-            <cv-transcript class="loom-transcript"></cv-transcript>
+          <div class="splice-source-body">
+            <cv-transcript class="splice-transcript"></cv-transcript>
           </div>
         </section>
 
-        <section class="loom-lane">
-          <div class="loom-pane-head">
+        <section class="splice-lane">
+          <div class="splice-pane-head">
             <strong>Composition</strong>
             <span class="muted">${this._lane.length} message${this._lane.length === 1 ? "" : "s"}</span>
           </div>
-          <div class="loom-title-row">
-            <input class="loom-title" type="text" value="${esc(this._title)}" aria-label="Composition title" placeholder="Composition title" />
+          <div class="splice-title-row">
+            <input class="splice-title" type="text" value="${esc(this._title)}" aria-label="Composition title" placeholder="Composition title" />
           </div>
           <ol class="lane-list">${this._laneHtml()}</ol>
           ${this._genBarHtml()}
-          <div class="loom-actions">
+          <div class="splice-actions">
             <button type="button" class="mini-btn" data-clear ${this._lane.length ? "" : "disabled"}>clear</button>
             <button type="button" class="btn-accent" data-export-json ${this._lane.length ? "" : "disabled"}>⬇ OpenSession .json</button>
             <button type="button" class="mini-btn" data-export-md ${this._lane.length ? "" : "disabled"}>⬇ .md</button>
           </div>
         </section>
 
-        <section class="loom-preview">
-          <div class="loom-pane-head"><strong>Live preview</strong></div>
-          <div class="loom-preview-body"><cv-transcript class="loom-preview-transcript"></cv-transcript></div>
+        <section class="splice-preview">
+          <div class="splice-pane-head"><strong>Live preview</strong></div>
+          <div class="splice-preview-body"><cv-transcript class="splice-preview-transcript"></cv-transcript></div>
         </section>
       </div>
     `;
 
     // Source transcript in pick mode.
-    const srcT = this.querySelector(".loom-transcript");
+    const srcT = this.querySelector(".splice-transcript");
     srcT.pickMode = true;
     srcT.session = this._source();
     srcT.addEventListener("pick-message", (e) => this._addMessage(e.detail.session, e.detail.message));
@@ -176,18 +176,18 @@ class CvLoom extends HTMLElement {
     this._renderPreview();
 
     // Source picker (searchable, not a 2000-option <select>).
-    const pick = this.querySelector(".loom-source-pick");
+    const pick = this.querySelector(".splice-source-pick");
     pick.sessions = this._sessions;
     pick.value = this._sourceId;
     pick.placeholder = "Pick a source session…";
     pick.addEventListener("pick", (e) => {
       this._sourceId = e.detail.id;
-      this.querySelector(".loom-transcript").session = this._source();
+      this.querySelector(".splice-transcript").session = this._source();
       this._ensureSourceHydrated();
     });
     // Pull the current source's full transcript if it's still a stub.
     this._ensureSourceHydrated();
-    this.querySelector(".loom-title").addEventListener("input", (e) => {
+    this.querySelector(".splice-title").addEventListener("input", (e) => {
       this._title = e.target.value;
       this._renderPreview();
     });
@@ -211,7 +211,7 @@ class CvLoom extends HTMLElement {
   }
 
   _renderPreview() {
-    const p = this.querySelector(".loom-preview-transcript");
+    const p = this.querySelector(".splice-preview-transcript");
     if (p) p.session = this._lane.length ? this._composed() : null;
   }
 
@@ -226,7 +226,7 @@ class CvLoom extends HTMLElement {
       `<option value="${esc(m)}"${m === model ? " selected" : ""}>${esc(m)}</option>`).join("");
     const inPresets = MODEL_PRESETS.includes(model);
     return `
-      <div class="loom-settings">
+      <div class="splice-settings">
         <div class="ls-row">
           <label class="ls-label" for="ls-key">OpenRouter API key</label>
           <input id="ls-key" class="ls-key" type="password" autocomplete="off" spellcheck="false"
@@ -274,8 +274,8 @@ class CvLoom extends HTMLElement {
 
   // ---- branch bar --------------------------------------------------------
 
-  // A real branch-tree visualization: roots and their forked descendants,
-  // indented by depth, with the fork point (shared message count) shown on each
+  // A real branch-tree visualization: roots and their branched descendants,
+  // indented by depth, with the branch point (shared message count) shown on each
   // child. The active branch is highlighted; rows are keyboard-navigable.
   _branchBarHtml() {
     const order = this._branchTreeOrder();
@@ -288,14 +288,14 @@ class CvLoom extends HTMLElement {
         const lastAtThatDepth = ancestorsLast[d];
         guide += `<span class="bt-rail">${d === depth - 1 ? (isLast ? "└" : "├") : (lastAtThatDepth ? " " : "│")}</span>`;
       }
-      const fork = b.parent ? `<span class="bt-fork muted" title="forked after ${b.forkAt} message${b.forkAt === 1 ? "" : "s"}">⑂${b.forkAt}</span>` : "";
+      const branchMark = b.parent ? `<span class="bt-branch muted" title="branched after ${b.branchAt} message${b.branchAt === 1 ? "" : "s"}">⑂${b.branchAt}</span>` : "";
       return `
         <div class="branch-node${on ? " on" : ""}" data-branch="${esc(b.id)}" role="tab"
           aria-selected="${on}" tabindex="${on ? 0 : -1}" title="${esc(b.name)} · ${b.lane.length} msg">
           <span class="bt-guide" aria-hidden="true">${guide}</span>
           <span class="bt-dot"></span>
           <span class="branch-name">${esc(b.name)}</span>
-          ${fork}
+          ${branchMark}
           <span class="branch-count muted">${b.lane.length}</span>
           ${multi ? `<span class="branch-x" data-branch-del="${esc(b.id)}" role="button" tabindex="-1" title="Delete branch (children re-parent)">✕</span>` : ""}
         </div>`;
@@ -355,7 +355,7 @@ class CvLoom extends HTMLElement {
     this.querySelector("[data-branch-dup]")?.addEventListener("click", () => {
       const cur = this._branch();
       const lane = cur.lane.map((e) => ({ ...e, uid: randomId(), message: JSON.parse(JSON.stringify(e.message)) }));
-      this._newBranch(`${cur.name}′`, lane, { parent: cur.id, forkAt: cur.lane.length });
+      this._newBranch(`${cur.name}′`, lane, { parent: cur.id, branchAt: cur.lane.length });
       this.render();
     });
   }
@@ -367,7 +367,7 @@ class CvLoom extends HTMLElement {
     const gone = this._branches[i];
     // Re-parent any children onto the deleted branch's parent so the tree stays
     // connected (no orphaned sub-trees).
-    for (const b of this._branches) if (b.parent === id) { b.parent = gone.parent; b.forkAt = Math.min(b.forkAt, gone.forkAt); }
+    for (const b of this._branches) if (b.parent === id) { b.parent = gone.parent; b.branchAt = Math.min(b.branchAt, gone.branchAt); }
     this._branches.splice(i, 1);
     if (this._activeBranchId === id) this._activeBranchId = (gone.parent && this._branches.find((b) => b.id === gone.parent)?.id) || this._branches[Math.max(0, i - 1)].id;
     this.render();
@@ -380,7 +380,7 @@ class CvLoom extends HTMLElement {
     const ready = hasKey();
     const busy = this._gen.busy;
     return `
-      <div class="loom-gen">
+      <div class="splice-gen">
         <button type="button" class="btn-gen" data-generate ${this._lane.length && !busy ? "" : "disabled"}
           title="${ready ? "Send the composition to OpenRouter and append the reply" : "Set an API key in ⚙ generation first"}">
           ${busy ? "⏳ generating…" : "⚡ generate continuation"}
@@ -466,7 +466,7 @@ class CvLoom extends HTMLElement {
     }
   }
 
-  // ---- lane (collection / reorder / fork) --------------------------------
+  // ---- lane (collection / reorder / branch) --------------------------------
 
   _addMessage(session, message) {
     // Clone so reordering/removal never mutates the source pool.
@@ -479,7 +479,7 @@ class CvLoom extends HTMLElement {
 
   _laneHtml() {
     if (!this._lane.length) {
-      return `<li class="lane-empty muted">Empty — click <b>＋ loom</b> on any source message to add it, then <b>⚡ generate</b> a continuation.</li>`;
+      return `<li class="lane-empty muted">Empty — click <b>＋ splice</b> on any source message to add it, then <b>⚡ generate</b> a continuation.</li>`;
     }
     return this._lane.map((e, i) => {
       const m = e.message;
@@ -501,7 +501,7 @@ class CvLoom extends HTMLElement {
           <div class="lane-ctrls">
             <button type="button" class="lane-btn" data-up="${esc(e.uid)}" title="Move up" ${i === 0 ? "disabled" : ""}>▲</button>
             <button type="button" class="lane-btn" data-down="${esc(e.uid)}" title="Move down" ${i === this._lane.length - 1 ? "disabled" : ""}>▼</button>
-            <button type="button" class="lane-btn" data-branchfork="${esc(e.uid)}" title="Fork into a new branch from here — keep up to and including this message">⑂</button>
+            <button type="button" class="lane-btn" data-branch-here="${esc(e.uid)}" title="Branch from here — a new branch keeping up to and including this message">⑂</button>
             <button type="button" class="lane-btn lane-rm" data-rm="${esc(e.uid)}" title="Remove">✕</button>
           </div>
         </li>`;
@@ -531,14 +531,14 @@ class CvLoom extends HTMLElement {
     list.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => {
       const i = this._idx(b.dataset.rm); if (i >= 0) this._lane.splice(i, 1); this.render();
     }));
-    // Fork from here → spawn a SIBLING BRANCH containing the prefix, switch to it.
-    list.querySelectorAll("[data-branchfork]").forEach((b) => b.addEventListener("click", () => {
-      const i = this._idx(b.dataset.branchfork);
+    // Branch from here → spawn a SIBLING BRANCH containing the prefix, switch to it.
+    list.querySelectorAll("[data-branch-here]").forEach((b) => b.addEventListener("click", () => {
+      const i = this._idx(b.dataset.branchHere);
       if (i < 0) return;
       const cur = this._branch();
       const prefix = this._lane.slice(0, i + 1).map((e) => ({ ...e, uid: randomId(), message: JSON.parse(JSON.stringify(e.message)) }));
       const base = cur.name.replace(/′+$/, "");
-      this._newBranch(`${base}·fork`, prefix, { parent: cur.id, forkAt: i + 1 });
+      this._newBranch(`${base}·branch`, prefix, { parent: cur.id, branchAt: i + 1 });
       this.render();
     }));
 
@@ -568,4 +568,4 @@ class CvLoom extends HTMLElement {
   }
 }
 
-customElements.define("cv-loom", CvLoom);
+customElements.define("cv-splice", CvSplice);

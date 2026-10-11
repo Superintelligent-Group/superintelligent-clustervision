@@ -1,5 +1,5 @@
 // <cv-compare> — pick two sessions and view them side-by-side, with message-
-// level alignment and divergence highlighting. Useful for loom branches that
+// level alignment and divergence highlighting. Useful for splice branches that
 // share a common prefix and then split.
 //
 // API: compare.sessions = Session[]   (setter)

@@ -54,7 +54,7 @@ A tab bar (`<cv-app>`) switches between views, all reading from the merged pool:
   chronological axis, grouped by day, colored by harness. Click to open.
 - **🔍 Compare** (`<cv-compare>`) — pick two sessions side-by-side; messages are
   aligned and divergence is highlighted (shared prefix dims, the split is marked).
-  Great for inspecting loom branches.
+  Great for inspecting splice branches.
 - **📊 Stats** (`<cv-stats>`) — two clearly separated halves, because two
   different questions were being answered as if they were one. **The archive**
   (session and message totals, per-harness bars, top working directories, date
@@ -69,32 +69,32 @@ A tab bar (`<cv-app>`) switches between views, all reading from the merged pool:
   session: the sub-agent **forest** (direct + workflow agents), **workflow phase
   lanes**, **tool** histograms + a phase×tool **heatmap**, and the **compaction**
   seams (with the carried-forward summaries). See **Structure explorer** below.
-- **✨ Loom** (`<cv-loom>`) — the headline. A three-pane composer: pick a source
-  session, click **＋ loom** on any message to collect it, then reorder (▲ ▼ or
-  drag), remove (✕), or **fork from here** (⑂). A live preview renders the
-  composition as you build it. **Download** it as an OpenSession `.json` or
-  Markdown — pure client-side. Now it also *looms*: see **Generation & the branch
-  tree** below.
+- **✨ Splice** (`<cv-splice>`) — the headline: `cv splice` in the browser. A
+  three-pane composer: pick a source session, click **＋ splice** on any message to
+  collect it, then reorder (▲ ▼ or drag), remove (✕), or **branch from here** (⑂).
+  A live preview renders the composition as you build it. **Download** it as an
+  OpenSession `.json` or Markdown — pure client-side. It also generates: see
+  **Generation & the branch tree** below.
 - **📡 Fleet** (`<cv-fleet>`) — a live dashboard over a running `cv serve` HTTP
   API. See **Fleet dashboard** below.
 
 The OpenSession format itself is documented in the manual (`manual/src/conversion.md`, "The OpenSession standard"); the
 footer links there.
 
-## ⚡ Loom: generation & the branch tree
+## ⚡ Splice: generation & the branch tree
 
-The loom no longer only *rearranges* messages — with an OpenRouter API key (or the
-desktop runtime) it **generates** continuations, so you can fork a transcript and
-grow alternate futures with a model.
+The composer does not only *rearrange* messages — with an OpenRouter API key it
+**generates** continuations, so you can branch a transcript and grow alternate
+futures with a model.
 
-The **branch tree** at the top of the loom is a real fork-structure
-visualization, not a flat bar: roots and their forked descendants are indented by
-depth with `├`/`└` guide rails, each child shows its fork point (`⑂N` = messages
+The **branch tree** at the top of the composer is a real branch-structure
+visualization, not a flat bar: roots and their branched descendants are indented by
+depth with `├`/`└` guide rails, each child shows its branch point (`⑂N` = messages
 shared with its parent), the active branch is highlighted, and rows are
 keyboard-navigable (`↑`/`↓` to move, `Enter`/`Space` to switch). Deleting a branch
 re-parents its children so the tree stays connected.
 
-- **⚙ generation** (top-right of the loom) opens a settings panel: paste an
+- **⚙ generation** (top-right of the composer) opens a settings panel: paste an
   **OpenRouter API key** and pick a **model** (free-text, with presets like
   `anthropic/claude-3.5-sonnet`, `openai/gpt-4o-mini`). The key is stored in
   `localStorage` on your device only and is sent **only** to
@@ -109,13 +109,13 @@ re-parents its children so the tree stays connected.
   uses the same OpenRouter path.
 - **Branches.** The branch tree holds multiple named variants, each with its own
   lane. **＋ branch** duplicates the active branch into a child; **⑂** on any lane
-  message forks a *child branch* from that prefix. Switch branches, generate
+  message branches a *child branch* from that prefix. Switch branches, generate
   divergent continuations, and compare them side-by-side in the **🔍 Compare**
   view (export each branch to OpenSession `.json` and drop them back in).
 - Errors (bad key `401/403`, no credits `402`, rate limit `429`, …) surface
   inline and never block the UI; the key always stays client-side.
 
-Implementation: `components/cv-loom.js` plus the dependency-free helper
+Implementation: `components/cv-splice.js` plus the dependency-free helper
 `openrouter.js` (credential storage, IR→chat conversion, streaming request).
 
 ## 🌳 Structure explorer
@@ -217,12 +217,12 @@ All are plain native custom elements (no framework, no build step), in `componen
   are virtualized** — only a sliding window of messages is in the DOM, so a
   12k-message session renders in ~30 ms instead of freezing the tab. Has
   per-session **Markdown / OpenSession-JSON export** buttons, and an optional
-  `pickMode` (used by the loom).
-- **`<cv-timeline>`**, **`<cv-compare>`**, **`<cv-stats>`**, **`<cv-loom>`**,
+  `pickMode` (used by the splice composer).
+- **`<cv-timeline>`**, **`<cv-compare>`**, **`<cv-stats>`**, **`<cv-splice>`**,
   **`<cv-fleet>`** — the views above.
 - **`<cv-harness-badge>`** — a small per-harness colored pill.
 
-`openrouter.js` is a dependency-free OpenRouter client used by the loom (key
+`openrouter.js` is a dependency-free OpenRouter client used by the splice composer (key
 storage in `localStorage`, IR→chat conversion, and a streaming
 `chat/completions` request).
 
@@ -243,19 +243,16 @@ shell (the `app/` wrapper). All of `tauri.js` degrades to no-ops when
 
 When running under Tauri, clustervision:
 
-- **routes generation through native commands.** The loom's **⚡ generate** calls
-  `window.__TAURI__.core.invoke('generate', { messages, model })` instead of the
-  in-JS OpenRouter path — **no API key needed** (the desktop env / a local LM
-  Studio does the work). The gen bar shows **🖥 native**. (The same `invoke`
-  pathway is ready for `distill` / `redact`.) Streaming is supported if the native
-  side emits `cv://generate-token` events; otherwise the full reply is awaited.
+- **reads sessions through the native `api` command.** `hydrate.js` calls
+  `invoke('api', { path, query })` — the same `route_json` `cv serve` answers
+  `/api/*` with, in-process — instead of fetching `http://localhost:7777`.
 - **loads sessions from the native File → Open.** It listens for the
   `cv://open-sessions` Tauri event (payload = a JSON array of `Session`), via
   `window.__TAURI__.event.listen`, and merges the opened sessions into the pool —
   exactly like a drop. The `app/` agent emits that event from its native menu.
 
 In a browser none of this exists: `isTauri()` is `false`, `canInvokeNative()` is
-`false`, the loom falls back to OpenRouter, and the event listener is a no-op.
+`false`, reads go over HTTP, and the event listener is a no-op.
 
 ## Session schema
 
@@ -328,11 +325,11 @@ serves this directory itself); locally, with Playwright on `NODE_PATH`:
 
     NODE_PATH=~/tools/playwright/node_modules node tools/web-selftest.mjs
 
-## Export & the loom
+## Export & the splice composer
 
 - From any transcript header: **⬇ .md** and **⬇ .json** (OpenSession).
-- From the loom: the composed lane downloads as
-  `{ openSession: "0.2", harness: "openSession", id, title, messages: [...] }`.
+- From the splice composer: the composed lane downloads as an OpenSession 0.3
+  document (`{ open_session: "0.3", harness, id, title, messages: [...] }`).
 
 All exports are client-side `Blob` downloads — nothing leaves the page.
 
@@ -377,12 +374,12 @@ wasm-pack build crates/cv-web --target web --out-dir ../../web/pkg --no-default-
 
 > A plain `file://` open won't work — ES module imports require an HTTP origin.
 
-### Demo the loom generation
+### Demo the splice generation
 
-1. Open the **✨ Loom** tab and click **＋ loom** on a few source messages.
+1. Open the **✨ Splice** tab and click **＋ splice** on a few source messages.
 2. Click **⚙ generation**, paste an OpenRouter API key, pick a model.
 3. Click **⚡ generate continuation** — the model's reply streams in as a new
-   assistant turn. Use **⑂** on a message to fork a sibling **branch**, switch to
+   assistant turn. Use **⑂** on a message to start a sibling **branch**, switch to
    it, and generate a divergent continuation. Compare branches in **🔍 Compare**.
 
 ### Demo the fleet dashboard

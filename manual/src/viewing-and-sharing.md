@@ -35,15 +35,15 @@ Pick **two** sessions and view them side by side with message-level alignment. T
 
 A small, tasteful dashboard over the loaded pool: total sessions / messages / projects / harnesses, input & output token sums, sessions-per-harness bars, messages-by-role and block-kind breakdowns, top working directories, and an activity histogram over the date range. Charts are hand-rolled CSS bars and a tiny inline SVG — no chart library. It's **honest about lazy loading**: role, block, and token breakdowns reflect only the sessions whose transcripts are actually loaded, and it says so ("…breakdowns reflect the 12 opened sessions — open more to enrich them").
 
-### ✨ Loom — the splice composer
+### ✨ Splice — the composer
 
-The headline. A three-pane workspace for **weaving new transcripts** out of old ones:
+The headline, and [`cv splice`](cli.md#cv-splice) in the browser. A three-pane workspace for **weaving new transcripts** out of old ones:
 
-1. **Source** — pick any loaded session; its transcript renders with a **＋ loom** button on every message.
-2. **Composition** — the messages you've collected, in order. Reorder with ▲ ▼ or drag-and-drop, remove with ✕, retitle, and **⑂ fork from here** to spawn a new branch keeping everything up to that point.
+1. **Source** — pick any loaded session; its transcript renders with a **＋ splice** button on every message.
+2. **Composition** — the messages you've collected, in order. Reorder with ▲ ▼ or drag-and-drop, remove with ✕, retitle, and **⑂ branch from here** to spawn a new branch keeping everything up to that point.
 3. **Live preview** — the composed transcript, rendered exactly as it will export.
 
-Beyond rearranging, the Loom can actually *loom*: **⚡ generate continuation** sends the current composition to an LLM and appends the model's reply as a new assistant turn (streamed in live). Combined with fork, that grows a transcript into **alternate futures** — a branch tree you can navigate and then drop into [Compare](#-compare--side-by-side-aligned). Export the active branch as OpenSession `.json` or `.md`, entirely client-side.
+Beyond rearranging, the composer can generate: **⚡ generate continuation** sends the current composition to an LLM and appends the model's reply as a new assistant turn (streamed in live). Combined with branching, that grows a transcript into **alternate futures** — a branch tree you can navigate and then drop into [Compare](#-compare--side-by-side-aligned). Export the active branch as OpenSession `.json` or `.md`, entirely client-side.
 
 Generation calls **OpenRouter** directly, in the desktop app and the browser alike. Open **⚙ generation** to paste an API key (stored only in this device's `localStorage`, sent only to `openrouter.ai`) and choose a model. For a free local model, `cv splice --generate` with `LMSTUDIO_API_BASE=local` is the CLI's path.
 
@@ -80,7 +80,7 @@ When a session spawned sub-agents — Claude Code's `Task` sub-agents — the tr
 
 ## The searchable session picker
 
-Anywhere you pick a session from many — Compare's two sides, Loom's source — you get a **command-palette-style picker** instead of a hopeless 2,000-option dropdown. Click the trigger (which shows the current pick as a harness badge + title) to open a filterable popover. Type to narrow: it does an **AND over your terms** across title, project, and harness ("claude payments" narrows to both), shows the most recent matches with badge · title · project · when · message count, and footers a "…and 1,140 more — keep typing to narrow" when there's overflow. Full keyboard nav: ↑/↓ to move, Enter to pick, Esc to close.
+Anywhere you pick a session from many — Compare's two sides, Splice's source — you get a **command-palette-style picker** instead of a hopeless 2,000-option dropdown. Click the trigger (which shows the current pick as a harness badge + title) to open a filterable popover. Type to narrow: it does an **AND over your terms** across title, project, and harness ("claude payments" narrows to both), shows the most recent matches with badge · title · project · when · message count, and footers a "…and 1,140 more — keep typing to narrow" when there's overflow. Full keyboard nav: ↑/↓ to move, Enter to pick, Esc to close.
 
 ## Keyboard shortcuts
 
@@ -88,7 +88,7 @@ Press **?** anytime for the in-app cheat sheet.
 
 | Key | Action |
 | --- | --- |
-| `1` – `8` | Switch view (Sessions, Projects, Timeline, Compare, Stats, Loom, Fleet, OpenSession) |
+| `1` – `8` | Switch view (Sessions, Projects, Timeline, Compare, Stats, Structure, Splice, Fleet) |
 | `/` | Focus the session search (switches to Sessions first) |
 | `j` / `k` · `↓` / `↑` | Move the selection in the session list |
 | `Enter` | Open the focused session |
@@ -104,8 +104,7 @@ The browser build is fully capable, but the Tauri desktop shell adds the things 
 
 - **Native access to all your local sessions** — no zip, no HTTP round-trip, no upload — via one native `api` command that runs the server's read API in-process.
 - **A bundled `cv serve`** launched on startup (and toggleable from **View → Toggle cv serve**), so the Fleet dashboard is live out of the box. It's reaped when you quit.
-- **Native redact** — pure and offline; no key needed. (Generation in the loom is the OpenRouter path in both the app and the browser.)
-- **Native zip ingest** — File → Open zip… and drag-and-drop both work without the WASM module.
+- **Native zip ingest** — File → Open zip… reads the zip in Rust, without the WASM module. (Generation in the splice composer is the OpenRouter path in both the app and the browser.)
 - A **native menu** (File / Edit / View / Help — Edit so `Cmd+C`/`Cmd+V` work in the transcript, which is the whole point of a viewer), DevTools, and **window state persistence** across launches.
 
 Whichever way you run it, the promise on the footer holds: **all parsing happens locally; nothing is uploaded.**

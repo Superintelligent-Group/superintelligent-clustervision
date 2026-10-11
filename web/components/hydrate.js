@@ -1,5 +1,5 @@
 // Shared lazy hydration: the session pool is metadata-only stubs (`/api/sessions`) until a
-// transcript is actually needed. Any view (transcript, compare, loom) calls `hydrateSession(stub)`
+// transcript is actually needed. Any view (transcript, compare, splice) calls `hydrateSession(stub)`
 // to pull the full message tree on demand through `apiGet` — the native `api` command in the
 // desktop, HTTP to a local `cv serve` in the browser. Already-full sessions pass through.
 import { invoke, canInvokeNative } from "../tauri.js";

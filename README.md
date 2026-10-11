@@ -100,7 +100,7 @@ cv scry
 - **🖥️ Desktop app + 🌐 web viewer** — the Tauri app reads **all your local sessions natively** (zero setup) and lays the corpus out beautifully:
   - a **Projects** lens — every repo, every agent that touched it, over time;
   - a GitHub-style **activity heatmap** timeline (a constellation of your working days);
-  - side-by-side **Compare**, a **Stats** dashboard, and a visual **loom composer** (OpenRouter *or* free local LM Studio generation);
+  - side-by-side **Compare**, a **Stats** dashboard, and a visual **splice composer** (OpenRouter *or* free local LM Studio generation);
   - **sub-agent trees** — a Claude Task session's children, nested and lazy-loaded inline, each labeled with its task prompt;
   - a **Structure** explorer (`<cv-forest>`) — Overview / Forest / Workflows / Tools / Compaction tabs that turn a run's anatomy into something you can drill through.
 
