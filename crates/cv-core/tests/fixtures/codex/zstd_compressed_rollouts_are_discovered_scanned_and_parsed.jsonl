@@ -1,0 +1,4 @@
+{"timestamp":"2026-08-01T10:00:00Z","ordinal":0,"type":"session_meta","payload":{"id":"cold-1","timestamp":"2026-08-01T10:00:00Z","cwd":"/cold","originator":"codex-tui","cli_version":"0.154.0","history_mode":"paginated"}}
+{"timestamp":"2026-08-01T10:00:01Z","ordinal":1,"type":"turn_context","payload":{"turn_id":"t0","cwd":"/cold","model":"gpt-6-astra","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}
+{"timestamp":"2026-08-01T10:00:02Z","ordinal":2,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"cold storage question"}]}}
+{"timestamp":"2026-08-01T10:00:03Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"cold storage answer"}]}}

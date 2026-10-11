@@ -2072,15 +2072,32 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
 
-    /// Build a `.jsonl` transcript from individual record lines and parse it.
+    /// A fixture under `tests/fixtures/codex/`, without its final newline (the text the old
+    /// inline `lines.join("\n")` built).
+    fn fixture(name: &str) -> String {
+        let path = format!("{}/tests/fixtures/codex/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+        text.strip_suffix('\n').map(str::to_string).unwrap_or(text)
+    }
+
+    /// A JSONL fixture's records, one string per line.
+    fn fixture_lines(name: &str) -> Vec<String> {
+        fixture(name).split('\n').map(str::to_string).collect()
+    }
+
     /// Parse JSONL lines into a Session, checking the IR-v2 nesting invariant on the way out:
     /// every Codex fact must be in `extra["codex"]`, never flat (`crate::harness::assert_no_flat_keys`).
     /// Doing it here means every test below that builds a session enforces it for free.
-    fn parse_jsonl(lines: &[&str]) -> Session {
+    fn parse_jsonl(lines: &[impl std::borrow::Borrow<str>]) -> Session {
         let text = lines.join("\n");
         let s = parse_str("fallback-id", &text, true, None);
         crate::harness::assert_no_flat_keys(&s);
         s
+    }
+
+    /// [`parse_jsonl`] over a fixture's records.
+    fn parse_fixture(name: &str) -> Session {
+        parse_jsonl(&fixture_lines(name))
     }
 
     fn first_block<'a>(s: &'a Session, pred: impl Fn(&&'a Block) -> bool) -> &'a Block {
@@ -2093,9 +2110,7 @@ mod tests {
 
     #[test]
     fn session_meta_seeds_id_cwd_git() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-02-07T14:07:45Z","type":"session_meta","payload":{"id":"abc-123","timestamp":"2026-02-07T14:07:44Z","cwd":"/work","originator":"codex-cli","cli_version":"0.99.0","git":{"branch":"main","commit_hash":"deadbeef","repository_url":"https://x/y"}}}"#,
-        ]);
+        let s = parse_fixture("session_meta_seeds_id_cwd_git.jsonl");
         assert_eq!(s.id, "abc-123");
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/work")));
         let g = s.git.unwrap();
@@ -2107,12 +2122,7 @@ mod tests {
     #[test]
     fn bare_header_provides_id() {
         // No session_meta: first line is a bare {id,timestamp} header.
-        let s = parse_str(
-            "",
-            "{\"id\":\"hdr-1\",\"timestamp\":\"2025-09-01T00:00:00Z\"}\n{\"timestamp\":\"2025-09-01T00:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}}",
-            true,
-            None,
-        );
+        let s = parse_str("", &fixture("bare_header_provides_id.jsonl"), true, None);
         assert_eq!(s.id, "hdr-1");
         assert_eq!(s.messages.len(), 1);
     }
@@ -2121,12 +2131,7 @@ mod tests {
     fn event_msg_dedups_response_item_text() {
         // When event_msgs are present, NL text comes from them and the response_item message dup is
         // skipped — so we expect exactly one user + one assistant text message.
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"hi there"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi there"}]}}"#,
-        ]);
+        let s = parse_fixture("event_msg_dedups_response_item_text.jsonl");
         let texts: Vec<_> = s.messages.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, vec!["hello", "hi there"]);
         assert_eq!(s.messages[0].role, Role::User);
@@ -2135,9 +2140,7 @@ mod tests {
 
     #[test]
     fn reasoning_prefers_content_keeps_summary_and_encrypted() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"short summary"}],"content":[{"type":"reasoning_text","text":"raw thoughts"}],"encrypted_content":"ENC"}}"#,
-        ]);
+        let s = parse_fixture("reasoning_prefers_content_keeps_summary_and_encrypted.jsonl");
         let m = &s.messages[0];
         match &m.content[0] {
             Block::Thinking { text, encrypted, .. } => {
@@ -2154,10 +2157,7 @@ mod tests {
 
     #[test]
     fn function_call_and_output_roundtrip_with_error() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\"]}","call_id":"c1"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":{"output":"boom","metadata":{"exit_code":1}}}}"#,
-        ]);
+        let s = parse_fixture("function_call_and_output_roundtrip_with_error.jsonl");
         match first_block(&s, |b| matches!(b, Block::ToolUse { .. })) {
             Block::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "c1");
@@ -2183,9 +2183,7 @@ mod tests {
 
     #[test]
     fn custom_tool_call_string_input() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"c2","name":"apply_patch","input":"*** Begin Patch","status":"completed"}}"#,
-        ]);
+        let s = parse_fixture("custom_tool_call_string_input.jsonl");
         match &s.messages[0].content[0] {
             Block::ToolUse { name, input, .. } => {
                 assert_eq!(name, "apply_patch");
@@ -2201,9 +2199,7 @@ mod tests {
 
     #[test]
     fn local_shell_call_maps_to_tool_use() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"local_shell_call","id":"ls1","status":"completed","action":{"type":"exec","command":["echo","hi"],"timeout_ms":1000}}}"#,
-        ]);
+        let s = parse_fixture("local_shell_call_maps_to_tool_use.jsonl");
         match &s.messages[0].content[0] {
             Block::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "ls1");
@@ -2216,9 +2212,7 @@ mod tests {
 
     #[test]
     fn web_search_call_surfaces_query() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-04-28T00:00:00Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"rust serde"}}}"#,
-        ]);
+        let s = parse_fixture("web_search_call_surfaces_query.jsonl");
         match &s.messages[0].content[0] {
             Block::ToolUse { name, input, .. } => {
                 assert_eq!(name, "web_search");
@@ -2230,10 +2224,7 @@ mod tests {
 
     #[test]
     fn tool_search_call_and_output() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-04-28T00:00:00Z","type":"response_item","payload":{"type":"tool_search_call","call_id":"t1","status":"completed","execution":"client","arguments":{"query":"repl","limit":5}}}"#,
-            r#"{"timestamp":"2026-04-28T00:00:01Z","type":"response_item","payload":{"type":"tool_search_output","call_id":"t1","status":"completed","execution":"client","tools":[]}}"#,
-        ]);
+        let s = parse_fixture("tool_search_call_and_output.jsonl");
         assert!(matches!(&s.messages[0].content[0], Block::ToolUse { name, .. } if name == "tool_search"));
         assert!(
             matches!(&s.messages[1].content[0], Block::ToolResult { tool_use_id, content, .. } if tool_use_id == "t1" && content == "[]")
@@ -2242,9 +2233,7 @@ mod tests {
 
     #[test]
     fn user_message_with_input_image() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-27T00:46:27Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"see this"},{"type":"input_image","image_url":"data:image/png;base64,iVBORabc"}]}}"#,
-        ]);
+        let s = parse_fixture("user_message_with_input_image.jsonl");
         let m = &s.messages[0];
         assert!(matches!(&m.content[0], Block::Text { text } if text == "see this"));
         match &m.content[1] {
@@ -2258,9 +2247,7 @@ mod tests {
 
     #[test]
     fn view_image_event_becomes_image_block() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-05-06T01:38:29Z","type":"event_msg","payload":{"type":"view_image_tool_call","call_id":"v1","path":"/tmp/x.png"}}"#,
-        ]);
+        let s = parse_fixture("view_image_event_becomes_image_block.jsonl");
         match &s.messages[0].content[0] {
             Block::Image { data_ref, .. } => assert_eq!(data_ref.as_deref(), Some("/tmp/x.png")),
             _ => unreachable!(),
@@ -2394,10 +2381,7 @@ mod tests {
 
     #[test]
     fn token_count_attaches_usage_to_assistant() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"total_tokens":120},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":7.0}}}}"#,
-        ]);
+        let s = parse_fixture("token_count_attaches_usage_to_assistant.jsonl");
         let m = s.messages.iter().find(|m| m.role == Role::Assistant).unwrap();
         let u = m.usage.as_ref().expect("usage attached");
         assert_eq!(
@@ -2455,18 +2439,10 @@ mod tests {
         // Task-4 regression guard: the streaming path holds back the trailing assistant message so
         // a `token_count` event can attach usage to it — and must agree with `parse_str` exactly,
         // including the carrier message for a stale snapshot and the EOF flush of a held message.
-        let lines = [
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"total_tokens":120},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":7.0}}}}"#,
-            // A tool exchange, then a token_count that trails the *tool result* (the re-emitted
-            // snapshot codex writes after non-assistant records) — a carrier on both paths.
-            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":8.0}}}}"#,
-            // Trailing assistant message with no token_count after it: held, then flushed at EOF.
-            r#"{"timestamp":"2026-01-01T00:00:06Z","type":"event_msg","payload":{"type":"agent_message","message":"bye"}}"#,
-        ];
+        // Lines 4-6: a tool exchange, then a token_count that trails the *tool result* (the
+        // re-emitted snapshot codex writes after non-assistant records) — a carrier on both paths.
+        // Line 7: trailing assistant message with no token_count after it: held, then flushed at EOF.
+        let lines = fixture_lines("stream_attaches_usage_like_parse.jsonl");
         let text = lines.join("\n");
         let parsed = parse_str("s", &text, true, None);
 
@@ -2564,11 +2540,8 @@ mod tests {
         // diagnostic, not a harness fact — see `ir::CV_NAMESPACE`), and (c) stay
         // byte-identical to each other. Clean files get NO `cv` bag (see the other tests'
         // sessions, which assert exact JSON equality without it).
-        let lines = [
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"agent_mess"#, // truncated mid-write
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"hello"}}"#,
-        ];
+        // Line 2 is truncated mid-write.
+        let lines = fixture_lines("corrupt_lines_are_counted_identically_on_both_paths.jsonl");
         let text = lines.join("\n");
         let parsed = parse_str("s", &text, true, None);
         assert_eq!(parsed.messages.len(), 2);
@@ -2608,9 +2581,7 @@ mod tests {
     fn compacted_record_is_a_boundary_plus_a_summary_when_readable() {
         // Legacy shape: a human-readable `message` — the boundary, then the summary that seeds the
         // next window.
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-27T00:52:58Z","type":"compacted","payload":{"message":"summary text","replacement_history":[{"type":"message","role":"user","content":[]}]}}"#,
-        ]);
+        let s = parse_fixture("compacted_record_is_a_boundary_plus_a_summary_when_readable.jsonl");
         let kinds: Vec<_> = s.messages.iter().map(|m| (m.role, m.kind, m.origin)).collect();
         assert_eq!(
             kinds,
@@ -2626,28 +2597,21 @@ mod tests {
 
         // 0.147+ shape: `message` is "" and the replacement is an encrypted `compaction` item —
         // nothing readable seeds the window, so only the boundary is emitted.
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-09-19T18:12:51.000Z","ordinal":17,"type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"compaction","encrypted_content":"ENC"}],"window_number":1,"window_id":"w1"}}"#,
-        ]);
+        let s = parse_fixture("compacted_record_is_a_boundary_plus_a_summary_when_readable-2.jsonl");
         assert_eq!(s.messages.len(), 1);
         assert_eq!(s.messages[0].kind, MessageKind::CompactionBoundary);
         assert_eq!(s.messages[0].extra["codex"]["replacement_history_len"], 2);
         assert_eq!(s.messages[0].extra["codex"]["window_number"], 1);
 
         // The inline `response_item compaction` (mid-history) is a boundary too.
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-27T00:52:58Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"ENC"}}"#,
-        ]);
+        let s = parse_fixture("compacted_record_is_a_boundary_plus_a_summary_when_readable-3.jsonl");
         assert_eq!(s.messages[0].kind, MessageKind::CompactionBoundary);
         assert_eq!(s.messages[0].extra["codex"]["encrypted"], true);
     }
 
     #[test]
     fn turn_context_records_model_change() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-02-07T14:07:47Z","type":"turn_context","payload":{"cwd":"/work","model":"gpt-5.3-codex","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"}}}"#,
-            r#"{"timestamp":"2026-02-07T14:10:00Z","type":"turn_context","payload":{"cwd":"/work","model":"gpt-5.3-codex-high","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"}}}"#,
-        ]);
+        let s = parse_fixture("turn_context_records_model_change.jsonl");
         assert_eq!(s.model.as_deref(), Some("gpt-5.3-codex-high"));
         let note = s.messages.iter().find(|m| m.role == Role::System).unwrap();
         assert_eq!(note.kind, MessageKind::ModelChange);
@@ -2667,11 +2631,7 @@ mod tests {
 
     #[test]
     fn turn_context_effort_change_is_a_model_change_note_without_a_model() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-09-19T18:12:43.000Z","type":"turn_context","payload":{"turn_id":"t0","cwd":"/w","model":"gpt-6-astra","effort":"high","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/w","model":"gpt-6-astra","effort":"xhigh","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:45.000Z","type":"turn_context","payload":{"turn_id":"t2","cwd":"/w","model":"gpt-6-astra","effort":"xhigh","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-        ]);
+        let s = parse_fixture("turn_context_effort_change_is_a_model_change_note_without_a_model.jsonl");
         assert_eq!(s.extra["codex"]["reasoning_effort"], "xhigh");
         assert_eq!(
             s.messages.len(),
@@ -2692,8 +2652,8 @@ mod tests {
 
     #[test]
     fn legacy_2025_json_layout() {
-        let text = r#"{"session":{"timestamp":"2025-05-05T19:24:54Z","id":"legacy-1","instructions":""},"items":[{"role":"user","content":[{"type":"input_text","text":"do the thing"}],"type":"message"},{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]},{"type":"function_call","name":"shell","arguments":"{}","call_id":"x"},{"type":"function_call_output","call_id":"x","output":"ok"}]}"#;
-        let s = parse_str("fallback", text, false, None);
+        let text = fixture("legacy_2025_json_layout.json");
+        let s = parse_str("fallback", &text, false, None);
         assert_eq!(s.id, "legacy-1");
         // user text, reasoning, tool use, tool result => 4 messages (no event_msg dedup in legacy).
         assert_eq!(s.messages.len(), 4);
@@ -2740,7 +2700,7 @@ mod tests {
 
     /// Parse a `.jsonl` transcript under explicit options via the streaming path (the only entry
     /// that takes `ParseOptions`), collecting messages like `parse_jsonl` does.
-    fn stream_jsonl_with(lines: &[&str], opts: &ParseOptions) -> Session {
+    fn stream_jsonl_with(lines: &[impl std::borrow::Borrow<str>], opts: &ParseOptions) -> Session {
         let text = lines.join("\n");
         let has_events = detect_has_events(std::io::Cursor::new(text.as_bytes()));
         let mut sink = crate::stream::CollectSink::default();
@@ -2756,14 +2716,11 @@ mod tests {
         s
     }
 
-    /// The 0.154 subagent-rollout head: the child's meta (with swarm fields and an inherited-prefix
-    /// cutoff), the parent's meta embedded as line 1, then the parent's history up to the cutoff.
-    const SUBAGENT_META: &str = r#"{"timestamp":"2026-09-19T18:12:43.771Z","ordinal":0,"type":"session_meta","payload":{"id":"child-1","session_id":"root-1","forked_from_id":"parent-1","parent_thread_id":"parent-1","timestamp":"2026-09-19T18:12:43.771Z","cwd":"/Users/ember/dev/minidregg","originator":"codex-tui","cli_version":"0.154.0","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-1","depth":1,"agent_path":"/root/cycle_client","agent_nickname":"Newton","agent_role":null}}},"thread_source":"subagent","agent_nickname":"Newton","agent_path":"/root/cycle_client","agent_role":null,"model_provider":"openai","history_mode":"paginated","subagent_history_start_ordinal":4}}"#;
-    const PARENT_META: &str = r#"{"timestamp":"2026-09-19T18:12:43.780Z","ordinal":1,"type":"session_meta","payload":{"id":"parent-1","timestamp":"2026-09-19T17:00:00.000Z","cwd":"/Users/ember/dev/parent","originator":"codex-tui","cli_version":"0.154.0","agent_path":"/root","history_mode":"paginated"}}"#;
-
     #[test]
     fn session_meta_swarm_fields_land_in_extra_and_first_meta_wins() {
-        let s = parse_jsonl(&[SUBAGENT_META, PARENT_META]);
+        // The 0.154 subagent-rollout head: the child's meta (with swarm fields and an inherited-prefix
+        // cutoff), the parent's meta embedded as line 1, then the parent's history up to the cutoff.
+        let s = parse_fixture("session_meta_swarm_fields_land_in_extra_and_first_meta_wins.jsonl");
         assert_eq!(s.id, "child-1", "the first session_meta is canonical");
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/Users/ember/dev/minidregg")));
         assert_eq!(s.extra["codex"]["session_id"], "root-1");
@@ -2794,13 +2751,7 @@ mod tests {
     fn inherited_prefix_is_skipped_lean_and_tagged_complete() {
         // Ordinals 0-3 are the parent's embedded history (cutoff 4): its turn_context still seeds
         // the child's model, but its messages are not the child's turns.
-        let lines = [
-            SUBAGENT_META,
-            PARENT_META,
-            r#"{"timestamp":"2026-09-19T18:12:43.790Z","ordinal":2,"type":"turn_context","payload":{"turn_id":"t0","cwd":"/Users/ember/dev/parent","model":"gpt-6-astra","effort":"xhigh","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:43.795Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"parent's original prompt"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t0","create_time":1789840968.10353}}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.000Z","ordinal":4,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child's own reply"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t1","create_time":1789845000.5}}}"#,
-        ];
+        let lines = fixture_lines("inherited_prefix_is_skipped_lean_and_tagged_complete.jsonl");
         let lean = parse_jsonl(&lines);
         assert_eq!(
             lean.model.as_deref(),
@@ -2840,15 +2791,7 @@ mod tests {
 
     #[test]
     fn agent_message_pairs_with_preceding_metadata_and_attributes_by_author() {
-        let lines = [
-            SUBAGENT_META,
-            r#"{"timestamp":"2026-09-19T18:12:45.000Z","ordinal":4,"type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:45.001Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"amsg_1","author":"/root","recipient":"/root/cycle_client","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/cycle_client\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAA"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:46.000Z","ordinal":6,"type":"response_item","payload":{"type":"function_call","id":"fc_1","name":"send_message","namespace":"collaboration","arguments":"{\"to\":\"/root\"}","call_id":"call_1"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:46.100Z","ordinal":7,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","name":"send_message","namespace":"collaboration","output":""}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:47.000Z","ordinal":8,"type":"inter_agent_communication_metadata","payload":{"trigger_turn":false}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:47.001Z","ordinal":9,"type":"response_item","payload":{"type":"agent_message","id":"amsg_2","author":"/root/cycle_client","recipient":"/root","content":[{"type":"input_text","text":"Message Type: MESSAGE\nPayload:\n"}]}}"#,
-        ];
+        let lines = fixture_lines("agent_message_pairs_with_preceding_metadata_and_attributes_by_author.jsonl");
         let s = parse_jsonl(&lines);
         let inbound = &s.messages[0];
         assert_eq!(inbound.role, Role::User, "addressed to this thread ⇒ input");
@@ -2894,19 +2837,7 @@ mod tests {
 
     #[test]
     fn item_completed_items_become_system_notes_except_twins() {
-        let lines = [
-            r#"{"timestamp":"2026-09-19T18:13:04.000Z","ordinal":0,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","cargo test"],"cwd":"file:///Users/ember/dev/x","status":"failed","exit_code":101,"duration":{"secs":3,"nanos":0},"stdout":"error: test failed","source":"unified_exec_startup"},"started_at_ms":1789841584000,"completed_at_ms":1789841587000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:05.000Z","ordinal":1,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"FileChange","id":"exec-2","changes":{"/Users/ember/dev/x/src/lib.rs":{"type":"update","unified_diff":"@@ -1 +1 @@\n-a\n+b\n"}},"status":"completed"},"completed_at_ms":1789841588000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:06.000Z","ordinal":2,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"SubAgentActivity","id":"call_9","kind":"started","agent_thread_id":"grand-1","agent_path":"/root/cycle_client/helper"},"completed_at_ms":1789841589000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:06.500Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"SubAgentActivity","id":"call_9","kind":"completed","agent_thread_id":"grand-1","agent_path":"/root/cycle_client/helper"},"completed_at_ms":1789841589500}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:07.000Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"ImageView","id":"exec-3","path":"file:///Users/ember/shot.png"},"completed_at_ms":1789841590000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:08.000Z","ordinal":4,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"McpToolCall","id":"exec-4","server":"node_repl","tool":"js","arguments":{"code":"1+1"},"status":"failed","error":{"message":"boom"}},"completed_at_ms":1789841591000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:09.000Z","ordinal":5,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"Extension","kind":"web.search","id":"exec-5","query":"q","action":{"type":"search","query":null,"queries":["rust zstd crate","ruzstd docs"]}},"completed_at_ms":1789841592000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:10.000Z","ordinal":6,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"Plan","id":"plan-1","text":"1. read\n2. fix"},"completed_at_ms":1789841593000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:11.000Z","ordinal":7,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"Reasoning","id":"rs_1","summary_text":[],"raw_content":[]},"completed_at_ms":1789841594000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:12.000Z","ordinal":8,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"AgentMessage","id":"msg_1","content":[{"type":"Text","text":"twin of the response_item"}]},"completed_at_ms":1789841595000}}"#,
-            r#"{"timestamp":"2026-09-19T18:13:13.000Z","ordinal":9,"type":"event_msg","payload":{"type":"item_completed","thread_id":"child-1","turn_id":"t1","item":{"type":"Extension","kind":"clock.sleep","id":"exec-6"},"completed_at_ms":1789841596000}}"#,
-        ];
+        let lines = fixture_lines("item_completed_items_become_system_notes_except_twins.jsonl");
         let s = parse_jsonl(&lines);
         let texts: Vec<String> = s.messages.iter().filter_map(|m| m.text()).collect();
         assert_eq!(
@@ -2968,12 +2899,7 @@ mod tests {
 
     #[test]
     fn token_usage_record_is_authoritative_and_its_token_count_merges() {
-        let lines = [
-            r#"{"timestamp":"2026-09-19T18:12:44.000Z","ordinal":0,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.100Z","ordinal":1,"type":"token_usage_record","payload":{"thread_id":"child-1","turn_id":"t1","session_id":"root-1","root_turn_id":"t1","response_id":"resp_1","usage":{"input_tokens":35507,"cached_input_tokens":34432,"cache_write_input_tokens":512,"output_tokens":55,"reasoning_output_tokens":7,"total_tokens":35562},"turn_token_usage":{"input_tokens":35507},"thread_token_usage":{"input_tokens":70000}}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.200Z","ordinal":2,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":35507,"cached_input_tokens":34432,"cache_write_input_tokens":512,"output_tokens":55,"reasoning_output_tokens":7,"total_tokens":35562},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":7.0}}}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:50.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}}"#,
-        ];
+        let lines = fixture_lines("token_usage_record_is_authoritative_and_its_token_count_merges.jsonl");
         let s = parse_jsonl(&lines);
         assert_eq!(
             s.messages.len(),
@@ -3017,14 +2943,7 @@ mod tests {
 
     #[test]
     fn thread_settings_applied_aborts_and_rollbacks_are_noted() {
-        let lines = [
-            r#"{"timestamp":"2026-09-19T18:12:43.000Z","ordinal":0,"type":"turn_context","payload":{"turn_id":"t0","cwd":"/w","model":"gpt-6-astra","effort":"high","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.000Z","ordinal":1,"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"child-1","thread_settings":{"model":"gpt-6-vega","model_provider_id":"openai","reasoning_effort":"xhigh","personality":"pragmatic","cwd":"/w","approval_policy":"never","service_tier":"default"}}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:45.000Z","ordinal":2,"type":"turn_context","payload":{"turn_id":"t1","cwd":"/w","model":"gpt-6-vega","effort":"xhigh","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:46.000Z","ordinal":3,"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"all done here"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:47.000Z","ordinal":4,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t2","reason":"interrupted","started_at":1788236085,"completed_at":1788246782,"duration_ms":10696120}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:48.000Z","ordinal":5,"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":2}}"#,
-        ];
+        let lines = fixture_lines("thread_settings_applied_aborts_and_rollbacks_are_noted.jsonl");
         let s = parse_jsonl(&lines);
         assert_eq!(s.model.as_deref(), Some("gpt-6-vega"));
         assert_eq!(s.extra["codex"]["reasoning_effort"], "xhigh");
@@ -3058,12 +2977,7 @@ mod tests {
 
     #[test]
     fn error_prefix_marks_tool_failure_and_is_stripped() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"[error] command not found: frobnicate"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":"[error] is only a marker at the very start"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c3","output":[{"type":"input_text","text":"[error] inside an array is plain text"}]}}"#,
-        ]);
+        let s = parse_fixture("error_prefix_marks_tool_failure_and_is_stripped.jsonl");
         let results: Vec<(&str, bool, Option<&str>)> = s
             .messages
             .iter()
@@ -3124,12 +3038,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn zstd_compressed_rollouts_are_discovered_scanned_and_parsed() {
-        let lines = [
-            r#"{"timestamp":"2026-08-01T10:00:00Z","ordinal":0,"type":"session_meta","payload":{"id":"cold-1","timestamp":"2026-08-01T10:00:00Z","cwd":"/cold","originator":"codex-tui","cli_version":"0.154.0","history_mode":"paginated"}}"#,
-            r#"{"timestamp":"2026-08-01T10:00:01Z","ordinal":1,"type":"turn_context","payload":{"turn_id":"t0","cwd":"/cold","model":"gpt-6-astra","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-            r#"{"timestamp":"2026-08-01T10:00:02Z","ordinal":2,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"cold storage question"}]}}"#,
-            r#"{"timestamp":"2026-08-01T10:00:03Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"cold storage answer"}]}}"#,
-        ];
+        let lines = fixture_lines("zstd_compressed_rollouts_are_discovered_scanned_and_parsed.jsonl");
         let raw = lines.join("\n") + "\n";
         let zst = ruzstd::encoding::compress_to_vec(raw.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
         let root = std::env::temp_dir().join(format!("cv-codex-zst-{}", uuid::Uuid::new_v4()));
@@ -3165,15 +3074,7 @@ mod tests {
 
     #[test]
     fn scan_titles_a_subagent_by_its_own_task_not_the_parents_prompt() {
-        let lines = [
-            SUBAGENT_META,
-            PARENT_META,
-            r#"{"timestamp":"2026-09-19T18:12:43.795Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"parent's original prompt"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:45.000Z","ordinal":4,"type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:45.001Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"amsg_1","author":"/root","recipient":"/root/cycle_client","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: build the client"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:46.000Z","ordinal":6,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"on it"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:47.000Z","ordinal":7,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<user_instructions>injected</user_instructions>"}]}}"#,
-        ];
+        let lines = fixture_lines("scan_titles_a_subagent_by_its_own_task_not_the_parents_prompt.jsonl");
         let dir = std::env::temp_dir().join(format!("cv-codex-scan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rollout-2026-09-19T14-12-43-child-1.jsonl");
@@ -3315,9 +3216,7 @@ mod tests {
 
     #[test]
     fn structured_output_with_image() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"here"},{"type":"input_image","image_url":"data:image/jpeg;base64,zzz"}]}}"#,
-        ]);
+        let s = parse_fixture("structured_output_with_image.jsonl");
         let m = &s.messages[0];
         assert!(matches!(&m.content[0], Block::ToolResult { content, .. } if content == "here"));
         assert!(
@@ -3328,20 +3227,7 @@ mod tests {
     #[test]
     fn user_prompts_vs_injected_preambles_kind_and_origin() {
         // Paginated (no NL event twins): the response_items carry the text.
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-09-19T18:12:44.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<app-context>\n# Codex desktop context"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.001Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/w</cwd>\n</environment_context>"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.002Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nHere is a list of plugins"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:44.003Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<codex_internal_context source=\"goal\">\nCurrent goal"}]}}"#,
-            r##"{"timestamp":"2026-09-19T18:12:44.004Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /Users/ember/dev/x\n\nbe kind"}]}}"##,
-            r##"{"timestamp":"2026-09-19T18:12:44.005Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# Files mentioned by the user\n\n## /x/y.rs"}]}}"##,
-            r#"{"timestamp":"2026-09-19T18:12:44.006Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"please fix the build"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:45.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:46.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:46.100Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:46.200Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c2","output":"patched"}}"#,
-            r#"{"timestamp":"2026-09-19T18:12:47.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixed"}],"phase":"final_answer"}}"#,
-        ]);
+        let s = parse_fixture("user_prompts_vs_injected_preambles_kind_and_origin.jsonl");
         let shape: Vec<_> = s.messages.iter().map(|m| (m.role, m.kind, m.origin)).collect();
         let injected = (Role::User, MessageKind::InjectedContext, Origin::Harness);
         assert_eq!(
@@ -3368,11 +3254,7 @@ mod tests {
         );
 
         // Legacy mode (NL event twins): the `user_message` event decides the same way.
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"<environment_context>\n  <cwd>/w</cwd>\n</environment_context>"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"hello","kind":"plain"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"hi"}}"#,
-        ]);
+        let s = parse_fixture("user_prompts_vs_injected_preambles_kind_and_origin-2.jsonl");
         let shape: Vec<_> = s.messages.iter().map(|m| (m.role, m.kind, m.origin)).collect();
         assert_eq!(
             shape,
@@ -3387,9 +3269,7 @@ mod tests {
 
     #[test]
     fn persisted_error_event_is_an_error_message() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-04-28T03:55:07.952Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit. To get more access now, send a request to your admin or try again at 10:56 AM.","codex_error_info":"usage_limit_exceeded"}}"#,
-        ]);
+        let s = parse_fixture("persisted_error_event_is_an_error_message.jsonl");
         let m = &s.messages[0];
         assert_eq!(
             (m.role, m.kind, m.origin),
@@ -3407,9 +3287,7 @@ mod tests {
 
     #[test]
     fn session_meta_lineage_and_system_prompt() {
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-09-19T18:12:43.771Z","ordinal":0,"type":"session_meta","payload":{"id":"child-2","session_id":"root-1","parent_thread_id":"parent-1","forked_from_id":"fork-src-1","cwd":"/w","originator":"codex-tui","cli_version":"0.154.0","source":"cli","thread_source":"subagent","agent_path":"/root/reviewer","agent_nickname":"Ada","model_provider":"openai","history_mode":"paginated","subagent_history_start_ordinal":9,"history_base":{"thread_id":"parent-1","end_ordinal_exclusive":9,"end_byte_offset":4096},"base_instructions":{"text":"You are Codex, a coding agent.","provenance":"built_in"}}}"#,
-        ]);
+        let s = parse_fixture("session_meta_lineage_and_system_prompt.jsonl");
         assert_eq!(s.lineage.parent.as_deref(), Some("parent-1"));
         assert_eq!(s.lineage.forked_from.as_deref(), Some("fork-src-1"));
         assert_eq!(s.lineage.agent_path.as_deref(), Some("/root/reviewer"));
@@ -3446,9 +3324,7 @@ mod tests {
         );
 
         // Without those fields: empty lineage, no system prompt (a blank one does not count).
-        let s = parse_jsonl(&[
-            r#"{"timestamp":"2026-09-19T18:12:43.771Z","type":"session_meta","payload":{"id":"solo-1","cwd":"/w","base_instructions":{"text":"   "}}}"#,
-        ]);
+        let s = parse_fixture("session_meta_lineage_and_system_prompt-2.jsonl");
         assert!(s.lineage.is_empty());
         assert_eq!(s.system_prompt, None);
     }
@@ -3457,33 +3333,13 @@ mod tests {
     /// fact under `extra["codex"]`, `_record` the only other top-level key (complete mode only),
     /// precise kinds, `Message::model` unset except on the model-change note, `namespace` on the
     /// block and not in the bag.
-    const EVERY_ARM: &[&str] = &[
-        r#"{"timestamp":"2026-09-19T18:12:43.771Z","ordinal":0,"type":"session_meta","payload":{"id":"nest-1","timestamp":"2026-09-19T18:12:43.771Z","cwd":"/w","originator":"codex-tui","cli_version":"0.154.0","source":"cli","thread_source":"user","model_provider":"openai","history_mode":"paginated","base_instructions":{"text":"You are Codex."}}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:43.780Z","ordinal":1,"type":"turn_context","payload":{"turn_id":"t0","cwd":"/w","model":"gpt-6-astra","effort":"high","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:43.790Z","ordinal":2,"type":"event_msg","payload":{"type":"task_started","turn_id":"t0","model_context_window":258400}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:44.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/w</cwd>\n</environment_context>"}]}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:44.001Z","ordinal":4,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"please fix the build"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t0","create_time":1789845000.5}}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:45.000Z","ordinal":5,"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"ENC"}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:46.000Z","ordinal":6,"type":"response_item","payload":{"type":"function_call","id":"fc_1","name":"spawn","namespace":"collaboration","arguments":"{\"agent\":\"helper\"}","call_id":"call_1"}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:46.100Z","ordinal":7,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","name":"spawn","namespace":"collaboration","output":"spawned"}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:46.200Z","ordinal":8,"type":"event_msg","payload":{"type":"item_completed","thread_id":"nest-1","turn_id":"t0","item":{"type":"SubAgentActivity","id":"call_1","kind":"started","agent_thread_id":"child-9","agent_path":"/root/helper"},"completed_at_ms":1789845006200}}"#,
-        r##"{"timestamp":"2026-09-19T18:12:47.000Z","ordinal":9,"type":"world_state","payload":{"agents_md":"# AGENTS.md"}}"##,
-        r#"{"timestamp":"2026-09-19T18:12:48.000Z","ordinal":10,"type":"inter_agent_communication_metadata","payload":{"trigger_turn":false}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:48.001Z","ordinal":11,"type":"response_item","payload":{"type":"agent_message","id":"amsg_1","author":"/root/helper","recipient":"/root","content":[{"type":"input_text","text":"Message Type: MESSAGE\nPayload: done"}]}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:49.000Z","ordinal":12,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixed"}],"phase":"final_answer"}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:49.100Z","ordinal":13,"type":"token_usage_record","payload":{"thread_id":"nest-1","turn_id":"t0","response_id":"resp_1","usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":7,"total_tokens":120},"thread_token_usage":{"input_tokens":100}}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:49.200Z","ordinal":14,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":7,"total_tokens":120},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":7.0}}}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:49.300Z","ordinal":15,"type":"event_msg","payload":{"type":"task_complete","turn_id":"t0","last_agent_message":"fixed"}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:50.000Z","ordinal":16,"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"nest-1","thread_settings":{"model":"gpt-6-vega","model_provider_id":"openai","reasoning_effort":"high","cwd":"/w"}}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:51.000Z","ordinal":17,"type":"compacted","payload":{"message":"","replacement_history":[{"type":"compaction","encrypted_content":"ENC"}],"window_number":1}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:52.000Z","ordinal":18,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:53.000Z","ordinal":19,"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}"#,
-        r#"{"timestamp":"2026-09-19T18:12:54.000Z","ordinal":20,"type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}"#,
-    ];
+    fn every_arm() -> Vec<String> {
+        fixture_lines("every_arm.jsonl")
+    }
 
     #[test]
     fn every_arm_has_a_precise_kind_and_nothing_flat() {
-        let s = parse_jsonl(EVERY_ARM);
+        let s = parse_jsonl(&every_arm());
         let shape: Vec<_> = s.messages.iter().map(|m| (m.role, m.kind, m.origin)).collect();
         assert_eq!(
             shape,
@@ -3597,7 +3453,7 @@ mod tests {
         assert_eq!(keys(11), vec!["codex_event", "num_turns"]);
         assert_eq!(keys(12), vec!["codex_event", "error"]);
         // parse == stream
-        let streamed = stream_jsonl_with(EVERY_ARM, &ParseOptions::full());
+        let streamed = stream_jsonl_with(&every_arm(), &ParseOptions::full());
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
             serde_json::to_value(&streamed).unwrap()
@@ -3606,9 +3462,9 @@ mod tests {
 
     #[test]
     fn complete_mode_carries_lifecycle_and_unknown_records_verbatim() {
-        let lean = parse_jsonl(EVERY_ARM);
+        let lean = parse_jsonl(&every_arm());
         assert!(lean.messages.iter().all(|m| m.kind != MessageKind::Carrier));
-        let complete = stream_jsonl_with(EVERY_ARM, &ParseOptions::complete());
+        let complete = stream_jsonl_with(&every_arm(), &ParseOptions::complete());
         let carriers: Vec<(&str, &str)> = complete
             .messages
             .iter()

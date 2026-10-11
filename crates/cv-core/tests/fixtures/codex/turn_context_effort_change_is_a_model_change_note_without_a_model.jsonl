@@ -1,0 +1,3 @@
+{"timestamp":"2026-09-19T18:12:43.000Z","type":"turn_context","payload":{"turn_id":"t0","cwd":"/w","model":"gpt-6-astra","effort":"high","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}
+{"timestamp":"2026-09-19T18:12:44.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/w","model":"gpt-6-astra","effort":"xhigh","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}
+{"timestamp":"2026-09-19T18:12:45.000Z","type":"turn_context","payload":{"turn_id":"t2","cwd":"/w","model":"gpt-6-astra","effort":"xhigh","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}

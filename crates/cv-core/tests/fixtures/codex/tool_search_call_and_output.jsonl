@@ -1,0 +1,2 @@
+{"timestamp":"2026-04-28T00:00:00Z","type":"response_item","payload":{"type":"tool_search_call","call_id":"t1","status":"completed","execution":"client","arguments":{"query":"repl","limit":5}}}
+{"timestamp":"2026-04-28T00:00:01Z","type":"response_item","payload":{"type":"tool_search_output","call_id":"t1","status":"completed","execution":"client","tools":[]}}

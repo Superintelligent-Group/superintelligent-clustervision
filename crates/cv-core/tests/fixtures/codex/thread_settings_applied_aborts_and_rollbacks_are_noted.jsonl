@@ -1,0 +1,6 @@
+{"timestamp":"2026-09-19T18:12:43.000Z","ordinal":0,"type":"turn_context","payload":{"turn_id":"t0","cwd":"/w","model":"gpt-6-astra","effort":"high","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}
+{"timestamp":"2026-09-19T18:12:44.000Z","ordinal":1,"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"child-1","thread_settings":{"model":"gpt-6-vega","model_provider_id":"openai","reasoning_effort":"xhigh","personality":"pragmatic","cwd":"/w","approval_policy":"never","service_tier":"default"}}}
+{"timestamp":"2026-09-19T18:12:45.000Z","ordinal":2,"type":"turn_context","payload":{"turn_id":"t1","cwd":"/w","model":"gpt-6-vega","effort":"xhigh","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"summary":"auto"}}
+{"timestamp":"2026-09-19T18:12:46.000Z","ordinal":3,"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"all done here"}}
+{"timestamp":"2026-09-19T18:12:47.000Z","ordinal":4,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t2","reason":"interrupted","started_at":1788236085,"completed_at":1788246782,"duration_ms":10696120}}
+{"timestamp":"2026-09-19T18:12:48.000Z","ordinal":5,"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":2}}

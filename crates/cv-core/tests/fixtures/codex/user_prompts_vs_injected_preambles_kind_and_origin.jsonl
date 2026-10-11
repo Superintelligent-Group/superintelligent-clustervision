@@ -1,0 +1,12 @@
+{"timestamp":"2026-09-19T18:12:44.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<app-context>\n# Codex desktop context"}]}}
+{"timestamp":"2026-09-19T18:12:44.001Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/w</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-09-19T18:12:44.002Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nHere is a list of plugins"}]}}
+{"timestamp":"2026-09-19T18:12:44.003Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<codex_internal_context source=\"goal\">\nCurrent goal"}]}}
+{"timestamp":"2026-09-19T18:12:44.004Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /Users/ember/dev/x\n\nbe kind"}]}}
+{"timestamp":"2026-09-19T18:12:44.005Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# Files mentioned by the user\n\n## /x/y.rs"}]}}
+{"timestamp":"2026-09-19T18:12:44.006Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"please fix the build"}]}}
+{"timestamp":"2026-09-19T18:12:45.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}}
+{"timestamp":"2026-09-19T18:12:46.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}
+{"timestamp":"2026-09-19T18:12:46.100Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}
+{"timestamp":"2026-09-19T18:12:46.200Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c2","output":"patched"}}
+{"timestamp":"2026-09-19T18:12:47.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixed"}],"phase":"final_answer"}}
