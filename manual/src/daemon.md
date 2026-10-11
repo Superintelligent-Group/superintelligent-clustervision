@@ -303,41 +303,6 @@ warnings ride every response, so a corrupted coordination log is visible from an
 - **`GET /api/task/{id}/events`** — the raw durable history, `{ "events": [...], "warnings": [] }`,
   each event carrying `id`, `task_id`, `ts`, `by`, and its tagged `event` payload
   (`opened`, `claimed`, `revision_proposed`, `review_passed`, `landed`, …).
-- **`GET /api/tasks/debt`** — the honest-ledger envelope (optional `?repo=` filter):
-
-  ```json
-  {
-    "debt": [
-      {
-        "id": "019f6e4c-5cc6-72a1-b358-a178d650e226",
-        "title": "add retry backoff",
-        "repo": "/Users/you/code/demo",
-        "revision": 1,
-        "branch": "task/retry-backoff",
-        "upstream": "main",
-        "state": "ready",
-        "since": "2026-07-17T04:18:46.268959Z",
-        "issues": [],
-        "suspect": false
-      }
-    ],
-    "awaiting_review": [],
-    "suspects": [],
-    "verified_as_of": "2026-07-17T04:18:46.612684Z",
-    "verify_warning": null,
-    "warnings": []
-  }
-  ```
-
-  `debt` rows are reviewed-but-unlanded revisions (each with a literal `"suspect": false` —
-  this surface's dashboard keys off the marker); `awaiting_review` rows are proposed revisions
-  whose reviewer hasn't spoken (with `reviewer` and `since`); `suspects` are revisions recorded
-  `landed` whose content the verifier no longer observes on upstream (`"suspect": true` rows);
-  `verified_as_of` / `verify_warning` carry the verifier heartbeat — `verify_warning` names a
-  never-run or stale verifier, and is `null` when the heartbeat is fresh.
-- **`GET /api/tasks/stats`** — fleet batting averages computed from observed events only
-  (optional `?repo=`): per-endpoint and per-reviewer outcome counts, annotated with verifier
-  freshness, plus `warnings`. Informational, never a gate — `cv task stats --json`.
 - **`GET /api/tasks/inbox/{who}`** — what needs this endpoint, stalest first:
   `{ "inbox": [ { "id", "title", "reason", "effective_state" } ], "warnings": [] }`, where
   `reason` is one of `decision_owed`, `discussing`, `provisional`, `assigned_open`,

@@ -61,7 +61,7 @@ An **ambiguous** prefix is never resolved by guessing: cv lists the candidates a
 | `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping | `ls` `splice` `loom` `port` `scry` |
 | `--out <dir\|file>` | write somewhere other than the real store | `rewind` `splice` `loom` `port` `dataset` `pack` `share` |
 | `--json` | machine output | `ls` `show` `search` `events` `touched` `tools` `workflow` `compaction` `stats` `doctor` `prune` `rewind` `schema` `task list/show/inbox/debt/stats` `board read/unanswered` |
-| `--limit <n>` | how many rows/records | `ls` `search` `dataset` `pack` `board read` |
+| `--limit <n>` | how many rows/records | `ls` `search` `dataset` `pack` |
 | `--fresh` | bypass the catalog and re-discover | `ls` |
 | `--all` | include what is hidden by default | `task list` `task inbox` |
 | `--thinking <mode>` | what an emit does with the model's reasoning: `native` (default), `text`, `drop` | `port` `splice` `loom` `pack` |

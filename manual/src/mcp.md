@@ -257,13 +257,7 @@ shapes. Two things to know up front:
 | `task_note` | `id`, `text` | `session_ref`, `from` | Progress note; never changes state. |
 | `task_done` | `id` | `observed`, `from` | Complete a task. Self-reported and labeled so; `observed` is free text. Refused on a decision. |
 | `task_abandon` | `id` | `reason`, `from` | Kill a task (always allowed on a non-terminal task). |
-| `task_propose` | `id`, `branch` | `upstream` (`origin/main`), `sha`, `worktree`, `reviewer`, `session_ref`, `from`* | Attach a reviewed revision: cv resolves the tip and computes the range patch-id **from git itself**. Re-proposing supersedes the prior revision (the only cure for a refute). |
-| `task_pass` | `id` | `session`, `from`* | Review PASS (you must be the active reviewer). Pass your cv session id so the advisory cross-family independence check can run. |
-| `task_refute` | `id` | `session`, `from`* | Review REFUTE — terminal for the revision. |
-| `task_verify` | — | `id` (else all), `fetch` (`false`) | Run the git verifier: observe landings/local merges/findings. The **only** way landing state changes. |
 | `task_inbox` | — | `who` (default `$CV_ENDPOINT`) | What needs `who`: assigned, claimed, awaiting-their-review, their unlanded work. Stalest first. |
-| `task_debt` | — | `repo` | Reviewed-but-unlanded work by repo, plus awaiting-review rows, SUSPECT lands, and the verifier heartbeat (`verified_as_of` / `verify_warning`). |
-| `task_stats` | — | `repo` | Fleet batting averages from observed events only: per-endpoint claim/propose/land/refute counts, per-reviewer verdicts with rubber-stamp signals, verifier freshness. Informational, never a gate. |
 
 \* identity-bearing: defaults to `$CV_ENDPOINT`, errors when neither is set.
 
