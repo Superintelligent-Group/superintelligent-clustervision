@@ -1,0 +1,11 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "codex"
+version = "0.161.0"
+generated = "2026-10-11"
+model = "glm-5.3-flash via Z.ai coding endpoint, through responses_shim.py"
+codex_model_profile = "gpt-6-luna (the slug Codex recorded; it picks Codex's tool set, not the model)"
+model_calls = 32
+scenarios = ["chat","resume","tools","parallel_tools","tool_error","reasoning","image","compaction","mcp","subagent"]
+skipped = []
+note = "two runs: the full scenario set (its MCP calls were refused for approval, kept as an MCP tool error), then --only mcp with default_tools_approval_mode = approve"
+generator_commit = "a93c4a8"
