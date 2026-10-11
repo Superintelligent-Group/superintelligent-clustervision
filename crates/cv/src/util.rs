@@ -332,7 +332,7 @@ pub(crate) fn dirs_home() -> Option<std::path::PathBuf> {
 
 // ---------- compose-family reports ----------
 
-/// The compose-family report (`prune`, `rewind`, `distill`, `fork`, `adopt`): the human account on
+/// The compose-family report (`prune`, `rewind`, `distill`, `splice --session`, `adopt`): the human account on
 /// stderr and, under `--json`, ONE JSON object on stdout — so stdout carries only the JSON and pipes
 /// cleanly.
 pub(crate) fn report(json: bool, human: &str, value: &serde_json::Value) -> Result<()> {
@@ -368,7 +368,7 @@ pub(crate) fn dry_run_nulls(v: &mut serde_json::Value, pinned: bool, paths: &[&s
 }
 
 /// `--thinking <native|text|drop>`: what an emit does with the model's reasoning on the way out.
-/// Shared by every command that writes a session into a harness (`port`, `splice`, `loom`,
+/// Shared by every command that writes a session into a harness (`port`, `splice`,
 /// `pack --format session`), because a flag means the same thing everywhere it appears.
 pub(crate) fn parse_thinking(s: &str) -> Result<cv_core::emit::ThinkingMode> {
     cv_core::emit::ThinkingMode::parse(s).ok_or_else(|| {

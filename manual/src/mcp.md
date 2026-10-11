@@ -149,8 +149,7 @@ Each produces a **new** session id; the source is never touched.
 |---|---|---|---|
 | `prune` | `id` | yes | Lossless compaction into a new resumable session: bulky old tool payloads go to a sidecar behind a `[PRUNED]` marker. Retrieve one with `cat`. |
 | `rewind` | `id` | yes | The agent as of a past message or commit (`at`: message index or sha), as a new resumable Claude session with a provenance sidecar; sub-agents come out standalone. |
-| `splice` | `specs` | no | Compose a new session from spans of existing ones (`<id>:A..B`). |
-| `loom` | `base`, `at`, `graft`, `from` | no | Graft: `base[..N]` then `other[M..]`, as one new branched session. |
+| `splice` | `specs` | no | Compose a new session from spans of existing ones (`<id>:A..B`): `<id>:..N` forks at message N, `<base>:..N <other>:M..` grafts. |
 | `port` | `id` | no | A copy that runs elsewhere — another harness (`harness`), another working directory (`cwd`), or both. |
 | `resume` | `id` | no | The resume incantation for a session in its native harness. |
 

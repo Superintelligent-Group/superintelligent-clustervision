@@ -103,7 +103,7 @@ One selector at a time. Piped `cv show` with no selector over 200 KB prints the 
     cv distill <agent-id> --agent-of <root-id>   # a new sub-agent of <root>: SendMessage to the printed id resumes it
     cv distill <agent-id> --session              # a new session: claude -p --resume <new-id> \"<next quest>\"
     cv distill <agent-id> --with <other-agent>   # inject another lane's findings into this pack
-    cv fork <id> --at N --agent-of <root-id>     # branch a lane's verbatim context at message N
+    cv splice <id>:..N --agent-of <root-id>      # branch a lane's verbatim context at message N
     → stderr: context before → after; --json: {stats: {recorded_context_tokens, distilled_est_tokens, …},
       emitted: {session_id, agent_id, path, sidecar_path, resume}}; elided outputs: cv cat <new> <tool_use_id>
 

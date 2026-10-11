@@ -248,7 +248,7 @@ clustervision is a Rust workspace. `cv-core` is the library every other crate is
 | **`cv-mcp`** | An MCP server: lets a *running* agent search and read *other* agents' sessions (same project, across time, across harnesses). |
 | **`cvd`** | The daemon — watches every harness's storage root and archives sessions (incl. cloud-fleet logs) into a central store; also hosts the `serve` HTTP API. |
 | **`cv-search`** | Pure-Rust search: full-text via [tantivy](https://github.com/quickwit-oss/tantivy) (BM25 + snippets) and semantic via embeddings (model2vec). |
-| **`cv-llm`** | LLM-backed features — the optional abstractive digests behind `cv pack` and the `--generate` continuations for `splice`/`loom`, via OpenRouter / Anthropic / a local LM Studio. |
+| **`cv-llm`** | LLM-backed features — the optional abstractive digests behind `cv pack` and the `--generate` continuations for `splice`, via OpenRouter / Anthropic / a local LM Studio. |
 | **`cv-web`** | WASM bindings — ingest an uploaded harness `.zip` entirely in-browser and hand back sessions as JSON. |
 | **`app/`** | The desktop app — a Tauri v2 shell around the web UI with native `cv-core`/`cv-llm` power. |
 

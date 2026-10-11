@@ -1,4 +1,4 @@
-//! `cv prune` / `cv rewind` / `cv splice` / `cv loom` / `cv dataset` — reshaping sessions into new ones.
+//! `cv prune` / `cv rewind` / `cv splice` / `cv dataset` — reshaping sessions into new ones.
 
 use crate::cmd::port::emit_session;
 use crate::util::{dry_run_nulls, parse_harness, parse_range, report, resolve, short_id, usage};
