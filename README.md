@@ -16,7 +16,7 @@ No database, no import, no telemetry: clustervision reads your **real local sess
 
 <br>
 
-<img src="docs/screenshot-timeline.png" alt="clustervision timeline — a GitHub-style activity heatmap of every agent session across every harness, with a constellation feed below" width="840">
+<img src="manual/src/screenshot-timeline.png" alt="clustervision timeline — a GitHub-style activity heatmap of every agent session across every harness, with a constellation feed below" width="840">
 
 <sub>the desktop app reading 2,245 real local sessions across 8 harnesses — heatmap, harness legend, and a live feed</sub>
 
