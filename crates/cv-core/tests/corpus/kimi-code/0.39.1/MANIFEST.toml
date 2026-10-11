@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "kimi-code"
+version = "0.39.1"
+generated = "2026-10-11"
+model = "kimi-for-coding via api.kimi.com/coding/v1, through passthrough_proxy.py"
+model_calls = 51
+scenarios = ["chat","resume","tools","parallel_tools","tool_error","thinking","hooks","image","todo","plan_mode","background_task","cron","goal","skill","mcp","fetch_url","subagent","swarm","compaction","undo","interrupt","api_retry","clear"]
+skipped = ["fork: no kimi fork command in 0.39.1","ask_user: prompt mode runs in auto permission mode, which withholds AskUserQuestion","approvals: auto permission mode never prompts","model_switch: one env-defined model (KIMI_MODEL_NAME); a second needs a config.toml provider with the key in it"]
+generator_commit = "ccc954a"
+not_captured = ["image: the model read dot.png with Bash/Read instead of ReadMediaFile, so no image part was persisted"]

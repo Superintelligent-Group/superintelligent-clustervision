@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "n61d7fd0c",
+  "category": "task",
+  "type": "task.completed",
+  "source_kind": "background_task",
+  "source_id": "bash-nlrzg8j5",
+  "title": "Background task completed: Sleep 2s then echo",
+  "body": "Task ID: bash-nlrzg8j5\nStatus: completed (Completed at: 2026-10-11 16:24:38, Duration: 2s)\nDescription: Sleep 2s then echo\nExit code: 0",
+  "severity": "success",
+  "created_at": 1791750279.313809,
+  "payload": {
+    "task_id": "bash-nlrzg8j5",
+    "task_kind": "bash",
+    "status": "completed",
+    "description": "Sleep 2s then echo",
+    "exit_code": 0,
+    "interrupted": false,
+    "timed_out": false,
+    "terminal_reason": "completed",
+    "failure_reason": null,
+    "finished_at": 1791750278.977155,
+    "duration_s": 2.0205719470977783
+  },
+  "targets": [
+    "llm",
+    "wire",
+    "shell"
+  ],
+  "dedupe_key": "background_task:bash-nlrzg8j5:completed"
+}

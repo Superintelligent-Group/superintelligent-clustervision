@@ -1,0 +1,16 @@
+{
+  "agent_id": "a901fe706",
+  "subagent_type": "coder",
+  "status": "idle",
+  "description": "Reply with ok",
+  "created_at": 1791750311.080215,
+  "updated_at": 1791750320.275949,
+  "last_task_id": null,
+  "launch_spec": {
+    "agent_id": "a901fe706",
+    "subagent_type": "coder",
+    "model_override": null,
+    "effective_model": null,
+    "created_at": 1791750311.080215
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "bash-w0luzz0b",
+  "kind": "bash",
+  "session_id": "73116dbd-aaa3-4aa1-a83b-8757b7b7df61",
+  "description": "sleep then echo bg-done",
+  "tool_call_id": "tool_CvLcbs9H7NbiGXaF0J1133nt",
+  "owner_role": "root",
+  "created_at": 1791750506.8421729,
+  "command": "sleep 2; echo bg-done",
+  "shell_name": "bash",
+  "shell_path": "/bin/bash",
+  "cwd": "/home/corpus/project",
+  "timeout_s": 60,
+  "kind_payload": null
+}

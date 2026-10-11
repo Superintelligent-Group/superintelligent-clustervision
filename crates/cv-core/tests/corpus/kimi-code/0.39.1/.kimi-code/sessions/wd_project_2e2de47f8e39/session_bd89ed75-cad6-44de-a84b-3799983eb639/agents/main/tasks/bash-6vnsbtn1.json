@@ -1,0 +1,1 @@
+{"taskId":"bash-6vnsbtn1","description":"Sleep 2s then echo bg-done","status":"completed","detached":true,"startedAt":1791750234694,"endedAt":1791750236703,"timeoutMs":600000,"kind":"process","command":"sleep 2; echo bg-done","pid":58522,"exitCode":0,"parentToolCallId":"tool_DSR5fFbtil7ZSmCiYtnFATgC"}

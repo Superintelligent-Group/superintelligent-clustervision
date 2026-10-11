@@ -1,0 +1,1 @@
+{"taskId":"bash-x5914qa0","description":"Sleep then echo","status":"completed","detached":true,"startedAt":1791750474941,"endedAt":1791750476947,"timeoutMs":600000,"kind":"process","command":"sleep 2; echo bg-done","pid":71934,"exitCode":0,"parentToolCallId":"tool_ieDQPIw3yda4xOmxK1x9RT0L"}

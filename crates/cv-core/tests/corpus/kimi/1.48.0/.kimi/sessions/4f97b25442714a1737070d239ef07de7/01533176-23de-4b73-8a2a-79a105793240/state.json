@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "approval": {
+    "yolo": false,
+    "afk": true,
+    "auto_approve_actions": []
+  },
+  "additional_dirs": [],
+  "custom_title": "Say hello in five words.",
+  "title_generated": false,
+  "title_generate_attempts": 0,
+  "plan_mode": false,
+  "plan_session_id": null,
+  "plan_slug": null,
+  "wire_mtime": null,
+  "archived": false,
+  "archived_at": null,
+  "auto_archive_exempt": false,
+  "todos": [
+    {
+      "title": "Read a.txt",
+      "status": "done"
+    },
+    {
+      "title": "Read b.txt",
+      "status": "pending"
+    },
+    {
+      "title": "Summarize",
+      "status": "pending"
+    }
+  ]
+}

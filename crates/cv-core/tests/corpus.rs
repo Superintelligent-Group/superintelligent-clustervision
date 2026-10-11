@@ -15,9 +15,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cv_core::harness::codex::Codex;
+use cv_core::harness::kimi::Kimi;
+use cv_core::harness::kimi_code::KimiCode;
 use cv_core::harness::opencode::OpenCode;
 use cv_core::ir::{Block, MessageKind};
-use cv_core::Adapter;
+use cv_core::{Adapter, SessionRef};
 use cv_testkit::World;
 use serde_json::{json, Value};
 
@@ -26,6 +28,9 @@ use serde_json::{json, Value};
 struct CorpusHarness {
     name: &'static str,
     adapter: fn(&Path) -> Box<dyn Adapter>,
+    /// For a harness whose discovery lists only top-level sessions (sub-agents hang off the
+    /// parent): the child refs of one discovered session, summarized under its `children`.
+    children: Option<fn(&SessionRef) -> Vec<SessionRef>>,
 }
 
 fn codex(version_dir: &Path) -> Box<dyn Adapter> {
@@ -36,14 +41,34 @@ fn opencode(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(OpenCode::with_data_dir(&version_dir.join(".local/share/opencode")))
 }
 
+fn kimi(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Kimi::with_home(&version_dir.join(".kimi")))
+}
+
+fn kimi_code(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(KimiCode::with_home(&version_dir.join(".kimi-code")))
+}
+
 const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "codex",
         adapter: codex,
+        children: None,
     },
     CorpusHarness {
         name: "opencode",
         adapter: opencode,
+        children: None,
+    },
+    CorpusHarness {
+        name: "kimi",
+        adapter: kimi,
+        children: Some(cv_core::harness::kimi::subagent_refs),
+    },
+    CorpusHarness {
+        name: "kimi-code",
+        adapter: kimi_code,
+        children: Some(cv_core::harness::kimi_code::subagent_refs),
     },
 ];
 
@@ -76,52 +101,67 @@ fn tag(v: impl serde::Serialize) -> String {
     serde_json::to_value(v).unwrap().as_str().unwrap_or("?").to_string()
 }
 
-/// The stable, comparable part of what an adapter read out of one version directory.
-fn summarize(adapter: &dyn Adapter, version_dir: &Path) -> Value {
+/// The stable, comparable part of one parsed session.
+fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> Value {
+    let s = adapter
+        .parse(r)
+        .unwrap_or_else(|e| panic!("parsing {}: {e:#}", r.path.display()));
+    let mut blocks: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut tools = Vec::new();
+    for m in &s.messages {
+        for b in &m.content {
+            *blocks.entry(block_type(b)).or_default() += 1;
+            if let Block::ToolUse { name, namespace, .. } = b {
+                tools.push(match namespace {
+                    Some(ns) => format!("{ns}/{name}"),
+                    None => name.clone(),
+                });
+            }
+        }
+    }
+    let indices = |k: MessageKind| -> Vec<usize> {
+        s.messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.kind == k)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    json!({
+        "id": s.id,
+        "path": r.path.strip_prefix(version_dir).unwrap_or(&r.path),
+        "messages": s.messages.len(),
+        "sequence": s.messages.iter().map(|m| format!("{}/{}", tag(m.role), tag(m.kind))).collect::<Vec<_>>(),
+        "blocks": blocks,
+        "tools": tools,
+        "usage_messages": s.messages.iter().filter(|m| m.usage.is_some()).count(),
+        "compaction_boundaries": indices(MessageKind::CompactionBoundary),
+        "subagent_spawns": indices(MessageKind::SubagentSpawn).len(),
+        "subagent_returns": indices(MessageKind::SubagentReturn).len(),
+        "lineage": s.lineage,
+        "model": s.model,
+        "skipped_lines": s.cv_extra().and_then(|c| c.get("skipped_lines")).cloned().unwrap_or(json!(0)),
+    })
+}
+
+/// Every discovered session of one version directory, with its children where the harness has any.
+fn summarize(h: &CorpusHarness, version_dir: &Path) -> Value {
+    let adapter = (h.adapter)(version_dir);
     let mut refs = adapter.discover().expect("discover");
     refs.sort_by(|a, b| a.id.cmp(&b.id));
     let sessions: Vec<Value> = refs
         .iter()
         .map(|r| {
-            let s = adapter
-                .parse(r)
-                .unwrap_or_else(|e| panic!("parsing {}: {e:#}", r.path.display()));
-            let mut blocks: BTreeMap<&str, usize> = BTreeMap::new();
-            let mut tools = Vec::new();
-            for m in &s.messages {
-                for b in &m.content {
-                    *blocks.entry(block_type(b)).or_default() += 1;
-                    if let Block::ToolUse { name, namespace, .. } = b {
-                        tools.push(match namespace {
-                            Some(ns) => format!("{ns}/{name}"),
-                            None => name.clone(),
-                        });
-                    }
-                }
-            }
-            let indices = |k: MessageKind| -> Vec<usize> {
-                s.messages
+            let mut one = summarize_one(adapter.as_ref(), r, version_dir);
+            if let Some(children) = h.children {
+                let mut kids = children(r);
+                kids.sort_by(|a, b| a.id.cmp(&b.id));
+                one["children"] = kids
                     .iter()
-                    .enumerate()
-                    .filter(|(_, m)| m.kind == k)
-                    .map(|(i, _)| i)
-                    .collect()
-            };
-            json!({
-                "id": s.id,
-                "path": r.path.strip_prefix(version_dir).unwrap_or(&r.path),
-                "messages": s.messages.len(),
-                "sequence": s.messages.iter().map(|m| format!("{}/{}", tag(m.role), tag(m.kind))).collect::<Vec<_>>(),
-                "blocks": blocks,
-                "tools": tools,
-                "usage_messages": s.messages.iter().filter(|m| m.usage.is_some()).count(),
-                "compaction_boundaries": indices(MessageKind::CompactionBoundary),
-                "subagent_spawns": indices(MessageKind::SubagentSpawn).len(),
-                "subagent_returns": indices(MessageKind::SubagentReturn).len(),
-                "lineage": s.lineage,
-                "model": s.model,
-                "skipped_lines": s.cv_extra().and_then(|c| c.get("skipped_lines")).cloned().unwrap_or(json!(0)),
-            })
+                    .map(|k| summarize_one(adapter.as_ref(), k, version_dir))
+                    .collect();
+            }
+            one
         })
         .collect();
     json!({ "sessions": sessions })
@@ -144,7 +184,7 @@ fn every_corpus_version_reads_as_its_golden_summary() {
         for v in versions {
             let label = format!("{}/{}", h.name, v.file_name().unwrap().to_string_lossy());
             assert!(v.join("MANIFEST.toml").is_file(), "{label}: no MANIFEST.toml");
-            let got = summarize((h.adapter)(&v).as_ref(), &v);
+            let got = summarize(h, &v);
             assert!(
                 !got["sessions"].as_array().unwrap().is_empty(),
                 "{label}: the adapter found no sessions"

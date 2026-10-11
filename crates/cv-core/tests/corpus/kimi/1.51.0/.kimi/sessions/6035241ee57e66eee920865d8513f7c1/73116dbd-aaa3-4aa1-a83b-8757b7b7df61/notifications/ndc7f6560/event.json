@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "ndc7f6560",
+  "category": "task",
+  "type": "task.completed",
+  "source_kind": "background_task",
+  "source_id": "bash-w0luzz0b",
+  "title": "Background task completed: sleep then echo bg-done",
+  "body": "Task ID: bash-w0luzz0b\nStatus: completed (Completed at: 2026-10-11 16:28:29, Duration: 2s)\nDescription: sleep then echo bg-done\nExit code: 0",
+  "severity": "success",
+  "created_at": 1791750509.544961,
+  "payload": {
+    "task_id": "bash-w0luzz0b",
+    "task_kind": "bash",
+    "status": "completed",
+    "description": "sleep then echo bg-done",
+    "exit_code": 0,
+    "interrupted": false,
+    "timed_out": false,
+    "terminal_reason": "completed",
+    "failure_reason": null,
+    "finished_at": 1791750509.313683,
+    "duration_s": 2.0139899253845215
+  },
+  "targets": [
+    "llm",
+    "wire",
+    "shell"
+  ],
+  "dedupe_key": "background_task:bash-w0luzz0b:completed"
+}

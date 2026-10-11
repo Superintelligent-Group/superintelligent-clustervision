@@ -1,0 +1,9 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "kimi"
+version = "1.51.0"
+generated = "2026-10-11"
+model = "kimi-for-coding via api.kimi.com/coding/v1, through passthrough_proxy.py"
+model_calls = 38
+scenarios = ["chat","resume","tools","parallel_tools","tool_error","thinking","hooks","checkpoints","image","todo","plan_mode","background_task","skill","mcp","fetch_url","ask_user","subagent","ralph_loop","compaction","clear"]
+skipped = ["approvals: --afk auto-approves every tool call","web_search: SearchWeb needs the Moonshot search service (OAuth login)","interrupt: print mode has no interrupt; the Kimi Code corpus covers it"]
+generator_commit = "8d62dea"

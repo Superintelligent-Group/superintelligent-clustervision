@@ -15,6 +15,7 @@
 - OpenCode corpus: real stores from 1.18.20 and 2.0.25, plus 2.0.25's migration of the 1.18.20 store.
 - kimi-cli: sessions read every `context_N.jsonl` segment, not just the live file; `/clear` is a branch; `subagents/` parse as child sessions.
 - Kimi Code 2.x: `subagent.spawned`/`completed` are spawn/return turns, `/undo` is a branch, `kimi fork` sets `lineage.forked_from`.
+- Kimi corpus: real stores from kimi-cli 1.48.0/1.51.0, Kimi Code 0.39.1/2.1.1, and a 0.39.1 store reopened by 2.1.1.
 
 ## 0.15.1 — 2026-10-11
 

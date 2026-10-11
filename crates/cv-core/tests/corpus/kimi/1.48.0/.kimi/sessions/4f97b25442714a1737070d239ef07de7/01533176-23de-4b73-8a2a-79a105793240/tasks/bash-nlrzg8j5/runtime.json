@@ -1,0 +1,14 @@
+{
+  "status": "completed",
+  "worker_pid": 59740,
+  "child_pid": 59745,
+  "child_pgid": 59745,
+  "started_at": 1791750276.956583,
+  "heartbeat_at": 1791750278.977155,
+  "updated_at": 1791750278.977155,
+  "finished_at": 1791750278.977155,
+  "exit_code": 0,
+  "interrupted": false,
+  "timed_out": false,
+  "failure_reason": null
+}
