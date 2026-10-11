@@ -6,7 +6,7 @@
 harness = "roo"
 # Roo has no parser or writer of its own: `harness/roo.rs` points the Cline code at Roo's roots, so
 # the vocabulary is checked against the file that actually interprets it.
-source_files = ["harness/cline.rs"]
+source_files = ["harness/cline.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
 ignore_literals = ["base64", "url"]
 store = [
   "<globalStorage>/rooveterinaryinc.roo-cline|roo-code/tasks/<taskId>/",

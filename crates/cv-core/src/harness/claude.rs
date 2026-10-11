@@ -14,6 +14,7 @@ pub mod adopt;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
+use super::wire::anthropic;
 use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
 use crate::lazy::{Span, Text, INLINE_MAX};
@@ -1682,108 +1683,19 @@ fn attach_tool_use_result(blocks: &mut [Block], tur: &Value) {
     });
 }
 
+/// One Anthropic content block → IR, with large strings spanned into the source (the wire codec
+/// maps the shape; `span_field` is the item's raw JSON + record context, when the reader has it).
+/// A persisted-output stub keeps the stub as `content` (that IS what the model saw) and records
+/// where the full output lives, so renders can point at it and indexers can read it.
 fn parse_block(item: &Value, span_field: Option<(&RawValue, &SpanCtx)>) -> Option<Block> {
-    match item.get("type").and_then(Value::as_str)? {
-        "text" => Some(Block::Text {
-            text: spanned_or_inline(item.get("text").and_then(Value::as_str)?, "text", span_field),
-        }),
-        "thinking" => Some(Block::Thinking {
-            text: spanned_or_inline(
-                item.get("thinking").and_then(Value::as_str).unwrap_or(""),
-                "thinking",
-                span_field,
-            ),
-            signature: item.get("signature").and_then(Value::as_str).map(str::to_string),
-            encrypted: None,
-            redacted: false,
-        }),
-        // Encrypted reasoning the API returns when thinking can't be shown in the clear. The plaintext
-        // is intentionally absent; stash the opaque blob in `encrypted` so it's not silently lost.
-        "redacted_thinking" => Some(Block::Thinking {
-            text: String::new().into(),
-            signature: None,
-            encrypted: item.get("data").and_then(Value::as_str).map(str::to_string),
-            redacted: true,
-        }),
-        "tool_use" => Some(Block::ToolUse {
-            id: item.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-            name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-            input: item.get("input").cloned().unwrap_or(Value::Null),
-            namespace: None,
-        }),
-        "tool_result" => {
-            let cv = item.get("content");
-            let coerced = coerce_text(cv);
-            // Span only when the raw content is a *plain JSON string* (then the span body unescapes
-            // back to exactly `coerced`); array/mixed content is transformed by `coerce_text`, so it
-            // can't be a verbatim slice — keep it inline.
-            let content = match span_field {
-                Some((raw, ctx)) if coerced.len() > INLINE_MAX && matches!(cv, Some(Value::String(_))) => {
-                    span_of_string_field(raw, "content", ctx)
-                        .inspect(|sp| debug_assert_span(sp, ctx, &coerced))
-                        .map(Text::Span)
-                        .unwrap_or_else(|| Text::Inline(coerced))
-                }
-                _ => Text::Inline(coerced),
-            };
-            // A persisted-output stub keeps the stub as `content` (that IS what the model saw) and
-            // records where the full output lives, so renders can point at it and indexers can read it.
-            let details = persisted_output(coerced_ref(&content, item))
-                .map(|(path, size)| serde_json::json!({ "persistedOutput": { "path": path, "size": size } }));
-            Some(Block::ToolResult {
-                tool_use_id: item
-                    .get("tool_use_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                content,
-                is_error: item.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                tool_name: None,
-                status: None,
-                details,
-            })
-        }
-        "image" => {
-            let source = item.get("source");
-            let media_type = source
-                .and_then(|s| s.get("media_type"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            // Sources come in three shapes: inline `base64` (we don't inline megabytes of pixels into
-            // the IR — record only the kind), a Files-API `file_id`, or a `url`. Keep a reference, not
-            // the bytes.
-            let data_ref = source.and_then(|s| match s.get("type").and_then(Value::as_str) {
-                Some("url") => s.get("url").and_then(Value::as_str).map(str::to_string),
-                Some("file") => s.get("file_id").and_then(Value::as_str).map(|id| format!("file:{id}")),
-                Some("base64") | None => s
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .map(|_| "base64:inline".to_string()),
-                Some(other) => Some(other.to_string()),
-            });
-            Some(Block::Image { media_type, data_ref })
-        }
-        // Some user turns embed a `document` block (PDF/text attachments); surface it as a File.
-        "document" => {
-            let source = item.get("source");
-            let mime = source
-                .and_then(|s| s.get("media_type"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let path = item.get("title").and_then(Value::as_str).map(str::to_string);
-            let data = source.and_then(|s| match s.get("type").and_then(Value::as_str) {
-                Some("url") => s.get("url").and_then(Value::as_str).map(str::to_string),
-                Some("file") => s.get("file_id").and_then(Value::as_str).map(|id| format!("file:{id}")),
-                _ => None,
-            });
-            Some(Block::File {
-                mime,
-                path,
-                source: data,
-            })
-        }
-        _ => None,
+    let mut block = anthropic::block_from_with(item, &anthropic::ANTHROPIC, &mut |s, field| {
+        spanned_or_inline(s, field, span_field)
+    })?;
+    if let Block::ToolResult { content, details, .. } = &mut block {
+        *details = persisted_output(coerced_ref(content, item))
+            .map(|(path, size)| serde_json::json!({ "persistedOutput": { "path": path, "size": size } }));
     }
+    Some(block)
 }
 
 /// Make a [`Text`] for a content string: a lazy [`Span`] into the source when large and a span is
@@ -1895,24 +1807,6 @@ fn debug_assert_span(sp: &Span, ctx: &SpanCtx, expected: &str) {
 }
 #[cfg(not(debug_assertions))]
 fn debug_assert_span(_: &Span, _: &SpanCtx, _: &str) {}
-
-/// Claude tool_result `content` is sometimes a string, sometimes `[{type:text,text}]`, and sometimes
-/// a mix of text and `image` blocks (e.g. a screenshot tool). We flatten to text, replacing image
-/// blocks with a placeholder so they aren't silently dropped from the searchable transcript.
-fn coerce_text(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|i| match i.get("type").and_then(Value::as_str) {
-                Some("image") => Some("[image]".to_string()),
-                _ => i.get("text").and_then(Value::as_str).map(str::to_string),
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
 
 fn parse_usage(v: &Value) -> Usage {
     let get = |k: &str| v.get(k).and_then(Value::as_u64);

@@ -37,6 +37,7 @@
 //! Harness-specific facts (rate limits, turn ids, the structured `item`, swarm routing) live in
 //! `extra["codex"]`, the only bag this adapter writes; images become `Block::Image` references.
 
+use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::lazy::{json_string_span, RawValue, Text};
@@ -1500,7 +1501,7 @@ fn handle_item(
                 return true;
             }
             // A message can mix text and images; emit one message carrying all blocks in order.
-            let blocks = content_blocks(p.get("content"));
+            let blocks = openai::blocks_from(p.get("content"), &openai::CODEX);
             if !blocks.is_empty() {
                 let mut m = match role {
                     "assistant" => Message::new(Role::Assistant),
@@ -1510,7 +1511,7 @@ fn handle_item(
                         Message::of_kind(Role::System, MessageKind::InjectedContext, Origin::Harness)
                     }
                     _ => {
-                        let text = join_text(p.get("content"));
+                        let text = text_parts(p.get("content"));
                         if is_injected_text(&text) {
                             Message::of_kind(Role::User, MessageKind::InjectedContext, Origin::Harness)
                         } else {
@@ -1530,8 +1531,8 @@ fn handle_item(
             // `summary` holds the user-visible reasoning summary; `content` (when present) holds the
             // raw chain-of-thought. Prefer raw content, fall back to summary. `encrypted_content`
             // carries the opaque replay blob.
-            let summary = join_text(p.get("summary"));
-            let raw = join_text(p.get("content"));
+            let summary = text_parts(p.get("summary"));
+            let raw = text_parts(p.get("content"));
             let text = if !raw.is_empty() { raw } else { summary.clone() };
             let encrypted = p.get("encrypted_content").and_then(Value::as_str).map(str::to_string);
             if !text.is_empty() || encrypted.is_some() {
@@ -1612,20 +1613,12 @@ fn handle_item(
                 ("local_shell".to_string(), Value::Object(obj))
             } else {
                 let name = str_field("name");
-                // Tool `arguments`/`input` arrive as JSON-encoded *strings*. Only treat the decode as
-                // structured when it yields an object/array; a bare scalar (e.g. the literal arg `"42"`
-                // or `"true"`) must stay a string, or we'd silently retype the call's payload.
-                let as_structured = |s: &str| -> Value {
-                    match serde_json::from_str::<Value>(s) {
-                        Ok(v @ Value::Object(_)) | Ok(v @ Value::Array(_)) => v,
-                        _ => Value::String(s.to_string()),
-                    }
-                };
+                // Tool `arguments`/`input` arrive as JSON-encoded *strings* (`custom_tool_call`'s
+                // `input` is freeform text).
                 let input = if let Some(args) = p.get("arguments").and_then(Value::as_str) {
-                    as_structured(args)
+                    openai::structured_arguments(args)
                 } else if let Some(input) = p.get("input").and_then(Value::as_str) {
-                    // custom_tool_call `input` is a freeform string.
-                    as_structured(input)
+                    openai::structured_arguments(input)
                 } else {
                     p.get("input").cloned().unwrap_or(Value::Null)
                 };
@@ -1772,81 +1765,6 @@ fn handle_item(
     true
 }
 
-/// Build IR content blocks from a `ContentItem[]` (or a bare string), preserving text + images.
-fn content_blocks(v: Option<&Value>) -> Vec<Block> {
-    match v {
-        Some(Value::String(s)) if !s.is_empty() => vec![Block::Text { text: s.clone().into() }],
-        Some(Value::Array(items)) => {
-            let mut out = Vec::new();
-            for it in items {
-                match it.get("type").and_then(Value::as_str) {
-                    Some("input_image") | Some("output_image") => {
-                        out.push(image_block(it));
-                    }
-                    // input_text / output_text / text / summary_text / reasoning_text
-                    _ => {
-                        if let Some(t) = it.get("text").and_then(Value::as_str) {
-                            if !t.is_empty() {
-                                out.push(Block::Text { text: t.into() });
-                            }
-                        }
-                    }
-                }
-            }
-            out
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// An `input_image`/`output_image` content item → [`Block::Image`]. We never inline the bytes: a
-/// `data:` URL becomes the marker `base64:inline`; an `http(s)`/`file:` URL is kept as a reference.
-fn image_block(it: &Value) -> Block {
-    let url = it
-        .get("image_url")
-        .and_then(Value::as_str)
-        .or_else(|| it.get("url").and_then(Value::as_str));
-    let media_type = url.and_then(|u| {
-        u.strip_prefix("data:")
-            .and_then(|rest| rest.split(';').next())
-            .filter(|m| m.contains('/'))
-            .map(str::to_string)
-    });
-    let data_ref = url.map(|u| {
-        if u.starts_with("data:") {
-            "base64:inline".to_string()
-        } else {
-            u.to_string()
-        }
-    });
-    Block::Image { media_type, data_ref }
-}
-
-/// Join the `text` fields of a `[{... text}]` array (used for reasoning summary/content).
-fn join_text(v: Option<&Value>) -> String {
-    v.and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
-}
-
-/// `content` is `[{type:input_text|output_text|text, text}]` or a plain string.
-fn coerce_content(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|i| i.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
 /// Coerce a tool-call `output` into text plus any image blocks. On the wire `output` is one of:
 /// a plain string; an object like `{output, metadata}` (legacy) or `{success, content}`; or an
 /// array of structured content items (`input_text`/`input_image`/`encrypted_content`).
@@ -1858,7 +1776,9 @@ fn coerce_output(v: Option<&Value>) -> (String, Vec<Block>) {
             let mut images = Vec::new();
             for it in items {
                 match it.get("type").and_then(Value::as_str) {
-                    Some("input_image") | Some("output_image") => images.push(image_block(it)),
+                    Some("input_image") | Some("output_image") => {
+                        images.extend(openai::part_to_block(it, &openai::CODEX))
+                    }
                     Some("encrypted_content") => {}
                     _ => {
                         if let Some(t) = it.get("text").and_then(Value::as_str) {
@@ -2003,7 +1923,7 @@ impl CodexScan {
                     self.message_count += 1;
                 }
                 if role == "user" {
-                    self.consider_title(&coerce_content(v.pointer("/payload/content")));
+                    self.consider_title(&text_parts(v.pointer("/payload/content")));
                 }
             }
             // A task handed to this thread by another agent is its prompt — the only one a
@@ -2050,7 +1970,7 @@ impl CodexScan {
                         self.message_count += 1;
                     }
                     if role == "user" {
-                        self.consider_title(&coerce_content(it.get("content")));
+                        self.consider_title(&text_parts(it.get("content")));
                     }
                 }
             }

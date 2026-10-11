@@ -25,6 +25,7 @@
 //!   are both handled: the raw `session_kind`/`agent_name` ride in `extra["grok"]`, and a subagent's
 //!   `agent_name` nickname also becomes [`Lineage::agent_path`] (Grok records no parent session id).
 
+use super::wire::{coerce_text, openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -272,7 +273,7 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let content = coerce_content(v.get("content"));
+        let content = coerce_text(v.get("content"));
         let e = enrich.get(&tool_use_id);
         let is_error = e.map(|e| e.is_error()).unwrap_or(false);
         let status = e.and_then(|e| e.status.clone());
@@ -325,7 +326,7 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
         m.model = Some(model.to_string());
     }
 
-    let text = coerce_content(v.get("content"));
+    let text = coerce_text(v.get("content"));
     if !text.is_empty() {
         m.content.push(Block::Text { text: text.into() });
     }
@@ -335,7 +336,7 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
         for c in calls {
             let id = c.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
             let name = c.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-            let input = parse_arguments(c.get("arguments"));
+            let input = openai::parse_arguments(c.get("arguments"));
             // Stash sidecar enrichment so nothing is lost (ir.rs has no field for it yet).
             if let Some(e) = enrich.get(&id) {
                 let mut info = serde_json::Map::new();
@@ -401,35 +402,12 @@ fn user_kind_origin(v: &Value) -> (MessageKind, Origin) {
         Some("compaction_meta") => (MessageKind::CompactionSummary, Origin::Harness),
         Some(_) => (MessageKind::InjectedContext, Origin::Harness),
         None => {
-            if coerce_content(v.get("content")).trim_start().starts_with("<user_info>") {
+            if coerce_text(v.get("content")).trim_start().starts_with("<user_info>") {
                 (MessageKind::InjectedContext, Origin::Harness)
             } else {
                 (MessageKind::Prompt, Origin::Human)
             }
         }
-    }
-}
-
-/// Tool-call `arguments` is a JSON-encoded *string*. Parse it into structured JSON when possible,
-/// otherwise keep the raw string (some tools historically stored a bare string).
-fn parse_arguments(v: Option<&Value>) -> Value {
-    match v {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
-        Some(other) => other.clone(),
-        None => Value::Null,
-    }
-}
-
-/// Grok `content` is a string (system/assistant/tool_result) or `[{type:text,text}]` (user).
-fn coerce_content(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|i| i.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
     }
 }
 
@@ -473,7 +451,7 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
                 message_count += 1;
             }
             if title.is_none() && ty == Some("user") {
-                let t = coerce_content(v.get("content"));
+                let t = text_parts(v.get("content"));
                 if !t.trim().is_empty() {
                     title = Some(crate::ir::truncate(&t, 80));
                 }
@@ -615,15 +593,6 @@ mod tests {
         let tc = &m.harness_extra(Harness::Grok).expect("grok bag")["tool_calls"]["call-9"];
         assert_eq!(tc["title"], "Search foo");
         assert_eq!(tc["kind"], "search");
-    }
-
-    #[test]
-    fn arguments_falls_back_to_raw_string_when_not_json() {
-        assert_eq!(
-            parse_arguments(Some(&Value::String("not json".into()))),
-            Value::String("not json".into())
-        );
-        assert_eq!(parse_arguments(None), Value::Null);
     }
 
     #[test]

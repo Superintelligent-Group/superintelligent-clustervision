@@ -110,6 +110,7 @@
 //! * `model` is reconstructed from `provider_name` + `model_config_json.model_name` when present.
 
 use super::store::sqlite::{columns, open_ro};
+use super::wire::anthropic;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -802,51 +803,11 @@ fn control_block_text(item: &Value) -> String {
     }
 }
 
+/// One content item → IR. The tool request/response pair is Goose's own (rmcp) shape; everything
+/// else — text, thinking, `redactedThinking`, image, `DocumentContent {data, mimeType, name?}`
+/// (message.rs:291-296, goose 1.4x) — is the Anthropic shape under Goose's keys.
 fn item_to_block(item: &Value, tool_names: &mut HashMap<String, String>) -> Option<Block> {
     match item.get("type").and_then(Value::as_str)? {
-        "text" => {
-            let text = item.get("text").and_then(Value::as_str)?.to_string();
-            Some(Block::Text { text: text.into() })
-        }
-        "image" => Some(Block::Image {
-            media_type: item.get("mimeType").and_then(Value::as_str).map(str::to_string),
-            data_ref: item
-                .get("data")
-                .and_then(Value::as_str)
-                .map(|d| crate::ir::truncate(d, 120)),
-        }),
-        "thinking" => Some(Block::Thinking {
-            text: item
-                .get("thinking")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-                .into(),
-            signature: item
-                .get("signature")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            encrypted: None,
-            redacted: false,
-        }),
-        "redactedThinking" => Some(Block::Thinking {
-            text: String::new().into(),
-            signature: None,
-            encrypted: item.get("data").and_then(Value::as_str).map(str::to_string),
-            redacted: true,
-        }),
-        // `DocumentContent {data, mimeType, name?}` (message.rs:291-296, goose 1.4x): an attached
-        // file (PDF, …) — like Claude's `document` block, a File carrying the name + mime, never the
-        // base64 bytes.
-        "document" => Some(Block::File {
-            mime: item.get("mimeType").and_then(Value::as_str).map(str::to_string),
-            path: item.get("name").and_then(Value::as_str).map(str::to_string),
-            source: item
-                .get("data")
-                .and_then(Value::as_str)
-                .map(|_| "base64:inline".to_string()),
-        }),
         "toolRequest" | "frontendToolRequest" => {
             let id = item.get("id").and_then(Value::as_str).unwrap_or("").to_string();
             let call = item.get("toolCall")?;
@@ -910,7 +871,7 @@ fn item_to_block(item: &Value, tool_names: &mut HashMap<String, String>) -> Opti
             })
         }
         // `error` and the control blocks are handled by `decode_content`; anything unknown is skipped.
-        _ => None,
+        _ => anthropic::block_from(item, &anthropic::GOOSE),
     }
 }
 

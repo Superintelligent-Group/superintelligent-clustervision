@@ -109,6 +109,7 @@
 
 #[cfg(feature = "sqlite")]
 use super::store::sqlite::open_ro;
+use super::wire::{anthropic, coerce_text, text_parts};
 use super::{parse_ts, ts_from_epoch, ts_from_value, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -506,7 +507,7 @@ fn parse_control_entry(v: &Value) -> Vec<Message> {
             Some(level) => format!("[thinking level: {level}]"),
             None => "[thinking level changed]".to_string(),
         },
-        _ => coerce_content_text(v.get("content")),
+        _ => coerce_text(v.get("content")),
     };
     if !text.is_empty() {
         m.content.push(Block::Text { text: text.into() });
@@ -684,7 +685,7 @@ impl ScanAcc {
                     self.updated_at = Some(ts);
                 }
                 if self.first_user.is_none() && v.pointer("/message/role").and_then(Value::as_str) == Some("user") {
-                    let t = coerce_content_text(v.pointer("/message/content"));
+                    let t = text_parts(v.pointer("/message/content"));
                     if !t.trim().is_empty() {
                         self.first_user = Some(crate::ir::truncate(&t, 80));
                     }
@@ -831,7 +832,7 @@ fn parse_tool_result(m: &mut Message, msg: &Value) {
     // block, where every harness puts them.
     m.content.push(Block::ToolResult {
         tool_use_id,
-        content: coerce_content_text(msg.get("content")).into(),
+        content: coerce_text(msg.get("content")).into(),
         is_error: msg.get("isError").and_then(Value::as_bool).unwrap_or(false),
         tool_name: msg.get("toolName").and_then(Value::as_str).map(str::to_string),
         status: None,
@@ -992,7 +993,7 @@ fn parse_compaction_summary(m: &mut Message, msg: &Value) {
 }
 
 fn parse_custom(m: &mut Message, msg: &Value) {
-    let text = coerce_content_text(msg.get("content"));
+    let text = coerce_text(msg.get("content"));
     if !text.is_empty() {
         m.content.push(Block::Text { text: text.into() });
     }
@@ -1005,58 +1006,20 @@ fn parse_custom(m: &mut Message, msg: &Value) {
     }
 }
 
+/// One `(TextContent|ThinkingContent|ToolCall|ImageContent)` item → IR: the Anthropic shape under
+/// OpenClaw's keys; `redacted` flags a server-redacted reasoning block.
 fn content_block(item: &Value) -> Option<Block> {
-    match item.get("type").and_then(Value::as_str)? {
-        "text" => Some(Block::Text {
-            text: item.get("text").and_then(Value::as_str)?.to_string().into(),
-        }),
-        "thinking" => Some(Block::Thinking {
-            text: item
-                .get("thinking")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-                .into(),
-            // OpenClaw uses `thinkingSignature`; `redacted` flags a server-redacted reasoning block.
-            signature: item
-                .get("thinkingSignature")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            encrypted: item
-                .get("redacted")
-                .and_then(Value::as_bool)
-                .filter(|&r| r)
-                .map(|_| "redacted".to_string()),
-            redacted: item.get("redacted").and_then(Value::as_bool).unwrap_or(false),
-        }),
-        "toolCall" => Some(Block::ToolUse {
-            id: item.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-            name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-            input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            namespace: None,
-        }),
-        "image" => Some(Block::Image {
-            media_type: item.get("mimeType").and_then(Value::as_str).map(str::to_string),
-            data_ref: item
-                .get("data")
-                .and_then(Value::as_str)
-                .map(|d| crate::ir::truncate(d, 80)),
-        }),
-        _ => None,
+    let mut b = anthropic::block_from(item, &anthropic::OPENCLAW)?;
+    if let Block::Thinking {
+        encrypted, redacted, ..
+    } = &mut b
+    {
+        if item.get("redacted").and_then(Value::as_bool).unwrap_or(false) {
+            *redacted = true;
+            *encrypted = Some("redacted".to_string());
+        }
     }
-}
-
-/// Coerce a `content` field (string | array of text/image blocks) to plain text.
-fn coerce_content_text(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|i| i.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
+    Some(b)
 }
 
 /// camelCase → snake_case for `extra` keys (ASCII only; OpenClaw keys are all ASCII).

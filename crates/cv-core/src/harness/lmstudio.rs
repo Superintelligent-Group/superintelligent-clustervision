@@ -553,7 +553,7 @@ fn chat_title(v: &Value) -> Option<String> {
     for msg in messages {
         let version = selected_version(msg)?;
         if version.get("role").and_then(Value::as_str) == Some("user") {
-            let t = collect_text_parts(version.get("content"));
+            let t = super::wire::text_parts(version.get("content"));
             if !t.trim().is_empty() {
                 return Some(crate::ir::truncate(&t, 80));
             }
@@ -780,20 +780,6 @@ fn push_file(m: &mut Message, part: &Value) {
             path: name,
             source: data_ref,
         });
-    }
-}
-
-/// Concatenate `{type:"text"}` parts of a `content` value into a single string (for titles).
-fn collect_text_parts(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
     }
 }
 

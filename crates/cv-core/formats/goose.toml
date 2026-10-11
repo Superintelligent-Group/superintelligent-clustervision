@@ -4,7 +4,7 @@
 # (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
 
 harness = "goose"
-source_files = ["harness/goose.rs"]
+source_files = ["harness/goose.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
 ignore_literals = ["NULL", "binary", "other", "goose"]
 store = [
   "~/.local/share/goose/sessions/sessions.db (Linux)",

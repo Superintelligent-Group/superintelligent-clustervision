@@ -16,6 +16,7 @@
 //! `$CV_EXPORTS` (`:`-separated dirs/files), scanned for `conversations*.json`. With nothing
 //! registered no scan happens (see [`export_dirs`]).
 
+use super::wire::anthropic;
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
 use anyhow::{Context, Result};
@@ -447,65 +448,40 @@ fn claude_messages(conv: &Value) -> Vec<Message> {
         .collect()
 }
 
-/// A Claude.ai message's `content[]` blocks → IR blocks (text/thinking/tool_use/tool_result), with the
-/// flat `text` field as a fallback when there are no structured blocks.
+/// A Claude.ai message's `content[]` blocks → IR blocks (the Anthropic shape, empty text dropped;
+/// a `tool_result` may carry its text under `text`), with the flat `text` field as a fallback when
+/// there are no structured blocks.
 fn claude_content_blocks(m: &Value) -> Vec<Block> {
-    let mut out = Vec::new();
-    if let Some(blocks) = m.get("content").and_then(Value::as_array) {
-        for b in blocks {
-            match b.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(t) = b.get("text").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                        out.push(Block::Text { text: t.into() });
+    let mut out: Vec<Block> = m
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| {
+                    let mut block = anthropic::block_from(b, &anthropic::CLAUDE_AI)?;
+                    // The export spells some thinking and tool-result text under `text`.
+                    match &mut block {
+                        Block::ToolResult { content, .. } | Block::Thinking { text: content, .. }
+                            if content.is_empty() =>
+                        {
+                            if let Some(t) = b.get("text").and_then(Value::as_str) {
+                                *content = t.into();
+                            }
+                        }
+                        _ => {}
                     }
-                }
-                Some("thinking") => {
-                    if let Some(t) = b.get("thinking").or_else(|| b.get("text")).and_then(Value::as_str) {
-                        out.push(Block::Thinking {
-                            text: t.into(),
-                            signature: None,
-                            encrypted: None,
-                            redacted: false,
-                        });
-                    }
-                }
-                Some("tool_use") => out.push(Block::ToolUse {
-                    id: b.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                    name: b.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                    input: b.get("input").cloned().unwrap_or(Value::Null),
-                    namespace: None,
-                }),
-                Some("tool_result") => out.push(Block::ToolResult {
-                    tool_use_id: b.get("tool_use_id").and_then(Value::as_str).unwrap_or("").to_string(),
-                    content: claude_tool_result_text(b).into(),
-                    is_error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                    tool_name: None,
-                    status: None,
-                    details: None,
-                }),
-                _ => {}
-            }
-        }
-    }
-    // Fallback to the flattened `text` field if no structured blocks produced content.
+                    Some(block)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     if out.is_empty() {
         if let Some(t) = m.get("text").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             out.push(Block::Text { text: t.into() });
         }
     }
     out
-}
-
-fn claude_tool_result_text(b: &Value) -> String {
-    match b.get("content") {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(|x| x.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => b.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
-    }
 }
 
 #[cfg(test)]

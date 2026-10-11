@@ -41,6 +41,7 @@
 //! namespace (`rooveterinaryinc.roo-cline` / `rooveterinaryinc.roo-code`) and `~/.roo/`. The real
 //! parsing lives here as `pub` helpers; `roo.rs` reuses them with Roo's paths + `Harness::Roo`.
 
+use super::wire::{anthropic, text_parts};
 use super::Adapter;
 use crate::ir::*;
 use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
@@ -201,7 +202,7 @@ fn scan(dir: &Path, id: &str, harness: Harness) -> Option<SessionRef> {
             message_count += 1;
         }
         if role == "user" {
-            let text = content_plain_text(m.get("content"));
+            let text = text_parts(m.get("content"));
             if cwd.is_none() {
                 cwd = extract_cwd(&text);
             }
@@ -434,7 +435,7 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
         Some(Value::String(s)) => blocks.push(Block::Text { text: s.clone().into() }),
         Some(Value::Array(items)) => {
             for it in items {
-                if let Some(b) = parse_block(it) {
+                if let Some(b) = anthropic::block_from(it, &anthropic::ANTHROPIC) {
                     blocks.push(b);
                 }
             }
@@ -499,100 +500,6 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
         }
     }
     Some(m)
-}
-
-/// One Anthropic content block → IR `Block`. Mirrors `claude.rs::parse_block`.
-fn parse_block(item: &Value) -> Option<Block> {
-    match item.get("type").and_then(Value::as_str)? {
-        "text" => Some(Block::Text {
-            text: item.get("text").and_then(Value::as_str)?.to_string().into(),
-        }),
-        "thinking" => Some(Block::Thinking {
-            text: item
-                .get("thinking")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-                .into(),
-            signature: item.get("signature").and_then(Value::as_str).map(str::to_string),
-            encrypted: None,
-            redacted: false,
-        }),
-        "redacted_thinking" => Some(Block::Thinking {
-            text: String::new().into(),
-            signature: None,
-            encrypted: item.get("data").and_then(Value::as_str).map(str::to_string),
-            redacted: true,
-        }),
-        "tool_use" => Some(Block::ToolUse {
-            id: item.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-            name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-            input: item.get("input").cloned().unwrap_or(Value::Null),
-            namespace: None,
-        }),
-        "tool_result" => Some(Block::ToolResult {
-            tool_use_id: item
-                .get("tool_use_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            content: coerce_text(item.get("content")).into(),
-            is_error: item.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-            tool_name: None,
-            status: None,
-            details: None,
-        }),
-        "image" => {
-            let source = item.get("source");
-            let media_type = source
-                .and_then(|s| s.get("media_type"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let data_ref = source.and_then(|s| match s.get("type").and_then(Value::as_str) {
-                Some("url") => s.get("url").and_then(Value::as_str).map(str::to_string),
-                Some("base64") | None => s
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .map(|_| "base64:inline".to_string()),
-                Some(other) => Some(other.to_string()),
-            });
-            Some(Block::Image { media_type, data_ref })
-        }
-        _ => None,
-    }
-}
-
-/// tool_result `content` is a string or `[{type:text,text}|{type:image,…}]`. Flatten to text,
-/// replacing images with a placeholder. Mirrors `claude.rs::coerce_text`.
-fn coerce_text(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|i| match i.get("type").and_then(Value::as_str) {
-                Some("image") => Some("[image]".to_string()),
-                _ => i.get("text").and_then(Value::as_str).map(str::to_string),
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
-/// Plain concatenated text of a message's text blocks (for cwd/title sniffing in `scan`).
-fn content_plain_text(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|i| match i.get("type").and_then(Value::as_str) {
-                Some("text") | None => i.get("text").and_then(Value::as_str).map(str::to_string),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,7 +568,7 @@ pub fn emit_with_harness(
                 } else {
                     None
                 };
-                let mut blocks = emit_blocks(&msg.content);
+                let mut blocks = anthropic::user_blocks(&msg.content, &anthropic::ANTHROPIC);
                 if let Some(cwd) = inject {
                     // Prepend a <task> title block (when we have one) so titles round-trip, then
                     // append the environment_details so cwd extraction finds it.
@@ -680,7 +587,7 @@ pub fn emit_with_harness(
             Role::Assistant => {
                 history.push(json!({
                     "role": "assistant",
-                    "content": Value::Array(emit_blocks(&msg.content)),
+                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)),
                 }));
             }
             Role::Tool => {
@@ -688,13 +595,13 @@ pub fn emit_with_harness(
                 // reclassifies it back to Role::Tool.
                 history.push(json!({
                     "role": "user",
-                    "content": Value::Array(emit_tool_result_blocks(&msg.content)),
+                    "content": Value::Array(anthropic::tool_result_blocks(&msg.content)),
                 }));
             }
             Role::System => {
                 history.push(json!({
                     "role": "system",
-                    "content": Value::Array(emit_blocks(&msg.content)),
+                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)),
                 }));
             }
         }
@@ -749,91 +656,6 @@ pub fn emit_with_harness(
         new_id,
         resume_hint: Some(resume),
     })
-}
-
-/// Map IR blocks → Anthropic content blocks, exactly as [`parse_block`] reads them. Tool results
-/// are skipped here (they live on their own [`Role::Tool`] turn via [`emit_tool_result_blocks`]).
-fn emit_blocks(content: &[Block]) -> Vec<Value> {
-    let mut out = Vec::new();
-    for b in content {
-        match b {
-            Block::Text { text } => out.push(json!({ "type": "text", "text": text })),
-            Block::Thinking {
-                text,
-                signature,
-                encrypted,
-                redacted,
-            } => {
-                if *redacted {
-                    let mut m = Map::new();
-                    m.insert("type".into(), json!("redacted_thinking"));
-                    if let Some(enc) = encrypted {
-                        m.insert("data".into(), json!(enc));
-                    }
-                    out.push(Value::Object(m));
-                } else {
-                    let mut m = Map::new();
-                    m.insert("type".into(), json!("thinking"));
-                    m.insert("thinking".into(), json!(text));
-                    if let Some(sig) = signature {
-                        m.insert("signature".into(), json!(sig));
-                    }
-                    out.push(Value::Object(m));
-                }
-            }
-            Block::ToolUse { id, name, input, .. } => out.push(json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            })),
-            Block::Image { media_type, data_ref } => {
-                let mut source = Map::new();
-                if let Some(mt) = media_type {
-                    source.insert("media_type".into(), json!(mt));
-                }
-                match data_ref.as_deref() {
-                    Some("base64:inline") | None => {
-                        source.insert("type".into(), json!("base64"));
-                    }
-                    Some(r) => {
-                        source.insert("type".into(), json!("url"));
-                        source.insert("url".into(), json!(r));
-                    }
-                }
-                out.push(json!({ "type": "image", "source": Value::Object(source) }));
-            }
-            Block::File { path, source, .. } => {
-                let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
-                out.push(json!({ "type": "text", "text": format!("[file: {label}]") }));
-            }
-            // Tool results don't belong on a non-Tool turn; emitted separately.
-            Block::ToolResult { .. } => {}
-        }
-    }
-    out
-}
-
-/// Map a [`Role::Tool`] turn's blocks → `tool_result` content blocks the parser pairs by id.
-fn emit_tool_result_blocks(content: &[Block]) -> Vec<Value> {
-    let mut out = Vec::new();
-    for b in content {
-        if let Block::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-            ..
-        } = b
-        {
-            out.push(json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": content,
-                "is_error": is_error,
-            }));
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------

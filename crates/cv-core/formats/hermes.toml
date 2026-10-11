@@ -4,7 +4,7 @@
 # (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
 
 harness = "hermes"
-source_files = ["harness/hermes.rs"]
+source_files = ["harness/hermes.rs", "harness/wire/openai.rs", "harness/wire/mod.rs"]
 ignore_literals = []
 store = [
   "$HERMES_HOME/state.db (default ~/.hermes)",
@@ -55,8 +55,8 @@ date = "2026-09-19"
 "column.display_name" = { status = "handled", note = "" }
 "column.tool_names" = { status = "ignored", note = "" }
 'content.\x00json:' = { status = "generic", note = "multimodal sentinel" }
-"part.input_text" = { status = "handled", note = "" }
-"part.output_text" = { status = "handled", note = "" }
+"part.input_text" = { status = "generic", note = "any part with `text` is text (wire::openai)" }
+"part.output_text" = { status = "generic", note = "any part with `text` is text (wire::openai)" }
 "part.input_image" = { status = "handled", note = "" }
 "part.image_url" = { status = "handled", note = "" }
 "reasoning.reasoning.summary" = { status = "handled", note = "codex reasoning items" }

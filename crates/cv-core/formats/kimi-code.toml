@@ -4,7 +4,7 @@
 # (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
 
 harness = "kimi-code"
-source_files = ["harness/kimi_code.rs"]
+source_files = ["harness/kimi_code.rs", "harness/wire/openai.rs", "harness/wire/mod.rs"]
 ignore_literals = ["wire.jsonl", "session_index.jsonl", "tool-results"]
 store = [
   "$KIMI_CODE_HOME or ~/.kimi-code/sessions/wd_<slug>_<sha256[:12]>/session_<uuid>/agents/<id>/wire.jsonl",

@@ -53,6 +53,7 @@
 //!   first-class [`Lineage::parent`]; the `Compaction` summary becomes a `CompactionSummary` turn.
 
 use super::store::sqlite::{columns, open_ro};
+use super::wire::anthropic;
 use super::Adapter;
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -479,7 +480,7 @@ fn legacy_message(m: &Value, tool_names: &mut HashMap<String, String>, f: &mut d
     // segments[] (0.1.0+) or a plain `text` field (the oldest, versionless shape).
     if let Some(segments) = m.get("segments").and_then(Value::as_array) {
         for seg in segments {
-            if let Some(b) = segment_to_block(seg) {
+            if let Some(b) = anthropic::block_from(seg, &anthropic::ZED) {
                 msg.content.push(b);
             }
         }
@@ -552,33 +553,6 @@ fn legacy_message(m: &Value, tool_names: &mut HashMap<String, String>, f: &mut d
         return f(tm);
     }
     Flow::Continue
-}
-
-fn segment_to_block(seg: &Value) -> Option<Block> {
-    match seg.get("type").and_then(Value::as_str)? {
-        "text" => {
-            let text = seg.get("text").and_then(Value::as_str)?.to_string();
-            (!text.is_empty()).then(|| Block::Text { text: text.into() })
-        }
-        "thinking" => Some(Block::Thinking {
-            text: seg.get("text").and_then(Value::as_str).unwrap_or("").to_string().into(),
-            signature: seg
-                .get("signature")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            encrypted: None,
-            redacted: false,
-        }),
-        // serde tag without a rename ⇒ the variant name itself.
-        "RedactedThinking" => Some(Block::Thinking {
-            text: String::new().into(),
-            signature: None,
-            encrypted: seg.get("data").and_then(Value::as_str).map(str::to_string),
-            redacted: true,
-        }),
-        _ => None,
-    }
 }
 
 /// One legacy/modern tool result → a [`Block::ToolResult`]. The legacy shape has no `tool_name`;

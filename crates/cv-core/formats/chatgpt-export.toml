@@ -4,7 +4,7 @@
 # (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
 
 harness = "chatgpt-export"
-source_files = ["harness/export.rs"]
+source_files = ["harness/export.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
 # `human` is claude-export vocabulary; harness/export.rs serves both export harnesses.
 ignore_literals = ["conversations.json", "human"]
 store = [

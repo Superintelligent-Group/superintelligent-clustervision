@@ -62,6 +62,7 @@
 //! `extra["hermes"]["session"]`.
 
 use super::store::sqlite::{columns, open_ro, table_exists};
+use super::wire::openai;
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -1127,7 +1128,12 @@ impl MsgRow {
 fn decode_content(raw: &str) -> Vec<Block> {
     if let Some(rest) = raw.strip_prefix(MULTIMODAL_SENTINEL) {
         match serde_json::from_str::<Value>(rest) {
-            Ok(Value::Array(items)) => return items.iter().filter_map(part_to_block).collect(),
+            Ok(Value::Array(items)) => {
+                return items
+                    .iter()
+                    .filter_map(|p| openai::part_to_block(p, &openai::HERMES))
+                    .collect()
+            }
             // Dict-shaped content (provider wrappers, e.g. {"parts":[…]}). Best-effort: pull any
             // string fields out; otherwise stash nothing and fall through to the empty case.
             Ok(Value::Object(map)) => {
@@ -1153,13 +1159,7 @@ fn object_content_to_blocks(map: &serde_json::Map<String, Value>) -> Option<Vec<
     if let Some(Value::Array(parts)) = map.get("parts") {
         let blocks: Vec<Block> = parts
             .iter()
-            .filter_map(|p| {
-                part_to_block(p).or_else(|| {
-                    p.get("text").and_then(Value::as_str).map(|t| Block::Text {
-                        text: t.to_string().into(),
-                    })
-                })
-            })
+            .filter_map(|p| openai::part_to_block(p, &openai::HERMES))
             .collect();
         if !blocks.is_empty() {
             return Some(blocks);
@@ -1168,55 +1168,9 @@ fn object_content_to_blocks(map: &serde_json::Map<String, Value>) -> Option<Vec<
     None
 }
 
-fn part_to_block(part: &Value) -> Option<Block> {
-    match part.get("type").and_then(Value::as_str)? {
-        // OpenAI chat (`text`) and Responses (`input_text`/`output_text`) text parts.
-        "text" | "input_text" | "output_text" => Some(Block::Text {
-            text: part.get("text").and_then(Value::as_str)?.to_string().into(),
-        }),
-        // `image_url` parts hold either `{image_url:{url}}` or, for `input_image`, `{image_url:"…"}`.
-        "image_url" | "input_image" => {
-            let url = part
-                .pointer("/image_url/url")
-                .and_then(Value::as_str)
-                .or_else(|| part.get("image_url").and_then(Value::as_str));
-            Some(Block::Image {
-                media_type: None,
-                data_ref: url.map(|u| crate::ir::truncate(u, 120)),
-            })
-        }
-        _ => None,
-    }
-}
-
 /// Hermes `tool_calls` is an OpenAI-shaped array: `[{id,type,function:{name,arguments}}]`.
 fn parse_tool_calls(raw: &str) -> Vec<Block> {
-    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) else {
-        return vec![];
-    };
-    items
-        .iter()
-        .map(|tc| {
-            let id = tc.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-            let name = tc
-                .pointer("/function/name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let input = tc
-                .pointer("/function/arguments")
-                .and_then(Value::as_str)
-                .and_then(|a| serde_json::from_str::<Value>(a).ok())
-                .or_else(|| tc.pointer("/function/arguments").cloned())
-                .unwrap_or(Value::Null);
-            Block::ToolUse {
-                id,
-                name,
-                input,
-                namespace: None,
-            }
-        })
-        .collect()
+    openai::tool_calls(serde_json::from_str::<Value>(raw).ok().as_ref())
 }
 
 /// `reasoning_details` is an OpenRouter-unified array. Each item may carry summary/thinking text

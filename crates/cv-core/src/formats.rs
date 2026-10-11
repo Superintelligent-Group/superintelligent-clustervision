@@ -15,8 +15,9 @@
 //!    `ignored` (known and deliberately skipped). The manifest is the human-readable spec the
 //!    adapter is checked against; `docs/FORMATS.md` stays the prose.
 //! 2. **[`check`]** — source vs manifest, both directions: every `handled` type must appear as a
-//!    string literal in the adapter's source, and every type-like literal in the adapter's match
-//!    arms must be in the manifest (or its explicit `ignore_literals`). Runs as an integration test
+//!    string literal in the adapter's source (or the shared `harness/wire/` codec it names), and
+//!    every type-like literal in the adapter's own match arms must be in the manifest (or its
+//!    explicit `ignore_literals`). Runs as an integration test
 //!    (`tests/formats_manifest.rs`) on a source tree.
 //!
 //! 3. **[`census`]** — real data vs manifest: parse the N most recent sessions per harness in
@@ -305,6 +306,11 @@ pub fn key_candidates(key: &str) -> Vec<String> {
     v
 }
 
+/// A source file under `harness/wire/`: the shared Anthropic/OpenAI codecs (see [`check`]).
+fn is_shared_codec(file: &str) -> bool {
+    file.starts_with("harness/wire/")
+}
+
 /// A `table.` / `column.` key: a SQL identifier, matched as a bare word (see the module docs).
 fn is_sql_key(key: &str) -> bool {
     key.starts_with("table.") || key.starts_with("column.")
@@ -368,8 +374,11 @@ pub fn check(m: &Manifest, sources: &[(String, String)]) -> Vec<Finding> {
             });
         }
     }
-    // 2. every match-arm literal ⇒ known to the manifest, by the same rule the census uses.
-    for (file, text) in sources {
+    // 2. every match-arm literal ⇒ known to the manifest, by the same rule the census uses. A
+    //    shared wire codec (`harness/wire/`) carries every dialect's spellings at once, so it
+    //    answers direction 1 for each manifest that reads through it but is not one harness's
+    //    vocabulary: its literals are not required in every such manifest.
+    for (file, text) in sources.iter().filter(|(f, _)| !is_shared_codec(f)) {
         for lit in type_literals(text) {
             if m.lookup(&lit).is_none() && !m.ignore_literals.contains(&lit) {
                 findings.push(Finding {

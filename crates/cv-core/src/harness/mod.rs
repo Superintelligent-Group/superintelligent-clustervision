@@ -39,6 +39,7 @@ pub mod opensession;
 pub mod qwen;
 pub mod roo;
 pub mod store;
+pub mod wire;
 #[cfg(feature = "sqlite")]
 pub mod zed;
 

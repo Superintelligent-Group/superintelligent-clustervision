@@ -1,0 +1,471 @@
+//! The Anthropic Messages content shape — `text | thinking | redacted_thinking | tool_use |
+//! tool_result | image | document` — read into [`Block`]s and written back. Claude Code and Cline
+//! persist it verbatim; the claude.ai export, OpenClaw, Goose and Zed's legacy threads renamed a
+//! key or two, which a [`Quirks`] constant names so the adapter does not re-type the shape.
+
+use super::{coerce_text, str_field};
+use crate::ir::Block;
+use crate::lazy::Text;
+use serde_json::{json, Map, Value};
+
+/// How a store spells the shape. Every field is the Anthropic spelling in [`ANTHROPIC`].
+#[derive(Debug, Clone, Copy)]
+pub struct Quirks {
+    /// The tool-invocation block's `type` and its input key: `("tool_use", "input")`; OpenClaw
+    /// `("toolCall", "arguments")`.
+    pub tool_use: (&'static str, &'static str),
+    /// The thinking block's text key and signature key: `("thinking", "signature")`; OpenClaw
+    /// `("thinking", "thinkingSignature")`; Zed `("text", "signature")`.
+    pub thinking: (&'static str, &'static str),
+    /// The redacted-thinking block's `type`: `redacted_thinking`; Goose `redactedThinking`; Zed
+    /// `RedactedThinking`. `None` for a store without one — on the way out a redacted block is then
+    /// written as a plain thinking block.
+    pub redacted_thinking: Option<&'static str>,
+    /// An image's or document's payload: Anthropic's `source {type, media_type, data|url|file_id}`
+    /// object (`None`), or flat `mimeType`/`data`/`name` fields with `data` kept as a reference
+    /// truncated to this many chars (OpenClaw 80, Goose 120).
+    pub flat_media: Option<usize>,
+    /// Drop a `text` block whose text is empty rather than keep it (Zed, the claude.ai export).
+    pub skip_empty_text: bool,
+    /// An empty signature string means no signature (Goose, Zed), not a present-but-empty one.
+    pub empty_signature_is_none: bool,
+}
+
+/// The shape as Anthropic defines it: Claude Code, Cline, Roo.
+pub const ANTHROPIC: Quirks = Quirks {
+    tool_use: ("tool_use", "input"),
+    thinking: ("thinking", "signature"),
+    redacted_thinking: Some("redacted_thinking"),
+    flat_media: None,
+    skip_empty_text: false,
+    empty_signature_is_none: false,
+};
+/// The claude.ai account export: Anthropic's shape with empty text blocks dropped.
+pub const CLAUDE_AI: Quirks = Quirks {
+    skip_empty_text: true,
+    ..ANTHROPIC
+};
+/// OpenClaw: `toolCall`/`arguments`, `thinkingSignature`, flat `mimeType`/`data` images.
+pub const OPENCLAW: Quirks = Quirks {
+    tool_use: ("toolCall", "arguments"),
+    thinking: ("thinking", "thinkingSignature"),
+    redacted_thinking: None,
+    flat_media: Some(80),
+    ..ANTHROPIC
+};
+/// Goose: `redactedThinking`, flat `mimeType`/`data`/`name` media, empty signatures absent.
+pub const GOOSE: Quirks = Quirks {
+    redacted_thinking: Some("redactedThinking"),
+    flat_media: Some(120),
+    empty_signature_is_none: true,
+    ..ANTHROPIC
+};
+/// Zed's legacy (0.1.0) thread segments: thinking text under `text`, serde-tagged `RedactedThinking`.
+pub const ZED: Quirks = Quirks {
+    thinking: ("text", "signature"),
+    redacted_thinking: Some("RedactedThinking"),
+    skip_empty_text: true,
+    empty_signature_is_none: true,
+    ..ANTHROPIC
+};
+
+/// A content string's [`Text`], given the string and the key it came from. The default makes an
+/// inline copy; Claude's lazy reader supplies one that spans the source bytes instead.
+pub type Texter<'a> = &'a mut dyn FnMut(&str, &'static str) -> Text;
+
+/// One content block → one [`Block`]; `None` for a type the IR has no home for.
+pub fn block_from(item: &Value, q: &Quirks) -> Option<Block> {
+    block_from_with(item, q, &mut |s, _| Text::Inline(s.to_string()))
+}
+
+/// [`block_from`] with the caller choosing how each content string becomes a [`Text`]: `text` is
+/// called with the string and its key (`text`, `thinking`, `content`) for every field a span could
+/// replace — a tool result's `content` only when it is a plain string (array content is coerced and
+/// can never be a verbatim slice).
+pub fn block_from_with(item: &Value, q: &Quirks, text: Texter<'_>) -> Option<Block> {
+    let ty = item.get("type").and_then(Value::as_str)?;
+    if ty == "text" {
+        let s = item.get("text").and_then(Value::as_str)?;
+        if q.skip_empty_text && s.is_empty() {
+            return None;
+        }
+        return Some(Block::Text { text: text(s, "text") });
+    }
+    if ty == "thinking" {
+        let (text_key, sig_key) = q.thinking;
+        let s = item.get(text_key).and_then(Value::as_str).unwrap_or("");
+        let signature = item
+            .get(sig_key)
+            .and_then(Value::as_str)
+            .filter(|s| !(q.empty_signature_is_none && s.is_empty()))
+            .map(str::to_string);
+        return Some(Block::Thinking {
+            text: text(s, text_key),
+            signature,
+            encrypted: None,
+            redacted: false,
+        });
+    }
+    // Encrypted reasoning the API returns when thinking can't be shown in the clear. The plaintext
+    // is intentionally absent; the opaque blob rides in `encrypted` so it is not silently lost.
+    if Some(ty) == q.redacted_thinking {
+        return Some(Block::Thinking {
+            text: String::new().into(),
+            signature: None,
+            encrypted: item.get("data").and_then(Value::as_str).map(str::to_string),
+            redacted: true,
+        });
+    }
+    if ty == q.tool_use.0 {
+        return Some(Block::ToolUse {
+            id: str_field(item, "id"),
+            name: str_field(item, "name"),
+            input: item.get(q.tool_use.1).cloned().unwrap_or(Value::Null),
+            namespace: None,
+        });
+    }
+    match ty {
+        "tool_result" => {
+            let cv = item.get("content");
+            let content = match cv {
+                Some(Value::String(s)) => text(s, "content"),
+                _ => Text::Inline(coerce_text(cv)),
+            };
+            Some(Block::ToolResult {
+                tool_use_id: str_field(item, "tool_use_id"),
+                content,
+                is_error: item.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                tool_name: None,
+                status: None,
+                details: None,
+            })
+        }
+        "image" => Some(image_from(item, q)),
+        // A `document` block (PDF/text attachments on user turns) is a File.
+        "document" => Some(document_from(item, q)),
+        _ => None,
+    }
+}
+
+/// Every block of a `content` array; a bare string is one text block. (Claude's lazy reader spans
+/// the bare-string case itself, so it walks the array with [`block_from_with`] instead.)
+pub fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
+    match content {
+        Some(Value::String(s)) => vec![Block::Text { text: s.clone().into() }],
+        Some(Value::Array(items)) => items.iter().filter_map(|i| block_from(i, q)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `source {type, media_type, …}` → (media type, reference). The IR never inlines image bytes: a
+/// `base64` source is recorded only as the marker `base64:inline`, a Files-API id as `file:<id>`,
+/// a URL as itself.
+fn source_ref(source: Option<&Value>, base64_marker: bool) -> (Option<String>, Option<String>) {
+    let media_type = source
+        .and_then(|s| s.get("media_type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let data_ref = source.and_then(|s| match s.get("type").and_then(Value::as_str) {
+        Some("url") => s.get("url").and_then(Value::as_str).map(str::to_string),
+        Some("file") => s.get("file_id").and_then(Value::as_str).map(|id| format!("file:{id}")),
+        Some("base64") | None if base64_marker => s
+            .get("data")
+            .and_then(Value::as_str)
+            .map(|_| "base64:inline".to_string()),
+        Some(other) if base64_marker => Some(other.to_string()),
+        _ => None,
+    });
+    (media_type, data_ref)
+}
+
+fn image_from(item: &Value, q: &Quirks) -> Block {
+    match q.flat_media {
+        Some(n) => Block::Image {
+            media_type: item.get("mimeType").and_then(Value::as_str).map(str::to_string),
+            data_ref: item
+                .get("data")
+                .and_then(Value::as_str)
+                .map(|d| crate::ir::truncate(d, n)),
+        },
+        None => {
+            let (media_type, data_ref) = source_ref(item.get("source"), true);
+            Block::Image { media_type, data_ref }
+        }
+    }
+}
+
+fn document_from(item: &Value, q: &Quirks) -> Block {
+    match q.flat_media {
+        Some(_) => Block::File {
+            mime: item.get("mimeType").and_then(Value::as_str).map(str::to_string),
+            path: item.get("name").and_then(Value::as_str).map(str::to_string),
+            source: item
+                .get("data")
+                .and_then(Value::as_str)
+                .map(|_| "base64:inline".to_string()),
+        },
+        None => {
+            let (mime, source) = source_ref(item.get("source"), false);
+            Block::File {
+                mime,
+                path: item.get("title").and_then(Value::as_str).map(str::to_string),
+                source,
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// writing
+// ------------------------------------------------------------------------------------------------
+
+/// An assistant turn's blocks as content: text, thinking (redacted as the store's redacted block,
+/// or a plain one when it has none), tool invocations, images; a [`Block::File`] becomes a
+/// `[file: …]` text marker (documents are a user-turn shape); tool results are skipped (they go
+/// on the Tool turn via [`tool_result_blocks`]).
+pub fn assistant_blocks(content: &[Block], q: &Quirks) -> Vec<Value> {
+    content.iter().filter_map(|b| block_to(b, q, false)).collect()
+}
+
+/// A user turn's blocks as content: text and images natively, a [`Block::File`] as the
+/// `document` attachment the reader turns back into a File (stores with flat media get the text
+/// marker), a stray tool result (mixed user content) as a `tool_result` block; thinking and tool
+/// invocations do not occur on user turns but map to their native shapes rather than vanishing.
+pub fn user_blocks(content: &[Block], q: &Quirks) -> Vec<Value> {
+    content.iter().filter_map(|b| block_to(b, q, true)).collect()
+}
+
+/// A Tool turn's results as `tool_result` blocks the reader pairs by id.
+pub fn tool_result_blocks(content: &[Block]) -> Vec<Value> {
+    content
+        .iter()
+        .filter(|b| matches!(b, Block::ToolResult { .. }))
+        .filter_map(|b| block_to(b, &ANTHROPIC, true))
+        .collect()
+}
+
+fn block_to(b: &Block, q: &Quirks, user: bool) -> Option<Value> {
+    Some(match b {
+        Block::Text { text } => json!({ "type": "text", "text": text }),
+        Block::Thinking {
+            text,
+            signature,
+            encrypted,
+            redacted,
+        } => {
+            let mut m = Map::new();
+            match q.redacted_thinking {
+                Some(rt) if *redacted => {
+                    m.insert("type".into(), json!(rt));
+                    if let Some(enc) = encrypted {
+                        m.insert("data".into(), json!(enc));
+                    }
+                }
+                _ => {
+                    m.insert("type".into(), json!("thinking"));
+                    m.insert(q.thinking.0.into(), json!(text));
+                    if let Some(sig) = signature {
+                        m.insert(q.thinking.1.into(), json!(sig));
+                    }
+                }
+            }
+            Value::Object(m)
+        }
+        Block::ToolUse { id, name, input, .. } => json!({
+            "type": q.tool_use.0,
+            "id": id,
+            "name": name,
+            q.tool_use.1: input,
+        }),
+        Block::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+            ..
+        } if user => json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content,
+            "is_error": is_error,
+        }),
+        Block::ToolResult { .. } => return None,
+        Block::Image { media_type, data_ref } => image_block(media_type, data_ref, q),
+        Block::File { mime, path, source } if user && q.flat_media.is_none() => {
+            // Inverse of `document_from`: title ← path, source ← url/file_id.
+            let mut src = Map::new();
+            if let Some(mt) = mime {
+                src.insert("media_type".into(), json!(mt));
+            }
+            match source.as_deref() {
+                Some(r) if r.starts_with("file:") => {
+                    src.insert("type".into(), json!("file"));
+                    src.insert("file_id".into(), json!(&r["file:".len()..]));
+                }
+                Some(r) => {
+                    src.insert("type".into(), json!("url"));
+                    src.insert("url".into(), json!(r));
+                }
+                None => {}
+            }
+            let mut doc = Map::new();
+            doc.insert("type".into(), json!("document"));
+            if let Some(p) = path {
+                doc.insert("title".into(), json!(p));
+            }
+            doc.insert("source".into(), Value::Object(src));
+            Value::Object(doc)
+        }
+        Block::File { path, source, .. } => {
+            let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
+            json!({ "type": "text", "text": format!("[file: {label}]") })
+        }
+    })
+}
+
+/// An `image` block rebuilt from the IR's reference so the pointer survives a round trip (the
+/// reader keeps a ref, not the bytes): the three `source` shapes [`image_from`] reads, or the
+/// flat `mimeType`/`data` pair.
+pub fn image_block(media_type: &Option<String>, data_ref: &Option<String>, q: &Quirks) -> Value {
+    if q.flat_media.is_some() {
+        let mut m = Map::new();
+        m.insert("type".into(), json!("image"));
+        if let Some(mt) = media_type {
+            m.insert("mimeType".into(), json!(mt));
+        }
+        if let Some(d) = data_ref {
+            m.insert("data".into(), json!(d));
+        }
+        return Value::Object(m);
+    }
+    let mut source = Map::new();
+    if let Some(mt) = media_type {
+        source.insert("media_type".into(), json!(mt));
+    }
+    match data_ref.as_deref() {
+        Some(r) if r.starts_with("file:") => {
+            source.insert("type".into(), json!("file"));
+            source.insert("file_id".into(), json!(&r["file:".len()..]));
+        }
+        Some("base64:inline") => {
+            // Bytes were intentionally not retained in the IR; mark the kind.
+            source.insert("type".into(), json!("base64"));
+        }
+        Some(r) => {
+            source.insert("type".into(), json!("url"));
+            source.insert("url".into(), json!(r));
+        }
+        None => {}
+    }
+    json!({ "type": "image", "source": Value::Object(source) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_every_anthropic_block() {
+        let items = json!([
+            {"type": "text", "text": ""},
+            {"type": "thinking", "thinking": "hm", "signature": ""},
+            {"type": "redacted_thinking", "data": "BLOB"},
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "x"}},
+            {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "ok"}, {"type": "image"}], "is_error": true},
+            {"type": "image", "source": {"type": "file", "file_id": "f9", "media_type": "image/png"}},
+            {"type": "document", "title": "a.pdf", "source": {"type": "url", "url": "https://x/a.pdf", "media_type": "application/pdf"}},
+            {"type": "server_tool_use"}
+        ]);
+        let b = blocks_from(Some(&items), &ANTHROPIC);
+        assert_eq!(b.len(), 7, "unknown types are skipped, empty text is kept");
+        assert!(matches!(&b[0], Block::Text { text } if text.is_empty()));
+        assert!(matches!(&b[1], Block::Thinking { signature: Some(s), redacted: false, .. } if s.is_empty()));
+        assert!(matches!(&b[2], Block::Thinking { encrypted: Some(e), redacted: true, .. } if e == "BLOB"));
+        assert!(matches!(&b[3], Block::ToolUse { name, .. } if name == "Read"));
+        assert!(matches!(&b[4], Block::ToolResult { content, is_error: true, .. } if content == "ok\n[image]"));
+        assert!(matches!(&b[5], Block::Image { data_ref: Some(r), .. } if r == "file:f9"));
+        assert!(
+            matches!(&b[6], Block::File { path: Some(p), source: Some(s), .. } if p == "a.pdf" && s == "https://x/a.pdf")
+        );
+    }
+
+    #[test]
+    fn quirks_rename_keys() {
+        let oc = json!([
+            {"type": "toolCall", "id": "c", "name": "exec", "arguments": {"cmd": "ls"}},
+            {"type": "thinking", "thinking": "t", "thinkingSignature": "S"},
+            {"type": "image", "mimeType": "image/png", "data": "0123456789"}
+        ]);
+        let b = blocks_from(Some(&oc), &OPENCLAW);
+        assert!(matches!(&b[0], Block::ToolUse { input, .. } if input["cmd"] == "ls"));
+        assert!(matches!(&b[1], Block::Thinking { signature: Some(s), .. } if s == "S"));
+        assert!(
+            matches!(&b[2], Block::Image { media_type: Some(m), data_ref: Some(d) } if m == "image/png" && d == "0123456789")
+        );
+        let zed = json!([{"type": "text", "text": ""}, {"type": "thinking", "text": "z", "signature": ""}, {"type": "RedactedThinking", "data": "D"}]);
+        let b = blocks_from(Some(&zed), &ZED);
+        assert_eq!(b.len(), 2, "Zed drops empty text");
+        assert!(matches!(&b[0], Block::Thinking { text, signature: None, .. } if text == "z"));
+        assert!(matches!(&b[1], Block::Thinking { redacted: true, .. }));
+        let goose = json!([{"type": "redactedThinking", "data": "D"}, {"type": "document", "name": "n.pdf", "mimeType": "application/pdf", "data": "AAAA"}]);
+        let b = blocks_from(Some(&goose), &GOOSE);
+        assert!(matches!(&b[0], Block::Thinking { redacted: true, .. }));
+        assert!(
+            matches!(&b[1], Block::File { path: Some(p), source: Some(s), .. } if p == "n.pdf" && s == "base64:inline")
+        );
+    }
+
+    #[test]
+    fn writes_what_it_reads() {
+        let blocks = vec![
+            Block::Text { text: "hi".into() },
+            Block::Thinking {
+                text: "".into(),
+                signature: None,
+                encrypted: Some("BLOB".into()),
+                redacted: true,
+            },
+            Block::ToolUse {
+                id: "t1".into(),
+                name: "Read".into(),
+                input: json!({"path": "x"}),
+                namespace: None,
+            },
+            Block::Image {
+                media_type: Some("image/png".into()),
+                data_ref: Some("base64:inline".into()),
+            },
+            Block::File {
+                mime: None,
+                path: Some("a.pdf".into()),
+                source: Some("file:f9".into()),
+            },
+            Block::ToolResult {
+                tool_use_id: "t1".into(),
+                content: "ok".into(),
+                is_error: false,
+                tool_name: None,
+                status: None,
+                details: None,
+            },
+        ];
+        let a = assistant_blocks(&blocks, &ANTHROPIC);
+        assert_eq!(a.len(), 5, "tool results are not assistant content");
+        assert_eq!(a[1]["type"], "redacted_thinking");
+        assert_eq!(a[4]["type"], "text", "a file on an assistant turn is a marker");
+        let u = user_blocks(&blocks, &ANTHROPIC);
+        assert_eq!(u[4]["type"], "document");
+        assert_eq!(u[5]["type"], "tool_result");
+        let back = blocks_from(Some(&Value::Array(u)), &ANTHROPIC);
+        assert_eq!(back.len(), blocks.len());
+        assert!(
+            matches!(&back[4], Block::File { path: Some(p), source: Some(s), .. } if p == "a.pdf" && s == "file:f9")
+        );
+        // OpenClaw has no redacted block: the thinking block is written plain, under its keys.
+        let oc = assistant_blocks(&blocks, &OPENCLAW);
+        assert_eq!(oc[1]["type"], "thinking");
+        assert_eq!(oc[2]["type"], "toolCall");
+        assert_eq!(oc[2]["arguments"]["path"], "x");
+        assert_eq!(oc[3]["mimeType"], "image/png");
+        assert_eq!(tool_result_blocks(&blocks).len(), 1);
+    }
+}

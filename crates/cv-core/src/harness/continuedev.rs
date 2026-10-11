@@ -30,6 +30,7 @@
 //! Missing index → glob `*.json` (minus `sessions.json`). Missing fields → skip. `content` as
 //! string or array both work. `dateCreated` ms-epoch or ISO both work. Never panics.
 
+use super::wire::{coerce_text, openai};
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -598,7 +599,7 @@ fn history_item_to_message(item: &Value, model: &mut Option<String>) -> Option<M
     match role {
         Role::Tool => {
             // A tool result. Continue stores the output in `content`.
-            let content = coerce_content_text(message.get("content"));
+            let content = coerce_text(message.get("content"));
             let tool_use_id = message
                 .get("toolCallId")
                 .and_then(Value::as_str)
@@ -616,24 +617,7 @@ fn history_item_to_message(item: &Value, model: &mut Option<String>) -> Option<M
         _ => {
             push_content(&mut m, message.get("content"));
             if role == Role::Assistant {
-                if let Some(calls) = message.get("toolCalls").and_then(Value::as_array) {
-                    for c in calls {
-                        let id = c.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                        let func = c.get("function");
-                        let name = func
-                            .and_then(|f| f.get("name"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        let input = parse_arguments(func.and_then(|f| f.get("arguments")));
-                        m.content.push(Block::ToolUse {
-                            id,
-                            name,
-                            input,
-                            namespace: None,
-                        });
-                    }
-                }
+                m.content.extend(openai::tool_calls(message.get("toolCalls")));
             }
         }
     }
@@ -652,44 +636,7 @@ fn history_item_to_message(item: &Value, model: &mut Option<String>) -> Option<M
 
 /// Push `message.content` (string or `[Part]`) onto a message as Text/Image blocks.
 fn push_content(m: &mut Message, content: Option<&Value>) {
-    match content {
-        Some(Value::String(s)) => {
-            if !s.is_empty() {
-                m.content.push(Block::Text { text: s.clone().into() });
-            }
-        }
-        Some(Value::Array(parts)) => {
-            for p in parts {
-                if let Some(b) = part_to_block(p) {
-                    m.content.push(b);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// One `type`-tagged content part → a Block.
-fn part_to_block(p: &Value) -> Option<Block> {
-    let ty = p.get("type").and_then(Value::as_str)?;
-    match ty {
-        "text" => {
-            let text = p.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-            (!text.is_empty()).then_some(Block::Text { text: text.into() })
-        }
-        "imageUrl" => {
-            let url = p
-                .get("imageUrl")
-                .and_then(|iu| iu.get("url"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            Some(Block::Image {
-                media_type: None,
-                data_ref: url,
-            })
-        }
-        _ => None,
-    }
+    m.content.extend(openai::blocks_from(content, &openai::CONTINUE));
 }
 
 /// A `contextItem` → a `File` block (best-effort). The path/source is taken from `uri.value` (a file
@@ -726,39 +673,6 @@ fn context_item_to_block(ci: &Value) -> Option<Block> {
         path,
         source,
     })
-}
-
-/// Flatten `content` (string or `[Part]`) to plain text (text parts joined by newline).
-fn coerce_content_text(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|p| match p.get("type").and_then(Value::as_str) {
-                Some("text") => p.get("text").and_then(Value::as_str).map(str::to_string),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
-/// `arguments` is a JSON-encoded *string* (possibly streamed/partial). Parse it; null/empty ⇒ `{}`.
-/// A non-empty but unparseable string is stashed under `_raw` so nothing is lost.
-fn parse_arguments(v: Option<&Value>) -> Value {
-    match v {
-        Some(Value::String(s)) if !s.trim().is_empty() => match serde_json::from_str::<Value>(s) {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                let mut map = serde_json::Map::new();
-                map.insert("_raw".into(), Value::String(s.clone()));
-                Value::Object(map)
-            }
-        },
-        Some(Value::Object(_)) => v.cloned().unwrap(),
-        _ => Value::Object(Default::default()),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -942,13 +856,6 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].0.as_deref(), Some("/proj/src/main.rs"));
         assert_eq!(files[1].1.as_deref(), Some("https://react.dev"));
-    }
-
-    #[test]
-    fn arguments_garbage_preserved() {
-        let v = parse_arguments(Some(&Value::String("{partial".into())));
-        assert_eq!(v["_raw"], "{partial");
-        assert_eq!(parse_arguments(None), Value::Object(Default::default()));
     }
 
     #[test]

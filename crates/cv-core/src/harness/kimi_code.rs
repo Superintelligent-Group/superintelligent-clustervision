@@ -78,6 +78,7 @@
 //! `…/agents/agent-N`); parsing one yields its own [`Session`] with `lineage.parent` = the session
 //! uuid and `lineage.agent_path` = `agent-N`.
 
+use super::wire::{coerce_text, openai, text_parts};
 use super::Adapter;
 use crate::harness::claude::CARRIER_KEY;
 use crate::ir::*;
@@ -483,7 +484,7 @@ fn scan_wire(wire: &Path) -> WireScan {
                 if v.pointer("/message/role").and_then(Value::as_str) == Some("user") {
                     w.message_count += 1;
                     if w.title.is_none() && origin_kind(v.get("message")) == "user" {
-                        let t = parts_text(v.pointer("/message/content"));
+                        let t = text_parts(v.pointer("/message/content"));
                         if !t.trim().is_empty() {
                             w.title = Some(crate::ir::truncate(&t, 80));
                         }
@@ -800,7 +801,7 @@ impl Ctx<'_> {
                     return Flow::Stop;
                 }
                 if let (Some(step), Some(part)) = (self.step.as_mut(), e.get("part")) {
-                    if let Some(b) = part_to_block(part) {
+                    if let Some(b) = openai::part_to_block(part, &openai::KIMI_CODE) {
                         step.msg.content.push(b);
                     }
                 }
@@ -925,7 +926,7 @@ impl Ctx<'_> {
         let id = e.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_string();
         let result = e.get("result");
         let output = result.and_then(|r| r.get("output"));
-        let content = parts_text(output);
+        let content = coerce_text(output);
         let is_error = result
             .and_then(|r| r.get("isError"))
             .and_then(Value::as_bool)
@@ -1002,72 +1003,7 @@ fn usage_from(u: &Value) -> Usage {
 
 /// Append a message's parts (`[Part]`, or a bare string) as blocks.
 fn push_parts(m: &mut Message, content: Option<&Value>) {
-    match content {
-        Some(Value::String(s)) => m.content.push(Block::Text {
-            text: Text::from(s.as_str()),
-        }),
-        Some(Value::Array(parts)) => {
-            for p in parts {
-                if let Some(b) = part_to_block(p) {
-                    m.content.push(b);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn part_to_block(p: &Value) -> Option<Block> {
-    match p.get("type").and_then(Value::as_str)? {
-        "text" => Some(Block::Text {
-            text: Text::from(p.get("text").and_then(Value::as_str).unwrap_or("")),
-        }),
-        "think" => {
-            let text = p.get("think").and_then(Value::as_str).unwrap_or("");
-            let encrypted = p.get("encrypted").and_then(Value::as_str).map(str::to_string);
-            // kosong ≥ 0.55 persists `{"think":"","encrypted":null}` for an empty reasoning
-            // stream — nothing to show, nothing to re-send.
-            if text.is_empty() && encrypted.is_none() {
-                return None;
-            }
-            Some(Block::Thinking {
-                text: Text::from(text),
-                signature: None,
-                encrypted,
-                redacted: false,
-            })
-        }
-        "image_url" => {
-            let url = p
-                .get("imageUrl")
-                .or_else(|| p.get("image_url"))
-                .and_then(|u| u.get("url"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            Some(Block::Image {
-                media_type: None,
-                data_ref: url,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Text of a part list (or bare string): text parts joined by newlines, images as `[image]`.
-fn parts_text(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|p| match p.get("type").and_then(Value::as_str) {
-                Some("image_url") => Some("[image]".to_string()),
-                Some("text") => p.get("text").and_then(Value::as_str).map(str::to_string),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
+    m.content.extend(openai::blocks_from(content, &openai::KIMI_CODE));
 }
 
 #[cfg(test)]

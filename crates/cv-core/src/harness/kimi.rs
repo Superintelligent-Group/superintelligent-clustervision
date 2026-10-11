@@ -62,6 +62,7 @@
 //! We tolerate protocol_version drift (1.1–1.9) and unknown message types: anything we don't
 //! recognize is ignored.
 
+use super::wire::{coerce_text, openai, text_parts};
 use super::Adapter;
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -368,7 +369,7 @@ fn scan(
             message_count += 1;
         }
         if title.is_none() && role == "user" {
-            let t = coerce_content_text(v.get("content"));
+            let t = text_parts(v.get("content"));
             if !t.trim().is_empty() {
                 title = Some(crate::ir::truncate(&t, 80));
             }
@@ -455,7 +456,7 @@ fn peek_system_prompt(transcript: &Path) -> Option<String> {
     super::for_each_json_line(BufReader::new(file), |v| {
         seen += 1;
         if v.get("role").and_then(Value::as_str) == Some("_system_prompt") {
-            let text = coerce_content_text(v.get("content"));
+            let text = coerce_text(v.get("content"));
             if !text.is_empty() {
                 prompt = Some(text);
             }
@@ -500,7 +501,7 @@ fn context_message(
             Some(m)
         }
         "_system_prompt" => {
-            let text = coerce_content_text(v.get("content"));
+            let text = coerce_text(v.get("content"));
             let mut m = Message::of_kind(Role::System, MessageKind::SystemPrompt, Origin::Harness);
             m.content.push(Block::Text { text: text.into() });
             Some(m)
@@ -516,23 +517,13 @@ fn context_message(
             push_parts(&mut m, v.get("content"));
             if let Some(calls) = v.get("tool_calls").and_then(Value::as_array) {
                 for c in calls {
-                    let id = c.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                    let func = c.get("function");
-                    let name = func
-                        .and_then(|f| f.get("name"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let input = parse_arguments(func.and_then(|f| f.get("arguments")));
-                    if !id.is_empty() && !name.is_empty() {
-                        call_names.insert(id.clone(), name.clone());
+                    let call = openai::tool_call(c);
+                    if let Block::ToolUse { id, name, .. } = &call {
+                        if !id.is_empty() && !name.is_empty() {
+                            call_names.insert(id.clone(), name.clone());
+                        }
                     }
-                    m.content.push(Block::ToolUse {
-                        id,
-                        name,
-                        input,
-                        namespace: None,
-                    });
+                    m.content.push(call);
                 }
             }
             (!m.content.is_empty()).then_some(m)
@@ -543,7 +534,7 @@ fn context_message(
             let we = enrich.tool_results.get(&tool_use_id);
             let (content, is_error, details) = match we {
                 Some(tr) => (tr.output.clone(), tr.is_error, tr.extras.clone()),
-                None => (coerce_content_text(v.get("content")), false, None),
+                None => (coerce_text(v.get("content")), false, None),
             };
             let status = Some(if is_error { "error" } else { "completed" }.to_string());
             let mut m = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
@@ -621,94 +612,7 @@ fn compaction_boundary(ts: Option<DateTime<Utc>>) -> Message {
 
 /// Push a record's `content` (bare string or `[Part]`) onto a message as Blocks.
 fn push_parts(m: &mut Message, content: Option<&Value>) {
-    match content {
-        Some(Value::String(s)) => {
-            if !s.is_empty() {
-                m.content.push(Block::Text { text: s.clone().into() });
-            }
-        }
-        Some(Value::Array(parts)) => {
-            for p in parts {
-                if let Some(b) = part_to_block(p) {
-                    m.content.push(b);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// One `type`-tagged Part → a `Block`.
-fn part_to_block(p: &Value) -> Option<Block> {
-    let ty = p.get("type").and_then(Value::as_str)?;
-    match ty {
-        "text" => {
-            let text = p.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-            Some(Block::Text { text: text.into() })
-        }
-        "think" => {
-            let text = p.get("think").and_then(Value::as_str).unwrap_or("").to_string();
-            let encrypted = p.get("encrypted").and_then(Value::as_str).map(str::to_string);
-            Some(Block::Thinking {
-                text: text.into(),
-                signature: encrypted.clone(),
-                encrypted,
-                redacted: false,
-            })
-        }
-        "image_url" => {
-            let url = media_url(p, "image_url");
-            Some(Block::Image {
-                media_type: None,
-                data_ref: url,
-            })
-        }
-        "audio_url" | "video_url" => {
-            let url = media_url(p, ty);
-            Some(Block::File {
-                mime: None,
-                path: None,
-                source: url,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Media parts nest `{url, id}` under a key named after the type, e.g. `image_url: {url, id}`.
-fn media_url(p: &Value, key: &str) -> Option<String> {
-    p.get(key)
-        .and_then(|inner| inner.get("url"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-/// `arguments` is a JSON-encoded *string*. Parse it; `null`/empty/unparseable ⇒ `{}`.
-fn parse_arguments(v: Option<&Value>) -> Value {
-    match v {
-        Some(Value::String(s)) if !s.is_empty() => {
-            serde_json::from_str(s).unwrap_or_else(|_| Value::Object(Default::default()))
-        }
-        Some(Value::Object(_)) => v.cloned().unwrap(),
-        _ => Value::Object(Default::default()),
-    }
-}
-
-/// Flatten a record `content` (string or `[Part]`) to plain text (text parts joined by newline).
-fn coerce_content_text(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|p| match p.get("type").and_then(Value::as_str) {
-                Some("text") => p.get("text").and_then(Value::as_str).map(str::to_string),
-                Some("think") => p.get("think").and_then(Value::as_str).map(str::to_string),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
+    m.content.extend(openai::blocks_from(content, &openai::KIMI));
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,19 +1019,6 @@ mod tests {
             }
             _ => unreachable!(),
         }
-    }
-
-    #[test]
-    fn arguments_empty_becomes_object() {
-        assert_eq!(parse_arguments(None), Value::Object(Default::default()));
-        assert_eq!(
-            parse_arguments(Some(&Value::String("".into()))),
-            Value::Object(Default::default())
-        );
-        assert_eq!(
-            parse_arguments(Some(&Value::String("not json".into()))),
-            Value::Object(Default::default())
-        );
     }
 
     #[test]

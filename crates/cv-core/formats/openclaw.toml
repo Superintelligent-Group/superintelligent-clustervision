@@ -4,7 +4,7 @@
 # (and tests/formats_manifest.rs in CI) holds it to the adapter source in both directions.
 
 harness = "openclaw"
-source_files = ["harness/openclaw.rs"]
+source_files = ["harness/openclaw.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
 # Record FIELDS the parser names while copying the rest of an entry into extra[openclaw] —
 # first-class in the IR, so they are not vocabulary.
 ignore_literals = [

@@ -11,6 +11,7 @@
 //! point; `cv-core::lib` re-exports it and the `cv` CLI calls it.
 
 use crate::harness::store::write_jsonl;
+use crate::harness::wire::anthropic;
 use crate::harness::EmitResult;
 use crate::ir::{Block, GitInfo, Harness, Message, MessageKind, Role, Session, SessionRef};
 use crate::stream::ParseOptions;
@@ -1720,119 +1721,24 @@ fn claude_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
     (!m.is_empty()).then_some(Value::Object(m))
 }
 
+/// An assistant line's content: the Anthropic blocks, never empty (an empty turn is one empty
+/// text block, as Claude Code writes it).
 fn claude_assistant_blocks(content: &[Block]) -> Vec<Value> {
-    let mut out = Vec::new();
-    for b in content {
-        match b {
-            Block::Text { text } => out.push(json!({ "type": "text", "text": text })),
-            Block::Thinking { text, signature, .. } => {
-                let mut m = Map::new();
-                m.insert("type".into(), json!("thinking"));
-                m.insert("thinking".into(), json!(text));
-                if let Some(sig) = signature {
-                    m.insert("signature".into(), json!(sig));
-                }
-                out.push(Value::Object(m));
-            }
-            Block::ToolUse { id, name, input, .. } => out.push(json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            })),
-            // Tool results don't belong on an assistant line; skip (emitted on the Tool turn).
-            Block::ToolResult { .. } => {}
-            Block::File { path, source, .. } => {
-                let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
-                out.push(json!({ "type": "text", "text": format!("[file: {label}]") }));
-            }
-            Block::Image { media_type, data_ref } => out.push(claude_image_block(media_type, data_ref)),
-        }
-    }
+    let mut out = anthropic::assistant_blocks(content, &anthropic::ANTHROPIC);
     if out.is_empty() {
         out.push(json!({ "type": "text", "text": "" }));
     }
     out
 }
 
-/// Reconstruct an Anthropic `image` block's `source` from our `data_ref` so the reference survives
-/// a round-trip (the parser keeps a ref, not the bytes — dropping it would lose even the
-/// `file:`/url pointer). Mirrors the three shapes claude.rs parses.
-fn claude_image_block(media_type: &Option<String>, data_ref: &Option<String>) -> Value {
-    let mut source = serde_json::Map::new();
-    if let Some(mt) = media_type {
-        source.insert("media_type".into(), json!(mt));
-    }
-    match data_ref.as_deref() {
-        Some(r) if r.starts_with("file:") => {
-            source.insert("type".into(), json!("file"));
-            source.insert("file_id".into(), json!(&r["file:".len()..]));
-        }
-        Some("base64:inline") => {
-            // Bytes were intentionally not retained in the IR; mark the kind.
-            source.insert("type".into(), json!("base64"));
-        }
-        Some(r) => {
-            source.insert("type".into(), json!("url"));
-            source.insert("url".into(), json!(r));
-        }
-        None => {}
-    }
-    json!({ "type": "image", "source": Value::Object(source) })
+/// A user line's content: text/image natively, a [`Block::File`] as the `document` attachment
+/// the parser reads back into a File, a stray tool result kept as a `tool_result` block.
+fn claude_user_blocks(content: &[Block]) -> Vec<Value> {
+    anthropic::user_blocks(content, &anthropic::ANTHROPIC)
 }
 
-/// Map user-turn IR blocks → Claude's array-of-blocks user content. Text/Image round-trip
-/// natively; a [`Block::File`] becomes the `document` attachment shape the parser reads back into
-/// a File; a stray ToolResult (mixed user content) is kept as a `tool_result` block. Thinking/
-/// ToolUse don't occur on user turns, but map to their native shapes rather than being dropped.
-fn claude_user_blocks(content: &[Block]) -> Vec<Value> {
-    let mut out = Vec::new();
-    for b in content {
-        match b {
-            Block::Text { text } => out.push(json!({ "type": "text", "text": text })),
-            Block::Image { media_type, data_ref } => out.push(claude_image_block(media_type, data_ref)),
-            Block::File { mime, path, source } => {
-                // Inverse of claude.rs's `document` parsing: title ← path, source ← url/file_id.
-                let mut src = serde_json::Map::new();
-                if let Some(mt) = mime {
-                    src.insert("media_type".into(), json!(mt));
-                }
-                match source.as_deref() {
-                    Some(r) if r.starts_with("file:") => {
-                        src.insert("type".into(), json!("file"));
-                        src.insert("file_id".into(), json!(&r["file:".len()..]));
-                    }
-                    Some(r) => {
-                        src.insert("type".into(), json!("url"));
-                        src.insert("url".into(), json!(r));
-                    }
-                    None => {}
-                }
-                let mut doc = Map::new();
-                doc.insert("type".into(), json!("document"));
-                if let Some(p) = path {
-                    doc.insert("title".into(), json!(p));
-                }
-                doc.insert("source".into(), Value::Object(src));
-                out.push(Value::Object(doc));
-            }
-            Block::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-                ..
-            } => out.push(json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": content,
-                "is_error": is_error,
-            })),
-            Block::Thinking { .. } | Block::ToolUse { .. } => {
-                out.extend(claude_assistant_blocks(std::slice::from_ref(b)));
-            }
-        }
-    }
-    out
+fn claude_tool_result_blocks(content: &[Block]) -> Vec<Value> {
+    anthropic::tool_result_blocks(content)
 }
 
 /// A record's `toolUseResult` sidecar, rebuilt from the message's tool-result `details`
@@ -1859,27 +1765,6 @@ fn claude_tool_use_result(content: &[Block]) -> Option<Value> {
     let mut out = map.clone();
     out.remove(crate::harness::claude::PERSISTED_OUTPUT_KEY);
     (!out.is_empty()).then(|| Value::Object(out))
-}
-
-fn claude_tool_result_blocks(content: &[Block]) -> Vec<Value> {
-    let mut out = Vec::new();
-    for b in content {
-        if let Block::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-            ..
-        } = b
-        {
-            out.push(json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": content,
-                "is_error": is_error,
-            }));
-        }
-    }
-    out
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3034,46 +2919,9 @@ fn openclaw_short_id() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
-/// Map IR blocks → an OpenClaw content array (`text`/`thinking`/`toolCall`/`image`).
+/// IR blocks → an OpenClaw content array (`text`/`thinking`/`toolCall`/`image`).
 fn openclaw_content_blocks(content: &[Block]) -> Value {
-    let mut out = Vec::new();
-    for b in content {
-        match b {
-            Block::Text { text } => out.push(json!({ "type": "text", "text": text })),
-            Block::Thinking { text, signature, .. } => {
-                let mut m = Map::new();
-                m.insert("type".into(), json!("thinking"));
-                m.insert("thinking".into(), json!(text));
-                if let Some(sig) = signature {
-                    m.insert("thinkingSignature".into(), json!(sig));
-                }
-                out.push(Value::Object(m));
-            }
-            Block::ToolUse { id, name, input, .. } => out.push(json!({
-                "type": "toolCall",
-                "id": id,
-                "name": name,
-                "arguments": input,
-            })),
-            Block::Image { media_type, data_ref } => {
-                let mut m = Map::new();
-                m.insert("type".into(), json!("image"));
-                if let Some(mt) = media_type {
-                    m.insert("mimeType".into(), json!(mt));
-                }
-                if let Some(d) = data_ref {
-                    m.insert("data".into(), json!(d));
-                }
-                out.push(Value::Object(m));
-            }
-            Block::File { path, source, .. } => {
-                let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
-                out.push(json!({ "type": "text", "text": format!("[file: {label}]") }));
-            }
-            Block::ToolResult { .. } => {}
-        }
-    }
-    Value::Array(out)
+    Value::Array(anthropic::assistant_blocks(content, &anthropic::OPENCLAW))
 }
 
 /// Pull the (id, content, is_error, name) out of a Tool turn's blocks.
