@@ -47,7 +47,7 @@ jobs:
           fi
 
           # Dependency order: a crate cannot be published before the ones it depends on are live.
-          # `cv-sim` and `cv-web` are `publish = false` and deliberately absent.
+          # `cv-web` is `publish = false` and deliberately absent.
           CRATES="clustervision-core cv-search cv-llm cvd cv-mcp clustervision"
 
           for c in $CRATES; do
