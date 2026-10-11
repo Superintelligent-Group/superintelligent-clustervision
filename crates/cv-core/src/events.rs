@@ -844,7 +844,6 @@ mod db {
     /// distinct targets, ~⅓ of the event rows) and joins matches back through `idx_events_target`
     /// instead of scanning every event row.
     pub fn sessions_touching(path: &str, edits_only: bool) -> Vec<TouchedSession> {
-        let Some(conn) = open() else { return Vec::new() };
         let abs = absolutize(path, std::env::current_dir().ok().as_deref());
         // Escape LIKE metacharacters in the user's path, then match any target ending in /<path>.
         let escaped = path
@@ -857,9 +856,27 @@ mod db {
         } else {
             format!("%/{escaped}")
         };
+        touching(&abs, Some(&suffix), edits_only)
+    }
+
+    /// Sessions that EDITED exactly `abs` (an absolute path as the event index stores it): the
+    /// indexed point lookup behind the `cv hook edit` guard, which must answer in milliseconds on
+    /// a store of millions of events. No suffix match, so no scan of `event_targets` — the
+    /// `target` UNIQUE index resolves the path and `idx_events_target` the rows. Newest first.
+    pub fn sessions_editing(abs: &str) -> Vec<TouchedSession> {
+        touching(abs, None, true)
+    }
+
+    fn touching(abs: &str, suffix: Option<&str>, edits_only: bool) -> Vec<TouchedSession> {
+        let Some(conn) = open() else { return Vec::new() };
         let having = if edits_only { "HAVING edits > 0" } else { "" };
-        // The IN-subquery (not a join) pins the plan: one scan over the distinct targets, then
-        // matching event rows through idx_events_target — never a scan of all events.
+        // With a suffix: `target = ?1 OR target LIKE ?2` — the IN-subquery (not a join) pins the
+        // plan to one scan over the distinct targets, then matching event rows through
+        // idx_events_target, never a scan of all events. Without one: a point lookup.
+        let target_where = match suffix {
+            Some(_) => "target = ?1 OR target LIKE ?2 ESCAPE '\\'",
+            None => "target = ?1",
+        };
         let sql = format!(
             "SELECT es.harness, es.session_id,
                     SUM(e.kind='file_edit') AS edits,
@@ -871,8 +888,7 @@ mod db {
              JOIN event_sessions es ON es.id = e.session
              LEFT JOIN sessions s ON s.harness = es.harness AND s.id = es.session_id
              WHERE e.kind IN ('file_edit','file_read')
-               AND e.target_id IN (SELECT id FROM event_targets
-                                   WHERE target = ?1 OR target LIKE ?2 ESCAPE '\\')
+               AND e.target_id IN (SELECT id FROM event_targets WHERE {target_where})
              GROUP BY es.harness, es.session_id
              {having}
              ORDER BY last_ts DESC, es.session_id"
@@ -880,7 +896,8 @@ mod db {
         let Ok(mut stmt) = conn.prepare(&sql) else {
             return Vec::new();
         };
-        let rows = stmt.query_map(params![abs, suffix], |row| {
+        // rusqlite binds by position; an unused `?2` is simply never referenced by the SQL.
+        let rows = stmt.query_map(params![abs, suffix.unwrap_or("")], |row| {
             Ok(TouchedSession {
                 harness: row.get(0)?,
                 session_id: row.get(1)?,
@@ -958,7 +975,7 @@ mod db {
 #[cfg(feature = "sqlite")]
 pub use db::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_with, sessions_touching, SyncTable,
+    record_with, sessions_editing, sessions_touching, SyncTable,
 };
 
 /// No-op fallbacks without sqlite: extraction still works (the sink is pure), persistence and
@@ -998,6 +1015,9 @@ mod db_stub {
     pub fn sessions_touching(_path: &str, _edits_only: bool) -> Vec<TouchedSession> {
         Vec::new()
     }
+    pub fn sessions_editing(_abs: &str) -> Vec<TouchedSession> {
+        Vec::new()
+    }
     pub fn edits_touching_file(_abs: &str, _rel: &str) -> Vec<EditEvent> {
         Vec::new()
     }
@@ -1008,7 +1028,7 @@ mod db_stub {
 #[cfg(not(feature = "sqlite"))]
 pub use db_stub::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_with, sessions_touching, SyncTable,
+    record_with, sessions_editing, sessions_touching, SyncTable,
 };
 
 #[cfg(test)]

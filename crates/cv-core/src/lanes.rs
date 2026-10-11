@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::harness::claude::{subagent_end, task_notices, ApiErrorNotice, SubagentEnd, TaskNotice};
@@ -56,6 +56,10 @@ pub enum StatusSource {
     TaskNotification,
     /// The child's own `SubagentStop` hook attachment after its last turn (`stopped`).
     SubagentStop,
+    /// A `stop` row for this agent in the hook ledger ([`LaneEvent`]) at or after its last turn
+    /// (`stopped`) — the same fact as [`StatusSource::SubagentStop`], written by `cv hook lane`
+    /// when the transcript has not recorded the attachment (it lags the harness).
+    HookLedger,
     /// Nothing says it stopped: the transcript ends mid-work (`running`) — or, with no stop
     /// recorded anywhere, it ends in a final report that has sat untouched for
     /// [`RETURNED_QUIET_SECS`] (`returned`: the lane finished and the harness lost the
@@ -66,6 +70,78 @@ pub enum StatusSource {
 /// How long a transcript must be quiet after a text-only final turn before `returned` is
 /// inferred — long enough that a tool call still being streamed out never reads as a return.
 pub const RETURNED_QUIET_SECS: i64 = 600;
+
+/// One row of the hook ledger: what Claude Code's `SubagentStart` / `SubagentStop` hooks told
+/// `cv hook lane`, appended as one JSON line to [`ledger_path`] with no model action. The ledger
+/// is a side channel for the same facts the transcripts carry; [`lanes_of`] reads it so a lane
+/// whose transcript has not yet recorded its stop still reads `stopped`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LaneEvent {
+    pub ts: DateTime<Utc>,
+    /// `start` or `stop`.
+    pub event: String,
+    /// The parent session's id (the hook's `session_id`).
+    pub session_id: String,
+    /// The bare agent id (`agent-` stripped, as `SendMessage` uses it).
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// The parent transcript (`transcript_path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<PathBuf>,
+    /// The agent's own transcript (`agent_transcript_path`, or derived from the parent's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_transcript_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// The head of `last_assistant_message` on a stop (capped by the writer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_text: Option<String>,
+}
+
+/// `$CLUSTERVISION_HOME/lanes.jsonl` (default `~/.clustervision/lanes.jsonl`).
+pub fn ledger_path() -> PathBuf {
+    std::env::var_os("CLUSTERVISION_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".clustervision")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lanes.jsonl")
+}
+
+/// Append one row: a single `O_APPEND` `write_all` of one line, so concurrent hooks never tear
+/// each other's records (the board's idiom; no lock needed for append-only rows).
+pub fn append_lane_event(ev: &LaneEvent) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = ledger_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut line = serde_json::to_string(ev).map_err(std::io::Error::other)?;
+    line.push('\n');
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    f.write_all(line.as_bytes())
+}
+
+/// Every row of the ledger, file order. Unparseable lines (a torn append) are skipped. Empty
+/// when there is no ledger.
+pub fn read_ledger() -> Vec<LaneEvent> {
+    let Ok(text) = std::fs::read_to_string(ledger_path()) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<LaneEvent>(l).ok())
+        .collect()
+}
+
+/// The latest `stop` per bare agent id — what [`status_of`] consults.
+fn ledger_stops(rows: &[LaneEvent]) -> HashMap<String, DateTime<Utc>> {
+    let mut m: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for r in rows.iter().filter(|r| r.event == "stop") {
+        let e = m.entry(r.agent_id.clone()).or_insert(r.ts);
+        *e = (*e).max(r.ts);
+    }
+    m
+}
 
 /// One sub-agent, summarized.
 #[derive(Debug, Clone, Serialize)]
@@ -450,6 +526,7 @@ fn status_of(
     sub: &SubagentInfo,
     end: &SubagentEnd,
     notice: Option<&TaskNotice>,
+    ledger_stop: Option<DateTime<Utc>>,
     ends_in_report: bool,
     now: DateTime<Utc>,
 ) -> (String, StatusSource) {
@@ -471,6 +548,11 @@ fn status_of(
     if end.stopped() == Some(true) {
         return ("stopped".into(), StatusSource::SubagentStop);
     }
+    // The hook ledger saw the stop before the transcript recorded it (or the harness never
+    // wrote the attachment): a stop at or after the last turn parks the lane the same way.
+    if ledger_stop.is_some_and(|ts| end.last_turn_at.is_none_or(|lt| ts >= lt)) {
+        return ("stopped".into(), StatusSource::HookLedger);
+    }
     // No journal, no notification, no stop hook — but the transcript ends in a final report and
     // has been quiet for a while: the lane returned and nobody recorded it (a harness restart
     // drops the pending notification). One "running" row was a lane that had finished 15 h
@@ -484,7 +566,11 @@ fn status_of(
     ("running".into(), StatusSource::Transcript)
 }
 
-fn lane_of(sub: SubagentInfo, notices: &HashMap<String, TaskNotice>) -> Option<Lane> {
+fn lane_of(
+    sub: SubagentInfo,
+    notices: &HashMap<String, TaskNotice>,
+    ledger: &HashMap<String, DateTime<Utc>>,
+) -> Option<Lane> {
     let p = pass(&sub.session)?;
     // `subagent_end` reads Claude's jsonl sidecars; other harnesses' child sessions live inside
     // their own stores (a `.db` path here), where a jsonl scan is meaningless.
@@ -494,7 +580,14 @@ fn lane_of(sub: SubagentInfo, notices: &HashMap<String, TaskNotice>) -> Option<L
         SubagentEnd::default()
     };
     let agent_id = sub.agent_id().to_string();
-    let (status, status_source) = status_of(&sub, &end, notices.get(&agent_id), p.ends_in_report, Utc::now());
+    let (status, status_source) = status_of(
+        &sub,
+        &end,
+        notices.get(&agent_id),
+        ledger.get(&agent_id).copied(),
+        p.ends_in_report,
+        Utc::now(),
+    );
     let started_at = sub.session.created_at;
     let last_turn_at = end.last_turn_at.or(sub.session.updated_at);
     let duration_ms = match (started_at, last_turn_at) {
@@ -545,7 +638,8 @@ fn lane_of(sub: SubagentInfo, notices: &HashMap<String, TaskNotice>) -> Option<L
 pub fn lanes_of(parent: &SessionRef) -> Vec<Lane> {
     let subs = crate::subagent_tree_of(parent);
     let notices = task_notices(&parent.path);
-    let mut lanes = crate::par_filter_map(subs, |s| lane_of(s, &notices));
+    let ledger = ledger_stops(&read_ledger());
+    let mut lanes = crate::par_filter_map(subs, |s| lane_of(s, &notices, &ledger));
     lanes.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.agent_id.cmp(&b.agent_id)));
     lanes
 }
@@ -658,6 +752,72 @@ mod tests {
             ..ApiErrorNotice::default()
         };
         assert_eq!(classify_api_error(&usage), Some("rate-limited"));
+    }
+
+    /// The ledger is consulted after the transcript's own stop and before the running/returned
+    /// guess: a `stop` at or after the last turn parks the lane; an older one is history (the
+    /// lane was resumed since); and a transcript that recorded its own stop keeps that source.
+    #[test]
+    fn a_ledger_stop_parks_a_lane_the_transcript_has_not_stopped() {
+        let sub = SubagentInfo {
+            session: SessionRef {
+                id: "agent-a1".into(),
+                harness: crate::ir::Harness::Claude,
+                path: PathBuf::from("/x/agent-a1.jsonl"),
+                cwd: None,
+                title: None,
+                created_at: None,
+                updated_at: None,
+                message_count: 0,
+            },
+            agent_type: None,
+            description: None,
+            tool_use_id: None,
+            workflow: None,
+            result_status: None,
+            result_summary: None,
+        };
+        let now = DateTime::from_timestamp(1_000, 0).unwrap();
+        let running = SubagentEnd {
+            last_turn_at: DateTime::from_timestamp(100, 0),
+            stopped_at: None,
+            api_error: None,
+        };
+        assert_eq!(
+            status_of(&sub, &running, None, None, false, now),
+            ("running".into(), StatusSource::Transcript)
+        );
+        assert_eq!(
+            status_of(&sub, &running, None, DateTime::from_timestamp(100, 0), false, now),
+            ("stopped".into(), StatusSource::HookLedger)
+        );
+        assert_eq!(
+            status_of(&sub, &running, None, DateTime::from_timestamp(50, 0), false, now),
+            ("running".into(), StatusSource::Transcript),
+            "a stop before the last turn is a stop the lane was resumed from"
+        );
+        let stopped = SubagentEnd {
+            stopped_at: DateTime::from_timestamp(120, 0),
+            ..running.clone()
+        };
+        assert_eq!(
+            status_of(&sub, &stopped, None, DateTime::from_timestamp(130, 0), false, now).1,
+            StatusSource::SubagentStop
+        );
+        // The reducer keeps the newest stop per agent, bare id.
+        let row = |ts: i64, ev: &str| LaneEvent {
+            ts: DateTime::from_timestamp(ts, 0).unwrap(),
+            event: ev.into(),
+            session_id: "s".into(),
+            agent_id: "a1".into(),
+            agent_type: None,
+            transcript_path: None,
+            agent_transcript_path: None,
+            cwd: None,
+            last_text: None,
+        };
+        let stops = ledger_stops(&[row(10, "start"), row(20, "stop"), row(30, "stop"), row(5, "stop")]);
+        assert_eq!(stops.get("a1").copied(), DateTime::from_timestamp(30, 0));
     }
 
     #[test]
