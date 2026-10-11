@@ -48,6 +48,16 @@ jobs:
       - name: Build cv-core for wasm config (no default features)
         run: cargo build -p clustervision-core --no-default-features
 
+      # `dist plan` parses dist-workspace.toml and the release matrix without building anything.
+      # A bad `publish-jobs` value sat in that file from v0.9.22 until 0.11.0 and every tag in
+      # between produced zero artifacts, because the only thing that ever ran `dist plan` was the
+      # release workflow itself, after the tag. Same installer and version as release.yml.
+      - name: Install dist
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+      - name: dist plan
+        run: dist plan --output-format=json > /dev/null && dist plan
+
   wasm:
     name: wasm build (cv-web)
     runs-on: ubuntu-latest

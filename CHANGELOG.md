@@ -78,7 +78,6 @@ stopped at v0.11.2. Everything since ships here. Every change is in the manual; 
 ### Fixes
 - `web:<who>` resolves to `<who>` at the token gate; `cv task serve --token`/`$CV_TOKEN` presents it on every page action.
 - `posed`/`resolved` refuse over a live revision, as `done` does: no decision closes unlanded reviewed code.
-
 - Rendered-attachment messages were never stamped with a byte offset, so any current Claude session fell back to a full stream under `cv show --range`.
 - `cv_core::digest::Sha256` (the vendored SHA-256) is incremental.
 - The clap-tree unit tests run on a 16 MB thread: `Cli::command()` overflowed the 2 MB test stack in a debug build.
