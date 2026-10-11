@@ -1171,55 +1171,44 @@ fn error_paths_exit_nonzero_with_stderr() {
     let (_, err) = w.cv_fails(&["show", "alphasess", "--harness", "marsrover"]);
     assert!(err.contains("unknown harness"), "{err}");
 
-    // Every name a release removed or renamed: gone, but never silently — each one exits 2 (a
-    // caller mistake, not a failure) with a line naming the version and the replacement.
-    let removed: &[(&[&str], &str, &str)] = &[
-        // `convert` folded into `port`.
-        (
-            &["convert", "alphasess", "--to", "marsrover"],
-            "0.11.0",
-            "cv port <id> --harness <harness>",
-        ),
-        // `query` only ever printed the field reference; that is `schema`.
-        (&["query"], "0.11.0", "cv schema"),
-        // `recall` superseded by the one build-context verb. (`distill` was a 0.11 stub that pointed
-        // here too; the name now means `cv distill`, the transcript reshaper.)
-        (&["recall", "zebrafish"], "0.11.0", "cv pack <task>"),
-        // Fetching a tool's output is a Read, not a prune option.
-        (
-            &["prune", "alphasess", "--retrieve", "t1"],
-            "0.11.0",
-            "cv cat <session> <tool_use_id>",
-        ),
-        // `--to`/`--to-dir` say where; the flags now say what.
-        (
-            &["port", "alphasess", "--to", "codex"],
-            "0.11.0",
-            "use `--harness <harness>`",
-        ),
-        (
-            &["port", "alphasess", "--to-dir", "/tmp/nope"],
-            "0.11.0",
-            "use `--cwd <dir>`",
-        ),
-        // `prune --thinking` was a boolean "snip reasoning too"; `--thinking <mode>` now names what
-        // an EMIT does with reasoning, and one word may not mean two things.
-        (&["prune", "alphasess", "--thinking"], "0.11.0", "use `--drop-thinking`"),
+    // Every name this release removed: gone, but never silently — each one exits 2 (a caller
+    // mistake, not a failure) with a line naming the version and the replacement. The 0.11
+    // tombstones left at 0.15; these leave at the next release.
+    let removed: &[(&[&str], &str)] = &[
+        // `timeline` was `ls` with the shown window reversed.
+        (&["timeline", "--limit", "5"], "cv ls --sort-by updated --asc"),
+        // `redact` was `export` with the scrubber in front.
+        (&["redact", "alphasess", "--format", "json"], "cv export <id> --redact"),
         // `diff` was a role+text prefix compare; export both and use a real diff.
+        (&["diff", "alphasess", "betasess"], "cv export <id> --format md"),
+        // `export --format html` had a second, non-streaming renderer; `share` is the one.
+        (&["export", "alphasess", "--format", "html"], "cv share <id>"),
+        // `adopt --list/--orphans` were lanes tables.
+        (&["adopt", "--list", "alphasess"], "cv lanes alphasess"),
+        (&["adopt", "--orphans"], "cv lanes --recent <N> --unfinished"),
+        // `formats check` needed a checkout: it is the test; `census` is plain `formats`.
         (
-            &["diff", "alphasess", "betasess"],
-            "0.15.0",
-            "cv export <id> --format md",
+            &["formats", "check"],
+            "cargo test -p clustervision-core --test formats_manifest",
         ),
+        (&["formats", "census"], "cv formats"),
     ];
     for (args, version, pointer) in removed {
         let (ok, code, out, err) = w.cv(args);
         assert!(!ok, "cv {args:?} must not still work\nstdout:\n{out}");
         assert_eq!(code, 2, "cv {args:?} must exit 2 (caller mistake)\nstderr:\n{err}");
         assert!(!err.contains("panicked"), "cv {args:?} panicked:\n{err}");
-        assert!(err.contains(version), "cv {args:?} must say when it went away:\n{err}");
+        assert!(
+            err.contains("0.15.0") || err.contains("is now"),
+            "cv {args:?} must say when it went away:\n{err}"
+        );
         assert!(err.contains(pointer), "cv {args:?} must point at {pointer:?}:\n{err}");
     }
+    // The 0.11 tombstones are plain unknown names now: clap's error, still exit 2, no pointer.
+    let (ok, code, _, err) = w.cv(&["convert", "alphasess"]);
+    assert!(!ok && code == 2 && err.contains("unrecognized subcommand"), "{err}");
+    let (ok, code, _, err) = w.cv(&["prune", "alphasess", "--retrieve", "t1"]);
+    assert!(!ok && code == 2 && err.contains("unexpected argument"), "{err}");
     // The pointers are real: the replacement parses (it fails on the harness, not the grammar).
     let (_, err) = w.cv_fails(&["port", "alphasess", "--harness", "marsrover"]);
     assert!(err.contains("unknown"), "{err}");
