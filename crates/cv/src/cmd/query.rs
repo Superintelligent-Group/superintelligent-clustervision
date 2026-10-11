@@ -5,19 +5,22 @@
 //! `/api/stats?q=` evaluate the same calculus. The reference itself is `cv schema`
 //! (`cmd/schema.rs`).
 
-use anyhow::{anyhow, Result};
+use crate::util::usage;
+use anyhow::Result;
 use cv_core::query::{FieldId, SessionQuery};
 use std::collections::HashSet;
 
 pub(crate) use cv_core::query::{filter_refs, matches_full, TextSets};
 
-/// Parse an optional `-q` string into a query, surfacing parse errors. The core's messages point
-/// at the reference by its 0.10 name; the CLI seam re-points them at `cv schema`.
+/// Parse an optional `-q` string into a query. A malformed query is a caller mistake (exit 2,
+/// like a bad window or a removed flag). The core's messages point at the reference by its 0.10
+/// name; the CLI seam re-points them at `cv schema`.
 pub(crate) fn build(query: Option<String>) -> Result<Option<SessionQuery>> {
     match query {
-        Some(q) => Ok(Some(
-            SessionQuery::parse(&q).map_err(|e| anyhow!(e.replace("`cv query`", "`cv schema`")))?,
-        )),
+        Some(q) => match SessionQuery::parse(&q) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(e) => usage(e.replace("`cv query`", "`cv schema`")),
+        },
         None => Ok(None),
     }
 }

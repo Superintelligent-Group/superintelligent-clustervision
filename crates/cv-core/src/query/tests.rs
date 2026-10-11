@@ -173,33 +173,6 @@ fn ext_facts_drive_external_terms() {
 }
 
 #[test]
-fn regex_operator() {
-    // case-insensitive by default
-    let query = q("title~^fix.*bug$");
-    assert!(query.prefilter(&refx("a", Harness::Claude, None, Some("FIX the Bug"), 1)));
-    assert!(!query.prefilter(&refx("a", Harness::Claude, None, Some("bug fix later"), 1)));
-    // regex on model (parse-required)
-    let mq = q(r"model~fable|opus");
-    assert!(mq.needs_parse());
-    assert!(mq.matches_session(&sess(Some("claude-opus-4-8"), &[])));
-    assert!(mq.matches_session(&sess(Some("claude-fable-5"), &[])));
-    assert!(!mq.matches_session(&sess(Some("claude-sonnet-4-6"), &[])));
-    // equivalent AST regardless of source identity isn't expected; just ensure parse round-trips
-    assert_eq!(q("title~ab").expr, q("title~ab").expr);
-}
-
-#[test]
-fn regex_errors_and_restrictions() {
-    // a literal paren in a regex must be quoted (bare `(` is grouping syntax)
-    assert!(SessionQuery::parse(r#"title~"(unclosed""#)
-        .unwrap_err()
-        .contains("bad regex"));
-    // `~` rejected on external/non-string fields
-    assert!(SessionQuery::parse("text~foo").unwrap_err().contains("regex"));
-    assert!(SessionQuery::parse("msgs~5").unwrap_err().contains("regex"));
-}
-
-#[test]
 fn forest_fields_classify_and_resolve() {
     let query = q("agent:Explore subtool:Bash agents>=3 workflows>=1 compactions>=2 workflow:census has:compacted");
     assert!(query.needs_forest());
@@ -240,84 +213,18 @@ fn forest_fields_classify_and_resolve() {
     // a count that fails the comparison flips it false
     let q2 = q("agents>=10");
     assert!(!q2.matches(&facts)); // Fx says 4
-                                  // regex is rejected on forest fields
-    assert!(SessionQuery::parse("agent~explore").unwrap_err().contains("regex"));
-    assert!(SessionQuery::parse("subtool~bash").unwrap_err().contains("regex"));
-}
-
-#[test]
-fn thread_matches_message_path() {
-    use crate::ir::{Block, Message, Role};
-    let msg = |id: &str, parent: Option<&str>, role: Role, blocks: Vec<Block>| Message {
-        id: Some(id.into()),
-        parent_id: parent.map(str::to_string),
-        role,
-        timestamp: None,
-        model: None,
-        content: blocks,
-        usage: None,
-        extra: serde_json::Map::new(),
-        kind: crate::ir::MessageKind::for_role(role),
-        origin: crate::ir::Origin::for_role(role),
-    };
-    let text = |t: &str| Block::Text { text: t.into() };
-    // u1("please refactor") -> a1(assistant) -> t1(tool Bash)
-    let s = Session {
-        id: "s".into(),
-        harness: Harness::Claude,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
-        messages: vec![
-            msg("u1", None, Role::User, vec![text("please refactor this")]),
-            msg("a1", Some("u1"), Role::Assistant, vec![text("on it")]),
-            msg(
-                "t1",
-                Some("a1"),
-                Role::Tool,
-                vec![Block::ToolUse {
-                    id: "x".into(),
-                    name: "Bash".into(),
-                    input: serde_json::json!({}),
-                    namespace: None,
-                }],
-            ),
-        ],
-        source_path: None,
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
-    };
-
-    assert!(q(r#"thread:"text:refactor > assistant""#).matches_session(&s));
-    assert!(q(r#"thread:"user > assistant > tool:Bash""#).matches_session(&s));
-    assert!(q(r#"thread:"refactor > assistant > tool:bash""#).matches_session(&s)); // bare word=text, case-insens
-                                                                                    // wrong child role
-    assert!(!q(r#"thread:"user > tool""#).matches_session(&s)); // a1 is assistant, not tool
-                                                                // tool not present as a child of user
-    assert!(!q(r#"thread:"user > tool:Grep""#).matches_session(&s));
-    // single step still works
-    assert!(q(r#"thread:"tool:Bash""#).matches_session(&s));
-
-    assert!(SessionQuery::parse(r#"thread:"user > > assistant""#)
-        .unwrap_err()
-        .contains("empty step"));
-    assert!(SessionQuery::parse(r#"thread:"role:bogus""#)
-        .unwrap_err()
-        .contains("role"));
-    assert!(SessionQuery::parse("thread~x").unwrap_err().contains("thread"));
-    assert!(q("thread:\"user\"").needs_parse());
 }
 
 #[test]
 fn errors_teach() {
-    // A near-miss of a real field errors with a suggestion (the typo guard) …
-    let err = SessionQuery::parse("harnes:claude").unwrap_err();
-    assert!(err.contains("unknown field") && err.contains("harness"), "{err}");
-    assert!(SessionQuery::parse("titel:x").unwrap_err().contains("title"));
+    // The retired sub-languages name their replacement instead of silently becoming needles.
+    let err = SessionQuery::parse("title~^fix").unwrap_err();
+    assert!(err.contains("removed in 0.15.0") && err.contains("`~`"), "{err}");
+    let err = SessionQuery::parse(r#"thread:"user > assistant""#).unwrap_err();
+    assert!(err.contains("removed in 0.15.0") && err.contains("thread:"), "{err}");
+    assert!(SessionQuery::parse("path:x").unwrap_err().contains("thread:"));
+    // A bare `~` word is a needle, not an operator.
+    assert!(!q("~/dev/cv").needs_parse());
     assert!(SessionQuery::parse("harness:nope").unwrap_err().contains("harness"));
     assert!(SessionQuery::parse("msgs>=abc").unwrap_err().contains("number"));
     assert!(SessionQuery::parse("(harness:claude").unwrap_err().contains(')'));
@@ -356,7 +263,9 @@ fn bare_url_and_unknown_keys_fall_back_to_needles() {
         1
     )));
     assert!(!query.prefilter(&refx("a", Harness::Claude, None, Some("no links here"), 1)));
-    // An unknown key that's nowhere near a real field is a needle too.
+    // An unknown key is a needle too — including a near-miss of a real field (no typo guard).
+    let query = q("harnes:claude");
+    assert!(query.prefilter(&refx("a", Harness::Claude, None, Some("harnes:claude typo"), 1)));
     let query = q("bogus:1");
     assert!(query.prefilter(&refx("a", Harness::Claude, None, Some("the Bogus:1 flag"), 1)));
     assert!(!query.prefilter(&refx("a", Harness::Claude, None, Some("nothing"), 1)));

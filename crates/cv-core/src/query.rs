@@ -25,7 +25,7 @@
 //! catalog) evaluates to [`Tri::Unknown`], and the prefilter keeps a session unless the expression is
 //! *definitely* false. A second pass with full [`Facts`] then decides for real.
 
-use crate::ir::{Harness, Message, Session, SessionRef};
+use crate::ir::{Harness, Session, SessionRef};
 use chrono::{DateTime, NaiveDate, Utc};
 
 // ---------------------------------------------------------------------------
@@ -44,7 +44,6 @@ pub enum FieldId {
     Created,
     Updated,
     Git,
-    Thread,
     Text,
     Tool,
     Touched,
@@ -110,6 +109,7 @@ pub const HAS_FLAGS: &[(&str, &str)] = &[
 ];
 
 /// The language. One row per field; everything else is generated from this.
+#[rustfmt::skip]
 pub const FIELDS: &[FieldDef] = &[
     FieldDef { id: FieldId::Harness, name: "harness", aliases: &["h"], kind: Kind::HarnessEnum, cost: Cost::Catalog,
         desc: "Which harness produced the session.", example: "harness:claude" },
@@ -129,9 +129,6 @@ pub const FIELDS: &[FieldDef] = &[
         desc: "Last-updated time. (`before:`/`until:` are sugar for `updated<`; `after:`/`since:` for `updated>=`.)", example: "updated:2026-01-01..2026-04-01" },
     FieldDef { id: FieldId::Git, name: "git", aliases: &["branch"], kind: Kind::Str, cost: Cost::Parse,
         desc: "Git branch or repo (substring). Parse-required.", example: "git:main" },
-    FieldDef { id: FieldId::Thread, name: "thread", aliases: &["path"], kind: Kind::Str, cost: Cost::Parse,
-        desc: "A message-tree path (CSS child combinator `>`): a turn matching the first step with a direct reply matching the next, etc. Steps: a role (user/assistant/tool/system), `tool:NAME`, `text:WORD`, or a bare word (text). Quote the value.",
-        example: "thread:\"text:refactor > assistant\"" },
     FieldDef { id: FieldId::Text, name: "text", aliases: &["content"], kind: Kind::Str, cost: Cost::Index,
         desc: "Full-text match over session content (tantivy). Needs `cv index`.", example: "text:\"SandboxDenied\"" },
     FieldDef { id: FieldId::Tool, name: "tool", aliases: &[], kind: Kind::Str, cost: Cost::Events,
@@ -174,12 +171,11 @@ fn cost_label(c: Cost) -> &'static str {
 // Operators & values.
 // ---------------------------------------------------------------------------
 
-/// A comparison operator. `Contains` is the default `:`; `Eq` is `=`; `Match` is `~` (regex).
+/// A comparison operator. `Contains` is the default `:`; `Eq` is `=`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Contains,
     Eq,
-    Match,
     Gt,
     Ge,
     Lt,
@@ -191,7 +187,6 @@ impl Op {
         match self {
             Op::Contains => ":",
             Op::Eq => "=",
-            Op::Match => "~",
             Op::Gt => ">",
             Op::Ge => ">=",
             Op::Lt => "<",
@@ -204,51 +199,20 @@ impl Op {
             Op::Ge => lhs >= rhs,
             Op::Lt => lhs < rhs,
             Op::Le => lhs <= rhs,
-            Op::Eq | Op::Contains | Op::Match => lhs == rhs,
+            Op::Eq | Op::Contains => lhs == rhs,
         }
     }
 }
 
-/// One step in a `thread:` message-path: a predicate on a single message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ThreadStep {
-    /// Match a message role.
-    Role(crate::ir::Role),
-    /// Message text contains this (lowercased) substring.
-    Text(String),
-    /// The message has a tool-use whose name contains this (lowercased) substring.
-    Tool(String),
-}
-
 /// A parsed right-hand value, already shaped to the field's [`Kind`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Val {
     /// Lowercased strings; >1 means an OR-list (`a,b,c`).
     Strs(Vec<String>),
-    /// A compiled regex (the `~` operator), case-insensitive — matches local string fields.
-    Regex(regex::Regex),
-    /// A `thread:` path: each step is a direct child (CSS `>`) of the previous.
-    Thread(Vec<ThreadStep>),
     Num(u64),
     NumRange(u64, u64),
     Date(DateTime<Utc>),
     DateRange(DateTime<Utc>, DateTime<Utc>),
-}
-
-// `regex::Regex` isn't `PartialEq`; compare by source so the AST stays comparable (used in tests).
-impl PartialEq for Val {
-    fn eq(&self, other: &Val) -> bool {
-        match (self, other) {
-            (Val::Strs(a), Val::Strs(b)) => a == b,
-            (Val::Regex(a), Val::Regex(b)) => a.as_str() == b.as_str(),
-            (Val::Thread(a), Val::Thread(b)) => a == b,
-            (Val::Num(a), Val::Num(b)) => a == b,
-            (Val::NumRange(a, b), Val::NumRange(c, d)) => a == c && b == d,
-            (Val::Date(a), Val::Date(b)) => a == b,
-            (Val::DateRange(a, b), Val::DateRange(c, d)) => a == c && b == d,
-            _ => false,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,11 +525,6 @@ fn eval_term(t: &Term, f: &Facts) -> Tri {
                 str_contains_any(&t.val, hay)
             }
         },
-        FieldId::Thread => match (f.session, &t.val) {
-            (Some(s), Val::Thread(steps)) => Tri::of(match_thread(s, steps)),
-            (None, _) => Tri::Unknown,
-            _ => Tri::False,
-        },
         // External (index/events).
         FieldId::Text => or_over(&t.val, |n| f.ext.text(n)),
         FieldId::Tool => or_over(&t.val, |n| f.ext.tool(n)),
@@ -602,11 +561,10 @@ fn as_strs(val: &Val) -> Vec<String> {
     }
 }
 
-/// Does `val` (under `op`) match a single lowercased haystack? Handles substring (`:`), exact (`=`),
-/// and regex (`~`); OR-lists match if any element does.
+/// Does `val` (under `op`) match a single lowercased haystack? Handles substring (`:`) and exact
+/// (`=`); OR-lists match if any element does.
 fn val_hit(val: &Val, op: Op, h: &str) -> bool {
     match val {
-        Val::Regex(re) => re.is_match(h),
         Val::Strs(strs) => match op {
             Op::Eq => strs.iter().any(|n| h == n),
             _ => strs.iter().any(|n| h.contains(n)),
@@ -615,7 +573,7 @@ fn val_hit(val: &Val, op: Op, h: &str) -> bool {
     }
 }
 
-/// Substring/regex-any (the `:`/`~` semantic) against an optional lowercased haystack.
+/// Substring-any (the `:` semantic) against an optional lowercased haystack.
 fn str_contains_any(val: &Val, hay: Option<String>) -> Tri {
     match hay {
         None => Tri::False,
@@ -623,7 +581,7 @@ fn str_contains_any(val: &Val, hay: Option<String>) -> Tri {
     }
 }
 
-/// `:` contains, `=` exact, `~` regex — against an optional lowercased haystack.
+/// `:` contains, `=` exact — against an optional lowercased haystack.
 fn str_match(op: Op, val: &Val, hay: Option<String>) -> Tri {
     match hay {
         None => Tri::False,
@@ -645,58 +603,6 @@ fn date_match(op: Op, val: &Val, when: Option<DateTime<Utc>>) -> Tri {
         Val::Date(rhs) => Tri::of(op.cmp_ok(&w, rhs)),
         Val::DateRange(lo, hi) => Tri::of(w >= *lo && w <= *hi),
         _ => Tri::False,
-    }
-}
-
-/// Does the session's message DAG contain a path matching `steps` — message m0 matching step 0 with a
-/// direct child (by `parent_id`) matching step 1, and so on (CSS `>` child combinator)?
-fn match_thread(s: &Session, steps: &[ThreadStep]) -> bool {
-    if steps.is_empty() {
-        return false;
-    }
-    // id → indices of its direct children (messages whose parent_id is that id).
-    let mut children: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
-    for (i, m) in s.messages.iter().enumerate() {
-        if let Some(pid) = m.parent_id.as_deref() {
-            children.entry(pid).or_default().push(i);
-        }
-    }
-    let resolver = s.resolver();
-    (0..s.messages.len()).any(|i| match_from(s, steps, &children, &resolver, i, 0))
-}
-
-fn match_from(
-    s: &Session,
-    steps: &[ThreadStep],
-    children: &std::collections::HashMap<&str, Vec<usize>>,
-    resolver: &crate::lazy::Resolver,
-    i: usize,
-    k: usize,
-) -> bool {
-    if !step_matches(&s.messages[i], &steps[k], resolver) {
-        return false;
-    }
-    if k + 1 == steps.len() {
-        return true;
-    }
-    // Descend to a direct child matching the next step.
-    match s.messages[i].id.as_deref().and_then(|id| children.get(id)) {
-        Some(kids) => kids.iter().any(|&c| match_from(s, steps, children, resolver, c, k + 1)),
-        None => false,
-    }
-}
-
-fn step_matches(m: &Message, step: &ThreadStep, resolver: &crate::lazy::Resolver) -> bool {
-    match step {
-        ThreadStep::Role(r) => m.role == *r,
-        ThreadStep::Tool(n) => m
-            .content
-            .iter()
-            .any(|b| matches!(b, crate::ir::Block::ToolUse { name, .. } if name.to_lowercase().contains(n))),
-        ThreadStep::Text(t) => m.content.iter().any(|b| match b {
-            crate::ir::Block::Text { text } => text.resolve(resolver).to_lowercase().contains(t),
-            _ => false,
-        }),
     }
 }
 
@@ -899,43 +805,13 @@ fn parse_term(w: &Word) -> Result<Expr, String> {
     if w.quoted_from == Some(0) {
         return Ok(bare(&w.text));
     }
-    if let Some((field, op, value)) = split_op(&w.text) {
+    if let Some((field, op, value)) = split_op(&w.text)? {
         // Was (any of) the value quoted? Quoted values are literal: exempt from comma-OR-splitting.
         let vstart = w.text.len() - value.len();
         let value_quoted = w.quoted_from.is_some_and(|q| q >= vstart);
-        // A known field → a real term. An unknown key that's one typo away from a known field is
-        // an error (typo guard). Anything else (a bare `http://…`, `key:value` prose) falls back
-        // to a plain needle.
+        // A known field → a real term. A retired field names its replacement. Anything else (a
+        // bare `http://…`, `key:value` prose) falls back to a plain needle.
         if let Some(def) = field_for(field) {
-            // `thread:` parses its value with the message-path sub-grammar, not as a plain string.
-            if def.id == FieldId::Thread {
-                if !matches!(op, Op::Contains) {
-                    return Err("thread: only takes `:` — see `cv query`".to_string());
-                }
-                return Ok(Expr::Term(Term {
-                    field: FieldId::Thread,
-                    op,
-                    val: parse_thread(value)?,
-                }));
-            }
-            // `~` (regex): only on local (catalog/parse) string fields — the external resolvers
-            // (`text:`/`tool:`/`touched:`) take plain needles, not patterns.
-            if op == Op::Match {
-                if !matches!(def.kind, Kind::Str | Kind::Path)
-                    || matches!(def.cost, Cost::Index | Cost::Events | Cost::Forest)
-                {
-                    return Err(format!("`~` (regex) isn't valid on {} — see `cv query`", def.name));
-                }
-                let re = regex::RegexBuilder::new(value)
-                    .case_insensitive(true)
-                    .build()
-                    .map_err(|e| format!("bad regex {value:?}: {e} — see `cv query`"))?;
-                return Ok(Expr::Term(Term {
-                    field: def.id,
-                    op,
-                    val: Val::Regex(re),
-                }));
-            }
             if !matches!(def.kind, Kind::Num | Kind::Date) && !matches!(op, Op::Contains | Op::Eq) {
                 return Err(format!(
                     "operator {} isn't valid on {} (string field) — see `cv query`",
@@ -967,102 +843,16 @@ fn parse_term(w: &Word) -> Result<Expr, String> {
             let val = parse_value(def, op, value, value_quoted)?;
             return Ok(Expr::Term(Term { field: def.id, op, val }));
         }
-        if let Some(name) = close_field(field) {
-            return Err(format!(
-                "unknown field {field:?} (did you mean `{name}`?) — see `cv query` for the field list"
-            ));
+        if matches!(field.to_ascii_lowercase().as_str(), "thread" | "path") {
+            return Err(
+                "`thread:` message paths were removed in 0.15.0 — select the session (`tool:`, `text:`, `has:`) and read the turns with `cv show` — see `cv query`"
+                    .to_string(),
+            );
         }
-        // Not a known field and not a near-miss: fall through to a plain needle, so bare URLs
-        // (`http://…`) and `key:value`-shaped prose still search title/cwd/id.
+        // Not a known field: fall through to a plain needle, so bare URLs (`http://…`) and
+        // `key:value`-shaped prose still search title/cwd/id.
     }
     Ok(bare(&w.text))
-}
-
-/// The typo guard: a known field name/alias within one edit of `key`, so `harnes:claude` errors
-/// with a suggestion instead of silently becoming a needle. Short keys (< 3 chars) never fuzzy-
-/// match — one edit on a 1–2 char key reaches half the alphabet of aliases.
-fn close_field(key: &str) -> Option<&'static str> {
-    let k = key.to_ascii_lowercase();
-    if k.len() < 3 {
-        return None;
-    }
-    FIELDS
-        .iter()
-        .flat_map(|f| std::iter::once(f.name).chain(f.aliases.iter().copied()))
-        .find(|cand| cand.len() >= 3 && within_one_edit(&k, cand))
-}
-
-/// Whether `a` and `b` are within one edit (insert / delete / substitute / adjacent transpose) —
-/// exact for distance ≤ 1, which is all [`close_field`] wants.
-fn within_one_edit(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    match a.len().abs_diff(b.len()) {
-        0 => {
-            let diffs: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
-            match diffs.as_slice() {
-                [_] => true,                                                // one substitution
-                [i, j] => *j == *i + 1 && a[*i] == b[*j] && a[*j] == b[*i], // one transposition
-                _ => false,
-            }
-        }
-        1 => {
-            // One insertion/deletion: after the common prefix, the shorter's tail matches the
-            // longer's tail shifted by one.
-            let (s, l) = if a.len() < b.len() { (&a, &b) } else { (&b, &a) };
-            let i = s.iter().zip(l.iter()).take_while(|(x, y)| x == y).count();
-            s[i..] == l[i + 1..]
-        }
-        _ => false,
-    }
-}
-
-/// Parse a `thread:` value — `step > step > …` — into a path of [`ThreadStep`]s. Each `>`-separated
-/// step is a role keyword, `tool:NAME`, `text:WORD`, or a bare word (treated as text).
-fn parse_thread(raw: &str) -> Result<Val, String> {
-    let mut steps = Vec::new();
-    for chunk in raw.split('>') {
-        let tok = chunk.trim();
-        if tok.is_empty() {
-            return Err("empty step in thread: path (use `a > b`) — see `cv query`".to_string());
-        }
-        let step = if let Some((key, val)) = tok.split_once(':') {
-            let val = val.trim();
-            match key.trim() {
-                "role" => ThreadStep::Role(parse_role(val)?),
-                "tool" => ThreadStep::Tool(val.to_lowercase()),
-                "text" => ThreadStep::Text(val.to_lowercase()),
-                other => {
-                    return Err(format!(
-                        "unknown thread step key {other:?} (role/tool/text) — see `cv query`"
-                    ))
-                }
-            }
-        } else if let Ok(role) = parse_role(tok) {
-            ThreadStep::Role(role)
-        } else {
-            ThreadStep::Text(tok.to_lowercase())
-        };
-        steps.push(step);
-    }
-    Ok(Val::Thread(steps))
-}
-
-fn parse_role(s: &str) -> Result<crate::ir::Role, String> {
-    use crate::ir::Role;
-    Ok(match s.to_ascii_lowercase().as_str() {
-        "user" => Role::User,
-        "assistant" | "agent" => Role::Assistant,
-        "tool" => Role::Tool,
-        "system" => Role::System,
-        other => {
-            return Err(format!(
-                "unknown role {other:?} (user/assistant/tool/system) — see `cv query`"
-            ))
-        }
-    })
 }
 
 /// A bare word → OR over title/cwd/id substring.
@@ -1177,7 +967,7 @@ fn parse_date(val: &str) -> Result<DateTime<Utc>, String> {
 }
 
 /// Split a `field<op>value` word into (field, op, value). Returns None if there's no operator.
-fn split_op(w: &str) -> Option<(&str, Op, &str)> {
+fn split_op(w: &str) -> Result<Option<(&str, Op, &str)>, String> {
     // Scan for the first operator char outside of any value. Field names are [a-z_], so the operator
     // is the first non-field char.
     let bytes = w.as_bytes();
@@ -1186,23 +976,36 @@ fn split_op(w: &str) -> Option<(&str, Op, &str)> {
         k += 1;
     }
     if k == 0 || k == bytes.len() {
-        return None;
+        return Ok(None);
     }
     let field = &w[..k];
+    // The retired regex operator: on a real field it names its replacement; `a~b` prose that never
+    // was a field term stays the needle it always was.
+    if w[k..].starts_with('~') {
+        return if field_for(field).is_some() {
+            Err(
+                "the `~` regex operator was removed in 0.15.0 — `:` is substring, `=` exact — see `cv query`"
+                    .to_string(),
+            )
+        } else {
+            Ok(None)
+        };
+    }
     // Longest operators first so `>=` isn't read as `>`. `strip_prefix` returns the value tail,
     // which is exactly `vstart`.
-    let (op, vstart) = [
+    let Some((op, vstart)) = [
         (">=", Op::Ge),
         ("<=", Op::Le),
         (">", Op::Gt),
         ("<", Op::Lt),
         ("=", Op::Eq),
         (":", Op::Contains),
-        ("~", Op::Match),
     ]
     .into_iter()
-    .find_map(|(pat, op)| w[k..].strip_prefix(pat).map(|r| (op, r)))?;
-    Some((field, op, vstart))
+    .find_map(|(pat, op)| w[k..].strip_prefix(pat).map(|r| (op, r))) else {
+        return Ok(None);
+    };
+    Ok(Some((field, op, vstart)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,10 +1020,8 @@ pub fn reference() -> String {
     s.push_str("GRAMMAR\n");
     s.push_str("  terms combine with implicit AND; also: OR (or |), NOT (or a leading -), and ( ) grouping.\n");
     s.push_str("  a term is  field<op>value  — or a bare word, which matches title/cwd/id.\n");
-    s.push_str("  (an unknown `key:value` word is a bare needle too — so URLs just work; a near-miss\n");
-    s.push_str("   of a real field like `harnes:` errors with a suggestion.)\n");
-    s.push_str("  ops: ':' (contains) '=' (exact) '~' (case-insensitive regex, on string fields)\n");
-    s.push_str("       and for numbers/dates: > >= < <=\n");
+    s.push_str("  (an unknown `key:value` word is a bare needle too — so URLs just work.)\n");
+    s.push_str("  ops: ':' (contains) '=' (exact); for numbers/dates also > >= < <=\n");
     s.push_str("  values: word | \"quoted phrase\" | a,b,c (OR-list) | lo..hi (range, numbers & dates)\n");
     s.push_str("  quoting is literal: commas inside quotes are text, not an OR-list, and a fully-quoted\n");
     s.push_str("  word is always a needle. `field:YYYY-MM-DD` on a date field means that whole day.\n\n");
@@ -1268,12 +1069,8 @@ pub fn schema_json() -> serde_json::Value {
                 Kind::Path => "path",
                 Kind::Flag => "flag",
             };
-            let ops: Vec<&str> = if f.id == FieldId::Thread {
-                vec![":"] // a path sub-grammar, not a plain string
-            } else if matches!(f.kind, Kind::Num | Kind::Date) {
+            let ops: Vec<&str> = if matches!(f.kind, Kind::Num | Kind::Date) {
                 vec![":", "=", ">", ">=", "<", "<="]
-            } else if matches!(f.kind, Kind::Str | Kind::Path) && matches!(f.cost, Cost::Catalog | Cost::Parse) {
-                vec![":", "=", "~"]
             } else {
                 vec![":", "="]
             };
