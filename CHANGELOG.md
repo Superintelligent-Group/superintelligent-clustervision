@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Qwen Code 0.25: sessions in `~/.qwen/projects/*/chats/*.jsonl` and their sub-agent transcripts are read; cv previously found none.
+- Gemini: tool results and thoughts no longer appear twice after a resume, and a resumed 0.46 session is no longer hidden by its empty twin.
+- Gemini: hook context is its own turn; `invoke_agent` calls are sub-agent spawns and returns.
+- Gemini and Qwen corpus: real stores from Gemini CLI 0.46.0 and 0.63.0 and Qwen Code 0.25.1 in the golden test.
+
 - Codex 0.161/0.162: `turn_aborted` notes keep the abort `error` and `root_turn_id`; `cv formats` names carried records `event_msg.<type>` as the manifest does.
 - Codex corpus: real rollouts from Codex 0.161.0 and 0.162.1, re-read by a golden test so every recorded format keeps reading.
 - `cv index` merges its segments itself, by size, to completion: no more abandoned ~1 GB background merge on long runs.

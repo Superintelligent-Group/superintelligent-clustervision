@@ -34,7 +34,7 @@ All paths are the real ones the adapters look at. `~` is your home dir; `<AppSup
 | **Cline** | `<AppSupport>/<Editor>/User/globalStorage/saoudrizwan.claude-dev/tasks/<taskId>/` | ✓ | ✓ | VS Code extension; `api_conversation_history.json` is a raw Anthropic-Messages array (≈1:1 with Claude). Also `~/.cline/tasks/`. cwd from first user msg's `<environment_details>`. |
 | **Roo Code** | `<AppSupport>/<Editor>/User/globalStorage/rooveterinaryinc.roo-cline\|roo-code/tasks/<taskId>/` | ✓ | ✓ | A **Cline fork** — identical per-task layout, different namespace. Also `~/.roo/tasks/`. Reuses the Cline parser/emitter, tagged `Harness::Roo`. |
 | **Continue (continue.dev)** | `~/.continue/sessions/<sid>.json` | ✓ | ✓ | `$CONTINUE_GLOBAL_DIR` overrides. `sessions.json` index + per-session file. OpenAI-shaped messages; cwd = `workspaceDirectory`. |
-| **Qwen Code** | `~/.qwen/tmp/<projectHash>/chats/session-*.json\|jsonl` | ✓ | ✓ | A **gemini-cli fork** — byte-identical format, just rooted at `~/.qwen`. Delegates to the Gemini parser, re-tagged `Harness::Qwen`. **Sub-agents** dir-nested like Gemini. |
+| **Qwen Code** | `~/.qwen/projects/<cwd>/chats/<id>.jsonl` (+ legacy `~/.qwen/tmp/<hash>/chats/session-*.json\|jsonl`) | ✓ | ✓ | Claude-Code-shaped records carrying Gemini parts; sub-agents under `subagents/<parent>/agent-<id>.jsonl`. The legacy gemini-cli shape delegates to the Gemini parser. |
 | **Cursor IDE** | `<AppSupport>/Cursor/User/globalStorage/state.vscdb` (**SQLite**) | ✓ | — | Closed-source, opened read-only. Global DB holds `composerData:`/`bubbleId:` rows; per-workspace DB links composers → cwd. Schema churns (`_v` 1..=10+). |
 | **Goose (Block)** | `<AppSupport>/Block.block.goose/sessions/sessions.db` (**SQLite**) | ✓ | — | `$GOOSE_PATH_ROOT`/`$XDG_DATA_HOME` override. Modern `sessions.db` + **legacy** per-session `<name>.jsonl`. MCP-style tool content; read-only, PRAGMA-probed. |
 | **Zed (agent panel)** | `<data_dir>/Zed/threads/threads.db` (**SQLite**) | ✓ | — | One DB, one row per thread; `data` BLOB = **zstd-compressed JSON** (pure-Rust decode). Three blob generations (versionless / agent1 0.1–0.2 / agent2 0.3 tagged-enum). cwd + git from the project snapshot; **subagents** linked by `parent_id`. |
@@ -103,7 +103,7 @@ as a tree — see [sub-agent trees in the app](viewing-and-sharing.md).
   don't get mistaken for top-level sessions; they're attached to their parent instead.
 - **Grok** tags subagent sessions with `session_kind: "subagent"` (primary sessions instead carry an
   `agent_name`); the kind is preserved in the message `extra`.
-- **Gemini and Qwen** dir-nest subagent recordings under `chats/<parentId>/<id>.jsonl`.
+- **Gemini** dir-nests subagent recordings under `chats/<parentId>/<id>.jsonl`; **Qwen** writes them to `subagents/<parentId>/agent-<id>.jsonl`.
 - **OpenCode** models them as `subtask` parts — a spawned sub-session with its own prompt, agent, and
   model — alongside `agent` mention parts.
 - **Zed** stores a subagent thread as its own row in `threads.db` with a `parent_id` column (and, in

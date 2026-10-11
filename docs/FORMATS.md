@@ -428,8 +428,27 @@ here means "unchanged across everything we have", not "unchanged since the file 
 - **Record vocabulary:** `formats/gemini.toml` `[types]` is the checked list — the record kinds
   (`user`, `gemini`/`model`/`assistant`, `info`, `error`, `warning`, `system`, `rewind`), the
   append-only controls (`$set`, `$rewindTo`) and the parts (`text`, `thought`, `functionCall`,
-  `functionResponse`, `inlineData`, `fileData`). Qwen delegates to this parser, so
-  `formats/qwen.toml` is a path delta only.
+  `functionResponse`, `inlineData`, `fileData`). Qwen's gemini-cli-shaped `~/.qwen/tmp` store
+  delegates to this parser.
+- **Re-verified 2026-10-11 against 0.46.0 and 0.63.0** (corpus `tests/corpus/gemini/<v>/`; source diff
+  v0.46.0 → cfbcaa8 → v0.63.0: `chatRecordingTypes.ts` unchanged; 0.63.0 adds the
+  `session-<ts>-<n>-<id8>.jsonl` same-minute collision name). What real recordings hold that a reader must
+  survive, in both versions:
+  - every tool response is ALSO a `user` record of bare `functionResponse` parts (the wire turn), beside
+    `toolCalls[].result` on the `gemini` record: one result, recorded twice;
+  - each resume appends a `$set.messages` re-synced from the API history (`updateMessagesFromHistory`):
+    `gemini` entries then carry their thoughts and calls twice (`thought`/`functionCall` parts AND
+    `thoughts[]`/`toolCalls[]`), 0.46.0 drops `model` from them, and the tool-response `user` turn can
+    take the SAME `id` as the `gemini` turn that made the call (key by type + id, never id alone);
+  - a resumed 0.46.0 process leaves a second `session-*.jsonl` with the same `sessionId` holding only the
+    `<session_context>` preamble, and it is the newer file (0.63.0 deletes it);
+  - a BeforeAgent hook's `additionalContext` is a trailing `<hook_context>` part of the prompt record;
+    `displayContent` holds what was typed (`/command`, `@file`) when the model got something else;
+  - an `invoke_agent` call's `toolCalls[].agentId` is the child recording `chats/<parent>/<agentId>.jsonl`;
+  - compression (automatic; `/compress` is interactive-only) writes no record; `/chat save <tag>` writes
+    `checkpoint-<tag>.json` whose first user Content merges the preamble and the prompt (0.63.0);
+  - `tmp/<project>/<sessionId>/plans/*.md` (plan mode), `.../tracker/*.json` (task tracker) and
+    `tmp/background-processes/background-<pid>.log` are written beside the recordings; cv reads none.
 
 ## Hermes (Nous) — `~/.hermes/state.db` (SQLite, `SCHEMA_VERSION` 30 as of 2026-09-19; `$HERMES_HOME` overrides; per-profile `profiles/<name>/state.db`)
 
@@ -588,8 +607,28 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
 
 ## Qwen Code — `~/.qwen/`
 
-- A **gemini-cli fork**: byte-identical format under `~/.qwen/tmp/<projectHash>/{logs.json, chats/session-*.json|jsonl,
-  checkpoint-*.json}`. The adapter delegates to the Gemini parser and re-tags `Harness::Qwen`. (Path delta only.)
+- **Current (verified on 0.25.1, 2026-10-11; corpus `tests/corpus/qwen/0.25.1/`):** one JSONL per session at
+  `~/.qwen/projects/<sanitized cwd>/chats/<sessionId>.jsonl` (`<sanitized cwd>` = every non-alphanumeric byte a
+  dash; `$QWEN_HOME` moves `~/.qwen`, `$QWEN_RUNTIME_DIR` the runtime dirs), one `ChatRecord` per line
+  (`services/chatRecordingService.ts`): `{uuid, parentUuid, sessionId, timestamp, type: user|assistant|tool_result|system,
+  subtype?, provenance, cwd, version, gitBranch, message?: Gemini Content, model?, usageMetadata?, toolCallResult?,
+  systemPayload?, forkedFrom?}`. The format is Claude-Code-shaped records carrying Gemini parts; it is NOT the
+  gemini-cli recording any more.
+  - Sub-agents: `projects/<cwd>/subagents/<parentSessionId>/agent-<agentId>.jsonl` (records with `isSidechain`,
+    `agentId`) + `agent-<agentId>.meta.json` (`toolUseId`, `subagentName`, `parentSessionId`).
+  - Deferred tools: most tools (agent, web_fetch, cron_*, MCP, goals) are loaded with `tool_search` and invoked as
+    `tool_call {name, arguments}`; cv unwraps it to the named tool, namespace `tool_call`.
+  - `user` records: `provenance: real_user` is a prompt (a `UserPromptSubmit` hook's context is a trailing
+    `<qwen:user-prompt-submit-context>` part); `goal_runtime`, `notification`, `cron`, `agent_*` are injected.
+  - `system` subtypes cv reads: `chat_compression` (`{info, compressedHistory}` → boundary + summary),
+    `slash_command`, `at_command`, `goal_state`, `rewind`, `session_model`, `custom_title`, `parent_session`,
+    `turn_result`. `ui_telemetry` (a third of the bytes), `attribution_snapshot`, `file_history_snapshot` and
+    the session-settings echoes are ignored (`formats/qwen.toml`).
+  - Beside the sessions: `tmp/<hash>/background-shells/<sessionId>/shell-*.{output,status}`,
+    `tmp/<hash>/scheduled_tasks.json` (cron), `~/.qwen/memories/` and `projects/<cwd>/memory/` (memory files).
+- **Legacy (the fork's original layout):** gemini-cli-shaped `~/.qwen/tmp/<projectHash>/{logs.json,
+  chats/session-*.json|jsonl, checkpoint-*.json}`. The adapter delegates these to the Gemini parser and re-tags
+  `Harness::Qwen`.
 
 ## LM Studio — `~/.lmstudio/conversations/<ms-epoch>.conversation.json`
 
