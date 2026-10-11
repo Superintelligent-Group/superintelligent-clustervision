@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cv_core::harness::claude::Claude;
 use cv_core::harness::cline::Cline;
 use cv_core::harness::codex::Codex;
 use cv_core::harness::continuedev::Continue;
@@ -41,6 +42,19 @@ struct CorpusHarness {
 
 fn codex(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Codex::with_home(&version_dir.join(".codex")))
+}
+
+fn claude_adapter(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Claude::with_config_dir(&version_dir.join(".claude")))
+}
+
+/// Claude Code keeps each sub-agent (direct, and every workflow agent) in its own transcript under
+/// the parent's `subagents/`, found the way `cv show --tree` finds them.
+fn claude_children(r: &SessionRef) -> Vec<SessionRef> {
+    cv_core::harness::claude::subagent_tree(&r.path)
+        .into_iter()
+        .map(|k| k.session)
+        .collect()
 }
 
 fn opencode(version_dir: &Path) -> Box<dyn Adapter> {
@@ -86,6 +100,11 @@ fn qwen(version_dir: &Path) -> Box<dyn Adapter> {
 const SNAPSHOT_ONLY: &[&str] = &["lmstudio", "zed"];
 
 const HARNESSES: &[CorpusHarness] = &[
+    CorpusHarness {
+        name: "claude",
+        adapter: claude_adapter,
+        children: Some(claude_children),
+    },
     CorpusHarness {
         name: "cline",
         adapter: cline,
@@ -322,4 +341,71 @@ fn no_corpus_file_carries_a_secret_or_a_real_path() {
         "corpus files carry secret- or path-shaped text:\n{}",
         bad.join("\n")
     );
+}
+
+/// Claude Code keeps a `Workflow` run's state beside the transcript (`workflows/wf_<run>.json`) and
+/// each agent's journaled result in `subagents/workflows/<run>/journal.jsonl`; the summary's
+/// `children` has the agents' transcripts but neither of those. This reads them for every Claude
+/// version through `claude_workflow::workflows` and `subagent_tree` into `workflows.json`, and checks
+/// that every `agent-*.jsonl` on disk is one of the summary's children. `CV_REGEN_CORPUS=1` rewrites.
+#[test]
+fn claude_corpus_workflow_runs_read_as_recorded() {
+    use cv_core::harness::{claude, claude_workflow};
+    let _w = World::in_process("corpus-workflows");
+    let regen = std::env::var_os("CV_REGEN_CORPUS").is_some();
+    let mut failures = Vec::new();
+    for v in subdirs(&corpus_root().join("claude")) {
+        let label = format!("claude/{}", v.file_name().unwrap().to_string_lossy());
+        let mut refs = claude_adapter(&v).discover().expect("discover");
+        refs.sort_by(|a, b| a.id.cmp(&b.id));
+        let children: usize = refs.iter().map(|r| claude_children(r).len()).sum();
+        let on_disk = walkdir::WalkDir::new(&v)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy();
+                n.starts_with("agent-") && n.ends_with(".jsonl")
+            })
+            .count();
+        assert_eq!(children, on_disk, "{label}: subagent_tree missed sub-agent transcripts");
+        let sessions: Vec<Value> = refs
+            .iter()
+            .filter_map(|r| {
+                let runs: Vec<Value> = claude_workflow::workflows(&r.path)
+                    .iter()
+                    .map(|w| {
+                        let mut agents: Vec<Value> = claude::subagent_tree(&r.path)
+                            .iter()
+                            .filter(|k| k.workflow.as_deref() == Some(w.run_id.as_str()))
+                            .map(|k| json!({"agent_id": k.agent_id(), "result_status": k.result_status, "result_summary": k.result_summary}))
+                            .collect();
+                        agents.sort_by_key(|a| a["agent_id"].as_str().unwrap_or("").to_string());
+                        json!({
+                            "name": w.name,
+                            "status": w.status,
+                            "agent_count": w.agent_count,
+                            "phases": w.phases.iter().map(|p| json!({"title": p.title, "agents": p.agents.len()})).collect::<Vec<_>>(),
+                            "script": w.script.is_some(),
+                            "journal": agents,
+                        })
+                    })
+                    .collect();
+                (!runs.is_empty()).then(|| json!({ "id": r.id, "workflows": runs }))
+            })
+            .collect();
+        let text = serde_json::to_string_pretty(&json!({ "sessions": sessions })).unwrap() + "\n";
+        let path = v.join("workflows.json");
+        if regen {
+            fs::write(&path, &text).unwrap();
+            continue;
+        }
+        let want = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{label}: {e} (CV_REGEN_CORPUS=1 writes it)"));
+        if want != text {
+            failures.push(format!(
+                "{label}: workflows differ from {}\n--- got:\n{text}",
+                path.display()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

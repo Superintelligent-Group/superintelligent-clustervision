@@ -1,0 +1,33 @@
+{
+  "sessions": [
+    {
+      "id": "fc2a257c-05d1-422a-813e-c446155d90b4",
+      "workflows": [
+        {
+          "name": "corpus-hello",
+          "status": "completed",
+          "agent_count": 2,
+          "phases": [
+            {
+              "title": "Say",
+              "agents": 2
+            }
+          ],
+          "script": true,
+          "journal": [
+            {
+              "agent_id": "a1a3ee73248f12690",
+              "result_status": null,
+              "result_summary": "ok"
+            },
+            {
+              "agent_id": "a751293ea3651c047",
+              "result_status": null,
+              "result_summary": "yes"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ This is the ground-truth catalog of how each harness stores sessions on disk, re
 real machine (2026-05-29; re-verified 2026-09-19 against upstream checkouts under `~/pug` for Codex
 `132c2be23` (0.154), OpenCode `fee476bb` (1.18.31), gemini-cli `cfbcaa8`, Goose `2090ad1c`
 (1.51.0), OpenClaw `0e9181234a`, Hermes `6d8a8bebf7` (schema v30), kimi-cli `86f1364`, and against the
-shipped bundles for Claude Code 2.1.278 and Kimi Code 0.39.1; kimi-cli 1.48.0/1.51.0 and Kimi Code
+shipped bundles for Claude Code 2.1.278 (re-checked against 2.1.296 by the corpus) and Kimi Code 0.39.1; kimi-cli 1.48.0/1.51.0 and Kimi Code
 0.39.1/2.1.1 re-read 2026-10-11 from their corpora in `crates/cv-core/tests/corpus/`). It drives the adapters in `cv-core`.
 Keep it accurate; it is the spec.
 
@@ -203,6 +203,21 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
   (`~/.claude/debug/<sessionId>.txt`) exist only when run with `--debug`. The installed binary
   (`~/.local/share/claude/versions/<v>`, Bun-compiled Mach-O) has its JS in plaintext — `grep -a -b -o`
   + `dd` reads any behavior; older versions stay in that dir, which dates a change.
+- **2.1.296 (corpus `crates/cv-core/tests/corpus/claude/2.1.296/`, generated headless):** sub-agents
+  launch async by default (the `Agent` tool_result is "Async agent launched successfully"; the return
+  arrives as a `<task-notification>` user turn). Their `meta.json` adds `spawnDepth`, `requestShape`
+  (`background`/`foreground`), `requestNonInteractive`, and `workflowPhase` for workflow agents. A
+  notification turn is `origin{kind:"task-notification", producer, runId}`, `promptSource:"system"`,
+  `turnOrigin:"task_notification"`, and its body adds `<output-file>`, `<result>`, `<usage>`. A
+  `ScheduleWakeup` fire is a `user` turn with `isMeta`, `turnOrigin:"scheduled"` and no
+  `scheduledTaskId` (cv reads it as `origin: scheduler`). `--fork-session` copies the records under the
+  new `sessionId` with no pointer back; the shared `uuid`s are the only link. New bookkeeping records:
+  `file-history-delta` and `worktree-state` (with `relocated` on EnterWorktree/ExitWorktree); new
+  attachments `plan_mode`, `structured_output`, `hook_additional_context`. Assistant turns add
+  `requestedModel`, `thinkingDisplay`, `thinkingDurationMs`, `perTurnEffort`; user turns add
+  `turnPosition{promptIndex, turnIndex}`. Outside `projects/`: `tasks/<sessionId>/<n>.json`
+  (TaskCreate), `file-history/<sessionId>/<hash>@v<n>` (checkpoint backups), and background-task output
+  and pasted images under `$CLAUDE_CODE_TMPDIR` (default `/tmp/claude-<uid>/<encoded-cwd>/<sessionId>/`).
 - **cv surfacing:** `cv show <id> --tree` appends the sub-agent forest (direct + per-workflow, with journaled
   outcomes); `cv show <id> --subagents` lists every agent with its return; `cv show <id> --agent <aid>`
   renders one sub-agent transcript; `cv events <id> --subagents` extracts the whole forest's tool activity,

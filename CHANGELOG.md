@@ -26,6 +26,7 @@
 - Continue: the cn CLI's tool results (`toolCallStates`) and per-turn usage and model are read; they were missing.
 - Devin: a `run_subagent` child, which has no `subagent_heads` row, is listed as its own session.
 - Corpora for Cline 3.0.70, Roo CLI 0.1.17, Continue cn 1.5.47 and Devin 3000.11.3; schema snapshots for Zed 1.16.1 and LM Studio 0.4.21.
+- Claude Code 2.1.296: `ScheduleWakeup` turns read as `origin: scheduler`; its corpus (18 sessions, 6 sub-agents, a workflow) joins the golden test.
 
 ## 0.15.1 — 2026-10-11
 

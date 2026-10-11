@@ -1,0 +1,9 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "claude"
+version = "2.1.296"
+generated = "2026-10-11"
+model = "glm-5.3-flash (switch target glm-5.3) via Z.ai's Anthropic endpoint, through key_proxy.py"
+model_calls = 80
+scenarios = ["chat","resume","session_name","model_switch","compaction","fork_session","thinking","hooks","claude_md","tools","parallel_tools","tool_error","permission_denied","large_tool_result","write","notebook","file_history","image_input","image_tool_result","plan_mode","task_list","subagent","custom_agent_type","send_message","agent_default_type","background_agent","agent_notification","background_bash","task_notification","cron","schedule_wakeup","mcp","tool_search_deferred","skill_slash_command","skill_tool","workflow","worktree","web_fetch","structured_output","interrupt"]
+skipped = ["monitor (remote feature flag tengu_amber_sentinel; never on for a third-party endpoint)","fork_subagent (CLAUDE_CODE_FORK_SUBAGENT=1 still spawned a general-purpose child)"]
+generator_commit = "6a37134"
