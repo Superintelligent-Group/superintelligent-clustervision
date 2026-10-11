@@ -105,6 +105,15 @@ impl Claude {
         Claude { entries }
     }
 
+    /// An adapter over one explicit Claude config dir (the dir holding `projects/`) or projects
+    /// dir, instead of the environment and `~/.claude` — for the harness corpus and other tests,
+    /// without mutating the process environment.
+    pub fn with_config_dir(dir: &Path) -> Self {
+        Claude {
+            entries: vec![dir.to_path_buf()],
+        }
+    }
+
     /// The projects dirs this adapter reads, in priority order: each entry with its `*` expanded
     /// and a config dir mapped to its `projects/`; missing dirs dropped; and one directory reached
     /// several ways (a symlink, or a config dir and its `projects/` both listed) kept once, under
@@ -630,9 +639,13 @@ fn copy_str_field(v: &Value, from: &str, to: &str, bag: &mut Map<String, Value>)
 
 /// Where a `user` record came from: a typed prompt is human; `isMeta` rows ("Continue from where
 /// you left off.", the local-command caveat) and non-human `origin.kind`s are the harness; a
-/// scheduled/loop wakeup (`scheduledTaskId`) is the scheduler.
+/// cron/loop fire (`scheduledTaskId`) or a `ScheduleWakeup` turn (`turnOrigin: "scheduled"`, which
+/// 2.1.296 writes with `isMeta` and no task id) is the scheduler.
 fn user_origin(v: &Value) -> Origin {
-    if v.get("scheduledTaskId").is_some() || v.get("scheduledFireId").is_some() {
+    if v.get("scheduledTaskId").is_some()
+        || v.get("scheduledFireId").is_some()
+        || v.get("turnOrigin").and_then(Value::as_str) == Some("scheduled")
+    {
         return Origin::Scheduler;
     }
     if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
@@ -2451,6 +2464,19 @@ mod tests {
         );
         // The text itself is untouched (round-trips stay byte-honest); only the classification moves.
         assert!(s.messages[1].text().unwrap().starts_with("<command-name>"));
+    }
+
+    #[test]
+    fn a_wakeup_turn_is_the_scheduler_and_a_task_notification_is_the_harness() {
+        // Shapes from the 2.1.296 corpus: a ScheduleWakeup fire and an agent's task-notification.
+        let text = [
+            r#"{"type":"user","uuid":"w","timestamp":"2026-10-11T20:23:00Z","isMeta":true,"promptSource":"system","turnOrigin":"scheduled","message":{"role":"user","content":"say awake"}}"#,
+            r#"{"type":"user","uuid":"n","parentUuid":"w","timestamp":"2026-10-11T20:24:00Z","origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","turnOrigin":"task_notification","message":{"role":"user","content":"<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+        ]
+        .join("\n");
+        let s = parse_str("wakeup", &text, None);
+        let origins: Vec<Origin> = s.messages.iter().map(|m| m.origin).collect();
+        assert_eq!(origins, vec![Origin::Scheduler, Origin::Harness]);
     }
 
     #[test]
