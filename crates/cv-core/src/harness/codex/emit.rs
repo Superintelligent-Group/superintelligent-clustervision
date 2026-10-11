@@ -2,6 +2,7 @@
 //! backwards plus a store writer. Registered in `crate::emit::emitter_for`; the shared skeleton
 //! (`EmitOptions`, `effective_cwd`, the fidelity table) is in [`crate::emit`].
 
+use crate::emit::fidelity::unrepresentable;
 use crate::emit::*;
 use crate::harness::store::write_jsonl;
 use crate::harness::EmitResult;

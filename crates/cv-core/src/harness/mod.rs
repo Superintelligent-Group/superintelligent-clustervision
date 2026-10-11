@@ -146,7 +146,7 @@ fn each_json_line_inner(line: &str, skipped: &mut u64, f: &mut impl FnMut(Value)
 ///
 /// Why a namespace and not a flat key (`docs/INTERFACE-V2.md` §4): the flat-key exception list is a
 /// list that GROWS — every new cross-harness diagnostic would have to be added to it and to every
-/// consumer that walks `extra` (see [`emit::is_internal_extra_key`](crate::emit)). A namespace does
+/// consumer that walks `extra` (see `harness::claude::emit::is_internal_extra_key`). A namespace does
 /// not. So §4's exceptions stay exactly what they are today, both on `Message` only:
 /// [`claude::CARRIER_KEY`] (`_record`, the verbatim source record under `ParseOptions::complete`)
 /// and [`crate::offsets::OFFSET_KEY`] (`cv_byte_offset`, written per message on the lazy-offset hot

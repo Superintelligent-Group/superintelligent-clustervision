@@ -210,3 +210,17 @@ fn grok_concat_text(msg: &crate::ir::Message) -> String {
     }
     s
 }
+
+/// The model id [`emit_grok`] records in `summary.json` as `current_model_id` — the session's own
+/// when Grok can serve it, else [`GROK_FALLBACK_MODEL`]. Shared with the verifier so "did the
+/// emitter pin a foreign model?" is asked of the same code that does the pinning.
+pub(crate) fn grok_model_id(session: &Session) -> &str {
+    session
+        .model
+        .as_deref()
+        .filter(|m| session.harness == Harness::Grok || m.to_ascii_lowercase().contains("grok"))
+        .unwrap_or(GROK_FALLBACK_MODEL)
+}
+
+/// What `summary.json` records when the source model is not one Grok can run.
+pub(crate) const GROK_FALLBACK_MODEL: &str = "grok-build";

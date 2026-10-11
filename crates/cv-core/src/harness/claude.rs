@@ -11,6 +11,7 @@ use super::{parse_ts, Adapter};
 /// `cv adopt`: move a sub-agent stranded by a dead session into a live one — Claude-only byte
 /// surgery on this store's layout, so it lives beside the adapter that knows it.
 pub mod adopt;
+pub(crate) mod emit;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
@@ -21,6 +22,7 @@ use crate::lazy::{Span, Text, INLINE_MAX};
 use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+pub use emit::{emit, verify_claude_resumable};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::HashSet;

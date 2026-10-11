@@ -211,7 +211,7 @@ pub(crate) fn emit_to(
 
 /// Emit `ir` as a Claude transcript under `out_dir` and verify what was written: the fidelity
 /// read-back (anything the IR carried that the file does not comes back as a warning) and the
-/// resumability rules ([`cv_core::emit::verify_claude_resumable`], an error — it means a bug in cv).
+/// resumability rules ([`cv_core::harness::claude::verify_claude_resumable`], an error — it means a bug in cv).
 fn emit_resumable(ir: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<cv_core::EmitResult> {
     let (res, warnings) = cv_core::emit::emit_verified(ir, Harness::Claude, out_dir, opts)?;
     for w in &warnings {

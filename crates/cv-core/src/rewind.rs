@@ -712,7 +712,7 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
         .rev()
         .cloned()
         .chain(owner)
-        .find(|c| crate::emit::claude_encode_cwd(Path::new(c)) == home_name);
+        .find(|c| crate::harness::claude::emit::claude_encode_cwd(Path::new(c)) == home_name);
     let mut warnings = Vec::new();
     if launch.is_none() && cut_cwd.is_some() {
         warnings.push(format!(

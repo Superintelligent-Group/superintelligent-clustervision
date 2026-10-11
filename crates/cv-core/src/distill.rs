@@ -1056,7 +1056,7 @@ fn tail_cut(msgs: &[Message], keep_last: usize) -> usize {
 /// usage stripped (so a resume gate never reads the source's stale near-limit size), oversized
 /// results clipped with a `cv cat` pointer, queued messages turned into user turns, harness-only
 /// records dropped. A trailing call with no result stays here (the pack shows the lane stopped
-/// mid-call); the Claude emitter drops it from a resumable session (`emit::make_resumable`).
+/// mid-call); the Claude emitter drops it from a resumable session (`harness::claude::emit::make_resumable`).
 fn resumable_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, retrieve_ref: &str) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     for m in &msgs[tail_start..] {
@@ -1185,7 +1185,7 @@ pub fn resume_preamble(d: &Distilled, keep_last: usize) -> String {
 /// The caller emits it (as a session, or as a sub-agent of a root) with the Claude emitter, which
 /// owns the resumability rules: the first tail turn's parent names a record the tail does not
 /// carry and is re-linked to the opening prompt, a hook attachment's child is re-linked over the
-/// gap, an unanswered trailing call is dropped (`emit::make_resumable`). This is a selector.
+/// gap, an unanswered trailing call is dropped (`harness::claude::emit::make_resumable`). This is a selector.
 pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions) -> Session {
     let mut first = Message::of_kind(Role::User, MessageKind::Prompt, Origin::Human);
     first.timestamp = session
