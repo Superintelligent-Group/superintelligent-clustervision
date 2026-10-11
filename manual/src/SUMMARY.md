@@ -8,7 +8,7 @@
 - [The CLI: `cv`](cli.md)
 - [Search (full-text & semantic)](search.md)
 - [`cv pack` — the context compiler](pack.md)
-- [Reshaping a lane: `distill`, `fork`, `rewind`, `adopt`](reshaping.md)
+- [Reshaping a lane: `distill`, `splice`, `rewind`, `adopt`](reshaping.md)
 
 # The fleet
 

@@ -632,7 +632,7 @@ fn thinking_mode_is_one_word_on_every_emitting_command() {
     standard_corpus(&w);
 
     // Present, with the same three values, wherever a session is written out.
-    for cmd in ["port", "splice", "loom", "pack"] {
+    for cmd in ["port", "splice", "pack"] {
         let (ok, _, out, err) = w.cv(&[cmd, "--help"]);
         assert!(ok, "cv {cmd} --help failed:\n{err}");
         for mode in ["native", "text", "drop"] {
@@ -1192,6 +1192,15 @@ fn error_paths_exit_nonzero_with_stderr() {
             "cargo test -p clustervision-core --test formats_manifest",
         ),
         (&["formats", "census"], "cv formats"),
+        // `fork` was `splice <id>:..N`; `loom` was a two-span `splice`.
+        (
+            &["fork", "alphasess", "--at", "2", "--session"],
+            "cv splice <id>:..N --session",
+        ),
+        (
+            &["loom", "alphasess", "--at", "2", "--graft", "betasess", "--from", "1"],
+            "cv splice <base>:..N <other>:M..",
+        ),
     ];
     for (args, pointer) in removed {
         let (ok, code, out, err) = w.cv(args);
@@ -2737,6 +2746,33 @@ fn distill_emits_a_whole_resumable_session_and_a_sub_agent() {
         body,
         "distill must never modify the source"
     );
+
+    // A fork is a splice of the verbatim prefix, to the same two destinations. `..2` strands `t1`
+    // (its result is message 2) and the emitter drops the call, so the session resumes whole.
+    let spec = format!("{agent_s}:..2");
+    let (out, _) = w.cv_ok(&["splice", &spec, "--session", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("stdout must be pure JSON");
+    let path = PathBuf::from(v["path"].as_str().unwrap());
+    let (reached, threaded, root) = chain_walk(&path);
+    assert_eq!(reached, threaded);
+    assert_eq!(root["uuid"], "u0", "{root}");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("\"t1\"") && !text.contains("\"isSidechain\":true"),
+        "{text}"
+    );
+    let (out, _) = w.cv_ok(&["splice", &spec, "--agent-of", "rootsess", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let aid = v["agent_id"].as_str().unwrap();
+    let apath = sub.join(format!("agent-{aid}.jsonl"));
+    assert!(apath.exists() && sub.join(format!("agent-{aid}.meta.json")).exists());
+    for l in fs::read_to_string(&apath).unwrap().lines() {
+        let r: serde_json::Value = serde_json::from_str(l).unwrap();
+        assert!(
+            r["isSidechain"] == true && r["agentId"] == aid && r["sessionId"] == "rootsess",
+            "{l}"
+        );
+    }
 }
 
 // ───────────────────────────── adopt ─────────────────────────────

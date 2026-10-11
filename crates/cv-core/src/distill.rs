@@ -1055,7 +1055,8 @@ fn tail_cut(msgs: &[Message], keep_last: usize) -> usize {
 /// The tail as real IR turns for a resumable session: thinking dropped (unless asked), recorded
 /// usage stripped (so a resume gate never reads the source's stale near-limit size), oversized
 /// results clipped with a `cv cat` pointer, queued messages turned into user turns, harness-only
-/// records dropped, and a trailing call with no result removed.
+/// records dropped. A trailing call with no result stays here (the pack shows the lane stopped
+/// mid-call); the Claude emitter drops it from a resumable session (`emit::make_resumable`).
 fn resumable_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, retrieve_ref: &str) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     for m in &msgs[tail_start..] {
@@ -1103,22 +1104,6 @@ fn resumable_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, re
             _ => {}
         }
     }
-    // Drop tool calls whose results never arrived (the run stopped mid-call).
-    let answered: std::collections::HashSet<String> = out
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|b| match b {
-            Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-            _ => None,
-        })
-        .collect();
-    for m in out.iter_mut().filter(|m| m.role == Role::Assistant) {
-        m.content.retain(|b| match b {
-            Block::ToolUse { id, .. } => answered.contains(id),
-            _ => true,
-        });
-    }
-    out.retain(|m| !m.content.is_empty());
     out
 }
 
@@ -1197,7 +1182,10 @@ pub fn resume_preamble(d: &Distilled, keep_last: usize) -> String {
 }
 
 /// A resumable IR session: one opening prompt carrying the pack head, then the tail's real turns.
-/// The caller emits it (as a session, or as a sub-agent of a root) with the Claude emitter.
+/// The caller emits it (as a session, or as a sub-agent of a root) with the Claude emitter, which
+/// owns the resumability rules: the first tail turn's parent names a record the tail does not
+/// carry and is re-linked to the opening prompt, a hook attachment's child is re-linked over the
+/// gap, an unanswered trailing call is dropped (`emit::make_resumable`). This is a selector.
 pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions) -> Session {
     let mut first = Message::of_kind(Role::User, MessageKind::Prompt, Origin::Human);
     first.timestamp = session
@@ -1211,7 +1199,6 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
     let mut tail = resumable_tail(&session.messages, d.tail_start, opts, &d.retrieve_ref);
     let mut messages = vec![first];
     messages.append(&mut tail);
-    linearize(&mut messages);
     Session {
         id: session.id.clone(),
         harness: session.harness,
@@ -1229,17 +1216,6 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
         messages,
         source_path: None,
         extra: serde_json::Map::new(),
-    }
-}
-
-/// Thread `messages` as one linear chain. Source parent links point at records a reshaped session
-/// does not carry (dropped turns, and harness records the IR never holds, such as hook attachments);
-/// Claude Code resumes by walking `parentUuid` back from the newest record and stops at the first
-/// missing link, so a single dangling parent silently truncates the resumed context to the turns
-/// after it. With every parent cleared, the emitter chains each record to the one before it.
-pub fn linearize(messages: &mut [Message]) {
-    for m in messages.iter_mut() {
-        m.parent_id = None;
     }
 }
 
@@ -1285,7 +1261,7 @@ pub fn findings(session: &Session, opts: &DistillOptions) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ir::Harness;
     use serde_json::json;
@@ -1317,7 +1293,9 @@ mod tests {
         }
     }
 
-    fn lane() -> Session {
+    /// The distill fixture: a lane with a brief, polls, a commit, an error, and a trailing call
+    /// (`z1`) that never got its result. Shared with the emitter's resumability test.
+    pub(crate) fn lane() -> Session {
         let mut msgs = vec![msg(
             Role::User,
             MessageKind::Prompt,
@@ -1407,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn tail_opens_on_an_assistant_turn_and_drops_unanswered_calls() {
+    fn tail_opens_on_an_assistant_turn_and_keeps_the_source_threading() {
         let s = lane();
         let d = distill(
             &s,
@@ -1427,18 +1405,16 @@ mod tests {
         );
         assert_eq!(r.messages[0].role, Role::User);
         assert_eq!(r.messages[1].role, Role::Assistant);
-        // `z1` never got a result: it must not survive into the resumable session.
+        assert!(r.messages.iter().all(|m| m.usage.is_none()));
+        // A selector: `z1` (never answered) and the tail's source parents are still here; the
+        // emitter drops the one and re-links the other (see `emit::reshape_verbs_emit_resumable`).
         let has_z1 = r
             .messages
             .iter()
             .flat_map(|m| &m.content)
             .any(|b| matches!(b, Block::ToolUse { id, .. } if id == "z1"));
-        assert!(!has_z1);
-        assert!(r.messages.iter().all(|m| m.usage.is_none()));
-        assert!(
-            r.messages.iter().all(|m| m.parent_id.is_none()),
-            "reshaped sessions thread linearly"
-        );
+        assert!(has_z1, "the pack shows the lane stopped mid-call");
+        assert_eq!(r.messages[0].parent_id, None, "the opening prompt is the root");
     }
 
     #[test]

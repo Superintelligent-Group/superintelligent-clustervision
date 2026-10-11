@@ -1,11 +1,15 @@
-//! 🧵 Splice / loom — compose a NEW session from spans of existing ones.
+//! 🧵 Splice — compose a NEW session from spans of existing ones.
 //!
 //! Because every harness parses into one IR, a transcript is just an ordered list of messages you can
-//! cut and recombine. `splice` concatenates message spans from several sessions into a fresh session
-//! (re-threaded), and `graft` does the loom move — take a base up to a point, then graft an alternate
-//! continuation from another branch. The result is a normal [`Session`] you can `emit` into any harness.
+//! cut and recombine. [`splice`] concatenates message spans from several sessions into a fresh
+//! [`Session`] with provenance; a verbatim prefix (`a:..N`) forks a lane at message N, and two spans
+//! (`base:..N other:M..`) graft one continuation onto another's head. The result is a normal session
+//! you `emit` into any harness.
 //!
-//! OWNED BY the loom work. The `cv loom`/`cv splice` CLI calls these.
+//! Splice is a **selector**: it chooses messages and nothing more. Threading, open tool calls and
+//! sidechain identity are the Claude emitter's rules (`emit::make_resumable`): a span's source
+//! parents that still resolve are kept, the cut points are re-linked, a span lifted from a sub-agent
+//! joins the main thread. `cv splice` calls this.
 
 use crate::ir::{Harness, Message, Session};
 
@@ -35,8 +39,9 @@ impl<'a> Span<'a> {
     }
 }
 
-/// Concatenate `spans` (in order) into a new [`Session`] with `harness`, a fresh id (or `new_id`), and
-/// linearly re-threaded `parent_id`s. The first span's session provides default cwd/title/model.
+/// Concatenate `spans` (in order) into a new [`Session`] with `harness` and a fresh id (or
+/// `new_id`). Messages are cloned as they are — ids and parents included — and the first span's
+/// session provides default cwd/title/model.
 pub fn splice(spans: &[Span<'_>], new_id: Option<String>, harness: Harness) -> Session {
     let id = new_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
@@ -65,28 +70,6 @@ pub fn splice(spans: &[Span<'_>], new_id: Option<String>, harness: Harness) -> S
     let created_at = messages.iter().filter_map(|m| m.timestamp).min();
     let updated_at = messages.iter().filter_map(|m| m.timestamp).max();
 
-    // Re-thread into a clean linear chain: each message gets a fresh id, parent_id points at the
-    // previous message's new id, the first is None. This makes threading coherent regardless of the
-    // sources' original ids (which may collide or reference messages that weren't spliced in).
-    // The chain is the new session's MAIN thread, so a span taken from a sub-agent transcript sheds
-    // its sidechain markers: a Claude record emitted with `isSidechain: true` / `agentId` is skipped
-    // by the main-thread loader, and the spliced session would resume empty.
-    let mut prev_id: Option<String> = None;
-    for msg in &mut messages {
-        let fresh = uuid::Uuid::now_v7().to_string();
-        msg.parent_id = prev_id.take();
-        msg.id = Some(fresh.clone());
-        prev_id = Some(fresh);
-        if let Some(bag) = msg
-            .extra
-            .get_mut(Harness::Claude.as_str())
-            .and_then(|b| b.as_object_mut())
-        {
-            bag.shift_remove("isSidechain");
-            bag.shift_remove("agentId");
-        }
-    }
-
     // Provenance is cv's own fact about a session cv synthesized, not something read out of a
     // harness store, so it lives in the `cv` namespace — `Session::extra` has no flat keys
     // (docs/INTERFACE-V2.md §4).
@@ -111,29 +94,6 @@ pub fn splice(spans: &[Span<'_>], new_id: Option<String>, harness: Harness) -> S
         system_prompt: None,
         lineage: crate::ir::Lineage::default(),
     }
-}
-
-/// Loom graft: `base[..at]` followed by `graft_src[from..]`, as one new branched session.
-///
-/// Indices clamp safely: `at` saturates to `base`'s length, `from` to `graft_src`'s length.
-/// The new session's harness defaults to `base`'s.
-pub fn graft(base: &Session, at: usize, graft_src: &Session, from: usize, new_id: Option<String>) -> Session {
-    splice(
-        &[
-            Span {
-                source: base,
-                start: 0,
-                end: Some(at),
-            },
-            Span {
-                source: graft_src,
-                start: from,
-                end: None,
-            },
-        ],
-        new_id,
-        base.harness,
-    )
 }
 
 #[cfg(test)]
@@ -180,28 +140,8 @@ mod tests {
         s.messages.iter().filter_map(|m| m.text()).collect()
     }
 
-    /// Assert the session forms a valid linear chain: first parent is None, every other parent_id
-    /// equals the previous message's id, and all ids are present and unique.
-    fn assert_linear_chain(s: &Session) {
-        let mut seen = std::collections::HashSet::new();
-        let mut prev: Option<&String> = None;
-        for (i, m) in s.messages.iter().enumerate() {
-            let id = m.id.as_ref().expect("every spliced message has an id");
-            assert!(seen.insert(id.clone()), "ids must be unique");
-            match prev {
-                None => assert_eq!(m.parent_id, None, "first message has no parent (idx {i})"),
-                Some(p) => assert_eq!(
-                    m.parent_id.as_ref(),
-                    Some(p),
-                    "parent_id must point at previous id (idx {i})"
-                ),
-            }
-            prev = m.id.as_ref();
-        }
-    }
-
     #[test]
-    fn splice_count_order_and_rethread() {
+    fn splice_count_order_and_defaults() {
         let a = session("A", Harness::Claude, 4);
         let b = session("B", Harness::Codex, 3);
 
@@ -227,8 +167,11 @@ mod tests {
         assert_eq!(spliced.messages.len(), 4);
         assert_eq!(texts(&spliced), vec!["A#1", "A#2", "B#0", "B#1"]);
 
-        // (b) valid linear chain.
-        assert_linear_chain(&spliced);
+        // (b) a selector copies messages as they are: source ids and parents ride along, and the
+        // emitter re-links the cut points (`emit::make_resumable`).
+        assert_eq!(spliced.messages[0].id.as_deref(), Some("A-m1"));
+        assert_eq!(spliced.messages[0].parent_id.as_deref(), Some("A-m0"));
+        assert_eq!(spliced.messages[2].parent_id, None);
 
         // Fresh id generated, harness honored, defaults from first span's source.
         assert!(!spliced.id.is_empty());
@@ -289,51 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn graft_is_base_head_plus_graft_tail() {
-        let base = session("BASE", Harness::Claude, 4);
-        let src = session("SRC", Harness::Codex, 4);
-
-        // base[..2] + src[2..] → BASE#0, BASE#1, SRC#2, SRC#3.
-        let g = graft(&base, 2, &src, 2, None);
-        assert_eq!(texts(&g), vec!["BASE#0", "BASE#1", "SRC#2", "SRC#3"]);
-        assert_linear_chain(&g);
-        assert_eq!(g.harness, Harness::Claude); // defaults to base's.
-
-        crate::harness::assert_no_flat_keys(&g);
-        let loom = g.cv_extra().unwrap()["loom"].as_array().unwrap();
-        assert_eq!(loom[0]["source_id"], "BASE");
-        assert_eq!(loom[1]["source_id"], "SRC");
-    }
-
-    #[test]
-    fn spliced_subagent_spans_lose_their_sidechain_markers() {
-        let mut sub = session("agent-x", Harness::Claude, 2);
-        for m in &mut sub.messages {
-            let bag = m.harness_extra_mut(Harness::Claude);
-            bag.insert("isSidechain".into(), serde_json::Value::Bool(true));
-            bag.insert("agentId".into(), "x".into());
-            bag.insert("slug".into(), "kept".into());
-        }
-        let out = splice(
-            &[Span {
-                source: &sub,
-                start: 0,
-                end: None,
-            }],
-            None,
-            Harness::Claude,
-        );
-        for m in &out.messages {
-            let bag = m.extra["claude"].as_object().unwrap();
-            assert!(
-                !bag.contains_key("isSidechain") && !bag.contains_key("agentId"),
-                "{bag:?}"
-            );
-            assert_eq!(bag["slug"], "kept", "only the sidechain markers go");
-        }
-    }
-
-    #[test]
     fn out_of_range_spans_clamp_without_panic() {
         let a = session("A", Harness::Claude, 3);
         let empty = session("E", Harness::Claude, 0);
@@ -370,12 +268,6 @@ mod tests {
         );
 
         assert_eq!(texts(&spliced), vec!["A#1", "A#2"]);
-        assert_linear_chain(&spliced);
-
-        // graft with wildly out-of-range indices is also panic-free.
-        let g = graft(&a, 999, &empty, 999, None);
-        assert_eq!(texts(&g), vec!["A#0", "A#1", "A#2"]);
-        assert_linear_chain(&g);
 
         // Empty result is fine, too.
         let none = splice(&[], None, Harness::Claude);

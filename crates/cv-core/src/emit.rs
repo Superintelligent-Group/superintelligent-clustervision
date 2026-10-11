@@ -35,6 +35,15 @@ pub struct EmitOptions {
     pub strict: bool,
     /// What to do with [`Block::Thinking`] on the way out. See [`ThinkingMode`].
     pub thinking: ThinkingMode,
+    /// Claude only: write the session as a **sub-agent transcript** of `(root session id, agent id)`
+    /// instead of a main-thread session. Every record carries the root's `sessionId`,
+    /// `isSidechain: true` and `agentId`; no `ai-title` is written; the file is
+    /// `<out_dir>/agent-<agent id>.jsonl` (the caller passes the root's `subagents/` dir as
+    /// `out_dir`, since a sub-agent lives beside its root, not under a project dir of its own) and
+    /// `EmitResult::new_id` is the agent id, the handle `SendMessage` takes. `new_id` is ignored.
+    /// With `None`, the emitter writes a main-thread session: `isSidechain` false where present,
+    /// no `agentId` — a span lifted from a sub-agent transcript joins the main thread.
+    pub sidechain_of: Option<(String, String)>,
 }
 
 /// What [`emit`] does with the model's reasoning.
@@ -331,6 +340,10 @@ pub fn emit_report(
     opts: &EmitOptions,
 ) -> Result<(EmitResult, FidelityReport)> {
     let result = emit(session, target, out_dir, opts)?;
+    // The emitter owns resumability for Claude; assert the three rules on what it wrote.
+    if target == Harness::Claude {
+        verify_claude_resumable(&result.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
+    }
     // Re-parse at the fidelity the SOURCE was parsed at. `cv port` parses a same-harness rehome
     // format-complete (`port::parse_for_emit`), and re-parsing that plainly compared a complete
     // session against a lean one: impossible deltas such as `per-message model: 2106 → 836` on an
@@ -624,14 +637,38 @@ fn unrepresentable(target: Harness, thinking: ThinkingMode, m: &Message) -> bool
 
 fn features(target: Harness, thinking: ThinkingMode, session: &Session) -> Features {
     let mut f = Features::default();
+    // The Claude emitter drops a `tool_use` the transcript never answered (`make_resumable`, rule
+    // 1), and an assistant turn that held nothing else goes with it. That is the format's
+    // resumability rule, not a loss the target could have avoided, so the verifier compares both
+    // sides without them. For every other target the set is unused.
+    let answered: std::collections::HashSet<&str> = if target == Harness::Claude {
+        session
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    } else {
+        Default::default()
+    };
+    let orphan_call = |b: &Block| {
+        target == Harness::Claude && matches!(b, Block::ToolUse { id, .. } if !answered.contains(id.as_str()))
+    };
     for m in &session.messages {
         // Two kinds of message are not *turns* for this comparison and are skipped whole — counting
         // their timestamps/ids/model would have reported losses that no emitter could have avoided:
         //
         //  * a format-complete **carrier** (empty-content System message holding a verbatim meta
         //    record) is bookkeeping the emitter replays byte-for-byte;
-        //  * a turn the target cannot represent AT ALL ([`unrepresentable`]).
-        if is_carrier(m) || unrepresentable(target, thinking, m) {
+        //  * a turn the target cannot represent AT ALL ([`unrepresentable`]), or one whose only
+        //    content is unanswered calls the Claude emitter drops.
+        if is_carrier(m)
+            || unrepresentable(target, thinking, m)
+            || (!m.content.is_empty() && m.content.iter().all(&orphan_call))
+        {
             continue;
         }
         // A store whose own reader re-tags a turn on the way back in is not LOSING it, and the
@@ -678,7 +715,7 @@ fn features(target: Harness, thinking: ThinkingMode, session: &Session) -> Featu
         if m.model.is_some() || session.model.is_some() {
             f.model_eff += 1;
         }
-        for b in &m.content {
+        for b in m.content.iter().filter(|b| !orphan_call(b)) {
             match b {
                 Block::Text { .. } => f.text += 1,
                 Block::ToolUse { .. } => f.tool_use += 1,
@@ -1180,7 +1217,14 @@ pub(crate) fn claude_encode_cwd(cwd: &Path) -> String {
 }
 
 fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    // The id every record is stamped with, and the id the caller resumes by. For a main-thread
+    // session they are one uuid; for a sub-agent transcript the records carry the ROOT's id and the
+    // handle is the agent id (see [`EmitOptions::sidechain_of`]).
+    let (session_id, agent) = match &opts.sidechain_of {
+        Some((root, agent)) => (root.clone(), Some(agent.clone())),
+        None => (opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()), None),
+    };
+    let new_id = agent.clone().unwrap_or_else(|| session_id.clone());
     // Resolve symlinks so the project-dir name matches the realpath Claude resolves at resume time.
     let cwd = effective_cwd(session, opts).map(|p| realpath_for_claude(&p));
     let cwd_str = cwd
@@ -1193,9 +1237,17 @@ fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
         .unwrap_or_else(|| "-".to_string());
     let branch = branch_of(session);
 
-    let proj_dir = out_dir.join(&dir_name);
-    fs::create_dir_all(&proj_dir).with_context(|| format!("creating {}", proj_dir.display()))?;
-    let file_path = proj_dir.join(format!("{new_id}.jsonl"));
+    let file_path = match &agent {
+        Some(a) => {
+            fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+            out_dir.join(format!("agent-{a}.jsonl"))
+        }
+        None => {
+            let proj_dir = out_dir.join(&dir_name);
+            fs::create_dir_all(&proj_dir).with_context(|| format!("creating {}", proj_dir.display()))?;
+            proj_dir.join(format!("{new_id}.jsonl"))
+        }
+    };
 
     let mut lines: Vec<Value> = Vec::new();
     let ts0 = session
@@ -1211,11 +1263,11 @@ fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
         .iter()
         .any(|m| carrier_record_of(m).is_some_and(|r| r.get("type").and_then(Value::as_str) == Some("ai-title")));
     if let Some(title) = &session.title {
-        if !has_title_carrier {
+        if !has_title_carrier && agent.is_none() {
             lines.push(json!({
                 "type": "ai-title",
                 "aiTitle": title,
-                "sessionId": new_id,
+                "sessionId": session_id,
                 "cwd": cwd_str,
                 "timestamp": ts0,
             }));
@@ -1230,7 +1282,7 @@ fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
         if let Some(sp) = session.system_prompt.as_deref().filter(|s| !s.trim().is_empty()) {
             lines.push(json!({
                 "type": "attachment",
-                "sessionId": new_id,
+                "sessionId": session_id,
                 "cwd": cwd_str,
                 "timestamp": ts0,
                 "attachment": { "type": "prompt_snapshot", "systemPrompt": [sp] },
@@ -1266,7 +1318,7 @@ fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
             let mut record = record.clone();
             if let Some(obj) = record.as_object_mut() {
                 if obj.contains_key("sessionId") {
-                    obj.insert("sessionId".into(), json!(new_id));
+                    obj.insert("sessionId".into(), json!(session_id));
                 }
                 if obj.contains_key("cwd") {
                     obj.insert("cwd".into(), json!(cwd_str));
@@ -1298,20 +1350,20 @@ fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
             let rec = match msg.kind {
                 MessageKind::CompactionBoundary => json!({
                     "type": "system", "subtype": "compact_boundary", "level": "info",
-                    "uuid": uuid, "parentUuid": parent_uuid, "sessionId": new_id, "cwd": cwd_str,
+                    "uuid": uuid, "parentUuid": parent_uuid, "sessionId": session_id, "cwd": cwd_str,
                     "timestamp": ts, "content": text,
                     "compactMetadata": { "trigger": "manual", "preTokens": 0 },
                 }),
                 MessageKind::CompactionSummary => json!({
                     "type": "user", "isCompactSummary": true,
-                    "uuid": uuid, "parentUuid": parent_uuid, "sessionId": new_id, "cwd": cwd_str,
+                    "uuid": uuid, "parentUuid": parent_uuid, "sessionId": session_id, "cwd": cwd_str,
                     "timestamp": ts, "message": { "role": "user", "content": text },
                 }),
                 // InjectedContext → an `attachment` whose `rendered[].content` is the injected text
                 // (exactly what Claude's parser reads back as InjectedContext).
                 _ => json!({
                     "type": "attachment",
-                    "uuid": uuid, "parentUuid": parent_uuid, "sessionId": new_id, "cwd": cwd_str,
+                    "uuid": uuid, "parentUuid": parent_uuid, "sessionId": session_id, "cwd": cwd_str,
                     "timestamp": ts,
                     "attachment": { "type": "injected_context" },
                     "rendered": [{ "content": text }],
@@ -1352,7 +1404,7 @@ fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
         let mut line = Map::new();
         line.insert("uuid".into(), json!(uuid));
         line.insert("parentUuid".into(), json!(parent_uuid));
-        line.insert("sessionId".into(), json!(new_id));
+        line.insert("sessionId".into(), json!(session_id));
         line.insert("cwd".into(), json!(cwd_str));
         line.insert("timestamp".into(), json!(ts));
         if let Some(b) = &branch {
@@ -1435,17 +1487,162 @@ fn emit_claude(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
         parent = Some(uuid);
     }
 
+    make_resumable(&mut lines, agent.as_deref());
     write_jsonl(&file_path, &lines)?;
 
-    let resume = match &cwd {
-        Some(c) => format!("claude --resume {new_id}  (run from {})", c.display()),
-        None => format!("claude --resume {new_id}"),
+    let resume = match (&agent, &cwd) {
+        (Some(a), _) => format!("from session {session_id}: SendMessage to=\"{a}\" with the next instruction"),
+        (None, Some(c)) => format!("claude --resume {new_id}  (run from {})", c.display()),
+        (None, None) => format!("claude --resume {new_id}"),
     };
     Ok(EmitResult {
         path: file_path,
         new_id,
         resume_hint: Some(resume),
     })
+}
+
+/// The content blocks of a threaded record, if it has any.
+fn record_blocks(v: &Value) -> Option<&Vec<Value>> {
+    v.pointer("/message/content").and_then(Value::as_array)
+}
+
+/// The resumability rules Claude Code enforces on a transcript, applied once to the records the
+/// emitter is about to write — so every IR→Claude door (port, distill, splice, pack) gets them
+/// without knowing they exist, and no selector has to re-thread, close calls or strip markers
+/// itself. Three rules, in this order:
+///
+/// 1. **No orphan `tool_use`.** A call whose `tool_result` is not in the file (the source stopped
+///    mid-call, or the selector cut between them) is dropped; an assistant record left with no
+///    content goes with it. The API rejects a resume with an unanswered call.
+/// 2. **No dangling `parentUuid`.** Claude Code resumes by walking `parentUuid` back from the newest
+///    record and stops silently at the first missing link, so a parent that names a record not in
+///    the file (a dropped turn, a hook attachment the IR never carried, a span cut) is re-pointed at
+///    the previous record. A parent that resolves is kept, so a source's branches survive.
+/// 3. **One identity.** A sub-agent transcript carries `isSidechain: true` and its `agentId` on
+///    every record; a main-thread session carries neither (`isSidechain` false where present), so a
+///    span lifted from a sub-agent joins the thread instead of being skipped by the loader.
+///
+/// [`verify_claude_resumable`] checks the same three on a written file.
+fn make_resumable(lines: &mut Vec<Value>, agent: Option<&str>) {
+    // 1. Orphan calls.
+    let answered: std::collections::HashSet<String> = lines
+        .iter()
+        .filter_map(record_blocks)
+        .flatten()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    lines.retain_mut(|v| {
+        if v.get("type").and_then(Value::as_str) != Some("assistant") {
+            return true;
+        }
+        let Some(blocks) = v.pointer_mut("/message/content").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = blocks.len();
+        blocks.retain(|b| {
+            b.get("type").and_then(Value::as_str) != Some("tool_use")
+                || b.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| answered.contains(id))
+        });
+        before == 0 || !blocks.is_empty()
+    });
+    // 2. Dangling parents.
+    let uuids: std::collections::HashSet<String> = lines
+        .iter()
+        .filter_map(|v| v.get("uuid").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let mut prev: Option<String> = None;
+    for v in lines.iter_mut() {
+        if let Some(p) = v.get("parentUuid").and_then(Value::as_str) {
+            if !uuids.contains(p) {
+                v["parentUuid"] = prev.clone().map(Value::String).unwrap_or(Value::Null);
+            }
+        }
+        if let Some(u) = v.get("uuid").and_then(Value::as_str) {
+            prev = Some(u.to_string());
+        }
+    }
+    // 3. Identity.
+    if agent.is_some() {
+        lines.retain(|v| v.get("type").and_then(Value::as_str) != Some("ai-title"));
+    }
+    for v in lines.iter_mut() {
+        let Some(o) = v.as_object_mut() else { continue };
+        match agent {
+            Some(a) => {
+                o.insert("isSidechain".into(), Value::Bool(true));
+                o.insert("agentId".into(), json!(a));
+            }
+            None => {
+                if o.contains_key("isSidechain") {
+                    o.insert("isSidechain".into(), Value::Bool(false));
+                }
+                o.shift_remove("agentId");
+            }
+        }
+    }
+}
+
+/// Check a written Claude transcript against the three rules [`make_resumable`] establishes: no
+/// dangling `parentUuid`, no `tool_use` without its `tool_result`, and one identity (`agent`
+/// `None`: no record with `isSidechain: true`; `Some`: every record `isSidechain: true` with that
+/// `agentId`). The post-emit assertion [`emit_verified`] runs on every Claude emit; an error here
+/// is a bug in cv, never in the input.
+pub fn verify_claude_resumable(path: &Path, agent: Option<&str>) -> Result<()> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let lines: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).with_context(|| format!("{}: not a JSON record: {l}", path.display())))
+        .collect::<Result<_>>()?;
+    let uuids: std::collections::HashSet<&str> = lines
+        .iter()
+        .filter_map(|v| v.get("uuid").and_then(Value::as_str))
+        .collect();
+    let answered: std::collections::HashSet<&str> = lines
+        .iter()
+        .filter_map(record_blocks)
+        .flatten()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+        .collect();
+    for (i, v) in lines.iter().enumerate() {
+        let n = i + 1;
+        if let Some(p) = v.get("parentUuid").and_then(Value::as_str) {
+            if !uuids.contains(p) {
+                anyhow::bail!("{}:{n}: parentUuid {p} names no record in the file", path.display());
+            }
+        }
+        for b in record_blocks(v).into_iter().flatten() {
+            if b.get("type").and_then(Value::as_str) == Some("tool_use") {
+                let id = b.get("id").and_then(Value::as_str).unwrap_or("");
+                if !answered.contains(id) {
+                    anyhow::bail!("{}:{n}: tool_use {id} has no tool_result", path.display());
+                }
+            }
+        }
+        let side = v.get("isSidechain").and_then(Value::as_bool);
+        let aid = v.get("agentId").and_then(Value::as_str);
+        match agent {
+            None if side == Some(true) || aid.is_some() => {
+                anyhow::bail!(
+                    "{}:{n}: a main-thread session carries a sidechain marker",
+                    path.display()
+                )
+            }
+            Some(a) if side != Some(true) || aid != Some(a) => anyhow::bail!(
+                "{}:{n}: a sub-agent record must carry isSidechain:true and agentId {a:?}",
+                path.display()
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The verbatim meta record a format-complete carrier message stashed (an object under
@@ -3921,6 +4118,197 @@ mod tests {
             Some("u1"),
             "child of a dropped system chain re-links to the surviving ancestor"
         );
+    }
+
+    /// A sub-agent transcript the reshape verbs cut: source ids and parents, a hook attachment
+    /// between two turns (the IR never carries it, so its child's parent dangles), sidechain markers
+    /// on every record, and a trailing call with no result.
+    fn reshape_source() -> Session {
+        use crate::harness::claude::parse_str;
+        let side = |mut v: Value| {
+            v["isSidechain"] = json!(true);
+            v["agentId"] = json!("a0123456789abcdef");
+            v["sessionId"] = json!("rootsess");
+            v["cwd"] = json!("/work/proj");
+            serde_json::to_string(&v).unwrap()
+        };
+        let text = [
+            side(json!({"type":"user","uuid":"u0","parentUuid":null,"timestamp":"2026-01-01T10:00:00Z",
+                "message":{"role":"user","content":"You are lane TEST. Build it."}})),
+            side(json!({"type":"assistant","uuid":"a1","parentUuid":"u0","timestamp":"2026-01-01T10:01:00Z",
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"make"}}]}})),
+            side(json!({"type":"user","uuid":"u1","parentUuid":"a1","timestamp":"2026-01-01T10:02:00Z",
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":false}]}})),
+            side(json!({"type":"attachment","uuid":"h1","parentUuid":"u1","timestamp":"2026-01-01T10:02:30Z",
+                "attachment":{"type":"hook_success","hookName":"PostToolUse","content":""}})),
+            side(json!({"type":"assistant","uuid":"a2","parentUuid":"h1","timestamp":"2026-01-01T10:03:00Z",
+                "message":{"role":"assistant","content":[{"type":"text","text":"Built."},
+                    {"type":"tool_use","id":"t2","name":"Bash","input":{"command":"git commit -am x"}}]}})),
+            side(json!({"type":"user","uuid":"u2","parentUuid":"a2","timestamp":"2026-01-01T10:04:00Z",
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"[main 1234abc] x","is_error":false}]}})),
+            side(json!({"type":"assistant","uuid":"a3","parentUuid":"u2","timestamp":"2026-01-01T10:05:00Z",
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"sleep 999"}}]}})),
+        ]
+        .join("\n");
+        parse_str("agent-a0123456789abcdef", &text, None)
+    }
+
+    /// Walk `parentUuid` back from the newest record as Claude Code does on resume: how many
+    /// records it reaches, out of how many threaded ones.
+    fn chain_walk(path: &Path) -> (usize, usize) {
+        let lines: Vec<Value> = fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let threaded: Vec<&Value> = lines.iter().filter(|v| v.get("uuid").is_some()).collect();
+        let by: std::collections::HashMap<&str, &Value> =
+            threaded.iter().map(|v| (v["uuid"].as_str().unwrap(), *v)).collect();
+        let mut cur = *threaded.last().unwrap();
+        let mut n = 1;
+        while let Some(p) = cur["parentUuid"].as_str() {
+            cur = by[p];
+            n += 1;
+        }
+        (n, threaded.len())
+    }
+
+    /// The emitter owns resumability: every reshape verb is a selector, and whatever it selects
+    /// comes out as a transcript Claude Code resumes whole — no dangling `parentUuid`, no orphan
+    /// `tool_use`, one identity — as a main-thread session and as a sub-agent of a root. Covers
+    /// `distill --session/--agent-of` (`resumable_session`), `splice <id>:..N` (a fork, whose cut
+    /// strands `t3`), a two-span splice (whose join point dangles), a plain port of the sub-agent
+    /// file, and the distill fixture's own lane.
+    #[test]
+    fn reshape_verbs_emit_resumable() {
+        use crate::distill::{distill, resumable_session, DistillOptions};
+        use crate::loom::{splice, Span};
+
+        let src = reshape_source();
+        // Six turns: the hook attachment is not one (the IR never carries it), so a2's parent `h1`
+        // names a record no emit can write — the dangling-parent case every selector used to dodge.
+        assert_eq!(src.messages.len(), 6);
+        let opts = DistillOptions {
+            keep_last: 1,
+            ..Default::default()
+        };
+        let d = distill(&src, &opts);
+        let distilled = resumable_session(&src, &d, &opts);
+        let fork = splice(
+            &[Span {
+                source: &src,
+                start: 0,
+                end: Some(2),
+            }],
+            None,
+            Harness::Claude,
+        );
+        let two = splice(
+            &[
+                Span {
+                    source: &src,
+                    start: 0,
+                    end: Some(3),
+                },
+                Span {
+                    source: &src,
+                    start: 4,
+                    end: None,
+                },
+            ],
+            None,
+            Harness::Claude,
+        );
+        let lane = crate::distill::tests::lane();
+        let dl = distill(&lane, &opts);
+        let lane_distilled = resumable_session(&lane, &dl, &opts);
+
+        let verbs: [(&str, &Session); 5] = [
+            ("distill", &distilled),
+            ("fork", &fork),
+            ("splice", &two),
+            ("port", &src),
+            ("distill(lane)", &lane_distilled),
+        ];
+        for (verb, session) in verbs {
+            for sidechain in [None, Some(("rootsess".to_string(), "afedcba9876543210".to_string()))] {
+                let out = temp_dir();
+                let opts = EmitOptions {
+                    sidechain_of: sidechain.clone(),
+                    ..Default::default()
+                };
+                let agent = sidechain.as_ref().map(|(_, a)| a.as_str());
+                let (res, _) = emit_verified(session, Harness::Claude, &out, &opts)
+                    .unwrap_or_else(|e| panic!("{verb} sidechain={agent:?}: {e:#}"));
+                verify_claude_resumable(&res.path, agent).unwrap_or_else(|e| panic!("{verb}: {e:#}"));
+                let (reached, threaded) = chain_walk(&res.path);
+                assert_eq!(
+                    reached, threaded,
+                    "{verb} sidechain={agent:?}: a dangling parent truncates the resume"
+                );
+                let text = fs::read_to_string(&res.path).unwrap();
+                match agent {
+                    None => {
+                        assert!(
+                            res.path.ends_with(format!("{}.jsonl", res.new_id)),
+                            "{verb}: {}",
+                            res.path.display()
+                        );
+                        assert!(!text.contains("\"agentId\""), "{verb}: {text}");
+                    }
+                    Some(a) => {
+                        assert_eq!(res.new_id, a, "{verb}: the handle is the agent id");
+                        assert!(
+                            res.path.ends_with(format!("agent-{a}.jsonl")),
+                            "{verb}: {}",
+                            res.path.display()
+                        );
+                        assert!(
+                            !text.contains("ai-title"),
+                            "{verb}: a sub-agent carries no title record"
+                        );
+                        assert!(
+                            text.contains("\"sessionId\":\"rootsess\""),
+                            "{verb}: the root's id on every record"
+                        );
+                    }
+                }
+                let _ = fs::remove_dir_all(&out);
+            }
+        }
+
+        // What each cut lost, specifically.
+        let emit_main = |s: &Session| {
+            let out = temp_dir();
+            let res = emit(s, Harness::Claude, &out, &EmitOptions::default()).unwrap();
+            let text = fs::read_to_string(&res.path).unwrap();
+            let _ = fs::remove_dir_all(&out);
+            text
+        };
+        let t = emit_main(&src);
+        assert!(!t.contains("\"t3\""), "the unanswered trailing call is dropped: {t}");
+        assert!(
+            !t.contains("\"uuid\":\"a3\""),
+            "and the turn that held nothing else with it: {t}"
+        );
+        assert!(
+            t.contains("\"parentUuid\":\"u1\""),
+            "a2's parent re-links over the hook attachment: {t}"
+        );
+        let t = emit_main(&fork);
+        assert!(
+            t.contains("\"uuid\":\"u0\"") && !t.contains("\"t1\""),
+            "fork at 2 strands t1: {t}"
+        );
+        let t = emit_main(&two);
+        assert!(
+            t.contains("\"uuid\":\"u2\",\"parentUuid\":\"u1\"") && !t.contains("\"uuid\":\"a3\""),
+            "{t}"
+        );
+        let t = emit_main(&distilled);
+        assert!(t.contains("[cv distill]") && !t.contains("\"t3\""), "{t}");
+        let t = emit_main(&lane_distilled);
+        assert!(!t.contains("\"z1\""), "the lane's unanswered z1 is dropped: {t}");
     }
 
     #[test]

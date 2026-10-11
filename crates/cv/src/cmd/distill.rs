@@ -1,4 +1,4 @@
-//! `cv distill` / `cv fork` — make a transcript a reshapeable lane context.
+//! `cv distill` — make a transcript a reshapeable lane context.
 //!
 //! `distill` compresses a session (typically a long sub-agent lane) into a context pack plus a
 //! verbatim tail (see [`cv_core::distill`]) and emits it three ways:
@@ -7,8 +7,10 @@
 //!  * `--agent-of <root>`: a new sub-agent transcript inside a root session's `subagents/` dir, which
 //!    that root resumes by sending it a message (`SendMessage` to the printed agent id).
 //!
-//! `fork` cuts a session at a message index and emits the verbatim prefix the same two ways, to
-//! branch a lane's context and run variants from one point.
+//! The same two destinations serve `cv splice … --session | --agent-of` (a verbatim prefix,
+//! `<id>:..N`, is the fork of a lane): [`Target`], [`target`] and [`emit_to`] are shared. Both
+//! destinations are one `cv_core::emit` of the IR to Claude — the emitter owns resumability
+//! (threading, open calls, sidechain identity), the selectors here only choose the messages.
 //!
 //! Neither command ever writes to the source session. Elided tool outputs go to a sidecar next to
 //! the new transcript (`<stem>.flat.jsonl`), which `cv cat <new> <tool_use_id>` reads.
@@ -16,7 +18,7 @@
 use crate::util::{parse_harness, report, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::distill::{distill, findings, resumable_session, DistillOptions, Distilled};
-use cv_core::ir::{Block, Harness, Role, Session, SessionRef};
+use cv_core::ir::{Harness, Session, SessionRef};
 use cv_core::EmitOptions;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -58,7 +60,7 @@ pub(crate) fn target(
 
 /// Resolve a session spec: an existing transcript path (read as Claude unless `--harness` says
 /// otherwise), else an id / `harness:id` / agent id through the normal resolver.
-fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
+pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
     let p = Path::new(spec);
     let (r, adapter) = if p.is_file() {
         let h = harness.unwrap_or(Harness::Claude);
@@ -93,51 +95,14 @@ fn new_agent_id() -> String {
     format!("a{}", &u[..16])
 }
 
-/// Rewrite emitted Claude lines into one stream's identity: a main-thread session (`agent = None`)
-/// or a sub-agent of `root_id` with id `agent`. The emitter restores per-message harness facts —
-/// including the SOURCE's `isSidechain`/`agentId` — so both are set explicitly here.
-fn restamp(raw: &str, session_id: &str, agent: Option<&str>) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
-        let Ok(mut v) = serde_json::from_str::<Value>(line) else {
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        };
-        if agent.is_some() && v.get("type").and_then(Value::as_str) == Some("ai-title") {
-            continue; // sub-agent transcripts carry no title record
-        }
-        if let Some(o) = v.as_object_mut() {
-            if o.contains_key("sessionId") {
-                o.insert("sessionId".into(), json!(session_id));
-            }
-            match agent {
-                Some(a) => {
-                    o.insert("isSidechain".into(), json!(true));
-                    o.insert("agentId".into(), json!(a));
-                }
-                None => {
-                    if o.contains_key("isSidechain") {
-                        o.insert("isSidechain".into(), json!(false));
-                    }
-                    o.remove("agentId");
-                }
-            }
-        }
-        out.push_str(&v.to_string());
-        out.push('\n');
-    }
-    out
-}
-
 /// What an emit produced.
 #[derive(Default, serde::Serialize)]
 pub(crate) struct Emitted {
-    session_id: Option<String>,
-    agent_id: Option<String>,
-    path: Option<PathBuf>,
-    sidecar_path: Option<PathBuf>,
-    resume: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) agent_id: Option<String>,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) sidecar_path: Option<PathBuf>,
+    pub(crate) resume: Option<String>,
 }
 
 fn write_sidecar(transcript: &Path, elided: &[cv_core::distill::Elided]) -> Result<Option<PathBuf>> {
@@ -179,13 +144,9 @@ pub(crate) fn emit_to(
             };
             let opts = EmitOptions {
                 new_cwd: cwd.clone(),
-                new_id: None,
-                strict: false,
-                thinking: Default::default(),
+                ..Default::default()
             };
-            let res = cv_core::emit(ir, Harness::Claude, &out_dir, &opts)?;
-            let raw = std::fs::read_to_string(&res.path)?;
-            std::fs::write(&res.path, restamp(&raw, &res.new_id, None))?;
+            let res = emit_resumable(ir, &out_dir, &opts)?;
             let sidecar = write_sidecar(&res.path, elided)?;
             let dir = cwd.clone().or_else(|| ir.cwd.clone());
             let resume = format!(
@@ -202,27 +163,26 @@ pub(crate) fn emit_to(
             })
         }
         Target::AgentOf { root } => {
-            let (root_path, root_id) = root_transcript(root)?;
-            let sub = root_path
+            let root = root_transcript(root)?;
+            let sub = root
+                .path
                 .parent()
                 .context("root transcript has no parent dir")?
-                .join(&root_id)
+                .join(&root.id)
                 .join("subagents");
-            std::fs::create_dir_all(&sub).with_context(|| format!("creating {}", sub.display()))?;
             let agent = new_agent_id();
             let dest = sub.join(format!("agent-{agent}.jsonl"));
             if dest.exists() {
                 bail!("{} already exists — refusing to overwrite", dest.display());
             }
-            // Emit into a private temp dir, then restamp into the root's sub-agent stream.
-            let tmp = std::env::temp_dir().join(format!("cv-distill-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&tmp)?;
-            let opts = EmitOptions::default();
-            let res = cv_core::emit(ir, Harness::Claude, &tmp, &opts);
-            let raw = res.as_ref().map(|r| std::fs::read_to_string(&r.path));
-            let _ = std::fs::remove_dir_all(&tmp);
-            let raw = raw.map_err(|e| anyhow::anyhow!("{e}"))??;
-            std::fs::write(&dest, restamp(&raw, &root_id, Some(&agent)))?;
+            // The emitter writes the sub-agent transcript in place: the root's id on every record,
+            // the sidechain markers, no title record (`EmitOptions::sidechain_of`).
+            let opts = EmitOptions {
+                sidechain_of: Some((root.id.clone(), agent.clone())),
+                ..Default::default()
+            };
+            let res = emit_resumable(ir, &sub, &opts)?;
+            debug_assert_eq!(res.path, dest);
             // The meta sidecar is optional for resume, but carries the model and the label a
             // harness shows; inherit the source's when it has one.
             let src_meta = source_path.with_extension("meta.json");
@@ -235,11 +195,11 @@ pub(crate) fn emit_to(
                 o.remove("toolUseId");
             }
             std::fs::write(sub.join(format!("agent-{agent}.meta.json")), meta.to_string())?;
-            let sidecar = write_sidecar(&dest, elided)?;
+            let sidecar = write_sidecar(&res.path, elided)?;
             Ok(Emitted {
-                session_id: Some(root_id),
+                session_id: Some(root.id),
                 agent_id: Some(agent.clone()),
-                path: Some(dest),
+                path: Some(res.path),
                 sidecar_path: sidecar,
                 resume: Some(format!(
                     "from the root session: SendMessage to=\"{agent}\" with the next instruction"
@@ -249,16 +209,22 @@ pub(crate) fn emit_to(
     }
 }
 
-/// A root session's transcript path and id, from a path or an id.
-fn root_transcript(root: &str) -> Result<(PathBuf, String)> {
+/// Emit `ir` as a Claude transcript under `out_dir` and verify what was written: the fidelity
+/// read-back (anything the IR carried that the file does not comes back as a warning) and the
+/// resumability rules ([`cv_core::emit::verify_claude_resumable`], an error — it means a bug in cv).
+fn emit_resumable(ir: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<cv_core::EmitResult> {
+    let (res, warnings) = cv_core::emit::emit_verified(ir, Harness::Claude, out_dir, opts)?;
+    for w in &warnings {
+        eprintln!("  ⚠ lossy: {w}");
+    }
+    Ok(res)
+}
+
+/// A root session's transcript, from a path or an id.
+fn root_transcript(root: &str) -> Result<SessionRef> {
     let p = Path::new(root);
     if p.is_file() {
-        let id = p
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .context("bad root path")?
-            .to_string();
-        return Ok((p.to_path_buf(), id));
+        return Ok(SessionRef::from_path(p, Harness::Claude));
     }
     let (r, _) = resolve(root, Some(Harness::Claude))?;
     if r.id.starts_with("agent-") {
@@ -266,7 +232,7 @@ fn root_transcript(root: &str) -> Result<(PathBuf, String)> {
             "{root} is a sub-agent; --agent-of takes the ROOT session that should own the new agent"
         ));
     }
-    Ok((r.path, r.id))
+    Ok(r)
 }
 
 /// The human report (stderr side of [`report`]).
@@ -368,55 +334,4 @@ pub(crate) fn cmd_distill(
         print!("{}", d.pack());
     }
     Ok(())
-}
-
-pub(crate) fn cmd_fork(spec: &str, harness: Option<String>, at: usize, target: Target, json_out: bool) -> Result<()> {
-    if matches!(target, Target::PackOnly) {
-        return usage("cv fork needs a destination: --session or --agent-of <root>");
-    }
-    let want = parse_harness(&harness)?;
-    let (mut s, src_path) = load(spec, want)?;
-    if at == 0 || at > s.messages.len() {
-        return usage(format!("--at {at}: the session has {} messages", s.messages.len()));
-    }
-    s.messages.truncate(at);
-    // A call whose result falls after the cut cannot be replayed: drop it.
-    let answered: std::collections::HashSet<String> = s
-        .messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|b| match b {
-            Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-            _ => None,
-        })
-        .collect();
-    for m in s.messages.iter_mut().filter(|m| m.role == Role::Assistant) {
-        m.content
-            .retain(|b| !matches!(b, Block::ToolUse { id, .. } if !answered.contains(id)));
-    }
-    s.messages.retain(|m| !m.content.is_empty());
-    cv_core::distill::linearize(&mut s.messages);
-    s.lineage.forked_from = Some(s.id.clone());
-    let label = s
-        .extra
-        .get("claude")
-        .and_then(|b| b.get("agent_description"))
-        .and_then(Value::as_str)
-        .map(String::from)
-        .unwrap_or_else(|| s.label());
-    let e = emit_to(&s, &target, &[], &src_path, &format!("fork@{at}: {label}"))?;
-    let mut h = String::new();
-    let _ = writeln!(
-        h,
-        "✦ forked {} at message {at} ({} messages kept)",
-        short_id(&s.id),
-        s.messages.len()
-    );
-    if let Some(p) = &e.path {
-        let _ = writeln!(h, "  ↳ wrote {}", p.display());
-    }
-    if let Some(r) = &e.resume {
-        let _ = writeln!(h, "  ↳ resume: {r}");
-    }
-    report(json_out, &h, &serde_json::to_value(&e)?)
 }

@@ -320,7 +320,7 @@ pub(crate) fn cmd_rewind(
     report(json, &h, &v)
 }
 
-// ---------- splice / loom ----------
+// ---------- splice ----------
 
 /// A parsed splice spec: which session, and a `[start, end)` window (end None → through the last).
 struct SpliceSpec {
@@ -358,6 +358,9 @@ fn parse_splice_spec(spec: &str) -> Result<SpliceSpec> {
     }
 }
 
+/// Where a splice goes. `resumable` is `--session` / `--agent-of` (a Claude transcript the harness
+/// resumes, shared with `distill`); otherwise `--harness`/`--out` emit to a harness and nothing at
+/// all prints a summary (with `--export md|json`, the composed session).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_splice(
     specs: &[String],
@@ -368,15 +371,19 @@ pub(crate) fn cmd_splice(
     generate: bool,
     gen_model: Option<String>,
     thinking: cv_core::emit::ThinkingMode,
+    resumable: Option<crate::cmd::distill::Target>,
+    json: bool,
 ) -> Result<()> {
     let parsed: Vec<SpliceSpec> = specs.iter().map(|s| parse_splice_spec(s)).collect::<Result<_>>()?;
 
     // Resolve + parse each spec's session FIRST, keeping the owners alive in a Vec so the spans can
-    // borrow them. We pair each parsed session with the (start, end) it'll select.
+    // borrow them. We pair each parsed session with the (start, end) it'll select. A spec may be a
+    // transcript path (a sub-agent file straight from `subagents/`), as for `distill`.
     let mut owned: Vec<(Session, usize, Option<usize>)> = Vec::with_capacity(parsed.len());
+    let mut first_path: Option<PathBuf> = None;
     for sp in &parsed {
-        let (r, adapter) = resolve(&sp.id, None)?;
-        let session = adapter.parse(&r)?;
+        let (session, path) = crate::cmd::distill::load(&sp.id, None)?;
+        first_path.get_or_insert(path);
         owned.push((session, sp.start, sp.end));
     }
 
@@ -399,6 +406,28 @@ pub(crate) fn cmd_splice(
     };
 
     let spliced = cv_core::loom::splice(&spans, None, to_h);
+    if let Some(target) = resumable {
+        // `--session` / `--agent-of`: a resumable Claude transcript, the way `distill` writes one.
+        // Nothing is elided (every selected message is carried whole), so there is no sidecar.
+        let label = format!("splice: {}", specs.join(" "));
+        let src = first_path.context("splice needs at least one session")?;
+        let e = crate::cmd::distill::emit_to(&spliced, &target, &[], &src, &label)?;
+        let mut h = String::new();
+        let _ = writeln!(
+            h,
+            "✦ spliced {} ({} messages from {} span(s))",
+            short_id(&spliced.id),
+            spliced.messages.len(),
+            specs.len()
+        );
+        if let Some(p) = &e.path {
+            let _ = writeln!(h, "  ↳ wrote {}", p.display());
+        }
+        if let Some(r) = &e.resume {
+            let _ = writeln!(h, "  ↳ resume: {r}");
+        }
+        return report(json, &h, &serde_json::to_value(&e)?);
+    }
     finish_composed(
         spliced,
         to_h,
@@ -412,48 +441,7 @@ pub(crate) fn cmd_splice(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_loom(
-    base: &str,
-    at: usize,
-    graft: &str,
-    from: usize,
-    harness: Option<String>,
-    out: Option<PathBuf>,
-    export: Option<String>,
-    cwd: Option<PathBuf>,
-    generate: bool,
-    gen_model: Option<String>,
-    thinking: cv_core::emit::ThinkingMode,
-) -> Result<()> {
-    let (rb, ab) = resolve(base, None)?;
-    let (rg, ag) = resolve(graft, None)?;
-    let base_s = ab.parse(&rb)?;
-    let graft_s = ag.parse(&rg)?;
-
-    let grafted = cv_core::loom::graft(&base_s, at, &graft_s, from, None);
-    // Default target harness is the base's (graft() already used it); honor --harness if given.
-    let to_h = match &harness {
-        Some(s) => Harness::parse(s).with_context(|| format!("unknown target harness: {s}"))?,
-        None => base_s.harness,
-    };
-    // Re-stamp the harness if --harness overrode it (graft used base.harness).
-    let mut grafted = grafted;
-    grafted.harness = to_h;
-    finish_composed(
-        grafted,
-        to_h,
-        harness.is_some(),
-        out,
-        export,
-        cwd,
-        generate,
-        gen_model,
-        thinking,
-    )
-}
-
-/// Shared tail for splice/loom: emit to a harness when `--harness`/`--out` is in play, otherwise
+/// Shared tail for splice: emit to a harness when `--harness`/`--out` is in play, otherwise
 /// print a summary and (with `--export md|json`) the composed session to stdout.
 #[allow(clippy::too_many_arguments)]
 fn finish_composed(
@@ -503,9 +491,8 @@ fn finish_composed(
             out,
             EmitOptions {
                 new_cwd: cwd,
-                new_id: None,
-                strict: false,
                 thinking,
+                ..Default::default()
             },
         );
     }

@@ -50,9 +50,9 @@ pub(crate) fn cmd_port(
         out,
         EmitOptions {
             new_cwd: cwd,
-            new_id: None,
             strict,
             thinking,
+            ..Default::default()
         },
     )?;
 

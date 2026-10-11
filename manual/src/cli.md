@@ -24,7 +24,7 @@ cv recipes         # the agent quickstart: ten command lines and the JSON they r
 | `cv prune --range A..B` | [`cv prune --keep A..B`](#cv-prune) |
 | `cv show --range <start>-<end>` / `--range -N` | the [window flags](#message-windows): `--range A..B`, `--first N`, `--last N` |
 | `cv splice <id>:A-B` | `cv splice <id>:A..B` |
-| `cv splice`/`cv loom`/`cv pack --to <h>` | `--harness <h>` |
+| `cv splice`/`cv pack --to <h>` | `--harness <h>` |
 | `cv help`'s agent footer | [`cv recipes`](#cv-recipes), a real command |
 
 The principle behind all of it: **one name, one meaning, no grammar to memorize.** A verb names one act; a flag means the same thing on every command that has it; a JSON key is spelled one way.
@@ -36,7 +36,7 @@ The principle behind all of it: **one name, one meaning, no grammar to memorize.
 | Group | What they have in common | Commands |
 | --- | --- | --- |
 | **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`stats`](#cv-stats) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
-| **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`fork`](#cv-fork) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`loom`](#cv-loom) [`port`](#cv-port) [`resume`](#cv-resume) |
+| **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`port`](#cv-port) [`resume`](#cv-resume) |
 | **[Export](#export)** | produce something that is *not* a session | [`export`](#cv-export) [`dataset`](#cv-dataset) [`pack`](#cv-pack) |
 | **[Fleet & live](#fleet--live)** | multi-agent coordination and live views | [`task`](#cv-task) [`scry`](#cv-scry) [`share`](#cv-share) |
 | **[System](#system)** | cv's own state and reference | [`index`](#cv-index) [`config`](#cv-config) [`schema`](#cv-schema) [`formats`](#cv-formats) [`recipes`](#cv-recipes) |
@@ -57,14 +57,14 @@ An **ambiguous** prefix is never resolved by guessing: cv lists the candidates a
 
 | flag | meaning | on |
 | --- | --- | --- |
-| `--harness <h>` | filter to, or target, one harness — never spelled `--to` | `ls` `show` `cat` `search` `events` `tools` `tree` `workflow` `compaction` `doctor` `prune` `rewind` `splice` `loom` `port` `resume` `export` `dataset` `pack` `scry` `share` |
-| `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping | `ls` `splice` `loom` `port` `scry` |
-| `--out <dir\|file>` | write somewhere other than the real store | `rewind` `splice` `loom` `port` `dataset` `pack` `share` |
+| `--harness <h>` | filter to, or target, one harness — never spelled `--to` | `ls` `show` `cat` `search` `events` `tools` `tree` `workflow` `compaction` `doctor` `prune` `rewind` `splice` `port` `resume` `export` `dataset` `pack` `scry` `share` |
+| `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping | `ls` `splice` `port` `scry` |
+| `--out <dir\|file>` | write somewhere other than the real store | `rewind` `splice` `port` `dataset` `pack` `share` |
 | `--json` | machine output | `ls` `show` `search` `events` `touched` `tools` `workflow` `compaction` `stats` `doctor` `prune` `rewind` `schema` `task list/show/inbox/debt/stats` `board read/unanswered` |
 | `--limit <n>` | how many rows/records | `ls` `search` `dataset` `pack` |
 | `--fresh` | bypass the catalog and re-discover | `ls` |
 | `--all` | include what is hidden by default | `task list` `task inbox` |
-| `--thinking <mode>` | what an emit does with the model's reasoning: `native` (default), `text`, `drop` | `port` `splice` `loom` `pack` |
+| `--thinking <mode>` | what an emit does with the model's reasoning: `native` (default), `text`, `drop` | `port` `splice` `pack` |
 | `--strict` | fail if a loss the target format *could* have carried happens | `port` |
 
 **`--thinking` and why the default drops some reasoning.** Thinking blocks come in two shapes. A few
@@ -634,17 +634,6 @@ cv distill agent-a5e2da77 --upto 400 --with agent-a04ff45c --json
 - `--upto N` — distill the session as it stood at message N (exclusive): a distilled fork. `--with <session>` (repeatable) — inject another session's findings into the pack.
 - Output: the pack on stdout, or `--pack FILE`; `--session` emits a resumable main-thread session (`--cwd` rehomes it, `--out` writes outside the Claude store); `--agent-of <root>` emits a new sub-agent of that root. `--json` reports stats and what was written.
 
-### `cv fork`
-
-The verbatim prefix `[0, N)` of a session as a new resumable session or a new sub-agent of a root, to branch a lane at a decision point and run variants. Calls whose results fall after the cut are dropped and the `parentUuid` chain is linearized (see [the dangling-parent trap](reshaping.md#the-dangling-parent-trap)).
-
-```sh
-cv fork agent-a5e2da77 --at 400 --session
-cv fork agent-a5e2da77 --at 400 --agent-of c1e4d723
-```
-
-- `--at N` — keep messages `[0, N)`. `--session` | `--agent-of <root>` as for `distill`; `--cwd`, `--out`, `--json`, `--harness` likewise.
-
 ### `cv adopt`
 
 Rescue the sub-agents of a dead Claude Code session into a live one, so the live session can `SendMessage` them and they resume with their whole transcript. It copies `subagents/agent-<id>.jsonl` (with `sessionId` restamped on every line, nothing else changed) and its `.meta.json` into the live session's `subagents/`.
@@ -687,26 +676,13 @@ A span may come from a sub-agent (`agent-<id>`): it joins the new session's main
 
 Without `--harness` or `--out`, splice composes in memory and prints a summary; add `--export md|json` to dump the result. With `--harness`/`--out` it materializes the session for a harness.
 
-- `<specs>…` — one or more span specs (**required**).
+- `<specs>…` — one or more span specs (**required**). A verbatim prefix `<id>:..N` forks a lane at message N; `<base>:..N <other>:M..` grafts one session's continuation onto another's head.
+- `--session` | `--agent-of <root>` — a resumable Claude session, or a new sub-agent of that root, as for `distill` (`--cwd`, `--out`, `--json` likewise). Threading, open calls and sidechain identity are the emitter's: the cut points re-link, a call whose result falls outside the spans is dropped (see [the dangling-parent trap](reshaping.md#the-dangling-parent-trap)).
 - `--harness <h>` — target harness (defaults to the first spec's harness).
 - `--out <dir>` — write under this directory instead of the target's real storage root.
 - `--export <md|json>` — print the composed session instead of emitting it.
 - `--cwd <dir>` — rehome the composed session.
 - `--generate` / `--gen-model <model>` — append an LLM-generated continuation.
-
-### `cv loom`
-
-A focused two-session graft: take `base[..N]`, then graft `graft[M..]` onto it, producing one new branched session. Where `splice` is general stitching, `loom` is the classic "rewind to message N, then continue along a different path."
-
-```sh
-cv loom da9174f4 --at 20 --graft 4f2a0c11 --from 35 --export md
-cv loom da9174f4 --at 20 --graft 4f2a0c11 --from 35 --harness codex
-cv loom da9174f4 --at 20 --graft 4f2a0c11 --from 35 --generate   # 🔮 grow a new branch
-```
-
-- `<base>` — base session id (positional). `--at <N>` — keep `base[..N]`.
-- `--graft <id>` — the session to graft from. `--from <M>` — start grafting at `graft[M..]`.
-- `--harness <h>` — target harness (defaults to the base's harness). `--out <dir>`, `--export <md|json>`, `--cwd <dir>`, `--generate`, `--gen-model` — as on `splice`.
 
 > **`--generate` needs an LLM provider.** Set one of `OPENROUTER_API_KEY` (preferred), `ANTHROPIC_API_KEY`, or `LMSTUDIO_API_BASE=local` (a free local LM Studio server at `localhost:1234`). It appends a single generated assistant turn to the composed branch.
 

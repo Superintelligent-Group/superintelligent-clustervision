@@ -87,9 +87,7 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Reshape",
-        &[
-            "prune", "rewind", "distill", "fork", "adopt", "splice", "loom", "port", "resume",
-        ],
+        &["prune", "rewind", "distill", "adopt", "splice", "port", "resume"],
     ),
     ("Export", &["export", "dataset", "pack"]),
     ("Fleet & live", &["task", "scry", "share"]),
@@ -655,28 +653,6 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Fork a session's context at message N: emit the verbatim prefix as a new resumable session
-    /// (`--session`) or as a new sub-agent of a root (`--agent-of`), to branch a lane and run
-    /// variants from one point. Calls whose results fall after the cut are dropped.
-    Fork {
-        /// Session id, agent id, `harness:id`, or a transcript path.
-        id: String,
-        #[arg(long)]
-        harness: Option<String>,
-        /// Keep messages [0, N).
-        #[arg(long, value_name = "N")]
-        at: usize,
-        #[arg(long, conflicts_with = "agent_of")]
-        session: bool,
-        #[arg(long, value_name = "ROOT")]
-        agent_of: Option<String>,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        #[arg(long)]
-        out: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
     /// Rescue sub-agents stranded by a dead Claude Code session into a live one, so the live
     /// session can `SendMessage` them and they resume with their whole transcript: copies
     /// `subagents/agent-<id>.jsonl` (with `sessionId` restamped on every line, nothing else
@@ -710,18 +686,32 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Compose a new session from spans of existing ones (`<id>:A..B`).
+    /// Compose a new session from spans of existing ones (`<id>:A..B`): a verbatim prefix
+    /// (`<id>:..N`) forks a lane at message N; two spans graft one session's continuation onto
+    /// another's head. `--session` emits a resumable Claude session, `--agent-of <root>` a new
+    /// sub-agent of that root (as `distill` does); `--harness`/`--out` emit to any harness; with
+    /// neither, a summary prints (`--export md|json` prints the composed session).
     Splice {
         /// One or more specs: `<id>:A..B`, `<id>:A..` (through the last), `<id>:..B`, or `<id>`
-        /// (the whole session). Indices are 0-based, end-exclusive; `<id>` may be `harness:id`.
+        /// (the whole session). Indices are 0-based, end-exclusive; `<id>` may be `harness:id` or a
+        /// transcript path.
         #[arg(required = true)]
         specs: Vec<String>,
+        /// Emit a resumable main-thread Claude session (new id) under the Claude store or --out.
+        #[arg(long, conflicts_with_all = ["agent_of", "harness", "export", "generate"])]
+        session: bool,
+        /// Emit a new sub-agent transcript owned by this ROOT session (id or transcript path).
+        #[arg(long, value_name = "ROOT", conflicts_with_all = ["harness", "export", "generate", "out", "cwd"])]
+        agent_of: Option<String>,
         /// Target harness for the composed session (defaults to the first spec's harness).
         #[arg(long)]
         harness: Option<String>,
         /// Write under this directory instead of the target's real storage root.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// With --session / --agent-of: report as JSON on stdout (what was written, how to resume).
+        #[arg(long)]
+        json: bool,
         /// What to do with the model's reasoning on the way out: `native` keeps it where the target
         /// format holds it and drops it elsewhere, `text` keeps the turn by demoting thinking to
         /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
@@ -738,41 +728,6 @@ enum Cmd {
         #[arg(long)]
         generate: bool,
         /// Model for --generate (provider-specific; defaults to the provider's default).
-        #[arg(long = "gen-model")]
-        gen_model: Option<String>,
-    },
-    /// Loom graft: take base[..N], then graft other[M..] into one new branched session.
-    Loom {
-        base: String,
-        /// Keep `base[..N]`.
-        #[arg(long, value_name = "N")]
-        at: usize,
-        /// The session to graft from.
-        #[arg(long)]
-        graft: String,
-        /// Start grafting at `graft[M..]`.
-        #[arg(long, value_name = "M")]
-        from: usize,
-        /// Target harness for the grafted session (defaults to the base's harness).
-        #[arg(long)]
-        harness: Option<String>,
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// What to do with the model's reasoning on the way out: `native` keeps it where the target
-        /// format holds it and drops it elsewhere, `text` keeps the turn by demoting thinking to
-        /// text (a placeholder for provider-signed blobs, which have no text), `drop` omits it.
-        #[arg(long, default_value = "native", value_parser = ["native", "text", "drop"])]
-        thinking: String,
-        /// Print the grafted session instead of emitting it: md or json.
-        #[arg(long)]
-        export: Option<String>,
-        /// Rehome the grafted session to this working directory.
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        /// Generate a continuation of the grafted branch via an LLM and append it.
-        #[arg(long)]
-        generate: bool,
-        /// Model for --generate.
         #[arg(long = "gen-model")]
         gen_model: Option<String>,
     },
@@ -1013,6 +968,16 @@ enum Cmd {
     },
     #[command(hide = true)]
     Diff {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Fork {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Loom {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         rest: Vec<String>,
     },
@@ -1355,19 +1320,6 @@ fn run() -> Result<()> {
             let target = cmd::distill::target(session, agent_of, cwd, out)?;
             cmd::distill::cmd_distill(&id, harness, opts, upto, &with, pack, target, json)
         }
-        Cmd::Fork {
-            id,
-            harness,
-            at,
-            session,
-            agent_of,
-            cwd,
-            out,
-            json,
-        } => {
-            let target = cmd::distill::target(session, agent_of, cwd, out)?;
-            cmd::distill::cmd_fork(&id, harness, at, target, json)
-        }
         Cmd::Adopt {
             agents,
             into,
@@ -1400,30 +1352,35 @@ fn run() -> Result<()> {
         }
         Cmd::Splice {
             specs,
+            session,
+            agent_of,
             harness,
             out,
-            export,
-            cwd,
-            generate,
-            gen_model,
-            thinking,
-        } => compose::cmd_splice(&specs, harness, out, export, cwd, generate, gen_model, util::parse_thinking(&thinking)?),
-        Cmd::Loom {
-            base,
-            at,
-            graft,
-            from,
-            harness,
-            out,
+            json,
             export,
             cwd,
             generate,
             gen_model,
             thinking,
         } => {
-            compose::cmd_loom(
-                &base, at, &graft, from, harness, out, export, cwd, generate, gen_model,
+            // `--session` / `--agent-of` take the distill destinations (`--out`/`--cwd` ride along
+            // with `--session`); without them `--out`/`--cwd` keep their harness-emit meaning.
+            let resumable = if session || agent_of.is_some() {
+                Some(cmd::distill::target(session, agent_of, cwd.clone(), out.clone())?)
+            } else {
+                None
+            };
+            compose::cmd_splice(
+                &specs,
+                harness,
+                out,
+                export,
+                cwd,
+                generate,
+                gen_model,
                 util::parse_thinking(&thinking)?,
+                resumable,
+                json,
             )
         }
         // Removed commands: one line each, pointing at the replacement; exit 2.
@@ -1437,6 +1394,14 @@ fn run() -> Result<()> {
         ),
         Cmd::Diff { .. } => usage(
             "`cv diff` was removed in 0.15.0 — `cv export <id> --format md` each session and diff the two files",
+        ),
+        Cmd::Fork { .. } => usage(
+            "`cv fork <id> --at N` was removed in 0.15.0 — use `cv splice <id>:..N --session` (or `--agent-of <root>`): \
+             the verbatim prefix as a new resumable session",
+        ),
+        Cmd::Loom { .. } => usage(
+            "`cv loom <base> --at N --graft <other> --from M` was removed in 0.15.0 — use `cv splice <base>:..N <other>:M..` \
+             (two spans; `--session`, `--harness <h>` or `--export md` as before)",
         ),
         Cmd::Board { .. } => usage(
             "`cv board` was removed in 0.15.0 — the task log is the fleet's record: `cv task note` to say something, \
@@ -1523,7 +1488,7 @@ mod tests {
             }
         }
         // Names removed in this release are hidden stubs, never visible commands.
-        for old in ["timeline", "redact", "diff", "board"] {
+        for old in ["timeline", "redact", "diff", "board", "fork", "loom"] {
             assert!(!visible.contains(&old), "{old} must be hidden");
             assert!(
                 cmd.get_subcommands().any(|s| s.get_name() == old),

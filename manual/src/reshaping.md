@@ -1,4 +1,4 @@
-# Reshaping a lane: `distill`, `fork`, `rewind`, `adopt`
+# Reshaping a lane: `distill`, `splice`, `rewind`, `adopt`
 
 A swarm root runs many sub-agent lanes. A long lane reaches 500K–900K tokens of context, every
 tool round re-reads all of it, and the two usual moves are both bad: keep going (slow, expensive,
@@ -12,7 +12,7 @@ touched. Four of them are about lanes:
 | you want | verb |
 |---|---|
 | the same lane, a sixth of the context, resumable | [`cv distill`](cli.md#cv-distill) |
-| the lane exactly as it stood at message N, to run variants | [`cv fork`](cli.md#cv-fork) |
+| the lane exactly as it stood at message N, to run variants | [`cv splice <id>:..N --session`](cli.md#cv-splice) |
 | the agent as of a past message or the commit it made, as a top-level session | [`cv rewind`](cli.md#cv-rewind) |
 | sub-agents of a dead root moved under a live one so it can `SendMessage` them | [`cv adopt`](cli.md#cv-adopt) |
 
@@ -81,9 +81,13 @@ Claude Code loads a session by walking `parentUuid` back from the newest record 
 first missing link without an error**. A lane's turns often point at records the IR does not carry,
 such as `hook_success` attachments, so a naïvely emitted session resumes with only its last one or
 two records: the pack is never seen, nothing errors, and the agent answers from whatever the tail
-happened to hold. `distill` and `fork` therefore clear every parent so the emitter chains records in
-order; `tests/cli.rs::distill_emits_a_whole_resumable_session_and_a_sub_agent` walks the chain the
-way Claude does and goes red if the fix is disabled.
+happened to hold. The Claude emitter therefore owns the rule, for every verb that writes a
+transcript (`distill`, `splice`, `port`, `pack --format session`): a parent that names a record not
+in the file is re-linked to the record before it, a call whose result is not in the file is dropped,
+and the records carry one identity (a main-thread session, or a sub-agent of the named root).
+`emit_verified` re-reads the file and asserts all three; `emit::tests::reshape_verbs_emit_resumable`
+and `tests/cli.rs::distill_emits_a_whole_resumable_session_and_a_sub_agent` walk the chain the way
+Claude does.
 
 ## Three ways to run the result
 
@@ -99,6 +103,6 @@ way Claude does and goes red if the fix is disabled.
   what a lane did, not to *be* it. `--with <other>` (repeatable) appends another lane's findings —
   its own words and its facts, not its brief, ledger or tail — for merge-context.
 
-`cv distill <id> --upto N` is a distilled fork: the lane as it stood at message N. `cv fork <id>
---at N (--session | --agent-of <root>)` is the verbatim prefix `[0, N)` instead, with calls whose
-results fall after the cut dropped and the chain linearized.
+`cv distill <id> --upto N` is a distilled fork: the lane as it stood at message N. `cv splice
+<id>:..N (--session | --agent-of <root>)` is the verbatim prefix `[0, N)` instead; a call whose
+result falls after the cut is dropped by the emitter.

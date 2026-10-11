@@ -10,6 +10,9 @@
 - `cv lanes` reads the hook ledger (`lanes.jsonl`): a lane whose stop only the `SubagentStop` hook saw reads `stopped`, `status_source: hook_ledger`.
 - `cv doctor` prints whether the hooks are installed and the compaction policy in force (settings and environment).
 - cv-mcp runs generated tools with stdin closed, so a command that reads stdin never consumes the JSON-RPC stream.
+- **Removed `cv fork` and `cv loom`**: `cv splice <id>:..N --session|--agent-of <root>` is the fork, `cv splice <base>:..N <other>:M..` the graft; both names exit 2 with that pointer.
+- The Claude emitter owns resumability: dangling `parentUuid` re-linked, unanswered `tool_use` dropped, one sidechain identity — for `distill`, `splice`, `port` and `pack` alike; `emit_verified` asserts it.
+- `cv distill`'s pack shows a trailing call that never got its result (the lane stopped mid-call); the emitted session still drops it.
 - `cv distill` token estimates count bytes (not chars) at its 2.4/token, a call's `input` only and encrypted thinking: one estimator with `doctor`.
 - Manual: `distill`, `fork`, `adopt` documented and a "Reshaping a lane" page; MCP tools and `cvd` routes match the binaries; harness counts corrected.
 - `integrations/` is gone (its recipes called MCP tools removed in 0.11); the manual's [Hooking a harness in](manual/src/integrations.md) replaces it.
