@@ -8,6 +8,7 @@
 #                                          (http://127.0.0.1:<port>), PROXY_PID, and CALLS_LOG
 #   corpus_proxy_stop                   -> stops it (safe to call twice; put it in the EXIT trap)
 #   corpus_calls                        -> the number of model calls made so far
+#   toml_list ITEM...                   -> a TOML string array, [] when empty
 
 corpus_proxy() {
   local upstream="$1" auth="$2" model="${3:-}" port
@@ -42,4 +43,11 @@ corpus_project() {
     git init -q -b main . && git -c user.name=corpus -c user.email=corpus@example.invalid add -A \
       && git -c user.name=corpus -c user.email=corpus@example.invalid commit -qm init
   )
+}
+
+# toml_list ITEM... -> ["a","b"] (and [] for no items), for corpus_manifest
+toml_list() {
+  local out="" x
+  for x in "$@"; do out="$out${out:+,}\"$x\""; done
+  printf '[%s]' "$out"
 }

@@ -111,7 +111,7 @@ corpus_manifest "$OUT" \
   "writer=\"Cline CLI $V (npm cline) on the Cline SDK; the 4.x VS Code extension writes the same ~/.cline/data store\"" \
   "model=\"$MODEL via Z.ai coding endpoint, through key_proxy.py (provider openai-compatible)\"" \
   "model_calls=$CALLS" \
-  "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
-  "skipped=[$(printf '"%s",' "${SKIP[@]}" | sed 's/,$//')]" \
+  "scenarios=$(toml_list ${SCEN[@]+"${SCEN[@]}"})" \
+  "skipped=$(toml_list ${SKIP[@]+"${SKIP[@]}"})" \
   "generator_commit=\"$(git -C "$HERE" rev-parse --short HEAD)\""
 corpus_size_check "$OUT"

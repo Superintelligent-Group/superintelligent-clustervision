@@ -42,8 +42,26 @@ any of these is left anywhere:
 
 `corpus.rs` runs the same kind of check over every committed file.
 
+### `drive.sh`, `key_proxy.py`, `schema_snapshot.py`
+
+- `key_proxy.py` serves harnesses that already speak the provider's wire (chat completions, Anthropic
+  messages) and need only the key kept out of them. It forwards to Z.ai and adds the key, enforces
+  `MAX_CALLS`, and logs offered tool names, never content. `drive.sh` (sourced after `lib.sh`) starts
+  it on a free port (`corpus_proxy UPSTREAM bearer|x-api-key [MODEL]`, giving `PROXY_URL`), counts
+  calls (`corpus_calls`), sets up the shared scratch project (`corpus_project`), and writes manifest
+  lists (`toml_list`). Used by `cline/`, `continue/` and `roo/`.
+- `schema_snapshot.py` records a store's shape (DDL, merged JSON key paths and types) without its
+  content. It is for desktop apps that cannot be driven headless (`zed/`, `lmstudio/`). Their
+  `snapshot.sh` writes `tests/corpus/<h>/<app version>/` (`SNAPSHOT.toml` and no sessions), and
+  `--check` diffs a later store against that snapshot.
+- Each harness dir also has an `AFFORDANCES.md`: every affordance, where the store records it, whether
+  the corpus exercises it, and how cv's IR represents it.
+
 ## Rules that are easy to break
 
+- **Throwaway dirs live in your lane's own directory.** Run generators with `TMPDIR` set to a directory
+  only your lane uses, and never delete by glob in a shared one: `lib.sh` names every work dir
+  `cv-corpus.XXXXXX`, so `rm -rf cv-corpus.*` in a shared TMPDIR deletes other lanes' runs.
 - **Throwaway home always.** Set `HOME` and the harness's own variable (`CODEX_HOME`, `GOOSE_PATH_ROOT`,
   `HERMES_HOME`, ...) and `TMPDIR` into `$WORK`, and run `corpus_guard` on all of them. Harnesses
   record `$TMPDIR` too: Codex lists it as a sandbox writable root.

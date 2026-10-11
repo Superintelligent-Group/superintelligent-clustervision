@@ -147,7 +147,7 @@ corpus_manifest "$OUT" \
   "writer=\"Roo Code CLI $V (GitHub cli-v$V), which runs the bundled Roo Code extension in a mock VS Code host\"" \
   "model=\"$MODEL via Z.ai Anthropic-compatible endpoint, through key_proxy.py (Roo told: anthropic / claude-sonnet-4-5)\"" \
   "model_calls=$CALLS" \
-  "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
-  "skipped=[$(printf '"%s",' "${SKIP[@]}" | sed 's/,$//')]" \
+  "scenarios=$(toml_list ${SCEN[@]+"${SCEN[@]}"})" \
+  "skipped=$(toml_list ${SKIP[@]+"${SKIP[@]}"})" \
   "generator_commit=\"$(git -C "$HERE" rev-parse --short HEAD)\""
 corpus_size_check "$OUT"

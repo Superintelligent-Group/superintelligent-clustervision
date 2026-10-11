@@ -102,7 +102,7 @@ corpus_manifest "$OUT" \
   "harness=\"devin\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
   "model=\"$MODEL (Devin backend, a Free model on the signed-in account; Z.ai cannot drive Devin)\"" \
   "model_calls=\"not observable (Devin's backend); $NSESS sessions, one devin -p per turn\"" \
-  "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
-  "skipped=[$(printf '"%s",' "${SKIP[@]}" | sed 's/,$//')]" \
+  "scenarios=$(toml_list ${SCEN[@]+"${SCEN[@]}"})" \
+  "skipped=$(toml_list ${SKIP[@]+"${SKIP[@]}"})" \
   "generator_commit=\"$(git -C "$HERE" rev-parse --short HEAD)\""
 corpus_size_check "$OUT"

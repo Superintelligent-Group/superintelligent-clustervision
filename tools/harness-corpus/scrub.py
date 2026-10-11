@@ -45,6 +45,8 @@ USER = os.path.basename(os.environ.get("CORPUS_REAL_HOME", "")).encode()
 def fix(b, reps):
     for a, z in reps:
         b = b.replace(a.encode(), z.encode())
+        # A model retyping a path can change its case (`corpus-ide` -> `corpus-IDE`).
+        b = re.sub(re.escape(a.encode()), z.replace("\\", "\\\\").encode(), b, flags=re.IGNORECASE)
     if len(USER) > 2:  # tool output like `ls -l` carries the owner name
         b = re.sub(rb"\b" + re.escape(USER) + rb"\b", b"corpus", b)
     b = ACCOUNT_RE.sub(lambda m: m.group(1) + b'"' + EMAIL.encode() + b'"', b)
