@@ -1,8 +1,7 @@
 # Adding a harness
 
 Got a coding agent we don't support yet? Adding one is a single new module implementing the
-[`Adapter`](architecture.md) trait. The full walkthrough is in
-**[ADDING_HARNESS.md](https://github.com/emberian/cv/blob/main/ADDING_HARNESS.md)**; the shape:
+[`Adapter`](architecture.md) trait. This chapter is the walkthrough; the shape:
 
 1. **`discover()`** — cheaply enumerate sessions on disk into `SessionRef`s (id, path, cwd, title,
    timestamps, a message count). No full parse.

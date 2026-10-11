@@ -82,7 +82,7 @@ cv scry
 
 <sub>¹ The Claude app keeps transcripts server-side; the ChatGPT app keeps them locally but encrypted at rest. We detect the install and document exactly why neither is readable — see [`docs/FORMATS.md`](docs/FORMATS.md).</sub>
 
-**Conversion is N-way** among the 12 emit-capable harnesses: any → any, mediated by one unified IR. Every format reverse-engineered in [`docs/FORMATS.md`](docs/FORMATS.md). Bringing your own? → [`ADDING_HARNESS.md`](ADDING_HARNESS.md) 💛
+**Conversion is N-way** among the 12 emit-capable harnesses: any → any, mediated by one unified IR. Every format reverse-engineered in [`docs/FORMATS.md`](docs/FORMATS.md). Bringing your own? → [Adding a harness](manual/src/adding-a-harness.md) 💛
 
 ## ✨ More than a viewer
 
@@ -220,7 +220,7 @@ Built in a wild few sessions, much of it by a swarm of agents working disjoint f
 - **23 harnesses parse**; 13 also **emit** (N-way conversion). The rest — Cursor, Goose, Zed, Devin CLI, the Claude/ChatGPT desktop apps, and the ChatGPT/Claude.ai **account data exports** (`chatgpt-export`/`claude-export` — register their location with `cv config --add-export <path>`) — are parse-only for now.
 - **Robustness:** 2000+ real sessions parse with **0 panics**; parsers are fuzz-tested against hostile input.
 - The full-text index trades disk for speed; Gemini's protobuf `.pb` is opaque; a few sidecar tool-call streams aren't merged yet.
-- Historical format variants are an explicit goal — see [`ADDING_HARNESS.md`](ADDING_HARNESS.md), and **please send your own harness logs** (we can only test what we can see).
+- Historical format variants are an explicit goal — see [Adding a harness](manual/src/adding-a-harness.md), and **please send your own harness logs** (we can only test what we can see).
 
 PRs and weird old transcripts deeply welcome. 💜
 

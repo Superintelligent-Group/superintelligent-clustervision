@@ -164,7 +164,7 @@ carry it. **Cost** is now `usage.cost_usd`, for the same reason.
 
 `open_session` is the format version of *this document*. The messy reality is that each *source* harness also
 drifts over time (Codex alone has ≥3 on-disk shapes). A faithful importer must recognize those by **content,
-not by a version field** — see [`ADDING_HARNESS.md`](../ADDING_HARNESS.md). OpenSession's job is to be the
+not by a version field** — see [Adding a harness](../manual/src/adding-a-harness.md). OpenSession's job is to be the
 stable target all those variants converge onto.
 
 ### 0.2 → 0.3
