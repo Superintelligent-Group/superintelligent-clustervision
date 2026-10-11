@@ -27,6 +27,7 @@ pub mod gemini;
 #[cfg(feature = "sqlite")]
 pub mod goose;
 pub mod grok;
+pub mod harmony;
 #[cfg(feature = "sqlite")]
 pub mod hermes;
 pub mod kimi;

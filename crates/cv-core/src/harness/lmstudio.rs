@@ -751,11 +751,11 @@ fn push_text(m: &mut Message, text: String, as_thinking: bool) {
             encrypted: None,
             redacted: false,
         });
-    } else if crate::harmony::looks_like_harmony(&text) {
+    } else if super::harmony::looks_like_harmony(&text) {
         // gpt-oss (common in LM Studio) embeds Harmony channel markers in plain assistant text:
         // analysis → Thinking, commentary tool calls → ToolUse, final → Text. Decode them into
         // first-class IR blocks instead of leaving the raw `<|channel|>…` markers in the text.
-        m.content.extend(crate::harmony::decode_content(&text));
+        m.content.extend(super::harmony::decode_content(&text));
     } else {
         m.content.push(Block::Text { text: text.into() });
     }

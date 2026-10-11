@@ -25,8 +25,9 @@
 //!   preserved messages come along (their relinking is Claude Code's, inferred from the record
 //!   shape — the head's `parentUuid` is left as recorded). `--full` starts at the first record.
 //!
-//! Every record's `sessionId`/`session_id` becomes the new id; `parentUuid` chains are untouched
-//! (a boundary record already roots its window with a null parent). The source is only read.
+//! Every record's `sessionId`/`session_id` becomes the new id; `parentUuid` chains are untouched —
+//! the window head keeps whatever parent it was recorded with (a boundary's is usually, not always,
+//! `null`; Claude Code's back-walk stops at the boundary regardless). The source is only read.
 //!
 //! ## Sub-agent transcripts
 //!

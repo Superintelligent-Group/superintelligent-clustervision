@@ -19,7 +19,6 @@ pub mod doctor;
 pub mod emit;
 pub mod events;
 pub mod formats;
-pub mod harmony;
 pub mod harness;
 pub mod html;
 pub mod ingest;

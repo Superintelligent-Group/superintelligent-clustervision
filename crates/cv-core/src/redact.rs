@@ -5,9 +5,10 @@
 //!
 //! # Approach
 //!
-//! cv-core is deliberately dep-light and does **not** depend on the `regex` crate, so every matcher
-//! here is a hand-rolled scanner over `&str`. We walk the text once, and at each position try a set
-//! of recognizers (`-----BEGIN PRIVATE KEY-----` blocks, known token prefixes, JWTs, emails,
+//! Every matcher here is a hand-rolled scanner over `&str` rather than a regex set — not for want of
+//! the crate (cv-core uses `regex` in `distill`, `rewind` and `query`) but because each recognizer
+//! applies its own false-positive guardrails at the match site (below), which a regex alternation
+//! cannot express. We walk the text once, and at each position try a set of recognizers (`-----BEGIN PRIVATE KEY-----` blocks, known token prefixes, JWTs, emails,
 //! `key = "value"` assignments, and conservative high-entropy blobs). When one matches, the matched
 //! span is replaced with a stable placeholder of the form `[REDACTED:kind]` and scanning resumes
 //! after it.
