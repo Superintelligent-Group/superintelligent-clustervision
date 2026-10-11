@@ -354,12 +354,10 @@ fn pack_rejects_bad_arguments() {
     let (_, err) = w.cv_fails(&["pack", "x", "--format", "session", "--harness", "marsrover"]);
     assert!(err.contains("unknown target harness"), "{err}");
 
-    // The 0.10 `--to` spelling is gone, with a pointer at --harness (exit 2: a caller mistake).
+    // The 0.10 `--to` spelling is a plain unknown argument now (its 0.11 tombstone left at 0.15):
+    // clap's error, exit 2.
     let (ok, code, out, err) = w.cv(&["pack", "x", "--to", "claude"]);
     assert!(!ok, "`pack --to` must not still work:\n{out}");
     assert_eq!(code, 2, "{err}");
-    assert!(
-        err.contains("renamed in 0.11.0") && err.contains("--harness <harness>"),
-        "{err}"
-    );
+    assert!(err.contains("unexpected argument '--to'"), "{err}");
 }
