@@ -232,14 +232,14 @@ clustervision is a Rust workspace. `cv-core` is the library every other crate is
                          │  cache · emit/convert · loom · board ·       │
                          │  render/html · ingest · redact · watch       │
                          └─────────────────────────────────────────────┘
-                            ▲    ▲    ▲    ▲    ▲    ▲    ▲     ▲     ▲
-            ┌───────────────┘    │    │    │    │    │    │     │     └──────────┐
-            │             ┌──────┘    │    │    │    │    │     └────┐           │
-         ┌──┴──┐      ┌───┴──┐   ┌────┴─┐ ┌┴───┐ ┌─┴──┐ ┌┴────┐ ┌───┴───┐   ┌───┴───┐
-         │ cv  │      │cv-mcp│   │ cvd  │ │ cv │ │ cv │ │ cv  │ │  cv   │   │  app/ │
-         │(CLI)│      │(MCP) │   │(daem │ │-tui│ │-sea│ │-llm │ │ -web  │   │(Tauri)│
-         │     │      │      │   │+serve│ │    │ │rch │ │     │ │(WASM) │   │       │
-         └─────┘      └──────┘   └──────┘ └────┘ └────┘ └─────┘ └───────┘   └───────┘
+                            ▲    ▲    ▲    ▲    ▲    ▲     ▲     ▲
+            ┌───────────────┘    │    │    │    │    │     │     └──────────┐
+            │             ┌──────┘    │    │    │    │     └────┐           │
+         ┌──┴──┐      ┌───┴──┐   ┌────┴─┐ ┌┴───┐ ┌─┴──┐  ┌───┴───┐   ┌───┴───┐
+         │ cv  │      │cv-mcp│   │ cvd  │ │ cv │ │ cv │  │  cv   │   │  app/ │
+         │(CLI)│      │(MCP) │   │(daem │ │-sea│ │-llm│  │ -web  │   │(Tauri)│
+         │     │      │      │   │+serve│ │rch │ │    │  │(WASM) │   │       │
+         └─────┘      └──────┘   └──────┘ └────┘ └────┘  └───────┘   └───────┘
 ```
 
 | Crate | Responsibility |
@@ -250,10 +250,9 @@ clustervision is a Rust workspace. `cv-core` is the library every other crate is
 | **`cv-search`** | Pure-Rust search: full-text via [tantivy](https://github.com/quickwit-oss/tantivy) (BM25 + snippets) and semantic via embeddings (model2vec). |
 | **`cv-llm`** | LLM-backed features — the optional abstractive digests behind `cv pack` and the `--generate` continuations for `splice`/`loom`, via OpenRouter / Anthropic / a local LM Studio. |
 | **`cv-web`** | WASM bindings — ingest an uploaded harness `.zip` entirely in-browser and hand back sessions as JSON. |
-| **`cv-tui`** | A terminal browser for sessions (search, read, scry, board), built on ratatui. |
 | **`app/`** | The desktop app — a Tauri v2 shell around the web UI with native `cv-core`/`cv-llm` power. |
 
-The shape to take away: **`cv-core` owns the IR, the adapters, and discovery; everything else is a lens onto it.** A bug fixed in an adapter improves the CLI, the daemon, the TUI, and the app at once — because they all see the same `Session`.
+The shape to take away: **`cv-core` owns the IR, the adapters, and discovery; everything else is a lens onto it.** A bug fixed in an adapter improves the CLI, the daemon, the web UI, and the app at once — because they all see the same `Session`.
 
 ## Where to go next
 

@@ -11,6 +11,7 @@
 - **Removed `cv diff`** (a role+text prefix compare): `cv export <id> --format md` each session and diff the files; the name exits 2 with that pointer.
 - OpenSession reader reads 0.3 only (byte-identical round trip); a 0.2 document errors naming the version and the renames.
 - Removed the `claude-app` and `chatgpt-app` harnesses (they never had a session to read); the names now error with a pointer, exit 2.
+- **Removed `cv-tui`**: its three views are `cv ls`, `cv show` and the web Sessions/Fleet tabs; one release binary fewer.
 
 ## 0.14.0 — 2026-10-10
 
