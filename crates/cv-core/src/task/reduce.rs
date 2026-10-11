@@ -536,15 +536,7 @@ impl TaskReducer {
                         task_id: task.task_id.clone(),
                     });
                 }
-                if let Some(rev) = task.current_revision() {
-                    if !rev.state.is_terminal() {
-                        return Err(ReduceError::DoneWithLiveRevision {
-                            task_id: task.task_id.clone(),
-                            revision: rev.revision.n,
-                            state: rev.state.as_str().to_string(),
-                        });
-                    }
-                }
+                require_no_live_revision(task)?;
                 task.done_observed = observed.clone();
                 task.done_check = check.clone();
                 task.state = TaskState::Done;
@@ -586,6 +578,9 @@ impl TaskReducer {
                 source,
             } => {
                 require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
+                // A task carrying unlanded reviewed code is work, not a question: posing it would
+                // let `resolved` close it past the live revision that `done` refuses to close past.
+                require_no_live_revision(task)?;
                 if task.decision.is_some() {
                     return Err(ReduceError::AlreadyPosed {
                         task_id: task.task_id.clone(),
@@ -625,6 +620,9 @@ impl TaskReducer {
                 } else {
                     require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
                 }
+                // Same gate as `done`: a resolution is terminal, and terminal is never reached over
+                // a live revision (a log posed before this rule existed is still refused here).
+                require_no_live_revision(task)?;
                 let task_id = task.task_id.clone();
                 let Some(decision) = task.decision.as_mut() else {
                     return Err(ReduceError::MissingDecision {
@@ -843,6 +841,20 @@ impl TaskEventKind {
     /// `tag()` but usable in `ReduceError`'s `&'static str` fields.
     fn tag_static(&self) -> &'static str {
         self.tag()
+    }
+}
+
+/// The terminal-over-live-code gate shared by `done`, `posed` and `resolved`: a task whose current
+/// revision is still live (not refuted/superseded/landed) cannot be completed or turned into a
+/// question — kill or land the revision first. Only the land facet's own events move it.
+fn require_no_live_revision(task: &TaskProjection) -> Result<(), ReduceError> {
+    match task.current_revision() {
+        Some(rev) if !rev.state.is_terminal() => Err(ReduceError::DoneWithLiveRevision {
+            task_id: task.task_id.clone(),
+            revision: rev.revision.n,
+            state: rev.state.as_str().to_string(),
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -1648,6 +1660,72 @@ mod tests {
             deadline: None,
             source: None,
         }
+    }
+
+    /// A live reviewed revision gates `posed` and `resolved` exactly as it gates `done`: neither a
+    /// pose over live code nor a resolution of a decision that later grew a revision reaches a
+    /// terminal state with unlanded reviewed content. A refuted (terminal) revision lifts the gate.
+    #[test]
+    fn pose_and_resolve_are_refused_while_a_revision_is_live() {
+        // propose, then pose: refused while awaiting review and while ready.
+        let mut log = Log::new();
+        let task = log.open(AUTHOR);
+        propose(&mut log, &task, 1);
+        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
+        assert!(matches!(
+            log.reduce(),
+            Err(ReduceError::DoneWithLiveRevision { revision: 1, ref state, .. }) if state == "awaiting_review"
+        ));
+        log.events.pop();
+        pass(&mut log, &task, REVIEWER);
+        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
+        assert!(matches!(
+            log.reduce(),
+            Err(ReduceError::DoneWithLiveRevision { revision: 1, ref state, .. }) if state == "ready"
+        ));
+        log.events.pop();
+        // A refute ends the revision; the pose then goes through.
+        log.push(
+            &task,
+            REVIEWER,
+            TaskEventKind::ReviewRefuted {
+                reviewer: REVIEWER.into(),
+                session_ref: None,
+                receipts: None,
+            },
+        );
+        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
+        assert!(log.reduce().unwrap().tasks[&task].is_decision());
+
+        // pose, then propose, then resolve: the resolution is refused over the live revision.
+        let mut log = Log::new();
+        let task = log.open(AUTHOR);
+        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
+        propose(&mut log, &task, 1);
+        log.push(
+            &task,
+            OTHER,
+            TaskEventKind::Resolved {
+                choice: "keep".into(),
+                note: None,
+                provisional: false,
+            },
+        );
+        assert!(matches!(
+            log.reduce(),
+            Err(ReduceError::DoneWithLiveRevision { revision: 1, .. })
+        ));
+        log.events.pop();
+        // `done` is still refused for the decision reason, so the only way past is the land facet.
+        log.push(
+            &task,
+            AUTHOR,
+            TaskEventKind::Done {
+                observed: None,
+                check: None,
+            },
+        );
+        assert!(matches!(log.reduce(), Err(ReduceError::DecisionNeedsResolve { .. })));
     }
 
     /// The decision facet: posing makes a task a decision; resolving answers it with one of the
