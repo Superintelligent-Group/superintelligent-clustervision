@@ -7,8 +7,12 @@ Everything `cv` does, it does over your *real* local session storage (`~/.claude
 ```sh
 cv --help          # every command, grouped
 cv <cmd> --help    # flags for any one command
-cv recipes         # the agent quickstart: ten command lines and the JSON they return
+cv recipes         # the agent quickstart: one command line per task, and the JSON it returns
 ```
+
+This chapter is what the commands are *for*: the examples, the sample output, and the reasons.
+Every flag of every command is in the [command reference](reference.md), which is generated from
+the binary when this manual is built, so it cannot fall behind it.
 
 ## Renamed in 0.11.0
 
@@ -31,15 +35,12 @@ The principle behind all of it: **one name, one meaning, no grammar to memorize.
 
 ## The map
 
-`cv --help` prints these five groups, and nothing is hidden from it.
+`cv --help` prints these groups, and nothing is hidden from it. **Read** commands only ever read;
+**Reshape** commands produce a **new** session id from existing ones and never touch the source;
+**Export** commands produce something that is *not* a session; **Fleet & live** is
+multi-agent coordination, live views and the servers; **System** is cv's own state and reference.
 
-| Group | What they have in common | Commands |
-| --- | --- | --- |
-| **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`stats`](#cv-stats) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
-| **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`port`](#cv-port) [`resume`](#cv-resume) |
-| **[Export](#export)** | produce something that is *not* a session | [`export`](#cv-export) [`dataset`](#cv-dataset) [`pack`](#cv-pack) |
-| **[Fleet & live](#fleet--live)** | multi-agent coordination and live views | [`task`](#cv-task) [`scry`](#cv-scry) [`share`](#cv-share) |
-| **[System](#system)** | cv's own state and reference | [`index`](#cv-index) [`config`](#cv-config) [`schema`](#cv-schema) [`formats`](#cv-formats) [`recipes`](#cv-recipes) |
+{{#cv-command-map}}
 
 ## Things that work everywhere
 
@@ -53,19 +54,19 @@ cv show da91 --harness codex
 
 An **ambiguous** prefix is never resolved by guessing: cv lists the candidates as `harness:full-id` lines and exits `2`. Surprising you with the wrong session is worse than making you type three more characters.
 
-**The shared flags.** A word means the same thing on every command that has it:
+**The shared flags.** A word means the same thing on every command that has it (which
+commands have it is in the [reference](reference.md)):
 
-| flag | meaning | on |
-| --- | --- | --- |
-| `--harness <h>` | filter to, or target, one harness — never spelled `--to` | `ls` `show` `cat` `search` `events` `tools` `tree` `workflow` `compaction` `doctor` `prune` `rewind` `splice` `port` `resume` `export` `dataset` `pack` `scry` `share` |
-| `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping | `ls` `splice` `port` `scry` |
-| `--out <dir\|file>` | write somewhere other than the real store | `rewind` `splice` `port` `dataset` `pack` `share` |
-| `--json` | machine output | `ls` `show` `search` `events` `touched` `tools` `workflow` `compaction` `stats` `doctor` `prune` `rewind` `schema` `task list/show/inbox/debt/stats` `board read/unanswered` |
-| `--limit <n>` | how many rows/records | `ls` `search` `dataset` `pack` |
-| `--fresh` | bypass the catalog and re-discover | `ls` |
-| `--all` | include what is hidden by default | `task list` `task inbox` |
-| `--thinking <mode>` | what an emit does with the model's reasoning: `native` (default), `text`, `drop` | `port` `splice` `pack` |
-| `--strict` | fail if a loss the target format *could* have carried happens | `port` |
+| flag | meaning |
+| --- | --- |
+| `--harness <h>` | filter to, or target, one harness — never spelled `--to` |
+| `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping |
+| `--out <dir\|file>` | write somewhere other than the real store |
+| `--json` | machine output |
+| `--limit <n>` | how many rows/records |
+| `--all` | include what is hidden by default |
+| `--thinking <mode>` | what an emit does with the model's reasoning: `native` (default), `text`, `drop` |
+| `--strict` | fail if a loss the target format *could* have carried happens |
 
 **`--thinking` and why the default drops some reasoning.** Thinking blocks come in two shapes. A few
 carry plaintext. Most carry only a provider **signature** — an opaque, vendor-bound blob with no
@@ -165,13 +166,17 @@ grok      7c0b1a3e  26-05-26 14:02 → 14:09            19 msg  ~/scratch/throwa
 
 Each row shows the session's `created → last-active` span in **local time** (same-day sessions compress the right side to a bare time). The span is what separates a long-lived orchestrator from a one-shot — and, after a crash, the resumed sessions from the dropped ones. When a session has no title, `cv` falls back to a dimmed cwd so the row still tells you *where* it happened.
 
-- `--asc` — print the shown rows oldest → newest. It flips the order of the window, never its membership: `--limit N --asc` is still the newest N sessions, read like a chat log ("what was I doing last Tuesday, across all my tools"). This replaces the former `timeline` command.
-- `--json` — the rows as one JSON array on stdout and nothing else, so it pipes cleanly. Keys are the shared [session row](#things-that-work-everywhere): `id`, `harness`, `path`, `cwd`, `title`, `created_at`, `updated_at`, `message_count`, `size_bytes`. Transcript-derived text (`title`) is emitted **raw** — the machine contract, not the sanitized terminal view.
-- `--enrich` (with `--json`) — add two transcript-derived fields to each row:
-  - `git` — the same object `cv show --json` emits (`branch`/`commit`/`remote`, each omitted when absent), read from the transcript's recorded git context. This is the branch the session *ran on*, a historical fact stored in the transcript — **not** the cwd's current branch.
-  - `display_title` — the row's `title` with a fallback synthesized from the first real user turn (peeling a leading `<system-reminder>` block and skipping the `Caveat:` command preamble, bare command wrappers, and tool-result turns). Explicit `null` only when a session carries neither an explicit title nor any user prose. `title` itself is left untouched, so a consumer can tell "no title anywhere" from "not enriched".
-
-  Enrichment costs **one lazy transcript parse per emitted row** — O(`--limit`), not the whole fleet. Plain `cv ls --json` stays a catalog-only, milliseconds-warm read; opt into `--enrich` when you need those fields on a bounded window.
+`--asc` flips the order of the window, never its membership: `--limit N --asc` is still the newest
+N sessions, read like a chat log ("what was I doing last Tuesday, across all my tools"). `--json`
+prints the shared [session row](#things-that-work-everywhere) with transcript-derived text
+(`title`) **raw** — the machine contract, not the sanitized terminal view. `--enrich` adds `git`
+(the branch the session *ran on*, read from the transcript — not the cwd's current branch) and
+`display_title`, the title with a fallback synthesized from the first real user turn (peeling a
+leading `<system-reminder>` block and skipping the `Caveat:` preamble, bare command wrappers and
+tool-result turns); it is explicit `null` only when a session has neither. `title` itself is left
+untouched, so a consumer can tell "no title anywhere" from "not enriched". Enrichment costs one
+lazy transcript parse per emitted row — O(`--limit`), not the fleet — so plain `cv ls --json`
+stays a catalog-only, milliseconds-warm read.
 
 #### Freshness — what `ls` guarantees
 
@@ -200,11 +205,15 @@ cv show da9174f4 --agent af19c2f1      # one sub-agent's transcript
 
 The header line gives you harness, full id and cwd; then each message is printed turn by turn with tool calls and results inlined. A turn's label carries its [`kind`](architecture.md#the-unified-ir) when that is more than its role says — `── system · injected_context/bash_output_audience_note ──` tells you at a glance that the harness put this in the model's input and which reminder it was.
 
-- `--json` — the unified IR as pretty JSON: session metadata including `system_prompt` and `lineage`, then `messages[]` with `role`, `kind`, `origin`, `content[]` (each block tagged by `type`), `usage`, and any harness-specific facts under `extra["<harness>"]`.
-- the five [window flags](#message-windows).
-- `--pre-compaction [N]` — read the span *before* a compaction boundary (the context a continued agent lost); defaults to the first boundary, `--pre-compaction 2` for the Nth. It sets the window for you, so it can't be combined with the window flags. Pair with [`cv compaction`](#cv-compaction) to see where the seams are.
-- `--subagents` — instead of the transcript, list the sub-agent forest this session spawned (each child's type, journaled outcome, and return value). `--agent <agent-id>` renders one specific sub-agent's transcript, resolved through this parent. Sub-agents aren't in the main pool, so they're read through their parent.
-- `cv show <agent-id>` also works **without** the parent: an id that matches no session is resolved as a sub-agent id across the fleet — one parent renders the agent directly with a provenance banner; several (fork lineages share sidecars) list ready-to-paste `cv show <parent> --agent …` commands.
+`--json` is the unified IR: session metadata including `system_prompt` and `lineage`, then
+`messages[]` with `role`, `kind`, `origin`, `content[]` (each block tagged by `type`), `usage`,
+and harness-specific facts under `extra["<harness>"]`. The [window flags](#message-windows) apply;
+`--pre-compaction [N]` sets the window for you (pair it with [`cv compaction`](#cv-compaction) to
+see where the seams are). `--subagents` lists the forest instead of the transcript, and
+`--agent <agent-id>` renders one child through its parent. `cv show <agent-id>` also works
+**without** the parent: an id that matches no session is resolved as a sub-agent id across the
+fleet — one parent renders the agent directly with a provenance banner; several (fork lineages
+share sidecars) list ready-to-paste `cv show <parent> --agent …` commands.
 
 A piped `cv show` with no window selector will not spray a whole giant transcript at you: past ~200 KB it prints the first and last 20 messages with a hint in between. Pick a window instead.
 
@@ -245,8 +254,12 @@ claude    da9174f4  2026-05-28  the flux inference refactor
 
 By default `cv` uses the tantivy full-text index if you've built one (real tokenization + BM25, instant). With no index it does a live scan and nudges you to run [`cv index`](#cv-index). When an index exists it's authoritative — no matches means no matches, not "scan harder."
 
-- `--semantic` — rank by *meaning* using stored embeddings instead of keywords. Requires `cv index --semantic` first; it downloads a small embedding model on first use. Unlike full-text it does **not** silently degrade: with no embeddings it errors and tells you what to run.
-- `--json` — the same hits in the same order as one JSON array: a [session row](#things-that-work-everywhere) plus `score` (BM25, cosine for `--semantic`, `null` on a live scan), `snippet` (untruncated), and `agent_id`/`parent_id`/`workflow` (populated for hits inside the sub-agent forest when the index was built with `cv index --subagents`; `null` for a top-level hit — the keys are always present).
+`--semantic` ranks by *meaning* using stored embeddings (`cv index --semantic` first; a small
+model downloads on first use). Unlike full-text it does **not** silently degrade: with no
+embeddings it errors and tells you what to run. `--json` is a [session row](#things-that-work-everywhere)
+per hit plus `score` (BM25, cosine for `--semantic`, `null` on a live scan), the untruncated
+`snippet`, and `agent_id`/`parent_id`/`workflow` (set for hits inside the sub-agent forest when the
+index was built with `cv index --subagents`; `null` for a top-level hit, and always present).
 
 ### `cv events`
 
@@ -577,18 +590,22 @@ cv prune 3b829648 --declassify --declassify-tokens-file terms.txt
 cv cat <new-id> toolu_abc123                       # fetch a stashed original back out
 ```
 
-- `--min-size <bytes>` — only snip a tool payload larger than this (default `2048`).
-- `--keep-last <N>` — keep the last N conversational turns' payloads verbatim (default `25`).
-- `--to <id>` — the new session id (default: a fresh UUID).
-- `--drop-thinking` — also flatten the **oldest** assistant reasoning (thinking blocks); recent thinking (within `--keep-last`) stays verbatim. On a long Claude session the chain-of-thought *signatures* dominate the loaded context (Claude keeps a ~600-byte signature per thinking turn even when the reasoning text is omitted), so this is the biggest lever for shrinking what a resume loads. Lossless. Real example: it took a 976k-token session from ~98% to ~36% of a 1M window.
-- `--drop` — discard payloads entirely instead of stashing them (smallest output, irreversible; the source is never touched regardless).
-- `--window <tokens>` — a sliding window: keep only the newest turns totalling ≤ this many **real** tokens, dropping older turns. Sized from Claude's own recorded `usage` counts rather than a tokenizer estimate, so the budget lands true; the resumed session loads roughly this budget plus ~30k of system overhead. Lossy in the new session — the source keeps the full history.
-- `--keep <A..B>` — the same thing by *index*: keep only this turn-index window (0-based, end-exclusive; `A..` through the last), dropping everything outside it. This is the flag that used to be spelled `--range`; it was renamed because it selects what to **keep**, while `--range` is the read-window flag everywhere else.
-- `--copy-resources` — also copy the session's `subagents/`/`workflows/` dir under the new id (off by default; can be hundreds of MB). `claude --resume` doesn't need it — only cv's forest features on the pruned session do.
-- `--no-revive` — opt *out* of the resume-gate fix. By default prune **resurrects an already-maxed session**: Claude Code's resume gate reads the last turn's recorded `usage` (input + cache tokens) as the session's current size, and checks it *before* re-sending anything, so a session sitting at the wall refuses to resume even after pruning has made the real content fit. Revive recomputes the honest size of the loaded window (everything after the last compaction boundary — what Claude actually re-sends) and rewrites the stale `usage` records to that figure. A no-op when the recorded size is already honest. `--no-revive` preserves the original records byte-for-byte.
-- `--declassify` — also snip conversational *prose* (user prompts + assistant text blocks) dense in caller-supplied terms, into the sidecar with a `[PRUNED …]` marker (lossless). A message is snipped iff it holds ≥ 2 distinct terms, matched case-insensitively as substrings. Unlike the tool/`--drop-thinking` passes this ignores `--keep-last` — recent prose is snipped too, because the use case (a scorer reading the *whole* loaded context) doesn't care about recency. cv ships **no built-in term list**: supply terms with `--declassify-tokens t1,t2,…` and/or `--declassify-tokens-file <path>` (one per line, `#` comments and blanks ignored), else `--declassify` warns and snips nothing.
-- `--dry-run` — compute and report without writing.
-- `--json` — also emit the report as **one JSON object on stdout** (the human report stays on stderr, so stdout is pure JSON): `source_id`/`new_id` (FULL ids), `harness`, `before_bytes`/`after_bytes`, `snipped_payloads`, `image_blocks`, `tokens_freed`, `dropped_turns`/`window_real_tokens`, `revived`, `warnings`, `new_path`/`sidecar_path`/`copied_resources`, `dry_run`, `note`. Dry-run honest: nothing was written, so the paths — and `new_id`, unless `--to` pinned it — are explicit nulls with a `note` saying so.
+The defaults snip payloads over 2 KB and keep the last 25 turns verbatim. `--drop-thinking` is the
+biggest lever on a long Claude session, because the chain-of-thought *signatures* dominate the
+loaded context (Claude keeps a ~600-byte signature per thinking turn even when the reasoning text
+is omitted): it took one 976k-token session from ~98% to ~36% of a 1M window. `--window` and
+`--keep` drop whole turns (lossy in the new session; the source keeps everything): `--window` by a
+real-token budget sized from Claude's own recorded `usage`, `--keep A..B` by index — the flag that
+was spelled `--range` before 0.11.0, renamed because it selects what to **keep**.
+
+By default prune also **revives** an already-maxed session: Claude Code's resume gate reads the
+last turn's recorded `usage` as the session's size *before* re-sending anything, so a session at
+the wall refuses to resume even after pruning made it fit. Revive rewrites those stale records to
+the honest size of the loaded window (everything after the last compaction boundary);
+`--no-revive` keeps the original records byte-for-byte. `--declassify` snips conversational
+*prose* dense in terms you supply (`--declassify-tokens`, `--declassify-tokens-file`); cv ships no
+term list. `--json` puts the report on stdout as one object (the human report stays on stderr),
+dry-run honest: paths written nowhere are `null`, with a `note` saying so.
 
 Claude Code only for now (it operates on the raw JSONL to stay byte-faithful).
 
@@ -607,11 +624,19 @@ cv rewind 7b2e19a4 --at d41c0de --dry-run --json
 claude --resume <new-id> --fork-session -p "Another agent changed the code you just landed. Review its diff: …"
 ```
 
-- `--at <MSG_IDX|SHA>` — the cut, inclusive. A message index, or a commit sha (7+ hex digits; an all-digit value is an index): the cut is the tool result whose `git commit`/`git push` output names that sha, and `cv rewind` fails with an explanation if no tool result does. Omit it for the last message. If the cut leaves parallel tool calls open, the copy runs on to their results (they happened at the same moment; the API rejects a call with no result) and stops at the next turn.
-- `--from-compaction` (default) / `--full` — where the new session starts. By default at the last compaction boundary before the cut — exactly the context the agent had, since a resume loads from the last boundary anyway — moved back to the boundary's preserved segment when partial compaction kept recent messages verbatim. On a month-long session that is the difference between one window (8k lines) and 900 MB. `--full` starts at the first record.
-- `--agent <id>` — rewind a sub-agent of `<id>` (resolved like `cv show --agent`). A sub-agent can also be named directly (`agent-<id>`) or by its transcript path. Its records carry the parent's session id and `isSidechain: true`; the rewind gives them their own id, `isSidechain: false`, drops `agentId`, and writes the session to the parent's project dir — a standalone top-level session.
-- `--out <dir>` — write somewhere other than the source's project dir. `claude --resume` only finds a session in the project dir of the directory it's launched from, so cv says where to copy it.
-- `--to <id>` — the new session id (default: a fresh UUID). `--dry-run` — report the window without writing. `--json` — the result as one JSON object on stdout (`source_*`, `new_id`/`new_path`/`provenance_path`, `cut_msg_idx`/`cut_line`, `start_msg_idx`/`start_line`/`boundary_msg_idx`/`preserved_head`, `end_line`, `closed_tool_calls`, `lines_written`, `omitted_lines`, `evidence`, `cwd`/`cut_cwd`, `resume`, `warnings`); dry-run honest like `prune --json`.
+`--at` is a message index or a commit sha (7+ hex digits; an all-digit value is an index). For a
+sha the cut is the tool result whose `git commit`/`git push` output names it, and rewind fails
+with an explanation if none does. If the cut leaves parallel tool calls open, the copy runs on to
+their results (they happened at the same moment, and the API rejects a call with no result).
+
+By default the new session starts at the last compaction boundary before the cut — exactly the
+context the agent had, since a resume loads from there anyway — moved back to the boundary's
+preserved segment when partial compaction kept recent messages verbatim. On a month-long session
+that is the difference between one window (8k lines) and 900 MB; `--full` starts at the first
+record. A sub-agent (`--agent`, `agent-<id>`, or its transcript path) comes out standalone: its
+records get their own session id and `isSidechain: false`, lose `agentId`, and land in the
+parent's project dir. `claude --resume` only finds a session in the project dir of the directory
+it is launched from, so with `--out` cv says where to copy it.
 
 The derived session is the source's raw records `[start, cut]` with every `sessionId` rewritten and `parentUuid` chains untouched, so everything Claude-specific survives. Next to it goes `<new-id>.rewind.json`, the provenance: source id, path, bytes and sha256 (of the prefix read — a live transcript keeps growing), the cut and start (message index, byte offset, line), the commit evidence, how many lines of the source come after the cut, when, and which cv. The resume line `cd`s to the directory Claude files the session under (the launch dir), which is not always where the agent was working at the cut — cv prints both.
 
@@ -629,25 +654,25 @@ cv distill agent-a5e2da77 --agent-of c1e4d723           # a new sub-agent of tha
 cv distill agent-a5e2da77 --upto 400 --with agent-a04ff45c --json
 ```
 
-- `<id>` — a session id, an agent id (`agent-…`), `harness:id`, or a path to a transcript file; `--harness` disambiguates.
-- `--keep-last N` (12) — tool calls kept verbatim at the tail; `--tail-result-max` (6000) and `--note-max` (6000) cap one result / one note in bytes; `--keep-tail-thinking` keeps the tail's thinking blocks; `--no-ledger` omits the ledger.
-- `--upto N` — distill the session as it stood at message N (exclusive): a distilled fork. `--with <session>` (repeatable) — inject another session's findings into the pack.
-- Output: the pack on stdout, or `--pack FILE`; `--session` emits a resumable main-thread session (`--cwd` rehomes it, `--out` writes outside the Claude store); `--agent-of <root>` emits a new sub-agent of that root. `--json` reports stats and what was written.
+The pack prints on stdout (or to `--pack FILE`); `--session` emits a resumable main-thread session
+instead, and `--agent-of <root>` a new sub-agent of that root, which the root resumes with
+`SendMessage` to the printed agent id. `--upto N` distills the session as it stood at message N —
+a distilled fork.
 
 ### `cv adopt`
 
 Rescue the sub-agents of a dead Claude Code session into a live one, so the live session can `SendMessage` them and they resume with their whole transcript. It copies `subagents/agent-<id>.jsonl` (with `sessionId` restamped on every line, nothing else changed) and its `.meta.json` into the live session's `subagents/`.
 
 ```sh
+cv lanes --recent 20 --unfinished       # find them: unfinished agents of the project's recent sessions
 cv adopt a5d8 b81e                      # into the project's newest session other than the one holding them (printed first)
 cv adopt a5d8 --into 7b2e19a4 --from c1e4d723
-cv adopt --list c1e4d723                # a session's sub-agents: status, model, size, description, meta?
-cv adopt --orphans --recent 20          # unfinished agents of the project's recent dead sessions
 cv adopt a5d8 --dry-run --json
 ```
 
-- `<agents>…` — agent ids (`a5d8…` or `agent-a5d8…`, unique prefix ok). `--into <session>` the adopter (default: the project's newest session other than the agent's own, printed before acting; with `--orphans`, the live session to exclude). `--from <session>` the dead holder (default: every session's `subagents/`, newest copy wins).
-- `--dry-run` prints what would be copied; `--force` replaces an agent file already present. `--list <session>` and `--orphans [--recent N]` (10) only list. `--json`.
+Without `--into`, the adopter is the project's newest session other than the one holding the
+agent, printed before acting; without `--from`, every session's `subagents/` is searched and the
+newest copy wins.
 
 Claude Code only; the dead session's files are never modified.
 
@@ -676,13 +701,11 @@ A span may come from a sub-agent (`agent-<id>`): it joins the new session's main
 
 Without `--harness` or `--out`, splice composes in memory and prints a summary; add `--export md|json` to dump the result. With `--harness`/`--out` it materializes the session for a harness.
 
-- `<specs>…` — one or more span specs (**required**). A verbatim prefix `<id>:..N` forks a lane at message N; `<base>:..N <other>:M..` grafts one session's continuation onto another's head.
-- `--session` | `--agent-of <root>` — a resumable Claude session, or a new sub-agent of that root, as for `distill` (`--cwd`, `--out`, `--json` likewise). Threading, open calls and sidechain identity are the emitter's: the cut points re-link, a call whose result falls outside the spans is dropped (see [the dangling-parent trap](reshaping.md#the-dangling-parent-trap)).
-- `--harness <h>` — target harness (defaults to the first spec's harness).
-- `--out <dir>` — write under this directory instead of the target's real storage root.
-- `--export <md|json>` — print the composed session instead of emitting it.
-- `--cwd <dir>` — rehome the composed session.
-- `--generate` / `--gen-model <model>` — append an LLM-generated continuation.
+A verbatim prefix `<id>:..N` forks a lane at message N; `<base>:..N <other>:M..` grafts one
+session's continuation onto another's head. `--session` and `--agent-of <root>` emit a resumable
+Claude session or a new sub-agent of that root, as for [`distill`](#cv-distill). Threading, open
+calls and sidechain identity are the emitter's: the cut points re-link, and a call whose result
+falls outside the spans is dropped (see [the dangling-parent trap](reshaping.md#the-dangling-parent-trap)).
 
 > **`--generate` needs an LLM provider.** Set one of `OPENROUTER_API_KEY` (preferred), `ANTHROPIC_API_KEY`, or `LMSTUDIO_API_BASE=local` (a free local LM Studio server at `localhost:1234`). It appends a single generated assistant turn to the composed branch.
 
@@ -705,11 +728,11 @@ cv port codex:019e75e0 --harness claude           # the source harness rides on 
 
 By default it writes into the target harness's *real* storage root, so the session shows up in that tool immediately. Point `--out` at a scratch directory for a safe dry run. If the target harness can't be emitted to, `cv` says so plainly and lists the harnesses that can. See [Cross-harness conversion](conversion.md) for the emit-target list and the gory IR details.
 
-- `--harness <h>` — target harness. Omitted, it defaults to the source harness — a pure rehome.
-- `--cwd <dir>` — the new working directory. Rehoming rewrites the cwd baked into the target format (Claude's encoded project-dir name, Grok's percent-encoded path, Cline/Roo's `<environment_details>` line, …).
-- `--out <dir>` — write under this directory instead of the target's storage root.
-- `--no-context` — don't copy project context files. By default `port` also copies `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `MEMORY.md`, `.cursorrules` and `.windsurfrules` into the new cwd, so the ported session lands with its memory intact. It never overwrites an existing file at the target.
-- `--strict` — fail if the fidelity check finds a loss the target format *could* have carried. Losses the format inherently cannot hold are still only reported, under `⚠ lost`.
+Without `--harness` the target is the source harness — a pure rehome. Rehoming rewrites the cwd
+baked into the target format (Claude's encoded project-dir name, Grok's percent-encoded path,
+Cline/Roo's `<environment_details>` line, …), and copies the project's context files (`CLAUDE.md`,
+`CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `MEMORY.md`, `.cursorrules`, `.windsurfrules`) into the
+new cwd, never over an existing one; `--no-context` skips them.
 
 Every port re-parses its own output and diffs it against the source IR per message — role and `kind` sequences, block-type counts, thinking (text / signature-only / encrypted), tool names on results, `is_error`, `details`, usage, model, timestamps, ids, plus the session's title, cwd, model, `system_prompt` and `lineage`. Each delta is classified as *expected for this target* (from a per-emitter table of what the format cannot carry) or *unexpected*; `--strict` fails on the latter.
 
@@ -750,9 +773,11 @@ cv export da9174f4 --redact > safe.md         # secrets/PII scrubbed first; coun
 ✦ redacted 7 item(s): 2 api_key, 1 private_key, 0 jwt, 3 email, 1 blob, 0 assignment
 ```
 
-- `--format <md|json>` — output format (default `md`). For a self-contained HTML page, [`cv share`](#cv-share) is the renderer: it streams and redacts.
-- `--redact` — scrub secrets and PII before rendering: API keys, private keys, JWTs, emails, opaque blobs, `KEY=value` assignments. The same pass [`cv share`](#cv-share) runs; the per-class tally goes to stderr so stdout stays the document. The thing to reach for before you paste a transcript into an issue. (This replaces the former `redact` command.)
-- the five [window flags](#message-windows) — identical to `cv show`'s.
+For a self-contained HTML page, [`cv share`](#cv-share) is the renderer: it streams and redacts.
+`--redact` runs the same scrubbing pass `share` does — API keys, private keys, JWTs, emails, opaque
+blobs, `KEY=value` assignments — with the per-class tally on stderr so stdout stays the document;
+the thing to reach for before you paste a transcript into an issue. The five
+[window flags](#message-windows) are `cv show`'s.
 
 (`show` and `export` are siblings: `show` is for your terminal, `export` is for a file or a pipe.)
 
@@ -767,11 +792,10 @@ cv dataset -q "model:fable" --subagents --out fable.jsonl    # a queried slice +
 cv dataset -q "harness:claude" --redact-only private_key     # strip PEM keys, keep the rest
 ```
 
-- `-q`/`--query <calculus>` — only sessions matching the [query calculus](#cv-schema).
-- `--subagents` — also emit each Claude session's sub-agent transcripts. A parent on one model often spawns sub-agents on another, and most model usage lives in the forest, so a `model:` query usually wants this.
-- `--min-messages <n>` — drop sessions with fewer than `n` messages (default `2`).
-- `--redact` — scrub every secret/PII class before emitting. `--redact-only <classes>` scopes it to a comma list (`private_key`, `api_key`, `jwt`, `email`, `blob`, `assignment`).
-- `--limit <n>` — stop after `n` emitted records. `--out <file>` — write to a file instead of stdout.
+`--subagents` also emits each Claude session's sub-agent transcripts: a parent on one model often
+spawns sub-agents on another, and most model usage lives in the forest, so a `model:` query
+usually wants it. `--redact-only <classes>` scopes the scrub to a comma list (`private_key`,
+`api_key`, `jwt`, `email`, `blob`, `assignment`).
 
 ### `cv pack`
 
@@ -784,10 +808,6 @@ cv pack "fix the parser" --format session --harness claude   # a synthetic resum
 cv pack "migrate the daemon" --limit 3 --out CONTEXT.md
 ```
 
-- `--format <md|prompt|session>` — output shape (default `md`).
-- `--harness <h>` — target harness, for (and only for) `--format session`.
-- `--limit <n>` — max past sessions to draw from (default `8`). `--out <path>` — write to a file.
-
 It gets its own chapter: **[`cv pack` — the context compiler](pack.md)**.
 
 ---
@@ -796,12 +816,7 @@ It gets its own chapter: **[`cv pack` — the context compiler](pack.md)**.
 
 ### `cv task`
 
-The fleet's durable dispatch objects: open/claim/note/done, and the decisions posed on them. Completion is self-reported and labeled so — cv never claims to have observed what it has not. The verbs:
-
-```text
-open · list · show · claim · release · note · status · tag · block · done · abandon · supersede
-decide · resolve · events · serve · inbox · sweep
-```
+The fleet's durable dispatch objects: open/claim/note/done, and the decisions posed on them. Completion is self-reported and labeled so — cv never claims to have observed what it has not. The verbs are under [`cv task` in the reference](reference.md#cv-task); the inbox page is served by [`cv serve`](daemon.md).
 
 `propose`, `reroute`, `pass`, `refute`, `verify`, `debt` and `stats` were removed in 0.15.0 with the land facet, `split` and `watch` with it; each errors with a pointer. This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the three laws, and a worked end-to-end example.
 
@@ -809,8 +824,8 @@ decide · resolve · events · serve · inbox · sweep
 
 The coordination board went away in 0.15.0: in 85 days of real swarms, 3,317 of its 3,319 lines
 were auto-mirrored task events. The task log is the fleet's record — `cv task note` to say
-something, `cv task events --since <id>` to follow it, `cv task claim` to hold work. Every
-The old `board` spelling errors with that pointer and exit 2.
+something, `cv task events --since <id>` to follow it, `cv task claim` to hold work. The old
+`board` spelling errors with that pointer and exit 2.
 
 ### `cv scry`
 
@@ -830,10 +845,6 @@ cv scry --interval 1
    +  claude   da9174f4  ~/pug/clustervision  (1 msg)
       assistant found it — the walker drops flux constraints here …
 ```
-
-- `--harness <h>` / `--cwd <substr>` — narrow what you follow.
-- `--interval <secs>` — poll interval (default `2`).
-- `--existing` — also emit sessions that already exist at startup (default: only new activity).
 
 This is the CLI face of [the daemon](daemon.md), which mirrors the same activity into a live feed for your whole fleet (and powers the MCP `await_omen` block-until-match primitive).
 
@@ -875,9 +886,10 @@ embedded 2245 session(s) → ~/.clustervision/embeddings.bin
 
 Incremental by default: only changed/new sessions are re-indexed and vanished ones reaped.
 
-- `--semantic` — also compute embeddings (downloads a ~30 MB model the first time).
-- `--subagents` — also index the **sub-agent / workflow forest** (the transcripts under each Claude session's `subagents/`), tagged with their parent session, workflow run, and agent id. Without it, `cv search`/`cv touched` see only top-level sessions; with it, a hit can point you *inside* a workflow agent. It can add hundreds of MB to the index, so it's opt-in.
-- `--rebuild` — clear and rebuild instead of updating incrementally.
+`--semantic` also computes embeddings (a ~30 MB model downloads the first time). `--subagents`
+also indexes the **sub-agent / workflow forest**, tagged with parent session, workflow run and
+agent id, so a `cv search`/`cv touched` hit can point *inside* a workflow agent; it can add
+hundreds of MB, so it is opt-in.
 
 `cv index` also ingests the **event catalog** in the same streaming pass — every tool call is classified (`file_edit`, `file_read`, `command`, `error`, `tool`) and stored in `catalog.db`, powering [`events`](#cv-events), [`touched`](#cv-touched) and [`blame`](#cv-blame). One read per changed session feeds both stores.
 
@@ -917,7 +929,6 @@ This command used to be called `cv query`, which read like it ran one. It doesn'
 cv ls -q "harness:claude model:fable"                 # fable sessions from Claude
 cv ls -q "(model:fable OR model:opus) -title:test"    # either model, excluding tests
 cv ls -q "msgs>=50 after:2026-01-01 tool:Bash"        # big recent sessions that ran Bash
-cv ls -q 'title~"fly\.?io|aws"'                       # ~ is case-insensitive regex
 cv stats -q "touched:src/ir.rs has:errors"            # analytics over a slice
 cv ls -q "harness:claude agent:Explore subtool:Bash"  # a forest query
 ```
@@ -925,26 +936,21 @@ cv ls -q "harness:claude agent:Explore subtool:Bash"  # a forest query
 Fields, by what they cost to answer:
 
 - **catalog** (free, no parse): `harness`, `cwd`, `title`, `id`, `msgs`, `created`, `updated` (`before:`/`after:`/`since:`/`until:` are sugar).
-- **parse** (reads the transcript): `model` (any turn's model), `git` (branch/remote), `thread` (a message-tree path — below).
+- **parse** (reads the transcript): `model` (any turn's model), `git` (branch/remote).
 - **index** (needs `cv index`): `text` — full-text over content.
 - **events**: `tool` (a tool *this session* ran), `touched` (a file it read/edited), `has` (flags: `subagents`, `errors`, `tools`, `images`, `compacted`, `workflows`).
 - **forest** (walks the [sub-agent forest / workflows / compaction seams](#cv-workflow) — the priciest): `subtool` (a tool a *sub-agent* ran), `agent` (spawned a sub-agent of this type), `agents` (forest size), `workflow` (ran a matching `Workflow`), `workflows` (run count), `compactions` (boundary count).
 
-Operators: `:` (contains), `=` (exact), `~` (case-insensitive regex, local string fields only), and `> >= < <=` for numbers/dates; values can be comma-OR-lists (`a,b`) or ranges (`lo..hi`). A bare word matches title/cwd/id. The evaluator prunes with the catalog-cheap terms **first**, so a forest/parse/index term only ever runs on what survives — always pair one with a `harness:`/`cwd:`/`msgs` term to stay fast.
+Operators: `:` (contains), `=` (exact), and `> >= < <=` for numbers/dates; values can be comma-OR-lists (`a,b`) or ranges (`lo..hi`). A bare word matches title/cwd/id. The evaluator prunes with the catalog-cheap terms **first**, so a forest/parse/index term only ever runs on what survives — always pair one with a `harness:`/`cwd:`/`msgs` term to stay fast.
 
 ```sh
 cv ls -q "harness:claude agents>=5 subtool:Bash compactions>=1"   # deep, tool-heavy, compacted runs
 cv ls -q "workflow:census OR workflows>=3"                        # ran a census workflow, or 3+ runs
 ```
 
-**`thread:` — a CSS-y message-tree path.** Match a parent→child chain through the session's message DAG (the loom/threading dimension), using the CSS child combinator `>`. Each step matches one message; a step is a role (`user`/`assistant`/`tool`/`system`), `tool:NAME`, `text:WORD`, or a bare word (content contains). Quote the whole value so the spaces and `>` belong to the path, not the outer query:
-
-```sh
-cv ls -q 'harness:claude thread:"text:refactor > assistant"'   # a "refactor" turn whose reply is an assistant turn
-cv ls -q 'thread:"user > assistant > tool:Bash"'               # a user turn that led to a Bash tool-use
-```
-
-Each `>` is a *direct* child (a reply), resolved via `parent_id`, so it follows the real threading — including loom branches and sidechains. (Harnesses that don't record message ids can't thread, so `thread:` simply won't match there.)
+The `thread:` message-path language and the `~` regex operator were removed in 0.15.0; each
+errors with a pointer. Select the session with `tool:`, `text:` and `has:`, then read the turns
+with [`cv show`](#cv-show).
 
 ### `cv formats`
 
@@ -969,7 +975,7 @@ The other direction — does each adapter's source still match its manifest — 
 
 ### `cv recipes`
 
-The agent quickstart: the ten things agents actually do with cv, each as one command line with the JSON keys it returns.
+The agent quickstart: the things agents actually do with cv, each as one command line with the JSON keys it returns.
 
 ```sh
 cv recipes

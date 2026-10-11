@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""mdbook preprocessor: the manual's generated pages, from the running binary.
+
+  {{#cv-commands}}     every command and argument, from `cv schema --commands --json`
+  {{#cv-command-map}}  the `cv --help` groups as a table, each command linked into the reference
+  {{#cv-mcp-tools}}    the MCP roster, from a live `tools/list` of `cv mcp`
+
+The clap tree is the one source of what cv can do; these two directives are how the manual says
+it without a second, hand-kept list. The binary is $CV_BIN, else ../target/debug/cv relative to
+the book root (mdbook runs preprocessors from there). A missing binary fails the build: a manual
+without its reference is worse than no build.
+
+    book.toml:  [preprocessor.cv]  command = "python3 ../tools/mdbook-cv.py"
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+
+def cv_bin():
+    path = os.environ.get("CV_BIN") or os.path.join("..", "target", "debug", "cv")
+    if not os.path.isfile(path):
+        sys.exit(f"mdbook-cv: no cv binary at {path} (cargo build -p clustervision, or set CV_BIN)")
+    return path
+
+
+def inline(text, table=False):
+    """One line of Markdown: newlines folded, `<`/`>` escaped outside code spans, pipes escaped in
+    a table cell."""
+    parts = re.split(r"(`[^`]*`)", " ".join(text.split()))
+    out = []
+    for p in parts:
+        if not p.startswith("`"):
+            p = p.replace("<", "&lt;").replace(">", "&gt;")
+            # A bare `--flag` in help text is code; unquoted, smart punctuation makes it a dash.
+            p = re.sub(r"(?<![\w`-])(--[a-z][a-z0-9-]*)", r"`\1`", p)
+        if table:
+            p = p.replace("|", "\\|")
+        out.append(p)
+    return "".join(out)
+
+
+def arg_line(a):
+    if a["kind"] == "positional":
+        name = f"`<{a['name']}>`"
+    elif a["kind"] == "flag":
+        name = f"`--{a['name'].replace('_', '-')}`"
+    else:
+        name = f"`--{a['name'].replace('_', '-')} <{a['value_type']}>`"
+    facts = []
+    if a.get("required"):
+        facts.append("required")
+    if a.get("possible_values"):
+        facts.append("one of " + ", ".join(f"`{v}`" for v in a["possible_values"]))
+    if a.get("default") is not None and "default" not in a["help"]:
+        facts.append(f"default `{a['default']}`")
+    tail = f" ({'; '.join(facts)})" if facts else ""
+    help_text = inline(a["help"]) if a["help"] else ""
+    sep = " — " if help_text else ""
+    return f"- {name}{sep}{help_text}{tail}"
+
+
+def commands(schema):
+    out = []
+    group = None
+    for c in schema:
+        sub = " " in c["name"]
+        if not sub and c["group"] != group:
+            group = c["group"]
+            out.append(f"## {group}\n")
+        out.append(f"{'####' if sub else '###'} `cv {c['name']}`\n")
+        out.append(inline(c["about"]) + "\n")
+        if c["args"]:
+            out.extend(arg_line(a) for a in c["args"])
+            out.append("")
+    return "\n".join(out)
+
+
+def command_map(schema):
+    groups = {}
+    for c in schema:
+        if " " not in c["name"]:
+            groups.setdefault(c["group"], []).append(c["name"])
+    out = ["| Group | Commands |", "| --- | --- |"]
+    for g, names in groups.items():
+        links = " ".join(f"[`{n}`](reference.md#cv-{n})" for n in names)
+        out.append(f"| **{g}** | {links} |")
+    return "\n".join(out) + "\n"
+
+
+def mcp_tools(schema, tools):
+    group_of = {c["name"].replace(" ", "_"): c["group"] for c in schema}
+    groups = {}
+    for t in tools:
+        groups.setdefault(group_of.get(t["name"], "MCP-only"), []).append(t)
+    order = [c["group"] for c in schema if " " not in c["name"]] + ["MCP-only"]
+    out = []
+    for g in dict.fromkeys(order):
+        if g not in groups:
+            continue
+        out.append(f"### {g}\n")
+        out.append("| Tool | Required | Runs | What it does |")
+        out.append("|---|---|---|---|")
+        for t in groups[g]:
+            desc = " ".join(t["description"].split())
+            m = re.search(r"\s*\(runs (`[^`]*`)\)\.?\s*", desc)
+            runs = m.group(1) if m else "—"
+            if m:
+                desc = (desc[: m.start()] + ". " + desc[m.end():]).strip()
+            first = re.split(r"(?<=[.!?])\s+(?=[A-Z`])", desc, maxsplit=1)[0]
+            first = first if first[-1:] in ".!?" else first + "."
+            req = ", ".join(f"`{r}`" for r in t.get("inputSchema", {}).get("required", [])) or "—"
+            out.append(f"| `{t['name']}` | {req} | {inline(runs, True)} | {inline(first, True)} |")
+        out.append("")
+    return "\n".join(out)
+
+
+def live_tools(cv):
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    stdin = "".join(json.dumps(m) + "\n" for m in msgs)
+    out = subprocess.run([cv, "mcp"], input=stdin, capture_output=True, text=True, check=True).stdout
+    for line in out.splitlines():
+        d = json.loads(line)
+        if d.get("id") == 2:
+            return d["result"]["tools"]
+    sys.exit("mdbook-cv: `cv mcp` answered no tools/list")
+
+
+def walk(items, fn):
+    for item in items:
+        ch = item.get("Chapter") if isinstance(item, dict) else None
+        if ch:
+            ch["content"] = fn(ch["content"])
+            walk(ch.get("sub_items", []), fn)
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "supports":
+        sys.exit(0)
+    _context, book = json.load(sys.stdin)
+    cv = cv_bin()
+    cache = {}
+
+    def schema():
+        if "schema" not in cache:
+            out = subprocess.run([cv, "schema", "--commands", "--json"], capture_output=True, text=True, check=True)
+            cache["schema"] = json.loads(out.stdout)
+        return cache["schema"]
+
+    def expand(content):
+        if "{{#cv-commands}}" in content:
+            content = content.replace("{{#cv-commands}}", commands(schema()))
+        if "{{#cv-command-map}}" in content:
+            content = content.replace("{{#cv-command-map}}", command_map(schema()))
+        if "{{#cv-mcp-tools}}" in content:
+            content = content.replace("{{#cv-mcp-tools}}", mcp_tools(schema(), live_tools(cv)))
+        return content
+
+    walk(book.get("items", book.get("sections", [])), expand)
+    json.dump(book, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()

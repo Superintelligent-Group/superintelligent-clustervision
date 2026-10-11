@@ -80,11 +80,12 @@ below eight) — a batch of 23 tasks opened by one orchestrator used to print as
 
 ### Decisions, and provisional resolutions
 
-A **decision** is a task with a posed question: `cv task decide "<title>" --for <who> --default
-<option> [--option <alt>]… [--by <when>]` appends `opened` + `posed` as one unit — one event
-creates the decision, one answers it — and the decider answers with `cv task resolve <id>
---accept-default | --choice "<option>"` — identity-bearing, terminal (`resolved`). `done` is
-refused on a decision; a second `posed` is refused.
+A **decision** is a task with a posed question:
+`cv task decide "<title>" --for <who> --default <option> [--option <alt>]… [--by <when>]`
+appends `opened` + `posed` as one unit — one event creates the decision, one answers it — and
+the decider answers with `cv task resolve <id> --accept-default | --choice "<option>"` —
+identity-bearing, terminal (`resolved`). `done` is refused on a decision; a second `posed` is
+refused.
 
 **There is one way to pose a decision.** A `decision` tag on a task with nothing posed is
 **refused by the reducer** — on the CLI, over MCP and from the page alike — with the message
@@ -96,8 +97,8 @@ and nothing is migrated. `cv task split`, which mined `DECIDE:` notes into decis
 with it: pose the question.
 
 **Provisional resolutions** are how an orchestrator proceeds on a default without leaving the
-decision to rot as owed: `cv task decide … --provisional` (or `cv task resolve <id>
---accept-default --provisional` on an existing one) resolves it **on its default, by the poser**,
+decision to rot as owed: `cv task decide … --provisional` (or
+`cv task resolve <id> --accept-default --provisional` on an existing one) resolves it **on its default, by the poser**,
 with a veto window. The task is `resolved` (work proceeds), `resolution.provisional` is `true`,
 and the decider's inbox lists it in its own group, **made for you (veto?)** — not counted as owed.
 The decider answers with `cv task resolve <id> --confirm` (keep it) or `--choice "<other>"` (veto),

@@ -56,6 +56,11 @@ jobs:
             echo "crates/cv-web not present yet; skipping WASM build (site will run in demo mode)."
           fi
 
+      # The manual's command reference and MCP roster are generated from the built binary
+      # (tools/mdbook-cv.py reads `cv schema --commands --json` and `cv mcp`'s tools/list).
+      - name: Build cv
+        run: cargo build -p clustervision
+
       # Build the mdBook user manual and nest it under the site at /manual/.
       - name: Install mdBook
         uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2.0.0

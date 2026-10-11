@@ -18,3 +18,8 @@ level = 1
 
 [output.html.search]
 enable = true
+
+# `{{#cv-commands}}` and `{{#cv-mcp-tools}}`: the reference and the MCP roster, generated from the
+# built binary (`$CV_BIN`, else `target/debug/cv`). Build cv before the book.
+[preprocessor.cv]
+command = "python3 ../tools/mdbook-cv.py"

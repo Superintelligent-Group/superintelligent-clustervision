@@ -28,6 +28,8 @@
 
 # Reference
 
+- [Command reference](reference.md)
+
 - [Architecture](architecture.md)
 - [Adding a harness](adding-a-harness.md)
 - [Troubleshooting & FAQ](troubleshooting.md)

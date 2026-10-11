@@ -101,62 +101,15 @@ would otherwise land in the agent's context in one shot, which is exactly the pr
 the whole thing is allowed, it just has to be asked for. The `ls` / `search` `limit`
 defaults are the CLI's, unchanged.
 
-## The generated tools
+## The roster
 
-The CLI's Read / Reshape / Export / System groups, plus the task tools (below). Arguments are listed in full by
-the live `tools/list`; only the **required** ones are shown here. "JSON" says whether the
-call gets `--json` appended (and so returns machine output rather than rendered text).
+Generated when this manual is built, from a live `tools/list` of the `cv mcp` beside it, so it
+is the server's own answer. "Required" is the schema's `required` list (the full argument list is
+in [the command reference](reference.md)); "Runs" is the command line a call becomes, with
+`--json` where the command has it. Each Reshape tool produces a **new** session id; the source
+is never touched.
 
-### Read
-
-| Tool | Required | JSON | What it does |
-|---|---|---|---|
-| `ls` | — | yes | List discovered sessions across all harnesses. `cwd` filters to a project; `query` takes the filter calculus. |
-| `show` | `id` | yes | Print a single session (by `harness:id` or a unique id prefix). Windowed by default — see above. |
-| `cat` | `session`, `tool_use_id` | no | Print one tool call's full output, wherever it lives: inline, in a `prune` sidecar, or in a persisted-output file. `input: true` prints the call's arguments instead. |
-| `search` | `query` | yes | Full-text search across all session content. |
-| `events` | `id` | yes | What a session DID: its extracted events (file edits/reads, commands, errors). |
-| `touched` | `path` | yes | Every session with a file_edit/file_read event on that path. |
-| `tools` | `id` | yes | Cross-agent tool analytics across the orchestrator and its whole sub-agent forest. |
-| `tree` | `id` | no | A session's message threading (DAG if parent ids exist, else a numbered list). |
-| `workflow` | `id` | yes | A `Workflow` run, first-class: phase tree, agents and outcomes, totals, driving script. Without `run_id`, lists the session's runs. |
-| `compaction` | `id` | yes | Every compaction boundary, its trigger, pre-compaction size, and the seeding summary. |
-| `prompts` | `id` | yes | Only what the person said: human prompts and `AskUserQuestion` answers, with message indices. `pre_compaction` narrows to a discarded span. |
-| `lanes` | `id` | yes | The sub-agent forest as a status table: model, duration, tokens, tool calls, status, last line; `stranded` lists lanes parked on a promise. |
-| `deferrals` | `id` | yes | Every deferral phrase in the assistant's text with context; `open_tasks` marks each MATCHED/UNMATCHED against the task store. |
-| `stats` | — | yes | Fleet analytics over all discovered sessions. |
-| `blame` | `file` | no | Which agent session wrote this code, and what was it thinking? A session whose own tool output made the commit ranks first, `exact`. |
-| `doctor` | — | yes | Why a context window keeps filling: pressure by source, overhead, compaction frequency. |
-
-### Reshape
-
-Each produces a **new** session id; the source is never touched.
-
-| Tool | Required | JSON | What it does |
-|---|---|---|---|
-| `prune` | `id` | yes | Lossless compaction into a new resumable session: bulky old tool payloads go to a sidecar behind a `[PRUNED]` marker. Retrieve one with `cat`. |
-| `rewind` | `id` | yes | The agent as of a past message or commit (`at`: message index or sha), as a new resumable Claude session with a provenance sidecar; sub-agents come out standalone. |
-| `splice` | `specs` | no | Compose a new session from spans of existing ones (`<id>:A..B`): `<id>:..N` forks at message N, `<base>:..N <other>:M..` grafts. |
-| `port` | `id` | no | A copy that runs elsewhere — another harness (`harness`), another working directory (`cwd`), or both. |
-| `resume` | `id` | no | The resume incantation for a session in its native harness. |
-
-### Export
-
-| Tool | Required | JSON | What it does |
-|---|---|---|---|
-| `export` | `id` | no | Export a session to markdown or OpenSession JSON (`redact` scrubs it first). Takes the window flags. |
-| `dataset` | — | no | The corpus as a fine-tuning dataset (JSONL, one session per line). |
-| `pack` | `task` | no | Compile a context bundle for a new task out of the whole corpus. |
-
-### System
-
-| Tool | Required | JSON | What it does |
-|---|---|---|---|
-| `index` | — | no | Build/refresh the full-text index that makes `search` instant. |
-| `config` | — | no | View the user config and manage the export-source index. |
-| `schema` | — | yes | The reference: query calculus, and the machine-readable schema of every shape cv emits. |
-| `formats` | — | yes | The format census: what recent sessions contain, per harness, and what the manifest does not name. |
-| `recipes` | — | no | The agent quickstart: the things agents do with cv, each as one command line. |
+{{#cv-mcp-tools}}
 
 ## What was removed in 0.11.0
 
@@ -224,11 +177,9 @@ head-of-line-blocks a `show` issued after it.
 ## The task substrate over MCP
 
 The [task substrate](tasks.md) is fully drivable over MCP, and the tools are **generated
-from `cv task`** like every other command tool: `task_open`, `task_list`, `task_show`,
-`task_claim`, `task_release`, `task_note`, `task_done`, `task_status`, `task_abandon`,
-`task_supersede`, `task_tag`, `task_block`, `task_decide`, `task_resolve`, `task_events`,
-`task_sweep`, `task_inbox` — the same names, arguments and help as `cv task
-<sub> --help`. What comes back is what the CLI prints:
+from `cv task`** like every other command tool: each `cv task <sub>` is `task_<sub>` in
+[the roster](#the-roster), with the same arguments and help as `cv task <sub> --help`. What
+comes back is what the CLI prints:
 
 - a write answers with its confirmation line (`✦ claimed 01a1… → claimed`; `task_open` puts the
   new task's full id on its own last line), and a refused one is a tool error carrying the
