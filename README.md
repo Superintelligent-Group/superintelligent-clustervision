@@ -123,7 +123,7 @@ Or from source:
 ```sh
 cargo build --release          # → target/release/{cv, cv-mcp, cvd, cv-tui, cv-search}
 make install                   # = cargo install --path crates/cv --force --target-dir target  → ~/.cargo/bin/cv
-cv --version                   # cv 0.12.0 (<git sha>) — compare against `git rev-parse --short=12 HEAD`
+cv --version                   # cv 0.14.0 (<git sha>) — compare against `git rev-parse --short=12 HEAD`
 ```
 
 `cv --version` prints the commit the binary was built from (`-dirty` when the tree had edits), so

@@ -9,7 +9,7 @@
 [package]
 name = "clustervision-app"
 description = "clustervision desktop app — Tauri v2 shell around the web UI + native cv-core/cv-llm power."
-version = "0.11.0"
+version = "0.14.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ember"]
