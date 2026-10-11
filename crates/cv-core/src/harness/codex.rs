@@ -2025,8 +2025,14 @@ impl CodexScan {
                 }
             }
             Some("response_item") if v.pointer("/payload/type").and_then(Value::as_str) == Some("message") => {
-                self.message_count += 1;
-                if v.pointer("/payload/role").and_then(Value::as_str) == Some("user") {
+                // `developer`/`system` messages are injected instructions (`handle_item` makes them
+                // System turns), not the user + assistant turns `SessionRef::message_count` counts.
+                // An absent role is `user`, as in `handle_item`.
+                let role = v.pointer("/payload/role").and_then(Value::as_str).unwrap_or("user");
+                if matches!(role, "user" | "assistant") {
+                    self.message_count += 1;
+                }
+                if role == "user" {
                     self.consider_title(&coerce_content(v.pointer("/payload/content")));
                 }
             }
@@ -2069,8 +2075,11 @@ impl CodexScan {
         if let Some(items) = root.get("items").and_then(Value::as_array) {
             for it in items {
                 if it.get("type").and_then(Value::as_str) == Some("message") {
-                    self.message_count += 1;
-                    if it.get("role").and_then(Value::as_str) == Some("user") {
+                    let role = it.get("role").and_then(Value::as_str).unwrap_or("user");
+                    if matches!(role, "user" | "assistant") {
+                        self.message_count += 1;
+                    }
+                    if role == "user" {
                         self.consider_title(&coerce_content(it.get("content")));
                     }
                 }
@@ -2102,11 +2111,18 @@ fn read_tail(path: &Path, n: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Files up to this size are scanned in full by [`scan`]; larger ones are sampled head+tail.
+const FULL_SCAN_CAP: u64 = 8 << 20; // 8 MiB
+
 /// Cheap metadata scan for `discover`. Files up to [`FULL_SCAN_CAP`] are parsed in full; larger ones
 /// (Codex rollout logs can be hundreds of MB) are sampled head+tail so discovery never reads — and
 /// JSON-parses — gigabytes just to list sessions. Exact content is parsed lazily on actual open.
 fn scan(path: &Path) -> Result<SessionRef> {
-    const FULL_SCAN_CAP: u64 = 8 << 20; // 8 MiB
+    scan_capped(path, FULL_SCAN_CAP)
+}
+
+/// [`scan`] with an explicit full-scan cap (tests exercise the sampled path on a small file).
+fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
     const SAMPLE: usize = 1 << 20; // 1 MiB head, 1 MiB tail
 
     let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -2121,7 +2137,7 @@ fn scan(path: &Path) -> Result<SessionRef> {
             Flow::Continue
         });
     } else if is_jsonl {
-        if size <= FULL_SCAN_CAP {
+        if size <= full_scan_cap {
             let text = fs::read_to_string(path)?;
             super::for_each_json_line_str(&text, |v| {
                 s.feed(&v);
@@ -2130,12 +2146,10 @@ fn scan(path: &Path) -> Result<SessionRef> {
         } else {
             // Head: id / cwd / title / created_at all live near the top.
             let head = read_head(path, SAMPLE)?;
-            let head_len = head.len().max(1) as u128;
             super::for_each_json_line_str(&head, |v| {
                 s.feed(&v);
                 Flow::Continue
             });
-            let head_msgs = s.message_count;
             // Tail: the last record carries the real updated_at. Skip the (likely partial) first line.
             let tail = read_tail(path, SAMPLE)?;
             let tail = tail.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
@@ -2143,24 +2157,14 @@ fn scan(path: &Path) -> Result<SessionRef> {
                 s.feed(&v);
                 Flow::Continue
             });
-            // We never read the middle, so the count is extrapolated from a sample — kept roughly
-            // monotonic with file growth. The true count comes from a full parse on open.
-            //
-            // Extrapolate from the TAIL, not the head. A rollout opens with its largest and least
-            // representative records — `session_meta`, `turn_context`, the `<environment_context>`
-            // and instruction dumps — so head records ran ~5.5 KB against a ~2.0 KB whole-file
-            // average on a real 10.9 MB session, and the head-density estimate came out 35× LOW
-            // (74 against 2,646 real turns). `cv ls` printed that as "74 msg". The tail is steady-
-            // state conversation and measured ~1.9 KB/record on the same file.
-            // Extrapolate from EVERY byte sampled, head and tail together, rather than the head
-            // alone. Measured on a real 10.9 MB rollout whose true record count is 198: head-only
-            // gave 74 (records there average ~5.5 KB against a ~2.0 KB whole-file average, because
-            // a rollout opens with its largest and least representative records — `session_meta`,
-            // `turn_context`, the environment and instruction dumps); tail-only gave 302 (the tail
-            // is steady-state conversation and denser than average); both together land closest.
-            let sampled_len = (head_len + tail.len() as u128).min(size as u128).max(1);
-            let est = (s.message_count as u128 * size as u128 / sampled_len) as usize;
-            s.message_count = est.max(head_msgs);
+            // The middle was never read, so the turn count is unknown, and `message_count` is a
+            // contract (`SessionRef::message_count`: user + assistant turns, never a proxy). The
+            // head+tail extrapolation that used to stand here was measured 35× low on one real
+            // rollout and 50% high on another. Reading every byte is not the cheap alternative it
+            // looks: one real `~/.codex` holds 1,353 rollouts over this cap (80 GB; 283 over 64 MiB,
+            // the largest 700 MB), and a live one would be re-parsed on every `cv ls`. So a file
+            // over the cap reports 0 — "not counted" — rather than a number that is wrong.
+            s.message_count = 0;
         }
     } else {
         // Legacy single-object `.json` recordings are small; read fully.
@@ -3296,6 +3300,7 @@ mod tests {
             r#"{"timestamp":"2026-09-19T18:12:45.000Z","ordinal":4,"type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}"#,
             r#"{"timestamp":"2026-09-19T18:12:45.001Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"amsg_1","author":"/root","recipient":"/root/cycle_client","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: build the client"}]}}"#,
             r#"{"timestamp":"2026-09-19T18:12:46.000Z","ordinal":6,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"on it"}]}}"#,
+            r#"{"timestamp":"2026-09-19T18:12:47.000Z","ordinal":7,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<user_instructions>injected</user_instructions>"}]}}"#,
         ];
         let dir = std::env::temp_dir().join(format!("cv-codex-scan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3309,7 +3314,23 @@ mod tests {
             r.title.as_deref(),
             Some("Message Type: NEW_TASK Task name: build the client")
         );
-        assert_eq!(r.message_count, 2, "the inherited parent prompt is not counted");
+        assert_eq!(
+            r.message_count, 2,
+            "the inherited parent prompt and the injected developer message are not counted"
+        );
+
+        // Over the full-scan cap the middle is never read: the metadata still comes from the head
+        // and tail, and the turn count is 0 ("not counted") rather than an extrapolation
+        // (`SessionRef::message_count` is user + assistant turns, never a proxy).
+        let sampled = scan_capped(&path, 0).unwrap();
+        assert_eq!(sampled.id, "child-1");
+        assert_eq!(sampled.cwd, r.cwd);
+        assert_eq!(sampled.title, r.title);
+        assert_eq!(sampled.updated_at, r.updated_at);
+        assert_eq!(
+            sampled.message_count, 0,
+            "over the cap the count is unknown, not estimated"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

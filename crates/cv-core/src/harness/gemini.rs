@@ -1354,7 +1354,13 @@ fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
         title: s.title.clone(),
         created_at: s.created_at,
         updated_at: s.updated_at,
-        message_count: s.messages.len(),
+        // The contract count (`SessionRef::message_count`): user + assistant turns only — a tool
+        // result, an `info`/`error` notice or a `$rewindTo` branch marker is a message, not a turn.
+        message_count: s
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+            .count(),
     }
 }
 
@@ -1827,6 +1833,8 @@ mod tests {
         assert_eq!(refs[0].cwd.as_deref(), Some(Path::new("/Users/u/pug/claurdvoyant")));
         let refs2 = scan_session_file(&file2, Harness::Gemini);
         assert_eq!(refs2[0].cwd.as_deref(), Some(Path::new("/Users/u/cvrt8/gemtest")));
+        // session_legacy.json parses to user, assistant, tool, assistant, info-notice: three turns.
+        assert_eq!(refs2[0].message_count, 3, "user + assistant turns, not every message");
         let refs3 = scan_session_file(&file3, Harness::Gemini);
         assert_eq!(refs3[0].cwd, None);
 

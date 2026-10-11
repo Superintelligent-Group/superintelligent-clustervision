@@ -461,26 +461,26 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
                 .filter(|s| !s.trim().is_empty())
         })
         .map(|s| crate::ir::truncate(s, 80));
-    if title.is_none() {
-        if let Ok(chat) = fs::read_to_string(dir.join("chat_history.jsonl")) {
-            super::for_each_json_line_str(&chat, |v| {
-                if v.get("type").and_then(Value::as_str) == Some("user") {
-                    let t = coerce_content(v.get("content"));
-                    if !t.trim().is_empty() {
-                        title = Some(crate::ir::truncate(&t, 80));
-                        return Flow::Stop;
-                    }
+    // `message_count` is the contract's user + assistant turns (`SessionRef::message_count`), so it
+    // is counted from the transcript: summary.json's `num_chat_messages` counts every line —
+    // `system` and `tool_result` included — and `num_messages` is the user-turn count. The same
+    // pass supplies the title fallback (first non-empty user text).
+    let mut message_count = 0usize;
+    if let Ok(chat) = fs::read_to_string(dir.join("chat_history.jsonl")) {
+        super::for_each_json_line_str(&chat, |v| {
+            let ty = v.get("type").and_then(Value::as_str);
+            if matches!(ty, Some("user") | Some("assistant")) {
+                message_count += 1;
+            }
+            if title.is_none() && ty == Some("user") {
+                let t = coerce_content(v.get("content"));
+                if !t.trim().is_empty() {
+                    title = Some(crate::ir::truncate(&t, 80));
                 }
-                Flow::Continue
-            });
-        }
+            }
+            Flow::Continue
+        });
     }
-
-    let message_count = summary
-        .get("num_chat_messages")
-        .and_then(Value::as_u64)
-        .or_else(|| summary.get("num_messages").and_then(Value::as_u64))
-        .unwrap_or(0) as usize;
 
     Ok(Some(SessionRef {
         id,
@@ -697,6 +697,17 @@ mod tests {
         let r = scan(&dir.join("summary.json")).unwrap().unwrap();
         let grok = Grok { root: None };
         let s = grok.parse(&r).unwrap();
+        // The contract count: user + assistant turns (the fixture's `system` line and two
+        // `tool_result` lines are not turns; summary.json's `num_chat_messages` says 5).
+        assert_eq!(r.message_count, 4);
+        assert_eq!(
+            r.message_count,
+            s.messages
+                .iter()
+                .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+                .count(),
+            "discover's count is the parse's user+assistant count"
+        );
         // Every Grok fact is nested under `extra["grok"]` (`docs/INTERFACE-V2.md` §4).
         crate::harness::assert_no_flat_keys(&s);
         // roles present: system, user, assistant(with tool_use), tool(result)

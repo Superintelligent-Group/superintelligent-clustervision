@@ -294,15 +294,29 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let updated: Option<String> = row.get(4).ok().flatten();
         Ok((id, title, wd, created, updated))
     })?;
+    // `message_count` is the contract's user + assistant turns (`SessionRef::message_count`), so the
+    // COUNT applies the same three rules `stream_db` does when it builds the IR: a `user` row whose
+    // every content item is a `toolResponse` is a Tool turn (`build_message`), and a row Goose hides
+    // from the user (`metadata_json.userVisible = false`: the `<turn-context>` block, compaction
+    // leftovers) is a System turn (`apply_metadata`). A corrupt JSON cell counts as not a turn
+    // rather than aborting the query (`json_valid` first, as the Devin adapter does).
+    let msg_cols = columns(conn, "messages");
+    let visible = if msg_cols.contains("metadata_json") {
+        " AND COALESCE(CASE WHEN json_valid(metadata_json) \
+           THEN json_extract(metadata_json, '$.userVisible') END, 1) != 0"
+    } else {
+        ""
+    };
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND (role = 'assistant' \
+         OR (role = 'user' AND CASE WHEN json_valid(content_json) THEN EXISTS (\
+             SELECT 1 FROM json_each(content_json) \
+             WHERE json_extract(value, '$.type') IS NOT 'toolResponse') ELSE 0 END)){visible}"
+    );
     let mut out = Vec::new();
     for row in rows.flatten() {
         let (id, title, wd, created, updated) = row;
-        // message_count: cheap COUNT (a `message_count` column is not in the modern schema).
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM messages WHERE session_id = ?1", [&id], |r| {
-                r.get(0)
-            })
-            .unwrap_or(0);
+        let count: i64 = conn.query_row(&count_sql, [&id], |r| r.get(0)).unwrap_or(0);
         out.push(SessionRef {
             id,
             harness: Harness::Goose,
@@ -615,7 +629,21 @@ fn discover_legacy(name: &str, path: &Path) -> Option<SessionRef> {
         .next()
         .and_then(|l| serde_json::from_str(l).ok())
         .unwrap_or(Value::Null);
-    let count = lines.filter(|l| !l.trim().is_empty()).count();
+    // The contract count (`SessionRef::message_count`): user + assistant turns, with a user line
+    // that is only tool results read as the Tool turn `stream_legacy` makes of it.
+    let count = lines
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|m| {
+            let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
+            let only_tool_results = m.get("content").and_then(Value::as_array).is_some_and(|items| {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|i| i.get("type").and_then(Value::as_str) == Some("toolResponse"))
+            });
+            matches!(role, "user" | "assistant") && !only_tool_results
+        })
+        .count();
     let title = header
         .get("description")
         .and_then(Value::as_str)
@@ -1623,11 +1651,22 @@ mod tests {
         c.execute("INSERT INTO sessions (id, description, working_dir, updated_at) VALUES ('b','B','/y','2024-02-01 00:00:00')", []).unwrap();
         c.execute("INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES ('a','user','[{\"type\":\"text\",\"text\":\"hi\"}]',1)", []).unwrap();
         c.execute("INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES ('a','assistant','[{\"type\":\"text\",\"text\":\"yo\"}]',2)", []).unwrap();
+        // A user row that is only a tool result is a Tool turn; a corrupt cell is not a turn. Neither
+        // is counted (`SessionRef::message_count`: user + assistant turns).
+        c.execute("INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES ('a','user','[{\"type\":\"toolResponse\",\"id\":\"t1\",\"toolResult\":{\"status\":\"success\",\"value\":{\"content\":[]}}}]',3)", []).unwrap();
+        c.execute(
+            "INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES ('a','user','not json',4)",
+            [],
+        )
+        .unwrap();
         let refs = discover_db(&c, Path::new("sessions.db")).unwrap();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].id, "b"); // updated_at DESC
         assert_eq!(refs[1].id, "a");
-        assert_eq!(refs[1].message_count, 2);
+        assert_eq!(
+            refs[1].message_count, 2,
+            "user + assistant; the tool-result row and the corrupt row are not turns"
+        );
         assert_eq!(refs[0].title.as_deref(), Some("B"));
     }
 
@@ -1666,7 +1705,7 @@ mod tests {
         let r = discover_legacy("20240101_120000", &path).unwrap();
         assert_eq!(r.title.as_deref(), Some("legacy chat"));
         assert_eq!(r.cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/u/old"));
-        assert_eq!(r.message_count, 3);
+        assert_eq!(r.message_count, 2, "m3 is only a tool result: a Tool turn, not counted");
         assert!(r.created_at.is_some());
 
         // full parse

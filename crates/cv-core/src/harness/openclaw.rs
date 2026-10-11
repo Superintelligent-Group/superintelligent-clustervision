@@ -680,7 +680,13 @@ impl ScanAcc {
                 }
             }
             Some("message") => {
-                self.message_count += 1;
+                // The contract count (`SessionRef::message_count`): user + assistant turns. A
+                // `toolResult` row and the custom roles (`bashExecution`, `compactionSummary`, …)
+                // are messages the store keeps, not turns of the conversation.
+                let role = v.pointer("/message/role").and_then(Value::as_str);
+                if matches!(role, Some("user") | Some("assistant")) {
+                    self.message_count += 1;
+                }
                 if let Some(ts) = entry_timestamp(v) {
                     self.updated_at = Some(ts);
                 }
@@ -1678,7 +1684,7 @@ mod tests {
             Some("Named session"),
             "session_info names the session"
         );
-        assert_eq!(r.message_count, 5, "every `message` row counts, branch or not");
+        assert_eq!(r.message_count, 5, "every user/assistant row counts, branch or not");
         assert_eq!(r.created_at, parse_ts("2026-09-19T10:00:00.000Z"));
         assert_eq!(
             r.updated_at,
@@ -1823,12 +1829,17 @@ mod tests {
             Some("cv fixture"),
             "the store label, as OpenClaw's list shows"
         );
-        assert_eq!(main.message_count, 13, "every message row, branches included");
+        // user + assistant rows, branches included; each window also holds one `toolResult`
+        // row, which is not a turn (`SessionRef::message_count`).
+        assert_eq!(
+            main.message_count, 12,
+            "6 user + 6 assistant; the toolResult row is not a turn"
+        );
         let fork = by_id("01a0bb4e-2bea-749a-8ec2-c494636244d1");
-        assert_eq!(fork.message_count, 12);
+        assert_eq!(fork.message_count, 11, "5 user + 6 assistant");
         let legacy = by_id("3f28190c-96fa-4d73-b37c-251dcccb3f9b");
         assert_eq!(legacy.cwd, Some(PathBuf::from("/Users/ember/ocfid/proj")));
-        assert_eq!(legacy.message_count, 5);
+        assert_eq!(legacy.message_count, 4, "2 user + 2 assistant");
 
         // OpenClaw's visible path for the main window. `session_info` and `label` are session
         // facts (they land in the session bag above, not as turns); `model_change` IS a turn —
