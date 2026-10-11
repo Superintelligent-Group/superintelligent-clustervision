@@ -81,9 +81,11 @@
 //! ## Kinds (`docs/INTERFACE-V2.md` §4)
 //! A `userVisible: false` row is text the harness fed the model and never showed the person — the
 //! per-turn `<turn-context>` block (`turnContext: true`), the agent-only rows compaction leaves
-//! behind — so it is a System turn: [`MessageKind::CompactionSummary`] when its
-//! `usage.isCompaction` says so (`context_mgmt/mod.rs:136-160`: the summary is `agent_only()`),
-//! else [`MessageKind::InjectedContext`]. A row holding an `error` block is a [`MessageKind::Error`]
+//! behind — so it is a System turn: [`MessageKind::CompactionSummary`] when it is the agent-only
+//! summary compaction appends after flipping every earlier row to `agentVisible: false`
+//! (`context_mgmt/mod.rs` `compact_messages`; Goose writes `isCompaction` only to `usage_ledger`,
+//! so a `usage.isCompaction` in `metadata_json` is honoured but real stores never have it), else
+//! [`MessageKind::InjectedContext`]. A row holding an `error` block is a [`MessageKind::Error`]
 //! (`extra["goose"]["error"]` = `{kind, message}`). The origin of a prompt follows the session's
 //! `session_type`: `scheduled` → [`Origin::Scheduler`], `sub_agent` → [`Origin::Subagent`],
 //! `hidden` (Goose's own helper runs) → [`Origin::Harness`], everything else a person. Goose 1.51
@@ -129,6 +131,14 @@ pub struct Goose {
 impl Goose {
     pub fn detect() -> Self {
         Goose { dir: sessions_dir() }
+    }
+
+    /// Rooted at an explicit `sessions/` dir (the one holding `sessions.db`), ignoring the process
+    /// env. The corpus test reads each committed Goose version this way.
+    pub fn with_sessions_dir(dir: &Path) -> Self {
+        Goose {
+            dir: Some(dir.to_path_buf()).filter(|d| d.exists()),
+        }
     }
 
     fn db_path(&self) -> Option<PathBuf> {
@@ -424,9 +434,10 @@ fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> R
 
     // Track tool-request names so we can label later tool responses (forward-only state).
     let mut tool_names: HashMap<String, String> = HashMap::new();
+    let mut history = AgentHistory::default();
     for (idx, row) in rows.enumerate() {
         let Ok(row) = row else { continue };
-        let Some(mut m) = row.into_message(&mut tool_names, s.model.as_deref()) else {
+        let Some(mut m) = row.into_message(&mut tool_names, s.model.as_deref(), &mut history) else {
             continue;
         };
         if m.kind == MessageKind::Prompt {
@@ -478,8 +489,41 @@ struct DbMsg {
     metadata: Option<String>,
 }
 
+/// What the rows before this one left in the model's context, in store order: how many there were
+/// and whether any is still `agentVisible`. Goose's compaction (`context_mgmt::compact_messages`)
+/// flips EVERY earlier row to `agentVisible: false` and appends an agent-only summary, so a summary
+/// is an agent-only user row with nothing agent-visible before it. Its `metadata_json` carries no
+/// usage at all: `isCompaction` is set only on the `usage_ledger` row (verified on real 1.51.0 and
+/// 1.54.0 stores). A tool-pair summary (`maybe_summarize_tool_pairs`) is also an agent-only user
+/// row, but it hides only its own pair, so the rows before it are still visible.
+#[derive(Default)]
+struct AgentHistory {
+    rows: usize,
+    any_agent_visible: bool,
+}
+
 impl DbMsg {
-    fn into_message(self, tool_names: &mut HashMap<String, String>, session_model: Option<&str>) -> Option<Message> {
+    fn into_message(
+        self,
+        tool_names: &mut HashMap<String, String>,
+        session_model: Option<&str>,
+        history: &mut AgentHistory,
+    ) -> Option<Message> {
+        let meta = self
+            .metadata
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<Value>(j).ok());
+        let flag = |k: &str| meta.as_ref().and_then(|m| m.get(k)).and_then(Value::as_bool);
+        let agent_visible = flag("agentVisible") != Some(false);
+        let compaction_summary = self.role == "user"
+            && flag("userVisible") == Some(false)
+            && agent_visible
+            && flag("turnContext") != Some(true)
+            && history.rows > 0
+            && !history.any_agent_visible;
+        history.rows += 1;
+        history.any_agent_visible |= agent_visible;
+
         let content: Value = serde_json::from_str(&self.content_json).unwrap_or(Value::Null);
         let decoded = decode_content(&content, tool_names);
         let mut m = build_message(
@@ -489,12 +533,8 @@ impl DbMsg {
             self.tokens,
             decoded,
         )?;
-        if let Some(meta) = self
-            .metadata
-            .as_deref()
-            .and_then(|j| serde_json::from_str::<Value>(j).ok())
-        {
-            apply_metadata(&mut m, meta, session_model);
+        if let Some(meta) = meta {
+            apply_metadata(&mut m, meta, session_model, compaction_summary);
         }
         Some(m)
     }
@@ -511,12 +551,13 @@ impl DbMsg {
 /// every prompt by 1.51's agent), the agent-only summary + continuation compaction leaves behind —
 /// and Goose never shows it to the user (`session_manager.rs:742` hides `userVisible = 0`). It
 /// becomes a [`Role::System`] turn of kind [`MessageKind::CompactionSummary`] (when
-/// `usage.isCompaction`) or [`MessageKind::InjectedContext`], so a user-text count or a `cv show`
+/// `usage.isCompaction`, or `compaction_summary`: see [`AgentHistory`]) or
+/// [`MessageKind::InjectedContext`], so a user-text count or a `cv show`
 /// reads as the user saw it while the model-visible context is still there. Verified on a real
 /// 1.51.0 store.
-fn apply_metadata(m: &mut Message, meta: Value, session_model: Option<&str>) {
+fn apply_metadata(m: &mut Message, meta: Value, session_model: Option<&str>, compaction_summary: bool) {
     let hidden = meta.get("userVisible") == Some(&Value::Bool(false));
-    let compaction = meta.pointer("/usage/isCompaction") == Some(&Value::Bool(true));
+    let compaction = compaction_summary || meta.pointer("/usage/isCompaction") == Some(&Value::Bool(true));
     if hidden && matches!(m.role, Role::User | Role::Assistant) {
         m.role = Role::System;
         m.origin = Origin::Harness;
@@ -830,6 +871,16 @@ fn item_to_block(item: &Value, tool_names: &mut HashMap<String, String>) -> Opti
             let id = item.get("id").and_then(Value::as_str).unwrap_or("").to_string();
             let result = item.get("toolResult")?;
             let tool_name = tool_names.get(&id).cloned();
+            // rmcp's `structuredContent` (the developer shell's `{stdout, stderr, exit_code}`) and
+            // `_meta` (summon's `delegate` puts the child's `subagent_session_id` there) ride in
+            // `details`, verbatim, so a consumer can join a delegate call to its child session.
+            let details = result.get("value").and_then(Value::as_object).and_then(|v| {
+                let d: serde_json::Map<String, Value> = ["structuredContent", "_meta"]
+                    .into_iter()
+                    .filter_map(|k| v.get(k).map(|x| (k.to_string(), x.clone())))
+                    .collect();
+                (!d.is_empty()).then_some(Value::Object(d))
+            });
             let (content, is_error) = match result.get("status").and_then(Value::as_str) {
                 Some("error") => (
                     result.get("error").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -857,7 +908,7 @@ fn item_to_block(item: &Value, tool_names: &mut HashMap<String, String>) -> Opti
                 is_error,
                 tool_name,
                 status: None,
-                details: None,
+                details,
             })
         }
         // `error` and the control blocks are handled by `decode_content`; anything unknown is skipped.
@@ -1307,6 +1358,62 @@ mod tests {
     }
 
     #[test]
+    fn compaction_summary_is_the_agent_only_row_after_everything_went_agent_invisible() {
+        // What real 1.51.0/1.54.0 compaction writes (tests/corpus/goose): every earlier row flipped to
+        // agentVisible:false, then an agent-only summary, continuation and preserved prompt, none
+        // carrying `usage`. A tool-pair summary is agent-only too, but earlier rows stay visible.
+        let c = mk(SCHEMA);
+        c.execute("INSERT INTO sessions (id, working_dir) VALUES ('c','/p')", [])
+            .unwrap();
+        let rows = [
+            ("user", "prompt one", r#"{"userVisible":true,"agentVisible":false}"#),
+            ("assistant", "reply one", r#"{"userVisible":true,"agentVisible":false}"#),
+            (
+                "user",
+                "# Conversation Summary",
+                r#"{"userVisible":false,"agentVisible":true}"#,
+            ),
+            (
+                "assistant",
+                "Your context was compacted.",
+                r#"{"userVisible":false,"agentVisible":true}"#,
+            ),
+            ("user", "prompt two", r#"{"userVisible":false,"agentVisible":true}"#),
+            ("assistant", "reply two", r#"{"userVisible":true,"agentVisible":true}"#),
+            (
+                "user",
+                "A call to shell was made",
+                r#"{"userVisible":false,"agentVisible":true}"#,
+            ),
+        ];
+        for (i, (role, text, meta)) in rows.iter().enumerate() {
+            let content = serde_json::json!([{"type": "text", "text": text}]).to_string();
+            c.execute(
+                "INSERT INTO messages (message_id, session_id, role, content_json, created_timestamp, metadata_json) \
+                 VALUES (?1, 'c', ?2, ?3, ?4, ?5)",
+                rusqlite::params![format!("m{i}"), role, content, 1_704_110_400 + i as i64, meta],
+            )
+            .unwrap();
+        }
+        let s = parse_db(&c, &sref("c")).unwrap();
+        let k: Vec<MessageKind> = s.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            k,
+            vec![
+                MessageKind::Prompt,
+                MessageKind::Reply,
+                MessageKind::CompactionBoundary,
+                MessageKind::CompactionSummary,
+                MessageKind::InjectedContext,
+                MessageKind::InjectedContext,
+                MessageKind::Reply,
+                MessageKind::InjectedContext,
+            ],
+            "one boundary, and the later tool-pair summary is not a compaction"
+        );
+    }
+
+    #[test]
     fn title_prefers_the_written_name_column() {
         // Goose only ever writes `name`; `description` is a never-written default '' (v16 DDL).
         let c = mk(SCHEMA);
@@ -1551,6 +1658,29 @@ mod tests {
         let s = parse_db(&c, &sref("s1")).unwrap();
         assert!(
             matches!(&s.messages[0].content[0], Block::ToolResult { is_error, content, .. } if *is_error && content == "boom")
+        );
+    }
+
+    #[test]
+    fn delegate_result_keeps_the_child_session_id_in_details() {
+        // summon's `delegate` result as Goose 1.51.0/1.54.0 write it (tests/corpus/goose).
+        let c = mk(SCHEMA);
+        c.execute("INSERT INTO sessions (id, working_dir) VALUES ('s1','/x')", [])
+            .unwrap();
+        let resp = r#"[{"type":"toolResponse","id":"c1","toolResult":{"status":"success","value":{"resultType":"complete","content":[{"type":"text","text":"ok"}],"isError":false,"_meta":{"subagent_session_id":"20261011_7"}}}}]"#;
+        c.execute(
+            "INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES ('s1','user',?1,100)",
+            [resp],
+        )
+        .unwrap();
+        let s = parse_db(&c, &sref("s1")).unwrap();
+        let Block::ToolResult { details, content, .. } = &s.messages[0].content[0] else {
+            panic!("a tool result")
+        };
+        assert_eq!(content, "ok");
+        assert_eq!(
+            details.as_ref().and_then(|d| d.pointer("/_meta/subagent_session_id")),
+            Some(&Value::from("20261011_7"))
         );
     }
 
