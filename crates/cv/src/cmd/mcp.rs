@@ -22,18 +22,18 @@
 //!
 //! 1. **Generated from the CLI** — one tool per `cv` command in the Read / Reshape / Export /
 //!    System groups (`ls`, `show`, `cat`, `search`, `events`, `tools`, `workflow`, `prune`,
-//!    `export`, `pack`, `doctor`, …), built at startup from the in-process clap tree (the same
-//!    `commands_json` `cv schema --commands --json` prints), so tool names, flags, harness lists
+//!    `export`, `pack`, `doctor`, …) and per `cv task` subcommand (`task_open`, `task_claim`, …),
+//!    built at startup from the in-process clap tree (the same `commands_json`
+//!    `cv schema --commands --json` prints), so tool names, flags, harness lists
 //!    and output shapes cannot drift from the binary. A call runs this executable as
 //!    `cv <command> <args…> --json`. See [`super::mcp_tools`].
-//! 2. **Hand-written, MCP-only** — the tools with no CLI equivalent, because they block, hold a
-//!    cursor, or arbitrate between agents:
+//! 2. **Hand-written, MCP-only** — the two tools with no CLI equivalent, because they block or
+//!    hold a cursor:
 //!    - `await_omen(regex, …)` — block until another agent's session emits a matching message.
 //!    - `observe_stream(cwd_contains?, harness?, since_cursor?, max_messages=50, char_cap?)` — the
 //!      non-blocking sibling: drains the *newly-appended* messages since an opaque cursor and
 //!      returns immediately with a fresh cursor, so a senior agent can poll a junior's activity on
 //!      its own cadence. Bounded + read-only.
-//!    - `task_*` — durable fleet tasks, mirroring `cv task <sub>`.
 //!
 //! `show` is windowed by default over MCP (`--last 50 --max-bytes 200000`) so a whole transcript is
 //! never what an agent accidentally pulls into its context.
@@ -237,12 +237,7 @@ fn instructions() -> String {
 /// Every tool: the CLI-generated commands first (they are the ones an agent reaches for), then the
 /// hand-written MCP-only tools. A generated name never shadows a hand-written one.
 fn tool_list() -> Value {
-    // Several json! blocks concatenated: one macro invocation over the whole list blows the macro
-    // recursion limit.
     let mut tools = base_tool_list();
-    if let (Value::Array(list), Value::Array(tasks)) = (&mut tools, task_tool_list()) {
-        list.extend(tasks);
-    }
     let Value::Array(list) = &mut tools else {
         return tools;
     };
@@ -260,126 +255,6 @@ fn tool_list() -> Value {
         *list = generated;
     }
     tools
-}
-
-fn task_tool_list() -> Value {
-    json!([
-        {
-            "name": "task_open",
-            "description": "Open a durable fleet task (dispatch object): a lifecycle open → claimed → done, notes, tags, blockers; completion is self-reported and labeled so. Returns the new task.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string", "description": "Short imperative title." },
-                    "body": { "type": "string", "description": "Details / acceptance criteria." },
-                    "repo": { "type": "string", "description": "Absolute path of the git repo the work happens in (`task_list` filters on it; `cv task sweep` reads it)." },
-                    "issue": { "type": "string", "description": "External issue/work handle, free-form." },
-                    "assignee": { "type": "string", "description": "Endpoint this task is assigned to, if pre-assigned." },
-                    "from": { "type": "string", "description": "Who's opening. Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["title"]
-            }
-        },
-        {
-            "name": "task_list",
-            "description": "List fleet tasks (non-terminal by default). Filter by state (open|claimed|resolved|done|abandoned|superseded), assignee, or repo.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "state": { "type": "string", "description": "Effective-state filter." },
-                    "assignee": { "type": "string", "description": "Assignee endpoint filter." },
-                    "repo": { "type": "string", "description": "Repo path filter." },
-                    "tag": { "type": "string", "description": "Only tasks carrying this tag." },
-                    "all": { "type": "boolean", "description": "Include terminal tasks (default false)." }
-                }
-            }
-        },
-        {
-            "name": "task_show",
-            "description": "Show one task's full projection: state, assignee, notes, tags, blockers, the decision facet, the pinned STATUS.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Task id (unique prefix ok)." }
-                },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "task_claim",
-            "description": "Claim an open task for yourself. First writer wins — a durable, race-free claim (losers get a rejection, not a duplicate).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Task id (prefix ok)." },
-                    "from": { "type": "string", "description": "Your endpoint. Defaults to $CV_ENDPOINT; ERROR when neither is set (identity-bearing events must record who acted)." }
-                },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "task_release",
-            "description": "Release your claim on a task back to open.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Task id (prefix ok)." },
-                    "from": { "type": "string", "description": "Your endpoint. Defaults to $CV_ENDPOINT; ERROR when neither is set (identity-bearing events must record who acted)." }
-                },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "task_note",
-            "description": "Record a progress note on a task (never changes state).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Task id (prefix ok)." },
-                    "text": { "type": "string", "description": "The note." },
-                    "session_ref": { "type": "string", "description": "Your cv session id, for provenance." },
-                    "from": { "type": "string", "description": "Your endpoint. Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["id", "text"]
-            }
-        },
-        {
-            "name": "task_done",
-            "description": "Complete a task, optionally pointing at observable evidence. Completion is SELF-REPORTED and labeled so — `observed` is free text cv records, never a claim cv checked. Refused on a decision (answer it with `cv task resolve`).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Task id (prefix ok)." },
-                    "observed": { "type": "string", "description": "Pointer to observable evidence (URL, path, session id)." },
-                    "from": { "type": "string", "description": "Your endpoint. Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "task_abandon",
-            "description": "Kill a task (always allowed on a non-terminal task).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Task id (prefix ok)." },
-                    "reason": { "type": "string", "description": "Why." },
-                    "from": { "type": "string", "description": "Your endpoint. Defaults to $CV_ENDPOINT, else 'agent'." }
-                },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "task_inbox",
-            "description": "What needs `who`: decisions they owe, decisions made for them provisionally, tasks assigned to them, tasks they claimed. Stalest first.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "who": { "type": "string", "description": "Endpoint to compute the inbox for. Defaults to $CV_ENDPOINT; ERROR when neither is given." }
-                }
-            }
-        }
-    ])
 }
 
 fn base_tool_list() -> Value {
@@ -406,7 +281,7 @@ fn base_tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "cwd_contains": { "type": "string", "description": "Only observe sessions whose recorded cwd contains this substring." },
-                    "harness": { "type": "string", "description": "Only observe this harness: claude, codex, grok, opencode, gemini." },
+                    "harness": { "type": "string", "description": "Only observe this harness (any name `cv ls --harness` takes)." },
                     "since_cursor": { "type": "string", "description": "Opaque cursor from a previous observe_stream call. Omit on the first call to start from the current tail (baseline; returns no messages)." },
                     "max_messages": { "type": "number", "description": "Max messages to return this call (default 50). Remaining unread messages are reported as more_pending; poll again with the returned cursor to drain them." },
                     "char_cap": { "type": "number", "description": "Optional cap on total characters of message text returned; the last message is truncated to fit (default 16000)." }
@@ -434,7 +309,7 @@ fn tool_text_result(text: &str, is_error: bool) -> Value {
 /// Return freed heap pages to the OS after a request.
 ///
 /// `cv mcp` lives as long as the host session (days), and the in-process tools (`observe_stream`,
-/// `await_omen`, `task_*`) parse whole transcripts, so one call can transiently allocate ~1 GB
+/// `await_omen`, the generated tools' children) parse whole transcripts, so one call can transiently allocate ~1 GB
 /// across several blocking-pool threads. glibc frees that memory but keeps it mapped in each
 /// thread's arena: without a trim, RSS stays at the high-water mark of the largest call ever made,
 /// times however many arenas were touched. `malloc_trim(0)` releases the free pages of every arena
@@ -477,15 +352,6 @@ fn call_tool(name: &str, args: &Value) -> anyhow::Result<String> {
             "{n} was removed in 0.15.0 with the coordination board — the task log is the fleet's record: \
              `task_note` to say something, `task_claim` to hold work, `await_omen`/`observe_stream` to wait on a sibling"
         ),
-        "task_open" => task_open(args),
-        "task_list" => task_list(args),
-        "task_show" => task_show(args),
-        "task_claim" => task_simple(args, |from| cv_core::task::TaskEventKind::Claimed { assignee: from }),
-        "task_release" => task_simple(args, |_| cv_core::task::TaskEventKind::Released {}),
-        "task_note" => task_note(args),
-        "task_done" => task_done(args),
-        "task_abandon" => task_abandon(args),
-        "task_inbox" => task_inbox(args),
         // Removed in 0.15.0 with the land facet: a pointer, never a silent "unknown tool".
         "task_propose" | "task_pass" | "task_refute" | "task_verify" | "task_debt" | "task_stats" => {
             anyhow::bail!(
@@ -500,191 +366,6 @@ fn call_tool(name: &str, args: &Value) -> anyhow::Result<String> {
             None => anyhow::bail!("unknown tool: {other} (the command tools failed to register at startup)"),
         },
     }
-}
-
-// ---------------------------------------------------------------------------
-// Board coordination primitives (request/reply, claim/lease, presence, ack)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// task_* tools — thin wrappers over cv_core::task.
-// ---------------------------------------------------------------------------
-
-/// Identity resolution (G4) for verbs where the actor is bookkeeping, not semantics
-/// (open/note/done/abandon): explicit `from` param, else the spawner-set
-/// `CV_ENDPOINT` (the MCP server inherits the agent's environment), else the legacy "agent"
-/// sink. Shared logic lives in [`cv_core::task::actor`]; only MCP's default sink is chosen here.
-fn task_from_or_agent(args: &Value) -> String {
-    cv_core::task::actor(arg_str(args, "from").map(String::from), "agent")
-}
-
-/// Identity for identity-BEARING tools (task_claim/release), whose endpoint string keys inbox
-/// semantics: unresolvable identity is a hard error, never a silent fall-through to the shared
-/// "agent" sink ([`cv_core::task::require_actor`]).
-fn require_task_from(args: &Value) -> anyhow::Result<String> {
-    cv_core::task::require_actor(arg_str(args, "from").map(String::from), "`from`")
-}
-
-/// Replay the default task store; error on unreadable log, surface warnings inline.
-fn task_replay() -> anyhow::Result<(cv_core::task::ReplayOutcome, Vec<String>)> {
-    let outcome = cv_core::task::replay()?;
-    let warnings = outcome.warnings.clone();
-    Ok((outcome, warnings))
-}
-
-/// Resolve an id prefix against the replayed model.
-fn task_resolve(outcome: &cv_core::task::ReplayOutcome, prefix: &str) -> anyhow::Result<String> {
-    cv_core::task::resolve_id(&outcome.model, prefix)
-        .map(String::from)
-        .map_err(|e| anyhow::anyhow!(e))
-}
-
-/// Append an agent event through the shared core path; return a JSON report of the event and
-/// new state.
-fn task_append(
-    task_id: Option<&str>,
-    from: &str,
-    kind: cv_core::task::TaskEventKind,
-    warnings: Vec<String>,
-) -> anyhow::Result<String> {
-    let store = cv_core::task::TaskStore::default_store();
-    let report = cv_core::task::append(&store, task_id, from, kind, warnings)?;
-    Ok(serde_json::to_string_pretty(&json!({
-        "event": report.event,
-        "effective_state": report.effective_state,
-        "warnings": report.warnings,
-    }))?)
-}
-
-fn task_open(args: &Value) -> anyhow::Result<String> {
-    let title = arg_str(args, "title").context("`title` is required")?.to_string();
-    if args.get("channel").is_some() {
-        anyhow::bail!(
-            "`channel` was removed in 0.15.0 with the coordination board — task events are mirrored nowhere; \
-             follow them with `cv task events --since <id>`"
-        );
-    }
-    let repo = match arg_str(args, "repo") {
-        Some(r) => Some(
-            std::path::Path::new(r)
-                .canonicalize()
-                .with_context(|| format!("repo {r} not found"))?,
-        ),
-        None => None,
-    };
-    task_append(
-        None,
-        &task_from_or_agent(args),
-        cv_core::task::TaskEventKind::Opened {
-            title,
-            body: arg_str(args, "body").unwrap_or("").to_string(),
-            repo,
-            issue: arg_str(args, "issue").map(String::from),
-            channel: None,
-            assignee: arg_str(args, "assignee").map(String::from),
-        },
-        Vec::new(),
-    )
-}
-
-fn task_list(args: &Value) -> anyhow::Result<String> {
-    let (outcome, warnings) = task_replay()?;
-    let filter = cv_core::task::TaskFilter {
-        state: arg_str(args, "state").map(String::from),
-        assignee: arg_str(args, "assignee").map(String::from),
-        repo: arg_str(args, "repo").map(std::path::PathBuf::from),
-        include_terminal: args.get("all").and_then(Value::as_bool).unwrap_or(false),
-        tag: arg_str(args, "tag").map(String::from),
-        // MCP/HTTP see the whole store: scoping is the shell's default, not the wire's.
-        ..Default::default()
-    };
-    let tasks: Vec<cv_core::task::TaskRow> = cv_core::task::list(&outcome.model, &filter)
-        .map_err(|e| anyhow::anyhow!(e))?
-        .into_iter()
-        .map(cv_core::task::TaskRow::brief)
-        .collect();
-    Ok(serde_json::to_string_pretty(
-        &json!({ "tasks": tasks, "warnings": warnings }),
-    )?)
-}
-
-fn task_show(args: &Value) -> anyhow::Result<String> {
-    let (outcome, warnings) = task_replay()?;
-    let id = task_resolve(&outcome, arg_str(args, "id").context("`id` is required")?)?;
-    Ok(serde_json::to_string_pretty(&json!({
-        "task": outcome.model.tasks[&id],
-        "effective_state": cv_core::task::effective_display(&outcome.model.tasks[&id]),
-        "warnings": warnings,
-    }))?)
-}
-
-/// Shared shape for claim/release: resolve id, build the kind from `from`, append.
-fn task_simple(args: &Value, kind: impl FnOnce(String) -> cv_core::task::TaskEventKind) -> anyhow::Result<String> {
-    let (outcome, warnings) = task_replay()?;
-    let id = task_resolve(&outcome, arg_str(args, "id").context("`id` is required")?)?;
-    let from = require_task_from(args)?;
-    task_append(Some(&id), &from.clone(), kind(from), warnings)
-}
-
-fn task_note(args: &Value) -> anyhow::Result<String> {
-    let (outcome, warnings) = task_replay()?;
-    let id = task_resolve(&outcome, arg_str(args, "id").context("`id` is required")?)?;
-    task_append(
-        Some(&id),
-        &task_from_or_agent(args),
-        cv_core::task::TaskEventKind::Noted {
-            text: arg_str(args, "text").context("`text` is required")?.to_string(),
-            session_ref: arg_str(args, "session_ref").map(String::from),
-        },
-        warnings,
-    )
-}
-
-fn task_done(args: &Value) -> anyhow::Result<String> {
-    let (outcome, warnings) = task_replay()?;
-    let id = task_resolve(&outcome, arg_str(args, "id").context("`id` is required")?)?;
-    for retired in ["check_cmd", "check_file", "check_http"] {
-        if args.get(retired).is_some() {
-            anyhow::bail!(
-                "`{retired}` was removed in 0.15.0 — completion is self-reported; put the evidence in `observed`"
-            );
-        }
-    }
-    task_append(
-        Some(&id),
-        &task_from_or_agent(args),
-        cv_core::task::TaskEventKind::Done {
-            observed: arg_str(args, "observed").map(String::from),
-            check: None,
-        },
-        warnings,
-    )
-}
-
-fn task_abandon(args: &Value) -> anyhow::Result<String> {
-    let (outcome, warnings) = task_replay()?;
-    let id = task_resolve(&outcome, arg_str(args, "id").context("`id` is required")?)?;
-    task_append(
-        Some(&id),
-        &task_from_or_agent(args),
-        cv_core::task::TaskEventKind::Abandoned {
-            reason: arg_str(args, "reason").unwrap_or("no reason given").to_string(),
-        },
-        warnings,
-    )
-}
-
-fn task_inbox(args: &Value) -> anyhow::Result<String> {
-    let (outcome, warnings) = task_replay()?;
-    // `who` still wins when given; a bare call means "my inbox" via the spawner-set CV_ENDPOINT.
-    let who = arg_str(args, "who")
-        .map(String::from)
-        .or_else(cv_core::task::default_endpoint)
-        .context("`who` is required (or set CV_ENDPOINT)")?;
-    let entries = cv_core::task::inbox_page(&outcome, &who, None, None, false, chrono::Utc::now()).items;
-    Ok(serde_json::to_string_pretty(
-        &json!({ "inbox": entries, "warnings": warnings }),
-    )?)
 }
 
 /// Block until a newly-emitted message matches `regex` (or `timeout_secs` elapses). The polling loop

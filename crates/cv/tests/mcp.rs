@@ -207,17 +207,18 @@ fn handshake_and_tool_schemas() {
             "missing CLI-generated tool {expected}: {names:?}"
         );
     }
-    // …alongside the hand-written MCP-only tools, which have no CLI equivalent.
-    for expected in ["observe_stream", "await_omen", "task_open", "task_inbox"] {
+    // …the task subcommands, generated the same way…
+    for expected in ["task_open", "task_claim", "task_resolve", "task_inbox", "task_events"] {
+        assert!(names.contains(expected), "missing CLI-generated tool {expected}");
+    }
+    assert!(!names.contains("task"), "`task` is a dispatcher, not a tool: {names:?}");
+    // …and the two hand-written tools, which block or hold a cursor.
+    for expected in ["observe_stream", "await_omen"] {
         assert!(names.contains(expected), "missing MCP-only tool {expected}");
     }
-    // `Fleet & live` commands are NOT generated — their MCP tools are the hand-written ones.
-    assert!(!names.contains("task"), "`task` is a dispatcher, not a tool: {names:?}");
-    let task_open = tools.iter().find(|t| t["name"] == "task_open").unwrap();
-    assert!(
-        task_open["description"].as_str().unwrap().contains("dispatch object"),
-        "task_open must be the hand-written tool, not a generated `cv task open`: {task_open}"
-    );
+    // `resolve` answers with one of choice / accept_default / confirm: none is required alone.
+    let resolve = tools.iter().find(|t| t["name"] == "task_resolve").unwrap();
+    assert_eq!(resolve["inputSchema"]["required"], json!(["id"]), "{resolve}");
     // Fleet & live commands (`serve`, `watch`, `mcp`) are never tools: they block or hold a socket.
     for gone in ["serve", "watch", "archive_sync", "mcp", "scry"] {
         assert!(!names.contains(gone), "{gone} must not be a generated tool: {names:?}");
@@ -315,31 +316,29 @@ fn tool_calls_against_fixture_corpus() {
     );
 }
 
-/// The task tools drive the durable store end-to-end over the protocol: open → two claimants
-/// race (first writer wins; the loser gets a rejection, not a duplicate) → done. Also pins the
-/// task row shapes (no timestamps on MCP rows), the inbox view, the identity-bearing-verb
-/// refusal, and the `--state` vocabulary rejection.
+/// The task tools are `cv task <sub>` and drive the durable store end-to-end over the protocol:
+/// open → two claimants race (first writer wins; the loser gets the store's rejection, not a
+/// duplicate) → done. Also pins the identity-bearing-verb refusal, the `--state` vocabulary
+/// rejection, the inbox, and the list's default (non-terminal) scope.
 #[test]
 fn task_tools_open_claim_race_done() {
     let mut s = Server::spawn("tasks");
     s.request(1, "initialize", json!({}));
 
-    // Open. The returned event carries the durable task id.
+    // Open: the CLI's confirmation line, then the full id.
     let (text, is_err) = s.call_tool(
         2,
         "task_open",
         json!({"title": "carve the totem", "from": "agent:alpha"}),
     );
     assert!(!is_err, "{text}");
-    let v: Value = serde_json::from_str(&text).expect("task_open returns JSON");
-    let id = v["event"]["task_id"].as_str().expect("task id").to_string();
-    assert_eq!(v["effective_state"], "open", "{text}");
+    assert!(text.contains("opened"), "{text}");
+    let id = text.lines().last().expect("the id line").trim().to_string();
 
     // First claimant wins…
     let (text, is_err) = s.call_tool(3, "task_claim", json!({"id": id, "from": "agent:alpha"}));
     assert!(!is_err, "{text}");
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["effective_state"], "claimed", "{text}");
+    assert!(text.contains("→ claimed"), "{text}");
 
     // …the second gets a rejection from the store's locked CAS, not a duplicate claim.
     let (text, is_err) = s.call_tool(4, "task_claim", json!({"id": id, "from": "agent:beta"}));
@@ -351,20 +350,21 @@ fn task_tools_open_claim_race_done() {
     assert!(is_err, "{text}");
     assert!(text.contains("CV_ENDPOINT"), "the error must name the cure: {text}");
 
-    // The winner's inbox carries the claim (shared row shape); the loser's stays empty.
+    // The winner's inbox carries the claim; the loser's stays empty.
     let (text, is_err) = s.call_tool(6, "task_inbox", json!({"who": "agent:alpha"}));
     assert!(!is_err, "{text}");
-    let v: Value = serde_json::from_str(&text).unwrap();
-    let inbox = v["inbox"].as_array().expect("inbox array");
+    // The one inbox row (`cv_core::task::InboxItem`), on the page `cv serve` serves too.
+    let page: Value = serde_json::from_str(&text).expect("inbox --json");
+    assert_eq!(page["who"], "agent:alpha", "{text}");
+    let inbox = page["items"].as_array().expect("inbox items");
     assert_eq!(inbox.len(), 1, "{text}");
     assert_eq!(inbox[0]["id"], json!(id), "{text}");
     assert_eq!(inbox[0]["reason"], "claimed_by_you", "{text}");
     assert_eq!(inbox[0]["effective_state"], "claimed", "{text}");
-    // The one inbox row (`cv_core::task::InboxItem`): the aging anchor and the age ride it.
     assert!(inbox[0]["since"].is_string() && inbox[0]["age"].is_string(), "{text}");
     let (text, _) = s.call_tool(7, "task_inbox", json!({"who": "agent:beta"}));
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["inbox"].as_array().unwrap().len(), 0, "{text}");
+    let page: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(page["items"], json!([]), "{text}");
 
     // An unknown state filter errors naming the vocabulary — never a silent empty list.
     let (text, is_err) = s.call_tool(8, "task_list", json!({"state": "redy"}));
@@ -377,21 +377,19 @@ fn task_tools_open_claim_race_done() {
     // Done closes it: hidden from the default list, visible with `all`.
     let (text, is_err) = s.call_tool(9, "task_done", json!({"id": id, "from": "agent:alpha"}));
     assert!(!is_err, "{text}");
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["effective_state"], "done", "{text}");
+    assert!(text.contains("→ done"), "{text}");
     let (text, _) = s.call_tool(10, "task_list", json!({}));
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["tasks"].as_array().unwrap().len(), 0, "terminal task hidden: {text}");
-    let (text, _) = s.call_tool(11, "task_list", json!({"all": true}));
-    let v: Value = serde_json::from_str(&text).unwrap();
-    let rows = v["tasks"].as_array().unwrap();
-    assert_eq!(rows.len(), 1, "{text}");
-    assert_eq!(rows[0]["id"], json!(id), "{text}");
-    assert_eq!(rows[0]["effective_state"], "done", "{text}");
-    assert!(
-        rows[0].get("opened_at").is_none(),
-        "MCP rows ship no timestamps: {text}"
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap(),
+        json!([]),
+        "terminal task hidden: {text}"
     );
+    let (text, _) = s.call_tool(11, "task_list", json!({"all": true}));
+    let rows: Value = serde_json::from_str(&text).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{text}");
+    assert_eq!(rows[0]["task_id"], json!(id), "{text}");
+    assert_eq!(rows[0]["state"], "done", "{text}");
 
     // The retired land-facet tools error with a pointer, never a bare "unknown tool".
     let (text, is_err) = s.call_tool(12, "task_debt", json!({}));

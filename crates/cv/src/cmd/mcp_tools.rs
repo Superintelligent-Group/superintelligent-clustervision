@@ -7,7 +7,9 @@
 //! second binary to find, so the roster cannot skew from the CLI by construction.
 //!
 //! - **Which commands.** Everything clap shows under the **Read**, **Reshape**, **Export** and
-//!   **System** groups. `Fleet & live` is excluded: its MCP tools are the hand-written ones.
+//!   **System** groups, plus every `task` subcommand (`task_open`, `task_claim`, …). The rest of
+//!   `Fleet & live` (`serve`, `watch`, `mcp`, `scry`, …) never returns, so it is no tool; the two
+//!   that block on purpose (`await_omen`, `observe_stream`) are hand-written in `mcp.rs`.
 //! - **Calls** run this same executable as `cv <command> <args…> --json` (the `--json` only for
 //!   commands that have the flag) and return stdout. A non-zero exit becomes a tool error
 //!   carrying stderr. (A subprocess, not a function call: every command prints to stdout.)
@@ -23,7 +25,8 @@ use std::path::PathBuf;
 
 use super::mcp::InvalidParams;
 
-/// The command groups that become MCP tools. `Fleet & live` is deliberately absent.
+/// The command groups that become MCP tools. Of `Fleet & live`, only the one-shot `task`
+/// subcommands do (see [`select_tool_commands`]).
 const TOOL_GROUPS: [&str; 4] = ["Read", "Reshape", "Export", "System"];
 
 /// `show`'s MCP-only window defaults: applied when the caller names no selector at all.
@@ -157,12 +160,13 @@ impl CliTools {
     }
 }
 
-/// Keep the commands in the four tool groups, dropping bare dispatcher parents (a command that
-/// has subcommands and no arguments of its own — calling it could only ever print clap's usage).
+/// Keep the commands in the four tool groups and the `task` subcommands, dropping bare dispatcher
+/// parents (a command that has subcommands and no arguments of its own — calling it could only
+/// ever print clap's usage).
 fn select_tool_commands(all: Vec<CommandSpec>) -> Vec<CommandSpec> {
     let names: Vec<String> = all.iter().map(|c| c.name.clone()).collect();
     all.into_iter()
-        .filter(|c| TOOL_GROUPS.contains(&c.group.as_str()))
+        .filter(|c| TOOL_GROUPS.contains(&c.group.as_str()) || c.name.starts_with("task "))
         .filter(|c| {
             let has_children = names.iter().any(|n| n.starts_with(&format!("{} ", c.name)));
             !(has_children && c.args.is_empty())
@@ -313,6 +317,12 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
     // arguments if a hole were left in the middle.
     for a in cmd.args.iter().filter(|a| a.kind == ArgKind::Positional) {
         match present(&obj, &a.name) {
+            // A list fills a repeatable positional (`splice <spec>…`) in order.
+            Some(Value::Array(items)) => {
+                for v in items {
+                    argv.push(scalar(&a.name, v)?);
+                }
+            }
             Some(v) => argv.push(scalar(&a.name, v)?),
             // Required ones were caught above; a hole in the OPTIONAL tail (`workflow <id>
             // [<run_id>]`) just ends the run — skipping it would shift later values into the
@@ -323,8 +333,15 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
 
     for a in cmd.args.iter().filter(|a| a.kind == ArgKind::Option) {
         let Some(v) = present(&obj, &a.name) else { continue };
-        argv.push(a.long_flag());
-        argv.push(scalar(&a.name, v)?);
+        // A list repeats the flag (`--blocked-by A --blocked-by B`), as a repeatable option takes it.
+        let values = match v {
+            Value::Array(items) => items.iter().collect(),
+            v => vec![v],
+        };
+        for v in values {
+            argv.push(a.long_flag());
+            argv.push(scalar(&a.name, v)?);
+        }
     }
 
     for a in cmd.args.iter().filter(|a| a.kind == ArgKind::Flag) {
@@ -498,7 +515,22 @@ mod tests {
         .unwrap();
         let kept = select_tool_commands(all);
         let names: Vec<String> = kept.iter().map(|c| c.tool_name()).collect();
-        assert_eq!(names, vec!["formats_census"], "dispatcher and Fleet & live are dropped");
+        assert_eq!(
+            names,
+            vec!["formats_census"],
+            "dispatchers and the rest of Fleet & live are dropped"
+        );
+
+        let all: Vec<CommandSpec> = serde_json::from_str(
+            r#"[{"name":"task","group":"Fleet & live","about":"Tasks","args":[]},
+                {"name":"task claim","group":"Fleet & live","about":"Claim","args":[
+                   {"name":"id","kind":"positional","value_type":"string","help":"Task","required":true}]},
+                {"name":"serve","group":"Fleet & live","about":"Serve","args":[
+                   {"name":"port","kind":"option","value_type":"integer","help":"p","required":false}]}]"#,
+        )
+        .unwrap();
+        let names: Vec<String> = select_tool_commands(all).iter().map(|c| c.tool_name()).collect();
+        assert_eq!(names, vec!["task_claim"], "task subcommands are tools; a server is not");
     }
 
     // -- argv construction -------------------------------------------------
@@ -550,6 +582,22 @@ mod tests {
         .unwrap();
         // No `--json` on cat: the command has no JSON form, so the call returns text.
         assert_eq!(argv, vec!["cat", "abc", "toolu_9", "--input"]);
+    }
+
+    #[test]
+    fn a_list_repeats_an_option_and_fills_a_positional() {
+        let c = spec(
+            r#"{"name":"task open","group":"Fleet & live","about":"Open","args":[
+              {"name":"title","kind":"positional","value_type":"string","help":"t","required":true},
+              {"name":"blocked_by","kind":"option","value_type":"string","help":"b","required":false}]}"#,
+        );
+        let argv = build_argv(&c, &json!({"title": "x", "blocked_by": ["a", "b"]})).unwrap();
+        assert_eq!(
+            argv,
+            vec!["task", "open", "x", "--blocked-by", "a", "--blocked-by", "b"]
+        );
+        let argv = build_argv(&cat(), &json!({"session": ["s"], "tool_use_id": "t"})).unwrap();
+        assert_eq!(argv, vec!["cat", "s", "t"]);
     }
 
     #[test]

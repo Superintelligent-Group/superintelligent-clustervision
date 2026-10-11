@@ -147,8 +147,11 @@ pub(crate) fn data_schema_json() -> Value {
 /// (`"task open"`), each `{ name, group, about, args: [{ name, kind, value_type, possible_values?,
 /// default?, help, required }] }`.
 pub(crate) fn commands_json(cli: &clap::Command) -> Value {
+    // Built, so the groups an `#[arg(group = …)]` names exist on each command (see push_command).
+    let mut cli = cli.clone();
+    cli.build();
     let mut out = Vec::new();
-    for sub in cli.get_subcommands().filter(|s| !s.is_hide_set()) {
+    for sub in cli.get_subcommands().filter(|s| visible(s)) {
         let group = crate::group_of(sub.get_name()).unwrap_or("");
         push_command(&mut out, sub, None, group);
     }
@@ -160,11 +163,27 @@ fn push_command(out: &mut Vec<Value>, cmd: &clap::Command, parent: Option<&str>,
         Some(p) => format!("{p} {}", cmd.get_name()),
         None => cmd.get_name().to_string(),
     };
+    // An argument in a group is never required on its own: `required` on a grouped arg (`task
+    // resolve --choice` in the `answer` group) means "one of the group", which clap enforces and a
+    // per-argument `required` would misstate as "always this one". The derive's own group per
+    // variant holds every argument; that one says nothing and is skipped.
+    let all_ids: Vec<&str> = cmd.get_arguments().map(|a| a.get_id().as_str()).collect();
+    let grouped: Vec<&str> = cmd
+        .get_groups()
+        .filter(|g| g.get_args().count() < all_ids.iter().filter(|id| !matches!(**id, "help" | "version")).count())
+        .flat_map(|g| g.get_args().map(|id| id.as_str()))
+        .collect();
     let args: Vec<Value> = cmd
         .get_arguments()
         .filter(|a| !a.is_hide_set())
         .filter(|a| !matches!(a.get_id().as_str(), "help" | "version"))
-        .map(arg_json)
+        .map(|a| {
+            let mut v = arg_json(a);
+            if grouped.contains(&a.get_id().as_str()) {
+                v["required"] = json!(false);
+            }
+            v
+        })
         .collect();
     out.push(json!({
         "name": name,
@@ -172,9 +191,14 @@ fn push_command(out: &mut Vec<Value>, cmd: &clap::Command, parent: Option<&str>,
         "about": cmd.get_about().map(|a| a.to_string()).unwrap_or_default(),
         "args": args,
     }));
-    for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
+    for sub in cmd.get_subcommands().filter(|s| visible(s)) {
         push_command(out, sub, Some(&name), group);
     }
+}
+
+/// A subcommand the tree reports: not hidden, and not the `help` clap's build adds to every parent.
+fn visible(cmd: &clap::Command) -> bool {
+    !cmd.is_hide_set() && cmd.get_name() != "help"
 }
 
 fn arg_json(a: &clap::Arg) -> Value {
