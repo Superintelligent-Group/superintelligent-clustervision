@@ -1,0 +1,253 @@
+//! `cv tools` — cross-agent tool analytics over a session's forest (the orchestrator plus every
+//! sub-agent): the aggregate histogram, one agent's, which agents used a tool, the per-agent
+//! breakdown, and the time-ordered tool-call timeline.
+
+use crate::util::short_id;
+use anyhow::{bail, Context, Result};
+use cv_core::ir::truncate;
+use cv_core::tools::{ForestTools, ToolHistogram};
+
+/// `cv tools <id>`: cross-agent tool analytics. Default = the aggregate histogram across the whole
+/// forest (orchestrator + every sub-agent). Filters:
+/// * `--agent <id>` — one agent's histogram ("which tools did agent X use")
+/// * `--tool <name>` — which agents used tool T (across the forest)
+/// * `--workflow <run>` — restrict to one workflow's agents
+/// * `--across` — one row per agent (the per-agent breakdown), instead of the aggregate
+/// * `--timeline` — the time-ordered tool-call timeline
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cmd_tools(
+    id: &str,
+    harness: Option<String>,
+    agent: Option<String>,
+    tool: Option<String>,
+    workflow: Option<String>,
+    across: bool,
+    timeline: bool,
+    json: bool,
+) -> Result<()> {
+    let want = crate::util::parse_harness(&harness)?;
+    let (r, _adapter) = crate::util::resolve(id, want)?;
+
+    if timeline {
+        return tools_timeline(&r, agent.as_deref(), json);
+    }
+
+    let mut forest = cv_core::tools::forest_tools(&r)?;
+    if let Some(run) = &workflow {
+        // Resolve a run-id *prefix* to the full id (the forest tags agents with the full run id),
+        // so `--workflow wf_08eb66fa` matches `wf_08eb66fa-4b1`.
+        let full = cv_core::workflow_of(&r, run)
+            .map(|w| w.run_id)
+            .with_context(|| format!("no workflow {run:?} in {}", short_id(&r.id)))?;
+        // The orchestrator isn't part of any one workflow; restrict to the named run's agents.
+        forest = forest.for_workflow(&full);
+        if forest.agents.is_empty() {
+            bail!("no agents found for workflow {full:?} in {}", short_id(&r.id));
+        }
+    }
+
+    // `--tool T`: which agents used it.
+    if let Some(t) = &tool {
+        return tools_which_agents(&forest, t, json);
+    }
+    // `--agent X`: one agent's histogram.
+    if let Some(a) = &agent {
+        let at = forest.agent(a).with_context(|| {
+            format!(
+                "no agent matching {a:?} in {} (try `cv tools {} --across`)",
+                short_id(&r.id),
+                short_id(&r.id)
+            )
+        })?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(at)?);
+            return Ok(());
+        }
+        println!("# tools used by {} ({})", at.agent, at.agent_type);
+        print_histogram(&at.histogram);
+        return Ok(());
+    }
+    // `--across`: per-agent breakdown.
+    if across {
+        return tools_across(&forest, json);
+    }
+
+    // Default: the aggregate across the whole forest.
+    let agg = forest.aggregate();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&agg)?);
+        return Ok(());
+    }
+    println!(
+        "# tool usage across {} ({} agent(s): orchestrator + forest)",
+        short_id(&r.id),
+        forest.agents.len()
+    );
+    print_histogram(&agg);
+    println!("\n→ `--across` for per-agent · `--agent <id>` · `--tool <name>` · `--timeline`");
+    Ok(())
+}
+
+/// "Which agents used tool T", ranked by count.
+fn tools_which_agents(forest: &ForestTools, tool: &str, json: bool) -> Result<()> {
+    let users = forest.agents_using(tool);
+    if json {
+        let rows: Vec<serde_json::Value> = users
+            .iter()
+            .map(|(a, c)| {
+                serde_json::json!({
+                    "agent": a.agent, "agent_type": a.agent_type, "workflow": a.workflow,
+                    "calls": c.calls, "edits": c.edits, "reads": c.reads, "commands": c.commands, "errors": c.errors,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if users.is_empty() {
+        println!("no agent used {tool:?}");
+        return Ok(());
+    }
+    let total: usize = users.iter().map(|(_, c)| c.calls).sum();
+    println!("# {} agent(s) used {tool:?} ({total} call(s) total)\n", users.len());
+    for (a, c) in users {
+        let wf = a.workflow.as_deref().map(|w| format!("  ⟐{w}")).unwrap_or_default();
+        println!(
+            "{:>5}  {:9}  {:18}{}",
+            c.calls,
+            a.agent_type,
+            if a.agent == cv_core::tools::ORCHESTRATOR {
+                a.agent.clone()
+            } else {
+                short_id(&a.agent)
+            },
+            wf,
+        );
+    }
+    Ok(())
+}
+
+/// Per-agent breakdown: one block per agent, its histogram beneath.
+fn tools_across(forest: &ForestTools, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(forest)?);
+        return Ok(());
+    }
+    // Skip agents that used no tools (a chat-only sub-agent) to keep the view dense.
+    let active: Vec<&cv_core::tools::AgentTools> =
+        forest.agents.iter().filter(|a| a.histogram.total_calls > 0).collect();
+    println!("# per-agent tool usage ({} active agent(s))\n", active.len());
+    for a in active {
+        let wf = a.workflow.as_deref().map(|w| format!("  ⟐{w}")).unwrap_or_default();
+        let label = if a.agent == cv_core::tools::ORCHESTRATOR {
+            a.agent.clone()
+        } else {
+            short_id(&a.agent)
+        };
+        let top: Vec<String> = a
+            .histogram
+            .ranked()
+            .into_iter()
+            .take(6)
+            .map(|(name, c)| format!("{name}×{}", c.calls))
+            .collect();
+        println!(
+            "{:18} {:11} {:>4} call(s){}  {}",
+            label,
+            a.agent_type,
+            a.histogram.total_calls,
+            wf,
+            top.join(" "),
+        );
+    }
+    Ok(())
+}
+
+/// The time-ordered tool-call timeline across the forest.
+fn tools_timeline(r: &cv_core::SessionRef, agent: Option<&str>, json: bool) -> Result<()> {
+    let mut events = cv_core::tools::forest_timeline(r)?;
+    if let Some(key) = agent {
+        // Match the orchestrator sentinel or a full/prefix agent id.
+        events.retain(|e| e.agent == key || e.agent.starts_with(key));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&events)?);
+        return Ok(());
+    }
+    if events.is_empty() {
+        println!(
+            "no tool calls{}",
+            agent.map(|a| format!(" for {a:?}")).unwrap_or_default()
+        );
+        return Ok(());
+    }
+    println!("# {} tool call(s) (chronological)\n", events.len());
+    for e in &events {
+        let time =
+            e.ts.and_then(|t| crate::util::fmt_local_ts(t, "%m-%d %H:%M:%S"))
+                .unwrap_or_else(|| "--------------".into());
+        let who = if e.agent == cv_core::tools::ORCHESTRATOR {
+            "orch".to_string()
+        } else {
+            short_id(&e.agent)
+        };
+        println!(
+            "{}  {:8}  {:9}  {:14}  {}",
+            time,
+            who,
+            e.kind,
+            e.tool.as_deref().unwrap_or("-"),
+            e.target.as_deref().map(|t| truncate(t, 70)).unwrap_or_default(),
+        );
+    }
+    Ok(())
+}
+
+/// Print a [`ToolHistogram`] as a ranked table (tool · calls · kind breakdown · errors).
+fn print_histogram(h: &ToolHistogram) {
+    if h.tools.is_empty() {
+        println!("  (no tool calls)");
+        return;
+    }
+    println!(
+        "  {:<22} {:>6}  {:>6} {:>6} {:>6} {:>6}",
+        "tool", "calls", "edit", "read", "cmd", "err"
+    );
+    for (name, c) in h.ranked() {
+        println!(
+            "  {:<22} {:>6}  {:>6} {:>6} {:>6} {:>6}",
+            truncate(name, 22),
+            c.calls,
+            kindcell(c.edits),
+            kindcell(c.reads),
+            kindcell(c.commands),
+            kindcell(c.errors),
+        );
+    }
+    println!(
+        "  {:<22} {:>6}  {:>30}",
+        "TOTAL",
+        h.total_calls,
+        format!("{} distinct · {} error(s)", h.distinct(), h.total_errors),
+    );
+}
+
+/// A histogram kind-cell: the count, or a blank for zero (keeps the table readable).
+fn kindcell(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        n.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kindcell_blanks_zero() {
+        assert_eq!(kindcell(0), "");
+        assert_eq!(kindcell(3), "3");
+    }
+}

@@ -21,8 +21,8 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cmd::task::TaskCmd;
 use cmd::{
-    browse, cat, compose, config, doctor, formats, live, orchestrate, pack, port, provenance, recipes, schema, search,
-    share, task, view, workflow,
+    browse, cat, compaction, compose, config, doctor, events, formats, live, orchestrate, pack, port, recipes, schema,
+    search, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
 use util::{usage, UsageError, WindowArgs};
@@ -1129,12 +1129,12 @@ fn run() -> Result<()> {
             kind,
             subagents,
             json,
-        } => provenance::cmd_events(&id, harness, kind, subagents, json),
+        } => events::cmd_events(&id, harness, kind, subagents, json),
         Cmd::Touched {
             path,
             edits_only,
             json,
-        } => provenance::cmd_touched(&path, edits_only, json),
+        } => events::cmd_touched(&path, edits_only, json),
         Cmd::Blame { file, lines, show } => blame::cmd_blame(&file, lines.as_deref(), show),
         Cmd::Share {
             id,
@@ -1238,13 +1238,13 @@ fn run() -> Result<()> {
             across,
             timeline,
             json,
-        } => workflow::cmd_tools(&id, harness, agent, tool, wf, across, timeline, json),
+        } => tools::cmd_tools(&id, harness, agent, tool, wf, across, timeline, json),
         Cmd::Compaction {
             id,
             harness,
             summaries,
             json,
-        } => workflow::cmd_compaction(&id, harness, summaries, json),
+        } => compaction::cmd_compaction(&id, harness, summaries, json),
         Cmd::Prompts {
             id,
             harness,

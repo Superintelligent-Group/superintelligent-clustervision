@@ -8,6 +8,9 @@
 
 use super::{parse_ts, Adapter};
 
+/// `cv adopt`: move a sub-agent stranded by a dead session into a live one — Claude-only byte
+/// surgery on this store's layout, so it lives beside the adapter that knows it.
+pub mod adopt;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;

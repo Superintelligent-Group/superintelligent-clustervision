@@ -6,7 +6,6 @@
 //! Every harness has an [`Adapter`](harness::Adapter) that *discovers* sessions on disk and *parses*
 //! them into the common [`Session`] IR. Cross-harness porting is then `parse(A) -> IR -> emit(B)`.
 
-pub mod adopt;
 pub mod catalog;
 pub mod compaction;
 pub mod config;

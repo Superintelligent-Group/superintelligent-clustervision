@@ -1,13 +1,13 @@
 //! `cv adopt` — rescue sub-agents stranded by a dead Claude Code session into a live one, so the
 //! live session can `SendMessage` them and they resume with their whole transcript. The mechanism
-//! and its limits live in [`cv_core::adopt`]; this module resolves ids, prints, and gates writes.
+//! and its limits live in [`cv_core::harness::claude::adopt`]; this module resolves ids, prints, and gates writes.
 //!
 //! Human report on stderr; `--json` puts one JSON value on stdout. Finding the agents is
 //! `cv lanes`'s job (`cv lanes <session>`, `cv lanes --recent N --unfinished`).
 
 use crate::util::{fmt_local, home_rel, report, short_id, usage};
 use anyhow::{Context, Result};
-use cv_core::adopt::{self, AgentFile, Plan, SessionFile};
+use cv_core::harness::claude::adopt::{self, AgentFile, Plan, SessionFile};
 use cv_core::ir::{human_bytes, Harness};
 use serde_json::json;
 use std::fmt::Write as _;
