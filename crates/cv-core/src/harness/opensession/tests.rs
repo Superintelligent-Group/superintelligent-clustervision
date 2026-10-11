@@ -30,19 +30,8 @@ fn block_type(b: &Block) -> &'static str {
 #[test]
 fn document_leads_with_the_version_and_session_never_carries_it() {
     let s = Session {
-        id: "s1".into(),
-        harness: Harness::Claude,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
-        system_prompt: None,
-        lineage: Lineage::default(),
         messages: vec![Message::new(Role::User)],
-        source_path: None,
-        extra: Map::new(),
+        ..Session::new("s1", Harness::Claude)
     };
     let doc = serde_json::to_string_pretty(&document(&s)).unwrap();
     assert!(

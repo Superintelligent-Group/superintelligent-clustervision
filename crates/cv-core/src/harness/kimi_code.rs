@@ -996,8 +996,7 @@ fn usage_from(u: &Value) -> Usage {
         output_tokens: get("output"),
         cache_read_tokens: get("inputCacheRead"),
         cache_creation_tokens: get("inputCacheCreation"),
-        reasoning_tokens: None,
-        cost_usd: None,
+        ..Usage::default()
     }
 }
 

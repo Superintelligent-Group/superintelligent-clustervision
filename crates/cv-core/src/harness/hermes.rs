@@ -1384,16 +1384,7 @@ mod tests {
     }
 
     fn sref(id: &str) -> SessionRef {
-        SessionRef {
-            id: id.into(),
-            harness: Harness::Hermes,
-            path: PathBuf::from(":memory:"),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        SessionRef::new(id, Harness::Hermes, PathBuf::from(":memory:"))
     }
 
     fn insert_session(

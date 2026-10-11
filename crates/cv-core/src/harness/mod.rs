@@ -358,21 +358,7 @@ mod tests {
         assert_eq!(skipped2, 1);
 
         // note_skipped_lines: zero leaves `extra` untouched (clean sessions stay byte-identical).
-        let mut s = Session {
-            id: "x".into(),
-            harness: Harness::Codex,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            model: None,
-            git: None,
-            messages: Vec::new(),
-            source_path: None,
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
-        };
+        let mut s = Session::new("x", Harness::Codex);
         note_skipped_lines(&mut s, 0);
         assert!(s.extra.is_empty());
         note_skipped_lines(&mut s, 3);

@@ -70,7 +70,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 mod tests {
     use super::super::cline::{parse_history_str, parse_task_dir};
     use super::*;
-    use serde_json::Map;
     use std::fs;
 
     fn fixture(name: &str) -> String {
@@ -135,19 +134,10 @@ mod tests {
         }];
 
         let session = Session {
-            id: "src".into(),
-            harness: Harness::Roo,
             cwd: Some(PathBuf::from("/home/dev/app")),
             title: Some("Add a unit test".into()),
-            created_at: None,
-            updated_at: None,
-            model: None,
-            git: None,
             messages: vec![user, asst, tool],
-            source_path: None,
-            extra: Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("src", Harness::Roo)
         };
 
         // ── emit to a unique temp dir (no tempfile crate) ──

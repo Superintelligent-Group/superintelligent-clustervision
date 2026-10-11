@@ -531,14 +531,11 @@ fn scan(path: &Path) -> Result<Option<SessionRef>> {
         .unwrap_or(0);
 
     Ok(Some(SessionRef {
-        id,
-        harness: Harness::LmStudio,
-        path: path.to_path_buf(),
-        cwd: None,
         title,
         created_at,
         updated_at,
         message_count,
+        ..SessionRef::new(id, Harness::LmStudio, path.to_path_buf())
     }))
 }
 
@@ -811,10 +808,7 @@ fn parse_usage(stats: Option<&Value>) -> Option<Usage> {
     Some(Usage {
         input_tokens: input,
         output_tokens: output,
-        cache_read_tokens: None,
-        cache_creation_tokens: None,
-        reasoning_tokens: None,
-        cost_usd: None,
+        ..Usage::default()
     })
 }
 
@@ -1018,26 +1012,15 @@ mod tests {
         assistant.usage = Some(Usage {
             input_tokens: Some(12),
             output_tokens: Some(34),
-            cache_read_tokens: None,
-            cache_creation_tokens: None,
-            reasoning_tokens: None,
-            cost_usd: None,
+            ..Usage::default()
         });
 
         let session = Session {
-            id: "orig".to_string(),
-            harness: Harness::LmStudio,
-            cwd: None,
             title: Some("Greeting".to_string()),
             created_at: DateTime::from_timestamp_millis(1_754_425_094_719),
-            updated_at: None,
             model: Some("openai/gpt-oss-120b".to_string()),
-            git: None,
             messages: vec![user, assistant],
-            source_path: None,
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("orig".to_string(), Harness::LmStudio)
         };
 
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);

@@ -313,19 +313,8 @@ pub fn parse_str(id: &str, text: &str, is_jsonl: bool, source_path: Option<PathB
     // Start the id empty so a transcript-provided id (session_meta / bare header / legacy
     // `session.id`) is authoritative; the `id` argument is only the fallback when none is present.
     let mut s = Session {
-        id: String::new(),
-        harness: Harness::Codex,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path,
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(String::new(), Harness::Codex)
     };
 
     if is_jsonl {
@@ -569,19 +558,8 @@ pub fn stream_jsonl<R: BufRead>(
     sink: &mut dyn MessageSink,
 ) -> Session {
     let mut s = Session {
-        id: String::new(),
-        harness: Harness::Codex,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path,
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(String::new(), Harness::Codex)
     };
     let mut scratch: Vec<Message> = Vec::new();
     let mut ctx = CodexCtx::for_opts(opts);
@@ -690,19 +668,9 @@ fn stream_spans_core(
     sink: &mut dyn MessageSink,
 ) -> Session {
     let mut s = Session {
-        id: String::new(),
-        harness: Harness::Codex,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
         model: seed_model,
-        git: None,
-        messages: Vec::new(),
         source_path,
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(String::new(), Harness::Codex)
     };
     if start_off as usize >= data.len() {
         if emit_meta {

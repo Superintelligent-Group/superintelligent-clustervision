@@ -221,16 +221,7 @@ mod tests {
         let path = chats.join("session-test.jsonl");
         fs::write(&path, &text).unwrap();
 
-        let r = SessionRef {
-            id: "11112222-3333-4444-5555-666677778888".into(),
-            harness: Harness::Qwen,
-            path,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new("11112222-3333-4444-5555-666677778888", Harness::Qwen, path);
         let mut sink = crate::stream::CollectSink::default();
         let s = Qwen::new()
             .stream(&r, &crate::stream::ParseOptions::full(), &mut sink)

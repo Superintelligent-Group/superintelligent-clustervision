@@ -15,7 +15,7 @@ pub mod adopt;
 /// spelled once, and the one journal parser.
 pub mod sidecar;
 use crate::ir::*;
-use crate::ir::{Lineage, MessageKind, Origin};
+use crate::ir::{MessageKind, Origin};
 use crate::lazy::{Span, Text, INLINE_MAX};
 use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
@@ -377,19 +377,8 @@ fn ingest_bytes(
 /// path) starts with its lineage already filled in — see [`apply_subagent_lineage`].
 fn new_session(id: &str, source_path: Option<PathBuf>) -> Session {
     let mut s = Session {
-        id: id.to_string(),
-        harness: Harness::Claude,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path,
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: Lineage::default(),
+        ..Session::new(id.to_string(), Harness::Claude)
     };
     if let Some(p) = s.source_path.clone() {
         apply_subagent_lineage(&mut s, &p);
@@ -1932,8 +1921,7 @@ fn parse_usage(v: &Value) -> Usage {
         output_tokens: get("output_tokens"),
         cache_read_tokens: get("cache_read_input_tokens"),
         cache_creation_tokens: get("cache_creation_input_tokens"),
-        reasoning_tokens: None,
-        cost_usd: None,
+        ..Usage::default()
     }
 }
 
@@ -2774,14 +2762,8 @@ mod tests {
         drop(f);
 
         let r = SessionRef {
-            id: "s".into(),
-            harness: Harness::Claude,
-            path: path.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
             message_count: 1,
+            ..SessionRef::new("s", Harness::Claude, path.clone())
         };
         // Lazy parse → expect a Span; resolving it must equal `big`.
         let mut sink = CollectSink::default();

@@ -275,19 +275,8 @@ pub fn stream_task_dir(
     let history = dir.join("api_conversation_history.json");
 
     let mut session = Session {
-        id: id.to_string(),
-        harness,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path: Some(dir.to_path_buf()),
-        extra: Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(id.to_string(), harness)
     };
 
     // Sidecar metadata is small; resolve timestamps up front. cwd-from-metadata is only a *fallback*
@@ -409,19 +398,8 @@ impl AsRef<[u8]> for HistoryBytes {
 /// so the two paths stay byte-identical without building the whole-document `Value`.
 pub fn parse_history_str(id: &str, text: &str, harness: Harness, source_path: Option<PathBuf>) -> Session {
     let mut session = Session {
-        id: id.to_string(),
-        harness,
-        cwd: None,
-        title: None,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path,
-        extra: Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(id.to_string(), harness)
     };
 
     // Borrow the array structure as raw items; tolerate corrupt / non-array documents.
@@ -1107,19 +1085,12 @@ mod tests {
 
         // Build a small Session: user, assistant (text + tool_use), tool result.
         let mut session = Session {
-            id: "src".to_string(),
-            harness: Harness::Cline,
             cwd: Some(PathBuf::from("/Users/me/proj")),
             title: Some("Fix the parser bug".to_string()),
             created_at: DateTime::<Utc>::from_timestamp_millis(1717000000000),
             updated_at: DateTime::<Utc>::from_timestamp_millis(1717000005000),
             model: Some("claude-x".to_string()),
-            git: None,
-            messages: Vec::new(),
-            source_path: None,
-            extra: Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("src".to_string(), Harness::Cline)
         };
 
         let mut user = Message::new(Role::User);
@@ -1161,16 +1132,7 @@ mod tests {
         assert_eq!(res.path, out_dir.join("tasks").join(&res.new_id));
 
         // Re-parse via this adapter's parse path.
-        let r = SessionRef {
-            id: res.new_id.clone(),
-            harness: Harness::Cline,
-            path: res.path.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new(res.new_id.clone(), Harness::Cline, res.path.clone());
         let parsed = cline.parse(&r).expect("re-parse");
         crate::harness::assert_no_flat_keys(&parsed);
 

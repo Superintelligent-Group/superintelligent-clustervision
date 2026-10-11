@@ -761,19 +761,12 @@ fn parse_logs_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
             .collect();
 
         let mut s = Session {
-            id: sid,
-            harness: Harness::Gemini,
             cwd: source_path.as_deref().and_then(project_cwd),
             title,
             created_at: times.iter().min().copied(),
             updated_at: times.iter().max().copied(),
-            model: None,
-            git: None,
-            messages: Vec::new(),
             source_path: source_path.clone(),
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new(sid, Harness::Gemini)
         };
         for e in items {
             let role = match e.get("type").and_then(Value::as_str) {
@@ -871,19 +864,14 @@ fn record_metadata(rec: &serde_json::Map<String, Value>, harness: Harness, sourc
     }
 
     Session {
-        id,
-        harness,
         cwd,
         title,
         created_at,
         updated_at,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path,
         extra,
-        system_prompt: None,
         lineage,
+        ..Session::new(id, harness)
     }
 }
 
@@ -1247,9 +1235,7 @@ fn parse_tokens(v: &Value) -> Option<Usage> {
         input_tokens: get("input").map(|i| i.saturating_sub(cached.unwrap_or(0))),
         output_tokens: get("output"),
         cache_read_tokens: get("cached"),
-        cache_creation_tokens: None,
-        reasoning_tokens: None,
-        cost_usd: None,
+        ..Usage::default()
     })
 }
 
@@ -1310,19 +1296,11 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
     }
 
     Some(Session {
-        id,
-        harness: Harness::Gemini,
         cwd: source_path.as_deref().and_then(project_cwd),
         title,
-        created_at: None,
-        updated_at: None,
-        model: None,
-        git: None,
         messages,
         source_path,
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(id, Harness::Gemini)
     })
 }
 
@@ -1665,16 +1643,7 @@ mod tests {
             .next()
             .expect("fixture parses to one session")
             .id;
-        let r = SessionRef {
-            id: id.clone(),
-            harness: Harness::Gemini,
-            path: file.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new(id.clone(), Harness::Gemini, file.clone());
         let adapter = Gemini { roots: vec![] };
 
         // Reference: the pure parser, with source_path set to the on-disk file for an apples-to-
@@ -1722,16 +1691,7 @@ mod tests {
         // A sink returning Stop after the first message halts the legacy-JSON streaming path without
         // emitting the rest.
         let (dir, file) = chats_fixture("session_legacy.json");
-        let r = SessionRef {
-            id: "9aeb2942-7c46-47b7-aded-13772d4d4e63".into(),
-            harness: Harness::Gemini,
-            path: file,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new("9aeb2942-7c46-47b7-aded-13772d4d4e63", Harness::Gemini, file);
         let adapter = Gemini { roots: vec![] };
         let mut seen = 0usize;
         let mut sink = |_m: Message| {

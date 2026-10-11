@@ -231,14 +231,11 @@ fn conv_ref(kind: Kind, path: &Path, v: &Value) -> Option<SessionRef> {
             .unwrap_or(0),
     };
     Some(SessionRef {
-        id,
-        harness: kind.harness(),
-        path: path.to_path_buf(),
-        cwd: None,
         title,
         created_at: created,
         updated_at: updated,
         message_count,
+        ..SessionRef::new(id, kind.harness(), path.to_path_buf())
     })
 }
 

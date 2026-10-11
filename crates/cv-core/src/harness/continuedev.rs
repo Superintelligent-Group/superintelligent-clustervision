@@ -128,19 +128,12 @@ impl Adapter for Continue {
     /// the next — so peak memory is O(largest item) + the mmap (reclaimable) + the slice vec.
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         let mut s = Session {
-            id: r.id.clone(),
-            harness: Harness::Continue,
             cwd: r.cwd.clone(),
             title: r.title.clone(),
             created_at: r.created_at,
             updated_at: r.updated_at.or_else(|| mtime(&r.path)),
-            model: None,
-            git: None,
-            messages: Vec::new(),
             source_path: Some(r.path.clone()),
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new(r.id.clone(), Harness::Continue)
         };
 
         // Map (or read) the file's raw bytes; the borrowed `Doc` slices into them.
@@ -965,16 +958,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let r = SessionRef {
-            id: "11111111-1111-1111-1111-111111111111".into(),
-            harness: Harness::Continue,
-            path: path.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Continue, path.clone());
         let s = Continue { sessions: None }.parse(&r).unwrap();
         crate::harness::assert_no_flat_keys(&s);
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/Users/me/proj")));
@@ -1001,19 +985,10 @@ mod tests {
 
         // Build a small session: user, assistant w/ a tool call, a tool result.
         let mut session = Session {
-            id: "src".into(),
-            harness: Harness::Continue,
             cwd: Some(PathBuf::from("/Users/me/proj")),
             title: Some("Roundtrip".into()),
-            created_at: None,
-            updated_at: None,
             model: Some("gpt-4o".into()),
-            git: None,
-            messages: Vec::new(),
-            source_path: None,
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("src", Harness::Continue)
         };
 
         let mut user = Message::new(Role::User);
@@ -1053,16 +1028,7 @@ mod tests {
         assert!(res.path.exists());
 
         // Re-parse via this adapter.
-        let r = SessionRef {
-            id: res.new_id.clone(),
-            harness: Harness::Continue,
-            path: res.path.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new(res.new_id.clone(), Harness::Continue, res.path.clone());
         let parsed = Continue { sessions: None }.parse(&r).unwrap();
 
         assert_eq!(parsed.cwd.as_deref(), Some(Path::new("/Users/me/proj")));
@@ -1134,16 +1100,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = SessionRef {
-            id: "s".into(),
-            harness: Harness::Continue,
-            path: path.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new("s", Harness::Continue, path.clone());
 
         // A sink that records every message it sees and stops after the first.
         struct StopFirst {

@@ -1139,21 +1139,7 @@ mod tests {
             (m.role, m.kind, m.origin),
             (Role::System, MessageKind::SystemPrompt, Origin::Harness)
         );
-        let mut s = Session {
-            id: "x".into(),
-            harness: Harness::OpenCode,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            model: None,
-            git: None,
-            system_prompt: None,
-            lineage: Lineage::default(),
-            messages: Vec::new(),
-            source_path: None,
-            extra: Map::new(),
-        };
+        let mut s = Session::new("x", Harness::OpenCode);
         fold_into_session(&mut s, &mut m);
         assert_eq!(s.system_prompt.as_deref(), Some("You are opencode."));
         // the IR diet: a message model equal to the session's is dropped, a different one kept

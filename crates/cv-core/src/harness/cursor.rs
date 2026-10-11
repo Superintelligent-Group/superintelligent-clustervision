@@ -337,19 +337,12 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
         .or_else(|| r.title.clone());
 
     let mut session = Session {
-        id: r.id.clone(),
-        harness: Harness::Cursor,
         cwd: r.cwd.clone(),
         title,
         created_at: created.and_then(ts_from_epoch).or(r.created_at),
         updated_at: updated.and_then(ts_from_epoch).or(r.updated_at),
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path: Some(r.path.clone()),
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(r.id.clone(), Harness::Cursor)
     };
     // Sub-agent lineage: a composer spawned as a sub-agent records `subagentInfo`
     // (`parentComposerId`, the spawning `toolCallId`, the `subagentTypeName` nickname).
@@ -499,10 +492,7 @@ fn bubble_to_message(b: &Value) -> Option<Message> {
             m.usage = Some(Usage {
                 input_tokens: input,
                 output_tokens: output,
-                cache_read_tokens: None,
-                cache_creation_tokens: None,
-                reasoning_tokens: None,
-                cost_usd: None,
+                ..Usage::default()
             });
         }
     }
@@ -642,14 +632,10 @@ fn discover_legacy_workspace(conn: &Connection, db: &Path, cwd: Option<&Path>, o
             .filter(|s| !s.trim().is_empty())
             .map(|s| crate::ir::truncate(s, 80));
         out.push(SessionRef {
-            id: format!("legacy:{tab_id}"),
-            harness: Harness::Cursor,
-            path: db.to_path_buf(),
             cwd: cwd.map(Path::to_path_buf),
             title,
-            created_at: None,
-            updated_at: None,
             message_count: count,
+            ..SessionRef::new(format!("legacy:{tab_id}"), Harness::Cursor, db.to_path_buf())
         });
     }
 }
@@ -673,19 +659,12 @@ fn stream_legacy(conn: &Connection, r: &SessionRef, tab_id: &str, sink: &mut dyn
         .map(str::to_string)
         .or_else(|| r.title.clone());
     let session = Session {
-        id: r.id.clone(),
-        harness: Harness::Cursor,
         cwd: r.cwd.clone(),
         title,
         created_at: r.created_at,
         updated_at: r.updated_at,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path: Some(r.path.clone()),
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(r.id.clone(), Harness::Cursor)
     };
     sink.meta(&session);
     if let Some(bubbles) = tab.get("bubbles").and_then(Value::as_array) {
@@ -758,16 +737,7 @@ mod tests {
     }
 
     fn sref(id: &str) -> SessionRef {
-        SessionRef {
-            id: id.into(),
-            harness: Harness::Cursor,
-            path: PathBuf::from(":memory:"),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        SessionRef::new(id, Harness::Cursor, PathBuf::from(":memory:"))
     }
 
     #[test]

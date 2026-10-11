@@ -542,8 +542,8 @@ fn apply_metadata(m: &mut Message, meta: Value, session_model: Option<&str>) {
             output_tokens: get("outputTokens"),
             cache_read_tokens: get("cacheReadTokens"),
             cache_creation_tokens: get("cacheWriteTokens"),
-            reasoning_tokens: None,
             cost_usd: u.get("cost").and_then(Value::as_f64),
+            ..Usage::default()
         };
         if usage.input_tokens.is_some() || usage.output_tokens.is_some() || usage.cost_usd.is_some() {
             m.usage = Some(usage);
@@ -1182,16 +1182,7 @@ mod tests {
     }
 
     fn sref(id: &str) -> SessionRef {
-        SessionRef {
-            id: id.into(),
-            harness: Harness::Goose,
-            path: PathBuf::from("sessions.db"),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        SessionRef::new(id, Harness::Goose, PathBuf::from("sessions.db"))
     }
 
     #[test]

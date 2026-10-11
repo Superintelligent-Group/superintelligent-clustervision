@@ -320,19 +320,12 @@ fn stream_rows<I: Iterator<Item = Row>>(
     sink: &mut dyn MessageSink,
 ) -> Session {
     let mut s = Session {
-        id: r.id.clone(),
-        harness: Harness::OpenClaw,
         cwd: r.cwd.clone(),
         title: r.title.clone(),
         created_at: r.created_at,
         updated_at: r.updated_at,
-        model: None,
-        git: None,
-        messages: Vec::new(),
         source_path: Some(r.path.clone()),
-        extra: serde_json::Map::new(),
-        system_prompt: None,
-        lineage: crate::ir::Lineage::default(),
+        ..Session::new(r.id.clone(), Harness::OpenClaw)
     };
     let mut header_version: Option<i64> = None;
     let mut meta_sent = false;
@@ -921,8 +914,8 @@ fn parse_usage(usage: &Value) -> Option<Usage> {
         output_tokens: get("output"),
         cache_read_tokens: get("cacheRead"),
         cache_creation_tokens: get("cacheWrite"),
-        reasoning_tokens: None,
         cost_usd: usage.pointer("/cost/total").and_then(Value::as_f64),
+        ..Usage::default()
     };
     let any = u.input_tokens.is_some()
         || u.output_tokens.is_some()
@@ -1545,16 +1538,7 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/openclaw")
             .join(name);
-        SessionRef {
-            id: "test-session".into(),
-            harness: Harness::OpenClaw,
-            path,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        SessionRef::new("test-session", Harness::OpenClaw, path)
     }
 
     fn parse_fixture(name: &str) -> Session {
@@ -2032,16 +2016,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s-sql.jsonl");
         fs::write(&path, branchy_events().join("\n") + "\n").unwrap();
-        let r = SessionRef {
-            id: "s-sql".into(),
-            harness: Harness::OpenClaw,
-            path: path.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new("s-sql", Harness::OpenClaw, path.clone());
         let s = OpenClaw { roots: vec![] }.parse(&r).unwrap();
         let ids: Vec<&str> = s.messages.iter().filter_map(|m| m.id.as_deref()).collect();
         assert_eq!(ids, ["u1", "a1", "u2", "c1", "a3"]);
@@ -2141,16 +2116,7 @@ mod tests {
         bytes.push(b'\n');
         fs::write(&path, &bytes).unwrap();
 
-        let r = SessionRef {
-            id: "s1".into(),
-            harness: Harness::OpenClaw,
-            path,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new("s1", Harness::OpenClaw, path);
         let s = OpenClaw { roots: vec![] }.parse(&r).unwrap();
         let texts: Vec<_> = s.messages.iter().filter_map(|m| m.text()).collect();
         assert_eq!(

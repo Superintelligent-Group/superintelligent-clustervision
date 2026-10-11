@@ -809,8 +809,7 @@ fn wire_usage(tu: &Value) -> Usage {
         output_tokens: g("output"),
         cache_read_tokens: g("input_cache_read"),
         cache_creation_tokens: g("input_cache_creation"),
-        reasoning_tokens: None,
-        cost_usd: None,
+        ..Usage::default()
     }
 }
 
@@ -1214,16 +1213,7 @@ mod tests {
             r#"{"role":"_usage","token_count":1234}"#,
         ];
         let dir = write_temp(&format!("{id}.jsonl"), &(lines.join("\n") + "\n"));
-        let r = SessionRef {
-            id: id.into(),
-            harness: Harness::Kimi,
-            path: dir.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new(id, Harness::Kimi, dir.clone());
         let adapter = Kimi {
             sessions: None,
             root: None,
@@ -1287,14 +1277,8 @@ mod tests {
             return;
         }
         let r = SessionRef {
-            id: "11111111-1111-1111-1111-111111111111".into(),
-            harness: Harness::Kimi,
-            path: dir.clone(),
             cwd: Some(PathBuf::from("/proj")),
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
+            ..SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Kimi, dir.clone())
         };
         let adapter = Kimi {
             sessions: None,
@@ -1332,14 +1316,8 @@ mod tests {
             return;
         }
         let r = SessionRef {
-            id: "11111111-1111-1111-1111-111111111111".into(),
-            harness: Harness::Kimi,
-            path: dir.clone(),
             cwd: Some(PathBuf::from("/proj")),
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
+            ..SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Kimi, dir.clone())
         };
         let s = Kimi {
             sessions: None,
@@ -1380,16 +1358,7 @@ mod tests {
             return;
         }
         let id = "22222222-2222-2222-2222-222222222222";
-        let r = SessionRef {
-            id: id.into(),
-            harness: Harness::Kimi,
-            path: dir.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        };
+        let r = SessionRef::new(id, Harness::Kimi, dir.clone());
         let s = Kimi {
             sessions: None,
             root: None,

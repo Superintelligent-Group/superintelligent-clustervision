@@ -181,14 +181,9 @@ fn parse_ref_finds_conversation_in_file_and_sniffs_kind() {
     assert!(first.get("chat_messages").is_some() && first.get("mapping").is_none());
 
     let r = SessionRef {
-        id: "b".into(),
-        harness: Harness::ClaudeExport,
-        path: path.clone(),
-        cwd: None,
         title: Some("second".into()),
-        created_at: None,
-        updated_at: None,
         message_count: 1,
+        ..SessionRef::new("b", Harness::ClaudeExport, path.clone())
     };
     let s = parse_ref(Kind::Claude, &r).unwrap();
     assert_eq!(s.id, "b");

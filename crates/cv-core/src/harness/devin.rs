@@ -431,14 +431,11 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude:
         )
         .unwrap_or_default();
     let parent = SessionRef {
-        id: session_id.to_string(),
-        harness: Harness::Devin,
-        path: db.to_path_buf(),
         cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
         title,
         created_at: created.and_then(ts_from_epoch),
         updated_at: last.and_then(ts_from_epoch),
-        message_count: 0,
+        ..SessionRef::new(session_id.to_string(), Harness::Devin, db.to_path_buf())
     };
     let forest = load_forest(&conn, session_id);
     let mut out = Vec::new();
@@ -1191,16 +1188,7 @@ mod tests {
     }
 
     fn sref(id: &str) -> SessionRef {
-        SessionRef {
-            id: id.into(),
-            harness: Harness::Devin,
-            path: fixture(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        SessionRef::new(id, Harness::Devin, fixture())
     }
 
     fn dbag(s: &Session) -> &serde_json::Map<String, Value> {

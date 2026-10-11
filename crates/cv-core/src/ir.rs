@@ -229,6 +229,28 @@ impl Lineage {
 pub const CV_NAMESPACE: &str = "cv";
 
 impl Session {
+    /// An empty session of `harness`: every optional field `None`, no messages, no extras. The one
+    /// way an adapter spells a fresh session — fill in what the store says with struct-update
+    /// syntax (`Session { cwd, title, ..Session::new(id, h) }`) rather than restating thirteen
+    /// `None`s.
+    pub fn new(id: impl Into<String>, harness: Harness) -> Session {
+        Session {
+            id: id.into(),
+            harness,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            model: None,
+            git: None,
+            system_prompt: None,
+            lineage: Lineage::default(),
+            messages: Vec::new(),
+            source_path: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
     /// cv's own fact bag — `extra["cv"]` as an object, created on demand. For things cv produced
     /// itself; anything read out of a harness store belongs in that harness's bag instead.
     pub fn cv_extra_mut(&mut self) -> &mut serde_json::Map<String, serde_json::Value> {
@@ -829,6 +851,22 @@ impl Message {
 }
 
 impl SessionRef {
+    /// A bare ref — the three facts discovery always has (id, harness, where on disk) and nothing
+    /// else known yet. Adapters fill the rest with struct-update syntax
+    /// (`SessionRef { cwd, title, ..SessionRef::new(id, h, path) }`).
+    pub fn new(id: impl Into<String>, harness: Harness, path: impl Into<PathBuf>) -> SessionRef {
+        SessionRef {
+            id: id.into(),
+            harness,
+            path: path.into(),
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        }
+    }
+
     /// A ref for a transcript named by path alone: the id is the file stem, the harness is the
     /// caller's, and nothing else is known (no cwd/title/timestamps, `message_count` 0). The one
     /// spelling for "read this file as a session" — a CLI given a path, a test over a fixture, a
@@ -840,16 +878,7 @@ impl SessionRef {
             .and_then(|s| s.to_str())
             .unwrap_or("session")
             .to_string();
-        SessionRef {
-            id,
-            harness,
-            path,
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        SessionRef::new(id, harness, path)
     }
 }
 
@@ -1114,19 +1143,9 @@ mod tests {
             m
         };
         let mut s = Session {
-            id: "s".into(),
-            harness: Harness::Claude,
-            cwd: None,
             title: Some("explicit".into()),
-            created_at: None,
-            updated_at: None,
-            model: None,
-            git: None,
             messages: vec![user("<system-reminder>noise</system-reminder>\n\nask about otters")],
-            source_path: None,
-            extra: Default::default(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
+            ..Session::new("s", Harness::Claude)
         };
         // Explicit title wins.
         assert_eq!(s.synth_title().as_deref(), Some("explicit"));

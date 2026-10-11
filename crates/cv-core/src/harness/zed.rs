@@ -815,16 +815,7 @@ mod tests {
     }
 
     fn sref(id: &str) -> SessionRef {
-        SessionRef {
-            id: id.into(),
-            harness: Harness::Zed,
-            path: PathBuf::from(":memory:"),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
+        SessionRef::new(id, Harness::Zed, PathBuf::from(":memory:"))
     }
 
     /// A representative legacy (0.2.0) thread: user text, assistant thinking+text+tool call with
