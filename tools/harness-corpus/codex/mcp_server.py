@@ -30,5 +30,10 @@ for line in sys.stdin:
         # structuredContent as an object: Gemini CLI's MCP client otherwise parses the text "5" as JSON
         # and rejects the number ("expected record").
         reply(i, {"content": [{"type": "text", "text": str(s)}], "structuredContent": {"sum": s}, "isError": False})
-    else:
+    elif meth == "ping":
         reply(i, {})
+    else:
+        # Method not found, per JSON-RPC. MCP 2026-07-28 clients (Goose 1.54) open with
+        # `server/discover` and fall back to `initialize` only on this error; a `{}` result fails them.
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": i, "error": {"code": -32601, "message": f"no method {meth}"}}) + "\n")
+        sys.stdout.flush()
