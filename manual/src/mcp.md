@@ -279,7 +279,6 @@ ever disagree the live reply is the authority.
 5. A sibling that ran `await_omen(regex='auth done', cwd_contains='/myproj')` unblocks and picks
    up the next task; the orchestrator sees the close in `cv task events --since <id>`.
 
-`board_post`, `board_read`, `board_await`, `board_request`, `board_reply`, `board_replies`,
-`board_unanswered`, `board_claim`, `board_release`, `board_claims`, `board_who`,
-`board_heartbeat` and `board_ack` were removed in 0.15.0 with the coordination board; calling
+The thirteen board tools (post, read, await, request, reply, replies, unanswered, claim,
+release, claims, who, heartbeat, ack) were removed in 0.15.0 with the coordination board; calling
 one errors with a pointer at the task tools.
