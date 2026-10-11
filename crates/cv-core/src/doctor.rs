@@ -9,11 +9,12 @@
 //! fixed block (base prompt, skills, MCP tool schemas) can't be itemized: the transcript records
 //! the conversation, not the system block, so it's only *sized* from token usage, not broken down.
 
-use crate::compaction;
-use crate::ir::{est_tokens, tool_index, Block, Message, MessageKind, Role, Session};
+use crate::compaction::CompactionSink;
+use crate::ir::{est_tokens, is_mcp_tool, Block, Message, MessageKind, Role};
+use crate::stream::{Flow, MessageSink};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Claude tokenizer ≈ 3.3–3.7 bytes/token.
 const BYTES_PER_TOKEN: f64 = 3.5;
@@ -66,95 +67,20 @@ pub struct Report {
 }
 
 impl Report {
-    /// Fold one parsed session into the report: content attribution + compaction tally.
-    pub fn observe(&mut self, session: &Session) {
+    /// Start folding one session into the report. Stream its messages into the returned sink (a
+    /// [`ParseOptions::full`](crate::ParseOptions::full) pass: attribution counts decoded text,
+    /// and the attachment kind and compaction metadata live in `extra`), then call
+    /// [`SessionPass::finish`]. One pass, one message in memory at a time.
+    pub fn session(&mut self, source: Option<std::path::PathBuf>) -> SessionPass<'_> {
         self.sessions += 1;
-        self.messages += session.messages.len() as u64;
-
-        // ToolResult blocks usually omit the tool name but carry `tool_use_id`; the matching
-        // ToolUse has {id, name}. Index first so results attribute to real tools (and MCP names)
-        // instead of all collapsing into "(unknown tool)".
-        let calls = tool_index(&session.messages);
-
-        let mut session_startup: Option<u64> = None;
-        for m in &session.messages {
-            if let Some(u) = &m.usage {
-                let total = u.prompt_tokens();
-                if total > 0 {
-                    self.peak_ctx = self.peak_ctx.max(total);
-                    if session_startup.is_none() {
-                        session_startup = Some(total); // first turn ≈ system+tools+rules+first msg
-                    }
-                }
-            }
-            for b in &m.content {
-                // What this block costs, by the one shared rule; the arms below only decide which
-                // bucket the number lands in.
-                let t = est_tokens(b, BYTES_PER_TOKEN);
-                match b {
-                    Block::Text { .. } => {
-                        match (m.role, m.kind) {
-                            // Harness-side notices, errors, markers and carriers are never sent to
-                            // the model: they cost no context.
-                            (_, MessageKind::Notice)
-                            | (_, MessageKind::Error)
-                            | (_, MessageKind::Carrier)
-                            | (_, MessageKind::CompactionBoundary)
-                            | (_, MessageKind::Branch)
-                            | (_, MessageKind::ModelChange) => {}
-                            // Context the harness injected into the prompt (system reminders, hook
-                            // output, turn context): real per-turn context, itemized by kind — it
-                            // used to hide inside "fixed overhead".
-                            (_, MessageKind::InjectedContext) => {
-                                self.attachments += t;
-                                *self.by_attachment.entry(injected_kind(m)).or_default() += t;
-                            }
-                            (Role::Assistant, _) => self.assistant_text += t,
-                            (Role::System, _) => self.system_text += t,
-                            _ => self.user_text += t,
-                        }
-                    }
-                    Block::Thinking { .. } => self.thinking += t,
-                    Block::ToolUse { name, .. } => {
-                        self.tool_call_args += t;
-                        let e = self.by_tool.entry(name.clone()).or_default();
-                        e.calls += 1;
-                        if name.starts_with("mcp__") {
-                            e.is_mcp = true;
-                        }
-                    }
-                    Block::ToolResult {
-                        tool_name, tool_use_id, ..
-                    } => {
-                        self.tool_results += t;
-                        let name = tool_name
-                            .clone()
-                            .or_else(|| calls.get(tool_use_id.as_str()).map(|c| c.name.to_string()))
-                            .unwrap_or_else(|| "(unknown tool)".to_string());
-                        let mcp = name.starts_with("mcp__");
-                        let e = self.by_tool.entry(name).or_default();
-                        e.result_tokens += t;
-                        if mcp {
-                            e.is_mcp = true;
-                        }
-                    }
-                    Block::Image { .. } => self.images += t,
-                    Block::File { .. } => {}
-                }
-            }
+        SessionPass {
+            rep: self,
+            resolver: crate::lazy::Resolver::new(source),
+            names: HashMap::new(),
+            unnamed: HashMap::new(),
+            startup: None,
+            compactions: CompactionSink::new(false),
         }
-
-        for c in compaction::detect_in_session(session, false) {
-            self.compactions += 1;
-            if c.trigger.as_deref() == Some("auto") {
-                self.auto_compactions += 1;
-            }
-            if let Some(p) = c.pre_tokens {
-                self.pre_tokens.push(p);
-            }
-        }
-
-        self.startup_ctx = self.startup_ctx.max(session_startup.unwrap_or(0));
     }
 
     /// Total measured conversational tokens across all sources.
@@ -169,7 +95,7 @@ impl Report {
             + self.attachments
     }
 
-    /// Tool-result tokens attributable to MCP tools (name `mcp__*`).
+    /// Tool-result tokens attributable to MCP tools ([`is_mcp_tool`]).
     pub fn mcp_tool_results(&self) -> u64 {
         self.by_tool
             .values()
@@ -210,5 +136,167 @@ impl Report {
             "tool_results_builtin": self.tool_results.saturating_sub(mcp),
             "by_tool": tools,
         })
+    }
+}
+
+/// One session streaming into a [`Report`] (see [`Report::session`]): content attribution, the
+/// usage-derived context sizing and the compaction tally, folded per message.
+pub struct SessionPass<'a> {
+    rep: &'a mut Report,
+    resolver: crate::lazy::Resolver,
+    /// `tool_use_id` → tool name, the last call per id wins. A result usually carries only the
+    /// id, so results attribute to real tools (and MCP names), not "(unknown tool)".
+    names: HashMap<String, String>,
+    /// Result tokens by `tool_use_id` for results that named no tool, attributed at
+    /// [`finish`](SessionPass::finish): a call can stream past after its result (a resumed
+    /// transcript re-copies history), so the id is resolved against the whole session.
+    unnamed: HashMap<String, u64>,
+    /// The first turn's total context (≈ system + tools + rules + first message).
+    startup: Option<u64>,
+    compactions: CompactionSink,
+}
+
+impl SessionPass<'_> {
+    /// Fold the session's compactions and fixed-overhead estimate into the report.
+    pub fn finish(self) {
+        let rep = self.rep;
+        for (id, t) in self.unnamed {
+            let name = self.names.get(&id).map_or("(unknown tool)", String::as_str);
+            let e = rep.by_tool.entry(name.to_string()).or_default();
+            e.result_tokens += t;
+            e.is_mcp |= is_mcp_tool(name);
+        }
+        for c in self.compactions.into_boundaries() {
+            rep.compactions += 1;
+            if c.trigger.as_deref() == Some("auto") {
+                rep.auto_compactions += 1;
+            }
+            if let Some(p) = c.pre_tokens {
+                rep.pre_tokens.push(p);
+            }
+        }
+        rep.startup_ctx = rep.startup_ctx.max(self.startup.unwrap_or(0));
+    }
+
+    fn observe(&mut self, m: &Message) {
+        let rep = &mut *self.rep;
+        rep.messages += 1;
+        if let Some(u) = &m.usage {
+            let total = u.prompt_tokens();
+            if total > 0 {
+                rep.peak_ctx = rep.peak_ctx.max(total);
+                self.startup.get_or_insert(total);
+            }
+        }
+        for b in &m.content {
+            // What this block costs, by the one shared rule; the arms below only decide which
+            // bucket the number lands in.
+            let t = est_tokens(b, BYTES_PER_TOKEN);
+            match b {
+                Block::Text { .. } => {
+                    match (m.role, m.kind) {
+                        // Harness-side notices, errors, markers and carriers are never sent to
+                        // the model: they cost no context.
+                        (_, MessageKind::Notice)
+                        | (_, MessageKind::Error)
+                        | (_, MessageKind::Carrier)
+                        | (_, MessageKind::CompactionBoundary)
+                        | (_, MessageKind::Branch)
+                        | (_, MessageKind::ModelChange) => {}
+                        // Context the harness injected into the prompt (system reminders, hook
+                        // output, turn context): real per-turn context, itemized by kind — it
+                        // used to hide inside "fixed overhead".
+                        (_, MessageKind::InjectedContext) => {
+                            rep.attachments += t;
+                            *rep.by_attachment.entry(injected_kind(m)).or_default() += t;
+                        }
+                        (Role::Assistant, _) => rep.assistant_text += t,
+                        (Role::System, _) => rep.system_text += t,
+                        _ => rep.user_text += t,
+                    }
+                }
+                Block::Thinking { .. } => rep.thinking += t,
+                Block::ToolUse { id, name, .. } => {
+                    rep.tool_call_args += t;
+                    self.names.insert(id.clone(), name.clone());
+                    let e = rep.by_tool.entry(name.clone()).or_default();
+                    e.calls += 1;
+                    e.is_mcp |= is_mcp_tool(name);
+                }
+                Block::ToolResult {
+                    tool_name, tool_use_id, ..
+                } => {
+                    rep.tool_results += t;
+                    match tool_name {
+                        Some(name) => {
+                            let e = rep.by_tool.entry(name.clone()).or_default();
+                            e.result_tokens += t;
+                            e.is_mcp |= is_mcp_tool(name);
+                        }
+                        None => *self.unnamed.entry(tool_use_id.clone()).or_default() += t,
+                    }
+                }
+                Block::Image { .. } => rep.images += t,
+                Block::File { .. } => {}
+            }
+        }
+    }
+}
+
+impl MessageSink for SessionPass<'_> {
+    fn message(&mut self, mut m: Message) -> Flow {
+        m.materialize(&self.resolver);
+        self.observe(&m);
+        self.compactions.message(m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(id: &str, body: &str) -> Message {
+        let mut m = Message::new(Role::Tool);
+        m.content.push(Block::ToolResult {
+            tool_use_id: id.into(),
+            content: body.to_string().into(),
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: None,
+        });
+        m
+    }
+
+    fn call(id: &str, name: &str) -> Message {
+        let mut m = Message::new(Role::Assistant);
+        m.content.push(Block::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: json!({}),
+            namespace: None,
+        });
+        m
+    }
+
+    /// A result that names no tool attributes to its call's tool even when the call streams past
+    /// after it (a resumed transcript re-copies history); an id no call carries is unknown.
+    #[test]
+    fn unnamed_results_resolve_against_the_whole_session() {
+        let mut rep = Report::default();
+        let mut pass = rep.session(None);
+        for m in [
+            result("t1", &"x".repeat(70)),
+            call("t1", "mcp__s__q"),
+            result("t9", "y"),
+        ] {
+            let _ = pass.message(m);
+        }
+        pass.finish();
+        let mcp = &rep.by_tool["mcp__s__q"];
+        assert_eq!((mcp.calls, mcp.result_tokens, mcp.is_mcp), (1, 20, true));
+        assert_eq!(rep.by_tool["(unknown tool)"].result_tokens, 1);
+        assert_eq!(rep.mcp_tool_results(), 20);
+        assert_eq!((rep.sessions, rep.messages), (1, 3));
     }
 }

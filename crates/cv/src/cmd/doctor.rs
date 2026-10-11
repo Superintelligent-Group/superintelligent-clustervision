@@ -52,11 +52,13 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
     for r in &targets {
         let (rr, adapter) =
             cv_core::find(&r.id, Some(r.harness))?.with_context(|| format!("could not load session {}", r.id))?;
-        let session = adapter.parse(&rr)?;
+        // Streamed, not parsed whole: a 700 MB rollout held 1.9 GB resident as a `Session`.
+        let mut pass = rep.session(Some(rr.path.clone()));
+        cv_core::stream::stream_counted(adapter.as_ref(), &rr, &cv_core::ParseOptions::full(), &mut pass)?;
+        pass.finish();
         if label.is_empty() {
             label = crate::short_id(&rr.id);
         }
-        rep.observe(&session);
     }
 
     if json {

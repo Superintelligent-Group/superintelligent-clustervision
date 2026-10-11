@@ -983,6 +983,13 @@ pub fn est_tokens(block: &Block, bytes_per_token: f64) -> u64 {
     }
 }
 
+/// Whether a tool is an MCP server's: Claude Code names those `mcp__<server>__<tool>`. Decided by
+/// name, not by `Block::ToolUse::namespace`: the Claude adapter sets no namespace on MCP calls,
+/// and Codex's one namespace (`collaboration`) is its built-in agent tools, not MCP.
+pub fn is_mcp_tool(name: &str) -> bool {
+    name.starts_with("mcp__")
+}
+
 /// One tool call as [`tool_index`] sees it: where it was made, what was called, with what.
 #[derive(Debug, Clone, Copy)]
 pub struct ToolCall<'a> {
