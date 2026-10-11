@@ -85,8 +85,8 @@ fn dependencies_stay_within_the_allowlist() {
 const PURE_MODULES: &[&str] = &[
     "src/task/reduce.rs",
     "src/task/model.rs",
-    "src/task/stats.rs",
-    "src/task/provenance.rs",
+    "src/task/project.rs",
+    "src/task/views.rs",
     "src/sanitize.rs",
 ];
 const FORBIDDEN: &[&str] = &["std::process", "std::net", "std::fs"];
