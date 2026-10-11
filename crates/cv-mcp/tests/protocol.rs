@@ -471,7 +471,7 @@ fn task_tools_open_claim_race_done() {
     let (text, is_err) = s.call_tool(8, "task_list", json!({"state": "redy"}));
     assert!(is_err, "{text}");
     assert!(
-        text.contains("redy") && text.contains("awaiting_review"),
+        text.contains("redy") && text.contains("claimed"),
         "the error names the typo and the vocabulary: {text}"
     );
 
@@ -494,14 +494,11 @@ fn task_tools_open_claim_race_done() {
         "MCP rows ship no timestamps: {text}"
     );
 
-    // Debt: the shared report envelope, loud about the never-run verifier.
+    // The retired land-facet tools error with a pointer, never a bare "unknown tool".
     let (text, is_err) = s.call_tool(12, "task_debt", json!({}));
-    assert!(!is_err, "{text}");
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert!(v["debt"].as_array().unwrap().is_empty(), "{text}");
-    assert!(v["suspects"].as_array().unwrap().is_empty(), "{text}");
+    assert!(is_err, "{text}");
     assert!(
-        v["verify_warning"].as_str().unwrap_or_default().contains("NEVER"),
+        text.contains("removed in 0.15.0") && text.contains("task_done"),
         "{text}"
     );
 }

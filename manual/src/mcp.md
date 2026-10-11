@@ -295,21 +295,18 @@ shapes. Two things to know up front:
 
 - **Identity.** The MCP server inherits the agent's environment, so a spawner-set
   `CV_ENDPOINT=agent:<name>` makes every bare call record the right actor. Identity-*bearing*
-  tools (`task_claim`, `task_release`, `task_propose`, `task_pass`, `task_refute`, and
-  `task_inbox`'s default `who`) **error** when neither `from` nor `CV_ENDPOINT` is set;
-  bookkeeping tools fall back to the `"agent"` sink.
-- **Law 1 at the tool surface.** There is deliberately *no* tool that records a merge or a
-  land. `task_verify` runs the git verifier; that is the only way landing state changes.
+  tools (`task_claim`, `task_release`, and `task_inbox`'s default `who`) **error** when neither
+  `from` nor `CV_ENDPOINT` is set; bookkeeping tools fall back to the `"agent"` sink.
 
 | Tool | Required args | Optional args | Purpose / when to use |
 |------|---------------|---------------|------------------------|
-| `task_open` | `title` | `body`, `repo`, `issue`, `channel` (`tasks`), `assignee`, `from` | Open a durable task. Pass `repo` (absolute path) to enable propose/verify/debt. |
-| `task_list` | — | `state`, `assignee`, `repo`, `all` (`false`) | List tasks (non-terminal by default). An unknown `state` is an error naming the vocabulary, never a silent `[]`. |
-| `task_show` | `id` | — | One task's full projection: state, revisions, review evidence, landed observation, notes, recorded issues. |
+| `task_open` | `title` | `body`, `repo`, `issue`, `channel` (`tasks`), `assignee`, `from` | Open a durable task. |
+| `task_list` | — | `state`, `assignee`, `repo`, `tag`, `all` (`false`) | List tasks (non-terminal by default). An unknown `state` is an error naming the vocabulary, never a silent `[]`. |
+| `task_show` | `id` | — | One task's full projection: state, assignee, notes, tags, blockers, the decision facet, the pinned STATUS. |
 | `task_claim` | `id` | `from`* | Claim an open task — durable, race-free, first writer wins. |
 | `task_release` | `id` | `from`* | Release your claim back to open. |
 | `task_note` | `id`, `text` | `session_ref`, `from` | Progress note; never changes state. |
-| `task_done` | `id` | `observed`, `from` | Complete a **non-code** task. Refused while a revision is live. |
+| `task_done` | `id` | `observed`, `from` | Complete a task. Self-reported and labeled so; `observed` is free text. Refused on a decision. |
 | `task_abandon` | `id` | `reason`, `from` | Kill a task (always allowed on a non-terminal task). |
 | `task_propose` | `id`, `branch` | `upstream` (`origin/main`), `sha`, `worktree`, `reviewer`, `session_ref`, `from`* | Attach a reviewed revision: cv resolves the tip and computes the range patch-id **from git itself**. Re-proposing supersedes the prior revision (the only cure for a refute). |
 | `task_pass` | `id` | `session`, `from`* | Review PASS (you must be the active reviewer). Pass your cv session id so the advisory cross-family independence check can run. |
