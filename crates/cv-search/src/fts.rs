@@ -154,6 +154,84 @@ fn open_existing(dir: &Path) -> Result<(Index, Fields)> {
 
 const COMMIT_EVERY: usize = 256;
 
+/// A segment at most this many bytes on disk sits in the bottom merge tier; each tier above holds
+/// segments [`TIER_FANOUT`] times larger than the one below.
+const TIER_FLOOR: u64 = 8 << 20;
+
+/// How many segments a tier holds before [`compact`] merges them into one.
+const TIER_FANOUT: usize = 8;
+
+/// A segment whose deleted-doc share exceeds this is rewritten alone, dropping the dead docs (an
+/// actively-written session is re-indexed on every run, so its old docs pile up as tombstones).
+const DEAD_RATIO: f32 = 0.5;
+
+/// A writer that never merges on its own. tantivy's default `LogMergePolicy` tiers segments by doc
+/// count with a 10,000-doc floor, and this index has ~31k docs in all (a doc is a 4 MB chunk), so
+/// every segment but the largest shares one tier: every commit started a background merge of
+/// ~1.2 GB that ran ~11 s at ~1 GB resident — and `cv index` exited first, abandoning it, so the
+/// next run started it again. Merging is [`compact`]'s job, sized by bytes, run to completion.
+fn open_writer(index: &Index, heap: usize) -> Result<IndexWriter> {
+    let writer: IndexWriter = index.writer(heap).context("creating tantivy index writer")?;
+    writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+    Ok(writer)
+}
+
+/// Merge the committed segments by size tier, synchronously: any tier holding [`TIER_FANOUT`]
+/// segments becomes one segment, and a segment past [`DEAD_RATIO`] is rewritten alone, until no
+/// rule fires. An unchanged index merges nothing; each byte is rewritten about once per tier it
+/// climbs, so the cost is amortized over the runs that wrote it. Returns the merges run.
+fn compact(dir: &Path, index: &Index, writer: &mut IndexWriter) -> Result<usize> {
+    let bytes = |m: &tantivy::index::SegmentMeta| -> u64 {
+        m.list_files()
+            .iter()
+            .filter_map(|f| std::fs::metadata(dir.join(f)).ok())
+            .map(|md| md.len())
+            .sum()
+    };
+    let tier = |b: u64| -> u32 {
+        let mut t = 0;
+        let mut cap = TIER_FLOOR * TIER_FANOUT as u64;
+        while b > cap {
+            t += 1;
+            cap = cap.saturating_mul(TIER_FANOUT as u64);
+        }
+        t
+    };
+    let mut merges = 0;
+    loop {
+        let metas = index.searchable_segment_metas().context("listing segments")?;
+        let mut tiers: std::collections::BTreeMap<u32, Vec<tantivy::index::SegmentId>> = Default::default();
+        let mut pick: Option<Vec<tantivy::index::SegmentId>> = None;
+        for m in &metas {
+            if m.max_doc() > 0 && m.num_deleted_docs() as f32 / m.max_doc() as f32 > DEAD_RATIO {
+                pick = Some(vec![m.id()]);
+                break;
+            }
+            tiers.entry(tier(bytes(m))).or_default().push(m.id());
+        }
+        let pick = pick.or_else(|| tiers.into_values().find(|ids| ids.len() >= TIER_FANOUT));
+        let Some(ids) = pick else { break };
+        writer.merge(&ids).wait().context("merging segments")?;
+        merges += 1;
+        // A merge tantivy declined leaves its inputs in place; stop rather than pick them forever.
+        let after: HashSet<_> = index
+            .searchable_segment_ids()
+            .context("listing segments")?
+            .into_iter()
+            .collect();
+        if ids.iter().all(|id| after.contains(id)) {
+            break;
+        }
+    }
+    if merges > 0 {
+        writer
+            .garbage_collect_files()
+            .wait()
+            .context("collecting merged-away segment files")?;
+    }
+    Ok(merges)
+}
+
 /// Max searchable bytes per tantivy document. A session's body is flushed into **multiple** docs of
 /// at most this size (all sharing the session id), so the index never holds a whole large session's
 /// body at once — search dedups hits back to one row per id. 4 MB keeps per-doc memory bounded while
@@ -189,7 +267,7 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     use cv_core::ParseOptions;
 
     let (index, f) = open_or_create(dir)?;
-    let mut writer: IndexWriter = index.writer(50_000_000).context("creating tantivy index writer")?;
+    let mut writer = open_writer(&index, 50_000_000)?;
 
     if rebuild {
         writer.delete_all_documents().context("clearing index")?;
@@ -214,7 +292,6 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     // One query for the whole event skip-table — the per-session checks would open (and run DDL
     // on) a fresh sqlite connection per call, which a ~2,400-session sweep pays ~2,400×.
     let event_sync = cv_core::events::SyncTable::load();
-
     for r in cv_core::discover_all() {
         total += 1;
         seen.insert(r.id.clone());
@@ -313,6 +390,7 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     };
 
     writer.commit().context("committing index")?;
+    compact(dir, &index, &mut writer)?;
     if !rebuild {
         eprintln!(
             "  ↳ index: {changed} changed/new, {removed} removed, {} unchanged",
@@ -816,7 +894,7 @@ pub fn has_subagent_docs(dir: &Path) -> bool {
 #[cfg(test)]
 pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool) -> Result<usize> {
     let (index, f) = open_or_create(dir)?;
-    let mut writer: IndexWriter = index.writer(50_000_000).context("creating tantivy index writer")?;
+    let mut writer = open_writer(&index, 50_000_000)?;
     writer.delete_all_documents().context("clearing index")?;
     for r in refs {
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
@@ -853,7 +931,7 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
 #[cfg(test)]
 pub(crate) fn index_refs_incremental(dir: &Path, refs: &[cv_core::SessionRef]) -> Result<usize> {
     let (index, f) = open_or_create(dir)?;
-    let mut writer: IndexWriter = index.writer(50_000_000).context("creating tantivy index writer")?;
+    let mut writer = open_writer(&index, 50_000_000)?;
     let (existing, folded) = read_indexed_sigs(&index, &f).unwrap_or_default();
     let mut seen: HashSet<String> = HashSet::new();
     let mut changed = 0usize;
@@ -900,7 +978,7 @@ pub(crate) fn index_refs_with_subagents(dir: &Path, refs: &[cv_core::SessionRef]
     // First the top-level pass (clears + indexes the parents).
     index_refs(dir, refs, catalog)?;
     let (index, f) = open_or_create(dir)?;
-    let mut writer: IndexWriter = index.writer(50_000_000).context("creating tantivy index writer")?;
+    let mut writer = open_writer(&index, 50_000_000)?;
     let (existing, _folded) = read_indexed_sigs(&index, &f).unwrap_or_default();
     let event_sync = cv_core::events::SyncTable::load();
     let mut folded = 0usize;
@@ -1167,7 +1245,7 @@ fn window(body: &str, pos: usize, len: usize) -> String {
 #[allow(dead_code)]
 pub fn delete(dir: &Path, id: &str) -> Result<()> {
     let (index, f) = open_existing(dir)?;
-    let mut writer: IndexWriter = index.writer(15_000_000)?;
+    let mut writer = open_writer(&index, 15_000_000)?;
     writer.delete_term(Term::from_field_text(f.id, id));
     writer.commit()?;
     Ok(())
@@ -2009,5 +2087,34 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    /// One commit per run leaves one small segment per run: the writer itself never merges them
+    /// (a background merge outlived by the process is the 11 s / 1 GB `cv index` used to abandon),
+    /// so `compact` merges a full tier to one segment, keeps every doc findable, and then has
+    /// nothing left to do on an unchanged index.
+    #[test]
+    fn compact_merges_a_full_tier_once_and_then_rests() {
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        for i in 0..TIER_FANOUT {
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.id, format!("s{i}"));
+            doc.add_text(f.body, format!("zqtier{i} common"));
+            writer.add_document(doc).unwrap();
+            writer.commit().unwrap();
+        }
+        assert_eq!(index.searchable_segment_ids().unwrap().len(), TIER_FANOUT);
+        assert_eq!(compact(&dir, &index, &mut writer).unwrap(), 1);
+        assert_eq!(index.searchable_segment_ids().unwrap().len(), 1);
+        assert_eq!(
+            compact(&dir, &index, &mut writer).unwrap(),
+            0,
+            "an unchanged index merges nothing"
+        );
+        let hits = text_search(&dir, "common", 50).unwrap();
+        assert_eq!(hits.len(), TIER_FANOUT);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
