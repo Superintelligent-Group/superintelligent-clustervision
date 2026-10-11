@@ -27,9 +27,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::ir::{Harness, SessionRef};
-use crate::lanes::{lanes_of, Lane};
-
 /// One session transcript in the store.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionFile {
@@ -44,19 +41,6 @@ pub struct SessionFile {
 impl SessionFile {
     pub fn subagents_dir(&self) -> PathBuf {
         self.project_dir.join(&self.session_id).join("subagents")
-    }
-
-    fn as_ref(&self) -> SessionRef {
-        SessionRef {
-            id: self.session_id.clone(),
-            harness: Harness::Claude,
-            path: self.path.clone(),
-            cwd: None,
-            title: None,
-            created_at: None,
-            updated_at: None,
-            message_count: 0,
-        }
     }
 }
 
@@ -126,12 +110,6 @@ fn roots_display(roots: &[PathBuf]) -> String {
         .map(|r| r.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// The project dir Claude Code uses for a working directory (symlinks resolved, as Claude does).
-pub fn project_dir_for_cwd(root: &Path, cwd: &Path) -> PathBuf {
-    let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    root.join(crate::emit::claude_encode_cwd(&real))
 }
 
 /// A session by full id or unique prefix, anywhere under `roots`.
@@ -423,45 +401,6 @@ pub fn execute(p: &Plan, write: bool, force: bool) -> Result<Adopted> {
         stamped: r.stamped,
         bytes: r.body.len(),
     })
-}
-
-/// Lanes of `session` keyed for display: status, last text, stranded — from [`lanes_of`].
-pub fn lanes_of_session(session: &SessionFile) -> Vec<Lane> {
-    lanes_of(&session.as_ref())
-}
-
-/// A sub-agent left unfinished by a session that is no longer the live one.
-#[derive(Debug, Clone, Serialize)]
-pub struct Orphan {
-    pub session_id: String,
-    pub lane: Lane,
-}
-
-/// Unfinished sub-agents of the `recent` most recently written sessions of a project, excluding
-/// `live`. Unfinished is [`Lane::is_done`]'s complement on the top-level agents: the harness
-/// recorded no completion (`running` — the transcript ends mid-work), recorded it stopped, killed
-/// or failed it (a session that exits sends one `stopped` notice naming every lane it abandons),
-/// or it completed while parked on a promise (`stranded`).
-pub fn orphans(project_dir: &Path, live: &str, recent: usize) -> Vec<Orphan> {
-    let mut sessions: Vec<SessionFile> = session_files_in(project_dir)
-        .into_iter()
-        .filter(|s| s.session_id != live && s.subagents_dir().is_dir())
-        .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
-    sessions.truncate(recent);
-    let mut out = Vec::new();
-    for s in &sessions {
-        let top: std::collections::HashSet<String> = session_agents(s).into_iter().map(|a| a.agent_id).collect();
-        for lane in lanes_of_session(s) {
-            if top.contains(&lane.agent_id) && !lane.is_done() {
-                out.push(Orphan {
-                    session_id: s.session_id.clone(),
-                    lane,
-                });
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]

@@ -380,7 +380,10 @@ cv lanes 0c315aee --done          # finished for real
 cv lanes 0c315aee --stranded      # the strand class, each with `→ resume: SendMessage to <agentId>`
 cv lanes 0c315aee --tasks         # each lane joined to the tasks its endpoint holds, with the last note
 cv lanes 0c315aee --json          # [{agent_id, model, tokens: {total, …}, status, status_source, last_text, stranded, …}]
+cv lanes --recent 10 --unfinished # the project's 10 most recent sessions: every lane not finished for real
 ```
+
+`--recent N` reads the forests of the N most recently active Claude sessions whose cwd is `--cwd` (default: the current directory) instead of one session's, and tags each row with its session. `--unfinished` keeps the lanes that did not finish for real — running, stopped, killed, failed or stranded. Together they are the rescue list for `cv adopt`: the agents a dead session left behind, with the `cv adopt <agent-id>… --into <live-session>` hint under the table.
 
 ```text
 AGENT     STATUS     MODEL          STARTED         DUR  TOKENS CALLS  DESCRIPTION

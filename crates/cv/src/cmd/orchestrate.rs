@@ -14,7 +14,7 @@ use cv_core::stream::{Flow, ParseOptions};
 use regex::Regex;
 use serde::Serialize;
 
-use crate::util::{fmt_local, parse_harness, resolve, short_id};
+use crate::util::{fmt_local, home_rel, parse_harness, resolve, short_id};
 
 // ===================== cv prompts =====================
 
@@ -201,6 +201,18 @@ pub(crate) enum LaneFilter {
     Running,
     Done,
     Stranded,
+    /// Not finished for real: running, stopped, killed, failed, or stranded — [`Lane::is_done`]'s
+    /// complement. Across recent sessions this is the rescue list for `cv adopt`.
+    Unfinished,
+}
+
+/// Which forests `cv lanes` reads.
+pub(crate) enum LaneScope {
+    /// One session's sub-agents.
+    Session { id: String, harness: Option<String> },
+    /// The sub-agents of the `n` most recently active Claude sessions whose recorded cwd is `dir`
+    /// — a project's recent swarms in one table (each row carries its `session_id`).
+    Recent { n: usize, dir: std::path::PathBuf },
 }
 
 fn lane_passes(l: &Lane, f: LaneFilter) -> bool {
@@ -209,7 +221,15 @@ fn lane_passes(l: &Lane, f: LaneFilter) -> bool {
         LaneFilter::Running => l.is_running(),
         LaneFilter::Done => l.is_done(),
         LaneFilter::Stranded => l.stranded,
+        LaneFilter::Unfinished => !l.is_done(),
     }
+}
+
+/// Two directories are the same when their canonical paths agree; a path that no longer exists
+/// (a session's recorded cwd from a deleted checkout) compares as spelled.
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 /// The `--tasks` lines under a lane: its endpoint, then each task it holds (short id, state,
@@ -259,15 +279,44 @@ fn print_lane_tasks(l: &Lane, tasks: &[cv_core::lanes::LaneTask]) {
 }
 
 pub(crate) fn cmd_lanes(
-    id: &str,
-    harness: Option<String>,
+    scope: LaneScope,
     filter: LaneFilter,
     since: Option<String>,
     with_tasks: bool,
     json: bool,
 ) -> Result<()> {
-    let want = parse_harness(&harness)?;
-    let (r, _adapter) = resolve(id, want)?;
+    let multi = matches!(scope, LaneScope::Recent { .. });
+    let (title, empty_note, sessions): (String, String, Vec<SessionRef>) = match scope {
+        LaneScope::Session { id, harness } => {
+            let want = parse_harness(&harness)?;
+            let (r, _adapter) = resolve(&id, want)?;
+            (
+                format!("lanes of {}", short_id(&r.id)),
+                format!("no sub-agents spawned by {}", short_id(&r.id)),
+                vec![r],
+            )
+        }
+        LaneScope::Recent { n, dir } => {
+            let mut refs: Vec<SessionRef> = cv_core::sessions()
+                .into_iter()
+                .filter(|r| r.harness == cv_core::ir::Harness::Claude)
+                .filter(|r| r.cwd.as_deref().is_some_and(|c| same_dir(c, &dir)))
+                .collect();
+            refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
+            refs.truncate(n);
+            let ids: Vec<String> = refs.iter().map(|r| short_id(&r.id)).collect();
+            (
+                format!(
+                    "lanes of the {} most recent session(s) in {} ({})",
+                    refs.len(),
+                    home_rel(&dir),
+                    ids.join(" ")
+                ),
+                format!("no Claude sessions with sub-agents in {}", home_rel(&dir)),
+                refs,
+            )
+        }
+    };
     let since = match since {
         Some(s) => {
             let d = cv_core::task::parse_duration(&s)
@@ -276,10 +325,18 @@ pub(crate) fn cmd_lanes(
         }
         None => None,
     };
-    let mut all: Vec<Lane> = cv_core::lanes::lanes_of(&r)
-        .into_iter()
-        .filter(|l| since.is_none_or(|t| l.active_since(t)))
-        .collect();
+    // Which forest each lane came from, keyed by its transcript path: a `Lane` carries only its
+    // own `agent-…` ref, and an adopted agent can sit in two sessions at once.
+    let mut parent_of: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
+    let mut all: Vec<Lane> = Vec::new();
+    for r in &sessions {
+        for l in cv_core::lanes::lanes_of(r) {
+            if since.is_none_or(|t| l.active_since(t)) {
+                parent_of.insert(l.path.clone(), r.id.clone());
+                all.push(l);
+            }
+        }
+    }
     if with_tasks {
         let outcome = cv_core::task::replay()?;
         for w in &outcome.warnings {
@@ -290,11 +347,25 @@ pub(crate) fn cmd_lanes(
     let lanes: Vec<&Lane> = all.iter().filter(|l| lane_passes(l, filter)).collect();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&lanes)?);
+        if multi {
+            // `--recent` rows carry the forest they came from as `parent_id`; one session's rows
+            // keep the plain `lane` shape.
+            let rows: Vec<serde_json::Value> = lanes
+                .iter()
+                .map(|l| {
+                    let mut v = serde_json::to_value(l).unwrap_or_default();
+                    v["parent_id"] = serde_json::json!(parent_of.get(&l.path));
+                    v
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&lanes)?);
+        }
         return Ok(());
     }
     if all.is_empty() {
-        println!("no sub-agents spawned by {}", short_id(&r.id));
+        println!("{empty_note}");
         return Ok(());
     }
     let running = all.iter().filter(|l| l.is_running()).count();
@@ -309,6 +380,7 @@ pub(crate) fn cmd_lanes(
         LaneFilter::Running => format!(" · showing {} running", lanes.len()),
         LaneFilter::Done => format!(" · showing {} done", lanes.len()),
         LaneFilter::Stranded => format!(" · showing {} stranded", lanes.len()),
+        LaneFilter::Unfinished => format!(" · showing {} unfinished", lanes.len()),
     };
     if let Some(t) = since {
         scope.push_str(&format!(" · active since {}", fmt_local(t, "%m-%d %H:%M")));
@@ -339,8 +411,7 @@ pub(crate) fn cmd_lanes(
         )
     };
     println!(
-        "# lanes of {} — {} sub-agents: {running} running · {done} completed{lost} · {other} other{why} · {stranded} STRANDED{scope}\n",
-        short_id(&r.id),
+        "# {title} — {} sub-agents: {running} running · {done} completed{lost} · {other} other{why} · {stranded} STRANDED{scope}\n",
         all.len(),
     );
     if lanes.is_empty() {
@@ -362,8 +433,21 @@ pub(crate) fn cmd_lanes(
         .max()
         .unwrap_or(0)
         .max(10);
+    // Across sessions every row says which forest it belongs to.
+    let session_col = |l: &Lane| {
+        if multi {
+            format!(
+                "{:<9} ",
+                parent_of.get(&l.path).map(|p| short_id(p)).unwrap_or_default()
+            )
+        } else {
+            String::new()
+        }
+    };
+    let indent = if multi { "                    " } else { "          " };
     println!(
-        "AGENT     {:<sw$} MODEL          STARTED         DUR  TOKENS CALLS  DESCRIPTION",
+        "{}AGENT     {:<sw$} MODEL          STARTED         DUR  TOKENS CALLS  DESCRIPTION",
+        if multi { "SESSION   " } else { "" },
         "STATUS"
     );
     for l in &lanes {
@@ -379,7 +463,8 @@ pub(crate) fn cmd_lanes(
             .unwrap_or_default();
         let wf = l.workflow.as_deref().map(|w| format!(" ⟐{w}")).unwrap_or_default();
         println!(
-            "{:<9} {:<sw$} {:<14} {:<11} {:>7} {:>7} {:>5}  {}{}",
+            "{}{:<9} {:<sw$} {:<14} {:<11} {:>7} {:>7} {:>5}  {}{}",
+            session_col(l),
             short_id(&l.agent_id),
             status,
             short_model(l.model.as_deref()),
@@ -409,10 +494,10 @@ pub(crate) fn cmd_lanes(
             l.last_text.as_deref().map(|t| format!("↩ {}", last_line(t)))
         };
         if let Some(d) = detail {
-            println!("          {}", truncate(&sanitize_line(&d), 140));
+            println!("{indent}{}", truncate(&sanitize_line(&d), 140));
         }
         if l.stranded {
-            println!("          → resume: SendMessage to {}", l.agent_id);
+            println!("{indent}→ resume: SendMessage to {}", l.agent_id);
         }
         match l.failure_cause.as_deref() {
             Some("rate-limited") => println!(
@@ -445,6 +530,9 @@ pub(crate) fn cmd_lanes(
         println!(
             "\n{returned} lane(s) show `returned`: the transcript ends in a final report and no stop was ever recorded — the harness lost the notification (a restart). Their returns are the ↩ lines; they count as done."
         );
+    }
+    if multi && filter == LaneFilter::Unfinished && !lanes.is_empty() {
+        println!("\n→ rescue into a live session: cv adopt <agent-id>… --into <live-session>  (the transcript moves; see `cv adopt --help`)");
     }
     Ok(())
 }

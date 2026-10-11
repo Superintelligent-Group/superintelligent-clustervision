@@ -16,6 +16,7 @@
 - **Removed `cv timeline`**: `cv ls --sort-by updated --asc` prints the same rows oldest-first; the old name errors with that pointer.
 - **Removed `cv redact`**: `cv export <id> --redact [--format md|json]` runs the same scrub; counts go to stderr.
 - **Removed `cv export --format html`**: `cv share` is the one HTML renderer (streaming, redacted); the whole-session `to_html` goes.
+- **`cv lanes --recent N [--cwd DIR] --unfinished`** replaces `cv adopt --list` / `--orphans`: a project's recent forests in one table, each row tagged with its session.
 
 ## 0.14.0 — 2026-10-10
 

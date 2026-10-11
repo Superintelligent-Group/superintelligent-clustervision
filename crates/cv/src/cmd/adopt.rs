@@ -2,8 +2,8 @@
 //! live session can `SendMessage` them and they resume with their whole transcript. The mechanism
 //! and its limits live in [`cv_core::adopt`]; this module resolves ids, prints, and gates writes.
 //!
-//! Human report on stderr; `--json` puts one JSON value on stdout. `--list` and `--orphans` print
-//! their table on stdout.
+//! Human report on stderr; `--json` puts one JSON value on stdout. Finding the agents is
+//! `cv lanes`'s job (`cv lanes <session>`, `cv lanes --recent N --unfinished`).
 
 use crate::util::{fmt_local, home_rel, report, short_id, usage};
 use anyhow::{Context, Result};
@@ -12,14 +12,6 @@ use cv_core::ir::{human_bytes, Harness};
 use serde_json::json;
 use std::fmt::Write as _;
 use std::path::PathBuf;
-
-/// Where this environment's Claude Code writes (`$CLAUDE_CONFIG_DIR/projects` or
-/// `~/.claude/projects`): the project dir for a cwd is derived here.
-fn store() -> Result<PathBuf> {
-    cv_core::harness::for_harness(Harness::Claude)
-        .and_then(|a| a.storage_root())
-        .context("Claude Code's store (~/.claude/projects) was not found")
-}
 
 /// Every Claude root cv reads (the store plus `CLUSTERVISION_CLAUDE_ROOTS` / `claude-roots`
 /// entries): sessions and agents are looked up across all of them.
@@ -48,159 +40,18 @@ fn short_model(m: Option<&str>) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-fn trunc(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(n - 1).collect::<String>())
-    }
-}
-
 pub(crate) struct AdoptArgs {
     pub agents: Vec<String>,
     pub into: Option<String>,
     pub from: Option<String>,
     pub dry_run: bool,
     pub force: bool,
-    pub list: Option<String>,
-    pub orphans: bool,
-    pub recent: usize,
     pub json: bool,
 }
 
 pub(crate) fn cmd_adopt(a: AdoptArgs) -> Result<()> {
     let roots = roots()?;
-    if let Some(spec) = &a.list {
-        return list(&roots, spec, a.json);
-    }
-    if a.orphans {
-        return orphans(&roots, a.into.as_deref(), a.recent, a.json);
-    }
     run(&roots, &a)
-}
-
-fn list(roots: &[PathBuf], spec: &str, json_out: bool) -> Result<()> {
-    let s = session(roots, spec)?;
-    let agents = adopt::session_agents(&s);
-    let lanes = adopt::lanes_of_session(&s);
-    let status = |id: &str| {
-        lanes
-            .iter()
-            .find(|l| l.agent_id == id)
-            .map(|l| {
-                if l.stranded {
-                    "stranded".to_string()
-                } else {
-                    l.status.clone()
-                }
-            })
-            .unwrap_or_else(|| "?".into())
-    };
-    if json_out {
-        let rows: Vec<_> = agents
-            .iter()
-            .map(|g| {
-                let mut v = serde_json::to_value(g).unwrap_or_default();
-                v["has_meta"] = json!(g.meta_path.is_some());
-                v["status"] = json!(status(&g.agent_id));
-                v
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-        return Ok(());
-    }
-    println!(
-        "# sub-agents of {} ({}) — {} agents",
-        s.session_id,
-        home_rel(&s.project_dir),
-        agents.len()
-    );
-    println!();
-    println!(
-        "{:<18} {:<10} {:<12} {:>9} {:<4} {:<11}  DESCRIPTION",
-        "AGENT", "STATUS", "MODEL", "SIZE", "META", "LAST WRITE"
-    );
-    for g in &agents {
-        println!(
-            "{:<18} {:<10} {:<12} {:>9} {:<4} {:<11}  {}",
-            g.agent_id,
-            status(&g.agent_id),
-            trunc(&short_model(g.model.as_deref()), 12),
-            human_bytes(g.bytes),
-            if g.meta_path.is_some() { "yes" } else { "NO" },
-            when(g.modified),
-            g.description.as_deref().unwrap_or("")
-        );
-    }
-    if !agents.is_empty() {
-        println!();
-        println!(
-            "adopt one into the newest session of this project: cv adopt <agent-id> --from {}",
-            short_id(&s.session_id)
-        );
-    }
-    Ok(())
-}
-
-fn orphans(roots: &[PathBuf], into: Option<&str>, recent: usize, json_out: bool) -> Result<()> {
-    let (project, live) = match into {
-        Some(spec) => {
-            let s = session(roots, spec)?;
-            (s.project_dir.clone(), s.session_id)
-        }
-        None => {
-            let cwd = std::env::current_dir()?;
-            let project = adopt::project_dir_for_cwd(&store()?, &cwd);
-            let Some(live) = adopt::newest_session(&project, &[]) else {
-                return usage(format!(
-                    "no Claude sessions for {} ({}) — run from a project dir or pass --into <live-session>",
-                    cwd.display(),
-                    home_rel(&project)
-                ));
-            };
-            (project, live.session_id)
-        }
-    };
-    let found = adopt::orphans(&project, &live, recent);
-    if json_out {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({"live_session": live, "project_dir": project, "orphans": found}))?
-        );
-        return Ok(());
-    }
-    println!(
-        "# orphans in {} — unfinished sub-agents of the {recent} most recent sessions other than live {}",
-        home_rel(&project),
-        short_id(&live)
-    );
-    println!("# unfinished = no completion recorded (running), stopped/killed/failed, or stranded on a promise");
-    println!();
-    if found.is_empty() {
-        println!("(none)");
-        return Ok(());
-    }
-    println!(
-        "{:<8} {:<18} {:<10} {:<12} {:<11}  DESCRIPTION",
-        "SESSION", "AGENT", "STATUS", "MODEL", "LAST TURN"
-    );
-    for o in &found {
-        let l = &o.lane;
-        println!(
-            "{:<8} {:<18} {:<10} {:<12} {:<11}  {}",
-            short_id(&o.session_id),
-            l.agent_id,
-            if l.stranded { "stranded" } else { l.status.as_str() },
-            trunc(&short_model(l.model.as_deref()), 12),
-            l.last_turn_at
-                .map(|t| fmt_local(t, "%m-%d %H:%M"))
-                .unwrap_or_else(|| "?".into()),
-            l.description.as_deref().unwrap_or("")
-        );
-    }
-    println!();
-    println!("adopt into {}: cv adopt <agent-id>… --into {}", short_id(&live), live);
-    Ok(())
 }
 
 fn run(roots: &[PathBuf], a: &AdoptArgs) -> Result<()> {

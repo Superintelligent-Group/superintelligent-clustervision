@@ -130,6 +130,7 @@ pub(crate) fn data_schema_json() -> Value {
             "endpoint": "the CV_ENDPOINT the lane's own shell commands exported first (lane:<name>; an Agent prompt or a written brief does not count), else with --tasks a lane:<slug> assignee matching the description's leading token",
             "endpoint_source": ["transcript", "description"],
             "tasks": "with --tasks: [{id, title, state, last_note?, last_ts}] the endpoint holds (assignee), newest first",
+            "parent_id": "with --recent only: the session whose forest the lane belongs to",
         },
         "deferral": {
             "description": "one row of `deferrals --json`: a place the assistant put something off",

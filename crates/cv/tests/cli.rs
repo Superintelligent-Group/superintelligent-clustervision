@@ -3026,10 +3026,35 @@ fn adopt_moves_a_stranded_lane_into_the_live_session() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     w.write_session(live, &[root_line(live)]); // the newest session: the default --into
 
-    let (out, _) = w.cv_ok(&["adopt", "--list", dead]);
+    // Finding the agents is `lanes`' job: one session, or the project's recent sessions.
+    let (out, _) = w.cv_ok(&["lanes", dead]);
+    assert!(out.contains(&aid[..8]) && out.contains("Lane TEST"), "{out}");
+    let (out, _) = w.cv_ok(&["lanes", "--recent", "5", "--unfinished", "--cwd", "/work/proj"]);
+    assert!(out.contains("SESSION"), "rows are tagged with their session: {out}");
+    assert!(out.contains("deadsess") && out.contains(&aid[..8]), "{out}");
+    assert!(out.contains("cv adopt <agent-id>"), "the rescue hint: {out}");
+    let (out, _) = w.cv_ok(&[
+        "lanes",
+        "--recent",
+        "5",
+        "--unfinished",
+        "--cwd",
+        "/work/proj",
+        "--json",
+    ]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
     assert!(
-        out.contains(aid) && out.contains("Lane TEST") && out.contains("yes"),
+        rows.iter()
+            .any(|r| r["parent_id"] == "deadsess" && r["agent_id"] == aid),
         "{out}"
+    );
+    // The removed flags error with the replacement, exit 2.
+    let (ok, code, _, err) = w.cv(&["adopt", "--list", dead]);
+    assert!(!ok && code == 2 && err.contains("cv lanes deadsess"), "{err}");
+    let (ok, code, _, err) = w.cv(&["adopt", "--orphans"]);
+    assert!(
+        !ok && code == 2 && err.contains("cv lanes --recent <N> --unfinished"),
+        "{err}"
     );
 
     let live_sub = w.home.join(".claude/projects/-work-proj/livesess/subagents");
@@ -3133,8 +3158,8 @@ fn adopt_reaches_extra_claude_roots_and_never_targets_the_dead_session() {
     assert!(fs::read_to_string(copied)
         .unwrap()
         .contains("\"sessionId\":\"livesess\""));
-    let (out, _) = w.cv_ok(&["adopt", "--list", dead]);
-    assert!(out.contains(aid), "a seat session lists by id too: {out}");
+    let (out, _) = w.cv_ok(&["lanes", dead]);
+    assert!(out.contains(&aid[..8]), "a seat session lists by id too: {out}");
 }
 
 /// Terminal is about STATE, not the record: a note on a done task appends (marked "(after

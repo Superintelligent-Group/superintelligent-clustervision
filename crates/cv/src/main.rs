@@ -367,11 +367,22 @@ enum Cmd {
     },
     /// The sub-agent forest as a status table: one row per lane with its model, start, duration,
     /// tokens, tool calls, status and last line — and the strand class (`--stranded`): lanes that
-    /// stopped saying they are waiting for something that will never wake them.
+    /// stopped saying they are waiting for something that will never wake them. `--recent N`
+    /// reads the forests of a project's N most recent sessions instead of one session's;
+    /// with `--unfinished` that is the rescue list for `cv adopt`.
     Lanes {
-        id: String,
+        /// The session (`harness:id` or a unique prefix). Omit it with `--recent`.
+        #[arg(required_unless_present = "recent", conflicts_with = "recent")]
+        id: Option<String>,
         #[arg(long)]
         harness: Option<String>,
+        /// Instead of one session: the N most recently active Claude sessions whose cwd is
+        /// `--cwd` (default: the current directory), each row tagged with its session.
+        #[arg(long, value_name = "N")]
+        recent: Option<usize>,
+        /// With --recent: the project directory the sessions ran in.
+        #[arg(long, value_name = "DIR", requires = "recent")]
+        cwd: Option<PathBuf>,
         /// Only lanes still running (no stop recorded).
         #[arg(long, group = "lane_filter")]
         running: bool,
@@ -383,6 +394,9 @@ enum Cmd {
         /// resume hint.
         #[arg(long, group = "lane_filter")]
         stranded: bool,
+        /// Only lanes not finished for real: running, stopped, killed, failed or stranded.
+        #[arg(long, group = "lane_filter")]
+        unfinished: bool,
         /// Only lanes active in this window: started or last turned within `2h`, `30m`, `1d`, …
         #[arg(long, value_name = "DUR")]
         since: Option<String>,
@@ -664,11 +678,12 @@ enum Cmd {
     /// Rescue sub-agents stranded by a dead Claude Code session into a live one, so the live
     /// session can `SendMessage` them and they resume with their whole transcript: copies
     /// `subagents/agent-<id>.jsonl` (with `sessionId` restamped on every line, nothing else
-    /// changed) and its `.meta.json` into the live session's `subagents/`. `--list <session>`
-    /// lists a session's agents; `--orphans` lists unfinished agents of recent dead sessions.
+    /// changed) and its `.meta.json` into the live session's `subagents/`. Find the agents with
+    /// `cv lanes <session>` (one session) or `cv lanes --recent N --unfinished` (the project's
+    /// recent sessions).
     Adopt {
         /// Agent ids (`a5d8…` or `agent-a5d8…`, unique prefix ok).
-        #[arg(required_unless_present_any = ["list", "orphans"], conflicts_with_all = ["list", "orphans"])]
+        #[arg(required_unless_present_any = ["list", "orphans"])]
         agents: Vec<String>,
         /// The live session that adopts them (default: the newest session in the agent's
         /// project other than the one holding it, printed before acting). With --orphans: the
@@ -685,16 +700,11 @@ enum Cmd {
         /// Replace an agent file already present in the live session.
         #[arg(long)]
         force: bool,
-        /// List a session's sub-agents: status, model, size, description, whether a meta exists.
-        #[arg(long, value_name = "SESSION", conflicts_with_all = ["orphans", "from", "dry_run", "force"])]
+        // Removed in 0.15.0 — hidden so the old spellings error with a pointer (exit 2).
+        #[arg(long, hide = true, value_name = "SESSION")]
         list: Option<String>,
-        /// List unfinished sub-agents (running / stopped / killed / failed / stranded) of the
-        /// project's recent sessions other than the live one (the cwd's project, or --into's).
-        #[arg(long, conflicts_with_all = ["from", "dry_run", "force"])]
+        #[arg(long, hide = true)]
         orphans: bool,
-        /// With --orphans: how many recent sessions to scan.
-        #[arg(long, default_value_t = 10, requires = "orphans")]
-        recent: usize,
         #[arg(long)]
         json: bool,
     },
@@ -1302,9 +1312,12 @@ fn run() -> Result<()> {
         Cmd::Lanes {
             id,
             harness,
+            recent,
+            cwd,
             running,
             done,
             stranded,
+            unfinished,
             since,
             tasks,
             json,
@@ -1315,10 +1328,23 @@ fn run() -> Result<()> {
                 orchestrate::LaneFilter::Done
             } else if stranded {
                 orchestrate::LaneFilter::Stranded
+            } else if unfinished {
+                orchestrate::LaneFilter::Unfinished
             } else {
                 orchestrate::LaneFilter::All
             };
-            orchestrate::cmd_lanes(&id, harness, filter, since, tasks, json)
+            let scope = match (id, recent) {
+                (Some(id), _) => orchestrate::LaneScope::Session { id, harness },
+                (None, Some(n)) => orchestrate::LaneScope::Recent {
+                    n,
+                    dir: match cwd {
+                        Some(d) => d,
+                        None => std::env::current_dir().context("reading the current directory")?,
+                    },
+                },
+                (None, None) => unreachable!("clap requires <ID> unless --recent is present"),
+            };
+            orchestrate::cmd_lanes(scope, filter, since, tasks, json)
         }
         Cmd::Deferrals {
             id,
@@ -1390,19 +1416,28 @@ fn run() -> Result<()> {
             force,
             list,
             orphans,
-            recent,
             json,
-        } => cmd::adopt::cmd_adopt(cmd::adopt::AdoptArgs {
-            agents,
-            into,
-            from,
-            dry_run,
-            force,
-            list,
-            orphans,
-            recent,
-            json,
-        }),
+        } => {
+            if let Some(session) = list {
+                return usage(format!(
+                    "`cv adopt --list <session>` was removed in 0.15.0 — use `cv lanes {session}` (status, model, description per agent)"
+                ));
+            }
+            if orphans {
+                return usage(
+                    "`cv adopt --orphans` was removed in 0.15.0 — use `cv lanes --recent <N> --unfinished [--cwd <project>]` \
+                     (unfinished sub-agents of the project's recent sessions, each row tagged with its session)",
+                );
+            }
+            cmd::adopt::cmd_adopt(cmd::adopt::AdoptArgs {
+                agents,
+                into,
+                from,
+                dry_run,
+                force,
+                json,
+            })
+        }
         Cmd::Splice {
             specs,
             harness,
