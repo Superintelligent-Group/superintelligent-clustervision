@@ -48,7 +48,9 @@
 //! its parent, with cwd/created_at inherited from the `sessions` row, `title` = `"[<agent_id>]
 //! <parent title>"`, `updated_at` from the head row, `lineage.parent`/`agent_path` set, and
 //! `extra["devin"]["agent_id"]`/`chain_head`. A `chain_node_id` naming no live node is skipped in
-//! discovery and counted under the parent's `extra["devin"]["dangling_subagent_heads"]`.
+//! discovery and counted under the parent's `extra["devin"]["dangling_subagent_heads"]`. A
+//! `run_subagent` child (3000.11.3) has no `subagent_heads` row at all; its tool result row's
+//! `subagent/agent_id` + `subagent/chain_node_id` name the chain instead (see `subagent_head_rows`).
 //!
 //! Sub-agent-specific message shapes: the child's first `user` row is the lead's handoff prompt —
 //! `is_user_input: true` plus `metadata.extensions["subagent/handoff"] = true` and
@@ -164,6 +166,13 @@ impl Devin {
         }
     }
 
+    /// The store under an explicit `devin/cli` dir (the one holding `sessions.db`).
+    pub fn with_root(root: &Path) -> Self {
+        Devin {
+            root: root.to_path_buf(),
+        }
+    }
+
     /// `sessions.db` inside the root, when it exists.
     fn db_path(&self) -> Option<PathBuf> {
         if self.root.as_os_str().is_empty() {
@@ -271,27 +280,60 @@ fn chain_head(f: &Forest, main_chain_id: Option<i64>) -> (Option<i64>, bool) {
     (f.parents.keys().max().copied(), true)
 }
 
-/// `(agent_id, chain_node_id, updated_at)` per `subagent_heads` row for a session (empty when the
-/// table is absent — it arrived late, in migration `subagent_heads`).
+/// `(agent_id, chain_node_id, updated_at)` per sub-agent chain of a session: every
+/// `subagent_heads` row (the table arrived late, in migration `subagent_heads`), plus every
+/// sub-agent that only a tool row names. 3000.11.3's `run_subagent` writes no `subagent_heads`
+/// row: its result row's `metadata.extensions` carry `subagent/agent_id` and
+/// `subagent/chain_node_id` (the child chain's tail), and that is the only pointer to the chain.
 fn subagent_head_rows(conn: &Connection, session_id: &str) -> Vec<(String, i64, Option<i64>)> {
-    if !table_exists(conn, "subagent_heads") {
-        return Vec::new();
+    let mut out: Vec<(String, i64, Option<i64>)> = Vec::new();
+    if table_exists(conn, "subagent_heads") {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT agent_id, chain_node_id, updated_at FROM subagent_heads WHERE session_id = ?1")
+        {
+            if let Ok(rows) = stmt.query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2).ok().flatten(),
+                ))
+            }) {
+                out.extend(rows.flatten());
+            }
+        }
     }
-    let mut stmt =
-        match conn.prepare("SELECT agent_id, chain_node_id, updated_at FROM subagent_heads WHERE session_id = ?1") {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-    let Ok(rows) = stmt.query_map([session_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, Option<i64>>(2).ok().flatten(),
-        ))
-    }) else {
-        return Vec::new();
-    };
-    rows.flatten().collect()
+    let sql = "SELECT json_extract(chat_message, '$.metadata.extensions.\"subagent/agent_id\"'), \
+                      json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"'), created_at \
+               FROM message_nodes WHERE session_id = ?1 AND json_extract(chat_message, '$.role') = 'tool' \
+                 AND json_extract(chat_message, '$.metadata.extensions.\"subagent/chain_node_id\"') IS NOT NULL \
+               ORDER BY node_id";
+    let mut from_tools: Vec<(String, i64, Option<i64>)> = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(sql) {
+        if let Ok(rows) = stmt.query_map([session_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2).ok().flatten(),
+            ))
+        }) {
+            for (agent, head, at) in rows.flatten() {
+                let (Some(agent), Some(head)) = (agent, head) else {
+                    continue;
+                };
+                if out.iter().any(|(a, ..)| *a == agent) {
+                    continue;
+                }
+                // The same agent reported twice (a copied tool row): the later chain tail wins.
+                match from_tools.iter_mut().find(|(a, ..)| *a == agent) {
+                    Some(e) if head > e.1 => *e = (agent, head, at),
+                    Some(_) => {}
+                    None => from_tools.push((agent, head, at)),
+                }
+            }
+        }
+    }
+    out.extend(from_tools);
+    out
 }
 
 /// user + assistant turns on `head`'s chain — the [`SessionRef::message_count`] contract

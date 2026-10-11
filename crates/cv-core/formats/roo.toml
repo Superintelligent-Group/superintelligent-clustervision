@@ -12,12 +12,13 @@ ignore_literals = []
 store = [
   "<globalStorage>/rooveterinaryinc.roo-cline|roo-code/tasks/<taskId>/",
   "~/.roo/tasks/",
+  "~/.vscode-mock/global-storage/tasks/<taskId>/ (the Roo CLI's mock VS Code host)",
 ]
 
 [upstream]
 repo = "https://github.com/RooCodeInc/Roo-Code (not checked out)"
-commit = "unknown"
-date = "2026-05-29"
+commit = "cli-v0.1.17 (Roo Code CLI release, bundled extension; tests/corpus/roo/0.1.17)"
+date = "2026-10-11"
 
 [types]
 "block.text" = { status = "handled", note = "" }
@@ -28,3 +29,8 @@ date = "2026-05-29"
 "block.image" = { status = "handled", note = "" }
 "ui.ask" = { status = "generic", note = "" }
 "ui.completion_result" = { status = "generic", note = "" }
+"msg.isSummary" = { status = "handled", note = "condense summary -> CompactionSummary, preceded by a synthetic CompactionBoundary" }
+"msg.condenseParent" = { status = "handled", note = "a turn a condense replaced; kept, flagged condensed_into" }
+"history_item.json" = { status = "handled", note = "parentTaskId -> Lineage.parent; mode, rootTaskId, totals -> extra" }
+"tasks/_index.json" = { status = "ignored", note = "the task-history index; history_item.json carries the same row" }
+"checkpoints" = { status = "ignored", note = "per-task shadow git repo; ui checkpoint_saved records point into it" }

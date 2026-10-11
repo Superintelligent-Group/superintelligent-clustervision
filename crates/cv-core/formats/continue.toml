@@ -13,11 +13,13 @@ store = [
 
 [upstream]
 repo = "https://github.com/continuedev/continue (not checked out)"
-commit = "unknown"
-date = "2026-05-29"
+commit = "cn 1.5.47 (npm @continuedev/cli, tests/corpus/continue/1.5.47)"
+date = "2026-10-11"
 
 [types]
 "part.text" = { status = "handled", note = "" }
 "part.imageUrl" = { status = "handled", note = "" }
 "field.toolCalls" = { status = "generic", note = "" }
 "field.contextItems" = { status = "generic", note = "→ File" }
+"field.toolCallStates" = { status = "handled", note = "cn CLI: per-call status + output on the assistant item -> a Tool message" }
+"field.usage" = { status = "handled", note = "cn CLI: OpenAI usage names + model + cost_cents -> Usage" }

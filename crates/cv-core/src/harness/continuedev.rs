@@ -21,6 +21,12 @@
 //! - `toolCalls` (assistant, newer Continue): `[{id, type:"function", function:{name, arguments}}]`.
 //!   `arguments` is a JSON-encoded *string* (streamed, so possibly partial) → `Block::ToolUse`.
 //! - `toolCallId` (role `tool`): the id of the call this result answers → `Block::ToolResult`.
+//! - `usage` (assistant, cn CLI 1.5): OpenAI usage names plus `model` and `cost_cents` → [`Usage`].
+//!
+//! ### `toolCallStates[]` (assistant items, cn CLI 1.5)
+//! The cn CLI writes no `role: "tool"` items; each assistant item carries its calls' outcomes as
+//! `{toolCallId, toolCall, status, parsedArgs, output: [{content, name, description}]}`, emitted
+//! right after the assistant turn as a Tool message (`status: "errored"` → `is_error`).
 //!
 //! ### `contextItems[]` (attached files / snippets / docs)
 //! `{name, description, content, uri?: {type, value}}`. Best-effort → `Block::File` (path/source from
@@ -52,6 +58,12 @@ impl Continue {
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".continue")));
         let sessions = root.map(|r| r.join("sessions")).filter(|p| p.exists());
+        Continue { sessions }
+    }
+
+    /// Continue's store under an explicit global dir (what `CONTINUE_GLOBAL_DIR` names).
+    pub fn with_root(root: &Path) -> Self {
+        let sessions = Some(root.join("sessions")).filter(|p| p.exists());
         Continue { sessions }
     }
 }
@@ -156,11 +168,19 @@ impl Adapter for Continue {
         // sinks read it from the returned Session); hand the header to the sink before the body.
         sink.meta(&s);
 
+        // Tool calls whose results came from an item's `toolCallStates` (the cn CLI's shape), so a
+        // later `role: "tool"` item answering the same call is not emitted twice.
+        let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
         for item in doc.history {
             // ONE small Value per item — parsed, emitted, dropped before the next.
             let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
                 continue;
             };
+            let reply_id = v.pointer("/message/toolCallId").and_then(Value::as_str);
+            if reply_id.is_some_and(|id| answered.contains(id)) {
+                continue;
+            }
+            let results = tool_states_message(&v);
             if let Some(m) = history_item_to_message(&v, &mut s.model) {
                 // A `system` history item is the system prompt — the session-level fact.
                 if s.system_prompt.is_none() && m.kind == MessageKind::SystemPrompt {
@@ -171,6 +191,16 @@ impl Adapter for Continue {
                     }
                 }
                 if sink.message(m) == Flow::Stop {
+                    break;
+                }
+            }
+            if let Some(r) = results {
+                for b in &r.content {
+                    if let Block::ToolResult { tool_use_id, .. } = b {
+                        answered.insert(tool_use_id.clone());
+                    }
+                }
+                if sink.message(r) == Flow::Stop {
                     break;
                 }
             }
@@ -620,6 +650,57 @@ fn history_item_to_message(item: &Value, model: &mut Option<String>) -> Option<M
         }
     }
 
+    // Per-request usage on assistant turns (`message.usage`, OpenAI's names): `prompt_tokens`
+    // includes the cached part, which the IR keeps disjoint.
+    if let Some(u) = message.get("usage").filter(|u| u.is_object()) {
+        let n = |p: &str| u.pointer(p).and_then(Value::as_u64);
+        let cached = n("/prompt_tokens_details/cached_tokens");
+        m.usage = Some(Usage {
+            input_tokens: n("/prompt_tokens").map(|p| p.saturating_sub(cached.unwrap_or(0))),
+            output_tokens: n("/completion_tokens"),
+            cache_read_tokens: cached,
+            reasoning_tokens: n("/completion_tokens_details/reasoning_tokens"),
+            cost_usd: u.get("cost_cents").and_then(Value::as_f64).map(|c| c / 100.0),
+            ..Usage::default()
+        });
+        m.model = u.get("model").and_then(Value::as_str).map(str::to_string);
+        if model.is_none() {
+            model.clone_from(&m.model);
+        }
+    }
+
+    (!m.content.is_empty()).then_some(m)
+}
+
+/// The tool results an assistant item carries in `toolCallStates` (what the cn CLI writes instead
+/// of `role: "tool"` items): `[{toolCallId, toolCall: {function: {name}}, status, output:
+/// [{content, name, description}]}]` → one [`Role::Tool`] message of [`Block::ToolResult`]s.
+/// `status` is `done` | `errored` | `canceled` | ...; a state with no output yet is skipped.
+fn tool_states_message(item: &Value) -> Option<Message> {
+    let states = item.get("toolCallStates")?.as_array()?;
+    let mut m = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
+    for st in states {
+        let Some(out) = st.get("output").and_then(Value::as_array) else {
+            continue;
+        };
+        let content = out
+            .iter()
+            .filter_map(|o| o.get("content").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let status = st.get("status").and_then(Value::as_str);
+        m.content.push(Block::ToolResult {
+            tool_use_id: st.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_string(),
+            content: content.into(),
+            is_error: status == Some("errored"),
+            tool_name: st
+                .pointer("/toolCall/function/name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            status: status.map(str::to_string),
+            details: None,
+        });
+    }
     (!m.content.is_empty()).then_some(m)
 }
 
@@ -706,6 +787,51 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn cn_tool_call_states_become_tool_results_and_usage_is_read() {
+        let dir = std::env::temp_dir().join(format!("cv-continue-cn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.json");
+        fs::write(&path, r#"{"sessionId":"s","history":[
+            {"message":{"role":"user","content":"read a"},"contextItems":[]},
+            {"message":{"role":"assistant","content":"","toolCalls":[{"id":"c1","type":"function","function":{"name":"Read","arguments":"{}"}}],
+              "usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":40},"model":"glm","cost_cents":2}},
+             "contextItems":[],
+             "toolCallStates":[{"toolCallId":"c1","toolCall":{"function":{"name":"Read"}},"status":"errored",
+               "output":[{"content":"no such file","name":"Tool Result"}]}]},
+            {"message":{"role":"tool","content":"no such file","toolCallId":"c1"},"contextItems":[]}
+        ]}"#).unwrap();
+        let r = SessionRef::new("s", Harness::Continue, path);
+        let s = Continue { sessions: None }.parse(&r).unwrap();
+        let kinds: Vec<MessageKind> = s.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [MessageKind::Prompt, MessageKind::Reply, MessageKind::ToolResult]
+        );
+        let u = s.messages[1].usage.as_ref().unwrap();
+        assert_eq!(
+            (u.input_tokens, u.cache_read_tokens, u.output_tokens),
+            (Some(60), Some(40), Some(7))
+        );
+        assert_eq!(s.model.as_deref(), Some("glm"));
+        match &s.messages[2].content[0] {
+            Block::ToolResult {
+                tool_use_id,
+                is_error,
+                tool_name,
+                ..
+            } => {
+                assert_eq!(
+                    (tool_use_id.as_str(), *is_error, tool_name.as_deref()),
+                    ("c1", true, Some("Read"))
+                )
+            }
+            b => panic!("{b:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn fixtures() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/continue")

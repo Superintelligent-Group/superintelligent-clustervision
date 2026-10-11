@@ -1,4 +1,6 @@
-//! Cline adapter (VS Code extension) — per-task `api_conversation_history.json`.
+//! Cline adapter (VS Code extension) — per-task `api_conversation_history.json`, the 3.x extension's
+//! store. The CLI 3.x and the 4.x extension write the SDK store in [`super::cline_sdk`]; [`Cline`]
+//! reads both.
 //!
 //! # Storage layout (reverse-engineered)
 //!
@@ -58,13 +60,28 @@ pub const CLINE_EXT_IDS: &[&str] = &["saoudrizwan.claude-dev"];
 pub const ROO_EXT_IDS: &[&str] = &["rooveterinaryinc.roo-cline", "rooveterinaryinc.roo-code"];
 
 pub struct Cline {
+    /// Legacy per-task `tasks/` dirs (the 3.x extension).
     roots: Vec<PathBuf>,
+    /// SDK `sessions/` dirs (the CLI 3.x and the 4.x extension; see [`super::cline_sdk`]).
+    sdk_roots: Vec<PathBuf>,
 }
 
 impl Cline {
     pub fn detect() -> Self {
         Cline {
             roots: task_roots(CLINE_EXT_IDS, ".cline"),
+            sdk_roots: dirs::home_dir()
+                .map(|h| super::cline_sdk::session_roots(&h, true))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Cline's stores under an explicit home: the SDK store and a plain `.cline/tasks`.
+    pub fn with_home(home: &Path) -> Self {
+        let plain = home.join(".cline").join("tasks");
+        Cline {
+            roots: plain.is_dir().then_some(plain).into_iter().collect(),
+            sdk_roots: super::cline_sdk::session_roots(home, false),
         }
     }
 }
@@ -75,14 +92,19 @@ impl Adapter for Cline {
     }
 
     fn roots(&self) -> Vec<PathBuf> {
-        self.roots.clone()
+        self.roots.iter().chain(&self.sdk_roots).cloned().collect()
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        Ok(discover_in(&self.roots, Harness::Cline))
+        let mut out = discover_in(&self.roots, Harness::Cline);
+        out.extend(super::cline_sdk::discover(&self.sdk_roots));
+        Ok(out)
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        if super::cline_sdk::is_sdk_path(&r.path) {
+            return super::cline_sdk::stream(&r.path, &r.id, sink);
+        }
         stream_task_dir(&r.path, &r.id, Harness::Cline, opts, sink)
     }
 }
@@ -288,6 +310,32 @@ pub fn stream_task_dir(
         }
     }
 
+    // Roo (3.5x) writes `history_item.json` beside each task: its task-history row, which is where
+    // a `new_task` child names its parent (`parentTaskId`, `rootTaskId`) and the task's mode lives.
+    if let Some(hi) = fs::read_to_string(dir.join("history_item.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    {
+        session.lineage.parent = hi.get("parentTaskId").and_then(Value::as_str).map(str::to_string);
+        let bag = session.harness_extra_mut(harness);
+        for k in [
+            "rootTaskId",
+            "mode",
+            "apiConfigName",
+            "status",
+            "tokensIn",
+            "tokensOut",
+            "totalCost",
+        ] {
+            if let Some(v) = hi.get(k).filter(|v| !v.is_null()) {
+                bag.insert(k.into(), v.clone());
+            }
+        }
+        if session.created_at.is_none() {
+            session.created_at = hi.get("ts").and_then(Value::as_i64).and_then(super::ts_from_epoch);
+        }
+    }
+
     // Emit the early `meta` signal with the sidecar-derived fields (header-rendering sinks use it;
     // most ignore it). The authoritative cwd/title are folded from the transcript below and live on
     // the returned `Session`, which `collect`/`parse` reattach the messages to.
@@ -319,6 +367,11 @@ pub fn stream_task_dir(
         let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
             continue;
         };
+        if let Some(b) = condense_boundary(&v, harness) {
+            if sink.message(b) == Flow::Stop {
+                break;
+            }
+        }
         if let Some(mut msg) = parse_message(&v, &mut session) {
             // Stamp the first user turn with the ui_messages first timestamp (best-effort), matching
             // the old `enrich_from_ui_messages` behavior.
@@ -403,6 +456,7 @@ pub fn parse_history_str(id: &str, text: &str, harness: Harness, source_path: Op
         let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
             continue;
         };
+        session.messages.extend(condense_boundary(&v, harness));
         if let Some(msg) = parse_message(&v, &mut session) {
             session.messages.push(msg);
         }
@@ -425,7 +479,7 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
         Some(Value::String(s)) => blocks.push(Block::Text { text: s.clone().into() }),
         Some(Value::Array(items)) => {
             for it in items {
-                if let Some(b) = anthropic::block_from(it, &anthropic::ANTHROPIC) {
+                if let Some(b) = reasoning_block(it).or_else(|| anthropic::block_from(it, &anthropic::ANTHROPIC)) {
                     blocks.push(b);
                 }
             }
@@ -480,6 +534,20 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
             }
         }
     }
+    // Roo's non-destructive condense: the summary turn is `isSummary`, and every turn it replaced
+    // stays in the file with `condenseParent` = the condense id (no longer sent to the model).
+    if v.get("isSummary").and_then(Value::as_bool) == Some(true) {
+        m.kind = MessageKind::CompactionSummary;
+        m.origin = Origin::Harness;
+        if let Some(id) = v.get("condenseId") {
+            m.harness_extra_mut(session.harness)
+                .insert("condense_id".into(), id.clone());
+        }
+    }
+    if let Some(parent) = v.get("condenseParent").filter(|p| !p.is_null()) {
+        m.harness_extra_mut(session.harness)
+            .insert("condensed_into".into(), parent.clone());
+    }
     if role == Role::User && (wraps_task || wraps_env) {
         let bag = m.harness_extra_mut(session.harness);
         if wraps_task {
@@ -490,6 +558,38 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
         }
     }
     Some(m)
+}
+
+/// Roo writes model reasoning as `{type: "reasoning", text, summary: []}` (Cline uses Anthropic's
+/// `thinking`).
+fn reasoning_block(it: &Value) -> Option<Block> {
+    if it.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+    Some(Block::Thinking {
+        text: it.get("text").and_then(Value::as_str).unwrap_or("").to_string().into(),
+        signature: None,
+        encrypted: None,
+        redacted: false,
+    })
+}
+
+/// The synthetic [`MessageKind::CompactionBoundary`] that precedes a Roo condense summary
+/// (`isSummary: true`), so the shared compaction sink pairs it with the summary that follows.
+fn condense_boundary(v: &Value, harness: Harness) -> Option<Message> {
+    if v.get("isSummary").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let mut b = Message::of_kind(Role::System, MessageKind::CompactionBoundary, Origin::Harness);
+    b.timestamp = v.get("ts").and_then(Value::as_i64).and_then(super::ts_from_epoch);
+    b.content = vec![Block::Text {
+        text: "context condensed".into(),
+    }];
+    if let Some(id) = v.get("condenseId") {
+        b.id = id.as_str().map(|s| format!("{s}#boundary"));
+        b.harness_extra_mut(harness).insert("condense_id".into(), id.clone());
+    }
+    Some(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +894,58 @@ fn ui_message_times(dir: &Path) -> UiTimes {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn roo_reasoning_and_a_condense_summary_with_its_boundary() {
+        let text = r#"[
+            {"role":"user","content":[{"type":"text","text":"list primes"}],"ts":1791750000000,"condenseParent":"c1"},
+            {"role":"assistant","content":[{"type":"reasoning","text":"think","summary":[]},{"type":"text","text":"2 3 5"}],"condenseParent":"c1"},
+            {"role":"user","content":[{"type":"text","text":"summary of it"}],"ts":1791750001000,"isSummary":true,"condenseId":"c1"}
+        ]"#;
+        let s = parse_history_str("t", text, Harness::Roo, None);
+        let kinds: Vec<MessageKind> = s.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                MessageKind::Prompt,
+                MessageKind::Reply,
+                MessageKind::CompactionBoundary,
+                MessageKind::CompactionSummary
+            ]
+        );
+        assert!(matches!(&s.messages[1].content[0], Block::Thinking { text, .. } if *text == "think"));
+        assert_eq!(
+            s.messages[0]
+                .harness_extra(Harness::Roo)
+                .and_then(|b| b.get("condensed_into")),
+            Some(&json!("c1"))
+        );
+        assert_eq!(s.messages[2].id.as_deref(), Some("c1#boundary"));
+    }
+
+    #[test]
+    fn roo_history_item_names_the_parent_task() {
+        let dir = std::env::temp_dir().join(format!("cv-roo-hi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("api_conversation_history.json"),
+            r#"[{"role":"user","content":"ok?"}]"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("history_item.json"),
+            r#"{"id":"child","parentTaskId":"lead","mode":"ask"}"#,
+        )
+        .unwrap();
+        let s = parse_task_dir(&dir, "child", Harness::Roo).unwrap();
+        assert_eq!(s.lineage.parent.as_deref(), Some("lead"));
+        assert_eq!(
+            s.harness_extra(Harness::Roo).and_then(|b| b.get("mode")),
+            Some(&json!("ask"))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn fixture(name: &str) -> String {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cline/");

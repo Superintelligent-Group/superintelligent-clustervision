@@ -5,24 +5,32 @@
 # tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "cline"
-source_files = ["harness/cline.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
+source_files = ["harness/cline.rs", "harness/cline_sdk.rs", "harness/wire/anthropic.rs", "harness/wire/mod.rs"]
 ignore_literals = []
 store = [
   "<globalStorage>/saoudrizwan.claude-dev/tasks/<taskId>/{api_conversation_history.json,ui_messages.json,task_metadata.json}",
   "~/.cline/tasks/",
+  "~/.cline/data/sessions/<sid>/{<sid>.json,<sid>.messages.json,agent_<uuid>.messages.json,<teammate>__<id>.messages.json}",
 ]
 
 [upstream]
-repo = "https://github.com/cline/cline (not checked out)"
-commit = "unknown"
-date = "2026-05-29"
+repo = "https://github.com/cline/cline (not checked out; npm cline, the CLI on the Cline SDK)"
+commit = "cli-v3.0.70 (npm cline 3.0.70, tests/corpus/cline/3.0.70; the 4.1.23 extension writes the same SDK store)"
+date = "2026-10-11"
 
 [types]
 "block.text" = { status = "handled", note = "" }
 "block.thinking" = { status = "handled", note = "" }
 "block.redacted_thinking" = { status = "handled", note = "" }
 "block.tool_use" = { status = "handled", note = "" }
-"block.tool_result" = { status = "handled", note = "" }
 "block.image" = { status = "handled", note = "" }
 "ui.ask" = { status = "generic", note = "" }
 "ui.completion_result" = { status = "generic", note = "" }
+"field.system_prompt" = { status = "handled", note = "SDK store (cline_sdk.rs): <sid>.messages.json's system prompt" }
+"field.started_at" = { status = "handled", note = "the <sid>.json session row (cwd, model, metadata.title too)" }
+"field.displayRole" = { status = "handled", note = "displayOnly error turns -> MessageKind::Error" }
+"field.metrics" = { status = "handled", note = "inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens -> Usage" }
+"field.parentThreadId" = { status = "handled", note = "spawn_agent and team children -> Lineage.parent" }
+"field.taskType" = { status = "handled", note = "subagent_task | team, kept in extra" }
+"db.sessions" = { status = "ignored", note = "db/sessions.db duplicates the session rows (plus schedules, spawn queue)" }
+"db.teams" = { status = "ignored", note = "db/teams.db: team events, tasks, runs, outcomes" }

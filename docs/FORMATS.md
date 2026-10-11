@@ -598,6 +598,9 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   content parts `text`/`file`; `multiStep` (assistant) `steps[]` of `contentBlock` (`style.type=="thinking"` →
   reasoning; `genInfo` → model + tokens). No first-class tool calls (gpt-oss inline `<|channel|>` markers kept as
   text). Attachments are references; bytes under `~/.lmstudio/.internal/files/`.
+- **Schema snapshot** (no corpus: the desktop app writes conversations, and `lms` has no throwaway-home mode to
+  test whether `lms chat` is saved too): `tests/corpus/lmstudio/0.4.21+2/` records the merged JSON shape of the 54 files on the reference machine;
+  `tools/harness-corpus/lmstudio/snapshot.sh --check` diffs a later one.
 
 ## Cline — VS Code extension (`<globalStorage>/saoudrizwan.claude-dev/`)
 
@@ -605,12 +608,33 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   (a JSON **array of raw Anthropic Messages-API objects** — maps ~1:1 onto the Claude block model), `ui_messages.json`
   (UI events, timestamp enrichment), `task_metadata.json`. globalStorage roots: `<Editor>/User/globalStorage/` for
   `<Editor>` ∈ {Code, Code - Insiders, Cursor, VSCodium}. `<taskId>` ms-epoch → `created_at`. cwd from the first user
-  msg's `<environment_details>`. A `user` turn of only `tool_result` blocks → a Tool turn.
+  msg's `<environment_details>`. A `user` turn of only `tool_result` blocks → a Tool turn. This is the **3.x
+  extension's** store.
+- **SDK store** (the npm `cline` CLI 3.x and the 4.x extension, both on `@cline/core`; verified at cli 3.0.70,
+  `tests/corpus/cline/3.0.70`): `~/.cline/data/sessions/<sid>/` (`$CLINE_DIR`, `$CLINE_DATA_DIR`,
+  `$CLINE_SESSION_DATA_DIR` override) with `<sid>.json` (the session row: cwd, model, provider, started_at,
+  status, team_name, `metadata.title`/usage) and `<sid>.messages.json` (`{agent: "lead", sessionId, origin,
+  messages[], system_prompt}`; messages are Anthropic-shaped with `id`, `ts` ms, `modelInfo`, `metrics`; a
+  `tool_result` names its tool and may hold an array of plain result objects; `metadata.displayOnly` +
+  `displayRole: "error"` marks a run error → `kind: error`). Children sit in the same dir:
+  `agent_<uuid>.messages.json` (spawn_agent) and `<teammate>__<id>.messages.json` (agent teams), with
+  `origin.parentThreadId` → `lineage.parent`; cv's id for them is `<sid>/<stem>`. `db/sessions.db` repeats the
+  rows (plus `schedules`, `schedule_executions`, `subagent_spawn_queue`) and `db/teams.db` holds team state;
+  neither is read. `~/.cline/tasks/` is now the SDK's task-SPEC dir, not transcripts.
 
 ## Roo Code — a Cline fork (`<globalStorage>/rooveterinaryinc.roo-cline|roo-code/`)
 
 - Identical per-task layout/schema to Cline, different extension namespace (+ `~/.roo/tasks/`). Reuses the Cline parser,
-  tagged `Harness::Roo`.
+  tagged `Harness::Roo`. The **Roo CLI** (GitHub `cli-v*` releases; verified at 0.1.17, `tests/corpus/roo/0.1.17`)
+  runs the extension in a mock VS Code whose globalStorage is `~/.vscode-mock/global-storage/`, so its tasks are
+  `~/.vscode-mock/global-storage/tasks/<uuid>/`.
+- Roo 3.5x additions: a `history_item.json` per task (its task-history row: `parentTaskId` of a `new_task`
+  child → `lineage.parent`, `rootTaskId`, `mode`, totals → `extra["roo"]`), `tasks/_index.json`, assistant
+  `{type: "reasoning", text, summary}` blocks (→ thinking), and a non-destructive condense: the summary turn
+  is `isSummary: true` + `condenseId` (→ `kind: compaction_summary`, preceded by a synthetic
+  `compaction_boundary`), while every turn it replaced stays with `condenseParent` (kept, flagged
+  `condensed_into`). `checkpoints/` per task is a shadow git repo (not read). Usage is only per task
+  (`history_item.json`) and per request in `ui_messages.json` `api_req_started`; none is per message.
 
 ## Continue (continue.dev) — `~/.continue/sessions/` (`$CONTINUE_GLOBAL_DIR` overrides)
 
@@ -618,6 +642,10 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   (`{sessionId, title, workspaceDirectory, history:[item]}`). Each item's `message` is OpenAI-shaped (role
   user/assistant/system/tool; content string or `[{type:text}/{type:imageUrl}]`; assistant `toolCalls[]`;
   `role:"tool"` + `toolCallId`). `contextItems[]` → File refs. cwd = `workspaceDirectory`.
+- The **cn CLI** (npm `@continuedev/cli`; verified at 1.5.47, `tests/corpus/continue/1.5.47`) writes the same store
+  but no `role:"tool"` items: an assistant item carries `toolCallStates[]` (`{toolCallId, toolCall, status:
+  done|errored|…, parsedArgs, output:[{content, name, description}]}`), which cv emits as the Tool turn after it,
+  and `message.usage` (OpenAI names + `model` + `cost_cents`) → `Usage`/model. A headless `/compact` is not saved.
 
 ## Goose (Block) — modern SQLite + legacy `.jsonl`
 
@@ -707,6 +735,13 @@ Re-verified 2026-09-19 at `2090ad1c` (1.51.0). Ground truth: `crates/goose/src/s
   `reasoning_details` ride in `extra["zed"]` (per-message), alongside session-level
   `thread_version`/`profile`/`completion_mode`/`detailed_summary`/`cumulative_token_usage`/`imported`.
   We decode blobs with pure-Rust `ruzstd` (no C cross-compile cost).
+- **Schema snapshot** (no corpus: Zed's agent panel cannot be driven headless): `tests/corpus/zed/1.16.1/`
+  records the DDL and blob shape of the store on the reference machine (`tools/harness-corpus/zed/snapshot.sh
+  --check` diffs a later one). Zed 1.16.1 also keeps agent-sidebar tables in the workspace db
+  (`db/0-stable/db.sqlite`): `sidebar_threads(thread_id, session_id, agent_id, title, updated_at, created_at,
+  folder_paths…, archived, interacted_at, title_override)`, `sidebar_terminal_threads`,
+  `thread_archived_worktrees`, `archived_git_worktrees`. `sidebar_threads.agent_id`/`session_id` index
+  external (ACP) agents' threads, whose transcripts are not in `threads.db`; cv reads none of these tables.
 
 ## Devin CLI — `~/.local/share/devin/cli/sessions.db` (SQLite, refinery schema 17 as of cli 3000.11.3)
 
@@ -751,7 +786,10 @@ WAL-mode and the CLI is typically running — we open READ-ONLY and never checkp
   parent, with cwd/created_at inherited, `title` = `"[<agent_id>] <parent title>"`, `updated_at`
   from the head row, `lineage.parent`/`agent_path` set, and `extra["devin"]["agent_id"]` +
   `chain_head`. A `chain_node_id` that names no live node is skipped and counted under the
-  parent's `extra["devin"]["dangling_subagent_heads"]`.
+  parent's `extra["devin"]["dangling_subagent_heads"]`. A `run_subagent` call (3000.11.3, seen in
+  `tests/corpus/devin/3000.11.3`) writes **no** `subagent_heads` row: its result row's
+  `metadata.extensions` carry `subagent/agent_id`, `subagent/chain_node_id` (the child chain's
+  tail), `subagent/profile_name` and `subagent/model`, and cv takes the chain from there.
 - **Compaction:** a compaction writes two consecutive chain nodes sharing `summarized_from` = the
   old window's head — an `assistant` node holding the summary markdown and a `system` wrapper
   ("You are continuing work…") carrying `devin-rs/summary` (`source`), `compact/edited_files`,

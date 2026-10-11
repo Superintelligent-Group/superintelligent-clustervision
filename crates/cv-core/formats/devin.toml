@@ -15,8 +15,8 @@ store = [
 
 [upstream]
 repo = "closed source; https://github.com/CognitionAI/devin-cli is a release manifest only"
-commit = "cli 3000.11.3"
-date = "2026-10-04"
+commit = "cli 3000.11.3 (npm devin 3000.11.3, tests/corpus/devin/3000.11.3)"
+date = "2026-10-11"
 
 [types]
 "table.sessions" = { status = "handled", note = "" }
@@ -93,3 +93,4 @@ date = "2026-10-04"
 "extension.subagent/agent_id" = { status = "handled", note = "→ extra.subagent; child's spawned_by_tool_use" }
 "extension.subagent/chain_node_id" = { status = "handled", note = "→ extra.subagent" }
 "extension.barista/prompt_cache_footer" = { status = "ignored", note = "prompt-cache hint; no informational content" }
+"ext.subagent/chain_node_id" = { status = "handled", note = "run_subagent result row: the child chain tail when subagent_heads has no row" }

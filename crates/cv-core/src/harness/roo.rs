@@ -1,7 +1,8 @@
 //! Roo Code adapter — a Cline fork with the **same** per-task file format.
 //!
 //! Roo stores tasks under a different VS Code extension namespace
-//! (`rooveterinaryinc.roo-cline` and the newer `rooveterinaryinc.roo-code`) plus a plain `~/.roo/`.
+//! (`rooveterinaryinc.roo-cline` and the newer `rooveterinaryinc.roo-code`) plus a plain `~/.roo/`,
+//! and the Roo CLI writes the same layout under `~/.vscode-mock/global-storage/tasks/`.
 //! The on-disk layout inside each `tasks/<taskId>/` is identical to Cline's
 //! (`api_conversation_history.json` array of Anthropic messages + `ui_messages.json` +
 //! `task_metadata.json`), so all real *parse* logic lives in [`super::cline`] as `pub` helpers and we
@@ -26,10 +27,29 @@ pub struct Roo {
 
 impl Roo {
     pub fn detect() -> Self {
-        Roo {
-            roots: task_roots(ROO_EXT_IDS, ".roo"),
-        }
+        let mut roots = task_roots(ROO_EXT_IDS, ".roo");
+        roots.extend(dirs::home_dir().and_then(|h| cli_tasks_root(&h)));
+        Roo { roots }
     }
+
+    /// Roo's task stores under an explicit home: the Roo CLI's mock-VS-Code globalStorage and a
+    /// plain `.roo/tasks` (the editor globalStorage dirs are platform paths, not home-relative).
+    pub fn with_home(home: &Path) -> Self {
+        let mut roots: Vec<PathBuf> = cli_tasks_root(home).into_iter().collect();
+        let plain = home.join(".roo").join("tasks");
+        if plain.is_dir() {
+            roots.push(plain);
+        }
+        Roo { roots }
+    }
+}
+
+/// The Roo Code CLI (GitHub `cli-v*` releases) runs the extension in a mock VS Code host whose
+/// globalStorage is `~/.vscode-mock/global-storage`, so its tasks land in `tasks/` there with the
+/// extension's own layout.
+fn cli_tasks_root(home: &Path) -> Option<PathBuf> {
+    let p = home.join(".vscode-mock").join("global-storage").join("tasks");
+    p.is_dir().then_some(p)
 }
 
 impl Adapter for Roo {
