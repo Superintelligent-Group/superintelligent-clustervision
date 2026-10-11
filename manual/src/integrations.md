@@ -91,7 +91,7 @@ claude mcp add clustervision -- /abs/path/to/cv-mcp
 
 `cv-mcp` finds `cv` next to itself, then on `$PATH` (`$CV_BIN` overrides), and generates one tool
 per CLI command from `cv schema --commands --json`, plus the hand-written `await_omen`,
-`observe_stream`, `task_*` and `board_*` tools. The roster, with arguments, is in
+`observe_stream` and `task_*` tools. The roster, with arguments, is in
 [MCP](mcp.md); the live `tools/list` reply is the authority.
 
 ## Every other harness

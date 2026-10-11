@@ -22,8 +22,8 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cmd::hooks::{HookName, HooksCmd};
 use cmd::task::TaskCmd;
 use cmd::{
-    browse, cat, compaction, compose, config, doctor, events, hooks, formats, live, orchestrate, pack, port, recipes, schema,
-    search, share, task, tools, view, workflow,
+    browse, cat, compaction, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port, recipes,
+    schema, search, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
 use util::{usage, UsageError, WindowArgs};
@@ -93,7 +93,10 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
     ),
     ("Export", &["export", "dataset", "pack"]),
     ("Fleet & live", &["task", "scry", "share"]),
-    ("System", &["index", "config", "schema", "formats", "recipes", "hooks", "hook"]),
+    (
+        "System",
+        &["index", "config", "schema", "formats", "recipes", "hooks", "hook"],
+    ),
 ];
 
 /// The group a visible command belongs to (`None` for hidden stubs and unknown names).

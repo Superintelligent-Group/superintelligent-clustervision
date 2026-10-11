@@ -25,8 +25,8 @@ use cv_core::sanitize::sanitize_line;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::util::fmt_int;
 use crate::short_id;
+use crate::util::fmt_int;
 
 /// The skill installed beside the hooks (`skills/cv/SKILL.md` in the repo).
 const SKILL: &str = include_str!("../../../../skills/cv/SKILL.md");
