@@ -10,7 +10,7 @@
 //!
 //! Routes:
 //! - `GET /`                              the page
-//! - `GET /api/inbox?who=`                the inbox page (`task_ops::inbox_page`, `all=1` lifts the window)
+//! - `GET /api/inbox?who=`                the inbox page (`task::inbox_page`, `all=1` lifts the window)
 //! - `GET /api/task/<id>`                 one item (`events=1` adds the raw history)
 //! - `POST /api/task/<id>/resolve`        `{choice}` | `{accept_default: true}` | `{confirm: true}` (a
 //!   provisional resolution), `{note}` optional
@@ -291,7 +291,7 @@ fn api_inbox(ctx: &Ctx, q: &Query) -> (u16, Value) {
     };
     with_replay(|outcome| {
         let caller = task::default_endpoint();
-        let page = task_ops::inbox_page(&outcome, &who, caller.as_deref(), window, false, now);
+        let page = task::inbox_page(&outcome, &who, caller.as_deref(), window, false, now);
         let mut v = serde_json::to_value(&page).expect("page serializes");
         if let Some(o) = v.as_object_mut() {
             o.insert("warnings".into(), json!(outcome.warnings));
@@ -308,7 +308,7 @@ fn api_task(id: &str, events: bool) -> (u16, Value) {
         };
         let t = &outcome.model.tasks[&id];
         let who = t.assignee.clone().unwrap_or_default();
-        let page = task_ops::inbox_page(&outcome, &who, None, None, false, Utc::now());
+        let page = task::inbox_page(&outcome, &who, None, None, false, Utc::now());
         let item = page
             .items
             .iter()

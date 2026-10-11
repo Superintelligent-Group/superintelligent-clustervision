@@ -1050,7 +1050,7 @@ fn serve_tasks_routes() {
     let msg = v["error"].as_str().unwrap_or_default();
     assert!(msg.contains("redy") && msg.contains("claimed"), "{v}");
 
-    // /api/tasks/inbox/{who}: the claim shows for its owner; `since` stays off the wire.
+    // /api/tasks/inbox/{who}: the claim shows for its owner, as the one inbox row.
     let (status, v) = get_json(port, "/api/tasks/inbox/agent:a");
     assert_eq!(status, 200, "{v}");
     let inbox = v["inbox"].as_array().expect("inbox array");
@@ -1058,7 +1058,7 @@ fn serve_tasks_routes() {
     assert_eq!(inbox[0]["id"], json!(id), "{v}");
     assert_eq!(inbox[0]["reason"], "claimed_by_you", "{v}");
     assert_eq!(inbox[0]["effective_state"], "claimed", "{v}");
-    assert!(inbox[0].get("since").is_none(), "since stays off the wire: {v}");
+    assert!(inbox[0]["since"].is_string() && inbox[0]["age"].is_string(), "{v}");
     // A stranger sees nothing.
     let (_, v) = get_json(port, "/api/tasks/inbox/agent:nobody");
     assert_eq!(v["inbox"].as_array().unwrap().len(), 0, "{v}");

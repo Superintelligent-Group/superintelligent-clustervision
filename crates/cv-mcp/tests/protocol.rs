@@ -434,7 +434,8 @@ fn task_tools_open_claim_race_done() {
     assert_eq!(inbox[0]["id"], json!(id), "{text}");
     assert_eq!(inbox[0]["reason"], "claimed_by_you", "{text}");
     assert_eq!(inbox[0]["effective_state"], "claimed", "{text}");
-    assert!(inbox[0].get("since").is_none(), "since stays off the wire: {text}");
+    // The one inbox row (`cv_core::task::InboxItem`): the aging anchor and the age ride it.
+    assert!(inbox[0]["since"].is_string() && inbox[0]["age"].is_string(), "{text}");
     let (text, _) = s.call_tool(7, "task_inbox", json!({"who": "agent:beta"}));
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["inbox"].as_array().unwrap().len(), 0, "{text}");

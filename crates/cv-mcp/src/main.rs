@@ -692,7 +692,7 @@ fn task_inbox(args: &Value) -> anyhow::Result<String> {
         .map(String::from)
         .or_else(cv_core::task::default_endpoint)
         .context("`who` is required (or set CV_ENDPOINT)")?;
-    let entries = cv_core::task::InboxRow::compute(&outcome.model, &who);
+    let entries = cv_core::task::inbox_page(&outcome, &who, None, None, false, chrono::Utc::now()).items;
     Ok(serde_json::to_string_pretty(
         &json!({ "inbox": entries, "warnings": warnings }),
     )?)

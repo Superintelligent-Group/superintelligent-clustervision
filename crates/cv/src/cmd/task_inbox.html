@@ -282,7 +282,7 @@
   }
 
   function card(i, closed, k) {
-    const meta = [el('code', { text: i.short, title: 'copy id', onclick: () => copy(i.id, 'id') }), el('span', { text: i.state })];
+    const meta = [el('code', { text: i.short, title: 'copy id', onclick: () => copy(i.id, 'id') }), el('span', { text: i.effective_state })];
     if (i.decision) meta.push(el('span', { class: i.stale && !closed ? 'stale' : '', text: 'asked ' + i.age + ' ago by ' + i.opened_by }));
     else meta.push(el('span', { class: i.stale && !closed ? 'stale' : '', text: (closed ? 'closed ' : 'waiting ') + i.age + ' ago' }));
     if (i.decision && i.decision.deadline_phrase) meta.push(el('span', { class: /OVERDUE/.test(i.decision.deadline_phrase) ? 'overdue' : '', text: i.decision.deadline_phrase }));

@@ -302,11 +302,16 @@ warnings ride every response, so a corrupted coordination log is visible from an
   pinned STATUS.
 - **`GET /api/task/{id}/events`** — the raw durable history, `{ "events": [...], "warnings": [] }`,
   each event carrying `id`, `task_id`, `ts`, `by`, and its tagged `event` payload
-  (`opened`, `claimed`, `revision_proposed`, `review_passed`, `landed`, …).
+  (`opened`, `claimed`, `noted`, `posed`, `resolved`, …; a pre-0.15.0 log's land-facet kinds
+  read through unchanged).
 - **`GET /api/tasks/inbox/{who}`** — what needs this endpoint, stalest first:
-  `{ "inbox": [ { "id", "title", "reason", "effective_state" } ], "warnings": [] }`, where
-  `reason` is one of `decision_owed`, `discussing`, `provisional`, `assigned_open`,
-  `claimed_by_you`.
+  `{ "inbox": [ … ], "warnings": [] }`, each row the one inbox row every surface serves (`cv task
+  inbox --json`'s `items`, MCP `task_inbox`, `cv task serve`'s page): `id`, `short`, `title`,
+  `kind`, `reason`, `effective_state`, `since` (the aging anchor), `age`, `stale`, `assignee`,
+  `opened_by`, `opened_at`, `body`, `blocked`, `last_by`, `last_ts`, `unread`, `notes`, and when
+  present `tags`, `repo`, `issue`, `decision` (default, options, alternatives, deadline and its
+  phrase, the resolution) and `status`. `reason` is one of `decision_owed`, `discussing`,
+  `provisional`, `assigned_open`, `claimed_by_you`; the whole store is in scope (no 14-day window).
 - `GET /api/tasks/debt` and `GET /api/tasks/stats` were removed in 0.15.0 with the task land
   facet; they answer `410` with a pointer.
 

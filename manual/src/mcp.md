@@ -249,7 +249,7 @@ shapes. Two things to know up front:
 
 | Tool | Required args | Optional args | Purpose / when to use |
 |------|---------------|---------------|------------------------|
-| `task_open` | `title` | `body`, `repo`, `issue`, `channel` (`tasks`), `assignee`, `from` | Open a durable task. |
+| `task_open` | `title` | `body`, `repo`, `issue`, `assignee`, `from` | Open a durable task. |
 | `task_list` | — | `state`, `assignee`, `repo`, `tag`, `all` (`false`) | List tasks (non-terminal by default). An unknown `state` is an error naming the vocabulary, never a silent `[]`. |
 | `task_show` | `id` | — | One task's full projection: state, assignee, notes, tags, blockers, the decision facet, the pinned STATUS. |
 | `task_claim` | `id` | `from`* | Claim an open task — durable, race-free, first writer wins. |
@@ -257,7 +257,7 @@ shapes. Two things to know up front:
 | `task_note` | `id`, `text` | `session_ref`, `from` | Progress note; never changes state. |
 | `task_done` | `id` | `observed`, `from` | Complete a task. Self-reported and labeled so; `observed` is free text. Refused on a decision. |
 | `task_abandon` | `id` | `reason`, `from` | Kill a task (always allowed on a non-terminal task). |
-| `task_inbox` | — | `who` (default `$CV_ENDPOINT`) | What needs `who`: assigned, claimed, awaiting-their-review, their unlanded work. Stalest first. |
+| `task_inbox` | — | `who` (default `$CV_ENDPOINT`) | What needs `who`, stalest first: decisions owed, in discussion, made for them (veto?), assigned, claimed — the same rows as `cv task inbox --json`'s `items`. |
 
 \* identity-bearing: defaults to `$CV_ENDPOINT`, errors when neither is set.
 

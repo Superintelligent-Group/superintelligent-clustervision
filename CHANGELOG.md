@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- One inbox row: `cv task inbox --json` prints the page `serve` serves; MCP `task_inbox` and cvd's inbox route return its `items` (`since`, `age`, decision, notes).
 - **Removed `cv task split`** (it mined `DECIDE:` notes); `cv task decide … --blocks <id>` poses the question. Exit 2 with that pointer.
 - `cv task decide` writes `opened` + `posed` only — no `decision` tag; the bare-tag refusal moved into the reducer, so MCP `task_open` gets it too.
 - `task open --tags/--blocked-by/--blocks` and the page's `discuss`/`reopen` are each one atomic append; `resolve` reports the reducer's own refusals.

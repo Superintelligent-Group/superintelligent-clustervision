@@ -956,7 +956,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 if let Some(d) = &t.decision {
                     let deadline = d
                         .deadline
-                        .map(|dl| format!(" · {}", task_ops::deadline_phrase(dl, show_now)))
+                        .map(|dl| format!(" · {}", task::deadline_phrase(dl, show_now)))
                         .unwrap_or_default();
                     println!(
                         "  decision: posed {} by {}{deadline}",
@@ -1005,7 +1005,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                         None => {}
                     }
                 }
-                let children = task_ops::decisions_from_notes(&outcome.model);
+                let children = task::decisions_from_notes(&outcome.model);
                 let selected: Vec<&cv_core::task::Note> = t
                     .notes
                     .iter()
@@ -1177,16 +1177,11 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let now = Utc::now();
             let window = scope_window(all, since.as_deref(), now)?;
             let caller = task::default_endpoint();
-            let page = task_ops::inbox_page(&outcome, &who, caller.as_deref(), window, unread, now);
+            let page = task::inbox_page(&outcome, &who, caller.as_deref(), window, unread, now);
             if json {
-                // The full entries, unchanged wire shape (`task` embeds the whole projection,
-                // decision facet included); `--unread`/the window narrow which entries appear.
-                let keep: std::collections::HashSet<&str> = page.items.iter().map(|i| i.id.as_str()).collect();
-                let entries: Vec<_> = task::inbox(&outcome.model, &who)
-                    .into_iter()
-                    .filter(|e| keep.contains(e.task.task_id.as_str()))
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&entries)?);
+                // The page the text and Markdown render from — the shape `cv task serve`'s
+                // `/api/inbox` serves, and whose `items` are MCP's and cvd's inbox rows.
+                println!("{}", serde_json::to_string_pretty(&page)?);
             } else if md {
                 print!("{}", task_ops::render_inbox_md(&page));
             } else {

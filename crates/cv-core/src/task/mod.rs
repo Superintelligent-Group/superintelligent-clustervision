@@ -21,12 +21,17 @@
 //! Storage is a single append-only event log (`$CLUSTERVISION_HOME/tasks/events.jsonl`) under a
 //! crash-safe flock.
 
+pub mod inbox;
 pub mod model;
 pub mod project;
 pub mod reduce;
 pub mod store;
 pub mod views;
 
+pub use inbox::{
+    deadline_phrase, decisions_from_notes, inbox_page, DecisionView, InboxCounts, InboxItem, InboxPage, NoteView,
+    ResolutionView,
+};
 pub use model::{RetiredEvent, TaskEvent, TaskEventKind, TaskState, RETIRED_TAGS};
 pub use project::{
     age_short, blocks, effective_display, in_scope, inbox, involves, is_blocked, list, parse_deadline, parse_duration,
@@ -35,7 +40,7 @@ pub use project::{
 };
 pub use reduce::{Decision, Note, PinnedStatus, ReduceError, Resolution, TaskProjection, TaskReadModel, TaskReducer};
 pub use store::{new_event, replay, ReplayOutcome, TaskStore};
-pub use views::{InboxDecision, InboxRow, TaskRow};
+pub use views::TaskRow;
 
 /// The fleet identity convention (audit G4): the spawner sets `CV_ENDPOINT=agent:<pane>` in each
 /// agent's environment, and cv front-ends derive their default `--from` here — the *bare*

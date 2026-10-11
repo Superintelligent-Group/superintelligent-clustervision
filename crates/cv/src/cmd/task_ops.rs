@@ -3,17 +3,13 @@
 //! one, the event feed (`cv task events` ≡ `GET /api/events`), and the inbox page
 //! (`cv task inbox` ≡ `GET /api/inbox`).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use cv_core::ir::truncate;
 use cv_core::sanitize::sanitize_line;
-use cv_core::task::{
-    self, InboxReason, ReplayOutcome, TaskEvent, TaskEventKind, TaskProjection, TaskReadModel, TaskStore,
-};
-use serde::Serialize;
+use cv_core::task::{self, InboxReason, ReplayOutcome, TaskEvent, TaskEventKind, TaskReadModel, TaskStore};
 
 use crate::util::fmt_local;
 
@@ -196,22 +192,6 @@ pub(crate) fn resolve(
         },
         Vec::new(),
     )
-}
-
-/// `note event id → decision task id` for every decision that names a note as its `source` (what
-/// `cv task split` wrote until 0.15.0; `show` and the page still point such a note at its
-/// decision).
-pub(crate) fn decisions_from_notes(model: &TaskReadModel) -> HashMap<String, String> {
-    model
-        .tasks
-        .values()
-        .filter_map(|d| {
-            d.decision
-                .as_ref()
-                .and_then(|dec| dec.source.clone())
-                .map(|s| (s, d.task_id.clone()))
-        })
-        .collect()
 }
 
 // ───────────────────────────── the event feed ─────────────────────────────
@@ -406,274 +386,7 @@ pub(crate) fn event_text(ev: &TaskEvent, model: &TaskReadModel, plen: usize) -> 
     )
 }
 
-// ───────────────────────────── the inbox page ─────────────────────────────
-
-/// One inbox item with everything a page or a Markdown export needs — the full projection is
-/// flattened into the fields a reader looks at, not embedded.
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct InboxItem {
-    pub id: String,
-    pub short: String,
-    pub title: String,
-    /// `decision` or `action`.
-    pub kind: &'static str,
-    /// `None` for a closed item (the page's Resolved filter).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<InboxReason>,
-    pub state: String,
-    pub since: DateTime<Utc>,
-    pub age: String,
-    pub stale: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<String>,
-    pub opened_by: String,
-    pub opened_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub issue: Option<String>,
-    pub body: String,
-    pub blocked: bool,
-    pub last_by: String,
-    pub last_ts: DateTime<Utc>,
-    pub unread: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decision: Option<DecisionView>,
-    /// The pinned STATUS text, when one is pinned.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    pub notes: Vec<NoteView>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct DecisionView {
-    #[serde(rename = "default")]
-    pub default_choice: String,
-    pub options: Vec<String>,
-    pub alternatives: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deadline: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deadline_phrase: Option<String>,
-    pub posed_by: String,
-    pub posed_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolution: Option<ResolutionView>,
-    /// The provisional resolution a decider confirmed or vetoed (kept, never rewritten).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub superseded_provisional: Option<ResolutionView>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ResolutionView {
-    pub choice: String,
-    pub by: String,
-    pub ts: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    pub accepted_default: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub provisional: bool,
-}
-
-impl ResolutionView {
-    fn of(r: &task::Resolution) -> ResolutionView {
-        ResolutionView {
-            choice: r.choice.clone(),
-            by: r.by.clone(),
-            ts: r.ts,
-            note: r.note.clone(),
-            accepted_default: r.accepted_default,
-            provisional: r.provisional,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct NoteView {
-    pub by: String,
-    pub ts: DateTime<Utc>,
-    pub text: String,
-    /// Appended after the task closed (the page renders "(after close)").
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub post_close: bool,
-    /// The decision posed from this note, when one names it as its `source`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub split_into: Option<String>,
-}
-
-/// The whole page for one person.
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct InboxPage {
-    pub who: String,
-    pub now: DateTime<Utc>,
-    /// Open items, stalest first (decisions age from their pose).
-    pub items: Vec<InboxItem>,
-    /// Closed items assigned to `who` in the window, newest first (resolved / done / abandoned).
-    pub closed: Vec<InboxItem>,
-    /// Open items outside the window (not involving the caller).
-    pub hidden: usize,
-    pub counts: InboxCounts,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct InboxCounts {
-    pub decisions: usize,
-    /// Decisions parked for discussion (open, not owed).
-    pub discussing: usize,
-    /// Decisions made for `who` provisionally, awaiting a confirm or veto (resolved, not owed).
-    pub provisional: usize,
-    pub assigned: usize,
-    pub claimed: usize,
-    pub unread: usize,
-    pub closed: usize,
-}
-
-/// `task_id → by of its last event`, from the replayed log.
-fn last_authors(events: &[TaskEvent]) -> HashMap<&str, &str> {
-    let mut m = HashMap::new();
-    for ev in events {
-        m.insert(ev.task_id.as_str(), ev.by.as_str());
-    }
-    m
-}
-
-/// Human deadline: `by 10-03 (in 2d)` / `by 10-03 (OVERDUE 1d)`.
-pub(crate) fn deadline_phrase(deadline: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let day = fmt_local(deadline, "%m-%d");
-    if deadline >= now {
-        format!("by {day} (in {})", task::age_short(now, deadline))
-    } else {
-        format!("by {day} (OVERDUE {})", task::age_short(deadline, now))
-    }
-}
-
-/// What every item on one page shares.
-struct PageCtx<'a> {
-    model: &'a TaskReadModel,
-    who: &'a str,
-    plen: usize,
-    children: HashMap<String, String>,
-    authors: HashMap<&'a str, &'a str>,
-    now: DateTime<Utc>,
-}
-
-fn item_of(ctx: &PageCtx<'_>, t: &TaskProjection, reason: Option<InboxReason>, since: DateTime<Utc>) -> InboxItem {
-    let (model, who, plen, children, now) = (ctx.model, ctx.who, ctx.plen, &ctx.children, ctx.now);
-    let last_by = ctx.authors.get(t.task_id.as_str()).copied().unwrap_or("");
-    InboxItem {
-        id: t.task_id.clone(),
-        short: t.task_id.get(..plen).unwrap_or(&t.task_id).to_string(),
-        title: t.title.clone(),
-        kind: t.kind(),
-        reason,
-        state: task::effective_display(t),
-        since,
-        age: task::age_short(since, now),
-        stale: now.signed_duration_since(since) > chrono::Duration::hours(24),
-        assignee: t.assignee.clone(),
-        opened_by: t.opened_by.clone(),
-        opened_at: t.opened_at,
-        tags: t.tags.clone(),
-        repo: t.repo.clone(),
-        issue: t.issue.clone(),
-        body: t.body.clone(),
-        blocked: task::is_blocked(model, t),
-        last_by: last_by.to_string(),
-        last_ts: t.last_ts,
-        unread: !task::same_actor(last_by, who),
-        decision: t.decision.as_ref().map(|d| DecisionView {
-            default_choice: d.default_choice.clone(),
-            options: d.options.clone(),
-            alternatives: d.alternatives().map(str::to_string).collect(),
-            deadline: d.deadline,
-            deadline_phrase: d.deadline.map(|dl| deadline_phrase(dl, now)),
-            posed_by: d.posed_by.clone(),
-            posed_at: d.posed_at,
-            source: d.source.clone(),
-            resolution: d.resolution.as_ref().map(ResolutionView::of),
-            superseded_provisional: d.superseded_provisional.as_ref().map(ResolutionView::of),
-        }),
-        status: t.status.as_ref().map(|s| s.text.clone()),
-        notes: t
-            .notes
-            .iter()
-            .map(|n| NoteView {
-                by: n.by.clone(),
-                ts: n.ts,
-                text: n.text.clone(),
-                post_close: n.post_close,
-                split_into: children.get(&n.event_id).cloned(),
-            })
-            .collect(),
-    }
-}
-
-/// Build the page: the inbox projection for `who`, scoped to `since` (items involving `caller`
-/// escape the window), `unread_only` keeping items whose last event is not `who`'s own.
-pub(crate) fn inbox_page(
-    outcome: &ReplayOutcome,
-    who: &str,
-    caller: Option<&str>,
-    since: Option<DateTime<Utc>>,
-    unread_only: bool,
-    now: DateTime<Utc>,
-) -> InboxPage {
-    let model = &outcome.model;
-    let ctx = PageCtx {
-        model,
-        who,
-        plen: task::unique_prefix_len(model.tasks.keys().map(String::as_str), 8),
-        children: decisions_from_notes(model),
-        authors: last_authors(&outcome.events),
-        now,
-    };
-    let mut items = Vec::new();
-    let mut hidden = 0;
-    for e in task::inbox(model, who) {
-        if !task::in_scope(e.task, since, caller) {
-            hidden += 1;
-            continue;
-        }
-        let item = item_of(&ctx, e.task, Some(e.reason), e.since);
-        if unread_only && !item.unread {
-            continue;
-        }
-        items.push(item);
-    }
-    let mut closed: Vec<InboxItem> = model
-        .tasks
-        .values()
-        .filter(|t| t.state.is_terminal() && t.assignee.as_deref() == Some(who))
-        // A provisional resolution awaiting a veto is an open item, not a closed one.
-        .filter(|t| !t.decision.as_ref().is_some_and(|d| d.awaiting_veto()))
-        .filter(|t| task::in_scope(t, since, caller))
-        .map(|t| item_of(&ctx, t, None, t.last_ts))
-        .collect();
-    closed.sort_by_key(|i| std::cmp::Reverse(i.last_ts));
-    let count = |r: InboxReason| items.iter().filter(|i| i.reason == Some(r)).count();
-    let counts = InboxCounts {
-        decisions: count(InboxReason::DecisionOwed),
-        discussing: count(InboxReason::Discussing),
-        provisional: count(InboxReason::Provisional),
-        assigned: count(InboxReason::AssignedOpen),
-        claimed: count(InboxReason::ClaimedByYou),
-        unread: items.iter().filter(|i| i.unread).count(),
-        closed: closed.len(),
-    };
-    InboxPage {
-        who: who.to_string(),
-        now,
-        items,
-        closed,
-        hidden,
-        counts,
-    }
-}
+// ───────────────────────────── the inbox, rendered ─────────────────────────────
 
 /// The inbox's groups, in the order they are printed: a decision owed is the slowest blocker a
 /// fleet has, so it comes first; then the actions handed to you; then the work you hold.
@@ -695,13 +408,13 @@ pub(crate) fn first_line(text: &str, max: usize) -> String {
 }
 
 /// `cv task inbox <who>` as text.
-pub(crate) fn render_inbox_text(page: &InboxPage) -> String {
+pub(crate) fn render_inbox_text(page: &task::InboxPage) -> String {
     let mut out = String::new();
     if page.items.is_empty() {
         out.push_str(&format!("(inbox empty for {})\n", sanitize_line(&page.who)));
     }
     for (reason, label) in INBOX_GROUPS {
-        let group: Vec<&InboxItem> = page.items.iter().filter(|i| i.reason == Some(*reason)).collect();
+        let group: Vec<&task::InboxItem> = page.items.iter().filter(|i| i.reason == Some(*reason)).collect();
         if group.is_empty() {
             continue;
         }
@@ -712,7 +425,7 @@ pub(crate) fn render_inbox_text(page: &InboxPage) -> String {
                 if i.stale { "⏰" } else { "  " },
                 i.short,
                 i.age,
-                i.state,
+                i.effective_state,
                 sanitize_line(&i.title)
             ));
             if let Some(d) = &i.decision {
@@ -782,7 +495,7 @@ pub(crate) fn render_inbox_text(page: &InboxPage) -> String {
 
 /// `cv task inbox <who> --md`: the whole inbox as one Markdown page — every item's body and the
 /// first line of every note, ready to paste anywhere.
-pub(crate) fn render_inbox_md(page: &InboxPage) -> String {
+pub(crate) fn render_inbox_md(page: &task::InboxPage) -> String {
     let mut out = String::new();
     let who = sanitize_line(&page.who);
     out.push_str(&format!(
@@ -806,7 +519,7 @@ pub(crate) fn render_inbox_md(page: &InboxPage) -> String {
     }
     let mut n = 0;
     for (reason, label) in INBOX_GROUPS {
-        let group: Vec<&InboxItem> = page.items.iter().filter(|i| i.reason == Some(*reason)).collect();
+        let group: Vec<&task::InboxItem> = page.items.iter().filter(|i| i.reason == Some(*reason)).collect();
         if group.is_empty() {
             continue;
         }
@@ -816,7 +529,7 @@ pub(crate) fn render_inbox_md(page: &InboxPage) -> String {
             out.push_str(&format!("### {n}. {}\n\n", md_inline(&i.title)));
             let mut facts = vec![
                 format!("`{}`", i.short),
-                i.state.clone(),
+                i.effective_state.clone(),
                 format!(
                     "{} {} ago by {}",
                     if i.decision.is_some() { "asked" } else { "waiting" },
@@ -937,12 +650,5 @@ mod tests {
             option_list(" keep ", &["delete".into(), "keep".into(), "".into(), "delete".into()]),
             vec!["keep", "delete"]
         );
-    }
-
-    #[test]
-    fn deadline_phrases_say_in_or_overdue() {
-        let now: DateTime<Utc> = "2026-10-01T12:00:00Z".parse().unwrap();
-        assert!(deadline_phrase(now + chrono::Duration::days(2), now).contains("(in 2d)"));
-        assert!(deadline_phrase(now - chrono::Duration::hours(5), now).contains("OVERDUE 5h"));
     }
 }

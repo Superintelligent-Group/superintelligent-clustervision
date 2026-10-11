@@ -338,7 +338,7 @@ fn task_one(id: &str, events: bool) -> (u16, Value) {
 /// `GET /api/tasks/inbox/{who}` — what needs this endpoint.
 fn tasks_inbox(who: &str) -> (u16, Value) {
     with_tasks(|outcome| {
-        let entries = cv_core::task::InboxRow::compute(&outcome.model, who);
+        let entries = cv_core::task::inbox_page(outcome, who, None, None, false, chrono::Utc::now()).items;
         ok(json!({ "inbox": entries, "warnings": outcome.warnings }))
     })
 }
