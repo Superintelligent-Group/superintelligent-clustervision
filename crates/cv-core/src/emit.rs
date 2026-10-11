@@ -10,6 +10,7 @@
 //! NOTE: This module is owned by the port-a-sesh work. The free function [`emit`] is the public entry
 //! point; `cv-core::lib` re-exports it and the `cv` CLI calls it.
 
+use crate::harness::store::write_jsonl;
 use crate::harness::EmitResult;
 use crate::ir::{Block, GitInfo, Harness, Message, MessageKind, Role, Session, SessionRef};
 use crate::stream::ParseOptions;
@@ -3787,20 +3788,6 @@ fn emit_hermes(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<
         new_id: new_id.clone(),
         resume_hint: Some(format!("hermes --resume {new_id}")),
     })
-}
-
-// ------------------------------------------------------------------------------------------------
-// shared
-// ------------------------------------------------------------------------------------------------
-
-fn write_jsonl(path: &Path, lines: &[Value]) -> Result<()> {
-    let mut buf = String::new();
-    for v in lines {
-        buf.push_str(&serde_json::to_string(v)?);
-        buf.push('\n');
-    }
-    fs::write(path, buf).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]

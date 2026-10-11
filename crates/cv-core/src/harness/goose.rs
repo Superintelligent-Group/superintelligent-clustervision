@@ -109,12 +109,13 @@
 //!   can pair it to a prior request by id (we do this within a session).
 //! * `model` is reconstructed from `provider_name` + `model_config_json.model_name` when present.
 
-use super::Adapter;
+use super::store::sqlite::{columns, open_ro};
+use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -174,11 +175,6 @@ fn sessions_dir() -> Option<PathBuf> {
         );
     }
     candidates.into_iter().find(|p| p.exists())
-}
-
-fn open_ro(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .with_context(|| format!("opening {}", path.display()))
 }
 
 impl Default for Goose {
@@ -244,19 +240,6 @@ impl Adapter for Goose {
 // ---------------------------------------------------------------------------
 // Modern SQLite store
 // ---------------------------------------------------------------------------
-
-/// Columns present on a table (for schema-drift tolerance).
-fn columns(conn: &Connection, table: &str) -> std::collections::HashSet<String> {
-    let mut set = std::collections::HashSet::new();
-    if let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) {
-        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
-            for n in rows.flatten() {
-                set.insert(n);
-            }
-        }
-    }
-    set
-}
 
 /// The SQL expression for a session's title, given which columns exist. Goose only ever WRITES
 /// `name` (`create_session`, the name updater — nothing touches `description`) and reads `name`
@@ -511,7 +494,7 @@ impl DbMsg {
         let mut m = build_message(
             &self.role,
             self.id,
-            self.created.and_then(secs_to_dt),
+            self.created.and_then(ts_from_epoch),
             self.tokens,
             decoded,
         )?;
@@ -717,7 +700,7 @@ fn stream_legacy(name: &str, path: &Path, sink: &mut dyn MessageSink) -> Result<
         };
         let role = v.get("role").and_then(Value::as_str).unwrap_or("user");
         let id = v.get("id").and_then(Value::as_str).map(str::to_string);
-        let ts = v.get("created").and_then(Value::as_i64).and_then(secs_to_dt);
+        let ts = v.get("created").and_then(Value::as_i64).and_then(ts_from_epoch);
         let decoded = v
             .get("content")
             .map(|c| decode_content(c, &mut tool_names))
@@ -1041,29 +1024,13 @@ fn build_message(
 // Timestamp helpers
 // ---------------------------------------------------------------------------
 
-/// Unix seconds → datetime. A value above Goose's `MILLISECOND_TIMESTAMP_THRESHOLD`
-/// (`10_000_000_000`, session_manager.rs:30 — i.e. past year 2286 as seconds) is milliseconds,
-/// exactly as Goose's own reader treats it (:728-733).
-fn secs_to_dt(s: i64) -> Option<DateTime<Utc>> {
-    if s <= 0 {
-        return None;
-    }
-    let s = if s > 10_000_000_000 { s / 1000 } else { s };
-    Utc.timestamp_opt(s, 0).single()
-}
-
-/// Parse a JSON timestamp value: an RFC3339 string, a SQLite `TIMESTAMP` string, or unix seconds.
+/// Parse a JSON timestamp value: an RFC3339 string, a SQLite `TIMESTAMP` string, or unix
+/// seconds/milliseconds (Goose's own reader splits them by magnitude too, session_manager.rs:728).
 fn parse_ts_value(v: &Value) -> Option<DateTime<Utc>> {
     if let Some(s) = v.as_str() {
         return parse_ts_text(s);
     }
-    if let Some(n) = v.as_i64() {
-        return secs_to_dt(n);
-    }
-    if let Some(f) = v.as_f64() {
-        return secs_to_dt(f as i64);
-    }
-    None
+    v.as_f64().and_then(ts_from_epoch)
 }
 
 /// Parse a textual timestamp: RFC3339 (`2024-01-01T12:00:00Z`) or SQLite (`2024-01-01 12:00:00`).
@@ -1620,10 +1587,11 @@ mod tests {
         let m = &s.messages[0];
         assert!(matches!(&m.content[0], Block::ToolResult { content, is_error, .. }
                 if content == "ok\nhello\n[resource: file:///tmp/b.bin]\n[audio: audio/wav]" && !is_error));
-        // millisecond `created_timestamp` normalized like Goose does (threshold 10_000_000_000)
+        // a millisecond `created_timestamp` is read as milliseconds (Goose's own reader divides it
+        // down to whole seconds for display; the IR keeps what the column holds)
         assert_eq!(
             m.timestamp.map(|t| t.to_rfc3339()),
-            Some("2024-01-01T12:00:00+00:00".to_string())
+            Some("2024-01-01T12:00:00.123+00:00".to_string())
         );
     }
 

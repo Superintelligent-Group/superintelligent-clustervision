@@ -26,12 +26,12 @@
 //! one machine). Anything absent is skipped gracefully — a missing table, key, or field never
 //! panics and never fails the whole session.
 
-use super::Adapter;
+use super::store::sqlite::open_ro;
+use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
-use chrono::{TimeZone, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -100,12 +100,6 @@ impl Default for Cursor {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn open_ro(path: &Path) -> Result<Connection> {
-    // immutable so we never lock the user's live DB or get blocked by the WAL.
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .with_context(|| format!("opening {}", path.display()))
 }
 
 impl Adapter for Cursor {
@@ -262,13 +256,6 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn ms_to_dt(ms: i64) -> Option<chrono::DateTime<Utc>> {
-    if ms <= 0 {
-        return None;
-    }
-    Utc.timestamp_millis_opt(ms).single()
-}
-
 // ---------------------------------------------------------------------------
 // Global (cursorDiskKV) format
 // ---------------------------------------------------------------------------
@@ -317,8 +304,8 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
             path: db.to_path_buf(),
             cwd: cwd_map.get(composer_id).cloned(),
             title,
-            created_at: created.and_then(ms_to_dt),
-            updated_at: updated.and_then(ms_to_dt),
+            created_at: created.and_then(ts_from_epoch),
+            updated_at: updated.and_then(ts_from_epoch),
             message_count: count,
         });
     }
@@ -354,8 +341,8 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
         harness: Harness::Cursor,
         cwd: r.cwd.clone(),
         title,
-        created_at: created.and_then(ms_to_dt).or(r.created_at),
-        updated_at: updated.and_then(ms_to_dt).or(r.updated_at),
+        created_at: created.and_then(ts_from_epoch).or(r.created_at),
+        updated_at: updated.and_then(ts_from_epoch).or(r.updated_at),
         model: None,
         git: None,
         messages: Vec::new(),

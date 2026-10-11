@@ -61,12 +61,13 @@
 //! compaction flags, the raw reasoning columns, and the session row under
 //! `extra["hermes"]["session"]`.
 
-use super::Adapter;
+use super::store::sqlite::{columns, open_ro, table_exists};
+use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
-use anyhow::{Context, Result};
-use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, OpenFlags};
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
@@ -145,16 +146,6 @@ fn lineage_markers(model_config: Option<&str>) -> serde_json::Map<String, Value>
     out
 }
 
-/// True if the DB has a table of this name (`system_prompts` arrived with schema v25).
-fn table_exists(conn: &Connection, name: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [name],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
-
 pub struct Hermes {
     /// Every Hermes `state.db` we can read: the top-level `<home>/state.db` PLUS one per
     /// `<home>/profiles/*/state.db`. Hermes stores most sessions under the *active* profile (e.g.
@@ -196,14 +187,6 @@ impl Hermes {
     pub fn with_db(db: PathBuf) -> Self {
         Hermes { dbs: vec![db] }
     }
-
-    fn open_path(path: &PathBuf) -> Result<Connection> {
-        // Read-only so we never touch the user's live DB / take a write lock.
-        let conn =
-            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-                .with_context(|| format!("opening {}", path.display()))?;
-        Ok(conn)
-    }
 }
 
 impl Default for Hermes {
@@ -244,7 +227,7 @@ impl Adapter for Hermes {
         // unreadable DB (e.g. permission-denied) is skipped rather than failing the whole scan.
         let mut out = Vec::new();
         for db in &self.dbs {
-            let conn = match Self::open_path(db) {
+            let conn = match open_ro(db) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -262,37 +245,9 @@ impl Adapter for Hermes {
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
         // what lets one Hermes adapter span many profile DBs without id collisions.
-        let conn = Self::open_path(&r.path)?;
+        let conn = open_ro(&r.path)?;
         stream_conn(&conn, r, opts, sink)
     }
-}
-
-/// Which optional columns exist on the `messages` table of this DB (for historical schemas).
-fn present_msg_cols(conn: &Connection) -> HashSet<String> {
-    let mut present = HashSet::new();
-    if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(messages)") {
-        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
-            for name in rows.flatten() {
-                present.insert(name);
-            }
-        }
-    }
-    present
-}
-
-/// True if `sessions` has a given column (older schemas may lack `title`, `parent_session_id`, …).
-fn session_has_col(conn: &Connection, col: &str) -> bool {
-    let mut stmt = match conn.prepare("PRAGMA table_info(sessions)") {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) else {
-        return false;
-    };
-    // Not a tail expression: `rows` borrows `stmt`, which must drop before the return.
-    #[allow(clippy::let_and_return)]
-    let found = rows.flatten().any(|n| n == col);
-    found
 }
 
 /// Row shape of the per-session metadata SELECT in [`stream_conn`] (columns guarded by
@@ -319,7 +274,7 @@ fn latest_of(stamps: [Option<f64>; 3]) -> Option<DateTime<Utc>> {
         .into_iter()
         .flatten()
         .fold(None, |acc: Option<f64>, t| Some(acc.map_or(t, |a| a.max(t))))
-        .and_then(secs_to_dt)
+        .and_then(ts_from_epoch)
 }
 
 /// One `SessionRef` per CONVERSATION. Excluded: delegate sub-agent runs
@@ -335,14 +290,16 @@ fn latest_of(stamps: [Option<f64>; 3]) -> Option<DateTime<Utc>> {
 /// user-visible conversations and stay listed. An untitled compression tip takes its root's title,
 /// as Hermes's listing does (`COALESCE(tip.title, s.title)`, `hermes_state_sessions.py:1137`).
 fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
+    // Older schemas may lack `title`, `parent_session_id`, …: select what exists, NULL for the rest.
+    let scols = columns(conn, "sessions");
     let expr = |col: &str| {
-        if session_has_col(conn, col) {
+        if scols.contains(col) {
             col.to_string()
         } else {
             "NULL".to_string()
         }
     };
-    let has_parent = session_has_col(conn, "parent_session_id");
+    let has_parent = scols.contains("parent_session_id");
     let sql = format!(
         "SELECT id, {title}, started_at, ended_at, message_count, {cwd}, {last}, {model_config} \
          FROM sessions ORDER BY started_at DESC",
@@ -353,7 +310,7 @@ fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
     );
     // Compression ancestors: parents (ended in compression) that some session continues from.
     let mut compression_parents: HashSet<String> = HashSet::new();
-    if session_has_col(conn, "parent_session_id") && session_has_col(conn, "end_reason") {
+    if has_parent && scols.contains("end_reason") {
         if let Ok(mut stmt) = conn.prepare(
             "SELECT DISTINCT p.id FROM sessions p JOIN sessions c ON c.parent_session_id = p.id \
              WHERE p.end_reason IN ('compression', 'orphaned_compression')",
@@ -394,7 +351,7 @@ fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
             path: path.to_path_buf(),
             cwd: cwd.filter(|c| !c.is_empty()).map(PathBuf::from),
             title: title.map(|t| crate::ir::truncate(&t, 80)),
-            created_at: started.and_then(secs_to_dt),
+            created_at: started.and_then(ts_from_epoch),
             updated_at: latest_of([ended, last, started]),
             message_count: count.unwrap_or(0).max(0) as usize,
         });
@@ -469,8 +426,9 @@ fn read_session_facts(conn: &Connection, id: &str, source: Option<&str>, end_rea
     if let Some(e) = end_reason.filter(|s| !s.is_empty()) {
         meta.insert("end_reason".into(), Value::String(e.to_string()));
     }
+    let scols = columns(conn, "sessions");
     for col in SESSION_META_TEXT_COLS {
-        if !session_has_col(conn, col) {
+        if !scols.contains(*col) {
             continue;
         }
         let v: Option<String> = conn
@@ -484,7 +442,7 @@ fn read_session_facts(conn: &Connection, id: &str, source: Option<&str>, end_rea
         }
     }
     for col in SESSION_META_INT_COLS {
-        if !session_has_col(conn, col) {
+        if !scols.contains(*col) {
             continue;
         }
         let v: Option<i64> = conn
@@ -511,13 +469,13 @@ fn read_session_facts(conn: &Connection, id: &str, source: Option<&str>, end_rea
             .filter(|s| !s.is_empty())
     };
     let mut system_prompt = None;
-    if session_has_col(conn, "system_prompt_hash") && table_exists(conn, "system_prompts") {
+    if scols.contains("system_prompt_hash") && table_exists(conn, "system_prompts") {
         system_prompt = str_col(
             "SELECT sp.prompt FROM sessions s JOIN system_prompts sp ON sp.hash = s.system_prompt_hash \
              WHERE s.id = ?1",
         );
     }
-    if system_prompt.is_none() && session_has_col(conn, "system_prompt") {
+    if system_prompt.is_none() && scols.contains("system_prompt") {
         system_prompt = str_col("SELECT system_prompt FROM sessions WHERE id = ?1");
     }
     let mut bag = serde_json::Map::new();
@@ -549,10 +507,11 @@ fn read_session_facts(conn: &Connection, id: &str, source: Option<&str>, end_rea
 /// that carries no branch / reset / delegate marker (`_COMPRESSION_CHILD_SQL`). Only meaningful for
 /// a session that ended in compression; `None` when the store does not say.
 fn compression_child(conn: &Connection, id: &str) -> Option<String> {
-    if !session_has_col(conn, "parent_session_id") {
+    let scols = columns(conn, "sessions");
+    if !scols.contains("parent_session_id") {
         return None;
     }
-    let model_config = if session_has_col(conn, "model_config") {
+    let model_config = if scols.contains("model_config") {
         "model_config"
     } else {
         "NULL"
@@ -578,14 +537,15 @@ fn compression_child(conn: &Connection, id: &str) -> Option<String> {
 
 fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
     // session-level metadata (guard optional columns for historical schemas).
+    let scols = columns(conn, "sessions");
     let expr = |col: &str| {
-        if session_has_col(conn, col) {
+        if scols.contains(col) {
             col.to_string()
         } else {
             "NULL".to_string()
         }
     };
-    let has_parent = session_has_col(conn, "parent_session_id");
+    let has_parent = scols.contains("parent_session_id");
     let meta_sql = format!(
         "SELECT {model}, started_at, ended_at, {title}, {source}, {parent}, {end_reason}, {cwd}, \
          {git_branch}, {last}, {model_config} FROM sessions WHERE id = ?1",
@@ -680,7 +640,7 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
             .filter(|t| !t.is_empty())
             .or_else(|| r.title.clone())
             .or_else(|| inherited_title(conn, &chain)),
-        created_at: started.and_then(secs_to_dt).or(r.created_at),
+        created_at: started.and_then(ts_from_epoch).or(r.created_at),
         updated_at: latest_of([ended, last_activity, started]).or(r.updated_at),
         model,
         git: git_branch.filter(|b| !b.is_empty()).map(|branch| GitInfo {
@@ -694,7 +654,7 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
         lineage,
     };
 
-    let cols = present_msg_cols(conn);
+    let cols = columns(conn, "messages");
     let has = |c: &str| cols.contains(c);
 
     // Build the SELECT defensively: required cols always present; optional cols gated by probe.
@@ -878,8 +838,9 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
     if session_id.is_empty() {
         return vec![session_id.to_string()];
     }
-    let has_end_reason = session_has_col(conn, "end_reason");
-    let has_model_config = session_has_col(conn, "model_config");
+    let scols = columns(conn, "sessions");
+    let has_end_reason = scols.contains("end_reason");
+    let has_model_config = scols.contains("model_config");
     let str_col = |col: &str, id: &str| -> Option<String> {
         conn.query_row(&format!("SELECT {col} FROM sessions WHERE id = ?1"), [id], |row| {
             row.get::<_, Option<String>>(0)
@@ -1006,7 +967,7 @@ impl MsgRow {
             origin = o;
         }
         let mut m = Message::of_kind(role, kind, origin);
-        m.timestamp = self.timestamp.and_then(secs_to_dt);
+        m.timestamp = self.timestamp.and_then(ts_from_epoch);
 
         // Everything Hermes-specific goes in the `extra["hermes"]` bag, built here and attached once.
         let mut bag = serde_json::Map::new();
@@ -1297,13 +1258,6 @@ fn extract_codex_encrypted(raw: &str) -> Option<String> {
     items
         .iter()
         .find_map(|it| it.get("encrypted_content").and_then(Value::as_str).map(str::to_string))
-}
-
-fn secs_to_dt(s: f64) -> Option<DateTime<Utc>> {
-    if !s.is_finite() || s <= 0.0 {
-        return None;
-    }
-    Utc.timestamp_millis_opt((s * 1000.0) as i64).single()
 }
 
 /// Whole-`Session` convenience over [`stream_conn`] for tests: stream into a [`CollectSink`] and
@@ -2161,7 +2115,11 @@ mod tests {
         );
         let plain = &refs[0];
         assert_eq!(plain.cwd.as_deref(), Some(Path::new("/work/proj")));
-        assert_eq!(plain.updated_at, secs_to_dt(5000.0), "last_activity_at beats ended_at");
+        assert_eq!(
+            plain.updated_at,
+            ts_from_epoch(5000.0),
+            "last_activity_at beats ended_at"
+        );
         // a v14 DB is listed exactly as before (no listing columns → no filters)
         let old = mk_conn(SCHEMA_V14);
         insert_session(&old, "a", None, None, 1000.0, None);
@@ -2181,7 +2139,7 @@ mod tests {
         let s = parse_conn(&conn, &sref("s")).unwrap();
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/work/proj")));
         assert_eq!(s.git.as_ref().and_then(|g| g.branch.as_deref()), Some("main"));
-        assert_eq!(s.updated_at, secs_to_dt(3000.0));
+        assert_eq!(s.updated_at, ts_from_epoch(3000.0));
         assert_eq!(smeta(&s)["git_repo_root"], "/work/proj");
         assert_eq!(smeta(&s)["profile_name"], "hermes-x");
         assert_nested_extra(&s);
@@ -2342,7 +2300,7 @@ mod tests {
         const Y: &str = "20260919_161227_f94c97";
         const F: &str = "20260919_161227_212153";
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hermes/state-v30.db");
-        let conn = Hermes::open_path(&path).unwrap();
+        let conn = open_ro(&path).unwrap();
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| row.get(0))
             .unwrap();

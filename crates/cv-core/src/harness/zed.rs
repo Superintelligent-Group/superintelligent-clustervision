@@ -52,11 +52,12 @@
 //!   `cumulative_token_usage` is kept (in `extra["zed"]`). A subagent's `parent_thread_id` is
 //!   first-class [`Lineage::parent`]; the `Compaction` summary becomes a `CompactionSummary` turn.
 
+use super::store::sqlite::{columns, open_ro};
 use super::Adapter;
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -98,11 +99,6 @@ fn threads_db() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-fn open_ro(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .with_context(|| format!("opening {}", path.display()))
-}
-
 impl Adapter for Zed {
     fn harness(&self) -> Harness {
         Harness::Zed
@@ -130,20 +126,6 @@ impl Adapter for Zed {
         let conn = open_ro(&r.path)?;
         stream_thread(&conn, r, sink)
     }
-}
-
-/// Columns present on a table (Zed grows `threads` via `ALTER TABLE`, so old DBs lack the newer
-/// `parent_id`/`folder_paths`/`created_at` columns entirely).
-fn columns(conn: &Connection, table: &str) -> std::collections::HashSet<String> {
-    let mut set = std::collections::HashSet::new();
-    if let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) {
-        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
-            for n in rows.flatten() {
-                set.insert(n);
-            }
-        }
-    }
-    set
 }
 
 fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {

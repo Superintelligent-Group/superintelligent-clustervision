@@ -30,7 +30,7 @@
 //! Missing index → glob `*.json` (minus `sessions.json`). Missing fields → skip. `content` as
 //! string or array both work. `dateCreated` ms-epoch or ISO both work. Never panics.
 
-use super::Adapter;
+use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
@@ -786,20 +786,16 @@ fn workspace_to_path(s: &str) -> PathBuf {
 /// ISO-8601 string.
 fn parse_date(v: &Value) -> Option<DateTime<Utc>> {
     match v {
-        Value::Number(n) => n.as_i64().and_then(ms_to_dt),
+        Value::Number(n) => n.as_i64().and_then(ts_from_epoch),
         Value::String(s) => {
             let s = s.trim();
             if let Ok(ms) = s.parse::<i64>() {
-                return ms_to_dt(ms);
+                return ts_from_epoch(ms);
             }
             super::parse_ts(s)
         }
         _ => None,
     }
-}
-
-fn ms_to_dt(ms: i64) -> Option<DateTime<Utc>> {
-    DateTime::<Utc>::from_timestamp_millis(ms)
 }
 
 fn mtime(path: &Path) -> Option<DateTime<Utc>> {

@@ -107,13 +107,13 @@
 //! `Lineage::forked_from`; `usage.cost.total` is `Usage::cost_usd`; `Message::model` is set only
 //! when it differs from `Session::model` (the first non-synthetic one seen).
 
-use super::{parse_ts, ts_from_value, Adapter};
+#[cfg(feature = "sqlite")]
+use super::store::sqlite::open_ro;
+use super::{parse_ts, ts_from_epoch, ts_from_value, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-#[cfg(feature = "sqlite")]
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1084,19 +1084,6 @@ fn snake(s: &str) -> String {
 // SQLite store (OpenClaw ≥ 2026-07-11)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "sqlite")]
-fn open_ro(path: &Path) -> Result<Connection> {
-    // Read-only, never a write lock on the agent's live store (WAL readers are fine).
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .with_context(|| format!("opening {}", path.display()))
-}
-
-/// Epoch-ms INTEGER column → timestamp.
-#[cfg(feature = "sqlite")]
-fn ms_to_dt(ms: Option<i64>) -> Option<DateTime<Utc>> {
-    ms.and_then(DateTime::from_timestamp_millis)
-}
-
 /// One [`SessionRef`] per `session_windows` row (one transcript each; a reset/rollover/fork opens a
 /// new window under the same `session_key`). Title precedence: the node's `label`, then either
 /// `display_name`, then the entry's `label`/`subject`, then a `session_info` name, then the first
@@ -1161,9 +1148,10 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
             path: db.to_path_buf(),
             cwd,
             title,
-            created_at: acc.created_at.or_else(|| ms_to_dt(created)),
-            updated_at: ms_to_dt(transcript_updated)
-                .or_else(|| ms_to_dt(updated))
+            created_at: acc.created_at.or_else(|| created.and_then(ts_from_epoch)),
+            updated_at: transcript_updated
+                .and_then(ts_from_epoch)
+                .or_else(|| updated.and_then(ts_from_epoch))
                 .or(acc.updated_at),
             message_count: acc.message_count,
         });

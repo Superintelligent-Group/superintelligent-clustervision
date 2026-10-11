@@ -38,6 +38,7 @@ pub mod opencode;
 pub mod opensession;
 pub mod qwen;
 pub mod roo;
+pub mod store;
 #[cfg(feature = "sqlite")]
 pub mod zed;
 
@@ -47,18 +48,47 @@ pub(crate) fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
 }
 
-/// Flexible timestamp from a JSON value: an RFC3339 string, epoch **milliseconds**, or epoch
-/// **seconds**. The ms/s split is a heuristic — magnitudes above 10^12 are milliseconds (10^12
-/// seconds is the year 33658; 10^12 ms is Sep 2001, so any modern harness timestamp disambiguates).
+/// Flexible timestamp from a JSON value: an RFC3339 string, or an epoch number as
+/// [`ts_from_epoch`] reads it.
 pub(crate) fn ts_from_value(v: &Value) -> Option<DateTime<Utc>> {
     if let Some(s) = v.as_str() {
         return parse_ts(s);
     }
-    let n = v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))?;
-    if n.abs() > 1_000_000_000_000 {
-        DateTime::from_timestamp_millis(n)
-    } else {
-        DateTime::from_timestamp(n, 0)
+    ts_from_epoch(v.as_f64()?)
+}
+
+/// An epoch number → UTC. The ms/s split is a heuristic — magnitudes above 10^12 are
+/// **milliseconds** (10^12 seconds is the year 33658; 10^12 ms is Sep 2001, so any modern harness
+/// timestamp disambiguates); anything else is **seconds**, and a fractional second keeps its
+/// millisecond part. Zero and negative values are "unset", not 1970: every SQLite store defaults
+/// an absent time column to 0, and no harness has a transcript older than itself. The one epoch
+/// reader for every adapter — a SQLite column, a JSON number, a float of seconds all come here.
+pub(crate) fn ts_from_epoch(n: impl EpochNumber) -> Option<DateTime<Utc>> {
+    let n = n.to_f64();
+    if !n.is_finite() || n <= 0.0 {
+        return None;
+    }
+    let millis = if n > 1_000_000_000_000.0 { n } else { n * 1000.0 };
+    DateTime::from_timestamp_millis(millis as i64)
+}
+
+/// The numeric column/field types an epoch timestamp arrives as (see [`ts_from_epoch`]).
+pub(crate) trait EpochNumber {
+    fn to_f64(self) -> f64;
+}
+impl EpochNumber for f64 {
+    fn to_f64(self) -> f64 {
+        self
+    }
+}
+impl EpochNumber for i64 {
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
+}
+impl EpochNumber for u64 {
+    fn to_f64(self) -> f64 {
+        self as f64
     }
 }
 
@@ -285,13 +315,22 @@ mod tests {
         // Epoch milliseconds (> 10^12).
         let ms = ts_from_value(&serde_json::json!(1_767_323_045_000i64)).unwrap();
         assert_eq!(ms, s);
-        // Epoch seconds (<= 10^12), integer and float.
+        // Epoch seconds (<= 10^12), integer and float; a float keeps its millisecond part.
         assert_eq!(ts_from_value(&serde_json::json!(1_767_323_045i64)).unwrap(), s);
-        assert_eq!(ts_from_value(&serde_json::json!(1_767_323_045.9f64)).unwrap(), s);
-        // Junk.
+        assert_eq!(
+            ts_from_value(&serde_json::json!(1_767_323_045.9f64))
+                .unwrap()
+                .timestamp_millis(),
+            1_767_323_045_900
+        );
+        // Junk, and the "unset" column values no store means as 1970.
         assert!(ts_from_value(&serde_json::json!("not a time")).is_none());
         assert!(ts_from_value(&serde_json::json!(null)).is_none());
         assert!(ts_from_value(&serde_json::json!({"t": 1})).is_none());
+        assert!(ts_from_value(&serde_json::json!(0)).is_none());
+        assert!(ts_from_epoch(-5i64).is_none());
+        assert!(ts_from_epoch(f64::NAN).is_none());
+        assert_eq!(ts_from_epoch(1_767_323_045_000u64).unwrap(), s);
     }
 
     #[test]

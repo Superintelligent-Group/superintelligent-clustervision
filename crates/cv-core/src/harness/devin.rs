@@ -139,12 +139,13 @@
 //! "" falls back to the last chain assistant's `generation_model` (observed on a real session). `hidden = 1` sessions are
 //! still discovered, flagged in `extra["devin"]["hidden"]`.
 
-use super::{note_skipped_lines, Adapter};
+use super::store::sqlite::{columns, open_ro, table_exists};
+use super::store::xdg_data_dir;
+use super::{note_skipped_lines, ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
-use anyhow::{Context, Result};
-use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, OpenFlags};
+use anyhow::Result;
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -156,7 +157,11 @@ pub struct Devin {
 
 impl Devin {
     pub fn new() -> Self {
-        Devin { root: data_dir() }
+        // The literal path Devin CLI uses (even on macOS — not Application Support): the XDG data
+        // dir's `devin/cli`.
+        Devin {
+            root: xdg_data_dir().map(|d| d.join("devin").join("cli")).unwrap_or_default(),
+        }
     }
 
     /// `sessions.db` inside the root, when it exists.
@@ -167,22 +172,6 @@ impl Devin {
         let p = self.root.join("sessions.db");
         p.exists().then_some(p)
     }
-}
-
-/// The literal path Devin CLI uses (even on macOS — not Application Support): the XDG data dir's
-/// `devin/cli`, honouring `$XDG_DATA_HOME` when set.
-fn data_dir() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(xdg).join("devin").join("cli");
-    }
-    dirs::home_dir()
-        .map(|h| h.join(".local/share/devin/cli"))
-        .unwrap_or_default()
-}
-
-fn open_ro(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .with_context(|| format!("opening {}", path.display()))
 }
 
 impl Default for Devin {
@@ -223,28 +212,6 @@ impl Adapter for Devin {
 // ---------------------------------------------------------------------------
 // Schema probing + the chain walk
 // ---------------------------------------------------------------------------
-
-/// Columns present on a table (for schema-drift tolerance — the columns accreted per migration).
-fn columns(conn: &Connection, table: &str) -> HashSet<String> {
-    let mut set = HashSet::new();
-    if let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) {
-        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
-            for n in rows.flatten() {
-                set.insert(n);
-            }
-        }
-    }
-    set
-}
-
-fn table_exists(conn: &Connection, name: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [name],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
 
 /// A session's node topology and (where decodable) roles. Topology comes from the plain columns —
 /// never the JSON — so a corrupt `chat_message` can't truncate the chain walk; `roles` is filled by
@@ -377,7 +344,7 @@ fn child_ref(
         cwd: parent.cwd.clone(),
         title: Some(crate::ir::truncate(&title, 80)),
         created_at: parent.created_at,
-        updated_at: updated.and_then(secs_to_dt).or(parent.updated_at),
+        updated_at: updated.and_then(ts_from_epoch).or(parent.updated_at),
         message_count: chain_message_count(forest, Some(head)),
     })
 }
@@ -416,8 +383,8 @@ fn discover_conn(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             title: title
                 .filter(|s| !s.trim().is_empty())
                 .map(|t| crate::ir::truncate(&t, 80)),
-            created_at: created.and_then(secs_to_dt),
-            updated_at: last.and_then(secs_to_dt).or_else(|| created.and_then(secs_to_dt)),
+            created_at: created.and_then(ts_from_epoch),
+            updated_at: last.and_then(ts_from_epoch).or_else(|| created.and_then(ts_from_epoch)),
             message_count: chain_message_count(&forest, head),
         };
         out.push(parent.clone());
@@ -469,8 +436,8 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude:
         path: db.to_path_buf(),
         cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
         title,
-        created_at: created.and_then(secs_to_dt),
-        updated_at: last.and_then(secs_to_dt),
+        created_at: created.and_then(ts_from_epoch),
+        updated_at: last.and_then(ts_from_epoch),
         message_count: 0,
     };
     let forest = load_forest(&conn, session_id);
@@ -829,7 +796,7 @@ fn stream_session(
             .iter()
             .find(|(id, _, _)| id == a)
             .and_then(|(_, _, u)| *u)
-            .and_then(secs_to_dt)
+            .and_then(ts_from_epoch)
     });
     let title = match (agent, title.filter(|t| !t.trim().is_empty())) {
         (Some(a), Some(t)) => Some(format!("[{a}] {t}")),
@@ -844,8 +811,8 @@ fn stream_session(
             .map(PathBuf::from)
             .or_else(|| r.cwd.clone()),
         title,
-        created_at: created.and_then(secs_to_dt).or(r.created_at),
-        updated_at: head_updated.or_else(|| last.and_then(secs_to_dt)).or(r.updated_at),
+        created_at: created.and_then(ts_from_epoch).or(r.created_at),
+        updated_at: head_updated.or_else(|| last.and_then(ts_from_epoch)).or(r.updated_at),
         model,
         git: None,
         messages: Vec::new(),
@@ -993,7 +960,7 @@ fn node_to_message(
         .get("created_at")
         .and_then(Value::as_str)
         .and_then(super::parse_ts)
-        .or_else(|| secs_to_dt(node_created));
+        .or_else(|| ts_from_epoch(node_created));
 
     let content = chat.get("content").and_then(Value::as_str).unwrap_or("");
     match role {
@@ -1202,14 +1169,6 @@ fn node_to_message(
     m
 }
 
-/// Unix seconds → datetime (the node/session `created_at` columns).
-fn secs_to_dt(s: i64) -> Option<DateTime<Utc>> {
-    if s <= 0 {
-        return None;
-    }
-    Utc.timestamp_opt(s, 0).single()
-}
-
 // ---------------------------------------------------------------------------
 // Tests — `tests/fixtures/devin/sessions-v17-3000.11.3.db` (tools/harness-fixtures/devin/)
 // ---------------------------------------------------------------------------
@@ -1274,7 +1233,7 @@ mod tests {
         assert_eq!(sub.title.as_deref(), Some("[sidekick] Fixture session alpha"));
         assert_eq!(sub.cwd, a.cwd);
         assert_eq!(sub.created_at, a.created_at);
-        assert_eq!(sub.updated_at, secs_to_dt(1_759_600_000 + 200));
+        assert_eq!(sub.updated_at, ts_from_epoch(1_759_600_000i64 + 200));
         // The child's own chain: handoff user + 5 assistant (incl. the compaction summary)
         // = 6 (its tool + system rows don't).
         assert_eq!(sub.message_count, 6);

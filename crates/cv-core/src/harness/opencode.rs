@@ -139,11 +139,7 @@ impl Default for OpenCode {
 /// `${XDG_DATA_HOME:-~/.local/share}/opencode` — opencode's data dir (`packages/core/src/global.ts`,
 /// via `xdg-basedir`).
 fn data_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))?;
-    Some(base.join("opencode"))
+    Some(super::store::xdg_data_dir()?.join("opencode"))
 }
 
 /// The database opencode itself would open (`packages/core/src/database/database.ts::path`):
@@ -388,9 +384,10 @@ mod db {
     //! `opencode.db` — `session`, `message`, `part` (`packages/core/src/session/sql.ts`). Rows are
     //! hydrated back into the exact JSON the tree stored (`{...data, id, sessionID, messageID}`,
     //! as `message-v2.ts` does) and handed to the shared mapping, so the two sources can't drift.
+    use super::super::store::sqlite::open_ro;
+    use super::super::ts_from_epoch;
     use super::*;
     use rusqlite::types::ValueRef;
-    use rusqlite::{Connection, OpenFlags};
     use std::collections::HashMap;
 
     /// Session columns the IR first-classes (`parent_id` is `Lineage::parent`; everything else lands
@@ -401,16 +398,6 @@ mod db {
 
     pub(super) fn is_db_ref(r: &SessionRef) -> bool {
         r.path.extension().and_then(|e| e.to_str()) == Some("db")
-    }
-
-    fn open_ro(path: &Path) -> Result<Connection> {
-        // Read-only, so we never take a write lock on the user's live (WAL-mode) database.
-        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-            .with_context(|| format!("opening {}", path.display()))
-    }
-
-    fn ms(v: Option<i64>) -> Option<chrono::DateTime<chrono::Utc>> {
-        v.and_then(|n| super::super::ts_from_value(&Value::from(n)))
     }
 
     /// One [`SessionRef`] per `session` row, newest first; `message_count` is user+assistant turns
@@ -442,8 +429,8 @@ mod db {
                         .get::<_, Option<String>>(2)?
                         .filter(|t| !t.is_empty())
                         .map(|t| crate::ir::truncate(&t, 80)),
-                    created_at: ms(r.get::<_, Option<i64>>(3)?),
-                    updated_at: ms(r.get::<_, Option<i64>>(4)?),
+                    created_at: r.get::<_, Option<i64>>(3)?.and_then(ts_from_epoch),
+                    updated_at: r.get::<_, Option<i64>>(4)?.and_then(ts_from_epoch),
                     message_count: 0,
                 })
             })?
