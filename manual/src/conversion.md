@@ -19,15 +19,15 @@ is just:
 
 Because the IR sits in the middle, you don't need an N×N matrix of converters — you need
 N parsers and a handful of emitters. **20 harnesses can be parsed** _into_ the IR
-([harnesses](harnesses.md)); of those, **13 can also be conversion _targets_** that the IR
+([harnesses](harnesses.md)); of those, **12 can also be conversion _targets_** that the IR
 can be emitted back _out_ to. Any emit-capable target can receive a session that originated
-in *any* of the 20, so the practical conversion space is "20 sources × 13 targets". 🔮
+in *any* of the 20, so the practical conversion space is "20 sources × 12 targets". 🔮
 
 The IR itself is defined in `crates/cv-core/src/ir.rs`; the emit side lives in
 `crates/cv-core/src/emit.rs`. For the broader picture of how parsers and emitters fit
 together, see [architecture](architecture.md).
 
-## The 13 emit targets
+## The 12 emit targets
 
 These are the harnesses `emit()` can currently write — the authoritative list is
 `supported_targets()` in `emit.rs`:
@@ -41,18 +41,18 @@ These are the harnesses `emit()` can currently write — the authoritative list 
 | OpenClaw | `openclaw` | parent-linked `agents/<id>/sessions/*.jsonl` |
 | Gemini CLI | `gemini` | legacy `ConversationRecord` JSON |
 | Hermes | `hermes` | SQLite `state.db` *(requires the `sqlite` build feature)* |
-| Kimi CLI | `kimi` | `~/.kimi` transcript |
 | LM Studio | `lmstudio` | chat-app conversation JSON |
 | Cline | `cline` | per-task `api_conversation_history.json` |
 | Roo Code | `roo` | Cline-format per-task dir |
 | Continue | `continue` | `~/.continue/sessions` JSON |
 | Qwen Code | `qwen` | reuses Gemini's `ConversationRecord` emitter |
 
-> The other seven parseable harnesses — **Cursor**, **Goose**, **Zed**, the **Claude
+> The other eight parseable harnesses — **Cursor**, **Goose**, **Zed**, **Kimi CLI** (its
+> `~/.kimi` store is frozen; kimi-cli migrates it to `~/.kimi-code` on open), the **Claude
 > desktop app**, the **ChatGPT desktop app**, and the **ChatGPT/Claude.ai account data
 > exports** — are parse-only. You can read, search, and port *away* from them, but
 > they aren't port targets yet (their on-disk stores are harder to write back
-> safely). Asking to emit to one gives a clear "not supported yet" error rather than
+> safely). Asking to emit to one is a usage error ("not a supported target", exit 2) rather than
 > corrupting anything.
 
 ## `cv port` — one verb for both

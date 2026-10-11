@@ -66,6 +66,8 @@ stopped at v0.11.2. Everything since ships here. Every change is in the manual; 
 - 0.14 reads every older log unchanged; the golden log gained specimens of each new event, every earlier line byte-identical.
 
 ### Harnesses
+- `cv port --to kimi` is gone: `~/.kimi` is frozen (kimi-cli moved to `~/.kimi-code`), so the port went nowhere. Errors, exit 2.
+- `cv ls` counts for grok, gemini, openclaw, goose and codex are user + assistant turns only; Codex rollouts over 8 MiB show 0, not an estimate.
 
 - **Devin CLI (Cognition) parses**: `~/.local/share/devin/cli/sessions.db` (schema 17) read-only; the `main_chain_id`→root walk of the message forest.
 - Devin: thinking (`sealed.v1`), parallel tool calls, per-call `Usage`, `generation_model`, system prefix, failed-tool marks, `cv prompts` answers; `cv resume` prints `devin --resume <id>`.

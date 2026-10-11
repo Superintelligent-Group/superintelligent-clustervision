@@ -117,14 +117,15 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
         #[cfg(feature = "sqlite")]
         Harness::Hermes => emit_hermes,
         // Emitters living in their own adapter modules.
-        Harness::Kimi => crate::harness::kimi::emit,
         Harness::LmStudio => crate::harness::lmstudio::emit,
         Harness::Cline => crate::harness::cline::emit,
         Harness::Roo => crate::harness::roo::emit,
         Harness::Continue => crate::harness::continuedev::emit,
         // Qwen Code stores the same ConversationRecord shape Gemini does, so it reuses that emitter.
         Harness::Qwen => emit_gemini,
-        // Parse-only harnesses (Cursor, Goose, desktop apps, …) aren't conversion targets.
+        // Parse-only harnesses (Cursor, Goose, desktop apps, …) aren't conversion targets. Kimi
+        // (`~/.kimi`) is not one either: kimi-cli froze that store in 2026-06 and migrates it to
+        // `~/.kimi-code` on open, so a session written there was a port to nowhere.
         _ => return None,
     })
 }
@@ -411,10 +412,6 @@ fn reparse_emitted(target: Harness, result: &EmitResult, opts: &ParseOptions) ->
         #[cfg(feature = "sqlite")]
         Harness::Hermes => reparse_hermes(result),
         // The emitters whose output is parseable directly from the EmitResult path.
-        Harness::Kimi => collect(
-            &crate::harness::kimi::Kimi::new(),
-            &sref(result.new_id.clone(), result.path.clone()),
-        ),
         Harness::LmStudio => collect(
             &crate::harness::lmstudio::LmStudio::new(),
             &sref(result.new_id.clone(), result.path.clone()),

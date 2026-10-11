@@ -5,7 +5,7 @@
 //! place, different harness) and `port` (different place) were the same act, so `--harness` picks
 //! the target harness (default: the source's) and `--cwd` the new home. The source is never touched.
 
-use crate::util::{home_rel, parse_harness, resolve};
+use crate::util::{home_rel, parse_harness, resolve, usage};
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{Harness, Session, SessionRef};
 use cv_core::{Adapter, EmitOptions, ParseOptions};
@@ -104,16 +104,16 @@ fn carry_context(src: &Path, dst: &Path) {
 
 pub(crate) fn emit_session(session: &Session, to_h: Harness, out: Option<PathBuf>, opts: EmitOptions) -> Result<()> {
     if !cv_core::emit::supported_targets().contains(&to_h) {
-        bail!(
-            "emitting to {to_h} isn't supported yet — the source parses fine ({} messages), but the \
-             {to_h} emitter is still TODO (supported: {})",
+        // A caller mistake, not a failure (exit 2): the source parsed, the target cannot be written.
+        return usage(format!(
+            "{to_h} is not a supported target (the source parses fine, {} messages); supported: {}",
             session.messages.len(),
             cv_core::emit::supported_targets()
                 .iter()
                 .map(|h| h.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
     }
     let out_dir = match out {
         Some(d) => d,

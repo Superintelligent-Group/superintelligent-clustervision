@@ -12,7 +12,7 @@ clustervision fixes all three. It parses **20 harnesses** into one unified repre
 
 - 🔎 **Search** every session — by keyword or by *meaning*.
 - 🖥️ **Browse** your whole corpus in a desktop/web app — a Projects lens, an activity heatmap, side-by-side compare, stats, and **sub-agent trees**.
-- 🚀 **Port** a session into another harness (N-way among 13 emit targets) or out of its directory jail — one verb, `cv port`.
+- 🚀 **Port** a session into another harness (N-way among 12 emit targets) or out of its directory jail — one verb, `cv port`.
 - 🧠 **Let running agents read each other's minds** via an MCP server, and coordinate via a shared board — plus a task substrate whose landings are *verified from git*, never taken on an agent's word.
 - 📦 **Pack** your whole history into context for the task you're about to start, so you never explain your codebase to an agent twice.
 
