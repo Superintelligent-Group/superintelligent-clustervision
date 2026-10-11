@@ -871,182 +871,10 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(t)?);
             } else {
-                // Every free-text field below came from the durable log — sanitize at render
-                // (G5): titles, notes, endpoints, and branch names are all untrusted.
-                println!("task {}  [{}]  {}", t.task_id, task::effective_display(t), t.kind());
-                if let Some(st) = &t.status {
-                    // The pinned STATUS leads: it is what a successor reads first.
-                    println!(
-                        "  STATUS ({}, {}{}):",
-                        sanitize_line(&st.by),
-                        fmt_local(st.ts, "%Y-%m-%d %H:%M"),
-                        if st.revisions > 1 {
-                            format!(", revision {}", st.revisions)
-                        } else {
-                            String::new()
-                        }
-                    );
-                    for line in st.text.lines() {
-                        println!("    {}", sanitize_line(line));
-                    }
-                    if brief {
-                        println!("  title:    {}", sanitize_line(&t.title));
-                        return Ok(());
-                    }
-                }
-                let show_now = Utc::now();
-                if t.state == cv_core::task::TaskState::Done {
-                    // A completion is what the agent said, labeled so: cv never claims to have
-                    // observed what it has not.
-                    println!(
-                        "  done:     self-reported {} ago{}",
-                        task::age_short(t.last_ts, show_now),
-                        t.done_observed
-                            .as_deref()
-                            .map(|o| format!(" ({})", sanitize_line(o)))
-                            .unwrap_or_default()
-                    );
-                }
-                println!("  title:    {}", sanitize_line(&t.title));
-                if !t.body.is_empty() {
-                    if brief {
-                        println!("  body:     {}", task_ops::first_line(&t.body, 160));
-                    } else {
-                        println!("  body:     {}", sanitize_line(&t.body));
-                    }
-                }
-                if let Some(repo) = &t.repo {
-                    println!("  repo:     {}", repo.display());
-                }
-                if let Some(issue) = &t.issue {
-                    println!("  issue:    {}", sanitize_line(issue));
-                }
-                println!("  assignee: {}", sanitize_line(t.assignee.as_deref().unwrap_or("-")));
-                if !t.tags.is_empty() {
-                    println!("  tags:     {}", sanitize_line(&t.tags.join(", ")));
-                }
-                let plen = prefix_len(&outcome.model);
-                for b in &t.blocked_by {
-                    match outcome.model.tasks.get(b) {
-                        Some(bt) => println!(
-                            "  blocked by: {} [{}] {}",
-                            prefix(b, plen),
-                            task::effective_display(bt),
-                            sanitize_line(&bt.title)
-                        ),
-                        None => println!("  blocked by: {} [unknown task]", prefix(b, plen)),
-                    }
-                }
-                if task::is_blocked(&outcome.model, t) {
-                    println!("  ⊘ BLOCKED — a blocker above has not finished");
-                }
-                for other in task::blocks(&outcome.model, &t.task_id) {
-                    println!(
-                        "  blocks:   {} [{}] {}",
-                        prefix(&other.task_id, plen),
-                        task::effective_display(other),
-                        sanitize_line(&other.title)
-                    );
-                }
-                println!(
-                    "  opened:   {} by {}",
-                    fmt_local(t.opened_at, "%Y-%m-%d %H:%M"),
-                    sanitize_line(&t.opened_by)
+                print!(
+                    "{}",
+                    render_show(&outcome.model, t, brief, grep.as_ref(), notes_last, Utc::now())
                 );
-                if let Some(d) = &t.decision {
-                    let deadline = d
-                        .deadline
-                        .map(|dl| format!(" · {}", task::deadline_phrase(dl, show_now)))
-                        .unwrap_or_default();
-                    println!(
-                        "  decision: posed {} by {}{deadline}",
-                        fmt_local(d.posed_at, "%Y-%m-%d %H:%M"),
-                        sanitize_line(&d.posed_by)
-                    );
-                    println!("    default:  {}", sanitize_line(&d.default_choice));
-                    for a in d.alternatives() {
-                        println!("    option:   {}", sanitize_line(a));
-                    }
-                    if let Some(p) = &d.superseded_provisional {
-                        println!(
-                            "    provisionally: {} — by {}, {} (then answered by the decider, below)",
-                            sanitize_line(&p.choice),
-                            sanitize_line(&p.by),
-                            fmt_local(p.ts, "%Y-%m-%d %H:%M"),
-                        );
-                    }
-                    match &d.resolution {
-                        Some(r) => {
-                            println!(
-                                "    resolved: {} — by {}, {}{}{}{}",
-                                sanitize_line(&r.choice),
-                                sanitize_line(&r.by),
-                                fmt_local(r.ts, "%Y-%m-%d %H:%M"),
-                                if r.accepted_default { " (the default)" } else { "" },
-                                if r.provisional { " PROVISIONAL" } else { "" },
-                                r.note
-                                    .as_deref()
-                                    .map(|n| format!(" · {}", sanitize_line(n)))
-                                    .unwrap_or_default()
-                            );
-                            if r.provisional {
-                                println!(
-                                    "    veto?:    cv task resolve {} --confirm --from {owner} · or --choice \"<option>\"",
-                                    prefix(&t.task_id, plen),
-                                    owner = sanitize_line(t.assignee.as_deref().unwrap_or("<you>"))
-                                );
-                            }
-                        }
-                        None if !t.state.is_terminal() => println!(
-                            "    resolve:  cv task resolve {} --accept-default --from {}",
-                            prefix(&t.task_id, plen),
-                            sanitize_line(t.assignee.as_deref().unwrap_or("<you>"))
-                        ),
-                        None => {}
-                    }
-                }
-                let children = task::decisions_from_notes(&outcome.model);
-                let selected: Vec<&cv_core::task::Note> = t
-                    .notes
-                    .iter()
-                    .filter(|n| grep.as_ref().is_none_or(|re| re.is_match(&n.text)))
-                    .collect();
-                let skip = notes_last.map_or(0, |k| selected.len().saturating_sub(k));
-                let shown = &selected[skip..];
-                if !t.notes.is_empty() && (brief || shown.len() != t.notes.len()) {
-                    println!(
-                        "  notes:    {} of {} (newest last){}",
-                        shown.len(),
-                        t.notes.len(),
-                        if brief {
-                            " — one line each; drop --brief for the full text"
-                        } else {
-                            ""
-                        }
-                    );
-                }
-                for note in shown {
-                    let split = children
-                        .get(&note.event_id)
-                        .map(|c| format!("  → split into {}", prefix(c, plen)))
-                        .unwrap_or_default();
-                    let late = if note.post_close { " (after close)" } else { "" };
-                    if brief {
-                        println!(
-                            "    {} {:<24} {}{late}{split}",
-                            fmt_local(note.ts, "%m-%d %H:%M"),
-                            truncate(&sanitize_line(&note.by), 24),
-                            task_ops::first_line(&note.text, 150)
-                        );
-                    } else {
-                        println!(
-                            "  note ({}, {}){late}: {}{split}",
-                            sanitize_line(&note.by),
-                            fmt_local(note.ts, "%Y-%m-%d %H:%M"),
-                            sanitize_line(&note.text)
-                        );
-                    }
-                }
             }
             if events {
                 let history: Vec<_> = outcome.events.iter().filter(|e| e.task_id == id).collect();
@@ -1391,6 +1219,204 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
     }
 }
 
+/// `cv task show <id>` as text: the pinned STATUS first (with `brief`, only it and the title), then
+/// the completion label, the fields, relations, the decision facet, and the notes `grep` and
+/// `notes_last` keep. Every free-text field came from the durable log — sanitized at render (G5).
+fn render_show(
+    model: &TaskReadModel,
+    t: &cv_core::task::TaskProjection,
+    brief: bool,
+    grep: Option<&regex::Regex>,
+    notes_last: Option<usize>,
+    now: DateTime<Utc>,
+) -> String {
+    let mut out = String::new();
+    // Every free-text field below came from the durable log — sanitize at render
+    // (G5): titles, notes, endpoints, and branch names are all untrusted.
+    out.push_str(&format!(
+        "task {}  [{}]  {}\n",
+        t.task_id,
+        task::effective_display(t),
+        t.kind()
+    ));
+    if let Some(st) = &t.status {
+        // The pinned STATUS leads: it is what a successor reads first.
+        out.push_str(&format!(
+            "  STATUS ({}, {}{}):\n",
+            sanitize_line(&st.by),
+            fmt_local(st.ts, "%Y-%m-%d %H:%M"),
+            if st.revisions > 1 {
+                format!(", revision {}", st.revisions)
+            } else {
+                String::new()
+            }
+        ));
+        for line in st.text.lines() {
+            out.push_str(&format!("    {}\n", sanitize_line(line)));
+        }
+        if brief {
+            out.push_str(&format!("  title:    {}\n", sanitize_line(&t.title)));
+            return out;
+        }
+    }
+    if t.state == cv_core::task::TaskState::Done {
+        // A completion is what the agent said, labeled so: cv never claims to have
+        // observed what it has not.
+        out.push_str(&format!(
+            "  done:     self-reported {} ago{}\n",
+            task::age_short(t.last_ts, now),
+            t.done_observed
+                .as_deref()
+                .map(|o| format!(" ({})", sanitize_line(o)))
+                .unwrap_or_default()
+        ));
+    }
+    out.push_str(&format!("  title:    {}\n", sanitize_line(&t.title)));
+    if !t.body.is_empty() {
+        if brief {
+            out.push_str(&format!("  body:     {}\n", task_ops::first_line(&t.body, 160)));
+        } else {
+            out.push_str(&format!("  body:     {}\n", sanitize_line(&t.body)));
+        }
+    }
+    if let Some(repo) = &t.repo {
+        out.push_str(&format!("  repo:     {}\n", repo.display()));
+    }
+    if let Some(issue) = &t.issue {
+        out.push_str(&format!("  issue:    {}\n", sanitize_line(issue)));
+    }
+    out.push_str(&format!(
+        "  assignee: {}\n",
+        sanitize_line(t.assignee.as_deref().unwrap_or("-"))
+    ));
+    if !t.tags.is_empty() {
+        out.push_str(&format!("  tags:     {}\n", sanitize_line(&t.tags.join(", "))));
+    }
+    let plen = prefix_len(model);
+    for b in &t.blocked_by {
+        match model.tasks.get(b) {
+            Some(bt) => out.push_str(&format!(
+                "  blocked by: {} [{}] {}\n",
+                prefix(b, plen),
+                task::effective_display(bt),
+                sanitize_line(&bt.title)
+            )),
+            None => out.push_str(&format!("  blocked by: {} [unknown task]\n", prefix(b, plen))),
+        }
+    }
+    if task::is_blocked(model, t) {
+        out.push_str("  ⊘ BLOCKED — a blocker above has not finished\n");
+    }
+    for other in task::blocks(model, &t.task_id) {
+        out.push_str(&format!(
+            "  blocks:   {} [{}] {}\n",
+            prefix(&other.task_id, plen),
+            task::effective_display(other),
+            sanitize_line(&other.title)
+        ));
+    }
+    out.push_str(&format!(
+        "  opened:   {} by {}\n",
+        fmt_local(t.opened_at, "%Y-%m-%d %H:%M"),
+        sanitize_line(&t.opened_by)
+    ));
+    if let Some(d) = &t.decision {
+        let deadline = d
+            .deadline
+            .map(|dl| format!(" · {}", task::deadline_phrase(dl, now)))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "  decision: posed {} by {}{deadline}\n",
+            fmt_local(d.posed_at, "%Y-%m-%d %H:%M"),
+            sanitize_line(&d.posed_by)
+        ));
+        out.push_str(&format!("    default:  {}\n", sanitize_line(&d.default_choice)));
+        for a in d.alternatives() {
+            out.push_str(&format!("    option:   {}\n", sanitize_line(a)));
+        }
+        if let Some(p) = &d.superseded_provisional {
+            out.push_str(&format!(
+                "    provisionally: {} — by {}, {} (then answered by the decider, below)\n",
+                sanitize_line(&p.choice),
+                sanitize_line(&p.by),
+                fmt_local(p.ts, "%Y-%m-%d %H:%M"),
+            ));
+        }
+        match &d.resolution {
+            Some(r) => {
+                out.push_str(&format!(
+                    "    resolved: {} — by {}, {}{}{}{}\n",
+                    sanitize_line(&r.choice),
+                    sanitize_line(&r.by),
+                    fmt_local(r.ts, "%Y-%m-%d %H:%M"),
+                    if r.accepted_default { " (the default)" } else { "" },
+                    if r.provisional { " PROVISIONAL" } else { "" },
+                    r.note
+                        .as_deref()
+                        .map(|n| format!(" · {}", sanitize_line(n)))
+                        .unwrap_or_default()
+                ));
+                if r.provisional {
+                    out.push_str(&format!(
+                        "    veto?:    cv task resolve {} --confirm --from {owner} · or --choice \"<option>\"\n",
+                        prefix(&t.task_id, plen),
+                        owner = sanitize_line(t.assignee.as_deref().unwrap_or("<you>"))
+                    ));
+                }
+            }
+            None if !t.state.is_terminal() => out.push_str(&format!(
+                "    resolve:  cv task resolve {} --accept-default --from {}\n",
+                prefix(&t.task_id, plen),
+                sanitize_line(t.assignee.as_deref().unwrap_or("<you>"))
+            )),
+            None => {}
+        }
+    }
+    let children = task::decisions_from_notes(model);
+    let selected: Vec<&cv_core::task::Note> = t
+        .notes
+        .iter()
+        .filter(|n| grep.is_none_or(|re| re.is_match(&n.text)))
+        .collect();
+    let skip = notes_last.map_or(0, |k| selected.len().saturating_sub(k));
+    let shown = &selected[skip..];
+    if !t.notes.is_empty() && (brief || shown.len() != t.notes.len()) {
+        out.push_str(&format!(
+            "  notes:    {} of {} (newest last){}\n",
+            shown.len(),
+            t.notes.len(),
+            if brief {
+                " — one line each; drop --brief for the full text"
+            } else {
+                ""
+            }
+        ));
+    }
+    for note in shown {
+        let split = children
+            .get(&note.event_id)
+            .map(|c| format!("  → split into {}", prefix(c, plen)))
+            .unwrap_or_default();
+        let late = if note.post_close { " (after close)" } else { "" };
+        if brief {
+            out.push_str(&format!(
+                "    {} {:<24} {}{late}{split}\n",
+                fmt_local(note.ts, "%m-%d %H:%M"),
+                truncate(&sanitize_line(&note.by), 24),
+                task_ops::first_line(&note.text, 150)
+            ));
+        } else {
+            out.push_str(&format!(
+                "  note ({}, {}){late}: {}{split}\n",
+                sanitize_line(&note.by),
+                fmt_local(note.ts, "%Y-%m-%d %H:%M"),
+                sanitize_line(&note.text)
+            ));
+        }
+    }
+    out
+}
+
 /// `cv task events`: one line per event, JSON by default (the poll surface),
 /// `--text` for people. The next cursor (the last event id) goes to stderr so stdout stays pure.
 fn print_events(outcome: &cv_core::task::ReplayOutcome, f: &EventFilter, text: bool) -> Result<()> {
@@ -1437,6 +1463,83 @@ mod tests {
             decision: None,
             status: None,
         }
+    }
+
+    /// `show`'s text, pinned whole for a resolved decision whose provisional answer the decider
+    /// vetoed, with a note after the close; and `--brief` with a STATUS stops after the title.
+    #[test]
+    fn show_renders_a_vetoed_decision_and_brief_stops_at_the_status() {
+        use cv_core::task::{Decision, Note, PinnedStatus, Resolution};
+        let at = |s: &str| -> DateTime<Utc> { s.parse().unwrap() };
+        let loc = |s: &str| fmt_local(at(s), "%Y-%m-%d %H:%M");
+        let res = |choice: &str, by: &str, ts: &str, provisional: bool| Resolution {
+            choice: choice.into(),
+            by: by.into(),
+            ts: at(ts),
+            event_id: "r".into(),
+            note: (!provisional).then(|| "my data".into()),
+            accepted_default: provisional,
+            provisional,
+        };
+        let mut t = proj("build base: /tank or \x1b[31mNVMe\x1b[0m", "2026-07-16T12:33:00Z");
+        t.state = TaskState::Resolved;
+        t.assignee = Some("ember".into());
+        t.decision = Some(Decision {
+            options: vec!["keep /tank".into(), "move to NVMe".into()],
+            default_choice: "keep /tank".into(),
+            deadline: None,
+            source: None,
+            posed_at: at("2026-07-16T12:28:00Z"),
+            posed_by: "orchestrator:demo".into(),
+            resolution: Some(res("move to NVMe", "web:ember", "2026-07-16T12:33:00Z", false)),
+            superseded_provisional: Some(res("keep /tank", "orchestrator:demo", "2026-07-16T12:31:00Z", true)),
+        });
+        t.notes.push(Note {
+            event_id: "n".into(),
+            by: "orchestrator:demo".into(),
+            ts: at("2026-07-16T12:34:00Z"),
+            text: "measured".into(),
+            session_ref: None,
+            post_close: true,
+        });
+        let mut model = TaskReadModel::default();
+        model.tasks.insert(t.task_id.clone(), t.clone());
+        let now = at("2026-07-17T00:00:00Z");
+        let got = render_show(&model, &t, false, None, None, now);
+        let want = format!(
+            "task 00000000-0000-7000-8000-000000000001  [resolved]  decision\n\
+             \x20 title:    build base: /tank or NVMe\n\
+             \x20 assignee: ember\n\
+             \x20 opened:   {opened} by h\n\
+             \x20 decision: posed {posed} by orchestrator:demo\n\
+             \x20   default:  keep /tank\n\
+             \x20   option:   move to NVMe\n\
+             \x20   provisionally: keep /tank — by orchestrator:demo, {prov} (then answered by the decider, below)\n\
+             \x20   resolved: move to NVMe — by web:ember, {res} · my data\n\
+             \x20 note (orchestrator:demo, {note}) (after close): measured\n",
+            opened = loc("2026-07-10T00:00:00Z"),
+            posed = loc("2026-07-16T12:28:00Z"),
+            prov = loc("2026-07-16T12:31:00Z"),
+            res = loc("2026-07-16T12:33:00Z"),
+            note = loc("2026-07-16T12:34:00Z"),
+        );
+        assert_eq!(got, want);
+
+        t.status = Some(PinnedStatus {
+            text: "gen 2: /tank is fast enough".into(),
+            by: "orchestrator:demo".into(),
+            ts: at("2026-07-16T12:30:00Z"),
+            event_id: "s".into(),
+            revisions: 2,
+        });
+        let got = render_show(&model, &t, true, None, None, now);
+        assert!(got.ends_with("  title:    build base: /tank or NVMe\n"), "{got}");
+        assert!(
+            got.contains("STATUS (orchestrator:demo, ")
+                && got.contains(", revision 2):\n    gen 2: /tank is fast enough\n"),
+            "{got}"
+        );
+        assert!(!got.contains("decision: posed"), "brief stops at the STATUS:\n{got}");
     }
 
     #[test]
