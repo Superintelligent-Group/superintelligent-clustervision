@@ -10,6 +10,7 @@
 
 mod blame;
 mod cmd;
+mod llm;
 mod util;
 
 // Crate-root re-exports for `blame.rs`, which renders conversation windows via the same

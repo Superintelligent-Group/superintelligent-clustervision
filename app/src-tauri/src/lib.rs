@@ -10,10 +10,9 @@
 //!      `http://localhost` is unreliable, and a session must not look different depending on which
 //!      door it came through. See the section header above `resolve` for the one deliberate
 //!      difference (the session row follows `docs/INTERFACE-V2.md` §3).
-//!   2. **Native LLM/ingest commands** — `distill`, `redact`, `generate`, `ingest_zip` — that call
-//!      into `cv_llm` / `cv_core` directly, so LLM API keys live in the desktop process's
-//!      environment (or a local `LMSTUDIO_API_BASE`) instead of being shipped into JS, and zip
-//!      ingestion works without the WASM module.
+//!   2. **Native `redact` and `ingest_zip`** — pure, offline calls into `cv_core`, so redaction and
+//!      zip ingestion work without the WASM module. (LLM generation lives in the web loom's
+//!      OpenRouter path; `cv splice --generate` is the CLI's.)
 //!   3. **Launches `cvd serve --port 7777` on startup** so the bundled fleet dashboard (which
 //!      fetches `http://localhost:7777`) works unchanged. The child is killed on exit.
 //!   4. A **native application menu** (File / Edit / View / Help) — including **File → Open zip…**
@@ -37,7 +36,6 @@ use std::io::Read;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 
-use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::menu::{AboutMetadataBuilder, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, WebviewWindow};
@@ -70,21 +68,6 @@ fn parse_session(session_json: &str) -> Result<Session, String> {
     serde_json::from_str::<Session>(session_json).map_err(|e| format!("invalid session JSON: {e}"))
 }
 
-/// Distill a session into durable Markdown memory via `cv_llm::distill`.
-///
-/// Requires an LLM provider in the environment: `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or
-/// `LMSTUDIO_API_BASE` (free/offline local server). Returns the Markdown digest, or an error string.
-#[tauri::command]
-async fn distill(session_json: String) -> Result<String, String> {
-    // `cv_llm` uses blocking reqwest; keep the async executor free by offloading to a blocking task.
-    tauri::async_runtime::spawn_blocking(move || {
-        let session = parse_session(&session_json)?;
-        cv_llm::distill(&session, &cv_llm::DistillOptions::default()).map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| format!("distill task panicked: {e}"))?
-}
-
 /// Scrub secrets/PII from a session via `cv_core::redact`, returning the redacted session as JSON.
 ///
 /// Pure + offline — no API key needed.
@@ -93,23 +76,6 @@ fn redact(session_json: String) -> Result<String, String> {
     let session = parse_session(&session_json)?;
     let redacted = cv_core::redact::redact(&session);
     serde_json::to_string(&redacted).map_err(|e| format!("serializing redacted session: {e}"))
-}
-
-/// Generate the next assistant turn for a session — the generative half of looming — via
-/// `cv_llm::generate`. Honors an optional `model` override; works with `LMSTUDIO_API_BASE` for
-/// free local generation.
-#[tauri::command]
-async fn generate(session_json: String, model: Option<String>) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let session = parse_session(&session_json)?;
-        let opts = cv_llm::GenerateOptions {
-            model,
-            ..Default::default()
-        };
-        cv_llm::generate(&session, &opts).map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| format!("generate task panicked: {e}"))?
 }
 
 /// Read a `.zip` of exported harness logs from `path`, unzip it in-memory, run
@@ -619,25 +585,6 @@ fn workflow_script_path(r: &SessionRef, wf: &str) -> Option<std::path::PathBuf> 
     })
 }
 
-/// Report whether an LLM provider is configured (so the UI can enable/disable distill/loom).
-#[derive(Serialize)]
-struct ProviderInfo {
-    /// `"openrouter" | "anthropic" | "lmstudio"`, or `null` if no provider is configured.
-    provider: Option<String>,
-    /// Convenience flag for the UI.
-    available: bool,
-}
-
-/// Tell the frontend which LLM provider (if any) is wired up via the desktop process's env.
-#[tauri::command]
-fn provider_info() -> ProviderInfo {
-    let provider = cv_llm::available_provider().map(|s| s.to_string());
-    ProviderInfo {
-        available: provider.is_some(),
-        provider,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Native application menu
 // ---------------------------------------------------------------------------
@@ -690,9 +637,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let about_meta = AboutMetadataBuilder::new()
         .name(Some("clustervision"))
         .version(Some(env!("CARGO_PKG_VERSION")))
-        .comments(Some(
-            "Cross-harness AI session viewer with native distill, redact, and generative loom.",
-        ))
+        .comments(Some("Cross-harness AI session viewer."))
         .build();
     let about = PredefinedMenuItem::about(app, Some("About clustervision"), Some(about_meta))?;
     let web_demo = MenuItem::with_id(app, "help.web_demo", "Open the web demo", true, None::<&str>)?;
@@ -857,11 +802,8 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(CvdServer::default())
         .invoke_handler(tauri::generate_handler![
-            distill,
             redact,
-            generate,
             ingest_zip,
-            provider_info,
             local_sessions,
             local_session,
             local_session_head,

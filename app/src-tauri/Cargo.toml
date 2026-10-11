@@ -8,7 +8,7 @@
 
 [package]
 name = "clustervision-app"
-description = "clustervision desktop app — Tauri v2 shell around the web UI + native cv-core/cv-llm power."
+description = "clustervision desktop app — Tauri v2 shell around the web UI + native cv-core power."
 version = "0.14.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -38,11 +38,10 @@ anyhow = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # The native power: pull in the workspace crates by relative path so the desktop app can
-# call distill/redact/generate without shipping API keys into JS.
+# read sessions and redact without HTTP.
 # NOTE: `cv-core`'s package name is `clustervision-core` (renamed for crates.io); the local alias
 # stays `cv_core` via `package = `, exactly as `crates/cv/Cargo.toml` does it.
 cv-core = { path = "../../crates/cv-core", package = "clustervision-core" }
-cv-llm = { path = "../../crates/cv-llm" }
 cv-search = { path = "../../crates/cv-search" }
 
 [dev-dependencies]

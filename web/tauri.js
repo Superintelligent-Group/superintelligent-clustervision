@@ -2,14 +2,13 @@
 //
 // When clustervision runs inside the Tauri shell (the `app/` desktop wrapper),
 // `window.__TAURI__` is present. We then:
-//   (a) route distill / redact / generate through native commands via
-//       `window.__TAURI__.core.invoke(...)` — no API key needed; the desktop
-//       env (or a local LM Studio) does the work; and
+//   (a) route session reads and `redact` through native commands via
+//       `window.__TAURI__.core.invoke(...)`; and
 //   (b) listen for the `cv://open-sessions` event whose payload is a JSON array
 //       of Session objects, emitted by the native File → Open menu.
 //
 // In a plain browser none of this exists, so every helper degrades to a no-op /
-// `false`, and callers fall back to the in-JS OpenRouter path.
+// `false`, and callers fall back to HTTP against a local `cv serve`.
 
 /** True when running inside the Tauri desktop shell. `__TAURI_INTERNALS__` is the low-level bridge
  *  that is ALWAYS present in the webview (even when `withGlobalTauri` is off and the high-level
@@ -31,7 +30,7 @@ function invokeFn() {
 /**
  * Call a native command. Rejects (rather than silently no-op'ing) when not in
  * Tauri so callers can detect the situation and fall back deliberately.
- * @param {"distill"|"redact"|"generate"|string} command
+ * @param {string} command
  * @param {object} [args]
  * @returns {Promise<any>}
  */
@@ -62,42 +61,5 @@ export async function listen(event, handler) {
   } catch (err) {
     console.warn("[clustervision] Tauri event listen failed:", err);
     return () => {};
-  }
-}
-
-/**
- * Generate a continuation through the native command. Mirrors the OpenRouter
- * `generate({ messages, model, onToken, signal })` shape closely enough that
- * the loom can swap them.
- *
- * The native side may stream by emitting `cv://generate-token` events, or it
- * may simply resolve with the full text. We support both: if a `streamEvent`
- * is provided we wire it up for the duration of the call.
- *
- * @param {object} opts
- * @param {object[]} opts.messages   IR messages.
- * @param {string}  [opts.model]
- * @param {(chunk:string, full:string)=>void} [opts.onToken]
- * @returns {Promise<string>}
- */
-export async function nativeGenerate({ messages, model, onToken } = {}) {
-  let unlisten = () => {};
-  let full = "";
-  if (typeof onToken === "function") {
-    unlisten = await listen("cv://generate-token", (payload) => {
-      const chunk = typeof payload === "string" ? payload : (payload?.chunk ?? "");
-      if (!chunk) return;
-      full += chunk;
-      onToken(chunk, full);
-    });
-  }
-  try {
-    const result = await invoke("generate", { messages, model });
-    const text = typeof result === "string" ? result : (result?.text ?? result?.content ?? "");
-    // If nothing streamed, deliver the whole thing once.
-    if (onToken && !full && text) onToken(text, text);
-    return text || full;
-  } finally {
-    unlisten();
   }
 }

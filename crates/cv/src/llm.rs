@@ -1,23 +1,26 @@
-//! cv-llm — LLM-backed features over clustervision sessions (distillation), via OpenRouter / Anthropic.
-//!
-//! The entry point is [`distill`], which renders a [`cv_core::Session`] to Markdown, wraps it in a
-//! distillation prompt, and asks a cheap/fast model to extract durable project memory (the kind of
-//! thing you'd keep in a `MEMORY.md`/`CLAUDE.md`).
+//! LLM-backed features over sessions: the abstractive digest behind `cv pack` (`CV_PACK_LLM`) and
+//! the `--generate` continuation of `cv splice`/`cv loom`, via OpenRouter / Anthropic / a local
+//! OpenAI-compatible server. Two blocking POSTs on `ureq`; no async stack.
 //!
 //! Provider is chosen by environment: `LMSTUDIO_API_BASE` (local, wins), then `OPENROUTER_API_KEY`,
 //! then `ANTHROPIC_API_KEY`. Remote providers receive the (truncated) transcript — which can carry
 //! secrets — so every call prints an egress notice to stderr naming the destination and size.
+//!
+//! `digest` is the LLM summary; `cv distill` (`cv_core::distill`) is the deterministic pack. One
+//! word, one meaning.
 
 use anyhow::{anyhow, bail, Context, Result};
+use cv_core::scan::{ceil_char, floor_char};
 use serde_json::{json, Value};
+use std::time::Duration;
 
-/// Knobs for distillation.
+/// Knobs for [`digest`].
 #[derive(Debug, Clone, Default)]
-pub struct DistillOptions {
+pub(crate) struct DigestOptions {
     /// Model id (OpenRouter provider-prefixed, e.g. `anthropic/claude-…`, or an Anthropic model).
     /// Overrides the provider default when set.
     pub model: Option<String>,
-    /// Distill a whole project (all sessions for a cwd) rather than a single session.
+    /// Digest a whole project (all sessions for a cwd) rather than a single session.
     pub project: bool,
 }
 
@@ -33,28 +36,21 @@ their fixes, where key things live (files/functions), conventions, and unresolve
 terse Markdown suitable for a MEMORY.md. No fluff, no recap of the whole conversation.";
 
 /// Which provider we'll use given the current environment, or `None` if no API key is set.
-///
-/// Returns `"openrouter"` or `"anthropic"`. The CLI can use this to tell the user which key is in
-/// play (or that none is).
-pub fn available_provider() -> Option<&'static str> {
+/// Returns `"openrouter"`, `"anthropic"` or `"lmstudio"`.
+pub(crate) fn available_provider() -> Option<&'static str> {
     provider_from_env().map(|p| p.name())
 }
 
-/// Distill a session into a compact, durable digest of what was learned — the kind of thing you'd
+/// Digest a session into a compact, durable summary of what was learned — the kind of thing you'd
 /// keep in a `MEMORY.md`/`CLAUDE.md`: decisions, gotchas, where things live, open threads.
 ///
-/// Picks a provider from the environment (`OPENROUTER_API_KEY` preferred, else `ANTHROPIC_API_KEY`),
-/// builds a prompt from the rendered session, calls the chat model, and returns its Markdown text.
-pub fn distill(session: &cv_core::Session, opts: &DistillOptions) -> Result<String> {
-    distill_markdown(session, opts)
-}
-
-/// Same as [`distill`]; named to make intent explicit at call sites that want the Markdown digest.
-pub fn distill_markdown(session: &cv_core::Session, opts: &DistillOptions) -> Result<String> {
+/// Picks a provider from the environment, builds a prompt from the rendered session, calls the
+/// chat model, and returns its Markdown text.
+pub(crate) fn digest(session: &cv_core::Session, opts: &DigestOptions) -> Result<String> {
     let provider = provider_from_env().ok_or_else(|| {
         anyhow!(
             "no LLM API key found: set OPENROUTER_API_KEY (preferred) or ANTHROPIC_API_KEY \
-             to enable distillation"
+             to enable the digest"
         )
     })?;
     let prompt = build_prompt(session, opts);
@@ -146,7 +142,7 @@ fn provider_from_env() -> Option<Provider> {
 }
 
 /// Build the user prompt: the (possibly truncated) rendered transcript plus instructions.
-fn build_prompt(session: &cv_core::Session, opts: &DistillOptions) -> String {
+fn build_prompt(session: &cv_core::Session, opts: &DigestOptions) -> String {
     let rendered = cv_core::render::to_markdown(session);
     let (transcript, truncated) = budget(&rendered, TRANSCRIPT_BUDGET);
 
@@ -185,8 +181,8 @@ fn budget(s: &str, budget: usize) -> (String, bool) {
     let head_len = usable * 2 / 3;
     let tail_len = usable - head_len;
 
-    let head_end = floor_char_boundary(s, head_len);
-    let tail_start = ceil_char_boundary(s, s.len().saturating_sub(tail_len));
+    let head_end = floor_char(s, head_len);
+    let tail_start = ceil_char(s, s.len().saturating_sub(tail_len));
 
     let mut out = String::with_capacity(budget);
     out.push_str(&s[..head_end]);
@@ -195,31 +191,22 @@ fn budget(s: &str, budget: usize) -> (String, bool) {
     (out, true)
 }
 
-/// Largest char-boundary index `<= i` (stable replacement for the nightly `str::floor_char_boundary`).
-fn floor_char_boundary(s: &str, i: usize) -> usize {
-    let mut i = i.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+/// A blocking HTTP agent with a per-call timeout.
+fn agent(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new().timeout(timeout).build()
 }
 
-/// Smallest char-boundary index `>= i`.
-fn ceil_char_boundary(s: &str, i: usize) -> usize {
-    let mut i = i.min(s.len());
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
+/// OpenRouter asks callers to identify themselves; the two headers are harmless elsewhere.
+fn openrouter_headers(req: ureq::Request, key: &str) -> ureq::Request {
+    req.set("Authorization", &format!("Bearer {key}"))
+        .set("HTTP-Referer", "https://github.com/emberian/cv")
+        .set("X-Title", "clustervision")
 }
 
-/// Send the prompt to the model and return its text. Blocking HTTP (this is a CLI-called lib).
+/// Send the prompt to the model and return its text.
 fn call_model(provider: &Provider, model: &str, prompt: &str) -> Result<String> {
     egress_notice(provider, model, prompt.len());
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .context("building HTTP client")?;
+    let agent = agent(Duration::from_secs(120));
 
     match provider {
         Provider::OpenRouter { key } => {
@@ -230,15 +217,8 @@ fn call_model(provider: &Provider, model: &str, prompt: &str) -> Result<String> 
                     { "role": "user", "content": prompt },
                 ],
             });
-            let resp = client
-                .post("https://openrouter.ai/api/v1/chat/completions")
-                .bearer_auth(key)
-                .header("HTTP-Referer", "https://github.com/emberian/cv")
-                .header("X-Title", "clustervision")
-                .json(&body)
-                .send()
-                .context("POST to OpenRouter")?;
-            let v = read_json(resp, "OpenRouter")?;
+            let req = openrouter_headers(agent.post("https://openrouter.ai/api/v1/chat/completions"), key);
+            let v = read_json(req.send_json(body), "OpenRouter")?;
             extract_openai_text(&v, "OpenRouter")
         }
         Provider::Anthropic { key } => {
@@ -250,14 +230,11 @@ fn call_model(provider: &Provider, model: &str, prompt: &str) -> Result<String> 
                     { "role": "user", "content": prompt },
                 ],
             });
-            let resp = client
+            let req = agent
                 .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
-                .send()
-                .context("POST to Anthropic")?;
-            let v = read_json(resp, "Anthropic")?;
+                .set("x-api-key", key)
+                .set("anthropic-version", "2023-06-01");
+            let v = read_json(req.send_json(body), "Anthropic")?;
             extract_anthropic_text(&v)
         }
         Provider::LmStudio { base } => {
@@ -269,12 +246,11 @@ fn call_model(provider: &Provider, model: &str, prompt: &str) -> Result<String> 
                     { "role": "user", "content": prompt },
                 ],
             });
-            let resp = client
-                .post(format!("{base}/chat/completions"))
-                .json(&body)
-                .send()
-                .with_context(|| format!("POST to LM Studio at {base} (is the local server running?)"))?;
-            let v = read_json(resp, "LM Studio")?;
+            let v = read_json(
+                agent.post(&format!("{base}/chat/completions")).send_json(body),
+                "LM Studio",
+            )
+            .with_context(|| format!("POST to LM Studio at {base} (is the local server running?)"))?;
             extract_openai_text(&v, "LM Studio")
         }
     }
@@ -308,13 +284,19 @@ fn extract_anthropic_text(v: &Value) -> Result<String> {
     Ok(text)
 }
 
-/// Read a response body as JSON, turning HTTP error statuses into clear errors.
-fn read_json(resp: reqwest::blocking::Response, who: &str) -> Result<Value> {
-    let status = resp.status();
-    let text = resp.text().with_context(|| format!("reading {who} response body"))?;
-    if !status.is_success() {
-        bail!("{who} API returned {status}: {text}");
-    }
+/// Read a response body as JSON, turning HTTP error statuses into clear errors. `ureq` reports a
+/// 4xx/5xx as `Error::Status` carrying the response, so the provider's own message reaches the user.
+fn read_json(resp: Result<ureq::Response, ureq::Error>, who: &str) -> Result<Value> {
+    let text = match resp {
+        Ok(r) => r
+            .into_string()
+            .with_context(|| format!("reading {who} response body"))?,
+        Err(ureq::Error::Status(code, r)) => {
+            let text = r.into_string().unwrap_or_default();
+            bail!("{who} API returned {code}: {text}");
+        }
+        Err(e) => return Err(e).with_context(|| format!("POST to {who}")),
+    };
     serde_json::from_str(&text).with_context(|| format!("parsing {who} JSON response: {text}"))
 }
 
@@ -324,7 +306,7 @@ fn read_json(resp: reqwest::blocking::Response, who: &str) -> Result<Value> {
 
 /// Knobs for [`generate`].
 #[derive(Debug, Clone, Default)]
-pub struct GenerateOptions {
+pub(crate) struct GenerateOptions {
     /// Model id; defaults per provider.
     pub model: Option<String>,
     /// Max tokens to generate (default 4096).
@@ -336,7 +318,7 @@ pub struct GenerateOptions {
 /// Generate the next assistant turn given a session's conversation — the generative half of looming.
 /// Forking/grafting happens in [`cv_core::loom`]; this produces a fresh continuation to append. With
 /// `LMSTUDIO_API_BASE` set this runs against a local model — free, offline looming.
-pub fn generate(session: &cv_core::Session, opts: &GenerateOptions) -> Result<String> {
+pub(crate) fn generate(session: &cv_core::Session, opts: &GenerateOptions) -> Result<String> {
     let provider = provider_from_env().ok_or_else(|| {
         anyhow!(
             "no LLM provider: set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or LMSTUDIO_API_BASE \
@@ -407,10 +389,7 @@ fn call_chat(
 ) -> Result<String> {
     let approx: usize = messages.iter().map(|m| m["content"].as_str().map_or(0, str::len)).sum();
     egress_notice(provider, model, approx);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .context("building HTTP client")?;
+    let agent = agent(Duration::from_secs(180));
 
     // OpenAI-compatible providers (OpenRouter, LM Studio) share a body/parse shape.
     let openai_call = |url: String, bearer: Option<&str>| -> Result<String> {
@@ -422,15 +401,11 @@ fn call_chat(
         }
         msgs.extend(messages.iter().cloned());
         let body = json!({ "model": model, "messages": msgs, "max_tokens": max_tokens });
-        let mut req = client.post(&url).json(&body);
+        let mut req = agent.post(&url);
         if let Some(b) = bearer {
-            req = req
-                .bearer_auth(b)
-                .header("HTTP-Referer", "https://github.com/emberian/cv")
-                .header("X-Title", "clustervision");
+            req = openrouter_headers(req, b);
         }
-        let resp = req.send().with_context(|| format!("POST to {url}"))?;
-        let v = read_json(resp, "chat")?;
+        let v = read_json(req.send_json(body), "chat").with_context(|| format!("POST to {url}"))?;
         v["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
@@ -446,14 +421,11 @@ fn call_chat(
             if let Some(sys) = sys {
                 body["system"] = json!(sys);
             }
-            let resp = client
+            let req = agent
                 .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
-                .send()
-                .context("POST to Anthropic")?;
-            let v = read_json(resp, "Anthropic")?;
+                .set("x-api-key", key)
+                .set("anthropic-version", "2023-06-01");
+            let v = read_json(req.send_json(body), "Anthropic")?;
             extract_anthropic_text(&v)
         }
     }
@@ -547,7 +519,7 @@ mod tests {
     #[test]
     fn prompt_contains_transcript_and_instructions() {
         let s = sample_session();
-        let opts = DistillOptions::default();
+        let opts = DigestOptions::default();
         let prompt = build_prompt(&s, &opts);
 
         // Transcript content is present.
@@ -564,7 +536,7 @@ mod tests {
     #[test]
     fn project_scope_changes_framing() {
         let s = sample_session();
-        let opts = DistillOptions {
+        let opts = DigestOptions {
             project: true,
             ..Default::default()
         };
@@ -740,12 +712,12 @@ mod tests {
     }
 
     /// Real network call. Ignored by default so `cargo test` passes without API keys / network.
-    /// Run with: `cargo test -p cv-llm -- --ignored live_distill`
+    /// Run with: `cargo test -p clustervision --bin cv -- --ignored live_digest`
     #[test]
     #[ignore]
-    fn live_distill() {
+    fn live_digest() {
         let s = sample_session();
-        let out = distill(&s, &DistillOptions::default()).expect("distill failed");
+        let out = digest(&s, &DigestOptions::default()).expect("digest failed");
         assert!(!out.trim().is_empty(), "expected non-empty digest");
         eprintln!("--- digest ---\n{out}");
     }

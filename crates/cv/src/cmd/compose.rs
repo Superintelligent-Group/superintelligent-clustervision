@@ -457,16 +457,16 @@ fn finish_composed(
 ) -> Result<()> {
     // The generative half of looming: grow the composed branch with an LLM-generated continuation.
     if generate {
-        match cv_llm::available_provider() {
+        match crate::llm::available_provider() {
             Some(prov) => eprintln!("✦ looming a continuation via {prov}…"),
             None => bail!(
                 "--generate needs an LLM provider: set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or \
                  LMSTUDIO_API_BASE=local (free local LM Studio)"
             ),
         }
-        let text = cv_llm::generate(
+        let text = crate::llm::generate(
             &session,
-            &cv_llm::GenerateOptions {
+            &crate::llm::GenerateOptions {
                 model: gen_model,
                 ..Default::default()
             },

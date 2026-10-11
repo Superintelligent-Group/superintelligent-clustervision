@@ -69,7 +69,7 @@ pub(crate) fn cmd_pack(
     // CV_PACK_LLM=1 (provider default model) or CV_PACK_LLM=<model-id>.
     let llm_model = llm_from_env();
     if llm_model.is_some() {
-        match cv_llm::available_provider() {
+        match crate::llm::available_provider() {
             Some(p) => eprintln!("✦ CV_PACK_LLM set — distilling each span via {p}…"),
             None => bail!(
                 "CV_PACK_LLM is set but no LLM provider is configured: set OPENROUTER_API_KEY, \
@@ -386,11 +386,11 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<Stri
             });
             mini.messages.push(m);
         }
-        let opts = cv_llm::DistillOptions {
+        let opts = crate::llm::DigestOptions {
             model: model.clone(),
             project: false,
         };
-        match cv_llm::distill(&mini, &opts) {
+        match crate::llm::digest(&mini, &opts) {
             Ok(d) => Some(d.trim().to_string()),
             Err(e) => {
                 eprintln!(

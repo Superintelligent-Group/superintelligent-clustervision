@@ -2,8 +2,8 @@
 
 A single clickable cross-platform desktop application that wraps clustervision:
 the existing **static web UI** (session viewer, timeline, compare, stats, OpenSession,
-splice/loom composer, fleet dashboard) plus **native Rust backend power** (distill,
-redact, generative loom, **native zip ingest**), a **native application menu**,
+splice/loom composer, fleet dashboard) plus **native Rust backend power** (redact,
+**native zip ingest**), a **native application menu**,
 **persisted window state**, and an auto-launched local fleet API.
 
 ## Layout
@@ -28,7 +28,7 @@ app/
 cargo workspace**, so it is *excluded* from the main clustervision workspace at the repo
 root. Building or CI-testing the main crates never compiles the app (which pulls in the
 heavy WebKit/Tauri stack), and vice-versa. The app still depends on the real crates by
-relative path: `cv-core`, `cv-llm`, `cv-search` at `../../crates/...`. Note that `cv-core`'s
+relative path: `cv-core`, `cv-search` at `../../crates/...`. Note that `cv-core`'s
 **package** name is `clustervision-core` (renamed for crates.io in 0.10), so the manifest says
 `cv-core = { path = "../../crates/cv-core", package = "clustervision-core" }` — the same form
 `crates/cv/Cargo.toml` uses. Asking for a bare `cv-core` fails resolution instantly, and because
@@ -41,16 +41,12 @@ No build step. `frontendDist` in `tauri.conf.json` points at the existing static
 
 ## Native commands
 
-Invoke from JS with `window.__TAURI__.core.invoke("<name>", { ... })`. Keeping these in
-Rust means LLM API keys live in the desktop *process* env, never in JS:
+Invoke from JS with `window.__TAURI__.core.invoke("<name>", { ... })`:
 
 | Command         | Args                                          | Returns                         | Backed by              |
 |-----------------|-----------------------------------------------|---------------------------------|------------------------|
-| `distill`       | `{ sessionJson: string }`                     | Markdown digest (`string`)      | `cv_llm::distill`      |
 | `redact`        | `{ sessionJson: string }`                     | redacted Session as JSON string | `cv_core::redact`      |
-| `generate`      | `{ sessionJson: string, model?: string }`     | next assistant turn (`string`)  | `cv_llm::generate`     |
 | `ingest_zip`    | `{ path: string }`                            | `Session[]` as a JSON string    | `cv_core::ingest::ingest_files` |
-| `provider_info` | `{}`                                          | `{ provider, available }`       | `cv_llm::available_provider` |
 
 ### Reading the machine's sessions — the `local_*` commands
 
@@ -90,9 +86,10 @@ Two IR-v2 notes for the UI:
   `continues`, `agent_path`) — plus `git`, `model` and the exact message `total`, in one pass that
   keeps no messages. It is the only way to get them for Claude, whose stream emits no `meta()`.
 
-`distill`/`generate` need a provider in the environment — see [LLM providers](#llm-providers).
-`redact` and `ingest_zip` are pure and offline (no key needed). All take/return the **same
+`redact` and `ingest_zip` are pure and offline (no key needed). Both take/return the **same
 Session IR JSON** the web UI already speaks (`serde_json` round-trip of `cv_core::Session`).
+Generation (the loom's ⚡) is the web UI's OpenRouter path in the app too; `cv splice --generate`
+is the CLI's, with `LMSTUDIO_API_BASE` for a free local model.
 
 `ingest_zip` reads a `.zip` from disk, unzips it **in-memory** (the `zip` crate, deflate only),
 and runs the same `cv_core::ingest::ingest_files` the browser's WASM path uses — so native
@@ -158,21 +155,6 @@ If `cvd` can't be found, the app still runs; only the live fleet dashboard is un
 > and spawn it via `tauri_plugin_shell`'s sidecar API instead of `std::process::Command`. The
 > `std::process` path above is intentionally the default because it needs no bundle prep.
 
-## LLM providers
-
-`distill` and `generate` pick a provider from the desktop process environment:
-
-- `OPENROUTER_API_KEY` — preferred when set
-- `ANTHROPIC_API_KEY`
-- `LMSTUDIO_API_BASE` — **free, offline, no key.** Set to `local` (→ `http://localhost:1234/v1`)
-  or a full base URL of any OpenAI-compatible local server (LM Studio / Ollama / vLLM).
-
-Example, free local looming:
-
-```sh
-LMSTUDIO_API_BASE=local cargo tauri dev
-```
-
 ## Build & run
 
 From `app/src-tauri/`:
@@ -198,7 +180,7 @@ Requirements:
 
 - `cargo build` **and** `cargo build --release` in `app/src-tauri` **compile cleanly** — Tauri v2
   (with the `devtools` feature) + system WebKit on macOS; the dialog, window-state, and shell
-  plugins; the `zip` crate; and cv-core / cv-llm / cv-search via relative paths. No warnings from
+  plugins; the `zip` crate; and cv-core / cv-search via relative paths. No warnings from
   `clustervision-app` itself.
 - The app is **excluded from the main repo workspace** (`cargo metadata` at the repo root does
   not list `clustervision-app`).

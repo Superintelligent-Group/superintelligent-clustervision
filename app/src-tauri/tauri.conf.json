@@ -30,7 +30,7 @@
       "icons/icon.png"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Cross-harness AI session viewer + native distill/redact/loom.",
-    "longDescription": "clustervision wraps the static web session viewer (timeline, compare, stats, splice/loom composer, fleet dashboard) and launches a local `cvd serve` API on startup, plus native commands for distillation, redaction, and generative looming."
+    "shortDescription": "Cross-harness AI session viewer.",
+    "longDescription": "clustervision wraps the static web session viewer (timeline, compare, stats, splice/loom composer, fleet dashboard) and launches a local `cv serve` API on startup, plus native redaction and zip ingest."
   }
 }

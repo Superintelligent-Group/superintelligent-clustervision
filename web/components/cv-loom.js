@@ -28,7 +28,6 @@ import {
   generate, getKey, setKey, getModel, setModel, hasKey,
   MODEL_PRESETS, DEFAULT_MODEL,
 } from "../openrouter.js";
-import { canInvokeNative, nativeGenerate } from "../tauri.js";
 import { hydrateSession, isStub } from "./hydrate.js";
 
 class CvLoom extends HTMLElement {
@@ -378,17 +377,16 @@ class CvLoom extends HTMLElement {
 
   _genBarHtml() {
     const model = getModel();
-    const native = canInvokeNative();        // desktop: route through native commands, no key needed
-    const ready = native || hasKey();
+    const ready = hasKey();
     const busy = this._gen.busy;
     return `
       <div class="loom-gen">
         <button type="button" class="btn-gen" data-generate ${this._lane.length && !busy ? "" : "disabled"}
-          title="${ready ? (native ? "Generate via the desktop runtime (no API key needed)" : "Send the composition to OpenRouter and append the reply") : "Set an API key in ⚙ generation first"}">
+          title="${ready ? "Send the composition to OpenRouter and append the reply" : "Set an API key in ⚙ generation first"}">
           ${busy ? "⏳ generating…" : "⚡ generate continuation"}
         </button>
         ${busy ? `<button type="button" class="mini-btn" data-gen-stop>stop</button>` : ""}
-        <span class="gen-model muted" title="active model">${native ? "🖥 native" : esc(model)}</span>
+        <span class="gen-model muted" title="active model">${esc(model)}</span>
         ${!ready ? `<button type="button" class="gen-needkey" data-settings-open>add API key →</button>` : ""}
         ${this._gen.error ? `<div class="gen-error" role="alert">${esc(this._gen.error)}</div>` : ""}
       </div>`;
@@ -404,8 +402,7 @@ class CvLoom extends HTMLElement {
 
   async _generate() {
     if (this._gen.busy || !this._lane.length) return;
-    const native = canInvokeNative();
-    if (!native && !hasKey()) { this._showSettings = true; this._gen.error = "Add an OpenRouter API key first."; this.render(); return; }
+    if (!hasKey()) { this._showSettings = true; this._gen.error = "Add an OpenRouter API key first."; this.render(); return; }
 
     this._gen.busy = true;
     this._gen.error = "";
@@ -439,10 +436,7 @@ class CvLoom extends HTMLElement {
       const messages = this._lane
         .filter((e) => e.uid !== entry.uid) // send everything *before* the placeholder
         .map((e) => e.message);
-      // Desktop: route through the native runtime (no API key). Browser: OpenRouter.
-      const text = native
-        ? await nativeGenerate({ messages, model: getModel(), onToken: (_chunk, full) => setText(full) })
-        : await generate({ messages, signal: this._abort.signal, onToken: (_chunk, full) => setText(full) });
+      const text = await generate({ messages, signal: this._abort.signal, onToken: (_chunk, full) => setText(full) });
       setText(text);
       if (!text.trim()) {
         // Empty reply — drop the placeholder so we don't leave a blank turn.
