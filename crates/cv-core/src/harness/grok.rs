@@ -4,12 +4,14 @@
 //! - `summary.json` — metadata (`info{id,cwd}`, timestamps, model, git, `session_kind`,
 //!   `chat_format_version`, `generated_title`/`session_summary`).
 //! - `chat_history.jsonl` — the canonical transcript. Per line `type` ∈
-//!   `system | user | assistant | tool_result`:
+//!   `system | user | assistant | tool_result | reasoning`:
 //!     * `system`/`user`: `content` is a string (system) or `[{type:text,text}]` (user). User lines
 //!       may carry `synthetic_reason` (e.g. `project_instructions`) for injected context.
 //!     * `assistant`: `content` (string), optional `reasoning{text,encrypted,id}`, `model_id`,
 //!       `model_fingerprint`, and **`tool_calls[]`** (`{id,name,arguments(JSON string)}`).
 //!     * `tool_result`: `{tool_call_id, content}` — the output fed back to the model.
+//!     * `reasoning` (1.0.5x): `{id, summary[{type:summary_text,text}], encrypted_content?}`, written
+//!       before the assistant line it belongs to; it becomes that message's leading `Thinking` block.
 //! - `updates.jsonl` — an ACP-style `session/update` event stream (plus `_x.ai/session/update`).
 //!   We mine `tool_call`/`tool_call_update` entries (keyed by `toolCallId`) to *enrich* tool calls
 //!   with a human `title`, a `kind`, file `locations`, and a `completed`/`failed` status that lets us
@@ -23,7 +25,9 @@
 //! - Sessions with no tool activity (`events.jsonl` empty, short `chat_history`) parse fine.
 //! - `session_kind: "subagent"` (under `.grok/worktrees/.../subagent-<id>/`) vs primary sessions
 //!   are both handled: the raw `session_kind`/`agent_name` ride in `extra["grok"]`, and a subagent's
-//!   `agent_name` nickname also becomes [`Lineage::agent_path`] (Grok records no parent session id).
+//!   `agent_name` nickname also becomes [`Lineage::agent_path`]. 1.0.5x links them: a fork's
+//!   `summary.json` has `parent_session_id` (→ `lineage.forked_from`), and a parent lists each child
+//!   under `subagents/<child id>/meta.json` (→ the child's `lineage.parent`).
 
 pub(crate) mod emit;
 pub use emit::emit;
@@ -128,8 +132,10 @@ impl Adapter for Grok {
         // Sidecar enrichment: tool_call / tool_call_update entries from the ACP update stream.
         let enrich = read_update_enrichment(dir);
 
-        // Subagent / agent-name facts + lineage from summary.json.
+        // Subagent / agent-name facts + lineage from summary.json (and a sub-agent's parent from the
+        // parent's `subagents/<id>/meta.json`).
         grok_session_facts(&mut s, &summary);
+        grok_lineage(&mut s, &summary, dir);
 
         // Grok persists the system prompt it sent as `system_prompt.txt` — byte-identical to the
         // leading `system` transcript record. It is the session-level fact, never a message.
@@ -147,23 +153,49 @@ impl Adapter for Grok {
         let session_model = s.model.clone();
         let file = fs::File::open(dir.join("chat_history.jsonl"))
             .with_context(|| format!("reading chat_history in {}", dir.display()))?;
-        let skipped = super::for_each_json_line(BufReader::new(file), |v| match chat_message(&v, &enrich) {
-            Some(mut m) => {
-                if m.model.is_some() && m.model == session_model {
-                    m.model = None;
+        // A 1.0.5x `reasoning` record joins the assistant turn after it, so one model turn stays one
+        // message (and discover's user+assistant count still matches); reasoning with no assistant
+        // turn after it (an interrupted turn) is flushed as a message of its own.
+        let mut pending: Option<Message> = None;
+        let mut stopped = false;
+        let skipped = super::for_each_json_line(BufReader::new(file), |v| {
+            let is_reasoning = v.get("type").and_then(Value::as_str) == Some("reasoning");
+            let Some(mut m) = chat_message(&v, &enrich) else {
+                return Flow::Continue;
+            };
+            if is_reasoning {
+                match pending.as_mut() {
+                    Some(p) => p.content.append(&mut m.content),
+                    None => pending = Some(m),
                 }
-                sink.message(m)
+                return Flow::Continue;
             }
-            None => Flow::Continue,
+            if let Some(mut p) = pending.take() {
+                if m.role == Role::Assistant {
+                    p.content.append(&mut m.content);
+                    m.content = p.content;
+                } else if let Flow::Stop = sink.message(p) {
+                    stopped = true;
+                    return Flow::Stop;
+                }
+            }
+            if m.model.is_some() && m.model == session_model {
+                m.model = None;
+            }
+            let f = sink.message(m);
+            stopped = matches!(f, Flow::Stop);
+            f
         });
+        if let (Some(p), false) = (pending, stopped) {
+            sink.message(p);
+        }
         super::note_skipped_lines(&mut s, skipped);
         Ok(s)
     }
 }
 
-/// Subagent lineage + Grok-specific session facts from `summary.json`. Grok stores no parent
-/// session id, so a subagent's `agent_name` nickname becomes [`Lineage::agent_path`]; the raw
-/// `session_kind` / `agent_name` ride in `extra["grok"]`.
+/// Subagent nickname + Grok-specific session facts from `summary.json`: a subagent's `agent_name`
+/// becomes [`Lineage::agent_path`]; the raw `session_kind` / `agent_name` ride in `extra["grok"]`.
 fn grok_session_facts(s: &mut Session, summary: &Value) {
     let kind = summary.get("session_kind").and_then(Value::as_str);
     let agent = summary.get("agent_name").and_then(Value::as_str);
@@ -180,6 +212,42 @@ fn grok_session_facts(s: &mut Session, summary: &Value) {
         if let Some(a) = agent {
             bag.insert("agent_name".into(), Value::String(a.to_string()));
         }
+    }
+}
+
+/// Who this session came from. A forked or restored session's `summary.json` names its source in
+/// `parent_session_id` (1.0.5x, with `forked_at`). A sub-agent's own summary names no parent; the
+/// parent records the child under `<parent>/subagents/<child id>/meta.json` (`parent_session_id`),
+/// and the parent sits in the same cwd group, so one directory listing finds it.
+fn grok_lineage(s: &mut Session, summary: &Value, dir: &Path) {
+    let subagent = summary.get("session_kind").and_then(Value::as_str) == Some("subagent");
+    let named = summary
+        .get("parent_session_id")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty());
+    if let (Some(p), false) = (named, subagent) {
+        s.lineage.forked_from = Some(p.to_string());
+    }
+    if !subagent {
+        return;
+    }
+    let Some(group) = dir.parent() else { return };
+    let Ok(rd) = fs::read_dir(group) else { return };
+    for e in rd.flatten() {
+        let meta = e.path().join("subagents").join(&s.id).join("meta.json");
+        let Some(v) = fs::read_to_string(&meta)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        else {
+            continue;
+        };
+        s.lineage.parent = v
+            .get("parent_session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| e.file_name().to_str().map(str::to_string));
+        s.lineage.spawned_by_tool_use = v.get("tool_call_id").and_then(Value::as_str).map(str::to_string);
+        return;
     }
 }
 
@@ -288,6 +356,35 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
             tool_name,
             status,
             details: None,
+        });
+        return Some(m);
+    }
+
+    // 1.0.5x writes reasoning as its own record before the assistant turn it belongs to:
+    // `{type: reasoning, id, summary: [{type: summary_text, text}], encrypted_content?}`. Older
+    // versions nest it in the assistant line (`reasoning{text,encrypted}`, below).
+    if ty == "reasoning" {
+        let text = v
+            .get("summary")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let encrypted = v.get("encrypted_content").and_then(Value::as_str).map(str::to_string);
+        if text.is_empty() && encrypted.is_none() {
+            return None;
+        }
+        let mut m = Message::new(Role::Assistant);
+        m.content.push(Block::Thinking {
+            text: text.into(),
+            signature: None,
+            encrypted,
+            redacted: false,
         });
         return Some(m);
     }
@@ -401,7 +498,11 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
 /// Harness. A `compaction_meta` turn is the summary that seeds the post-compaction window.
 fn user_kind_origin(v: &Value) -> (MessageKind, Origin) {
     match v.get("synthetic_reason").and_then(Value::as_str) {
-        Some("compaction_meta") => (MessageKind::CompactionSummary, Origin::Harness),
+        // After a compaction 1.0.5x re-tags the leading `<user_info>` block `compaction_meta` too;
+        // only the summary itself is the compaction summary.
+        Some("compaction_meta") if !text_parts(v.get("content")).trim_start().starts_with("<user_info>") => {
+            (MessageKind::CompactionSummary, Origin::Harness)
+        }
         Some(_) => (MessageKind::InjectedContext, Origin::Harness),
         None => {
             if text_parts(v.get("content")).trim_start().starts_with("<user_info>") {
@@ -653,6 +754,85 @@ mod tests {
         // A model reply.
         let a = msg(r#"{"type":"assistant","content":"hi"}"#).unwrap();
         assert_eq!((a.kind, a.origin), (MessageKind::Reply, Origin::Model));
+    }
+
+    #[test]
+    fn reasoning_records_join_the_next_turn_and_lineage_comes_from_summary_and_meta() {
+        let group = tempdir_with("x", "");
+        let parent = group.join("p1");
+        let child = group.join("c1");
+        let fork = group.join("f1");
+        for d in [&parent, &child, &fork] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::create_dir_all(parent.join("subagents/c1")).unwrap();
+        fs::write(
+            parent.join("subagents/c1/meta.json"),
+            r#"{"parent_session_id":"p1","child_session_id":"c1","tool_call_id":"call_7"}"#,
+        )
+        .unwrap();
+        fs::write(
+            child.join("summary.json"),
+            r#"{"info":{"id":"c1"},"session_kind":"subagent","agent_name":"general-purpose"}"#,
+        )
+        .unwrap();
+        fs::write(
+            fork.join("summary.json"),
+            r#"{"info":{"id":"f1"},"parent_session_id":"p1","forked_at":"2026-10-11T21:04:37Z"}"#,
+        )
+        .unwrap();
+        // Shapes from the 1.0.50 corpus: reasoning, then the reply; then trailing reasoning alone.
+        let chat = [
+            r#"{"type":"user","content":[{"type":"text","text":"<user_query>\nhi\n</user_query>"}],"prompt_index":0}"#,
+            r#"{"type":"reasoning","id":"","summary":[{"type":"summary_text","text":"think"}]}"#,
+            r#"{"type":"assistant","content":"hello","model_id":"m"}"#,
+            r#"{"type":"reasoning","id":"","summary":[{"type":"summary_text","text":"cut off"}]}"#,
+        ]
+        .join("\n");
+        for d in [&child, &fork] {
+            fs::write(d.join("chat_history.jsonl"), &chat).unwrap();
+        }
+        let grok = Grok {
+            root: Some(group.clone()),
+        };
+        let c = grok
+            .parse(&scan(&child.join("summary.json")).unwrap().unwrap())
+            .unwrap();
+        assert_eq!(c.lineage.parent.as_deref(), Some("p1"));
+        assert_eq!(c.lineage.spawned_by_tool_use.as_deref(), Some("call_7"));
+        assert_eq!(c.lineage.forked_from, None);
+        let f = grok.parse(&scan(&fork.join("summary.json")).unwrap().unwrap()).unwrap();
+        assert_eq!(f.lineage.forked_from.as_deref(), Some("p1"));
+        assert_eq!(f.lineage.parent, None);
+        let kinds: Vec<Vec<&str>> = f
+            .messages
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        Block::Thinking { .. } => "thinking",
+                        Block::Text { .. } => "text",
+                        _ => "other",
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(kinds, vec![vec!["text"], vec!["thinking", "text"], vec!["thinking"]]);
+        let _ = fs::remove_dir_all(&group);
+    }
+
+    #[test]
+    fn compaction_meta_on_the_user_info_block_is_context_not_the_summary() {
+        let msg = |line: &str| chat_message(&serde_json::from_str::<Value>(line).unwrap(), &HashMap::new()).unwrap();
+        let ui = msg(
+            r#"{"type":"user","content":[{"type":"text","text":"<user_info>\nOS: mac\n</user_info>"}],"synthetic_reason":"compaction_meta"}"#,
+        );
+        assert_eq!(ui.kind, MessageKind::InjectedContext);
+        let sum = msg(
+            r#"{"type":"user","content":[{"type":"text","text":"This session is being continued"}],"synthetic_reason":"compaction_meta"}"#,
+        );
+        assert_eq!(sum.kind, MessageKind::CompactionSummary);
     }
 
     #[test]

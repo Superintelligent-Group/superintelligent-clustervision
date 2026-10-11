@@ -9,13 +9,22 @@ source_files = ["harness/grok.rs", "harness/wire/openai.rs", "harness/wire/mod.r
 ignore_literals = []
 store = [
   "~/.grok/sessions/<percent-encoded-cwd>/<sessionId>/{chat_history.jsonl,updates.jsonl,summary.json,system_prompt.txt}",
+  "~/.grok/sessions/<percent-encoded-cwd>/<sessionId>/subagents/<childId>/meta.json",
 ]
 
 [upstream]
-repo = "unknown"
-commit = "unknown"
-date = "2026-05-29"
+repo = "closed source (Grok CLI binary from x.ai/cli; README and user guide unpacked into $GROK_HOME)"
+commit = "1.0.50 (c58f321264ba, stable; corpus tests/corpus/grok/1.0.50)"
+date = "2026-10-11"
 
 [types]
 tool_result = { status = "generic", note = "from tool_call_update" }
-reasoning = { status = "generic", note = "assistant reasoning{text,encrypted}" }
+reasoning = { status = "generic", note = "assistant reasoning{text,encrypted} (≤1.0.4x); 1.0.5x: its own record {id, summary[], encrypted_content?} joined to the next assistant turn" }
+synthetic_reason = { status = "handled", note = "compaction_meta → compaction summary, except the re-tagged <user_info> block; others → injected context" }
+"summary.parent_session_id" = { status = "handled", note = "fork source → lineage.forked_from (1.0.5x)" }
+"subagents.meta.json" = { status = "handled", note = "<parent>/subagents/<child>/meta.json → the child's lineage.parent (1.0.5x)" }
+"file.events" = { status = "ignored", note = "events.jsonl: phase/turn telemetry" }
+"file.usage" = { status = "ignored", note = "usage.json / signals.json: per-session token totals, not per message" }
+"file.compaction" = { status = "ignored", note = "compaction/, compaction_checkpoints/, compaction_requests/: the history is rewritten in place" }
+"file.workflows" = { status = "ignored", note = "workflows/wf_<run>/{state.json,journal.jsonl,script.rhai,args.json}" }
+"file.plan" = { status = "ignored", note = "plan.json (todo_write), plan_mode.json, rewind_points.jsonl" }

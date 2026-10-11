@@ -348,6 +348,24 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154); 2026-10-11 against the `rust-
   git_remotes[], head_commit, head_branch, agent_name, ...}`, plus the sub-agent/lineage facts.
 - **`system_prompt.txt`** is byte-identical to the leading `system` transcript record; cv reads it as
   **`Session::system_prompt`** (a session fact, never a message).
+- **1.0.50 (corpus `crates/cv-core/tests/corpus/grok/1.0.50/`, headless, BYOK model):** `$GROK_HOME`
+  overrides `~/.grok`. Reasoning is its own `chat_history` record `{type: reasoning, id, summary:
+  [{type: summary_text, text}], encrypted_content?}` before the assistant line (cv joins it to that
+  turn). User lines carry `prompt_index`; `/compact` rewrites `chat_history` in place (the summary and
+  the re-sent `<user_info>` block are both `synthetic_reason: compaction_meta`) and leaves
+  `compaction/{INDEX.md,segment_NNN.md}`, `compaction_checkpoints/<id>.json`,
+  `compaction_requests/<id>.json`. A fork's `summary.json` has `parent_session_id` + `forked_at`; a
+  sub-agent is a normal session (`session_kind: subagent`) whose parent keeps
+  `subagents/<child>/{meta.json,output.json}` (`parent_session_id`, `subagent_type`, `prompt`,
+  `status`, `tool_call_id`, `workflow_run_id`). Workflows (Rhai) leave
+  `workflows/wf_<run>/{state.json,journal.jsonl,script.rhai,args.json,scripts/NNNN.rhai}`. Also per
+  session: `events.jsonl` (`turn_started`/`phase_changed`/`turn_ended` telemetry), `usage.json` and
+  `signals.json` (session token totals), `plan.json` (todo_write), `plan_mode.json`,
+  `rewind_points.jsonl`, `prompt_context.json`, `tool_definitions.json`, `resources_state.json`,
+  `announcement_state.json`, `terminal/` (background command output). `updates.jsonl` adds
+  `hook_execution`, `background_tasks`, `task_backgrounded`/`task_completed`,
+  `scheduled_task_created`/`deleted`, `subagent_spawned`/`finished`, `workflow_updated`,
+  `auto_compact_completed`, `compaction_checkpoint`, `current_mode_update`, `plan`, `turn_completed`.
 - **Indexes (sqlite):** `~/.grok/sessions/session_search.sqlite` (FTS5: `session_docs` + `session_docs_fts`
   over title+content), `~/.grok/worktrees.db` (`worktrees(id,path,session_id,...)`), and per-cwd
   `prompt_history.jsonl` (`{timestamp,session_id,prompt,is_bash}`).
