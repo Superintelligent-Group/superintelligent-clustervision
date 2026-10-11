@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Codex 0.161/0.162: `turn_aborted` notes keep the abort `error` and `root_turn_id`; `cv formats` names carried records `event_msg.<type>` as the manifest does.
+- Codex corpus: real rollouts from Codex 0.161.0 and 0.162.1, re-read by a golden test so every recorded format keeps reading.
+
 ## 0.15.1 — 2026-10-11
 
 - The `clustervision` crate packages: the `cv` skill file lives inside the crate, so `cargo install clustervision` builds (0.15.0's CLI crate never reached crates.io).

@@ -214,7 +214,8 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
 
 Ground truth: `codex-rs/history/src/{lib,rollout_payload}.rs` (RolloutItem/RolloutLine),
 `codex-rs/rollout/src/policy.rs` (what is persisted), `codex-rs/protocol/src/{protocol,models,items}.rs`.
-Re-verified 2026-09-19 at `132c2be23` (CLI 0.154).
+Re-verified 2026-09-19 at `132c2be23` (CLI 0.154); 2026-10-11 against the `rust-v0.161.0` and
+`rust-v0.162.1` tags, with real rollouts from both in `crates/cv-core/tests/corpus/codex/`.
 
 - **Transcripts:** `~/.codex/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDTHH-MM-SS>-<thread_uuid>.jsonl` — the
   stamp is **local time, no zone suffix**; `RolloutFileName::parse` requires byte 19 to be `-` and skips
@@ -239,7 +240,7 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154).
   `agent_role`, `model_provider` (copied into the `threads` row — required for resume), `base_instructions
   {text}`, `history_mode`, `history_base {thread_id, end_ordinal_exclusive, end_byte_offset}`,
   `subagent_history_start_ordinal`, `git {commit_hash, branch, repository_url}`, `memory_mode`,
-  `context_window`. **Fork/subagent rollouts embed the parent's prefix** (ordinals below
+  `context_window`, `creator_user_id`/`creator_account_id` (0.161+, ChatGPT ids; cv drops them). **Fork/subagent rollouts embed the parent's prefix** (ordinals below
   `subagent_history_start_ordinal`, with a second `session_meta` = the parent's on line 1) stamped with
   the FORK time; the real per-item time is `payload.internal_chat_message_metadata_passthrough
   .create_time` (epoch seconds). The FIRST `session_meta` is canonical.
@@ -253,9 +254,11 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154).
   key flat once silently disabled a check that depended on it.
 - **`turn_context` payload:** REQUIRED `cwd`, `approval_policy` (`untrusted|on-request|never`),
   `sandbox_policy` (`{type: danger-full-access|read-only|workspace-write|external-sandbox, …}`),
-  `model`, `summary` (`auto|concise|detailed|none`); optional `turn_id`, `root_turn_id`, `effort`,
-  `personality`, `collaboration_mode {mode, settings{model, reasoning_effort}}`, `permission_profile`,
-  `current_date`, `timezone`, `workspace_roots`. A record missing a required field is skipped on resume.
+  `model`, `summary` (`auto|concise|detailed|none`; optional from 0.162, still written); optional
+  `turn_id`, `root_turn_id`, `effort`, `collaboration_mode {mode, settings{model, reasoning_effort}}`,
+  `permission_profile`, and until 0.161 `personality`, `current_date`, `timezone`, `workspace_roots`
+  (dropped in 0.162). A record missing a required field is skipped on resume; cv's emitter keeps
+  writing `summary` because pre-0.162 Codex requires it.
 - **`response_item.payload.type`:** `message` (`role`, `content[]` of `input_text|output_text|
   input_image`, `id: msg_…`, `phase`, `internal_chat_message_metadata_passthrough{turn_id,
   create_time}`), `agent_message` (inter-agent swarm channel: `{id: amsg_…, author, recipient,
@@ -271,7 +274,8 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154).
   `custom_tool_call(_output)` (`input`
   is a freeform string), `local_shell_call`, `web_search_call` (`action: search|open_page|find_in_page`),
   `tool_search_call/_output`, `image_generation_call`, `compaction`/`context_compaction`,
-  `configuration_update`. `formats/codex.toml` `[types]` carries the full, checked list of
+  `configuration_update`, `additional_tools` (0.162+: a responses-lite tool-definition prefix,
+  `{id: at_…, role: developer, tools[]}`, carried). `formats/codex.toml` `[types]` carries the full, checked list of
   `response_item.*` / `event_msg.*` / `item.*` names with cv's status for each (it names several the
   prose below does not, and marks the legacy `event_msg` twins `ignored`).
 - **Other top-level types:** `compacted` (`{message (now usually ""), replacement_history[], window_number,
@@ -285,21 +289,22 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154).
   `inter_agent_communication_metadata`, `world_state` (embeds AGENTS.md text), `security_risk_score`,
   `retained_context`, `realtime_item`.
 - **`event_msg.payload.type` (both modes):** `token_count {info{last_token_usage, total_token_usage},
-  rate_limits}`, `task_started {turn_id, model_context_window}`, `task_complete {turn_id,
-  last_agent_message, duration_ms}`, `thread_settings_applied {thread_settings{model, model_provider_id,
+  rate_limits}`, `task_started {turn_id, model_context_window, turn_attribution?, root_turn_id?}` (the last two
+  0.162+), `task_complete {turn_id, last_agent_message, duration_ms, root_turn_id?}`, `thread_settings_applied {thread_settings{model, model_provider_id,
   reasoning_effort, personality, approval_policy, cwd}}` (the reliable model-change signal → one
   `kind: model_change` note per switch),
-  `turn_aborted {turn_id, reason}`, `thread_goal_updated`, `thread_rolled_back {num_turns}` (→
+  `turn_aborted {turn_id, reason, error? (0.161+), root_turn_id? (0.162+)}`, `thread_goal_updated`, `thread_rolled_back {num_turns}` (→
   `kind: branch`: what follows does not continue what precedes),
   `item_completed` (paginated: all items; legacy: only FunctionCallOutput/Plan/Sleep/completed
   SubAgentActivity). `view_image_tool_call` is never persisted (images arrive as `item_completed
   ImageView{path:"file:///…"}`).
 - **`item_completed.item` (`type`, PascalCase):** `UserMessage`, `AgentMessage{content:[{type:Text}],
   phase}`, `Reasoning{summary_text, raw_content}`, `CommandExecution{command[], cwd:"file:///…",
-  parsed_cmd, source, status, stdout?, stderr?, aggregated_output?, exit_code?, duration}`,
+  parsed_cmd, source, status, aggregated_output?, exit_code?, duration}` (`stdout`/`stderr`/
+  `formatted_output` until 0.161; 0.162 middle-truncates `aggregated_output` over 64 KiB),
   `FileChange{changes{path:{type:add|update|delete, content|unified_diff}}, status}`, `ImageView{path}`,
   `ImageGeneration{saved_path}`, `SubAgentActivity{kind: started|interacted|interrupted|completed,
-  agent_thread_id, agent_path}` (`started` → IR `kind: subagent_spawn`, `completed` →
+  agent_thread_id, agent_path, model?, reasoning_effort?}` (the last two 0.162+) (`started` → IR `kind: subagent_spawn`, `completed` →
   `subagent_return`, anything else → `notice`), `CollabAgentToolCall{tool, status, sender_thread_id,
   receiver_thread_ids, prompt?, model?}`, `McpToolCall{server, tool, arguments, status, result?, error?}`,
   `WebSearch{query, action, results?}`, `ContextCompaction`, `Plan{text}`, `FunctionCallOutput`,

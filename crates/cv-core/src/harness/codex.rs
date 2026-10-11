@@ -1003,7 +1003,8 @@ fn handle_event(
             let mut m = note(MessageKind::Notice, ts, format!("[turn aborted: {reason}]"));
             let b = bag(&mut m);
             b.insert("codex_event".into(), Value::String("turn_aborted".into()));
-            for key in ["turn_id", "reason", "duration_ms"] {
+            // `error` (an `ErrorEvent`, 0.161+) says why; `root_turn_id` is 0.162+.
+            for key in ["turn_id", "reason", "duration_ms", "error", "root_turn_id"] {
                 if let Some(val) = p.get(key).filter(|v| !v.is_null()) {
                     b.insert(key.to_string(), val.clone());
                 }
@@ -3267,6 +3268,17 @@ mod tests {
     /// block and not in the bag.
     fn every_arm() -> Vec<String> {
         fixture_lines("every_arm.jsonl")
+    }
+
+    #[test]
+    fn turn_aborted_keeps_the_0_161_error_and_0_162_root_turn() {
+        let line = r#"{"timestamp":"2026-10-11T19:00:00Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t2","root_turn_id":"t1","reason":"interrupted","error":{"message":"stream closed","codex_error_info":"other"}}}"#;
+        let s = parse_jsonl(&[line.to_string()]);
+        let b = &s.messages[0].extra["codex"];
+        assert_eq!(s.messages[0].kind, MessageKind::Notice);
+        assert_eq!(b["error"]["message"], "stream closed");
+        assert_eq!(b["root_turn_id"], "t1");
+        assert_eq!(b["reason"], "interrupted");
     }
 
     #[test]

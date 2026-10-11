@@ -16,8 +16,8 @@ store = [
 
 [upstream]
 repo = "https://github.com/openai/codex (~/pug/codex)"
-commit = "132c2be23"
-date = "2026-09-19"
+commit = "092d3acd6 (tag rust-v0.162.1, on a release branch; also diffed: rust-v0.161.0 979011409)"
+date = "2026-10-11"
 
 [types]
 inter_agent_communication = { status = "carried", note = "defined, unobserved" }
@@ -26,6 +26,7 @@ security_risk_score = { status = "carried", note = "" }
 retained_context = { status = "carried", note = "" }
 realtime_item = { status = "carried", note = "paginated only" }
 "response_item.configuration_update" = { status = "carried", note = "new at HEAD, unobserved" }
+"response_item.additional_tools" = { status = "carried", note = "0.162+: tool-definition prefix (responses-lite), no conversational payload" }
 "event_msg.task_started" = { status = "carried", note = "" }
 "event_msg.task_complete" = { status = "carried", note = "last_agent_message read into the session bag; the record itself is carried" }
 "event_msg.thread_goal_updated" = { status = "carried", note = "" }
