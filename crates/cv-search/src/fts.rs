@@ -24,6 +24,7 @@
 
 use crate::Hit;
 use anyhow::{Context, Result};
+use cv_core::scan::{ceil_char, floor_char};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
@@ -1244,19 +1245,6 @@ fn window(body: &str, pos: usize, len: usize) -> String {
     } else {
         s
     }
-}
-
-fn floor_char(s: &str, mut i: usize) -> usize {
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-fn ceil_char(s: &str, mut i: usize) -> usize {
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
 }
 
 /// Remove a single session from the index by id (handy for incremental updates).

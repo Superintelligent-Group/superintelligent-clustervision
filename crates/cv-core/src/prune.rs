@@ -36,8 +36,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Marker prefix stamped where a payload used to be; carries enough to retrieve the original.
-const MARKER_PREFIX: &str = "[PRUNED id=";
+/// Marker prefix stamped where a payload used to be; carries enough to retrieve the original. The
+/// sidecar's public contract: `cv cat` keys retrieval on the id after it.
+pub const MARKER_PREFIX: &str = "[PRUNED id=";
 // NOTE: `--declassify` is a token-AGNOSTIC primitive. cv-core ships NO built-in token list — the
 // terms are always caller-supplied (CLI `--declassify-tokens` / `--declassify-tokens-file`, i.e.
 // external config/data). This keeps cv itself free of any domain "shitlist" (Ember, PR #9): a

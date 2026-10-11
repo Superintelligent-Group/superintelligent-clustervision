@@ -316,14 +316,7 @@ pub(crate) fn fmt_span(
     format!("{s:<SPAN_WIDTH$}")
 }
 
-pub(crate) fn home_rel(p: &Path) -> String {
-    if let Some(home) = dirs_home() {
-        if let Ok(rest) = p.strip_prefix(&home) {
-            return format!("~/{}", rest.display());
-        }
-    }
-    p.display().to_string()
-}
+pub(crate) use cv_core::ir::home_rel;
 
 pub(crate) fn dim_cwd(p: Option<&Path>) -> String {
     p.map(home_rel).unwrap_or_else(|| "(no cwd)".into())

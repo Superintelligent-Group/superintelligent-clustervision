@@ -5,11 +5,10 @@
 //! Human report on stderr; `--json` puts one JSON value on stdout. `--list` and `--orphans` print
 //! their table on stdout.
 
-use crate::cmd::compose::human_bytes;
 use crate::util::{fmt_local, home_rel, short_id, usage};
 use anyhow::{Context, Result};
 use cv_core::adopt::{self, AgentFile, Plan, SessionFile};
-use cv_core::ir::Harness;
+use cv_core::ir::{human_bytes, Harness};
 use serde_json::json;
 use std::path::PathBuf;
 

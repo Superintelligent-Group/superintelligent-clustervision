@@ -12,7 +12,7 @@
 use crate::util::{home_rel, parse_harness, resolve};
 use anyhow::{Context, Result};
 use cv_core::html::{self, ShareMeta};
-use cv_core::ir::{label_from, Harness, Message, Role, Session};
+use cv_core::ir::{human_bytes, label_from, Harness, Message, Role, Session};
 use cv_core::redact::{redact_message, redact_text, RedactOptions, RedactStats};
 use cv_core::{Flow, MessageSink, ParseOptions};
 use std::io::Write;
@@ -63,7 +63,7 @@ pub(crate) fn cmd_share(id: &str, harness: Option<String>, out: Option<PathBuf>,
     eprintln!(
         "✦ wrote {} — {count} message(s), {}",
         out_path.display(),
-        human_size(size),
+        human_bytes(size),
     );
     if !no_redact {
         eprintln!(
@@ -226,14 +226,4 @@ fn safe_stem(id: &str) -> String {
             }
         })
         .collect()
-}
-
-fn human_size(n: u64) -> String {
-    if n < 1024 {
-        format!("{n} B")
-    } else if n < 1024 * 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
-    }
 }

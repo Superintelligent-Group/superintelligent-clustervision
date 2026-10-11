@@ -23,7 +23,7 @@
 //! a lane's *reasons* survive a distill only where the lane wrote them down — in its text, its
 //! messages, its commit messages and notes. That is a property of the store, not of this module.
 
-use crate::ir::{Block, Message, MessageKind, Origin, Role, Session};
+use crate::ir::{truncate, Block, Message, MessageKind, Origin, Role, Session};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -260,7 +260,7 @@ fn git_log_head(cmd: &str, out: &str) -> Option<(String, String)> {
     }
     let line = out.lines().map(str::trim).find(|l| !l.is_empty())?;
     let m = oneline_re().captures(line)?;
-    Some((key, format!("{} {}", &m[1], clip(&m[2], 90))))
+    Some((key, format!("{} {}", &m[1], truncate(m[2].trim(), 90))))
 }
 
 fn heredoc_target_re() -> &'static Regex {
@@ -293,18 +293,6 @@ fn is_note_path(p: &str) -> bool {
 
 fn first_line(s: &str) -> &str {
     s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
-}
-
-fn clip(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 /// Keep `max` bytes of `s` as head + tail around an elision marker naming where the rest lives.
@@ -367,9 +355,9 @@ fn tool_label(name: &str, input: &Value) -> String {
         "Bash" => {
             let d = s("description");
             if d.is_empty() {
-                clip(first_line(s("command")), 120)
+                truncate(first_line(s("command")), 120)
             } else {
-                clip(d, 120)
+                truncate(d.trim(), 120)
             }
         }
         "Read" => format!("Read {}", s("file_path")),
@@ -378,9 +366,9 @@ fn tool_label(name: &str, input: &Value) -> String {
         "Grep" | "Glob" => format!("{name} {:?} {}", s("pattern"), s("path")),
         "SendMessage" => format!("SendMessage → {}", s("to")),
         "Agent" | "Task" => format!("{name}: {}", s("description")),
-        _ => format!("{name} {}", clip(&input.to_string(), 100)),
+        _ => format!("{name} {}", truncate(&input.to_string(), 100)),
     };
-    clip(&l, 140)
+    truncate(l.trim(), 140)
 }
 
 /// The command text of a tool call, when it has one (Bash and Bash-likes).
@@ -567,7 +555,7 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
                     idx: i,
                     when: when(m),
                     heading: "harness error".into(),
-                    body: clip(&m.text().unwrap_or_default(), 300),
+                    body: truncate(m.text().unwrap_or_default().trim(), 300),
                 });
             }
             (_, MessageKind::InjectedContext) if !in_tail => {
@@ -642,7 +630,10 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
                             when: when(m),
                             heading: format!(
                                 "sub-agent returned ({})",
-                                clip(input.get("description").and_then(Value::as_str).unwrap_or(""), 80)
+                                truncate(
+                                    input.get("description").and_then(Value::as_str).unwrap_or("").trim(),
+                                    80
+                                )
                             ),
                             body: head_tail(out, opts.note_max, &format!("cv cat {retrieve_ref} {tool_use_id}")),
                         });
@@ -890,7 +881,7 @@ fn scan_result_facts(
         // commit (or cherry-pick/amend) the agent made.
         if !f.commits.iter().any(|x| x.2 == sha) {
             bump(&mut f.branches, &b);
-            commit_outcome.get_or_insert_with(|| format!("⊕ [{b} {sha}] {}", clip(&subj, 90)));
+            commit_outcome.get_or_insert_with(|| format!("⊕ [{b} {sha}] {}", truncate(subj.trim(), 90)));
             f.tips.push((i, b.clone(), sha.clone()));
             f.commits.push((i, b, sha, subj));
         }
@@ -921,7 +912,7 @@ fn scan_result_facts(
             .or(lines.last())
             .copied()
             .unwrap_or("");
-        let line = clip(line, 200);
+        let line = truncate(line.trim(), 200);
         f.errors.push((i, label.to_string(), line.clone()));
         return format!("✗ {line}");
     }
@@ -937,12 +928,12 @@ fn scan_result_facts(
             .find(|l| verdict_re().is_match(l))
             .or_else(|| out.lines().rev().map(str::trim).find(|l| !l.is_empty()))
             .unwrap_or("(no output)");
-        let verdict = clip(verdict, 160);
+        let verdict = truncate(verdict.trim(), 160);
         f.gates.push((i, label.to_string(), verdict.clone()));
         return format!("⚑ {verdict}");
     }
     let n = out.lines().filter(|l| !l.trim().is_empty()).count();
-    let fl = clip(first_line(out), 100);
+    let fl = truncate(first_line(out), 100);
     if n > 1 {
         format!("{fl} (+{} lines)", n - 1)
     } else if fl.is_empty() {
@@ -967,7 +958,7 @@ fn render_facts(h: &mut String, f: &Facts) {
     } else {
         let _ = writeln!(h, "- **Commits made** (in order; the last is the newest):");
         for (i, b, sha, subj) in &f.commits {
-            let _ = writeln!(h, "  - [{i}] `{b}` `{sha}` {}", clip(subj, 160));
+            let _ = writeln!(h, "  - [{i}] `{b}` `{sha}` {}", truncate(subj.trim(), 160));
         }
     }
     if !f.tips.is_empty() {

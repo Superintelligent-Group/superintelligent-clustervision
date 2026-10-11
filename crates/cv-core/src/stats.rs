@@ -7,7 +7,7 @@
 //! the dashboard used to accumulate its own totals from whichever sessions the user had clicked,
 //! and said so in the UI.
 
-use crate::ir::{Harness, Message, SessionRef, Usage};
+use crate::ir::{home_rel, Harness, Message, SessionRef, Usage};
 use crate::stream::{Flow, ParseOptions};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -316,17 +316,6 @@ impl TokenStats {
             "by_model": self.rows.iter().map(TokenRow::to_json).collect::<Vec<_>>(),
         })
     }
-}
-
-/// `~/dev/x` for a path under `$HOME`, the full path otherwise. `$HOME` (not `dirs::home_dir`) so
-/// a test or a daemon running under a redirected home agrees with the CLI.
-fn home_rel(p: &std::path::Path) -> String {
-    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-        if let Ok(rest) = p.strip_prefix(&home) {
-            return format!("~/{}", rest.display());
-        }
-    }
-    p.display().to_string()
 }
 
 /// The keys `cv stats --json` / `GET /api/stats` carry, in order.

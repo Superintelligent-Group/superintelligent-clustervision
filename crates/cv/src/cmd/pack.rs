@@ -19,7 +19,7 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use cv_core::ir::{Block, Harness, Message, Role, Session};
 use cv_core::lazy::Resolver;
-use cv_core::scan::CapSink;
+use cv_core::scan::{ceil_char, floor_char, CapSink};
 use cv_core::stream::{Flow, MessageSink, ParseOptions};
 use cv_core::EmitOptions;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -814,23 +814,6 @@ fn write_text(text: &str, out: Option<PathBuf>, what: &str) -> Result<()> {
         None => print!("{text}"),
     }
     Ok(())
-}
-
-// ------------------------------------------------------------------------------------------------
-
-fn floor_char(s: &str, mut i: usize) -> usize {
-    i = i.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-fn ceil_char(s: &str, mut i: usize) -> usize {
-    i = i.min(s.len());
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
 }
 
 #[cfg(test)]

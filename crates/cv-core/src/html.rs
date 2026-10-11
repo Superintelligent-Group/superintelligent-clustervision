@@ -6,7 +6,7 @@
 //! HTML-escaped (see [`escape`]) so a transcript containing `<script>` etc. can never inject
 //! markup into the page.
 
-use crate::ir::{Block, Message, Role, Session, Usage};
+use crate::ir::{human_bytes, Block, Message, Role, Session, Usage};
 
 /// Render `session` as a single self-contained HTML document (inline CSS, no external assets).
 pub fn to_html(session: &Session) -> String {
@@ -657,7 +657,7 @@ fn share_block(b: &Block, out: &mut String) {
             } else if let Some(s) = status {
                 let _ = write!(out, " <span class=\"status\">{}</span>", escape(s));
             }
-            let _ = write!(out, "<span class=\"hint\">{}</span>", human_size(content.len()));
+            let _ = write!(out, "<span class=\"hint\">{}</span>", human_bytes(content.len() as u64));
             out.push_str("</summary>\n<pre><code>");
             out.push_str(&escape(content));
             out.push_str("</code></pre>\n</details>\n");
@@ -710,17 +710,6 @@ pub fn share_end(meta: &ShareMeta, redactions: usize, version: &str) -> String {
 /// First 8 chars of an id for the header chip.
 fn short(id: &str) -> String {
     id.chars().take(8).collect()
-}
-
-/// `1.2 KB`-style size for tool-result summaries.
-fn human_size(n: usize) -> String {
-    if n < 1024 {
-        format!("{n} B")
-    } else if n < 1024 * 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
-    }
 }
 
 /// A one-line preview of a tool input for the collapsed summary: the most human-meaningful
@@ -1236,9 +1225,6 @@ mod tests {
 
     #[test]
     fn share_helpers() {
-        assert_eq!(human_size(10), "10 B");
-        assert_eq!(human_size(2048), "2.0 KB");
-        assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
         assert_eq!(short("abcdef1234567890"), "abcdef12");
         // preview picks the meaningful key
         let v = serde_json::json!({"file_path": "/a/b.rs", "old_string": "xxxx"});

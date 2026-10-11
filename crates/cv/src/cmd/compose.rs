@@ -3,7 +3,7 @@
 use crate::cmd::port::emit_session;
 use crate::util::{parse_harness, parse_range, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
-use cv_core::ir::{Block, Harness, Message, Role, Session};
+use cv_core::ir::{human_bytes, Block, Harness, Message, Role, Session};
 use cv_core::EmitOptions;
 use std::fs;
 use std::path::PathBuf;
@@ -168,22 +168,6 @@ pub(crate) fn cmd_prune(
         eprintln!("  resume with: claude --resume {}", res.new_id);
     }
     Ok(())
-}
-
-/// Group-separate + unit a byte count (`5242880` → `5.0 MB`).
-pub(crate) fn human_bytes(n: u64) -> String {
-    const U: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut f = n as f64;
-    let mut i = 0;
-    while f >= 1024.0 && i < U.len() - 1 {
-        f /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{n} B")
-    } else {
-        format!("{f:.1} {}", U[i])
-    }
 }
 
 // ---------- rewind ----------

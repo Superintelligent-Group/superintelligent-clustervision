@@ -14,10 +14,6 @@ use cv_core::ParseOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Prune's marker prefix (`cv_core::prune::MARKER_PREFIX` is private; the format is the sidecar's
-/// public contract — retrieval keys on the id after it).
-const PRUNED_MARKER: &str = "[PRUNED id=";
-
 pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>, input: bool) -> Result<()> {
     let want = parse_harness(&harness)?;
     let (r, adapter) = resolve(session, want)?;
@@ -79,7 +75,7 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
             }
             let text = content.resolve(&resolver);
             // 2. A prune marker: the original lives in the sidecar next to the transcript.
-            if text.trim_start().starts_with(PRUNED_MARKER) {
+            if text.trim_start().starts_with(cv_core::prune::MARKER_PREFIX) {
                 if sidecar.is_file() {
                     if let Ok(v) = cv_core::prune::retrieve(&sidecar, tool_use_id) {
                         eprintln!("✦ from prune sidecar {}", sidecar.display());

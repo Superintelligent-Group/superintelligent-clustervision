@@ -863,9 +863,44 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// A byte count with a unit (`5242880` → `5.0 MB`): the one spelling every report and renderer uses.
+pub fn human_bytes(n: u64) -> String {
+    const U: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut f = n as f64;
+    let mut i = 0;
+    while f >= 1024.0 && i < U.len() - 1 {
+        f /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{f:.1} {}", U[i])
+    }
+}
+
+/// `~/dev/x` for a path under `$HOME`, the full path otherwise. `$HOME` (not `dirs::home_dir`) so a
+/// test or a daemon running under a redirected home agrees with the CLI.
+pub fn home_rel(p: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        if let Ok(rest) = p.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    p.display().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_bytes_picks_the_unit() {
+        assert_eq!(human_bytes(10), "10 B");
+        assert_eq!(human_bytes(2048), "2.0 KB");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(human_bytes(5 << 30), "5.0 GB");
+    }
 
     /// One spelling of a harness name on every door. Serde used to derive `rename_all =
     /// "lowercase"`, which spells the VARIANT — so `KimiCode` serialized as `"kimicode"` while
