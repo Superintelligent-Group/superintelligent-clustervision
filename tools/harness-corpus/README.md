@@ -27,13 +27,16 @@ Every `generate.sh` sources `lib.sh`:
 | `corpus_guard VAR...` | exits unless each env var (`HOME`, `CODEX_HOME`, `TMPDIR`, ...) resolves inside `$WORK` |
 | `corpus_load_key VAR FILE` | exports `VAR` from a key file without printing it, and records the file so the scrub can check that literal key |
 | `corpus_scrub DIR` | runs `scrub.py` (below) |
-| `corpus_size_check DIR` | warns over 300 KB and fails over 1 MB |
+| `corpus_size_check DIR` | warns over 300 KB and fails over 1 MB (file bytes, not `du` blocks) |
 | `corpus_manifest DIR k=v...` | writes `MANIFEST.toml` |
 
 `scrub.py` rewrites every file, including every TEXT/BLOB cell of every sqlite table (then VACUUM):
 the throwaway home becomes `/home/corpus`, so the project becomes `/home/corpus/project`. The rest of
-`$WORK` becomes `/home/corpus/.work`, `~/tools/harness-versions` becomes `/opt/harness-versions`, the real user name becomes `corpus`, and account ids and
-emails become `corpus@example.invalid`. It then **refuses**, naming each file but never the match, if
+`$WORK` becomes `/home/corpus/.work`, `~/tools/harness-versions` becomes `/opt/harness-versions`, the rest of the real home
+becomes `/home/corpus`, the real user name becomes `corpus`, and account ids and
+emails become `corpus@example.invalid`. The same paths are also rewritten dash-encoded (Claude Code's
+`-home-corpus-project` project dirs) and percent-encoded (Grok's `%2Fhome%2Fcorpus%2Fproject`), in
+file and directory names too. It then **refuses**, naming each file but never the match, if
 any of these is left anywhere:
 
 - a loaded key's literal value
@@ -49,7 +52,7 @@ any of these is left anywhere:
   `MAX_CALLS`, and logs offered tool names, never content. `drive.sh` (sourced after `lib.sh`) starts
   it on a free port (`corpus_proxy UPSTREAM bearer|x-api-key [MODEL]`, giving `PROXY_URL`), counts
   calls (`corpus_calls`), sets up the shared scratch project (`corpus_project`), and writes manifest
-  lists (`toml_list`). Used by `cline/`, `continue/` and `roo/`.
+  lists (`toml_list`). Used by `cline/`, `continue/` and `roo/`; `claude/` and `grok/` start it themselves.
 - `schema_snapshot.py` records a store's shape (DDL, merged JSON key paths and types) without its
   content. It is for desktop apps that cannot be driven headless (`zed/`, `lmstudio/`). Their
   `snapshot.sh` writes `tests/corpus/<h>/<app version>/` (`SNAPSHOT.toml` and no sessions), and
