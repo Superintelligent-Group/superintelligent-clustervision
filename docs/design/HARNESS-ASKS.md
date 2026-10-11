@@ -2,7 +2,7 @@
 
 Status: a letter, not a plan. Quotes are from https://code.claude.com/docs/en/hooks and
 /docs/en/sub-agents as served on 2026-10-11. Each ask is one field. Delete this file when both
-land or are declined. Context: REVIEW-2026-10.md, "The cybernetic layer".
+land or are declined. Context: `docs/INTERFACE-V2.md` "The shape" and the manual's hooks section.
 
 ## What the contract says today
 

@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.15.0 — 2026-10-11 — the clean break, part two
+
+cv went from 110K lines to the shape in `docs/INTERFACE-V2.md` "The shape": one binary, one read
+API every door maps onto, two reshape primitives, adapters over shared wire codecs, a task log of
+twelve event kinds, and a manual generated where it can be. Every removed or renamed name errors
+with a pointer and exits 2; every stored log and transcript still reads.
+
+| old | new |
+|---|---|
+| `cvd sync\|ls\|path`, `cvd watch`, `cvd serve`, `cv task serve` | `cv archive sync\|ls\|path`, `cv watch`, `cv serve` (`cvd` is a one-release shim) |
+| `cv-mcp` | `cv mcp` (`cv-mcp` is a one-release shim) |
+| `cv fork`, `cv loom` | `cv splice <id>:..N --session\|--agent-of`, `cv splice <a>:..N <b>:M..` |
+| `cv tree`, `cv prompts`, `cv compaction` | `cv show --tree`, `--kind prompt,answer`, `--kind compaction_boundary,compaction_summary` |
+| `cv timeline` | `cv ls --sort-by updated --asc` |
+| `cv redact`, `cv export --format html` | `cv export --redact`, `cv share` |
+| `cv diff` | export both sessions and diff the files |
+| `cv adopt --list\|--orphans` | `cv lanes <session>`, `cv lanes --recent N --unfinished` |
+| `cv board …` (13 verbs, 13 MCP tools) | the task log (`cv task`, `task events --since`) |
+| `cv task propose\|pass\|refute\|reroute\|verify\|debt\|stats\|split\|watch` | gone with the land facet; `decide --blocks`, `events --assignee` |
+| `cv-tui`, the `cv-search` binary, `cv-llm`, `cv-sim` | gone (`cv ls`/`show`/web; `cv index`/`search`) |
+| `$CVD_TOKEN` | `$CV_SERVE_TOKEN` |
+
+New: `cv hooks install|remove|show claude` and five `cv hook` bodies with the `cv` skill;
+`--model` on `adopt` and `distill --agent-of`; `cv lanes` reads the hook ledger.
+
+### All changes
+
 - `cv tools` counts tool calls, as `cv doctor` does: a multi-file patch through the shell is one call, not one per file. `calls`/`total_calls` drop.
 - `cv adopt --model <id>` and `cv distill --agent-of … --model <id>` set the new agent meta's `model` (`inherit`: the root's current model).
 - Web UI: the Loom tab is **Splice** (`<cv-splice>`, `＋ splice`, `⑂ branch from here`), the browser face of `cv splice`.
