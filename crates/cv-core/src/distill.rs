@@ -23,7 +23,9 @@
 //! a lane's *reasons* survive a distill only where the lane wrote them down — in its text, its
 //! messages, its commit messages and notes. That is a property of the store, not of this module.
 
-use crate::ir::{truncate, Block, Message, MessageKind, Origin, Role, Session};
+use crate::ir::{
+    est_tokens, est_tokens_bytes, tool_index, truncate, Block, Message, MessageKind, Origin, Role, Session,
+};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
@@ -31,10 +33,11 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
-/// Characters per token for distilled content. Prune's 3.5 bytes/token suits prose; a distilled
-/// pack is dense with shas, paths, hosts and code, and measured on three real lanes (resumed with
-/// Claude Code, harness overhead subtracted) it ran 2.2–2.4 characters per token.
-const CHARS_PER_TOKEN: f64 = 2.4;
+/// Bytes per token for distilled content. Prune's 3.5 suits prose; a distilled pack is dense with
+/// shas, paths, hosts and code, and measured on three real lanes (resumed with Claude Code, harness
+/// overhead subtracted) it ran 2.2–2.4 characters per token. The arithmetic is
+/// [`crate::ir::est_tokens`]'s, shared with `doctor`; only the constant is distill's.
+const BYTES_PER_TOKEN: f64 = 2.4;
 
 /// Knobs for [`distill`].
 #[derive(Debug, Clone)]
@@ -327,18 +330,11 @@ fn attachment_type(m: &Message) -> Option<&str> {
 }
 
 fn est(s: &str) -> u64 {
-    (s.chars().count() as f64 / CHARS_PER_TOKEN).ceil() as u64
+    est_tokens_bytes(s.len(), BYTES_PER_TOKEN)
 }
 
 fn block_est(b: &Block) -> u64 {
-    match b {
-        Block::Text { text } => est(text),
-        Block::Thinking { text, signature, .. } => est(text) + signature.as_deref().map(est).unwrap_or(0),
-        Block::ToolUse { input, name, .. } => est(name) + est(&input.to_string()),
-        Block::ToolResult { content, .. } => est(content),
-        Block::Image { .. } => 1500,
-        Block::File { .. } => 0,
-    }
+    est_tokens(b, BYTES_PER_TOKEN)
 }
 
 fn message_est(m: &Message) -> u64 {
@@ -430,15 +426,7 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
     let msgs = &session.messages;
     let retrieve_ref = opts.retrieve_ref.clone().unwrap_or_else(|| session.id.clone());
 
-    // Tool-use index: id → (message index, name, input).
-    let mut uses: HashMap<&str, (usize, &str, &Value)> = HashMap::new();
-    for (i, m) in msgs.iter().enumerate() {
-        for b in &m.content {
-            if let Block::ToolUse { id, name, input, .. } = b {
-                uses.insert(id.as_str(), (i, name.as_str(), input));
-            }
-        }
-    }
+    let uses = tool_index(msgs);
     let tool_calls = uses.len();
 
     let tail_start = tail_cut(msgs, opts.keep_last);
@@ -606,7 +594,7 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
                     };
                     let (name, input) = uses
                         .get(tool_use_id.as_str())
-                        .map(|(_, n, inp)| (n.to_string(), (*inp).clone()))
+                        .map(|c| (c.name.to_string(), c.input.clone()))
                         .unwrap_or_else(|| (tool_name.clone().unwrap_or_default(), Value::Null));
                     let label = tool_label(&name, &input);
                     let out: &str = content;
@@ -648,7 +636,7 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
                         });
                     }
                     if !in_tail && opts.ledger {
-                        let use_idx = uses.get(tool_use_id.as_str()).map(|u| u.0).unwrap_or(i);
+                        let use_idx = uses.get(tool_use_id.as_str()).map(|c| c.msg).unwrap_or(i);
                         match ledger.last_mut() {
                             Some(last) if last.2 == label => {
                                 last.1 = use_idx;

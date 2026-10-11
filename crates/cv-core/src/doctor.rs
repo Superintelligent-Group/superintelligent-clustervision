@@ -10,10 +10,10 @@
 //! the conversation, not the system block, so it's only *sized* from token usage, not broken down.
 
 use crate::compaction;
-use crate::ir::{Block, Message, MessageKind, Role, Session};
+use crate::ir::{est_tokens, tool_index, Block, Message, MessageKind, Role, Session};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// Claude tokenizer ≈ 3.3–3.7 bytes/token.
 const BYTES_PER_TOKEN: f64 = 3.5;
@@ -28,12 +28,6 @@ fn injected_kind(m: &Message) -> String {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| m.kind.as_str().to_string())
-}
-/// One image tile ≈ this many tokens (image bytes are never inlined into the IR).
-const IMAGE_TOKENS: u64 = 1500;
-
-fn toks(byte_len: usize) -> u64 {
-    (byte_len as f64 / BYTES_PER_TOKEN).ceil() as u64
 }
 
 #[derive(Default, Debug, Clone, Serialize)]
@@ -78,16 +72,9 @@ impl Report {
         self.messages += session.messages.len() as u64;
 
         // ToolResult blocks usually omit the tool name but carry `tool_use_id`; the matching
-        // ToolUse has {id, name}. Map id→name first so results attribute to real tools (and MCP
-        // names) instead of all collapsing into "(unknown tool)".
-        let mut id_to_name: HashMap<&str, &str> = HashMap::new();
-        for m in &session.messages {
-            for b in &m.content {
-                if let Block::ToolUse { id, name, .. } = b {
-                    id_to_name.insert(id.as_str(), name.as_str());
-                }
-            }
-        }
+        // ToolUse has {id, name}. Index first so results attribute to real tools (and MCP names)
+        // instead of all collapsing into "(unknown tool)".
+        let calls = tool_index(&session.messages);
 
         let mut session_startup: Option<u64> = None;
         for m in &session.messages {
@@ -101,9 +88,11 @@ impl Report {
                 }
             }
             for b in &m.content {
+                // What this block costs, by the one shared rule; the arms below only decide which
+                // bucket the number lands in.
+                let t = est_tokens(b, BYTES_PER_TOKEN);
                 match b {
-                    Block::Text { text } => {
-                        let t = toks(text.len());
+                    Block::Text { .. } => {
                         match (m.role, m.kind) {
                             // Harness-side notices, errors, markers and carriers are never sent to
                             // the model: they cost no context.
@@ -125,22 +114,9 @@ impl Report {
                             _ => self.user_text += t,
                         }
                     }
-                    Block::Thinking {
-                        text,
-                        signature,
-                        encrypted,
-                        ..
-                    } => {
-                        // Thinking costs context as plaintext PLUS the signature/encrypted blob that
-                        // rides with it — both re-sent to the API. Claude Code frequently records
-                        // signature-only thinking (plaintext stripped), so counting just `text`
-                        // reported a misleading zero.
-                        self.thinking += toks(text.len())
-                            + toks(signature.as_deref().map_or(0, str::len))
-                            + toks(encrypted.as_deref().map_or(0, str::len));
-                    }
-                    Block::ToolUse { name, input, .. } => {
-                        self.tool_call_args += toks(input.to_string().len());
+                    Block::Thinking { .. } => self.thinking += t,
+                    Block::ToolUse { name, .. } => {
+                        self.tool_call_args += t;
                         let e = self.by_tool.entry(name.clone()).or_default();
                         e.calls += 1;
                         if name.starts_with("mcp__") {
@@ -148,16 +124,12 @@ impl Report {
                         }
                     }
                     Block::ToolResult {
-                        content,
-                        tool_name,
-                        tool_use_id,
-                        ..
+                        tool_name, tool_use_id, ..
                     } => {
-                        let t = toks(content.len());
                         self.tool_results += t;
                         let name = tool_name
                             .clone()
-                            .or_else(|| id_to_name.get(tool_use_id.as_str()).map(|s| s.to_string()))
+                            .or_else(|| calls.get(tool_use_id.as_str()).map(|c| c.name.to_string()))
                             .unwrap_or_else(|| "(unknown tool)".to_string());
                         let mcp = name.starts_with("mcp__");
                         let e = self.by_tool.entry(name).or_default();
@@ -166,8 +138,8 @@ impl Report {
                             e.is_mcp = true;
                         }
                     }
-                    Block::Image { .. } => self.images += IMAGE_TOKENS,
-                    _ => {}
+                    Block::Image { .. } => self.images += t,
+                    Block::File { .. } => {}
                 }
             }
         }

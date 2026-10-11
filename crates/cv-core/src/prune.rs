@@ -47,9 +47,10 @@ pub const MARKER_PREFIX: &str = "[PRUNED id=";
 // no tokens is a safe no-op. Composing a security-declassify tool = supply your token file.
 /// Suffix distinguishing a flattened `toolUseResult` mirror entry from its `content` sibling.
 const TUR_SUFFIX: &str = "#tur";
-/// Token-estimate constants (Claude tokenizer ≈ 3.3–3.7 B/tok; a screenshot tile ≈ 1500 tok).
+/// Claude tokenizer ≈ 3.3–3.7 B/tok. Prune estimates over raw records (it never parses to the IR),
+/// so it walks `message.content` itself, with [`crate::ir::est_tokens_bytes`]'s arithmetic and
+/// [`crate::ir::IMAGE_TOKENS`] per image — the same numbers the IR-side estimator produces.
 const TEXT_BYTES_PER_TOKEN: f64 = 3.5;
-const IMAGE_TOKEN_EST: u64 = 1500;
 
 /// Knobs for [`prune_session`].
 #[derive(Debug, Clone)]
@@ -1316,7 +1317,7 @@ fn value_byte_size(v: &Value) -> usize {
 }
 
 fn str_tokens(s: &str) -> u64 {
-    (s.len() as f64 / TEXT_BYTES_PER_TOKEN).ceil() as u64
+    crate::ir::est_tokens_bytes(s.len(), TEXT_BYTES_PER_TOKEN)
 }
 
 /// Estimate the context-token cost of a content value (text + image tiles).
@@ -1348,7 +1349,7 @@ fn est_tokens(content: &Value) -> u64 {
         Value::Array(arr) => arr
             .iter()
             .map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("image") => IMAGE_TOKEN_EST,
+                Some("image") => crate::ir::IMAGE_TOKENS,
                 Some("text") => str_tokens(b.get("text").and_then(Value::as_str).unwrap_or("")),
                 _ => str_tokens(&b.to_string()),
             })

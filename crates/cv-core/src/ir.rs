@@ -901,6 +901,69 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// One image tile ≈ this many context tokens (image bytes are never inlined into the IR).
+pub const IMAGE_TOKENS: u64 = 1500;
+
+/// Byte-estimated tokens for `len` bytes at `bytes_per_token` (ceiling). The one arithmetic behind
+/// every estimate cv prints; callers keep their own constant (Claude's tokenizer runs ≈ 3.3–3.7
+/// bytes/token on prose; `distill` uses a deliberately pessimistic 2.4 for its budget).
+pub fn est_tokens_bytes(len: usize, bytes_per_token: f64) -> u64 {
+    (len as f64 / bytes_per_token).ceil() as u64
+}
+
+/// The context-token cost of one block, byte-estimated at `bytes_per_token`. A ceiling per field,
+/// summed: text as-is; thinking as its plaintext PLUS the signature / encrypted blob (both are
+/// re-sent to the API, and Claude Code often records signature-only thinking, so counting only
+/// `text` reads zero); a tool call as its `input` JSON; a tool result as its content; an image as
+/// [`IMAGE_TOKENS`]; a file reference as nothing. The one definition `doctor`, `distill` and `stats`
+/// share — change what a block costs here, nowhere else.
+pub fn est_tokens(block: &Block, bytes_per_token: f64) -> u64 {
+    let b = |len: usize| est_tokens_bytes(len, bytes_per_token);
+    match block {
+        Block::Text { text } => b(text.len()),
+        Block::Thinking {
+            text,
+            signature,
+            encrypted,
+            ..
+        } => b(text.len()) + b(signature.as_deref().map_or(0, str::len)) + b(encrypted.as_deref().map_or(0, str::len)),
+        Block::ToolUse { input, .. } => b(input.to_string().len()),
+        Block::ToolResult { content, .. } => b(content.len()),
+        Block::Image { .. } => IMAGE_TOKENS,
+        Block::File { .. } => 0,
+    }
+}
+
+/// One tool call as [`tool_index`] sees it: where it was made, what was called, with what.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolCall<'a> {
+    /// Index into the messages of the assistant turn that made the call.
+    pub msg: usize,
+    pub name: &'a str,
+    pub input: &'a serde_json::Value,
+}
+
+/// Every tool call in `messages` by its `tool_use_id`. Tool results carry only the id (and
+/// sometimes a name), so attributing a result to its call goes through this one index.
+pub fn tool_index(messages: &[Message]) -> std::collections::HashMap<&str, ToolCall<'_>> {
+    let mut map = std::collections::HashMap::new();
+    for (msg, m) in messages.iter().enumerate() {
+        for b in &m.content {
+            if let Block::ToolUse { id, name, input, .. } = b {
+                map.insert(
+                    id.as_str(),
+                    ToolCall {
+                        msg,
+                        name: name.as_str(),
+                        input,
+                    },
+                );
+            }
+        }
+    }
+    map
+}
+
 /// A byte count with a unit (`5242880` → `5.0 MB`): the one spelling every report and renderer uses.
 pub fn human_bytes(n: u64) -> String {
     const U: [&str; 4] = ["B", "KB", "MB", "GB"];
