@@ -1,23 +1,40 @@
-//! `cvd serve` — a tiny local HTTP server exposing the fleet's state as JSON.
+//! `cv serve` — one local HTTP server: the read API at `/api/*` (`cv_core::api::route_json`, plus
+//! the two tantivy routes `/api/search` and `/api/stats`), the task inbox page at `/inbox` with
+//! the routes its buttons use (`serve_tasks`), and, with `--web <dir>`, the browser dashboard from
+//! `/`. Without `--web`, `/` is the inbox. A lightweight *synchronous* server ([`tiny_http`]) with a
+//! small worker pool: the workload is a handful of pollers, and simplicity wins.
 //!
-//! A static browser dashboard polls these endpoints live, turning `cvd` into the fleet's live hub.
-//! Point `--web <dir>` at the `web/` frontend and `cvd serve` *also* hosts that dashboard from `/`,
-//! so a single command is a complete, self-contained hub (API at `/api/*`, UI everywhere else). We
-//! deliberately use a lightweight *synchronous* server ([`tiny_http`]) with a small worker-thread
-//! pool rather than an async stack — the workload is a handful of pollers, and simplicity wins.
-//!
-//! The transcript corpus is sensitive (it can contain secrets), so the API is locked to local
-//! callers: the `Host` header must name this machine (defeats DNS rebinding), and CORS is echoed
-//! only for an allow-list of local origins (the served dashboard, `localhost`/`127.0.0.1` dev
-//! servers, and the Tauri app) — never `*`. An optional bearer token (`--token` / `$CVD_TOKEN`)
-//! additionally gates every `/api/*` request; `OPTIONS` preflight is answered with a 204.
+//! The transcript corpus is sensitive (it can contain secrets) and the inbox writes identity-bearing
+//! events, so both are locked to local callers: the `Host` header must name this machine (defeats
+//! DNS rebinding), and CORS is echoed only for an allow-list of local origins (the served pages,
+//! `localhost`/`127.0.0.1` dev servers, and the Tauri app) — never `*`. A write (`POST`) must be
+//! `application/json` (so a cross-site form cannot send one without a preflight this server refuses)
+//! and, when it carries an `Origin`, an allowed one. An optional bearer token (`--token` /
+//! `$CV_SERVE_TOKEN`) gates every `/api/*` request; a non-loopback bind demands one (or an explicit
+//! `--insecure-expose`). `OPTIONS` preflight is answered with a 204.
 
 use anyhow::Result;
 use cv_core::Harness;
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tiny_http::{Header, Method, Request, Response, Server};
+
+use super::serve_tasks;
+
+/// Everything `cv serve` was asked for.
+pub(crate) struct ServeOpts {
+    pub host: String,
+    pub port: u16,
+    pub web: Option<PathBuf>,
+    pub token: Option<String>,
+    pub insecure_expose: bool,
+    /// Whose inbox `/inbox` opens on, and who a write is by when the request names nobody.
+    pub who: Option<String>,
+    /// Open the page in the default browser once the server is up.
+    pub open: bool,
+}
 
 /// What one request handler needs to know beyond the request itself.
 struct Ctx {
@@ -26,14 +43,53 @@ struct Ctx {
     web_root: Option<PathBuf>,
     /// When set, every `/api/*` request must carry `Authorization: Bearer <token>`.
     token: Option<String>,
+    default_who: Option<String>,
+}
+
+/// Gatekeep the exposure, then serve until the process is killed: a non-loopback bind serves the
+/// whole transcript corpus (secrets included) and the inbox's writes to anyone who can reach the
+/// port, so it demands a bearer token or an explicit `--insecure-expose`, and warns either way.
+pub(crate) fn cmd_serve(opts: ServeOpts) -> Result<()> {
+    if std::env::var_os("CVD_TOKEN").is_some() && std::env::var_os("CV_SERVE_TOKEN").is_none() {
+        return crate::util::usage(
+            "$CVD_TOKEN was renamed $CV_SERVE_TOKEN in 0.15.0 with `cvd serve` → `cv serve` \
+             (or pass --token)",
+        );
+    }
+    let token = opts
+        .token
+        .or_else(|| std::env::var("CV_SERVE_TOKEN").ok())
+        .filter(|t| !t.is_empty());
+    let host = opts.host.as_str();
+    if !is_loopback_host(host) {
+        if token.is_none() && !opts.insecure_expose {
+            anyhow::bail!(
+                "refusing to bind non-loopback host {host:?} without auth: the API serves your full \
+                 transcript corpus (which can contain secrets) to anyone who can reach the port.\n\
+                 Set a token (--token or $CV_SERVE_TOKEN), or pass --insecure-expose to serve it open."
+            );
+        }
+        eprintln!("cv serve: WARNING: binding non-loopback host {host:?} — the API is reachable from the network.");
+        if token.is_none() {
+            eprintln!(
+                "cv serve: WARNING: --insecure-expose without a token: anyone who can reach {host}:{} can read \
+                 every transcript and act in the inbox as web:<who>.",
+                opts.port
+            );
+        }
+    }
+    run(&opts.host, opts.port, opts.web, token, opts.who, opts.open)
 }
 
 /// Run the HTTP server until the process is killed. Never returns under normal operation.
-///
-/// When `web_root` is `Some(dir)`, any request that doesn't match an `/api/*` route is served as a
-/// static file from `dir` (with `index.html` for `/`), so the same process hosts both the JSON API
-/// and the browser dashboard.
-pub fn run(host: &str, port: u16, web_root: Option<PathBuf>, token: Option<String>) -> Result<()> {
+fn run(
+    host: &str,
+    port: u16,
+    web_root: Option<PathBuf>,
+    token: Option<String>,
+    who: Option<String>,
+    open: bool,
+) -> Result<()> {
     let server = Server::http((host, port)).map_err(|e| anyhow::anyhow!("failed to bind {host}:{port}: {e}"))?;
     // `--port 0` binds an ephemeral port; the banner below must carry the REAL bound port so
     // callers (test harnesses, scripts) can parse the address instead of racing to guess a free
@@ -43,16 +99,32 @@ pub fn run(host: &str, port: u16, web_root: Option<PathBuf>, token: Option<Strin
     let web_root = web_root.and_then(|d| match d.canonicalize() {
         Ok(c) => Some(c),
         Err(e) => {
-            eprintln!("cvd serve: --web {} is unreadable ({e}); serving API only", d.display());
+            eprintln!("cv serve: --web {} is unreadable ({e}); serving API only", d.display());
             None
         }
     });
     match &web_root {
         Some(dir) => eprintln!(
-            "cvd serve on http://{host}:{port} — dashboard at /, API at /api/* (web root {})",
+            "cv serve on http://{host}:{port} — dashboard at /, inbox at /inbox, API at /api/* (web root {})",
             dir.display()
         ),
-        None => eprintln!("cvd serve on http://{host}:{port} — API at /api/* (no --web; JSON only)"),
+        None => eprintln!("cv serve on http://{host}:{port} — inbox at /, API at /api/* (no --web)"),
+    }
+    let display_host = if is_loopback_host(host) || host == "0.0.0.0" || host == "::" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    let inbox = match &who {
+        Some(w) => format!("http://{display_host}:{port}/inbox?who={}", urlencoding::encode(w)),
+        None => format!("http://{display_host}:{port}/inbox"),
+    };
+    eprintln!("inbox: {inbox}");
+    if open {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        if let Err(e) = std::process::Command::new(opener).arg(&inbox).spawn() {
+            eprintln!("could not open a browser ({e}); open {inbox} yourself");
+        }
     }
 
     let server = Arc::new(server);
@@ -60,6 +132,7 @@ pub fn run(host: &str, port: u16, web_root: Option<PathBuf>, token: Option<Strin
         bind_host: host.to_string(),
         web_root,
         token,
+        default_who: who,
     });
     let mut workers = Vec::new();
     // A handful of workers is plenty for dashboard polling; they share the listener.
@@ -71,7 +144,7 @@ pub fn run(host: &str, port: u16, web_root: Option<PathBuf>, token: Option<Strin
                 // A panicking handler must cost one response, not a worker for the process's life.
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(request, &ctx)));
                 if outcome.is_err() {
-                    eprintln!("cvd serve: request handler panicked; worker continuing");
+                    eprintln!("cv serve: request handler panicked; worker continuing");
                 }
             }
         }));
@@ -84,7 +157,7 @@ pub fn run(host: &str, port: u16, web_root: Option<PathBuf>, token: Option<Strin
 }
 
 /// Handle one request: any error becomes a JSON error response.
-fn handle(request: Request, ctx: &Ctx) {
+fn handle(mut request: Request, ctx: &Ctx) {
     // DNS-rebinding guard: a hostile page can point its own domain at 127.0.0.1 and fetch us
     // same-origin, but it can't forge the Host header — reject anything that isn't our own name.
     if !host_allowed(header_value(&request, "Host").as_deref(), &ctx.bind_host) {
@@ -92,7 +165,8 @@ fn handle(request: Request, ctx: &Ctx) {
         return;
     }
     // Echoed on API responses only when the Origin is on the local allow-list; never `*`.
-    let origin = allowed_origin(header_value(&request, "Origin").as_deref(), &ctx.bind_host);
+    let raw_origin = header_value(&request, "Origin");
+    let origin = allowed_origin(raw_origin.as_deref(), &ctx.bind_host);
 
     let method = request.method().clone();
     let raw_url = request.url().to_string();
@@ -109,15 +183,18 @@ fn handle(request: Request, ctx: &Ctx) {
         Some((p, q)) => (p, q),
         None => (raw_url.as_str(), ""),
     };
-    let trimmed = path.trim_end_matches('/');
-    let segments: Vec<String> = trimmed
+    let segments: Vec<String> = path
+        .trim_end_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
         .map(cv_core::api::decode)
         .collect();
+    let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
+    let is_api = parts.first() == Some(&"api");
+    let post = method == Method::Post;
 
-    // Only GET (besides the OPTIONS handled above) is supported.
-    if method != Method::Get {
+    // GET reads anything; POST is only ever an inbox write (`/api/task/<id>/<verb>`).
+    if !(method == Method::Get || (post && matches!(parts.as_slice(), ["api", "task", _, _]))) {
         let _ = request.respond(json_response(
             405,
             &json!({"error": "method not allowed"}),
@@ -127,9 +204,18 @@ fn handle(request: Request, ctx: &Ctx) {
         return;
     }
 
-    // Anything outside `/api/*` is a static-dashboard request when a web root is configured.
-    let is_api = segments.first().map(|s| s == "api").unwrap_or(false);
     if !is_api {
+        // The inbox page: at `/inbox` always, and at `/` when no dashboard is being hosted.
+        let page = matches!(parts.as_slice(), ["inbox"] | ["inbox.html"])
+            || (ctx.web_root.is_none() && matches!(parts.as_slice(), [] | ["index.html"]));
+        if page {
+            let _ = request.respond(text_response(
+                200,
+                "text/html; charset=utf-8",
+                serve_tasks::PAGE.as_bytes().to_vec(),
+            ));
+            return;
+        }
         if let Some(root) = &ctx.web_root {
             let _ = request.respond(static_file(root, &segments));
             return;
@@ -151,8 +237,80 @@ fn handle(request: Request, ctx: &Ctx) {
         }
     }
 
-    let (status, body, extra) = route(&segments, query);
-    let _ = request.respond(json_response(status, &body, origin.as_deref(), &extra));
+    // A write: JSON only (a cross-site form or `text/plain` fetch is a "simple" request that needs
+    // no preflight; requiring JSON forces one, which a foreign origin fails), and a foreign Origin
+    // is refused outright rather than merely denied the response.
+    let mut body = Value::Null;
+    if post {
+        let json_ct = header_value(&request, "Content-Type")
+            .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/json"));
+        if !json_ct || (raw_origin.is_some() && origin.is_none()) {
+            let _ = request.respond(json_response(
+                403,
+                &json!({"error": "a write must be application/json from a local origin"}),
+                origin.as_deref(),
+                &[],
+            ));
+            return;
+        }
+        // Capped: a note is a paragraph, not an upload.
+        let mut buf = String::new();
+        if request.as_reader().take(1 << 20).read_to_string(&mut buf).is_err() {
+            let _ = request.respond(json_response(
+                400,
+                &json!({"error": "unreadable body"}),
+                origin.as_deref(),
+                &[],
+            ));
+            return;
+        }
+        if !buf.trim().is_empty() {
+            match serde_json::from_str::<Value>(&buf) {
+                Ok(v) => body = v,
+                Err(e) => {
+                    let _ = request.respond(json_response(
+                        400,
+                        &json!({"error": format!("body is not JSON: {e}")}),
+                        origin.as_deref(),
+                        &[],
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
+    let q = cv_core::api::Query::parse(query);
+    match serve_tasks::route(post, &parts, &q, &body, ctx.default_who.as_deref()) {
+        Some(serve_tasks::Answer::Json(status, v)) => {
+            let _ = request.respond(json_response(
+                status,
+                &v,
+                origin.as_deref(),
+                &[("Cache-Control", "no-store".into())],
+            ));
+        }
+        Some(serve_tasks::Answer::Ndjson(lines)) => {
+            let mut resp = text_response(200, "application/x-ndjson; charset=utf-8", lines.into_bytes());
+            for h in cors_headers(origin.as_deref()) {
+                resp.add_header(h);
+            }
+            resp.add_header(header("Cache-Control", "no-store"));
+            let _ = request.respond(resp);
+        }
+        None if post => {
+            let _ = request.respond(json_response(
+                404,
+                &json!({"error": "no such route"}),
+                origin.as_deref(),
+                &[],
+            ));
+        }
+        None => {
+            let (status, body, extra) = route(&parts, query);
+            let _ = request.respond(json_response(status, &body, origin.as_deref(), &extra));
+        }
+    }
 }
 
 /// First value of a (case-insensitively named) request header, if present.
@@ -178,7 +336,7 @@ fn is_local_name(name: &str, bind_host: &str) -> bool {
 }
 
 /// Whether a configured bind host is a loopback name/address.
-pub fn is_loopback_host(host: &str) -> bool {
+pub(crate) fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
             .trim_matches(['[', ']'])
@@ -212,19 +370,18 @@ fn allowed_origin(origin: Option<&str>, bind_host: &str) -> Option<String> {
 /// uses the third element today (to say which door answered — see [`search`]).
 type Reply = (u16, Value, Vec<(&'static str, String)>);
 
-/// Route a decoded path + raw query string. Never panics.
-fn route(segments: &[String], query: &str) -> Reply {
-    let parts: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+/// Route a decoded read path + raw query string. Never panics.
+fn route(parts: &[&str], query: &str) -> Reply {
     // Routes that carry extra response headers answer here; everything else is header-free.
-    if let ["api", "search"] = parts.as_slice() {
+    if let ["api", "search"] = parts {
         return search(query);
     }
-    if let ["api", "stats"] = parts.as_slice() {
+    if let ["api", "stats"] = parts {
         let (status, body) = stats(query);
         return (status, body, Vec::new());
     }
     // Every other noun is the one read API every door maps onto.
-    let (status, body) = cv_core::api::route_json(&parts, query);
+    let (status, body) = cv_core::api::route_json(parts, query);
     (status, body, Vec::new())
 }
 
@@ -233,26 +390,6 @@ fn route(segments: &[String], query: &str) -> Reply {
 /// `cv search`'s default `--limit`. The doors agree on defaults too, or a caller gets a different
 /// number of rows depending on which one it asked.
 const SEARCH_LIMIT: usize = 20;
-
-/// Resolve the query calculus's one external predicate the core can't (`text:`) against the tantivy
-/// index — the daemon's copy of what `cv -q` does, and the only part of `-q` evaluation that isn't
-/// shared code (`cv_core::query::filter_refs` is the rest).
-fn text_sets(q: &cv_core::SessionQuery) -> cv_core::query::TextSets {
-    use cv_core::query::{FieldId, TextSets};
-    if q.needles(FieldId::Text).is_empty() {
-        return TextSets::empty();
-    }
-    if !cv_search::default_tantivy_dir().exists() {
-        eprintln!("cvd serve: text: needs a full-text index — run `cv index` (treating text: as no match)");
-        return TextSets::resolve(q, |_| std::collections::HashSet::new());
-    }
-    TextSets::resolve(q, |n| {
-        // A generous cap: we want the full matching set, not a top-K ranking.
-        cv_search::text_search(None, n, 100_000)
-            .map(|hits| hits.into_iter().map(|h| h.id).collect())
-            .unwrap_or_default()
-    })
-}
 
 /// `GET /api/stats?q=<query-calculus>` — corpus-wide fleet statistics: exactly what `cv stats
 /// --json` prints (`sessions, messages, by_harness, top_cwds, earliest_created, latest_updated`),
@@ -277,7 +414,7 @@ fn stats(query: &str) -> (u16, Value) {
     };
     let mut refs = cv_core::sessions();
     if let Some(q) = &q {
-        cv_core::query::filter_refs(&mut refs, q, &text_sets(q));
+        cv_core::query::filter_refs(&mut refs, q, &crate::cmd::query::text_sets(q));
     }
     ok(cv_core::stats::CorpusStats::compute(&refs).to_json())
 }
@@ -601,7 +738,7 @@ fn cors_headers(origin: Option<&str>) -> Vec<Header> {
     let mut headers = vec![header("Vary", "Origin")];
     if let Some(o) = origin {
         headers.push(header("Access-Control-Allow-Origin", o));
-        headers.push(header("Access-Control-Allow-Methods", "GET, OPTIONS"));
+        headers.push(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"));
         headers.push(header("Access-Control-Allow-Headers", "Authorization, Content-Type"));
         headers.push(header("Access-Control-Expose-Headers", EXPOSED_HEADERS));
     }

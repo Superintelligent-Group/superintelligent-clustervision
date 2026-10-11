@@ -1,20 +1,28 @@
-//! The on-disk archive: a per-harness directory of serialized IR sessions plus an idempotent
-//! JSONL catalog. The archive is the durable, harness-agnostic store that `cvd` populates so a
-//! user can centralize agent logs from many machines/harnesses for search and safekeeping.
+//! `cv archive sync|ls|path` and `cv watch` — the durable, harness-agnostic store (what `cvd` was).
+//!
+//! The archive is a per-harness directory of serialized IR sessions plus an idempotent JSONL
+//! catalog, so a user can centralize agent logs from many machines/harnesses for search and
+//! safekeeping. `sync` snapshots once and exits; `watch` follows live activity and re-archives
+//! each session as it changes, built on cv-core's live-watch engine.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use cv_core::ir::{home_rel, truncate};
+use cv_core::watch::{EventKind, Filter, Watcher};
 use cv_core::{Harness, Session, SessionRef};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::util::{parse_harness, short_id};
 
 /// One row of the catalog (`catalog.jsonl`). Cheap metadata for listings/search; the full
 /// transcript lives in the per-session JSON under `archive/<harness>/<id>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CatalogEntry {
+pub(crate) struct CatalogEntry {
     pub harness: String,
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,13 +47,13 @@ impl CatalogEntry {
 
 /// Whether a `store` call actually wrote (the session was new/changed) or was skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StoreOutcome {
+pub(crate) enum StoreOutcome {
     Archived,
     Skipped,
 }
 
 /// Handle to the archive root (`$CLUSTERVISION_HOME` or `~/.clustervision`, overridable by `--home`).
-pub struct Archive {
+pub(crate) struct Archive {
     home: PathBuf,
 }
 
@@ -57,7 +65,7 @@ impl Archive {
         } else if let Some(env) = std::env::var_os("CLUSTERVISION_HOME") {
             PathBuf::from(env)
         } else {
-            let base = dirs::home_dir().context("could not determine home directory")?;
+            let base = crate::util::dirs_home().context("could not determine home directory")?;
             base.join(".clustervision")
         };
         Ok(Archive { home })
@@ -71,10 +79,10 @@ impl Archive {
         self.home.join("catalog.jsonl")
     }
 
-    /// Serialize catalog writers across processes (parallel `cvd sync` / `watch` on one archive):
-    /// an exclusive advisory flock, released when the returned handle drops. It lives on a
-    /// dedicated lockfile rather than the catalog itself, because compaction rename-replaces the
-    /// catalog and a lock on the replaced inode would guard nothing.
+    /// Serialize catalog writers across processes (parallel `sync` / `watch` on one archive): an
+    /// exclusive advisory flock, released when the returned handle drops. It lives on a dedicated
+    /// lockfile rather than the catalog itself, because compaction rename-replaces the catalog and
+    /// a lock on the replaced inode would guard nothing.
     fn lock_catalog(&self) -> Result<fs::File> {
         let path = self.home.join("catalog.jsonl.lock");
         if let Some(parent) = path.parent() {
@@ -158,7 +166,7 @@ impl Archive {
                         }
                     }
                 }
-                Err(e) => eprintln!("cvd: skipping corrupt catalog line: {e}"),
+                Err(e) => eprintln!("cv archive: skipping corrupt catalog line: {e}"),
             }
         }
         Ok(map.into_values().collect())
@@ -216,23 +224,141 @@ impl Archive {
     }
 }
 
-/// Best-effort cwd rendering for logs/listings, abbreviating `$HOME` to `~`.
-pub fn pretty_cwd(cwd: &Option<PathBuf>) -> String {
-    let Some(p) = cwd else {
-        return "-".to_string();
-    };
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rest) = p.strip_prefix(&home) {
-            if rest.as_os_str().is_empty() {
-                return "~".to_string();
-            }
-            return format!("~/{}", rest.display());
-        }
-    }
-    p.display().to_string()
+/// A cwd for logs/listings: `~`-relative, or `-` when unknown.
+fn pretty_cwd(cwd: Option<&Path>) -> String {
+    cwd.map(home_rel).unwrap_or_else(|| "-".to_string())
 }
 
-/// Short label for a discovered ref (for watch logs).
-pub fn ref_cwd(r: &SessionRef) -> String {
-    pretty_cwd(&r.cwd)
+// ---------------------------------------------------------------------------
+// commands
+// ---------------------------------------------------------------------------
+
+/// `cv archive sync`: discover and archive every session once, then exit.
+pub(crate) fn cmd_sync(archive: &Archive) -> Result<()> {
+    let refs = cv_core::discover_all();
+    let total = refs.len();
+    let mut archived = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for r in refs {
+        let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
+            continue;
+        };
+        match adapter.parse(&r) {
+            Ok(session) => match archive.store(&session) {
+                Ok(StoreOutcome::Archived) => archived += 1,
+                Ok(StoreOutcome::Skipped) => skipped += 1,
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("cv archive: failed to archive {} {}: {e:#}", r.harness, r.id);
+                }
+            },
+            Err(e) => {
+                failed += 1;
+                eprintln!("cv archive: failed to parse {} {}: {e:#}", r.harness, r.id);
+            }
+        }
+    }
+
+    if failed > 0 {
+        eprintln!("cv archive: {failed} session(s) failed (logged above)");
+    }
+    println!("sync complete: {archived} archived, {skipped} skipped (unchanged) of {total} discovered");
+    println!("archive: {}", archive.home().display());
+    Ok(())
+}
+
+/// `cv watch`: follow live activity and archive sessions as they change, forever.
+pub(crate) fn cmd_watch(archive: &Archive, interval: u64, harness: Option<String>, cwd: Option<String>) -> Result<()> {
+    let filter = Filter {
+        harness: parse_harness(&harness)?,
+        cwd_contains: cwd,
+    };
+    // Emit existing sessions on the first poll so a fresh watcher archives what's already there
+    // before following live activity (`sync` is the dedicated one-shot, but watch is self-sufficient).
+    let mut watcher = Watcher::new(filter, true);
+    let interval = Duration::from_secs(interval.max(1));
+
+    eprintln!(
+        "cv watch: watching (interval {}s) -> {}",
+        interval.as_secs(),
+        archive.home().display()
+    );
+
+    // Not `Watcher::run` (which never returns and takes the closure by value): a manual loop keeps
+    // ownership of `archive` and reads identically.
+    loop {
+        for ev in watcher.poll() {
+            archive_event(archive, &ev.reference, ev.kind, ev.new_messages.len());
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Re-parse and archive the session behind an event, logging the outcome to stderr.
+fn archive_event(archive: &Archive, r: &SessionRef, kind: EventKind, delta: usize) {
+    let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
+        return;
+    };
+    let session = match adapter.parse(r) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[parse-fail] {} {}: {e:#}", r.harness, short_id(&r.id));
+            return;
+        }
+    };
+    match archive.store(&session) {
+        Ok(StoreOutcome::Archived) => {
+            let verb = match kind {
+                EventKind::New => "new",
+                EventKind::Updated => "archived",
+            };
+            eprintln!(
+                "[{verb}] {} {}  +{delta} msgs  {}",
+                r.harness,
+                short_id(&r.id),
+                pretty_cwd(r.cwd.as_deref())
+            );
+        }
+        Ok(StoreOutcome::Skipped) => {}
+        Err(e) => eprintln!("[store-fail] {} {}: {e:#}", r.harness, short_id(&r.id)),
+    }
+}
+
+/// `cv archive ls`: what's in the archive, newest activity first.
+pub(crate) fn cmd_ls(archive: &Archive) -> Result<()> {
+    let mut entries = archive.load_catalog()?;
+    if entries.is_empty() {
+        println!("(archive empty — run `cv archive sync`)");
+        println!("archive: {}", archive.home().display());
+        return Ok(());
+    }
+    entries.sort_by(|a, b| {
+        b.updated_at
+            .unwrap_or(b.archived_at)
+            .cmp(&a.updated_at.unwrap_or(a.archived_at))
+    });
+
+    for e in &entries {
+        let title = e.title.clone().unwrap_or_else(|| "(untitled)".to_string());
+        let archived = e.archived_at.format("%Y-%m-%d %H:%M");
+        println!(
+            "{:<9} {:<10} {:>4} msgs  {}  [{}]  {}",
+            e.harness,
+            short_id(&e.id),
+            e.message_count,
+            archived,
+            pretty_cwd(e.cwd.as_deref()),
+            truncate(&title.replace('\n', " "), 60),
+        );
+    }
+    println!("\n{} session(s) in {}", entries.len(), archive.home().display());
+    Ok(())
+}
+
+/// `cv archive path`: print the archive location.
+pub(crate) fn cmd_path(archive: &Archive) -> Result<()> {
+    println!("{}", archive.home().display());
+    Ok(())
 }

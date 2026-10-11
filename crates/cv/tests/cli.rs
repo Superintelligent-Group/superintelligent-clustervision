@@ -2386,12 +2386,12 @@ fn task_inbox_unread_and_events_since() {
     assert!(err.contains("removed in 0.15.0") && err.contains("--not-by"), "{err}");
 }
 
-// ───────────────────────────── cv task serve ─────────────────────────────
+// ───────────────────────────── the inbox on cv serve ─────────────────────────────
 
 /// A minimal HTTP/1.1 client over a TcpStream (the test crate has no HTTP dependency).
 fn http(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
     use std::io::{Read, Write};
-    let mut s = std::net::TcpStream::connect(addr).expect("connect to cv task serve");
+    let mut s = std::net::TcpStream::connect(addr).expect("connect to cv serve");
     s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
     let body = body.unwrap_or("");
     let req = format!(
@@ -2407,11 +2407,11 @@ fn http(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u16, Strin
     (status, body.to_string())
 }
 
-/// Start `cv task serve` on an ephemeral port in this world; returns (child, addr).
+/// Start `cv serve` on an ephemeral port in this world; returns (child, addr).
 fn serve(w: &World, who: &str) -> (std::process::Child, String) {
     use std::io::{BufRead, BufReader};
     let mut child = Command::new(env!("CARGO_BIN_EXE_cv"))
-        .args(["task", "serve", "--bind", "127.0.0.1:0", "--assignee", who])
+        .args(["serve", "--port", "0", "--who", who])
         .current_dir(&w.base)
         .env("HOME", &w.home)
         .env("CLUSTERVISION_HOME", &w.cv_home)
@@ -2419,14 +2419,14 @@ fn serve(w: &World, who: &str) -> (std::process::Child, String) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("cv task serve starts");
+        .expect("cv serve starts");
     let stderr = child.stderr.take().unwrap();
     let mut lines = BufReader::new(stderr).lines();
     let banner = lines.next().expect("a banner line").expect("readable");
     let addr = banner
         .split("http://")
         .nth(1)
-        .and_then(|rest| rest.split('/').next())
+        .and_then(|rest| rest.split_whitespace().next())
         .unwrap_or_else(|| panic!("no address in banner: {banner}"))
         .to_string();
     // Keep draining stderr so the child never blocks on a full pipe.
@@ -2438,7 +2438,7 @@ fn serve(w: &World, who: &str) -> (std::process::Child, String) {
 /// action), POST resolve / done / note / discuss, and `cv task show --brief` reflects every event
 /// with the author `web:<assignee>`. The event feed route is the same query as `cv task events`.
 #[test]
-fn task_serve_records_the_same_events_as_the_cli() {
+fn the_inbox_records_the_same_events_as_the_cli() {
     let w = World::new("serve");
     let (out, _) = w.cv_ok(&[
         "task",
@@ -2478,7 +2478,7 @@ fn task_serve_records_the_same_events_as_the_cli() {
             !html.contains("<script src=") && !html.contains("<link rel=\"stylesheet\""),
             "no external resources"
         );
-        // A DNS-named Host is refused (rebinding); an IP literal is fine (the LAN case).
+        // A DNS-named Host is refused (rebinding).
         let (status, _) = {
             use std::io::{Read, Write};
             let mut s = std::net::TcpStream::connect(&addr).unwrap();
@@ -2504,7 +2504,7 @@ fn task_serve_records_the_same_events_as_the_cli() {
         assert_eq!(items[0]["decision"]["default"], "1 credit/unit");
         assert_eq!(items[0]["decision"]["alternatives"], serde_json::json!(["free tier"]));
         assert_eq!(items[1]["reason"], "assigned_open");
-        // Without --assignee/?who the server's default applies.
+        // Without ?who the server's --who applies.
         let (status, body) = http(&addr, "GET", "/api/inbox", None);
         assert_eq!(status, 200);
         assert!(body.contains("\"who\":\"ember\""), "{body}");

@@ -1,5 +1,5 @@
-//! Integration tests for the cvd daemon binary: `sync` idempotency against a fixture corpus and
-//! the `serve` HTTP endpoints (status codes, JSON shapes, query parsing) — all hermetic via a
+//! Integration tests for `cv archive` (`sync` idempotency against a fixture corpus) and the
+//! `cv serve` HTTP endpoints (status codes, JSON shapes, query parsing) — all hermetic via a
 //! temp `$HOME` + `$CLUSTERVISION_HOME` passed only to child processes.
 
 use serde_json::{json, Value};
@@ -19,7 +19,7 @@ struct World {
 impl World {
     fn new(tag: &str) -> World {
         let base = std::env::temp_dir().join(format!(
-            "cvd-{tag}-{}-{}",
+            "cv-serve-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -65,11 +65,12 @@ impl World {
         }
     }
 
-    fn cvd_cmd(&self) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_cvd"));
+    fn cv_cmd(&self) -> Command {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cv"));
         c.current_dir(&self.base)
             .env("HOME", &self.home)
-            .env_remove("CVD_TOKEN") // hermetic: a token in the ambient env must not gate tests
+            .env_remove("CV_SERVE_TOKEN") // hermetic: a token in the ambient env must not gate tests
+            .env_remove("CVD_TOKEN")
             .env("CLUSTERVISION_HOME", &self.cv_home)
             // Hermetic: an agent seat's own Claude config dir must not add its sessions here.
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -159,14 +160,14 @@ impl World {
         web
     }
 
-    /// Run a cvd subcommand to completion; returns (stdout, stderr), asserting success.
-    fn cvd(&self, args: &[&str]) -> (String, String) {
-        let out = self.cvd_cmd().args(args).output().expect("cvd should run");
+    /// Run a cv subcommand to completion; returns (stdout, stderr), asserting success.
+    fn cv(&self, args: &[&str]) -> (String, String) {
+        let out = self.cv_cmd().args(args).output().expect("cv should run");
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         assert!(
             out.status.success(),
-            "cvd {args:?} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            "cv {args:?} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
         (stdout, stderr)
     }
@@ -193,7 +194,7 @@ fn sync_is_idempotent() {
     let w = World::new("sync");
 
     // First sync archives both sessions.
-    let (out, _) = w.cvd(&["sync"]);
+    let (out, _) = w.cv(&["archive", "sync"]);
     assert!(
         out.contains("2 archived, 0 skipped (unchanged) of 2 discovered"),
         "{out}"
@@ -203,7 +204,7 @@ fn sync_is_idempotent() {
     assert_eq!(count_lines(&w.cv_home.join("catalog.jsonl")), 2);
 
     // Second sync: nothing changed → nothing rewritten, no duplicate catalog rows.
-    let (out, _) = w.cvd(&["sync"]);
+    let (out, _) = w.cv(&["archive", "sync"]);
     assert!(
         out.contains("0 archived, 2 skipped (unchanged) of 2 discovered"),
         "{out}"
@@ -211,7 +212,7 @@ fn sync_is_idempotent() {
     assert_eq!(count_lines(&w.cv_home.join("catalog.jsonl")), 2, "no dupes on resync");
 
     // ls shows each session exactly once.
-    let (out, _) = w.cvd(&["ls"]);
+    let (out, _) = w.cv(&["archive", "ls"]);
     assert!(out.contains("2 session(s)"), "{out}");
     assert_eq!(out.matches("alphases").count(), 1, "{out}");
     assert!(out.contains("alpha adventures"), "{out}");
@@ -226,12 +227,12 @@ fn sync_is_idempotent() {
     body.push('\n');
     fs::write(w.session_path("alphasess"), body).unwrap();
 
-    let (out, _) = w.cvd(&["sync"]);
+    let (out, _) = w.cv(&["archive", "sync"]);
     assert!(
         out.contains("1 archived, 1 skipped (unchanged) of 2 discovered"),
         "{out}"
     );
-    let (out, _) = w.cvd(&["ls"]);
+    let (out, _) = w.cv(&["archive", "ls"]);
     assert!(
         out.contains("2 session(s)"),
         "changed session must not duplicate:\n{out}"
@@ -249,9 +250,9 @@ fn sync_is_idempotent() {
 #[test]
 fn ls_and_path_on_empty_archive() {
     let w = World::new("empty");
-    let (out, _) = w.cvd(&["ls"]);
+    let (out, _) = w.cv(&["archive", "ls"]);
     assert!(out.contains("archive empty"), "{out}");
-    let (out, _) = w.cvd(&["path"]);
+    let (out, _) = w.cv(&["archive", "path"]);
     assert_eq!(out.trim(), w.cv_home.display().to_string(), "{out}");
 }
 
@@ -259,7 +260,7 @@ fn ls_and_path_on_empty_archive() {
 
 /// A minimal HTTP/1.0-style GET over a raw socket (no client dep): returns (status, body).
 fn http(port: u16, method: &str, path: &str) -> (u16, String) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to cvd serve");
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to cv serve");
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         stream,
@@ -284,7 +285,7 @@ fn http(port: u16, method: &str, path: &str) -> (u16, String) {
 /// Like [`http`] but also hands back the `Content-Type`, for the static-asset rules where the
 /// header IS the behaviour under test.
 fn get_raw(port: u16, path: &str) -> (u16, String, String) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to cvd serve");
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to cv serve");
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         stream,
@@ -327,7 +328,7 @@ impl Drop for Reaper {
     }
 }
 
-/// Spawn `cvd serve` on a free port and wait for the listener. Returns the port and the reaper
+/// Spawn `cv serve` on a free port and wait for the listener. Returns the port and the reaper
 /// keeping the child alive (drop it to kill the server).
 fn spawn_serve(w: &World) -> (u16, Reaper) {
     spawn_serve_with(w, &[])
@@ -348,15 +349,15 @@ fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Re
     let mut args: Vec<String> = vec!["serve".into(), "--port".into(), "0".into()];
     args.extend(extra.iter().map(|s| s.to_string()));
     let mut child = w
-        .cvd_cmd()
+        .cv_cmd()
         .args(&args)
         .envs(envs.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("cvd serve should spawn");
+        .expect("cv serve should spawn");
 
-    // Read the banner (`cvd serve on http://host:PORT — …`) off stderr on a side thread; keep
+    // Read the banner (`cv serve on http://host:PORT — …`) off stderr on a side thread; keep
     // draining afterwards so the child never blocks on a full pipe.
     let stderr = child.stderr.take().unwrap();
     let stdout = child.stdout.take().unwrap();
@@ -376,7 +377,7 @@ fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Re
     });
 
     let banner_port = |line: &str| -> Option<u16> {
-        // "cvd serve on http://127.0.0.1:PORT — …": take the port from the URL.
+        // "cv serve on http://127.0.0.1:PORT — …": take the port from the URL.
         let rest = line.split("http://").nth(1)?;
         let hostport = rest.split_whitespace().next()?;
         hostport.rsplit(':').next()?.parse().ok()
@@ -386,12 +387,12 @@ fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Re
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen = Vec::new();
     let port = loop {
-        if let Some(status) = reaper.0.try_wait().expect("try_wait cvd serve") {
-            panic!("cvd serve exited at startup ({status}); stderr so far: {seen:?}");
+        if let Some(status) = reaper.0.try_wait().expect("try_wait cv serve") {
+            panic!("cv serve exited at startup ({status}); stderr so far: {seen:?}");
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
-                if line.starts_with("cvd serve on ") {
+                if line.starts_with("cv serve on ") {
                     if let Some(p) = banner_port(&line) {
                         break p;
                     }
@@ -405,7 +406,7 @@ fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Re
         }
         assert!(
             Instant::now() < deadline,
-            "cvd serve never printed its banner; stderr so far: {seen:?}"
+            "cv serve never printed its banner; stderr so far: {seen:?}"
         );
     };
     // Keep draining stderr so the server never blocks writing logs.
@@ -418,12 +419,12 @@ fn spawn_serve_cfg(w: &World, extra: &[&str], envs: &[(&str, &str)]) -> (u16, Re
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
             break;
         }
-        if let Some(status) = reaper.0.try_wait().expect("try_wait cvd serve") {
-            panic!("cvd serve died after its banner ({status})");
+        if let Some(status) = reaper.0.try_wait().expect("try_wait cv serve") {
+            panic!("cv serve died after its banner ({status})");
         }
         assert!(
             Instant::now() < deadline,
-            "cvd serve banner printed :{port} but it never accepts"
+            "cv serve banner printed :{port} but it never accepts"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -1113,7 +1114,7 @@ fn serve_host_validation() {
 }
 
 /// Bearer-token auth on `/api/*`: 401 without (or with the wrong) token, 200 with it, and the
-/// credential-less OPTIONS preflight stays exempt. Both `--token` and `$CVD_TOKEN` wire it up.
+/// credential-less OPTIONS preflight stays exempt. Both `--token` and `$CV_SERVE_TOKEN` wire it up.
 #[test]
 fn serve_token_auth() {
     let w = World::new("token");
@@ -1133,7 +1134,7 @@ fn serve_token_auth() {
     assert_eq!(raw_status(&raw), 204, "preflight is exempt:\n{raw}");
 
     // Same gate via the environment variable.
-    let (port, _reaper2) = spawn_serve_cfg(&w, &[], &[("CVD_TOKEN", "hunter2")]);
+    let (port, _reaper2) = spawn_serve_cfg(&w, &[], &[("CV_SERVE_TOKEN", "hunter2")]);
     let raw = raw_request(port, "GET", "/api/health", &[]);
     assert_eq!(raw_status(&raw), 401, "{raw}");
     let raw = raw_request(port, "GET", "/api/health", &[("Authorization", "Bearer hunter2")]);
@@ -1146,10 +1147,10 @@ fn serve_token_auth() {
 fn serve_refuses_bare_public_bind() {
     let w = World::new("expose");
     let out = w
-        .cvd_cmd()
+        .cv_cmd()
         .args(["serve", "--host", "0.0.0.0", "--port", "0"])
         .output()
-        .expect("cvd should run");
+        .expect("cv should run");
     assert!(!out.status.success(), "bare 0.0.0.0 bind must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("refusing"), "{stderr}");
@@ -1389,4 +1390,128 @@ fn raw_status(raw: &str) -> u16 {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("bad status line in: {raw}"))
+}
+
+// ───────────────────────────── the inbox on cv serve ─────────────────────────────
+
+/// A POST with a body and headers, returning the raw response.
+fn raw_post(port: u16, path: &str, body: &str, headers: &[(&str, &str)]) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut s = String::new();
+    stream.read_to_string(&mut s).unwrap();
+    s
+}
+
+/// What `cv task serve` served moved onto `cv serve`: the page (at `/inbox`, and at `/` with no
+/// `--web`), its reads, and its writes — which record the same event the CLI would, as
+/// `web:<who>`, and only as JSON from a local origin (a cross-site form or `text/plain` fetch
+/// needs no preflight, so it must be refused, not merely denied the response).
+#[test]
+fn serve_carries_the_inbox_and_guards_its_writes() {
+    use cv_core::task::{new_event, TaskEventKind, TaskStore};
+    let w = World::new("inbox");
+    let store = TaskStore::at(w.cv_home.join("tasks"));
+    let opened = store
+        .append_agent_event(new_event(
+            None,
+            "human",
+            TaskEventKind::Opened {
+                title: "tune the theremin".into(),
+                body: String::new(),
+                repo: None,
+                issue: None,
+                channel: None,
+                assignee: Some("ember".into()),
+            },
+        ))
+        .expect("seed open");
+    let id = opened.task_id.clone();
+    let (port, _reaper) = spawn_serve_with(&w, &["--who", "ember"]);
+
+    for path in ["/", "/inbox"] {
+        let (status, ct, body) = get_raw(port, path);
+        assert_eq!(status, 200, "{path}");
+        assert!(
+            ct.contains("html") && body.contains("<title>cv inbox</title>"),
+            "{path}: {ct}"
+        );
+    }
+    let (status, v) = get_json(port, "/api/inbox");
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["who"], "ember", "the server's --who is the default inbox: {v}");
+    let (status, v) = get_json(port, "/api/backlog");
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["count"], 1, "{v}");
+
+    let path = format!("/api/task/{id}/note");
+    let body = r#"{"who":"ember","text":"a little flat"}"#;
+    // Not JSON → refused before it touches the store.
+    let raw = raw_post(port, &path, body, &[("Content-Type", "text/plain")]);
+    assert_eq!(raw_status(&raw), 403, "{raw}");
+    // JSON from a foreign origin → refused.
+    let raw = raw_post(
+        port,
+        &path,
+        body,
+        &[("Content-Type", "application/json"), ("Origin", "https://evil.example")],
+    );
+    assert_eq!(raw_status(&raw), 403, "{raw}");
+    // JSON from the page's own origin → recorded as web:<who>.
+    let raw = raw_post(
+        port,
+        &path,
+        body,
+        &[
+            ("Content-Type", "application/json"),
+            ("Origin", &format!("http://127.0.0.1:{port}")),
+        ],
+    );
+    assert_eq!(raw_status(&raw), 200, "{raw}");
+    let v = raw_json(&raw);
+    assert_eq!(v["by"], "web:ember", "{v}");
+
+    // The events feed is the same query as `cv task events`: JSON lines, the note last.
+    let (status, ct, lines) = get_raw(port, "/api/events?since=1h");
+    assert_eq!(status, 200);
+    assert!(ct.contains("ndjson"), "{ct}");
+    let last: Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
+    assert_eq!(last["by"], "web:ember", "{lines}");
+
+    // POST anywhere else is still a 405.
+    let raw = raw_post(port, "/api/sessions", "{}", &[("Content-Type", "application/json")]);
+    assert_eq!(raw_status(&raw), 405, "{raw}");
+}
+
+/// The removed names answer with a pointer and exit 2, never silently.
+#[test]
+fn removed_server_spellings_point_at_cv_serve() {
+    let w = World::new("removed");
+    let out = w
+        .cv_cmd()
+        .args(["task", "serve", "--bind", "0.0.0.0:7777"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("`cv serve`"));
+    let out = w
+        .cv_cmd()
+        .args(["serve", "--port", "0"])
+        .env("CVD_TOKEN", "x")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("CV_SERVE_TOKEN"));
+    let out = w.cv_cmd().args(["watch", "--verify-interval", "60"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
 }

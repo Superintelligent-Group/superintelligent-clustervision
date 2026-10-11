@@ -23,8 +23,8 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cmd::hooks::{HookName, HooksCmd};
 use cmd::task::TaskCmd;
 use cmd::{
-    browse, cat, compaction, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port, recipes,
-    schema, search, share, task, tools, view, workflow,
+    archive, browse, cat, compaction, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port,
+    recipes, schema, search, serve, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
 use util::{usage, UsageError, WindowArgs};
@@ -91,7 +91,7 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
         &["prune", "rewind", "distill", "adopt", "splice", "port", "resume"],
     ),
     ("Export", &["export", "dataset", "pack"]),
-    ("Fleet & live", &["task", "scry", "share"]),
+    ("Fleet & live", &["task", "scry", "watch", "archive", "serve", "share"]),
     (
         "System",
         &["index", "config", "schema", "formats", "recipes", "hooks", "hook"],
@@ -864,6 +864,62 @@ enum Cmd {
         #[arg(long)]
         existing: bool,
     },
+    /// Follow live activity and archive every session as it changes, forever (archives what
+    /// already exists on the first poll). `cv scry` is the same feed without the archive.
+    Watch {
+        /// Poll interval in seconds.
+        #[arg(long, default_value_t = 3)]
+        interval: u64,
+        /// Only this harness (e.g. claude, codex, gemini).
+        #[arg(long)]
+        harness: Option<String>,
+        /// Only sessions whose cwd contains this substring.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Archive home (default: $CLUSTERVISION_HOME or ~/.clustervision).
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+        // Removed in 0.15.0 with the task verifier — hidden so the old flag errors with a pointer.
+        #[arg(long = "verify-interval", hide = true)]
+        verify_interval: Option<u64>,
+    },
+    /// The durable archive: every session snapshotted as IR under one home, for search and
+    /// safekeeping across machines (`sync` once, `ls`, `path`; `cv watch` keeps it current).
+    Archive {
+        /// Archive home (default: $CLUSTERVISION_HOME or ~/.clustervision).
+        #[arg(long, global = true, value_name = "DIR")]
+        home: Option<PathBuf>,
+        #[command(subcommand)]
+        action: ArchiveCmd,
+    },
+    /// One local HTTP server: the read API at /api/* (what the dashboard and app read), the task
+    /// inbox at /inbox (decisions as buttons; writes record the same events the CLI does, as
+    /// `web:<who>`), and with `--web DIR` the dashboard at /. Loopback only unless `--host` is
+    /// non-loopback AND a token (or `--insecure-expose`) is given.
+    Serve {
+        /// Port to listen on (0 picks a free one; the banner prints the real port).
+        #[arg(long, default_value_t = 7777)]
+        port: u16,
+        /// Host/interface to bind.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Also host the browser dashboard from this directory (the repo's `web/`).
+        #[arg(long, value_name = "DIR")]
+        web: Option<PathBuf>,
+        /// Require `Authorization: Bearer <token>` on every /api/* request ($CV_SERVE_TOKEN works too).
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+        /// Allow a non-loopback --host without a token. The transcript corpus can contain
+        /// secrets; anyone who can reach the port can read all of it and act in the inbox.
+        #[arg(long)]
+        insecure_expose: bool,
+        /// Whose inbox /inbox opens on, and who a write is by when it names nobody. Default: $CV_ENDPOINT.
+        #[arg(long)]
+        who: Option<String>,
+        /// Open the inbox in the default browser once the server is up.
+        #[arg(long)]
+        open: bool,
+    },
     /// Redact a session and emit a single self-contained HTML artifact anyone can open.
     Share {
         id: String,
@@ -988,6 +1044,16 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         rest: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ArchiveCmd {
+    /// Discover and archive every session once, then exit (idempotent: unchanged ones are skipped).
+    Sync,
+    /// List what's in the archive, newest activity first.
+    Ls,
+    /// Print the archive location.
+    Path,
 }
 
 /// The clap tree with the grouped listing attached (`after_help` is computed from the tree itself,
@@ -1293,6 +1359,46 @@ fn run() -> Result<()> {
             json,
         } => doctor::cmd_doctor(id, harness, recent, json),
         Cmd::Task { action } => task::cmd_task(action),
+        Cmd::Watch {
+            interval,
+            harness,
+            cwd,
+            home,
+            verify_interval,
+        } => {
+            if verify_interval.is_some() {
+                return usage(
+                    "`--verify-interval` was removed in 0.15.0 — the task git-verifier is gone; \
+                     completion is self-reported and labeled so (`cv task done --observed`)",
+                );
+            }
+            archive::cmd_watch(&archive::Archive::resolve(home)?, interval, harness, cwd)
+        }
+        Cmd::Archive { home, action } => {
+            let a = archive::Archive::resolve(home)?;
+            match action {
+                ArchiveCmd::Sync => archive::cmd_sync(&a),
+                ArchiveCmd::Ls => archive::cmd_ls(&a),
+                ArchiveCmd::Path => archive::cmd_path(&a),
+            }
+        }
+        Cmd::Serve {
+            port,
+            host,
+            web,
+            token,
+            insecure_expose,
+            who,
+            open,
+        } => serve::cmd_serve(serve::ServeOpts {
+            host,
+            port,
+            web,
+            token,
+            insecure_expose,
+            who: who.or_else(cv_core::task::default_endpoint),
+            open,
+        }),
         Cmd::Distill {
             id,
             harness,

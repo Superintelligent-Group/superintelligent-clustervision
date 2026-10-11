@@ -1,6 +1,6 @@
 [package]
 name = "cvd"
-description = "clustervision daemon — watches harness storage roots and archives agent sessions (incl. cloud-fleet logs) into a central store."
+description = "Deprecated shim: `cvd` is `cv archive`, `cv watch` and `cv serve` now; this execs `cv` for one release."
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -15,14 +15,3 @@ name = "cvd"
 path = "src/main.rs"
 
 [dependencies]
-cv-core = { path = "../cv-core", version = "0.14", package = "clustervision-core" }
-# The full-text/semantic index `cv search` uses. The daemon serves the SAME index through
-# `/api/search`, so the dashboard can search a corpus it has not downloaded.
-cv-search = { path = "../cv-search", version = "0.14" }
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-clap.workspace = true
-chrono.workspace = true
-dirs.workspace = true
-tiny_http = { version = "0.12", default-features = false }

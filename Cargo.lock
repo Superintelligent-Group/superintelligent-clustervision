@@ -478,17 +478,6 @@ dependencies = [
 [[package]]
 name = "cvd"
 version = "0.14.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "clustervision-core",
- "cv-search",
- "dirs 5.0.1",
- "serde",
- "serde_json",
- "tiny_http",
-]
 
 [[package]]
 name = "darling"

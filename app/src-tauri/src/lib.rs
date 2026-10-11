@@ -10,7 +10,7 @@
 //!   2. **Native `redact` and `ingest_zip`** — pure, offline calls into `cv_core`, so redaction and
 //!      zip ingestion work without the WASM module. (LLM generation lives in the web loom's
 //!      OpenRouter path; `cv splice --generate` is the CLI's.)
-//!   3. **Launches `cvd serve --port 7777` on startup** so the bundled fleet dashboard (which
+//!   3. **Launches `cv serve --port 7777` on startup** so the bundled fleet dashboard (which
 //!      fetches `http://localhost:7777`) works unchanged. The child is killed on exit.
 //!   4. A **native application menu** (File / Edit / View / Help) — including **File → Open zip…**
 //!      which runs a native file dialog, ingests the zip in Rust, and emits the
@@ -18,15 +18,15 @@
 //!   5. **Window state persistence** (size/position across launches) via
 //!      `tauri-plugin-window-state`.
 //!
-//! ### cvd-serve wiring approach
-//! We spawn `cvd` via `std::process::Command` (rather than a bundled Tauri *sidecar*) — it's
+//! ### cv-serve wiring approach
+//! We spawn `cv` via `std::process::Command` (rather than a bundled Tauri *sidecar*) — it's
 //! the simplest thing that compiles and runs everywhere without an extra bundling step. We
-//! search the repo's build outputs `target/{release,debug}/cvd` first, then PATH, so a plain
-//! `cargo build -p cvd` in the repo is enough to make it work in dev. The handle is stored in
-//! Tauri's managed state and killed on `RunEvent::Exit`. A **View → cvd serve** menu toggle lets
+//! search the repo's build outputs `target/{release,debug}/cv` first, then PATH, so a plain
+//! `cargo build -p clustervision` in the repo is enough to make it work in dev. The handle is stored in
+//! Tauri's managed state and killed on `RunEvent::Exit`. A **View → cv serve** menu toggle lets
 //! you start/stop it at runtime.
 //!
-//! To ship a self-contained bundle later, build `cvd` (`cargo build -p cvd --release`) and
+//! To ship a self-contained bundle later, build `cv` (`cargo build -p clustervision --release`) and
 //! either drop the binary on PATH or register it as a Tauri sidecar (see `app/README.md`).
 
 use std::io::Read;
@@ -39,8 +39,8 @@ use tauri_plugin_dialog::DialogExt;
 
 use cv_core::Session;
 
-/// The port the bundled web fleet-dashboard expects `cvd serve` on.
-const CVD_PORT: u16 = 7777;
+/// The port the bundled web fleet-dashboard expects `cv serve` on.
+const SERVE_PORT: u16 = 7777;
 
 /// The Tauri event the web UI listens for to load freshly-ingested sessions. Payload is a JSON
 /// string holding a `Session[]` array (the same IR the WASM `ingest_zip` returns).
@@ -49,10 +49,10 @@ const OPEN_SESSIONS_EVENT: &str = "cv://open-sessions";
 /// The public web demo, opened from Help → Open the web demo.
 const WEB_DEMO_URL: &str = "https://emberian.github.io/clustervision/";
 
-/// Handle to the spawned `cvd serve` child, kept in Tauri managed state so we can kill it on exit
+/// Handle to the spawned `cv serve` child, kept in Tauri managed state so we can kill it on exit
 /// (and toggle it from the menu).
 #[derive(Default)]
-struct CvdServer(Mutex<Option<Child>>);
+struct ServeChild(Mutex<Option<Child>>);
 
 // ---------------------------------------------------------------------------
 // Native commands — invoked from JS via `window.__TAURI__.core.invoke(name, args)`.
@@ -178,7 +178,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let reload = MenuItem::with_id(app, "view.reload", "Reload", true, Some("CmdOrCtrl+R"))?;
     let devtools = MenuItem::with_id(app, "view.devtools", "Toggle DevTools", true, Some("CmdOrCtrl+Alt+I"))?;
     let fullscreen = PredefinedMenuItem::fullscreen(app, Some("Toggle Fullscreen"))?;
-    let cvd_toggle = MenuItem::with_id(app, "view.cvd_toggle", "Toggle cvd serve", true, None::<&str>)?;
+    let serve_toggle = MenuItem::with_id(app, "view.serve_toggle", "Toggle cv serve", true, None::<&str>)?;
     let view = Submenu::with_items(
         app,
         "View",
@@ -188,7 +188,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &devtools,
             &fullscreen,
             &PredefinedMenuItem::separator(app)?,
-            &cvd_toggle,
+            &serve_toggle,
         ],
     )?;
 
@@ -224,7 +224,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
                 }
             }
         }
-        "view.cvd_toggle" => toggle_cvd_serve(app),
+        "view.serve_toggle" => toggle_serve(app),
         "help.web_demo" => {
             // Open in the user's default browser via the shell plugin (matches the existing
             // `shell:allow-open` capability). `Shell::open` is deprecated in favor of
@@ -288,40 +288,40 @@ fn open_zip_via_dialog<R: Runtime>(app: &AppHandle<R>) {
 }
 
 // ---------------------------------------------------------------------------
-// cvd serve lifecycle
+// cv serve lifecycle
 // ---------------------------------------------------------------------------
 
-/// Locate the `cvd` binary: the repo's build outputs relative to this crate's manifest dir first
-/// (so a dev `cargo build -p cvd` works without installing anything), then a bare `cvd` on PATH.
-fn cvd_binary() -> std::path::PathBuf {
+/// Locate the `cv` binary: the repo's build outputs relative to this crate's manifest dir first
+/// (so a dev `cargo build -p clustervision` works without installing anything), then `cv` on PATH.
+fn cv_binary() -> std::path::PathBuf {
+    let name = if cfg!(windows) { "cv.exe" } else { "cv" };
     // CARGO_MANIFEST_DIR is `.../clustervision/app/src-tauri`; the workspace target dir is
     // `.../clustervision/target`.
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     if let Some(root) = manifest.parent().and_then(|p| p.parent()) {
         for profile in ["release", "debug"] {
-            let cand = root.join("target").join(profile).join("cvd");
+            let cand = root.join("target").join(profile).join(name);
             if cand.exists() {
                 return cand;
             }
         }
     }
-    // Fall back to PATH lookup.
-    std::path::PathBuf::from("cvd")
+    std::path::PathBuf::from(name)
 }
 
-/// Spawn `cvd serve --port 7777`. Errors are logged but non-fatal: the rest of the UI (everything
+/// Spawn `cv serve --port 7777`. Errors are logged but non-fatal: the rest of the UI (everything
 /// except the live fleet dashboard) still works without it. Returns the child on success.
-fn spawn_cvd_serve() -> Option<Child> {
-    let bin = cvd_binary();
+fn spawn_serve() -> Option<Child> {
+    let bin = cv_binary();
     match Command::new(&bin)
         .arg("serve")
         .arg("--port")
-        .arg(CVD_PORT.to_string())
+        .arg(SERVE_PORT.to_string())
         .spawn()
     {
         Ok(child) => {
             eprintln!(
-                "clustervision: launched `{} serve --port {CVD_PORT}` (pid {})",
+                "clustervision: launched `{} serve --port {SERVE_PORT}` (pid {})",
                 bin.display(),
                 child.id()
             );
@@ -329,9 +329,9 @@ fn spawn_cvd_serve() -> Option<Child> {
         }
         Err(e) => {
             eprintln!(
-                "clustervision: could not launch cvd serve ({}): {e}. The fleet dashboard at \
-                 http://localhost:{CVD_PORT} will be unavailable (non-fatal). Build it with \
-                 `cargo build -p cvd --release` or put `cvd` on PATH.",
+                "clustervision: could not launch cv serve ({}): {e}. The fleet dashboard at \
+                 http://localhost:{SERVE_PORT} will be unavailable (non-fatal). Build it with \
+                 `cargo build -p clustervision --release` or put `cv` on PATH.",
                 bin.display()
             );
             None
@@ -339,16 +339,16 @@ fn spawn_cvd_serve() -> Option<Child> {
     }
 }
 
-/// View → Toggle cvd serve: kill it if running, otherwise (re)spawn it.
-fn toggle_cvd_serve<R: Runtime>(app: &AppHandle<R>) {
-    let state = app.state::<CvdServer>();
+/// View → Toggle cv serve: kill it if running, otherwise (re)spawn it.
+fn toggle_serve<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<ServeChild>();
     let mut guard = state.0.lock().unwrap();
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
         let _ = child.wait();
-        eprintln!("clustervision: stopped cvd serve via menu toggle.");
+        eprintln!("clustervision: stopped cv serve via menu toggle.");
     } else {
-        *guard = spawn_cvd_serve();
+        *guard = spawn_serve();
     }
 }
 
@@ -359,7 +359,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // Persist each window's size/position/etc. across launches and restore on startup.
         .plugin(tauri_plugin_window_state::Builder::new().build())
-        .manage(CvdServer::default())
+        .manage(ServeChild::default())
         .invoke_handler(tauri::generate_handler![redact, ingest_zip, api])
         .on_menu_event(handle_menu_event)
         .setup(|app| {
@@ -368,8 +368,8 @@ pub fn run() {
             app.set_menu(menu)?;
 
             // Launch the fleet-state API so the bundled dashboard works unchanged.
-            if let Some(child) = spawn_cvd_serve() {
-                let state = app.state::<CvdServer>();
+            if let Some(child) = spawn_serve() {
+                let state = app.state::<ServeChild>();
                 *state.0.lock().unwrap() = Some(child);
             }
             Ok(())
@@ -377,9 +377,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building clustervision")
         .run(|app_handle, event| {
-            // On exit, reap the cvd child so we don't leave an orphaned server on :7777.
+            // On exit, reap the cv serve child so we don't leave an orphaned server on :7777.
             if let RunEvent::Exit = event {
-                let state = app_handle.state::<CvdServer>();
+                let state = app_handle.state::<ServeChild>();
                 let child = state.0.lock().unwrap().take();
                 if let Some(mut child) = child {
                     let _ = child.kill();
@@ -487,10 +487,11 @@ mod tests {
     }
 
     #[test]
-    fn cvd_binary_resolves_to_a_cvd_path() {
-        // Either a built binary under target/{release,debug}/cvd, or the bare PATH fallback — but it
+    fn cv_binary_resolves_to_a_cv_path() {
+        // Either a built binary under target/{release,debug}/cv, or the bare PATH fallback — but it
         // must always end in the executable name so the spawn targets the right thing.
-        let p = cvd_binary();
-        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("cvd"));
+        let p = cv_binary();
+        let name = if cfg!(windows) { "cv.exe" } else { "cv" };
+        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some(name));
     }
 }

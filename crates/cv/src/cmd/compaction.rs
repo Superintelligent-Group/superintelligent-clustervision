@@ -16,9 +16,7 @@ pub(crate) fn cmd_compaction(id: &str, harness: Option<String>, summaries: bool,
 
     if json {
         // `compaction::row`: the same row `/api/session/{h}/{id}/compactions` serves.
-        let rows: Vec<serde_json::Value> = (0..comps.len())
-            .map(|i| cv_core::compaction::row(&comps, i))
-            .collect();
+        let rows: Vec<serde_json::Value> = (0..comps.len()).map(|i| cv_core::compaction::row(&comps, i)).collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }

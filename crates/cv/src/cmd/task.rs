@@ -458,21 +458,11 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         text: bool,
     },
-    /// A local web inbox served by cv itself: decisions with their options as buttons, actions,
-    /// claimed work, notes — every button records the same event the CLI would. Loopback only
-    /// unless `--bind 0.0.0.0:<port>` is passed explicitly (then any device on the LAN can act as
-    /// `web:<assignee>`).
+    // Removed in 0.15.0: the inbox is a page on `cv serve` (hidden stub: pointer, exit 2).
+    #[command(hide = true)]
     Serve {
-        #[arg(long, default_value = "127.0.0.1:7777")]
-        bind: String,
-        /// Whose inbox the page opens on (`?who=` overrides per request). Default: $CV_ENDPOINT.
-        #[arg(long)]
-        assignee: Option<String>,
-        /// Open the page in the default browser once the server is up.
-        #[arg(long)]
-        open: bool,
-        #[arg(long, hide = true)]
-        token: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
     },
     /// Candidates for closing, from what git and the filesystem say — never closes anything.
     /// Lists non-terminal tasks whose `--issue` path no longer exists, or whose title/body names a
@@ -1194,16 +1184,10 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             "`cv task watch` was removed in 0.15.0 — it was an alias: \
              `cv task events --assignee <who> --not-by $CV_ENDPOINT [--since <when>] [--text]`",
         ),
-        TaskCmd::Serve {
-            bind,
-            assignee,
-            open,
-            token,
-        } => {
-            refuse_token(token)?;
-            let who = assignee.or_else(task::default_endpoint);
-            super::task_serve::run(&bind, who, open)
-        }
+        TaskCmd::Serve { .. } => usage(
+            "`cv task serve` was removed in 0.15.0 — `cv serve` carries the inbox at /inbox (and at / without \
+             --web): `--who` for `--assignee`, `--host`/`--port` for `--bind`, `--open` as before",
+        ),
         TaskCmd::Propose { .. } => removed_land_verb("propose"),
         TaskCmd::Reroute { .. } => removed_land_verb("reroute"),
         TaskCmd::Pass { .. } => removed_land_verb("pass"),

@@ -1,17 +1,11 @@
-//! `cv task serve` — a local web inbox served by cv itself: one inline HTML page (no external
-//! JS/CSS, no build step) over a handful of JSON routes that record **the same events the CLI
-//! records**, so the page and the shell are one store. Every write is stamped `web:<who>`.
-//!
-//! Loopback by default. `--bind 0.0.0.0:<port>` is an explicit choice to let any device on the LAN
-//! act as `web:<who>` (a phone in Safari). The `Host` header must be a loopback name, the bound
-//! host, or an IP literal — a DNS name is refused, which defeats DNS rebinding (a hostile page can
-//! point its own domain at this machine but cannot make the browser send an IP-literal `Host`).
-//! No CORS headers are ever emitted: only the served page is same-origin.
+//! The inbox's routes on `cv serve` (what `cv task serve` was): reads shaped for the one inline
+//! page (`serve_tasks_page.html`, served at `/inbox`) and the writes its buttons make, which record
+//! **the same events the CLI records**, so the page and the shell are one store. Every write is
+//! stamped `web:<who>`. The HTTP model (Host check, CORS allow-list, bearer token, the
+//! non-loopback refusal) is `cv serve`'s; this module never sees a socket.
 //!
 //! Routes:
-//! - `GET /`                              the page
 //! - `GET /api/inbox?who=`                the inbox page (`task::inbox_page`, `all=1` lifts the window)
-//! - `GET /api/task/<id>`                 one item (`events=1` adds the raw history)
 //! - `POST /api/task/<id>/resolve`        `{choice}` | `{accept_default: true}` | `{confirm: true}` (a
 //!   provisional resolution), `{note}` optional
 //! - `POST /api/task/<id>/done`           `{observed}` optional
@@ -23,247 +17,53 @@
 //! - `GET /api/events?since=&kind=&by=&not_by=&assignee=&task=`  JSON lines — the same query as
 //!   `cv task events`, so a poller and the page see one feed.
 //! - `GET /api/lanes?session=<id>`        the sub-agent forest of a session (`cv lanes --tasks`),
-//!   running first, each lane with the `tasks` its endpoint holds — the orchestrator's live lane
-//!   table beside the inbox.
-//! - `GET /api/backlog?repo=&state=&tag=&all=1` every open task (`cv task list` with no window);
-//!   `all=1` includes terminal ones.
+//!   running first, each lane with the `tasks` its endpoint holds.
+//! - `GET /api/backlog?repo=&state=&tag=&all=1` every open task (`cv task list` with no window).
 //!
-//! Every POST takes `who` in the body (else the server's `--assignee`).
-
-use std::io::Read;
-use std::sync::Arc;
+//! Every POST takes `who` in the body (else `?who=`, else the server's `--who`).
 
 use anyhow::{bail, Result};
 use chrono::Utc;
-use cv_core::sanitize::sanitize_line;
+use cv_core::api::Query;
 use cv_core::task::{self, TaskEventKind, TaskStore};
 use serde_json::{json, Value};
-use tiny_http::{Header, Method, Request, Response, Server};
 
 use super::task_ops::{self, DecisionSpec, EventFilter, Since};
 
-const PAGE: &str = include_str!("task_inbox.html");
+/// The inbox page: one inline HTML file, no external JS/CSS, no build step.
+pub(crate) const PAGE: &str = include_str!("serve_tasks_page.html");
 
-struct Ctx {
-    bind_host: String,
-    default_who: Option<String>,
+/// A task-route answer: JSON, or the newline-delimited JSON `/api/events` streams.
+pub(crate) enum Answer {
+    Json(u16, Value),
+    Ndjson(String),
 }
 
-pub(crate) fn run(bind: &str, default_who: Option<String>, open: bool) -> Result<()> {
-    let server = Server::http(bind).map_err(|e| anyhow::anyhow!("cannot bind {bind}: {e}"))?;
-    let addr = server
-        .server_addr()
-        .to_ip()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|| bind.to_string());
-    let bind_host = bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind).to_string();
-    let display_host = if bind_host == "0.0.0.0" || bind_host.is_empty() {
-        "127.0.0.1".to_string()
-    } else {
-        bind_host.clone()
-    };
-    let port = addr.rsplit_once(':').map(|(_, p)| p).unwrap_or("").to_string();
-    let url = match &default_who {
-        Some(w) => format!("http://{display_host}:{port}/?who={}", urlencoding::encode(w)),
-        None => format!("http://{display_host}:{port}/"),
-    };
-    // The banner carries the REAL bound address (`--bind 127.0.0.1:0` picks a free port), so a
-    // test or script can read it instead of guessing.
-    eprintln!(
-        "cv task serve listening on http://{addr}/ — {}{}",
-        match &default_who {
-            Some(w) => format!("inbox for {}", sanitize_line(w)),
-            None => "pass ?who=<name> (or --assignee)".to_string(),
-        },
-        if bind_host == "0.0.0.0" {
-            " · LAN-reachable: anyone who can reach this port acts as web:<who>"
-        } else {
-            ""
-        }
-    );
-    eprintln!("open {url}");
-    if open {
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-        if let Err(e) = std::process::Command::new(opener).arg(&url).spawn() {
-            eprintln!("could not open a browser ({e}); open {url} yourself");
-        }
-    }
-    let server = Arc::new(server);
-    let ctx = Arc::new(Ctx { bind_host, default_who });
-    let mut workers = Vec::new();
-    for _ in 0..2 {
-        let server = Arc::clone(&server);
-        let ctx = Arc::clone(&ctx);
-        workers.push(std::thread::spawn(move || {
-            for request in server.incoming_requests() {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(request, &ctx)));
-                if outcome.is_err() {
-                    eprintln!("cv task serve: a request handler panicked; still serving");
-                }
-            }
-        }));
-    }
-    for w in workers {
-        let _ = w.join();
-    }
-    Ok(())
-}
-
-fn header(field: &str, value: &str) -> Header {
-    Header::from_bytes(field.as_bytes(), value.as_bytes())
-        .unwrap_or_else(|_| Header::from_bytes(&b"X-Invalid"[..], &b"1"[..]).unwrap())
-}
-
-fn json_response(status: u16, body: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
-    let data = serde_json::to_vec(body).unwrap_or_else(|_| b"{\"error\":\"serialize failed\"}".to_vec());
-    let mut r = Response::from_data(data).with_status_code(status);
-    r.add_header(header("Content-Type", "application/json; charset=utf-8"));
-    r.add_header(header("Cache-Control", "no-store"));
-    r
-}
-
-fn text_response(status: u16, content_type: &str, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
-    let mut r = Response::from_data(body.into_bytes()).with_status_code(status);
-    r.add_header(header("Content-Type", content_type));
-    r.add_header(header("Cache-Control", "no-store"));
-    r
-}
-
-/// Accept `Host` when it is a loopback name, the bound host, or an IP literal; refuse any other
-/// DNS name (the rebinding vector).
-fn host_allowed(host: Option<&str>, bind_host: &str) -> bool {
-    let Some(h) = host else { return false };
-    let name = h.trim_start_matches('[');
-    let name = match name.rsplit_once(':') {
-        // `1.2.3.4:7777` / `[::1]:7777` / a bare IPv6 with many colons
-        Some((n, port)) if port.chars().all(|c| c.is_ascii_digit()) => n.trim_end_matches(']'),
-        _ => name.trim_end_matches(']'),
-    };
-    name == "localhost"
-        || name == bind_host
-        || name.parse::<std::net::IpAddr>().is_ok()
-        || (name.ends_with(".localhost"))
-}
-
-fn header_value(request: &Request, name: &str) -> Option<String> {
-    request
-        .headers()
-        .iter()
-        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
-        .map(|h| h.value.as_str().to_string())
-}
-
-struct Query(Vec<(String, String)>);
-
-impl Query {
-    fn parse(q: &str) -> Query {
-        Query(
-            q.split('&')
-                .filter(|s| !s.is_empty())
-                .map(|pair| {
-                    let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-                    let dec = |s: &str| {
-                        urlencoding::decode(&s.replace('+', " "))
-                            .map(|c| c.into_owned())
-                            .unwrap_or_else(|_| s.to_string())
-                    };
-                    (dec(k), dec(v))
-                })
-                .collect(),
-        )
-    }
-    fn get(&self, key: &str) -> Option<String> {
-        self.0
-            .iter()
-            .find(|(k, v)| k == key && !v.is_empty())
-            .map(|(_, v)| v.clone())
-    }
-}
-
-fn handle(mut request: Request, ctx: &Ctx) {
-    if !host_allowed(header_value(&request, "Host").as_deref(), &ctx.bind_host) {
-        let _ = request.respond(json_response(403, &json!({"error": "forbidden host"})));
-        return;
-    }
-    let method = request.method().clone();
-    let raw = request.url().to_string();
-    let (path, query) = raw.split_once('?').unwrap_or((raw.as_str(), ""));
-    let segments: Vec<String> = path
-        .trim_end_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            urlencoding::decode(s)
-                .map(|c| c.into_owned())
-                .unwrap_or_else(|_| s.to_string())
-        })
-        .collect();
-    let q = Query::parse(query);
-
-    // Body (POST only), capped: a note is a paragraph, not an upload.
-    let mut body = Value::Null;
-    if method == Method::Post {
-        let mut buf = String::new();
-        if request.as_reader().take(1 << 20).read_to_string(&mut buf).is_err() {
-            let _ = request.respond(json_response(400, &json!({"error": "unreadable body"})));
-            return;
-        }
-        if !buf.trim().is_empty() {
-            match serde_json::from_str::<Value>(&buf) {
-                Ok(v) => body = v,
-                Err(e) => {
-                    let _ = request.respond(json_response(400, &json!({"error": format!("body is not JSON: {e}")})));
-                    return;
-                }
-            }
-        }
-    }
-
-    let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
-    let response = match (method, parts.as_slice()) {
-        (Method::Get, []) | (Method::Get, ["index.html"]) => {
-            text_response(200, "text/html; charset=utf-8", PAGE.to_string())
-        }
-        (Method::Get, ["api", "inbox"]) => {
-            let (status, v) = api_inbox(ctx, &q);
-            json_response(status, &v)
-        }
-        (Method::Get, ["api", "task", id]) => {
-            let (status, v) = api_task(id, q.get("events").is_some());
-            json_response(status, &v)
-        }
-        (Method::Get, ["api", "events"]) => match api_events(&q) {
-            Ok(lines) => text_response(200, "application/x-ndjson; charset=utf-8", lines),
-            Err(e) => json_response(400, &json!({"error": e.to_string()})),
-        },
-        (Method::Get, ["api", "lanes"]) => {
-            let (status, v) = api_lanes(&q);
-            json_response(status, &v)
-        }
-        (Method::Get, ["api", "backlog"]) => {
-            let (status, v) = api_backlog(&q);
-            json_response(status, &v)
-        }
-        (Method::Post, ["api", "task", id, verb]) => {
+/// The inbox routes, or `None` when the path is not one of them (the read API answers it).
+pub(crate) fn route(post: bool, parts: &[&str], q: &Query, body: &Value, default_who: Option<&str>) -> Option<Answer> {
+    let json = |(status, v): (u16, Value)| Some(Answer::Json(status, v));
+    match (post, parts) {
+        (false, ["api", "inbox"]) => json(api_inbox(default_who, q)),
+        (false, ["api", "events"]) => Some(match api_events(q) {
+            Ok(lines) => Answer::Ndjson(lines),
+            Err(e) => Answer::Json(400, json!({"error": e.to_string()})),
+        }),
+        (false, ["api", "lanes"]) => json(api_lanes(q)),
+        (false, ["api", "backlog"]) => json(api_backlog(q)),
+        (true, ["api", "task", id, verb]) => {
             let who = body
                 .get("who")
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| q.get("who"))
-                .or_else(|| ctx.default_who.clone());
-            let (status, v) = match who {
-                Some(who) => api_act(id, verb, &who, &body),
-                None => (
-                    400,
-                    json!({"error": "who? pass `who` in the body or start with --assignee"}),
-                ),
-            };
-            json_response(status, &v)
+                .or_else(|| default_who.map(str::to_string));
+            json(match who {
+                Some(who) => api_act(id, verb, &who, body),
+                None => (400, json!({"error": "who? pass `who` in the body or start with --who"})),
+            })
         }
-        (_, p) if p.first() == Some(&"api") => json_response(404, &json!({"error": "no such route"})),
-        _ => text_response(404, "text/plain; charset=utf-8", "not found\n".into()),
-    };
-    let _ = request.respond(response);
+        _ => None,
+    }
 }
 
 fn with_replay(f: impl FnOnce(cv_core::task::ReplayOutcome) -> (u16, Value)) -> (u16, Value) {
@@ -273,12 +73,12 @@ fn with_replay(f: impl FnOnce(cv_core::task::ReplayOutcome) -> (u16, Value)) -> 
     }
 }
 
-fn api_inbox(ctx: &Ctx, q: &Query) -> (u16, Value) {
-    let Some(who) = q.get("who").or_else(|| ctx.default_who.clone()) else {
-        return (400, json!({"error": "who? pass ?who=<name> or start with --assignee"}));
+fn api_inbox(default_who: Option<&str>, q: &Query) -> (u16, Value) {
+    let Some(who) = q.get("who").or_else(|| default_who.map(str::to_string)) else {
+        return (400, json!({"error": "who? pass ?who=<name> or start with --who"}));
     };
     let now = Utc::now();
-    let window = if q.get("all").is_some() {
+    let window = if q.flag("all") {
         None
     } else {
         match q.get("since") {
@@ -295,35 +95,6 @@ fn api_inbox(ctx: &Ctx, q: &Query) -> (u16, Value) {
         let mut v = serde_json::to_value(&page).expect("page serializes");
         if let Some(o) = v.as_object_mut() {
             o.insert("warnings".into(), json!(outcome.warnings));
-        }
-        (200, v)
-    })
-}
-
-fn api_task(id: &str, events: bool) -> (u16, Value) {
-    with_replay(|outcome| {
-        let id = match task::resolve_id(&outcome.model, id) {
-            Ok(id) => id.to_string(),
-            Err(e) => return (404, json!({"error": e})),
-        };
-        let t = &outcome.model.tasks[&id];
-        let who = t.assignee.clone().unwrap_or_default();
-        let page = task::inbox_page(&outcome, &who, None, None, false, Utc::now());
-        let item = page
-            .items
-            .iter()
-            .chain(page.closed.iter())
-            .find(|i| i.id == id)
-            .cloned();
-        let mut v = json!({
-            "task": t,
-            "effective_state": task::effective_display(t),
-            "item": item,
-            "warnings": outcome.warnings,
-        });
-        if events {
-            let history: Vec<&task::TaskEvent> = outcome.events.iter().filter(|e| e.task_id == id).collect();
-            v["events"] = json!(history);
         }
         (200, v)
     })
@@ -371,7 +142,7 @@ fn api_backlog(q: &Query) -> (u16, Value) {
             state: q.get("state"),
             assignee: q.get("assignee"),
             repo: q.get("repo").map(std::path::PathBuf::from),
-            include_terminal: q.get("all").is_some(),
+            include_terminal: q.flag("all"),
             tag: q.get("tag"),
             touched_since: None,
             or_involving: None,
@@ -636,30 +407,4 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
         "task_state": state,
         "warnings": after.warnings,
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn host_check_admits_loopback_and_ip_literals_and_refuses_dns_names() {
-        assert!(host_allowed(Some("127.0.0.1:7777"), "127.0.0.1"));
-        assert!(host_allowed(Some("localhost:7777"), "127.0.0.1"));
-        assert!(host_allowed(Some("192.168.1.20:7777"), "0.0.0.0"), "a phone on the LAN");
-        assert!(host_allowed(Some("[::1]:7777"), "127.0.0.1"));
-        assert!(
-            !host_allowed(Some("evil.example:7777"), "0.0.0.0"),
-            "DNS rebinding vector"
-        );
-        assert!(!host_allowed(None, "127.0.0.1"));
-    }
-
-    #[test]
-    fn query_decodes_plus_and_percent() {
-        let q = Query::parse("who=ember&since=2h&x=a+b%21");
-        assert_eq!(q.get("who").as_deref(), Some("ember"));
-        assert_eq!(q.get("x").as_deref(), Some("a b!"));
-        assert_eq!(q.get("missing"), None);
-    }
 }
