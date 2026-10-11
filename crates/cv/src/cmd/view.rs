@@ -491,24 +491,13 @@ pub(crate) fn cmd_export(
             )?;
             *stats.borrow_mut() = st;
         }
-        // HTML is one self-contained document: windowed, but never cut mid-page.
         "html" => {
-            if window.max_bytes.is_some() {
-                bail!("--max-bytes does not apply to --format html — pick a window (--first/--last/--range/--around) instead");
-            }
-            let mut session = adapter.parse(&r)?;
-            if let Some(rg) = range {
-                let (s, e) = clamp(rg, session.messages.len());
-                session.messages = session.messages.drain(s..e).collect();
-            }
-            if redact {
-                let (clean, st) = cv_core::redact::redact_with(&session, &opts);
-                session = clean;
-                *stats.borrow_mut() = st;
-            }
-            print!("{}", cv_core::html::to_html(&session));
+            return usage(
+                "`cv export --format html` was removed in 0.15.0 — `cv share <id> [--out FILE]` writes the \
+                 self-contained, redacted HTML artifact (`--no-redact` to keep secrets)",
+            )
         }
-        other => bail!("unknown format {other:?} (use md, json, or html)"),
+        other => bail!("unknown format {other:?} (use md or json; `cv share` for html)"),
     }
     if redact {
         eprintln!("{}", redaction_summary(&stats.borrow()));

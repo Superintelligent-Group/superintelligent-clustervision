@@ -813,10 +813,10 @@ enum Cmd {
     },
 
     // ───────────────────────────── Export ─────────────────────────────
-    /// Export a session to markdown, JSON, or self-contained HTML (stdout).
+    /// Export a session to markdown or OpenSession JSON (stdout); `cv share` is the HTML artifact.
     Export {
         id: String,
-        /// Output format: `md` (default), `json`, or `html`.
+        /// Output format: `md` (default) or `json`.
         #[arg(long, default_value = "md")]
         format: String,
         #[arg(long)]

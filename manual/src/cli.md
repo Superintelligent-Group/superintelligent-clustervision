@@ -754,7 +754,6 @@ Render a session to a file format on stdout. Redirect it wherever you like.
 ```sh
 cv export da9174f4 > session.md               # markdown (default)
 cv export da9174f4 --format json > s.json
-cv export da9174f4 --format html > s.html     # one self-contained file
 cv export da9174f4 --last 100 --format md     # windows work here too
 cv export da9174f4 --redact > safe.md         # secrets/PII scrubbed first; counts on stderr
 ```
@@ -763,7 +762,7 @@ cv export da9174f4 --redact > safe.md         # secrets/PII scrubbed first; coun
 ✦ redacted 7 item(s): 2 api_key, 1 private_key, 0 jwt, 3 email, 1 blob, 0 assignment
 ```
 
-- `--format <md|json|html>` — output format (default `md`). `html` is a single self-contained page you can open or send to someone.
+- `--format <md|json>` — output format (default `md`). For a self-contained HTML page, [`cv share`](#cv-share) is the renderer: it streams and redacts.
 - `--redact` — scrub secrets and PII before rendering: API keys, private keys, JWTs, emails, opaque blobs, `KEY=value` assignments. The same pass [`cv share`](#cv-share) runs; the per-class tally goes to stderr so stdout stays the document. The thing to reach for before you paste a transcript into an issue. (This replaces `cv redact`.)
 - the five [window flags](#message-windows) — identical to `cv show`'s.
 

@@ -688,10 +688,11 @@ fn export_formats() {
     assert!(v.get("open_session").is_none(), "{out}");
     assert_eq!(v["id"], "alphasess", "{out}");
 
-    // HTML: self-contained document with the transcript in it.
-    let (out, _) = w.cv_ok(&["export", "alphasess", "--format", "html"]);
-    assert!(out.contains("<html"), "{out}");
-    assert!(out.contains("zebrafish"), "{out}");
+    // HTML left `export` for `share` (the streaming, redacting renderer): the old spelling
+    // points there and exits 2.
+    let (ok, code, _, err) = w.cv(&["export", "alphasess", "--format", "html"]);
+    assert!(!ok && code == 2, "{err}");
+    assert!(err.contains("cv share <id>"), "{err}");
 
     // Unknown format is an error, not a silent default.
     let (_, err) = w.cv_fails(&["export", "alphasess", "--format", "docx"]);
