@@ -31,6 +31,6 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Cross-harness AI session viewer.",
-    "longDescription": "clustervision wraps the static web session viewer (timeline, compare, stats, splice/loom composer, fleet dashboard) and launches a local `cv serve` API on startup, plus native redaction and zip ingest."
+    "longDescription": "clustervision wraps the static web session viewer (timeline, compare, stats, splice composer, fleet dashboard), reads sessions through the in-process read API, and launches a local `cv serve` on startup."
   }
 }

@@ -1,21 +1,18 @@
 //! clustervision desktop app — the Tauri v2 runtime.
 //!
-//! This crate is a thin native shell around the *existing* static web UI (`<repo>/web/`, wired via
+//! This crate is a window around the *existing* static web UI (`<repo>/web/`, wired via
 //! `frontendDist` in `tauri.conf.json`). It adds the things the browser-only app can't do:
 //!
-//!   1. **One native read command, `api(path, query)`**, which calls `cv_core::api::route_json` —
+//!   1. **One native command, `api(path, query)`**, which calls `cv_core::api::route_json` —
 //!      the same function `cv serve` answers `/api/*` with — in-process. No HTTP (the webview's
 //!      cross-origin fetch to `http://localhost` is unreliable) and no second implementation: a
 //!      session cannot look different depending on which door it came through.
-//!   2. **Native `redact` and `ingest_zip`** — pure, offline calls into `cv_core`, so redaction and
-//!      zip ingestion work without the WASM module. (LLM generation lives in the web loom's
-//!      OpenRouter path; `cv splice --generate` is the CLI's.)
-//!   3. **Launches `cv serve --port 7777` on startup** so the bundled fleet dashboard (which
+//!   2. **Launches `cv serve --port 7777` on startup** so the bundled fleet dashboard (which
 //!      fetches `http://localhost:7777`) works unchanged. The child is killed on exit.
-//!   4. A **native application menu** (File / Edit / View / Help) — including **File → Open zip…**
-//!      which runs a native file dialog, ingests the zip in Rust, and emits the
+//!   3. A **native application menu** (File / Edit / View / Help) — including **File → Open zip…**
+//!      which runs a native file dialog, ingests the zip in Rust (no WASM module), and emits the
 //!      `cv://open-sessions` Tauri event the web UI listens for.
-//!   5. **Window state persistence** (size/position across launches) via
+//!   4. **Window state persistence** (size/position across launches) via
 //!      `tauri-plugin-window-state`.
 //!
 //! ### cv-serve wiring approach
@@ -37,8 +34,6 @@ use tauri::menu::{AboutMetadataBuilder, Menu, MenuEvent, MenuItem, PredefinedMen
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
-use cv_core::Session;
-
 /// The port the bundled web fleet-dashboard expects `cv serve` on.
 const SERVE_PORT: u16 = 7777;
 
@@ -55,39 +50,11 @@ const WEB_DEMO_URL: &str = "https://emberian.github.io/clustervision/";
 struct ServeChild(Mutex<Option<Child>>);
 
 // ---------------------------------------------------------------------------
-// Native commands — invoked from JS via `window.__TAURI__.core.invoke(name, args)`.
+// Zip ingest (File → Open zip…)
 // ---------------------------------------------------------------------------
 
-/// Parse a `Session` from a JSON string (the IR the web UI already speaks), mapping serde errors
-/// to a readable string so the JS side gets a useful message.
-fn parse_session(session_json: &str) -> Result<Session, String> {
-    serde_json::from_str::<Session>(session_json).map_err(|e| format!("invalid session JSON: {e}"))
-}
-
-/// Scrub secrets/PII from a session via `cv_core::redact`, returning the redacted session as JSON.
-///
-/// Pure + offline — no API key needed.
-#[tauri::command]
-fn redact(session_json: String) -> Result<String, String> {
-    let session = parse_session(&session_json)?;
-    let redacted = cv_core::redact::redact(&session);
-    serde_json::to_string(&redacted).map_err(|e| format!("serializing redacted session: {e}"))
-}
-
-/// Read a `.zip` of exported harness logs from `path`, unzip it in-memory, run
-/// `cv_core::ingest::ingest_files`, and return the parsed sessions as a JSON string (a
-/// `Session[]` array — the exact shape the web UI's WASM `ingest_zip` produces).
-///
-/// Pure + offline: no API key, and no on-disk extraction (everything is held in memory). This is
-/// the native equivalent of the browser's WASM ingest path, so file-open works without WASM.
-#[tauri::command]
-fn ingest_zip(path: String) -> Result<String, String> {
-    let bytes = std::fs::read(&path).map_err(|e| format!("reading {path}: {e}"))?;
-    ingest_zip_bytes(&bytes)
-}
-
-/// Unzip `bytes` in-memory and ingest the contained files into `Session[]` JSON. Factored out so
-/// both the `ingest_zip` command and the File → Open zip… menu handler share one path.
+/// Unzip `bytes` in-memory and ingest the contained files into `Session[]` JSON — the shape the
+/// web UI's WASM `ingest_zip` produces, via the same `cv_core::ingest::ingest_files`.
 fn ingest_zip_bytes(bytes: &[u8]) -> Result<String, String> {
     let reader = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("not a readable zip: {e}"))?;
@@ -360,7 +327,7 @@ pub fn run() {
         // Persist each window's size/position/etc. across launches and restore on startup.
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(ServeChild::default())
-        .invoke_handler(tauri::generate_handler![redact, ingest_zip, api])
+        .invoke_handler(tauri::generate_handler![api])
         .on_menu_event(handle_menu_event)
         .setup(|app| {
             // Install the native application menu.
@@ -390,13 +357,14 @@ pub fn run() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — cover the native-command *logic* (parse/ingest/redact/binary lookup). The GUI shell
+// Tests — cover the native logic (zip ingest, the api command, binary lookup). The GUI shell
 // (menu, window, event loop) can't be driven headlessly, but these are the parts with real bug
 // surface, and they run without a webview via plain `cargo test`.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cv_core::Session;
     use std::io::Write as _;
 
     /// Build an in-memory zip from `(name, bytes)` entries using `Stored` (no compression feature
@@ -447,30 +415,7 @@ mod tests {
         assert!(sessions.is_empty(), "nothing recognizable → []");
     }
 
-    #[test]
-    fn parse_session_roundtrips_and_reports_errors() {
-        let zip = make_zip(&[("s.jsonl", CLAUDE_JSONL.as_bytes())]);
-        let json = ingest_zip_bytes(&zip).unwrap();
-        let one = &serde_json::from_str::<Vec<Session>>(&json).unwrap()[0];
-        let one_json = serde_json::to_string(one).unwrap();
-        let parsed = parse_session(&one_json).expect("a session we just serialized must parse");
-        assert_eq!(parsed.id, one.id);
 
-        let err = parse_session("{ not json").unwrap_err();
-        assert!(err.contains("invalid session JSON"), "got: {err}");
-    }
-
-    #[test]
-    fn redact_command_runs_offline_and_returns_valid_json() {
-        let zip = make_zip(&[("s.jsonl", CLAUDE_JSONL.as_bytes())]);
-        let session_json = {
-            let one = &serde_json::from_str::<Vec<Session>>(&ingest_zip_bytes(&zip).unwrap()).unwrap()[0];
-            serde_json::to_string(one).unwrap()
-        };
-        let out = redact(session_json).expect("redact is pure/offline and shouldn't fail");
-        // Output must be a valid Session again (so the UI can render it).
-        serde_json::from_str::<Session>(&out).expect("redacted output is a valid Session");
-    }
 
     #[test]
     fn api_command_routes_onto_the_read_api() {

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Desktop app: the unused native `redact` and `ingest_zip` commands and the `cv-search` dependency are gone (116 lock entries); File → Open zip is unchanged.
 - **`cv tree`, `cv prompts`, `cv compaction` are `show` views**: `show --tree`, `show --kind prompt,answer`, `show --kind compaction_boundary,compaction_summary [--summaries]`; old names exit 2.
 - Manual: a command reference and the MCP roster generated from the binary at build time; `cli.md` keeps examples and reasons, no flag lists.
 - Manual: twenty chapters are fifteen (intro, app, share, daemon, integrations, opensession merged into neighbours); the old page URLs redirect.

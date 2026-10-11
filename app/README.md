@@ -1,10 +1,9 @@
 # clustervision — desktop app (Tauri v2)
 
-A single clickable cross-platform desktop application that wraps clustervision:
-the existing **static web UI** (session viewer, timeline, compare, stats, OpenSession,
-splice/loom composer, fleet dashboard) plus **native Rust backend power** (redact,
-**native zip ingest**), a **native application menu**,
-**persisted window state**, and an auto-launched local fleet API.
+A window around clustervision's **static web UI** (session viewer, timeline, compare, stats,
+splice composer, fleet dashboard): sessions read through the in-process read API, **native zip
+ingest** from File → Open, a **native application menu**, **persisted window state**, and an
+auto-launched local `cv serve`.
 
 ## Layout
 
@@ -20,7 +19,7 @@ app/
     ├── icons/           ← app icon set (crystal-ball theme)
     └── src/
         ├── main.rs      ← thin binary entry point
-        └── lib.rs       ← Tauri runtime: native commands + cv-serve lifecycle
+        └── lib.rs       ← Tauri runtime: the `api` command, menu, zip open, cv-serve lifecycle
 ```
 
 ### Why its own workspace
@@ -28,7 +27,7 @@ app/
 cargo workspace**, so it is *excluded* from the main clustervision workspace at the repo
 root. Building or CI-testing the main crates never compiles the app (which pulls in the
 heavy WebKit/Tauri stack), and vice-versa. The app still depends on the real crates by
-relative path: `cv-core`, `cv-search` at `../../crates/...`. Note that `cv-core`'s
+relative path: `cv-core` at `../../crates/cv-core`. Note that `cv-core`'s
 **package** name is `clustervision-core` (renamed for crates.io in 0.10), so the manifest says
 `cv-core = { path = "../../crates/cv-core", package = "clustervision-core" }` — the same form
 `crates/cv/Cargo.toml` uses. Asking for a bare `cv-core` fails resolution instantly, and because
@@ -39,19 +38,10 @@ this workspace is excluded from the root one, that went unnoticed for a whole re
 No build step. `frontendDist` in `tauri.conf.json` points at the existing static web app
 (`../../web`). The desktop window simply loads `web/index.html`. We do **not** modify `web/`.
 
-## Native commands
-
-Invoke from JS with `window.__TAURI__.core.invoke("<name>", { ... })`:
-
-| Command         | Args                                          | Returns                         | Backed by              |
-|-----------------|-----------------------------------------------|---------------------------------|------------------------|
-| `redact`        | `{ sessionJson: string }`                     | redacted Session as JSON string | `cv_core::redact`      |
-| `ingest_zip`    | `{ path: string }`                            | `Session[]` as a JSON string    | `cv_core::ingest::ingest_files` |
-
-### Reading the machine's sessions — one `api` command
+## The native command: `api`
 
 The desktop app answers session reads **natively** instead of fetching `http://localhost:7777`
-(the webview's cross-origin fetch to localhost is unreliable). It has exactly one read command:
+(the webview's cross-origin fetch to localhost is unreliable). It has exactly one command:
 
 | Command | Args | Returns |
 |---------|------|---------|
@@ -64,15 +54,8 @@ routes and shapes are the ones in the manual's [server chapter](../manual/src/se
 The web UI calls it through `apiGet(path, params)` in `web/components/hydrate.js`, which uses
 `fetch` against `cv serve` in a browser instead.
 
-`redact` and `ingest_zip` are pure and offline (no key needed). Both take/return the **same
-Session IR JSON** the web UI already speaks (`serde_json` round-trip of `cv_core::Session`).
-Generation (the loom's ⚡) is the web UI's OpenRouter path in the app too; `cv splice --generate`
-is the CLI's, with `LMSTUDIO_API_BASE` for a free local model.
-
-`ingest_zip` reads a `.zip` from disk, unzips it **in-memory** (the `zip` crate, deflate only),
-and runs the same `cv_core::ingest::ingest_files` the browser's WASM path uses — so native
-file-open works **without** the WASM module. It returns the `Session[]` array as a JSON string,
-the exact shape the web UI's WASM `ingest_zip` produces.
+Generation (the splice composer's ⚡) is the web UI's OpenRouter path in the app too;
+`cv splice --generate` is the CLI's, with `LMSTUDIO_API_BASE` for a free local model.
 
 ## Native application menu
 
@@ -80,7 +63,8 @@ The app installs a native [`Menu`](https://docs.rs/tauri/2/tauri/menu/) in `setu
 `on_menu_event`):
 
 - **File → Open zip…** (`Cmd/Ctrl+O`) — native file dialog (`tauri-plugin-dialog`) → in-memory
-  unzip + ingest → **emits the `cv://open-sessions` Tauri event** with the `Session[]` JSON
+  unzip (the `zip` crate, deflate only) + the same `cv_core::ingest::ingest_files` the browser's
+  WASM path uses → **emits the `cv://open-sessions` Tauri event** with the `Session[]` JSON
   payload. The `web/` UI can `listen("cv://open-sessions", …)` to load the sessions without WASM.
   Ingest/read errors surface in a native error dialog. The picker + ingest run off the main
   thread so the event loop never blocks.
@@ -158,7 +142,7 @@ Requirements:
 
 - `cargo build` **and** `cargo build --release` in `app/src-tauri` **compile cleanly** — Tauri v2
   (with the `devtools` feature) + system WebKit on macOS; the dialog, window-state, and shell
-  plugins; the `zip` crate; and cv-core / cv-search via relative paths. No warnings from
+  plugins; the `zip` crate; and cv-core via a relative path. No warnings from
   `clustervision-app` itself.
 - The app is **excluded from the main repo workspace** (`cargo metadata` at the repo root does
   not list `clustervision-app`).
