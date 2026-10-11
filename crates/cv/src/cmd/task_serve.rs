@@ -47,9 +47,13 @@ const PAGE: &str = include_str!("task_inbox.html");
 struct Ctx {
     bind_host: String,
     default_who: Option<String>,
+    /// The TOFU token presented on every action (`--token`, else `$CV_TOKEN`). The page acts as
+    /// `web:<who>`, which the store resolves to `<who>` before checking bindings — so a bound
+    /// decider's page needs their token, exactly as their shell does.
+    token: Option<String>,
 }
 
-pub(crate) fn run(bind: &str, default_who: Option<String>, open: bool) -> Result<()> {
+pub(crate) fn run(bind: &str, default_who: Option<String>, open: bool, token: Option<String>) -> Result<()> {
     let server = Server::http(bind).map_err(|e| anyhow::anyhow!("cannot bind {bind}: {e}"))?;
     let addr = server
         .server_addr()
@@ -89,7 +93,11 @@ pub(crate) fn run(bind: &str, default_who: Option<String>, open: bool) -> Result
         }
     }
     let server = Arc::new(server);
-    let ctx = Arc::new(Ctx { bind_host, default_who });
+    let ctx = Arc::new(Ctx {
+        bind_host,
+        default_who,
+        token: task::token(token),
+    });
     let mut workers = Vec::new();
     for _ in 0..2 {
         let server = Arc::clone(&server);
@@ -252,7 +260,7 @@ fn handle(mut request: Request, ctx: &Ctx) {
                 .or_else(|| q.get("who"))
                 .or_else(|| ctx.default_who.clone());
             let (status, v) = match who {
-                Some(who) => api_act(id, verb, &who, &body),
+                Some(who) => api_act(id, verb, &who, &body, ctx.token.clone()),
                 None => (
                     400,
                     json!({"error": "who? pass `who` in the body or start with --assignee"}),
@@ -449,21 +457,21 @@ fn api_events(q: &Query) -> Result<String> {
 }
 
 /// One write, as `web:<who>`: the same `TaskEventKind`s the CLI verbs append.
-fn api_act(id: &str, verb: &str, who: &str, body: &Value) -> (u16, Value) {
-    match act(id, verb, who, body) {
+fn api_act(id: &str, verb: &str, who: &str, body: &Value, token: Option<String>) -> (u16, Value) {
+    match act(id, verb, who, body, token) {
         Ok(v) => (200, v),
         Err(e) => (400, json!({"error": e.to_string()})),
     }
 }
 
-fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
+fn act(id: &str, verb: &str, who: &str, body: &Value, token: Option<String>) -> Result<Value> {
     let outcome = task::replay()?;
     let id = task::resolve_id(&outcome.model, id)
         .map_err(|e| anyhow::anyhow!(e))?
         .to_string();
     let t = &outcome.model.tasks[&id];
     let by = format!("web:{}", who.trim());
-    let store = TaskStore::default_store();
+    let store = TaskStore::default_store().with_token(token.clone());
     let text = |k: &str| {
         body.get(k)
             .and_then(Value::as_str)
@@ -475,7 +483,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             let accept = body.get("accept_default").and_then(Value::as_bool).unwrap_or(false);
             let confirm = body.get("confirm").and_then(Value::as_bool).unwrap_or(false);
             let answer = task_ops::Answer::from_flags(text("choice"), accept, confirm)?;
-            let out = task_ops::resolve(&store, &outcome.model, &by, None, &id, answer, text("note"), false)?;
+            let out = task_ops::resolve(&store, &outcome.model, &by, token, &id, answer, text("note"), false)?;
             vec![out.event]
         }
         "done" => {

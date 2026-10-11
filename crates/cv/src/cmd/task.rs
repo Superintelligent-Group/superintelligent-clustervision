@@ -475,6 +475,10 @@ pub(crate) enum TaskCmd {
         /// Open the page in the default browser once the server is up.
         #[arg(long)]
         open: bool,
+        /// TOFU token presented on every page action (the page acts as `web:<who>`, which is
+        /// `<who>` to the store's bindings). Default: $CV_TOKEN.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Candidates for closing, from what git and the filesystem say — never closes anything.
     /// Lists non-terminal tasks whose `--issue` path no longer exists, or whose title/body names a
@@ -1724,9 +1728,14 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             };
             print_events(&outcome, &f, text)
         }
-        TaskCmd::Serve { bind, assignee, open } => {
+        TaskCmd::Serve {
+            bind,
+            assignee,
+            open,
+            token,
+        } => {
             let who = assignee.or_else(task::default_endpoint);
-            super::task_serve::run(&bind, who, open)
+            super::task_serve::run(&bind, who, open, token)
         }
         TaskCmd::Debt { repo, json } => {
             let outcome = replay_loud()?;

@@ -116,6 +116,10 @@ pub(crate) fn authorize(dir: &Path, by: &str, identity_bearing: bool, token: Opt
     if !identity_bearing {
         return Ok(Decision::Proceed);
     }
+    // Bindings are keyed by the CANONICAL endpoint: `web:ember` is ember acting through the inbox
+    // page (the reducer treats them as one party), so it must present ember's token — otherwise
+    // the alias was a tokenless path to every identity-bearing verb a bound endpoint has.
+    let by = super::project::canonical_actor(by);
     let bindings = Bindings::load(dir)?;
     match (bindings.endpoints.get(by), token) {
         // Bound + token presented: authenticate against the first-use binding.
@@ -216,6 +220,27 @@ mod tests {
         // Bound + no token → reject (opted-in endpoint must always present its token).
         let err = authorize(&dir, "agent:w", true, None).unwrap_err();
         assert!(err.to_string().contains("token-bound"), "{err}");
+    }
+
+    #[test]
+    fn web_alias_is_gated_by_its_canonical_endpoints_binding() {
+        let dir = tmp_dir();
+        commit(&dir, "ember", &token_hash("s3cret")).unwrap();
+        // `web:ember` is ember (the reducer's `same_actor` says so), so without ember's token it is
+        // an impersonation, not a fresh unbound endpoint.
+        let err = authorize(&dir, "web:ember", true, None).unwrap_err();
+        assert!(err.to_string().contains("token-bound"), "{err}");
+        let err = authorize(&dir, "web:ember", true, Some("guess")).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+        assert_eq!(
+            authorize(&dir, "web:ember", true, Some("s3cret")).unwrap(),
+            Decision::Proceed
+        );
+        // First use through the alias binds the canonical endpoint, not the alias.
+        let Decision::Bind { endpoint, .. } = authorize(&dir, "web:rex", true, Some("t")).unwrap() else {
+            panic!("first use with a token should bind");
+        };
+        assert_eq!(endpoint, "rex");
     }
 
     #[test]

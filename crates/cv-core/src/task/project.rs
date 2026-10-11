@@ -130,7 +130,15 @@ pub fn involves(t: &TaskProjection, endpoint: &str) -> bool {
 /// through the web inbox (`web:ember` ≡ `ember`). Everything else is distinct — `lane:x` is not
 /// `orchestrator:x`.
 pub fn same_actor(a: &str, b: &str) -> bool {
-    a == b || a.strip_prefix("web:") == Some(b) || b.strip_prefix("web:") == Some(a)
+    canonical_actor(a) == canonical_actor(b)
+}
+
+/// The endpoint an actor string stands for: `web:ember` acts as `ember`. This is the ONE place the
+/// alias is defined — the reducer's holder checks ([`same_actor`]) and the store's token gate
+/// (`identity::authorize`) both resolve through it, so an alias can never be a way around a
+/// binding its canonical endpoint made.
+pub fn canonical_actor(a: &str) -> &str {
+    a.strip_prefix("web:").unwrap_or(a)
 }
 
 /// Parse a `--since` argument into an instant: a duration back from `now` (`30m`, `2h`, `3d`,
