@@ -539,10 +539,12 @@ pub(crate) fn cmd_lanes(
 
 // ===================== cv deferrals =====================
 
-/// The phrases an orchestrator uses when it decides *not* to do something now. Each is a label
-/// plus the regex that catches its spellings; every match in assistant text is a deferral until a
-/// task says otherwise.
-pub(crate) const DEFERRAL_PHRASES: &[(&str, &str)] = &[
+/// The embedded phrase table: the spellings an orchestrator uses when it decides *not* to do
+/// something now, each a label plus the regex that catches it (compiled case-insensitively). Every
+/// match in assistant text is a deferral until a task says otherwise. This is the default only —
+/// a project's own vocabulary belongs in [`phrases_file`] (one `label = regex` per line), the
+/// way `prune --declassify-tokens-file` keeps term lists out of cv's source.
+const DEFAULT_PHRASES: &[(&str, &str)] = &[
     (
         "later lane",
         r"\b(a |one |the )?(later|separate|follow-?up|future) lane\b",
@@ -553,10 +555,7 @@ pub(crate) const DEFERRAL_PHRASES: &[(&str, &str)] = &[
         "queued",
         r"\b(queued|queue (it|this|that|them|these|those) (for|behind|after|until|up))\b",
     ),
-    (
-        "ember's call",
-        r"\b(ember.?s call|your call|ember (decides|to decide|chooses))\b",
-    ),
+    ("your call", r"\b(your|the (maintainer|user|owner)'?s) call\b"),
     ("decision for", r"\bdecision (for|is yours|to make)\b"),
     (
         "integrator item",
@@ -572,14 +571,75 @@ pub(crate) const DEFERRAL_PHRASES: &[(&str, &str)] = &[
     ("out of scope", r"\bout of scope\b"),
 ];
 
+/// The default table's labels, in the order `cv deferrals` tries them (`cv schema` publishes them).
+pub(crate) fn default_phrase_labels() -> Vec<&'static str> {
+    DEFAULT_PHRASES.iter().map(|(l, _)| *l).collect()
+}
+
+/// `<config dir>/deferrals.txt`: the phrase table a project keeps outside cv's source. Used when
+/// it exists and no `--phrases-file` is given.
+fn phrases_file() -> Option<std::path::PathBuf> {
+    cv_core::config::config_dir().map(|d| d.join("deferrals.txt"))
+}
+
+/// Parse a phrase file: one `label = regex` per line, `#` to end of line is a comment, blank lines
+/// ignored. The regex is compiled case-insensitively; a line that does not compile names itself.
+fn parse_phrases(body: &str, origin: &str) -> Result<Vec<(String, Regex)>> {
+    let mut out = Vec::new();
+    for (n, raw) in body.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((label, re)) = line.split_once('=') else {
+            bail!("{origin}:{}: expected `label = regex`, got {raw:?}", n + 1);
+        };
+        let (label, re) = (label.trim(), re.trim());
+        if label.is_empty() || re.is_empty() {
+            bail!("{origin}:{}: expected `label = regex`, got {raw:?}", n + 1);
+        }
+        let compiled = Regex::new(&format!("(?i){re}")).with_context(|| format!("{origin}:{}: regex {re:?}", n + 1))?;
+        out.push((label.to_string(), compiled));
+    }
+    if out.is_empty() {
+        bail!("{origin}: no phrases (one `label = regex` per line)");
+    }
+    Ok(out)
+}
+
+/// The phrase table in force: `--phrases-file`, else the config dir's `deferrals.txt` if it exists,
+/// else the embedded default.
+fn load_phrases(file: Option<&std::path::Path>) -> Result<Vec<(String, Regex)>> {
+    let path = match file {
+        Some(p) => Some(p.to_path_buf()),
+        None => phrases_file().filter(|p| p.is_file()),
+    };
+    match path {
+        Some(p) => {
+            let body =
+                std::fs::read_to_string(&p).with_context(|| format!("reading --phrases-file {}", p.display()))?;
+            parse_phrases(&body, &p.display().to_string())
+        }
+        None => Ok(DEFAULT_PHRASES
+            .iter()
+            .map(|(label, re)| {
+                (
+                    label.to_string(),
+                    Regex::new(&format!("(?i){re}")).expect("default deferral phrase compiles"),
+                )
+            })
+            .collect()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct Deferral {
     /// Message index in the session.
     index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<DateTime<Utc>>,
-    /// Which phrase fired.
-    phrase: &'static str,
+    /// Which phrase fired (its label).
+    phrase: String,
     /// ~100 chars centred on the match, newlines flattened.
     context: String,
     /// The sentence the match sits in — what the task cross-reference is scored against.
@@ -597,18 +657,6 @@ struct TaskMatch {
     state: String,
     /// The significant words the deferral and the task share.
     shared: Vec<String>,
-}
-
-fn phrase_regexes() -> Vec<(&'static str, Regex)> {
-    DEFERRAL_PHRASES
-        .iter()
-        .map(|(label, re)| {
-            (
-                *label,
-                Regex::new(&format!("(?i){re}")).expect("deferral phrase compiles"),
-            )
-        })
-        .collect()
 }
 
 /// The sentence of `text` containing byte range `at` (split on `.`/`!`/`?`/newline), capped.
@@ -703,7 +751,6 @@ const STOPWORDS: &[&str] = &[
     "followup",
     "queued",
     "queue",
-    "ember",
     "call",
     "decision",
     "integrator",
@@ -788,8 +835,12 @@ fn best_task(model: &cv_core::task::TaskReadModel, sentence: &str) -> Option<Tas
     })
 }
 
-fn collect_deferrals(r: &SessionRef, adapter: &dyn cv_core::harness::Adapter, since: usize) -> Result<Vec<Deferral>> {
-    let regexes = phrase_regexes();
+fn collect_deferrals(
+    r: &SessionRef,
+    adapter: &dyn cv_core::harness::Adapter,
+    since: usize,
+    regexes: &[(String, Regex)],
+) -> Result<Vec<Deferral>> {
     let mut out = Vec::new();
     let mut idx = 0usize;
     adapter.stream(r, &ParseOptions::default(), &mut |m: Message| {
@@ -802,13 +853,13 @@ fn collect_deferrals(r: &SessionRef, adapter: &dyn cv_core::harness::Adapter, si
             return Flow::Continue;
         };
         // One hit per phrase per message: the same promise repeated in one reply is one deferral.
-        for (label, re) in &regexes {
+        for (label, re) in regexes {
             if let Some(mm) = re.find(&text) {
                 let at = (mm.start(), mm.end());
                 out.push(Deferral {
                     index: i,
                     timestamp: m.timestamp,
-                    phrase: label,
+                    phrase: label.clone(),
                     context: context_around(&text, at),
                     sentence: sentence_around(&text, at),
                     matched: None,
@@ -826,11 +877,13 @@ pub(crate) fn cmd_deferrals(
     harness: Option<String>,
     since: Option<usize>,
     open_tasks: bool,
+    phrases_file: Option<std::path::PathBuf>,
     json: bool,
 ) -> Result<bool> {
     let want = parse_harness(&harness)?;
     let (r, adapter) = resolve(id, want)?;
-    let mut found = collect_deferrals(&r, adapter.as_ref(), since.unwrap_or(0))?;
+    let regexes = load_phrases(phrases_file.as_deref())?;
+    let mut found = collect_deferrals(&r, adapter.as_ref(), since.unwrap_or(0), &regexes)?;
 
     if open_tasks {
         let outcome = cv_core::task::replay()?;
@@ -911,12 +964,12 @@ mod tests {
 
     #[test]
     fn phrases_compile_and_catch_the_real_sentences() {
-        let regexes = phrase_regexes();
-        let hits = |s: &str| -> Vec<&'static str> {
+        let regexes = load_default();
+        let hits = |s: &str| -> Vec<&str> {
             regexes
                 .iter()
                 .filter(|(_, re)| re.is_match(s))
-                .map(|(l, _)| *l)
+                .map(|(l, _)| l.as_str())
                 .collect()
         };
         assert!(hits("an inconsistency to settle in one later lane, not tonight.").contains(&"later lane"));
@@ -926,7 +979,8 @@ mod tests {
         assert!(!hits("a queue is not an architecture").contains(&"queued"));
         assert!(hits("is queued for the standing integrator right after FINAL-1 lands").contains(&"after FINAL"));
         assert!(hits("is queued for the standing integrator right after FINAL-1 lands").contains(&"when X lands"));
-        assert!(hits("that one is ember's call").contains(&"ember's call"));
+        assert!(hits("that one is your call").contains(&"your call"));
+        assert!(hits("the maintainer's call, not mine").contains(&"your call"));
         assert!(hits("I'll defer the IPA leg to a later pass").contains(&"deferred"));
         assert!(hits("I'll defer the IPA leg to a later pass").contains(&"later pass"));
         assert!(
@@ -934,6 +988,38 @@ mod tests {
             "{:?}",
             hits("the tests pass and the build is green")
         );
+    }
+
+    /// The embedded table, compiled — what `load_phrases(None)` yields when no config file exists.
+    fn load_default() -> Vec<(String, Regex)> {
+        DEFAULT_PHRASES
+            .iter()
+            .map(|(l, re)| (l.to_string(), Regex::new(&format!("(?i){re}")).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn phrase_files_parse_in_order_and_name_their_errors() {
+        let got = parse_phrases(
+            "# a project's own vocabulary\nparking lot = \\bparking lot\\b   # trailing note\n\nnext sprint = \\bnext sprint\\b\n",
+            "t",
+        )
+        .unwrap();
+        assert_eq!(
+            got.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
+            ["parking lot", "next sprint"]
+        );
+        assert!(got[0].1.is_match("into the PARKING LOT it goes"), "case-insensitive");
+        let err = parse_phrases("no equals sign here\n", "t").unwrap_err().to_string();
+        assert!(err.contains("t:1") && err.contains("label = regex"), "{err}");
+        let err = parse_phrases("broken = \\b(unclosed\n", "t").unwrap_err().to_string();
+        assert!(err.contains("t:1"), "{err}");
+        assert!(parse_phrases("# only comments\n", "t").is_err());
+        // A named file that does not exist is an error naming the path, never a silent default.
+        let err = load_phrases(Some(std::path::Path::new("/nonexistent/deferrals.txt")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("phrases-file"), "{err}");
     }
 
     #[test]

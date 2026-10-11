@@ -426,13 +426,22 @@ a06df2ba  running    opus-5-5       10-01 20:26   3h34m   68.9M   223  FIX-KICK:
 
 ### `cv deferrals`
 
-A linter for promises. Every place the assistant put something off — "later lane", "follow-up", "not tonight", "queued for …", "ember's call", "decision for", "integrator item", "when X lands", "after FINAL", "deferred", "a later pass", "out of scope" — with its message index, timestamp and ~100 characters of context. The complaint it answers: *we can't just remark these things into the context log.*
+A linter for promises. Every place the assistant put something off — "later lane", "follow-up", "not tonight", "queued for …", "your call", "decision for", "integrator item", "when X lands", "after FINAL", "deferred", "a later pass", "out of scope" by default — with its message index, timestamp and ~100 characters of context. The complaint it answers: *we can't just remark these things into the context log.*
 
 ```sh
 cv deferrals 0c315aee                      # every deferral, oldest first
 cv deferrals 0c315aee --since 1591         # only the post-compaction region
 cv deferrals 0c315aee --open-tasks         # cross-reference the task store; exit 1 while any is UNMATCHED
 cv deferrals 0c315aee --open-tasks --json  # [{index, timestamp, phrase, context, matched?: {task_id, title, state, shared}}]
+cv deferrals 0c315aee --phrases-file deferrals.txt   # your project's phrase table instead of the built-in one
+```
+
+**The phrase table is yours.** The built-in list is a default, not a vocabulary cv insists on: a project's own idiom ("parking lot", "post-launch", the name of its integration phase) goes in a file of `label = regex` lines (`#` comments, regexes matched case-insensitively), passed with `--phrases-file` or kept at `~/.config/clustervision/deferrals.txt`, which is used whenever it exists. `cv schema --json` lists the default labels under `deferral.default_phrases`.
+
+```text
+# ~/.config/clustervision/deferrals.txt
+parking lot   = \bparking lot\b
+after launch  = \b(after|post)[ -]launch\b
 ```
 
 ```text

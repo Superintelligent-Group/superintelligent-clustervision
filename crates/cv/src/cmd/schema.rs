@@ -135,28 +135,13 @@ pub(crate) fn data_schema_json() -> Value {
         "deferral": {
             "description": "one row of `deferrals --json`: a place the assistant put something off",
             "keys": ["index", "timestamp", "phrase", "context", "matched"],
-            "phrase": DEFERRAL_PHRASES,
+            "phrase": "the label of the phrase that fired — the built-in table's labels are listed under `default_phrases`; `--phrases-file` (or `<config>/deferrals.txt`) replaces the table with your own",
+            "default_phrases": crate::cmd::orchestrate::default_phrase_labels(),
             "matched": "with --open-tasks: {task_id, title, state, shared[]} or absent when no task shares ≥3 significant words",
         },
         "query": query::schema_json(),
     })
 }
-
-/// The deferral phrase labels, in the order `cv deferrals` tries them.
-const DEFERRAL_PHRASES: &[&str] = &[
-    "later lane",
-    "follow-up",
-    "not tonight",
-    "queued",
-    "ember's call",
-    "decision for",
-    "integrator item",
-    "when X lands",
-    "after FINAL",
-    "deferred",
-    "later pass",
-    "out of scope",
-];
 
 /// The command tree in the §6 shape: one entry per visible command and subcommand
 /// (`"task open"`), each `{ name, group, about, args: [{ name, kind, value_type, possible_values?,

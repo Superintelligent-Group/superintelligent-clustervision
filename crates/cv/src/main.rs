@@ -410,9 +410,10 @@ enum Cmd {
         json: bool,
     },
     /// A linter for promises: every place the assistant deferred something ("later lane",
-    /// "follow-up", "not tonight", "queued", "ember's call", "when X lands", "after FINAL", …) with
-    /// its message index and context. `--open-tasks` cross-references the task store and marks
-    /// each MATCHED or UNMATCHED; any UNMATCHED exits 1, so a closeout can gate on it.
+    /// "follow-up", "not tonight", "queued", "your call", "when X lands", …) with its message
+    /// index and context. The phrase table is `--phrases-file`, else `<config>/deferrals.txt`
+    /// if present, else a built-in default. `--open-tasks` cross-references the task store and
+    /// marks each MATCHED or UNMATCHED; any UNMATCHED exits 1, so a closeout can gate on it.
     Deferrals {
         id: String,
         #[arg(long)]
@@ -424,6 +425,11 @@ enum Cmd {
         /// task when they share three or more significant words.
         #[arg(long)]
         open_tasks: bool,
+        /// The phrase table: one `label = regex` per line (`#` comments; regexes are
+        /// case-insensitive). Default: `~/.config/clustervision/deferrals.txt` if it exists, else
+        /// the built-in list — your project's vocabulary lives in the file, not in cv's source.
+        #[arg(long, value_name = "PATH")]
+        phrases_file: Option<PathBuf>,
         /// Emit the deferrals as one JSON array (`index, timestamp, phrase, context, matched?`).
         #[arg(long)]
         json: bool,
@@ -1287,10 +1293,11 @@ fn run() -> Result<()> {
             harness,
             since,
             open_tasks,
+            phrases_file,
             json,
         } => {
             // An unmatched deferral is a finding, not a failure: plain exit 1, no error text.
-            if !orchestrate::cmd_deferrals(&id, harness, since, open_tasks, json)? {
+            if !orchestrate::cmd_deferrals(&id, harness, since, open_tasks, phrases_file, json)? {
                 std::process::exit(1);
             }
             Ok(())
