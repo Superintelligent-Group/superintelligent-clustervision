@@ -56,11 +56,8 @@ pub(crate) fn option_list(default_choice: &str, options: &[String]) -> Vec<Strin
 
 /// Pose a decision: three events (`opened`, `tagged decision`, `posed`) plus one `blocked_by` per
 /// task it blocks, plus the provisional `resolved` when `spec.provisional` — appended as ONE unit
-/// (`TaskStore::append_agent_events`), so a decision is never left half-posed: a `resolved` is
-/// identity-bearing, and a token-bound poser without its token used to land the pose and then be
-/// refused the resolve, leaving an owed decision it meant to make provisionally. `store` carries
-/// the poser's token (`TaskStore::with_token`). Returns the events in append order and the
-/// advisory warnings.
+/// (`TaskStore::append_agent_events`), so a decision is never left half-posed. Returns the events
+/// in append order and the advisory warnings.
 pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<(Vec<TaskEvent>, Vec<String>)> {
     if spec.default_choice.trim().is_empty() {
         bail!("a decision needs a --default (the option that stands if nobody speaks)");
@@ -174,15 +171,13 @@ impl Answer {
     }
 }
 
-/// Resolve a decision (full task id) with `answer`. `from` is the resolver and is recorded;
-/// `token` is the TOFU credential for it. `provisional`: resolve it on its default on the
-/// decider's behalf, with a veto window (the reducer refuses a provisional non-default choice).
-#[allow(clippy::too_many_arguments)]
+/// Resolve a decision (full task id) with `answer`. `from` is the resolver and is recorded.
+/// `provisional`: resolve it on its default on the decider's behalf, with a veto window (the
+/// reducer refuses a provisional non-default choice).
 pub(crate) fn resolve(
     store: &TaskStore,
     model: &TaskReadModel,
     from: &str,
-    token: Option<String>,
     id: &str,
     answer: Answer,
     note: Option<String>,
@@ -232,7 +227,7 @@ pub(crate) fn resolve(
     }
     let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     task::append_and_notify(
-        &store.clone().with_token(task::token(token)),
+        store,
         Some(id),
         from,
         TaskEventKind::Resolved {
@@ -416,8 +411,8 @@ pub(crate) struct EventFilter {
 }
 
 /// The wire tag for a kind spelling a person would type: `note`→`noted`, `resolve`→`resolved`,
-/// `open`→`opened`, `claim`→`claimed`, `pass`→`review_passed`, … Unknown spellings pass through
-/// (and match nothing, loudly empty rather than wrong).
+/// `open`→`opened`, `claim`→`claimed`, … Unknown spellings pass through (and match nothing,
+/// loudly empty rather than wrong).
 pub(crate) fn kind_tag(s: &str) -> String {
     let s = s.trim().to_lowercase();
     match s.as_str() {
@@ -432,11 +427,6 @@ pub(crate) fn kind_tag(s: &str) -> String {
         "block" | "blocked" => "blocked_by",
         "pose" | "decision" => "posed",
         "status" | "status-set" => "status_set",
-        "propose" | "proposed" | "revision" => "revision_proposed",
-        "pass" | "passed" => "review_passed",
-        "refute" | "refuted" => "review_refuted",
-        "reroute" | "rerouted" => "review_rerouted",
-        "land" => "landed",
         other => other,
     }
     .to_string()
@@ -686,8 +676,6 @@ pub(crate) struct InboxCounts {
     pub provisional: usize,
     pub assigned: usize,
     pub claimed: usize,
-    pub reviews: usize,
-    pub unlanded: usize,
     pub unread: usize,
     pub closed: usize,
 }
@@ -821,8 +809,6 @@ pub(crate) fn inbox_page(
         provisional: count(InboxReason::Provisional),
         assigned: count(InboxReason::AssignedOpen),
         claimed: count(InboxReason::ClaimedByYou),
-        reviews: count(InboxReason::AwaitingYourReview),
-        unlanded: count(InboxReason::YourUnlandedWork),
         unread: items.iter().filter(|i| i.unread).count(),
         closed: closed.len(),
     };
@@ -837,8 +823,7 @@ pub(crate) fn inbox_page(
 }
 
 /// The inbox's groups, in the order they are printed: a decision owed is the slowest blocker a
-/// fleet has, so it comes first; then the actions handed to you; then the work you hold; then
-/// what others wait on you for.
+/// fleet has, so it comes first; then the actions handed to you; then the work you hold.
 pub(crate) const INBOX_GROUPS: &[(InboxReason, &str)] = &[
     (InboxReason::DecisionOwed, "decisions owed"),
     (
@@ -848,8 +833,6 @@ pub(crate) const INBOX_GROUPS: &[(InboxReason, &str)] = &[
     (InboxReason::Provisional, "made for you (veto?)"),
     (InboxReason::AssignedOpen, "assigned actions"),
     (InboxReason::ClaimedByYou, "claimed work"),
-    (InboxReason::AwaitingYourReview, "reviews"),
-    (InboxReason::YourUnlandedWork, "unlanded"),
 ];
 
 /// The first non-empty line of a text, trimmed and capped.
@@ -955,8 +938,8 @@ pub(crate) fn render_inbox_md(page: &InboxPage) -> String {
     ));
     let c = &page.counts;
     out.push_str(&format!(
-        "{} decision(s) owed · {} assigned action(s) · {} claimed · {} review(s) · {} unlanded · {} unread",
-        c.decisions, c.assigned, c.claimed, c.reviews, c.unlanded, c.unread
+        "{} decision(s) owed · {} assigned action(s) · {} claimed · {} unread",
+        c.decisions, c.assigned, c.claimed, c.unread
     ));
     if c.provisional > 0 {
         out.push_str(&format!(" · {} made for you (veto?)", c.provisional));
@@ -1080,7 +1063,6 @@ mod tests {
         assert_eq!(kind_tag("note"), "noted");
         assert_eq!(kind_tag("Resolve"), "resolved");
         assert_eq!(kind_tag("done"), "done");
-        assert_eq!(kind_tag("pass"), "review_passed");
         assert_eq!(kind_tag("bogus"), "bogus");
     }
 

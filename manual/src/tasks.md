@@ -1,13 +1,11 @@
 # The task substrate
 
 The [board](board.md) lets a fleet *talk*. Tasks let a fleet **commit to work** — and let a
-human see what is actually *true* about that work. 🔮
+human see what has been said about that work, by whom, when. 🔮
 
-A **task** is a durable dispatch object: open it, claim it, note progress on it, finish it.
-Code tasks additionally carry reviewed **revisions**, and here's the part that makes the whole
-substrate worth having: whether a revision has *landed* is **observed by running git**, never
-taken on an agent's word. An agent saying "merged, done!" changes nothing; `cv` looking at the
-repository does.
+A **task** is a durable dispatch object: open it, claim it, note progress on it, finish it. A
+**decision** is a task with a posed question: one event poses it (with the default that stands if
+nobody speaks), one event answers it.
 
 Storage is one append-only event log — `$CLUSTERVISION_HOME/tasks/events.jsonl` — with the same
 crash-safe flock recipe as the board. Every state you ever see is **replay-derived**: fold the
@@ -16,29 +14,27 @@ sync. The substrate is exposed three ways, all rendering the same shapes: the `c
 (this page), the [MCP `task_*` tools](mcp.md#the-task-substrate-over-mcp), and
 [`cvd serve`'s task routes](daemon.md#task-endpoints).
 
-## The four laws
+## The three laws
 
-The substrate is built on four laws (quoted from the module doc, which is the canonical text):
-
-1. **Observed, not attested.** No agent claim ever produces `MergedLocal` or `Landed`; only
-   the cv-side git verifier emits those events, and agent-facing append paths reject them at
-   the store seam.
-2. **Independence is read, not asserted.** Reviewer independence (cross-family review) is
-   determined by reading the reviewer's transcript harness from cv's catalog — advisory-warn,
-   never a gate.
-3. **No authority machinery.** No seats, grants, or debts. Landing authority is whoever can
-   push to the repo; cv only tracks and verifies.
-4. **Small.** This substrate stays a few thousand lines. Complexity requests go to the
+1. **cv never claims to have observed what it has not.** A completion is the agent's own word.
+   `cv task done --observed <evidence>` records that word and labels it `self-reported`; nothing
+   in cv turns it into a verified fact. What git and the filesystem can say about a task is a
+   [`sweep`](#the-read-surfaces) candidate, never a close.
+2. **No authority machinery.** No seats, grants, tokens or debts. Identity is `--from` /
+   `CV_ENDPOINT`: recorded, never authenticated.
+3. **Small.** This substrate stays a few thousand lines. Complexity requests go to the
    design-notes graveyard, next to the 200k-line system this replaced.
 
-> Law 1 is about the **land facet** — `merged_local`/`landed` on code revisions, which git
-> observes. Base-lifecycle `done` is **self-reported unless a completion check is attached** to
-> verify it; `--observed` on a check-less non-code task is free text (pinned by
-> `adversary_gym.rs::pin_done_completion_is_self_reported`).
+> Until 0.15.0 the substrate also carried a **land facet** — reviewed code revisions whose
+> landing a git verifier observed — with its own trust layer (TOFU tokens, reviewer receipts,
+> completion checks, a heartbeat). In 84 days of 8–24-lane swarms it was used on the day it was
+> built and never again, so it was removed: `propose`, `pass`, `refute`, `reroute`, `verify`,
+> `debt`, `stats`, `--token`/`CV_TOKEN` and `--check-*` error with a pointer. A log that holds
+> the old events still replays; they are state-neutral.
 
 ## The base lifecycle
 
-Every task has a base lifecycle, whether or not code is involved:
+Every task has a base lifecycle:
 
 ```text
 open ──claim──► claimed ──done──► done
@@ -47,25 +43,24 @@ open ──claim──► claimed ──done──► done
 ```
 
 - **`open`** — anyone can open a task (`cv task open <title>`), optionally with `--repo`
-  (required later for revisions), `--assignee`, `--issue`, a `--body`, and a `--channel` for
-  board notifications (default `tasks` — every task event posts a one-liner there).
+  (what `list --repo` filters on and `sweep` reads), `--assignee`, `--issue`, a `--body`, and a
+  `--channel` for board notifications (default `tasks` — every task event posts a one-liner there).
 - **`claim` / `release`** — claiming is a durable, race-free **first-writer-wins**: the store
   validates each append against a replay of the log *under the lock*, so when N agents race,
   exactly one claim lands and the rest get a rejection, not a duplicate.
 - **`note`** — progress notes; never change state. **A note is accepted on a terminal task too**:
   terminal is about *state*, not the record. A note appended after `done` / `resolved` /
   `abandoned` / `superseded` is marked `post_close: true` and every surface says so — `show`,
-  the inbox Markdown and the web page render it "(after close)" — and the task's effective state
-  does not move (pinned by `reduce.rs::post_close_note_appends_and_never_changes_effective_state`).
+  the inbox Markdown and the web page render it "(after close)" — and the task's state does not
+  move (pinned by `reduce.rs::post_close_note_appends_and_never_changes_effective_state`).
   Four lanes and the orchestrator lost or re-homed evidence before this, because they wrote
   `done` first and the note second. Tags stay refused on a terminal task: they change views.
 - **`done`** — completes a task, optionally pointing at observable evidence
   (`--observed <url-or-path>`). `--note TEXT` / `--note-file F` (and the same on `abandon`)
   appends the note and the terminal event as **one unit** — validated together under the lock
-  and written with one `write`, the note first: both land or neither does. **Refused while a code revision is live** — you can always
-  *kill* a task, but you can never silently complete one that has unlanded reviewed code. On a
-  non-code task `done` is **self-reported unless a completion check is attached** to verify it —
-  `--observed` alone is free text (law 1 covers landing, not completion; see the note above).
+  and written with one `write`, the note first: both land or neither does. `done` is
+  **self-reported** and `show` says so (`done: self-reported 4m ago (tests green)`); it is
+  refused on a decision, which is answered with `resolve`.
 - **`status`** — `cv task status <id> --file F` (or `-` for stdin, or the text inline) pins the
   task's **STATUS**: one `status_set` event that *replaces* the pinned status in the projection
   (every earlier one stays in the events; `revisions` counts them). It is the relay hand-off
@@ -76,7 +71,7 @@ open ──claim──► claimed ──done──► done
   state-bearing: allowed on an open or claimed task, **by its assignee or its opener** (an
   identity-bearing verb), and refused on a terminal task.
 - **`abandon` / `supersede`** — the terminals. Abandon is always available on a non-terminal
-  task, live revision or not.
+  task.
 
 Task ids are time-sortable UUIDs (v7) and, as everywhere in clustervision, a **unique prefix
 is enough** on the command line. Because v7 ids opened within the same second share their first
@@ -134,152 +129,29 @@ Tags and relations are events like everything else (`tagged`, `blocked_by`), fol
 reducer into `tags` / `blocked_by` on the projection; both are omitted from the wire when empty,
 so a log that never used them serializes exactly as before.
 
-## The land facet: revisions
+## The log is loud, never silent
 
-A code task carries revisions — reviewed snapshots of a branch. The grammar:
-
-```text
-propose ──► awaiting_review ──pass──► ready ──(verifier observes)──► merged_local ──► landed
-                 │                      │                                              ▲
-               refute                 refute                                           │
-                 ▼                      ▼                    ready ────(forge PR land)─┘
-              refuted (terminal)     refuted (terminal)
-```
-
-- **`cv task propose <id> --branch <b>`** attaches revision *n*. Proposing again supersedes
-  the live prior revision — that is the **only cure for a refute**: a REFUTE is terminal for
-  its revision, and a later pass on it fails closed. New content means a new revision, full
-  stop.
-- **Who may judge:** only the **active reviewer**'s verdict counts. The reviewer is bound at
-  propose time (`--reviewer agent:rex`), or — if none was named — by the *first* verdict.
-  `cv task reroute <id> --to <who>` is the only reassignment.
-- **`pass`** moves the revision to `ready`; **`refute`** ends it (from `awaiting_review` *or*
-  `ready` — a reviewer can retract a pass by refuting, but never the reverse).
-- **`merged_local` is NOT `landed`.** A merge observed on the local `main`/`master` is
-  actionable state, not a terminal: the reviewed patch still isn't on the upstream ref
-  (`origin/main` by default). Only when the verifier observes the reviewed *content* on the
-  upstream does the revision become `landed` — and `ready → landed` directly is legal too,
-  because a branch routinely lands via a forge PR with no local-integration step.
-- The five verifier-only events (`source_unavailable`, `merge_failed`, `merged_local`,
-  `reconcile_failed`, `landed`) **cannot be appended by agents at all** — the CLI verbs and
-  every MCP tool go through a store path that rejects them (law 1). Trying earns you:
-
-```text
-event kind 'landed' is verifier-only: landing state is observed by `cv task verify`, never asserted
-```
-
-Displays show the *effective* state — the base state unless a revision is live (or landed), in
-which case the revision layer is the truth that matters, rendered with a `rev:` prefix
-(`rev:ready`, `rev:landed`). Filters use the bare names.
-
-## Propose: revision identity is observed from git
-
-You never type a sha into the log. At propose time cv runs git itself:
-
-- resolves the **branch tip** (a `--sha` you pass is only an assertion — refused if it isn't
-  the tip; a branch with no commits over upstream is refused too),
-- records the **merge-base** of upstream and the tip at propose time (so the identity stays
-  recomputable between two fixed commits forever, even after a fast-forward land),
-- computes the **range patch-id**: `git diff <base> <tip> | git patch-id --stable` — the
-  cumulative content identity of the *whole branch*. A tampered or dropped earlier commit
-  changes it, which is exactly the hole tip-only patch-ids leave open.
-
-`branch` and `worktree` are locators, never identity; `review_sha` + `patch_id` are identity.
-
-Propose also runs an advisory **collision scan**: if another live task's current revision
-already carries this branch (or worktree) in the same repo, you get a warning — two tasks
-proposing one branch usually means two agents about to trample each other. Recorded and
-warned, never blocked.
-
-## Verify: the observation pass
-
-```sh
-cv task verify <id>          # one task
-cv task verify --all         # everything verifiable
-cv task verify --all --fetch # git fetch each upstream's remote first
-```
-
-For every `ready`/`merged_local` revision the verifier asks git — never an agent — what is
-true:
-
-1. **Is the reviewed content on the upstream?** By ancestry first, then by `git cherry`
-   patch-id equivalence (so a cherry-picked/rebased land under a *new* sha still counts). If
-   yes: recompute the range patch-id from the recorded base and append `landed`. The reducer
-   cross-checks the observed patch-id against the revision's — a tampered record fails loudly.
-2. **Merged into the local `main`/`master` but not pushed?** Consulted by explicit refs, never
-   `HEAD` (a checkout sitting on the task branch must not self-certify) → `merged_local`.
-3. **Otherwise, why not?** Findings, which never change state: repo missing
-   (`source unavailable`), worktree missing, branch deleted, **branch tip no longer the
-   reviewed sha** (someone committed after review), upstream moved past the recorded base
-   (`not fast-forwardable`). A finding identical to a recent one is deduped so a broken world
-   doesn't spam the log; a reviewed, intact, fast-forwardable branch that simply hasn't landed
-   yet appends nothing at all. A git *error* is never treated as landed.
-
-### The heartbeat, `verified as of`, and SUSPECT rows
-
-Silence is never evidence of health. Every verify pass writes a heartbeat
-(`tasks/last_verify.json`), and every debt view carries it as `verified_as_of` plus a
-`verify_warning` when trust isn't warranted:
-
-- **No heartbeat at all** is the loudest state: *"landing state has NEVER been verified — run
-  `cv task verify --all` or enable `cvd watch --verify-interval`"*.
-- **A stale heartbeat** (older than 2× its own recorded interval) means the periodic verifier
-  is probably dead, and says so.
-
-The periodic driver is [`cvd watch`](daemon.md#cvd-watch--follow-live--archive-as-it-happens),
-which runs the same engine every `--verify-interval` seconds (default **300**, `0` disables).
-
-Each full pass also **re-observes revisions recorded `landed`**. Landed-ness is monotone-true
-for genuine lands, so reviewed content that is *no longer observed* on its upstream contradicts
-the record — either a forged `landed` event (someone echoing JSON into the log; replay already
-warns when a verifier-only event carries a non-verifier author) or a genuinely rolled-back
-land. Those become **SUSPECT rows**: persisted in the heartbeat, rendered on the debt view as
-visible debt again, and *not* laundered away by a partial or `--skip-landed` pass.
-
-One more honesty property of the log itself: reads are best-effort and **loud** — an interior
-line the reducer refuses is quarantined with a warning naming the line, and every surface
-ships those warnings; appends **fail closed** on a degraded log rather than validating against
-an incomplete model.
-
-### Provenance & freshness: every fact knows how it was learned and when
-
-A fact is never just true — it is *observed true, by someone, as of some moment*, and that
-observation has a shelf life. The task substrate makes this structural: every landing and every
-self-reported completion carries a small **provenance** shape — `{ observed_at, source,
-freshness }` — so a reader can always answer "as observed when, by which pass?"
-
-- **`source`** is how the fact was learned: `git-verify` for a land the verifier read from git,
-  or `self-report` for a base-lifecycle `Done`. A self-reported completion is *labeled* as such,
-  never silently equal to a git-verified land — the `Done` carve-out made visible rather than
-  hidden.
-- **`observed_at`** is the moment of observation (the `Landed` event's timestamp; the verifier's
-  last pass over an unlanded row; `null` when nothing has observed it yet).
-- **`freshness`** is derived from the heartbeat, and **`Unknown` is first-class**: `Fresh` (a
-  pass covered it recently), `Stale { age_secs }` (the periodic verifier's last pass is older
-  than 2× its interval — it may be dead), or `Unknown` (the verifier has *never* checked this
-  revision since it became verifiable — not implicitly fine, said out loud).
-
-This surfaces on the debt view (`landed · observed 4m ago` / `SUSPECT · last checked 2h ago` /
-`ready … · NEVER verified`), on `cv task show` (the landed line reads `git-verified, observed 4m
-ago`; a `Done` reads `self-reported`), and as additive `provenance` keys on `cv task debt
---json`, the MCP `task_debt` tool, and `GET /api/tasks/debt`. Freshness derivation is a **pure**
-function of the heartbeat's fields — no extra git calls, no I/O in the projection layer.
+Reads are best-effort and **loud** — an interior line the reducer refuses is quarantined with a
+warning naming the line, and every surface ships those warnings; appends **fail closed** on a
+degraded log rather than validating against an incomplete model. Events from the retired land
+facet (`revision_proposed`, `review_passed`, `landed`, …) replay as state-neutral events: the
+log keeps them, `show --events` prints them, and nothing is derived from them.
 
 ## The read surfaces
 
 **`cv task list`** — non-terminal tasks by default, oldest first, with an age column off the
-last event. `--state <s>` filters by effective state, and a typo is an error naming the whole
-vocabulary, never a silently-empty list:
+last event. `--state <s>` filters by state, and a typo is an error naming the whole vocabulary,
+never a silently-empty list:
 
 ```text
-Error: unknown state "redy" (expected one of open|claimed|done|abandoned|superseded|awaiting_review|ready|merged_local|landed|refuted)
+Error: unknown state "redy" (expected one of open|claimed|done|abandoned|superseded|resolved)
 ```
 
 **`cv task inbox [who]`** — "what needs me", **grouped by reason and stalest first within a
 group** (age is the escalation mechanism; there is no other). Bare `cv task inbox` means *my*
 inbox via `$CV_ENDPOINT`. The groups print in this order — `decisions owed`, `in discussion`,
-`made for you (veto?)`, `assigned actions`, `claimed work`, `reviews`, `unlanded` — because a
-decision nobody sees is the slowest blocker a fleet has. Each reason has an honest aging anchor:
+`made for you (veto?)`, `assigned actions`, `claimed work` — because a decision nobody sees is
+the slowest blocker a fleet has. Each reason has an honest aging anchor:
 
 | Reason | You appear because | Ages since |
 | --- | --- | --- |
@@ -288,31 +160,17 @@ decision nobody sees is the slowest blocker a fleet has. Each reason has an hone
 | `Provisional` | a decision assigned to you was resolved *for* you, provisionally — resolved, not owed | the **provisional resolve** |
 | `AssignedOpen` | an open task is assigned to you, unclaimed | the last event |
 | `ClaimedByYou` | you claimed it; it's yours to finish | the last event |
-| `AwaitingYourReview` | a revision awaits your verdict | the **propose** |
-| `YourUnlandedWork` | your reviewed revision isn't observed landed | the **pass** |
 
-Rows waiting more than 24 hours lead with a `⏰`. A dead reviewer is honest state that nobody
-sees unless it ages somewhere the owner reads — this is that somewhere.
-
-**`cv task debt`** — the honest ledger: reviewed-but-unlanded work grouped by repo, oldest
-first, with recorded findings; then aged awaiting-review rows; then SUSPECT rows; then the
-heartbeat line. If this view isn't empty, something finished isn't on main yet.
-
-```text
-$ cv task debt
-/Users/you/code/demo:
-  019f6e4c  rev1 task/retry-backoff [ready] unlanded for 0h — add retry backoff
-verified as of 2026-07-17 00:18:46
-```
+Rows waiting more than 24 hours lead with a `⏰`.
 
 **`cv task sweep --repo <path>`** — candidates for closing, observed rather than asserted:
 every non-terminal task (in that repo, or with no repo) whose `--issue` path no longer exists
 (tried against the task's repo, the swept repo, the directory above it and the cwd), or whose
 title/body names a branch now merged into the repo's main (`git branch --merged`, local and
 remote-tracking; a name has to look like a branch — a separator, a digit, or eight characters —
-so a branch called `fix` does not sweep every task that says "fix"), or whose proposed revision's
-branch is merged. It prints them as *probably done* with the reason and **never closes one**;
-`done --observed` or `abandon --reason` is still a decision someone makes having read why.
+so a branch called `fix` does not sweep every task that says "fix"). It prints them as *probably
+done* with the reason and **never closes one**; `done --observed` or `abandon --reason` is still
+a decision someone makes having read why.
 
 All of these take `--json` for the full wire shapes (the same rows MCP and the HTTP API serve).
 
@@ -320,111 +178,57 @@ All of these take `--json` for the full wire shapes (the same rows MCP and the H
 
 The fleet convention: the spawner sets `CV_ENDPOINT=agent:<name>` in each agent's environment,
 and every cv front-end derives its default actor from it — the *bare* command records the
-right identity. Nothing verifies the string (law 3); it exists so a forgotten flag can't
+right identity. Nothing verifies the string (law 2); it exists so a forgotten flag can't
 misattribute the durable record forever.
 
 - **Chat-grade verbs** (`open`, `note`, `done`, `abandon`, `supersede`; board posts) fall back
   to a deliberate default sink — `cv` on the CLI (a human at a shell owes no ceremony),
   `agent` over MCP.
-- **Identity-bearing verbs** — `claim`, `release`, `propose`, `pass`, `refute`, whose endpoint
-  string *keys inbox and reviewer semantics* — refuse to run without an identity, naming the
-  cure:
+- **Identity-bearing verbs** — `claim`, `release`, `status`, `resolve`, whose endpoint string
+  *keys inbox and decision semantics* — refuse to run without an identity, naming the cure:
 
 ```text
 $ cv task claim 019f6e4c
 Error: set CV_ENDPOINT or pass --from; identity-bearing events must record who acted
 ```
 
-Review independence (law 2) rides on identity plus transcripts: pass `--session <your-cv-session-id>`
-when reviewing and cv reads the author's and reviewer's harness families from its catalog.
-Same-family review is **recorded and warned about, never blocked** — and cross-family review
-is the value the warning protects. Receipts are a **heuristic signal, not proof**: `saw_change`
-requires structural engagement (a content read of a path under the repo, or a real
-`git diff`/`git show`/`git log`), so quoting the sha alone (`echo <sha>`) is undetermined, not a
-pass — but a reviewer who pointlessly opens a repo file still passes (`adversary_gym.rs::
-saw_change_rejects_bare_sha_echo` and `receipts_remain_a_heuristic_by_design`). The bar is raised
-past the trivial forgery, never made a guarantee.
-
 ## A worked example
 
-Two agents, one repo. `agent:mira` authors; `agent:rex` reviews. (Transcript from a real run;
-the repo path is abbreviated.)
+An orchestrator and one lane. (Transcript from a real run; the repo path is abbreviated.)
 
 ```text
-$ export CV_ENDPOINT=agent:mira
-$ cv task open "switch task ids to uuid v7" --repo ~/code/demo
+$ export CV_ENDPOINT=orchestrator:o
+$ cv task open "switch task ids to uuid v7" --repo ~/code/demo --assignee lane:mira
 ✦ opened 019f6e4b → open
 019f6e4b-74c5-74f0-a493-1f8131ca38d5
 
-$ cv task claim 019f6e4b
+$ CV_ENDPOINT=lane:mira cv task claim 019f6e4b
 ✦ claimed 019f6e4b → claimed
+$ CV_ENDPOINT=lane:mira cv task note 019f6e4b "ids are v7 on task/uuid-ids; tests green"
+✦ noted 019f6e4b → claimed
+$ CV_ENDPOINT=lane:mira cv task done 019f6e4b --observed "task/uuid-ids @ c889a02, cargo test green"
+✦ done 019f6e4b → done
 ```
 
-Mira does the work on a branch, then proposes — note that the sha and range patch-id are
-*observed*, printed back from git:
-
-```text
-$ cv task propose 019f6e4b --branch task/uuid-ids --upstream main --reviewer agent:rex
-observed: task/uuid-ids tip c889a0236d6c range-patch-id f408d8649ec0
-✦ revision_proposed 019f6e4b → rev:awaiting_review
-```
-
-Rex's inbox now carries the review, aging from the propose:
-
-```text
-$ cv task inbox agent:rex
-   019f6e4b    0s  AwaitingYourReview       switch task ids to uuid v7
-
-$ CV_ENDPOINT=agent:rex cv task pass 019f6e4b
-⚠ no reviewer session given: reviewer independence not checked (recorded as unknown)
-✦ review_passed 019f6e4b → rev:ready
-```
-
-Ready is not landed. A verify pass before anything reaches `main` observes exactly nothing,
-and the debt view carries the revision:
-
-```text
-$ cv task verify --all
-(nothing new observed)
-
-$ cv task debt
-/Users/you/code/demo:
-  019f6e4b  rev1 task/uuid-ids [ready] unlanded for 0h — switch task ids to uuid v7
-verified as of 2026-07-17 00:17:56
-```
-
-Now the land actually happens — by whoever has push rights (law 3), outside cv entirely — and
-the next verify pass *observes* it:
-
-```text
-$ git -C ~/code/demo merge --ff-only task/uuid-ids
-
-$ cv task verify --all
-✦ observed landed on 019f6e4b
-
-$ cv task done 019f6e4b
-✦ done 019f6e4b → rev:landed
-```
-
-(`done` was refused while the revision was live; after the observed land it goes through.)
-The full projection keeps the whole story — review evidence, the landed observation with the
-upstream head and the re-computed patch-id:
+The completion is the lane's own word, and `show` labels it so:
 
 ```text
 $ cv task show 019f6e4b
-task 019f6e4b-74c5-74f0-a493-1f8131ca38d5  [rev:landed]
+task 019f6e4b-74c5-74f0-a493-1f8131ca38d5  [done]  action
+  done:     self-reported 2m ago (task/uuid-ids @ c889a02, cargo test green)
   title:    switch task ids to uuid v7
   repo:     /Users/you/code/demo
   channel:  #tasks
-  assignee: agent:mira
-  opened:   2026-07-17 00:17 by agent:mira
-  rev 1: task/uuid-ids [landed] c889a0236d6c → main
-         reviewer: agent:rex
-         landed: upstream c889a0236d6c (patch-id f408d8649ec0)
+  assignee: lane:mira
+  opened:   2026-07-17 00:17 by orchestrator:o
+  note (lane:mira, 2026-07-17 00:31): ids are v7 on task/uuid-ids; tests green
 ```
 
+Later, `cv task sweep --repo ~/code/demo` lists every still-open task that names a branch now
+merged into `main` — what git can say, offered as a candidate, closed by a person.
+
 `cv task show <id> --events` (or `GET /api/task/{id}/events`) prints the raw durable history —
-for this task: `opened`, `claimed`, `revision_proposed`, `review_passed`, `landed`, `done`.
+for this task: `opened`, `claimed`, `noted`, `done`.
 
 ## Growth & retention
 

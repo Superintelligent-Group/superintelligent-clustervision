@@ -168,21 +168,18 @@ cv task events --since <last-event-id> --kind resolved,done,noted   # the poll s
 cv task watch --assignee ember --since 2h              # what ember did on their tasks, minus your own events
 ```
 
-For agents, the substrate is built on one law: **landing state is observed, never attested**. An
-agent can claim a task and propose a reviewed branch — but `landed` is only ever written by cv
-itself, after running git (`merge-base` ancestry, `git cherry` patch-id equivalence, whole-branch
-range patch-id). An agent *saying* "done" moves nothing.
+For agents, the substrate is built on one law: **cv never claims to have observed what it has
+not**. A completion is the agent's own word, recorded and labeled `self-reported`; what git can
+say about a task (a merged branch, a vanished issue file) is a `sweep` candidate, never a close.
 
 ```sh
 cv task open "port the auth module" --repo ~/proj --body -   # dispatch (stdin body; --issue paths are absolutized)
 cv task claim <id> --from agent:claude-1               # first writer wins (flock CAS)
-cv task propose <id> --branch task/auth                # sha + patch-id read FROM git
-cv task pass <id> --from agent:codex-1 --session <sid> # cross-family check read from transcripts
-cv task verify --all                                   # cv observes what actually landed
-cv task debt                                           # reviewed-but-unlanded work, loudly
+cv task done <id> --observed "tests green in <sid>"    # self-reported, labeled so
+cv task sweep --repo ~/proj                            # what git says is probably done; closes nothing
 ```
 
-Same substrate over MCP (`task_open` … `task_verify`), cvd HTTP (`/api/tasks`, `/api/tasks/debt`,
+Same substrate over MCP (`task_open` … `task_inbox`), cvd HTTP (`/api/tasks`,
 `/api/tasks/inbox/{who}`) and `cv task serve` (`/api/inbox`, `/api/task/<id>/{resolve,done,note,
 discuss,claim,release,reopen}`, `/api/events` — the same query as `cv task events`). State lives in
 a replayed event log (`~/.clustervision/tasks/events.jsonl`) that refuses events its own reducer
@@ -199,7 +196,6 @@ The board never holds task state; the event log does.
 ```sh
 cvd sync     # snapshot every session into ~/.clustervision
 cvd watch    # follow live + archive as sessions change → a fleet activity feed
-cvd watch --verify-interval 300   # + run the task git-verifier every 5 min
 ```
 
 ## 🧬 The OpenSession standard

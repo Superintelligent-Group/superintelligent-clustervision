@@ -1,5 +1,6 @@
-//! `cv task` — the fleet task substrate: open/claim/propose/review/verify dispatch objects whose
-//! landing state is *observed* from git, never taken on an agent's word.
+//! `cv task` — the fleet task substrate: open/claim/note/done dispatch objects and the decisions
+//! posed on them. Completion is self-reported and labeled so; cv never claims to have observed
+//! what it has not.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -13,7 +14,7 @@ use cv_core::sanitize::sanitize_line;
 use cv_core::task::{self, TaskEventKind, TaskProjection, TaskReadModel, TaskRow, TaskStore};
 
 use super::task_ops::{self, DecisionSpec, EventFilter, Since};
-use crate::util::fmt_local;
+use crate::util::{fmt_local, usage};
 
 /// A text argument that may come from a file: `--body-file`/`--file` (`-` reads stdin). Bodies
 /// were 500-char shell strings before this existed; a brief is a document.
@@ -106,10 +107,31 @@ fn from_or_cv(explicit: Option<String>) -> String {
     task::actor(explicit, "cv")
 }
 
-/// Identity resolution for identity-BEARING verbs (claim/release/propose/pass/refute):
+/// Identity resolution for identity-BEARING verbs (claim/release/status):
 /// [`task::require_actor`], with the error naming this surface's `--from` flag.
 fn require_from(explicit: Option<String>) -> Result<String> {
     task::require_actor(explicit, "--from")
+}
+
+/// `--token` was the TOFU credential of the retired trust layer. The flag is kept hidden so the
+/// old spelling errors with a pointer (exit 2) instead of being silently accepted.
+fn refuse_token(token: Option<String>) -> Result<()> {
+    if token.is_some() {
+        return usage(
+            "`--token` / `CV_TOKEN` were removed in 0.15.0 — identity is `--from` / `CV_ENDPOINT`, \
+             recorded and labeled, never authenticated",
+        );
+    }
+    Ok(())
+}
+
+/// The pointer every retired land-facet verb prints (exit 2).
+fn removed_land_verb(verb: &str) -> Result<()> {
+    usage(format!(
+        "`cv task {verb}` was removed in 0.15.0 with the land facet — completion is self-reported and \
+         labeled: `cv task done <id> --observed <evidence>`, evidence in `cv task note`, candidates \
+         from `cv task sweep --repo <path>`"
+    ))
 }
 
 #[derive(Subcommand)]
@@ -124,7 +146,7 @@ pub(crate) enum TaskCmd {
         /// Read the body from a file (`-` for stdin) — a brief is a document, not a shell string.
         #[arg(long = "body-file", value_name = "PATH")]
         body_file: Option<PathBuf>,
-        /// Repository this task's code work happens in (enables propose/verify/debt).
+        /// Repository this task's work happens in (`list --repo` filters on it; `sweep` reads it).
         #[arg(long)]
         repo: Option<PathBuf>,
         /// External issue/work handle, free-form. A relative path is made absolute at open time
@@ -154,7 +176,7 @@ pub(crate) enum TaskCmd {
     /// List tasks: non-terminal, touched in the last 14 days or involving you ($CV_ENDPOINT).
     /// The hidden count is the last line; `--all` lifts both the window and the terminal filter.
     List {
-        /// Filter by effective state (open|claimed|resolved|awaiting_review|ready|landed|done|...).
+        /// Filter by state (open|claimed|resolved|done|abandoned|superseded).
         #[arg(long)]
         state: Option<String>,
         #[arg(long)]
@@ -214,9 +236,8 @@ pub(crate) enum TaskCmd {
         /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
         #[arg(long)]
         from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim. Default: $CV_TOKEN. First use
-        /// binds the endpoint to this token; thereafter it is required.
-        #[arg(long)]
+        // Removed in 0.15.0 — hidden so the old flag errors with a pointer (exit 2).
+        #[arg(long, hide = true)]
         token: Option<String>,
     },
     /// Release a claim back to open.
@@ -225,8 +246,7 @@ pub(crate) enum TaskCmd {
         /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
         #[arg(long)]
         from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim. Default: $CV_TOKEN.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         token: Option<String>,
     },
     /// Record a progress note. `cv task note <id> -` reads the note from stdin.
@@ -244,25 +264,19 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         from: Option<String>,
     },
-    /// Complete a non-code task (refused while a code revision is live — land or kill it first).
-    ///
-    /// With a `--check-*`, cv RUNS the check and records the result: a pass makes the completion
-    /// OBSERVED (provenance `checked`), a failure REFUSES the done (the task stays open). At most
-    /// one check kind may be given; a checkless done is self-reported, the honest fallback.
+    /// Complete a task. Self-reported and labeled so: `--observed` is free text cv records, never
+    /// a claim cv checked. Refused on a decision (answer it with `resolve`).
     Done {
         id: String,
         /// Pointer to observable evidence (URL, path, session id).
         #[arg(long)]
         observed: Option<String>,
-        /// Run this shell command; exit 0 = pass, nonzero refuses the done (runs in the task's repo
-        /// dir if it has one, else cwd).
-        #[arg(long = "check-cmd", group = "check")]
+        // Removed in 0.15.0 — hidden so the old flags error with a pointer (exit 2).
+        #[arg(long = "check-cmd", hide = true)]
         check_cmd: Option<String>,
-        /// Require this path to exist and be non-empty (relative paths resolve in the task's repo).
-        #[arg(long = "check-file", group = "check")]
+        #[arg(long = "check-file", hide = true)]
         check_file: Option<PathBuf>,
-        /// GET this http:// url; a 2xx = pass. (https is not built in — use --check-cmd 'curl -fsS …'.)
-        #[arg(long = "check-http", group = "check")]
+        #[arg(long = "check-http", hide = true)]
         check_http: Option<String>,
         /// A closing note (`-` = stdin), appended with the `done` as ONE unit: the note, then the
         /// done — both land or neither does.
@@ -289,8 +303,7 @@ pub(crate) enum TaskCmd {
         /// Acting endpoint recorded in `by` (must be the assignee or the opener). Default: $CV_ENDPOINT.
         #[arg(long)]
         from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim. Default: $CV_TOKEN.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         token: Option<String>,
     },
     /// Kill a task.
@@ -377,9 +390,7 @@ pub(crate) enum TaskCmd {
         /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
         #[arg(long)]
         from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim (a provisional `resolved` is
-        /// identity-bearing). Default: $CV_TOKEN.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         token: Option<String>,
     },
     /// Answer a decision: `--accept-default`, or `--choice "<option>"` (one of the posed options).
@@ -407,8 +418,7 @@ pub(crate) enum TaskCmd {
         /// The resolver, recorded in `by`. Default: $CV_ENDPOINT.
         #[arg(long)]
         from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim. Default: $CV_TOKEN.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         token: Option<String>,
     },
     /// Turn every leading-`DECIDE` note on a task into its own decision task (title = the label
@@ -475,9 +485,7 @@ pub(crate) enum TaskCmd {
         /// Open the page in the default browser once the server is up.
         #[arg(long)]
         open: bool,
-        /// TOFU token presented on every page action (the page acts as `web:<who>`, which is
-        /// `<who>` to the store's bindings). Default: $CV_TOKEN.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         token: Option<String>,
     },
     /// Candidates for closing, from what git and the filesystem say — never closes anything.
@@ -494,82 +502,8 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Propose a reviewed revision: cv resolves the branch tip and computes the range patch-id
-    /// from git itself (identity is observed, never typed).
-    Propose {
-        id: String,
-        #[arg(long)]
-        branch: String,
-        /// Verify this sha is the branch tip (refused otherwise). Default: use the tip.
-        #[arg(long)]
-        sha: Option<String>,
-        #[arg(long, default_value = "origin/main")]
-        upstream: String,
-        #[arg(long)]
-        worktree: Option<PathBuf>,
-        /// Reviewer endpoint bound to this revision (else the first verdict binds).
-        #[arg(long)]
-        reviewer: Option<String>,
-        /// Your cv session id (author side of the independence check).
-        #[arg(long = "session-ref")]
-        session_ref: Option<String>,
-        /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
-        #[arg(long)]
-        from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim. Default: $CV_TOKEN.
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Reroute the active review to another reviewer.
-    Reroute {
-        id: String,
-        #[arg(long)]
-        to: String,
-        /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
-        #[arg(long)]
-        from: Option<String>,
-    },
-    /// Record a review PASS (advisory independence check runs if --session is given).
-    Pass {
-        id: String,
-        /// The reviewer's cv session id — used to read the reviewer's harness family.
-        #[arg(long)]
-        session: Option<String>,
-        /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
-        #[arg(long)]
-        from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim. Default: $CV_TOKEN.
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Record a review REFUTE (terminal for the revision; propose a new revision to continue).
-    Refute {
-        id: String,
-        #[arg(long)]
-        session: Option<String>,
-        /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
-        #[arg(long)]
-        from: Option<String>,
-        /// TOFU per-endpoint token authenticating the `--from` claim. Default: $CV_TOKEN.
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Run the git verifier over Ready/MergedLocal revisions and record what it observes.
-    Verify {
-        /// Task id (prefix ok). Omit with --all to verify everything verifiable.
-        id: Option<String>,
-        #[arg(long)]
-        all: bool,
-        /// git fetch the upstream's remote first.
-        #[arg(long)]
-        fetch: bool,
-        /// Skip re-observation of Landed revisions (opt-out for huge histories; previously
-        /// recorded suspects are preserved, not cleared).
-        #[arg(long = "skip-landed")]
-        skip_landed: bool,
-    },
-    /// What needs `<who>`: decisions owed (default + options on one line each), then assigned
-    /// actions, claimed work, reviews, unlanded work. Same 14-day window as `list`.
+    /// What needs `<who>`: decisions owed (default + options on one line each), decisions made
+    /// for them provisionally, then assigned actions and claimed work. Same 14-day window as `list`.
     Inbox {
         /// Endpoint to compute the inbox for. Default: $CV_ENDPOINT, else "cv".
         who: Option<String>,
@@ -588,20 +522,41 @@ pub(crate) enum TaskCmd {
         #[arg(long, value_name = "WHEN", conflicts_with = "all")]
         since: Option<String>,
     },
-    /// Reviewed-but-unlanded work, grouped by repo, oldest first. The honest debt view.
-    Debt {
-        #[arg(long)]
-        repo: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
+    // ───────────── Removed in 0.15.0 with the land facet (hidden stubs: pointer, exit 2) ─────────────
+    #[command(hide = true)]
+    Propose {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
     },
-    /// Fleet batting averages: per-endpoint and per-reviewer outcome counts, computed from
-    /// observed events only. Informational — never a gate.
+    #[command(hide = true)]
+    Reroute {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Pass {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Refute {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Verify {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Debt {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
     Stats {
-        #[arg(long)]
-        repo: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
     },
 }
 
@@ -614,17 +569,15 @@ fn replay_loud() -> Result<cv_core::task::ReplayOutcome> {
     Ok(outcome)
 }
 
-/// Append an agent event through the shared core path, print a one-line confirmation. `token` is
-/// the TOFU credential presented on identity-bearing appends (`--token`, else `$CV_TOKEN`); it is
-/// inert for bookkeeping verbs and for endpoints that have never bound a token.
-fn append_and_report(task_id: Option<&str>, from: &str, kind: TaskEventKind, token: Option<String>) -> Result<()> {
-    append_event(task_id, from, kind, token).map(|_| ())
+/// Append an agent event through the shared core path, print a one-line confirmation.
+fn append_and_report(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Result<()> {
+    append_event(task_id, from, kind).map(|_| ())
 }
 
 /// [`append_and_report`], returning the event's task id (what `open` needs to attach its tags
 /// and relations to the task it just created).
-fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind, token: Option<String>) -> Result<String> {
-    let store = TaskStore::default_store().with_token(task::token(token));
+fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Result<String> {
+    let store = TaskStore::default_store();
     let report = task::append_and_notify(&store, task_id, from, kind, Vec::new())?;
     for w in report.replay_warnings.iter().chain(&report.warnings) {
         eprintln!("⚠ {}", sanitize_line(w));
@@ -656,7 +609,7 @@ fn note_arg(note: Option<String>, note_file: Option<PathBuf>) -> Result<Option<S
 /// neither does, so a lane cannot lose its evidence by ordering.
 fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventKind) -> Result<()> {
     let Some(text) = note else {
-        return append_and_report(Some(id), from, close, None);
+        return append_and_report(Some(id), from, close);
     };
     let store = TaskStore::default_store();
     let report = task::append_batch_and_notify(
@@ -814,16 +767,15 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                     channel,
                     assignee,
                 },
-                None,
             )?;
             if !tags.is_empty() {
-                append_and_report(Some(&id), &from, TaskEventKind::Tagged { tags }, None)?;
+                append_and_report(Some(&id), &from, TaskEventKind::Tagged { tags })?;
             }
             for b in blocked_by {
-                append_and_report(Some(&id), &from, TaskEventKind::BlockedBy { task: b }, None)?;
+                append_and_report(Some(&id), &from, TaskEventKind::BlockedBy { task: b })?;
             }
             for other in blocks {
-                append_and_report(Some(&other), &from, TaskEventKind::BlockedBy { task: id.clone() }, None)?;
+                append_and_report(Some(&other), &from, TaskEventKind::BlockedBy { task: id.clone() })?;
             }
             Ok(())
         }
@@ -962,30 +914,18 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                         return Ok(());
                     }
                 }
-                // Provenance for the terminal facts: a self-reported completion is labeled as
-                // such (never silently equal to a verified land), and landing carries the
-                // verifier's freshness read.
-                let hb = cv_core::task::verify::read_heartbeat(&task::tasks_dir());
-                let hb_ts = hb.as_ref().map(|h| h.ts);
-                let hb_interval = hb.as_ref().and_then(|h| h.interval_secs);
                 let show_now = Utc::now();
                 if t.state == cv_core::task::TaskState::Done {
-                    // A checked completion cv observed itself (provenance `checked`) renders
-                    // distinctly from a self-reported one — law 1 extended to non-code tasks.
-                    let (prov, detail) = match &t.done_check {
-                        Some(dc) => (
-                            cv_core::task::Provenance::checked(Some(t.last_ts)),
-                            format!(" ({})", sanitize_line(&describe_check(dc))),
-                        ),
-                        None => (
-                            cv_core::task::Provenance::self_reported(Some(t.last_ts)),
-                            t.done_observed
-                                .as_deref()
-                                .map(|o| format!(" ({})", sanitize_line(o)))
-                                .unwrap_or_default(),
-                        ),
-                    };
-                    println!("  done:     {}{}", freshness_phrase(&prov, show_now), detail);
+                    // A completion is what the agent said, labeled so: cv never claims to have
+                    // observed what it has not.
+                    println!(
+                        "  done:     self-reported {} ago{}",
+                        task::age_short(t.last_ts, show_now),
+                        t.done_observed
+                            .as_deref()
+                            .map(|o| format!(" ({})", sanitize_line(o)))
+                            .unwrap_or_default()
+                    );
                 }
                 println!("  title:    {}", sanitize_line(&t.title));
                 if !t.body.is_empty() {
@@ -1086,52 +1026,6 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                         None => {}
                     }
                 }
-                for rev in &t.revisions {
-                    println!(
-                        "  rev {}: {} [{}] {} → {}",
-                        rev.revision.n,
-                        sanitize_line(&rev.revision.branch),
-                        rev.state.as_str(),
-                        &rev.revision.review_sha[..12],
-                        sanitize_line(&rev.revision.upstream),
-                    );
-                    if let Some(reviewer) = &rev.active_reviewer {
-                        println!("         reviewer: {}", sanitize_line(reviewer));
-                    }
-                    for (verdict, receipts) in [
-                        ("pass", rev.pass.as_ref().and_then(|p| p.receipts.as_ref())),
-                        ("refute", rev.refute.as_ref().and_then(|r| r.receipts.as_ref())),
-                    ] {
-                        if let Some(r) = receipts {
-                            println!("         receipts ({verdict}): {}", sanitize_line(&receipts_line(r)));
-                        }
-                    }
-                    if let Some((head, pid)) = &rev.landed {
-                        // The land itself was git-observed (that is where landed_at comes from);
-                        // freshness only qualifies whether the latest pass has re-confirmed it.
-                        let observed = rev
-                            .landed_at
-                            .map(|at| format!("observed {} ago", task::age_short(at, show_now)))
-                            .unwrap_or_else(|| "observation time unknown".into());
-                        let qualifier = match rev.landed_at.map(|at| {
-                            cv_core::task::Provenance::git_verified(at, hb_ts, hb_interval, show_now).freshness
-                        }) {
-                            Some(cv_core::task::Freshness::Stale { .. }) => " (verifier stale)",
-                            Some(cv_core::task::Freshness::Unknown) => " (unconfirmed by latest pass)",
-                            _ => "",
-                        };
-                        println!(
-                            "         landed: upstream {} (patch-id {}) · git-verified, {}{}",
-                            &head[..12],
-                            &pid[..12],
-                            observed,
-                            qualifier
-                        );
-                    }
-                    for issue in &rev.issues {
-                        println!("         ⚠ {}", sanitize_line(&issue.describe()));
-                    }
-                }
                 let children = task_ops::split_children(&outcome.model);
                 let selected: Vec<&cv_core::task::Note> = t
                     .notes
@@ -1182,21 +1076,18 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             Ok(())
         }
         TaskCmd::Claim { id, from, token } => {
+            refuse_token(token)?;
             let from = require_from(from)?;
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
-            append_and_report(
-                Some(&id),
-                &from,
-                TaskEventKind::Claimed { assignee: from.clone() },
-                token,
-            )
+            append_and_report(Some(&id), &from, TaskEventKind::Claimed { assignee: from.clone() })
         }
         TaskCmd::Release { id, from, token } => {
+            refuse_token(token)?;
             let from = require_from(from)?;
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
-            append_and_report(Some(&id), &from, TaskEventKind::Released {}, token)
+            append_and_report(Some(&id), &from, TaskEventKind::Released {})
         }
         TaskCmd::Note {
             id,
@@ -1212,12 +1103,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 (None, Some(f)) => read_text_arg(&f)?,
                 (None, None) => unreachable!("clap requires text or --file"),
             };
-            append_and_report(
-                Some(&id),
-                &from_or_cv(from),
-                TaskEventKind::Noted { text, session_ref },
-                None,
-            )
+            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Noted { text, session_ref })
         }
         TaskCmd::Done {
             id,
@@ -1229,28 +1115,21 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             note_file,
             from,
         } => {
+            if check_cmd.is_some() || check_file.is_some() || check_http.is_some() {
+                return usage(
+                    "`--check-cmd` / `--check-file` / `--check-http` were removed in 0.15.0 — run the \
+                     check yourself and put its result in `--observed`; completion is self-reported",
+                );
+            }
             let note = note_arg(note, note_file)?;
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
-            let t = &outcome.model.tasks[&id];
-            // If a check was requested, cv RUNS it now. A pass records HOW the completion was
-            // observed; a failure refuses the done here (nothing is appended — the task stays open).
-            let spec = check_cmd
-                .map(cv_core::task::CheckSpec::Cmd)
-                .or_else(|| check_file.map(cv_core::task::CheckSpec::File))
-                .or_else(|| check_http.map(cv_core::task::CheckSpec::Http));
-            let (observed, check) = match spec {
-                Some(spec) => {
-                    let done_check = spec.run(t.repo.as_deref())?;
-                    // Default the human `observed` pointer to the check's own result when the caller
-                    // gave none, so `task show` always has something to print next to `checked`.
-                    let observed = observed.or_else(|| Some(done_check.result.clone()));
-                    println!("✓ completion check passed: {}", sanitize_line(&done_check.result));
-                    (observed, Some(done_check))
-                }
-                None => (observed, None),
-            };
-            close_with_note(&id, &from_or_cv(from), note, TaskEventKind::Done { observed, check })
+            close_with_note(
+                &id,
+                &from_or_cv(from),
+                note,
+                TaskEventKind::Done { observed, check: None },
+            )
         }
         TaskCmd::Status {
             id,
@@ -1259,6 +1138,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             from,
             token,
         } => {
+            refuse_token(token)?;
             let from = require_from(from)?;
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
@@ -1268,7 +1148,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 (None, None) => unreachable!("clap requires text or --file"),
             };
             let text = text.trim_end().to_string();
-            append_and_report(Some(&id), &from, TaskEventKind::StatusSet { text }, token)
+            append_and_report(Some(&id), &from, TaskEventKind::StatusSet { text })
         }
         TaskCmd::Abandon {
             id,
@@ -1286,12 +1166,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
             let by_task = resolve(&outcome.model, &by_task)?.to_string();
-            append_and_report(
-                Some(&id),
-                &from_or_cv(from),
-                TaskEventKind::Superseded { by_task },
-                None,
-            )
+            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Superseded { by_task })
         }
         TaskCmd::Tag { id, tags, from } => {
             let outcome = replay_loud()?;
@@ -1302,137 +1177,15 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             }
             let t = &outcome.model.tasks[&id];
             task_ops::refuse_bare_decision_tag(&tags, &t.title, Some(t))?;
-            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Tagged { tags }, None)
+            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Tagged { tags })
         }
         TaskCmd::Block { id, by_task, from } => {
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
             let by_task = resolve(&outcome.model, &by_task)?.to_string();
-            append_and_report(
-                Some(&id),
-                &from_or_cv(from),
-                TaskEventKind::BlockedBy { task: by_task },
-                None,
-            )
+            append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::BlockedBy { task: by_task })
         }
         TaskCmd::Sweep { repo, main, json } => cmd_sweep(&repo, main, json),
-        TaskCmd::Propose {
-            id,
-            branch,
-            sha,
-            upstream,
-            worktree,
-            reviewer,
-            session_ref,
-            from,
-            token,
-        } => {
-            let from = require_from(from)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            let t = &outcome.model.tasks[&id];
-            let repo = t
-                .repo
-                .clone()
-                .context("task has no --repo recorded; open it with one to propose revisions")?;
-            let n = t.revisions.len() as u32 + 1;
-            let revision = cv_core::task::verify::observe_revision(
-                &repo,
-                &branch,
-                &upstream,
-                sha.as_deref(),
-                n,
-                worktree,
-                reviewer,
-                session_ref,
-            )?;
-            println!(
-                "observed: {} tip {} range-patch-id {}",
-                sanitize_line(&branch),
-                &revision.review_sha[..12],
-                &revision.patch_id[..12]
-            );
-            // Advisory collision scan (never a block): another live task already carrying this
-            // branch/worktree in the same repo is usually two agents about to trample each other.
-            for w in task::propose_collision_warnings(&outcome.model, &id, &repo, &revision) {
-                eprintln!("⚠ WARNING: {}", sanitize_line(&w));
-            }
-            append_and_report(Some(&id), &from, TaskEventKind::RevisionProposed { revision }, token)
-        }
-        TaskCmd::Reroute { id, to, from } => {
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            let current = outcome.model.tasks[&id]
-                .current_revision()
-                .and_then(|r| r.active_reviewer.clone())
-                .context("no active reviewer to reroute from")?;
-            append_and_report(
-                Some(&id),
-                &from_or_cv(from),
-                TaskEventKind::ReviewRerouted { from: current, to },
-                None,
-            )
-        }
-        TaskCmd::Pass {
-            id,
-            session,
-            from,
-            token,
-        } => {
-            let from = require_from(from)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            // Both advisory observations from one parse of the reviewer's session (law 2:
-            // read, record, warn — never gate).
-            let obs = task::review_observation(&outcome.model.tasks[&id], session.as_deref());
-            if let Some(w) = task::independence_warning(obs.independence.as_ref()) {
-                eprintln!("⚠ {w}");
-            }
-            if let Some(w) = task::receipts_warning(obs.receipts.as_ref()) {
-                eprintln!("⚠ {w}");
-            }
-            append_and_report(
-                Some(&id),
-                &from,
-                TaskEventKind::ReviewPassed {
-                    reviewer: from.clone(),
-                    session_ref: session,
-                    independence: obs.independence,
-                    receipts: obs.receipts,
-                },
-                token,
-            )
-        }
-        TaskCmd::Refute {
-            id,
-            session,
-            from,
-            token,
-        } => {
-            let from = require_from(from)?;
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            let receipts = task::review_receipts(&outcome.model.tasks[&id], session.as_deref());
-            if let Some(w) = task::receipts_warning(receipts.as_ref()) {
-                eprintln!("⚠ {w}");
-            }
-            append_and_report(
-                Some(&id),
-                &from,
-                TaskEventKind::ReviewRefuted {
-                    reviewer: from.clone(),
-                    session_ref: session,
-                    receipts,
-                },
-                token,
-            )
-        }
-        TaskCmd::Verify {
-            id,
-            all,
-            fetch,
-            skip_landed,
-        } => cmd_verify(id, all, fetch, skip_landed),
         TaskCmd::Inbox {
             who,
             json,
@@ -1481,6 +1234,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             from,
             token,
         } => {
+            refuse_token(token)?;
             let repo = match repo {
                 Some(r) => Some(
                     r.canonicalize()
@@ -1521,8 +1275,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 provisional,
             };
             // One unit: the pose and (with --provisional) its resolution land together or not at
-            // all, under the poser's token — never a posed-but-unresolved decision left owed.
-            let store = TaskStore::default_store().with_token(task::token(token));
+            // all — never a posed-but-unresolved decision left owed.
+            let store = TaskStore::default_store();
             let from = from_or_cv(from);
             let (events, warnings) = task_ops::pose(&store, &from, spec)?;
             for w in &warnings {
@@ -1559,6 +1313,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             from,
             token,
         } => {
+            refuse_token(token)?;
             let note = note_arg(note, note_file)?;
             let outcome = replay_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
@@ -1581,7 +1336,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             };
             let store = TaskStore::default_store();
             let answer = task_ops::Answer::from_flags(choice, accept_default, confirm)?;
-            let report = task_ops::resolve(&store, &outcome.model, &from, token, &id, answer, note, provisional)?;
+            let report = task_ops::resolve(&store, &outcome.model, &from, &id, answer, note, provisional)?;
             for w in report.replay_warnings.iter().chain(&report.warnings) {
                 eprintln!("⚠ {}", sanitize_line(w));
             }
@@ -1734,150 +1489,22 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             open,
             token,
         } => {
+            refuse_token(token)?;
             let who = assignee.or_else(task::default_endpoint);
-            super::task_serve::run(&bind, who, open, token)
+            super::task_serve::run(&bind, who, open)
         }
-        TaskCmd::Debt { repo, json } => {
-            let outcome = replay_loud()?;
-            // The debt view is only as honest as the verifier is alive (G1) — the heartbeat
-            // rides it, and suspect lands (G3) re-surface as visible debt. Shaping (repo filter,
-            // aged awaiting-review rows (G8), warning text) is the shared DebtReport.
-            let hb = cv_core::task::verify::read_heartbeat(&task::tasks_dir());
-            if json {
-                // The full entries (task projection embedded), plus an additive `provenance` key
-                // per row deriving landing freshness from the heartbeat — every unlanded fact says
-                // how fresh the verifier's read of it is (Unknown when never checked).
-                let hb_ts = hb.as_ref().map(|h| h.ts);
-                let hb_interval = hb.as_ref().and_then(|h| h.interval_secs);
-                let now = Utc::now();
-                let json_rows: Vec<_> = task::debt(&outcome.model)
-                    .iter()
-                    .filter(|(group_repo, _)| match &repo {
-                        Some(want) => group_repo.as_deref() == Some(want.as_path()),
-                        None => true,
-                    })
-                    .flat_map(|(_, entries)| entries.clone())
-                    .map(|e| {
-                        let prov = cv_core::task::Provenance::awaiting_land(e.since, hb_ts, hb_interval, now);
-                        let mut v = serde_json::to_value(&e).expect("DebtEntry serializes");
-                        if let Some(obj) = v.as_object_mut() {
-                            obj.insert(
-                                "provenance".into(),
-                                serde_json::to_value(prov).expect("Provenance serializes"),
-                            );
-                        }
-                        v
-                    })
-                    .collect();
-                let awaiting: Vec<_> = task::awaiting_review(&outcome.model)
-                    .into_iter()
-                    .filter(|e| match &repo {
-                        Some(want) => e.task.repo.as_deref() == Some(want.as_path()),
-                        None => true,
-                    })
-                    .collect();
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "debt": json_rows,
-                        "awaiting_review": awaiting,
-                        "suspects": hb.as_ref().map(|h| h.suspect_landed.clone()).unwrap_or_default(),
-                        "verified_as_of": hb.as_ref().map(|h| h.ts),
-                        "verify_warning": cv_core::task::verify::heartbeat_warning(hb.as_ref()),
-                    }))?
-                );
-                return Ok(());
-            }
-            let report = task::DebtReport::compute(&outcome.model, hb.as_ref(), repo.as_deref());
-            let plen = prefix_len(&outcome.model);
-            // Rows arrive repo-ascending (no-repo first), oldest first within a repo: render a
-            // group header at each repo transition.
-            let mut current: Option<&Option<std::path::PathBuf>> = None;
-            let now = Utc::now();
-            for row in &report.debt {
-                if current != Some(&row.repo) {
-                    let name = row
-                        .repo
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "(no repo)".into());
-                    println!("{name}:");
-                    current = Some(&row.repo);
-                }
-                let age = now.signed_duration_since(row.since);
-                println!(
-                    "  {}  rev{} {} [{}] unlanded for {}h · {} — {}",
-                    prefix(&row.id, plen),
-                    row.revision,
-                    sanitize_line(&row.branch),
-                    row.state.as_str(),
-                    age.num_hours(),
-                    freshness_phrase(&row.provenance, now),
-                    sanitize_line(&row.title)
-                );
-                for issue in &row.issues {
-                    println!("      ⚠ {}", sanitize_line(issue));
-                }
-            }
-            if report.debt.is_empty() && report.suspects.is_empty() {
-                println!("✓ no unlanded reviewed work");
-            }
-            if !report.awaiting_review.is_empty() {
-                println!("awaiting review:");
-                for row in &report.awaiting_review {
-                    println!(
-                        "  {}  rev{} {} → {} waiting {} — {}",
-                        prefix(&row.id, plen),
-                        row.revision,
-                        sanitize_line(&row.branch),
-                        sanitize_line(row.reviewer.as_deref().unwrap_or("(reviewer unbound)")),
-                        task::age_short(row.since, now),
-                        sanitize_line(&row.title)
-                    );
-                }
-            }
-            // Suspects were all observed by the current pass — date their freshness off the
-            // heartbeat itself (the debt view is only as fresh as its verifier).
-            let suspect_prov = hb
-                .as_ref()
-                .map(|h| cv_core::task::Provenance::git_verified(h.ts, Some(h.ts), h.interval_secs, now));
-            for s in &report.suspects {
-                let fresh = suspect_prov
-                    .as_ref()
-                    .map(|p| format!(" · {}", freshness_phrase(p, now)))
-                    .unwrap_or_default();
-                println!(
-                    "⚠ SUSPECT {}  rev{} {}{} — {}",
-                    prefix(&s.task_id, plen),
-                    s.revision,
-                    sanitize_line(&s.detail),
-                    fresh,
-                    sanitize_line(&s.title)
-                );
-            }
-            if let Some(hb) = &hb {
-                println!(
-                    "verified as of {}{}",
-                    fmt_local(hb.ts, "%Y-%m-%d %H:%M:%S"),
-                    hb.interval_secs.map(|i| format!(" (every {i}s)")).unwrap_or_default()
-                );
-            }
-            if let Some(w) = &report.verify_warning {
-                eprintln!("⚠ {}", sanitize_line(w));
-            }
-            Ok(())
-        }
-        TaskCmd::Stats { repo, json } => {
-            let outcome = replay_loud()?;
-            let hb = cv_core::task::verify::read_heartbeat(&task::tasks_dir());
-            let stats = task::FleetStats::compute(&outcome.model, hb.as_ref(), repo.as_deref());
-            if json {
-                println!("{}", serde_json::to_string_pretty(&stats)?);
-            } else {
-                render_stats(&stats);
-            }
-            Ok(())
-        }
+        TaskCmd::Propose { .. } => removed_land_verb("propose"),
+        TaskCmd::Reroute { .. } => removed_land_verb("reroute"),
+        TaskCmd::Pass { .. } => removed_land_verb("pass"),
+        TaskCmd::Refute { .. } => removed_land_verb("refute"),
+        TaskCmd::Verify { .. } => removed_land_verb("verify"),
+        TaskCmd::Debt { .. } => usage(
+            "`cv task debt` was removed in 0.15.0 with the land facet — `cv task list --all` is the ledger; \
+             `cv task sweep --repo <path>` is what git can say about it",
+        ),
+        TaskCmd::Stats { .. } => usage(
+            "`cv task stats` was removed in 0.15.0 with the land facet — `cv task events --json` is the raw material",
+        ),
     }
 }
 
@@ -1896,176 +1523,6 @@ fn print_events(outcome: &cv_core::task::ReplayOutcome, f: &EventFilter, text: b
     match events.last() {
         Some(last) => eprintln!("# {} event(s) · next: --since {}", events.len(), last.id),
         None => eprintln!("# no events"),
-    }
-    Ok(())
-}
-
-/// A compact human phrase for a fact's freshness — how it was learned and when. Reused across the
-/// debt and show surfaces so provenance reads the same everywhere: `observed 4m ago` /
-/// `last checked 2h ago (stale)` / `NEVER verified` / `self-reported`.
-fn freshness_phrase(p: &cv_core::task::Provenance, now: DateTime<Utc>) -> String {
-    use cv_core::task::Freshness;
-    match p.freshness {
-        Freshness::Unknown if p.source == cv_core::task::provenance::SOURCE_SELF_REPORT => "self-reported".into(),
-        Freshness::Unknown => "NEVER verified".into(),
-        // A checked completion: cv ran the predicate itself — say "checked" rather than the generic
-        // "observed", so the surface distinguishes it from a git-verified land at a glance.
-        Freshness::Fresh if p.source == cv_core::task::provenance::SOURCE_CHECKED => match p.observed_at {
-            Some(t) => format!("checked {} ago", task::age_short(t, now)),
-            None => "checked".into(),
-        },
-        Freshness::Fresh => match p.observed_at {
-            Some(t) => format!("observed {} ago", task::age_short(t, now)),
-            None => "verified".into(),
-        },
-        Freshness::Stale { .. } => match p.observed_at {
-            Some(t) => format!("last checked {} ago (stale)", task::age_short(t, now)),
-            None => "stale".into(),
-        },
-    }
-}
-
-/// A completion check as a human line: `cmd: cargo test → exit 0` / `file: design.md → exists, 42
-/// bytes` / `http: http://… → 200 OK`. The target itself is untrusted log content, sanitized by
-/// the caller.
-fn describe_check(dc: &cv_core::task::DoneCheck) -> String {
-    use cv_core::task::DoneCheckKind;
-    let (label, target) = match &dc.kind {
-        DoneCheckKind::Cmd { cmd } => ("cmd", cmd.clone()),
-        DoneCheckKind::File { path } => ("file", path.display().to_string()),
-        DoneCheckKind::Http { url } => ("http", url.clone()),
-    };
-    format!("{label}: {target} → {}", dc.result)
-}
-
-/// One receipts observation as a human line: `saw change ✓, ran checks ✗, 14 turns`
-/// (`?` = undetermined — observed as unknown, never guessed).
-fn receipts_line(r: &cv_core::task::ReviewReceipts) -> String {
-    let mark = |o: Option<bool>| match o {
-        Some(true) => "✓",
-        Some(false) => "✗",
-        None => "?",
-    };
-    let turns = r
-        .turns
-        .map(|t| format!("{t} turns"))
-        .unwrap_or_else(|| "? turns".into());
-    format!(
-        "saw change {}, ran checks {}, {}",
-        mark(r.saw_change),
-        mark(r.ran_checks),
-        turns
-    )
-}
-
-/// A median duration cell: `-` when there is no sample (never a fake `0s`).
-fn median_cell(secs: Option<i64>) -> String {
-    let now = Utc::now();
-    match secs {
-        None => "-".into(),
-        Some(s) => task::age_short(now - chrono::Duration::seconds(s.max(0)), now),
-    }
-}
-
-/// `cv task stats` human rendering. Small-n honesty: rates print as the counts they came from
-/// (`2/3`), never a bare percentage.
-fn render_stats(stats: &cv_core::task::FleetStats) {
-    if stats.endpoints.is_empty() && stats.reviewers.is_empty() {
-        println!("(no task history yet)");
-    }
-    if !stats.endpoints.is_empty() {
-        println!("endpoints (as author/assignee):");
-        println!(
-            "  {:24} {:>7} {:>8} {:>7} {:>7} {:>5} {:>6}  {:>9} {:>9}",
-            "endpoint", "claimed", "proposed", "landed", "refuted", "live", "aband", "land-rate", "med-land"
-        );
-        for e in &stats.endpoints {
-            let terminal = e.landed + e.refuted + e.superseded;
-            let rate = if terminal == 0 {
-                "-".into()
-            } else {
-                format!("{}/{terminal}", e.landed)
-            };
-            println!(
-                "  {:24} {:>7} {:>8} {:>7} {:>7} {:>5} {:>6}  {:>9} {:>9}",
-                sanitize_line(&e.endpoint),
-                e.claimed,
-                e.proposed,
-                e.landed,
-                e.refuted,
-                e.unlanded,
-                e.abandoned_live,
-                rate,
-                median_cell(e.median_secs_to_land),
-            );
-        }
-    }
-    if !stats.reviewers.is_empty() {
-        println!("reviewers:");
-        println!(
-            "  {:24} {:>8} {:>11} {:>9} {:>8} {:>10}  {:>11}",
-            "reviewer", "verdicts", "pass/refute", "same-fam", "no-rcpt", "no-contact", "med-latency"
-        );
-        for r in &stats.reviewers {
-            println!(
-                "  {:24} {:>8} {:>11} {:>9} {:>8} {:>10}  {:>11}",
-                sanitize_line(&r.reviewer),
-                r.verdicts,
-                format!("{}/{}", r.passes, r.refutes),
-                r.same_family_passes,
-                r.no_receipts_passes,
-                r.no_contact_passes,
-                median_cell(r.median_review_latency_secs),
-            );
-        }
-    }
-    for f in &stats.families {
-        println!(
-            "family {}: {} reviews ({} cross-family, {} same-family, {} undetermined)",
-            sanitize_line(&f.family),
-            f.reviews_given,
-            f.cross_family,
-            f.same_family,
-            f.undetermined
-        );
-    }
-    match &stats.verified_as_of {
-        Some(ts) => println!("verified as of {}", fmt_local(*ts, "%Y-%m-%d %H:%M:%S")),
-        None => println!("verified: NEVER"),
-    }
-    if let Some(w) = &stats.verify_warning {
-        eprintln!("⚠ {}", sanitize_line(w));
-    }
-    println!("computed from observed events only; landed = git-verified");
-}
-
-/// `cv task verify` — the observation pass, shared with MCP/cvd via `verify::run_verify`.
-fn cmd_verify(id: Option<String>, all: bool, fetch: bool, skip_landed: bool) -> Result<()> {
-    if id.is_none() && !all {
-        bail!("pass a task id or --all");
-    }
-    let store = TaskStore::default_store();
-    let ids: Option<Vec<String>> = match &id {
-        Some(prefix) => {
-            let outcome = replay_loud()?;
-            Some(vec![resolve(&outcome.model, prefix)?.to_string()])
-        }
-        None => None,
-    };
-    let opts = cv_core::task::verify::VerifyOptions {
-        fetch,
-        skip_landed,
-        ..Default::default()
-    };
-    let (appended, warnings) = cv_core::task::verify::run_verify(&store, ids.as_deref(), &opts)?;
-    for w in &warnings {
-        eprintln!("⚠ {}", sanitize_line(w));
-    }
-    for ev in &appended {
-        println!("✦ observed {} on {}", ev.kind.tag(), prefix(&ev.task_id, 13));
-    }
-    if appended.is_empty() {
-        println!("(nothing new observed)");
     }
     Ok(())
 }
@@ -2304,14 +1761,6 @@ fn cmd_sweep(repo: &Path, main: Option<String>, json: bool) -> Result<()> {
             .filter(|b| branch_like(b) && merged.contains(b.as_str()))
         {
             reasons.push(format!("names branch `{b}`, merged into {main}"));
-        }
-        if let Some(rev) = t.current_revision() {
-            if !rev.state.is_terminal() && merged.contains(&rev.revision.branch) {
-                reasons.push(format!(
-                    "rev{} branch `{}` is merged into {main} (run `cv task verify`)",
-                    rev.revision.n, rev.revision.branch
-                ));
-            }
         }
         if !reasons.is_empty() {
             rows.push(SweepRow {

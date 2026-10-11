@@ -63,7 +63,7 @@ An **ambiguous** prefix is never resolved by guessing: cv lists the candidates a
 | `--json` | machine output | `ls` `show` `search` `events` `touched` `tools` `workflow` `compaction` `stats` `doctor` `prune` `rewind` `schema` `task list/show/inbox/debt/stats` `board read/unanswered` |
 | `--limit <n>` | how many rows/records | `ls` `search` `dataset` `pack` `board read` |
 | `--fresh` | bypass the catalog and re-discover | `ls` |
-| `--all` | include what is hidden by default | `task list` `task verify` |
+| `--all` | include what is hidden by default | `task list` `task inbox` |
 | `--thinking <mode>` | what an emit does with the model's reasoning: `native` (default), `text`, `drop` | `port` `splice` `loom` `pack` |
 | `--strict` | fail if a loss the target format *could* have carried happens | `port` |
 
@@ -820,15 +820,14 @@ It gets its own chapter: **[`cv pack` — the context compiler](pack.md)**.
 
 ### `cv task`
 
-The fleet's durable dispatch objects: open/claim/note/done plus reviewed code **revisions** whose landing is *observed from git by cv* (`cv task verify`), never asserted by an agent. The verbs:
+The fleet's durable dispatch objects: open/claim/note/done, and the decisions posed on them. Completion is self-reported and labeled so — cv never claims to have observed what it has not. The verbs:
 
 ```text
 open · list · show · claim · release · note · status · tag · block · done · abandon · supersede
-decide · resolve · split · events · watch · serve
-propose · reroute · pass · refute · verify · inbox · debt · stats · sweep
+decide · resolve · split · events · watch · serve · inbox · sweep
 ```
 
-This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the four laws, the verifier, and a worked end-to-end example.
+`propose`, `reroute`, `pass`, `refute`, `verify`, `debt` and `stats` were removed in 0.15.0 with the land facet; each errors with a pointer. This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the three laws, and a worked end-to-end example.
 
 ### `cv board`
 

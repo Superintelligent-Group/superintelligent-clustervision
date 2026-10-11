@@ -225,10 +225,10 @@
   function counters() {
     const p = S.page; if (!p) return;
     const c = p.counts;
-    $('#counter').textContent = c.decisions + ' owed' + (c.discussing ? ' · ' + c.discussing + ' in discussion' : '') + (c.provisional ? ' · ' + c.provisional + ' made for you' : '') + ' · ' + c.assigned + ' assigned · ' + c.claimed + ' claimed · ' + c.reviews + ' reviews · ' + c.unread + ' unread' +
+    $('#counter').textContent = c.decisions + ' owed' + (c.discussing ? ' · ' + c.discussing + ' in discussion' : '') + (c.provisional ? ' · ' + c.provisional + ' made for you' : '') + ' · ' + c.assigned + ' assigned · ' + c.claimed + ' claimed · ' + c.unread + ' unread' +
       (p.hidden ? ' · ' + p.hidden + ' older hidden' : '') + ' · ' + fmtHm(new Date().toISOString());
     $('#n-decisions').textContent = (c.decisions || c.discussing || c.provisional) ? ' ' + c.decisions + ((c.discussing + c.provisional) ? '+' + (c.discussing + c.provisional) : '') : '';
-    $('#n-actions').textContent = (c.assigned + c.claimed + c.reviews + c.unlanded) ? ' ' + (c.assigned + c.claimed + c.reviews + c.unlanded) : '';
+    $('#n-actions').textContent = (c.assigned + c.claimed) ? ' ' + (c.assigned + c.claimed) : '';
     $('#n-closed').textContent = c.closed ? ' ' + c.closed : '';
     if (S.lanes) $('#n-lanes').textContent = ' ' + S.lanes.counts.running + '/' + S.lanes.counts.total;
     if (S.backlog) $('#n-backlog').textContent = ' ' + S.backlog.count;
@@ -255,7 +255,7 @@
     if (S.pane === 'decisions' || S.pane === 'actions' || S.pane === 'closed') {
       const closed = S.pane === 'closed';
       if (S.pane === 'actions') {
-        const GROUPS = [['assigned_open', 'Assigned'], ['claimed_by_you', 'Claimed'], ['awaiting_your_review', 'Reviews'], ['your_unlanded_work', 'Unlanded']];
+        const GROUPS = [['assigned_open', 'Assigned'], ['claimed_by_you', 'Claimed']];
         let k = 0;
         GROUPS.forEach((g) => {
           const its = items.filter((i) => i.reason === g[0]); if (!its.length) return;
