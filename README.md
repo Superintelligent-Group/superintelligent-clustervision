@@ -113,7 +113,7 @@ Full docs — every CLI command, the MCP tools, the daemon's HTTP API, the app, 
 
 ## 🛠️ Install
 
-**Prebuilt binaries** for macOS / Linux / Windows (arm64 · x64 · x86) ship on every release — grab the latest from **[Releases](https://github.com/emberian/cv/releases/latest)** (`cv` · `cv-mcp` · `cvd` · `cv-search`), or one-line it:
+**Prebuilt binaries** for macOS / Linux / Windows (arm64 · x64 · x86) ship on every release — grab the latest from **[Releases](https://github.com/emberian/cv/releases/latest)** (`cv` · `cv-mcp` · `cvd`), or one-line it:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/emberian/cv/releases/latest/download/cv-installer.sh | sh
@@ -122,7 +122,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/emberian/cv/releases/la
 Or from source:
 
 ```sh
-cargo build --release          # → target/release/{cv, cv-mcp, cvd, cv-search}
+cargo build --release          # → target/release/{cv, cv-mcp, cvd}
 make install                   # = cargo install --path crates/cv --force --target-dir target  → ~/.cargo/bin/cv
 cv --version                   # cv 0.14.0 (<git sha>) — compare against `git rev-parse --short=12 HEAD`
 ```

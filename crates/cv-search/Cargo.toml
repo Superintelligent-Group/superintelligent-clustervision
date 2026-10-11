@@ -17,8 +17,6 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 chrono.workspace = true
-clap.workspace = true
-uuid.workspace = true
 
 # Full-text: pure-Rust Lucene-like engine. Always on.
 tantivy = "0.26"
@@ -33,6 +31,6 @@ model2vec-rs = { version = "0.2", default-features = false, features = ["onig", 
 default = ["semantic"]
 semantic = ["dep:model2vec-rs"]
 
-[[bin]]
-name = "cv-search"
-path = "src/main.rs"
+[dev-dependencies]
+# Tests name their scratch dirs with a fresh UUID.
+uuid.workspace = true

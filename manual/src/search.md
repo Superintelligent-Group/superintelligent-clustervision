@@ -12,8 +12,8 @@ remember what it was *about*). 🔮
   query is embedded too, and results are ranked by cosine similarity. It finds
   the *right* session even when it shares no words with your query.
 
-Both are exposed through the everyday [`cv`](cli.md) CLI; there's also a small
-standalone `cv-search` binary that talks to the same on-disk indexes.
+Both are exposed through the everyday [`cv`](cli.md) CLI (`cv index`, `cv search`); the
+`cv-search` crate is the library behind them.
 
 ## Building the index
 
@@ -39,13 +39,6 @@ modified sessions and reaping vanished ones, so routine refreshes are cheap. Pas
 embeddings; that step downloads a small embedding model (~30 MB) the first time
 it runs, then caches it. `--subagents` folds the sub-agent/workflow forest in too
 (off by default — it can add hundreds of MB).
-
-The equivalent low-level commands on the standalone binary are:
-
-```sh
-cv-search index    # full-text only
-cv-search embed    # semantic embeddings only (requires the `semantic` build feature)
-```
 
 ### What gets indexed
 
@@ -91,12 +84,6 @@ than OR). Results are ranked by BM25, with a highlighted snippet drawn from the
 matching region of the body. `--limit` caps the number of rows shown (default
 **20**); `--harness` filters by harness after ranking.
 
-The standalone binary exposes the same query engine:
-
-```sh
-cv-search text "harness:codex pandas" --limit 5
-```
-
 Here `--limit` defaults to **10**.
 
 ### How `cv search` resolves
@@ -126,7 +113,6 @@ Two front doors, both backed by the embeddings store:
 
 ```sh
 cv search "formalizing proofs" --semantic   # semantic mode of the normal search
-cv-search semantic "formalizing proofs" -k 5
 ```
 
 `cv search --semantic` embeds your query, ranks every stored session vector by
@@ -182,9 +168,6 @@ cv index --semantic
 | `cv search <query>`              | Full-text search (BM25)                             | `--limit` (20)       |
 | `cv search <query> --semantic`   | Semantic search (no keyword fallback)               | `--limit` (20)       |
 | `cv pack <task>`                 | Fused ranking → relevant spans, as a context bundle | `--limit` (8)        |
-| `cv-search text <query>`         | Full-text search (standalone binary)                | `--limit` (10)       |
-| `cv-search semantic <query>`     | Semantic search (standalone binary)                 | `-k` (10)            |
-| `cv-search index` / `embed`      | Build full-text / embeddings (standalone)           | —                    |
 
 See also: [the CLI](cli.md) for the full command surface, and
 [MCP](mcp.md) for exposing search to a running agent.

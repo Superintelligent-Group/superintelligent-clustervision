@@ -478,7 +478,6 @@ version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
- "clap",
  "clustervision-core",
  "dirs 5.0.1",
  "model2vec-rs",
