@@ -107,10 +107,15 @@
 //! `Lineage::forked_from`; `usage.cost.total` is `Usage::cost_usd`; `Message::model` is set only
 //! when it differs from `Session::model` (the first non-synthetic one seen).
 
+mod emit;
+pub use emit::emit;
+
 #[cfg(feature = "sqlite")]
 use super::store::sqlite::open_ro;
+#[cfg(feature = "sqlite")]
+use super::ts_from_epoch;
 use super::wire::{anthropic, coerce_text, text_parts};
-use super::{parse_ts, ts_from_epoch, ts_from_value, Adapter};
+use super::{parse_ts, ts_from_value, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};

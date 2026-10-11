@@ -37,6 +37,9 @@
 //! Harness-specific facts (rate limits, turn ids, the structured `item`, swarm routing) live in
 //! `extra["codex"]`, the only bag this adapter writes; images become `Block::Image` references.
 
+mod emit;
+pub use emit::emit;
+
 use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;

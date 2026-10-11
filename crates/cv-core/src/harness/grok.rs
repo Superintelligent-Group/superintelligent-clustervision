@@ -25,6 +25,9 @@
 //!   are both handled: the raw `session_kind`/`agent_name` ride in `extra["grok"]`, and a subagent's
 //!   `agent_name` nickname also becomes [`Lineage::agent_path`] (Grok records no parent session id).
 
+mod emit;
+pub use emit::emit;
+
 use super::wire::{coerce_text, openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;

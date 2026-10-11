@@ -55,6 +55,9 @@
 //! (`Usage::cost_usd`, `Usage::reasoning_tokens`); `session.parent_id` is `Lineage::parent`; the
 //! remaining `session` columns land in `Session::extra["opencode"]`.
 
+mod emit;
+pub use emit::emit;
+
 use super::Adapter;
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};

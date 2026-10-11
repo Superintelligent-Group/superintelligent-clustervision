@@ -61,6 +61,9 @@
 //! compaction flags, the raw reasoning columns, and the session row under
 //! `extra["hermes"]["session"]`.
 
+mod emit;
+pub use emit::emit;
+
 use super::store::sqlite::{columns, open_ro, table_exists};
 use super::wire::openai;
 use super::{ts_from_epoch, Adapter};

@@ -39,6 +39,9 @@
 //! `parse_all_str` (used by the wasm ingest path) handles all three readable JSON/JSONL shapes purely,
 //! with no filesystem access.
 
+mod emit;
+pub use emit::emit;
+
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
