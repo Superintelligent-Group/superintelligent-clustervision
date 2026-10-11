@@ -24,7 +24,7 @@ The pre-compaction records are still in your transcript; only your context lost 
   last line; `--stranded` lists lanes parked on a promise nothing will keep.
 - `cv distill <id> --session` — the same lane at a sixth of the context, resumable; its brief,
   timeline and last N tool calls verbatim, the rest indexed (`cv cat <new> <tool_use_id>`).
-- `cv fork <id> --at N` — the lane exactly as it stood at message N, to run variants.
+- `cv splice <id>:..N --session` (or `--agent-of <root>`) — the lane exactly as it stood at message N, to run variants.
 - `cv adopt <agent-id> --into <live-root>` — a dead root's lane moved under a live one so it can
   `SendMessage` it; `cv lanes --recent N --unfinished` is the rescue list.
 - `cv show <agent-id>` / `cv show <session> --subagents` — read a lane, or the whole forest.

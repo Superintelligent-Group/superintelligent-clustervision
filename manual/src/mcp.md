@@ -137,7 +137,6 @@ call gets `--json` appended (and so returns machine output rather than rendered 
 | `lanes` | `id` | yes | The sub-agent forest as a status table: model, duration, tokens, tool calls, status, last line; `stranded` lists lanes parked on a promise. |
 | `deferrals` | `id` | yes | Every deferral phrase in the assistant's text with context; `open_tasks` marks each MATCHED/UNMATCHED against the task store. |
 | `stats` | — | yes | Fleet analytics over all discovered sessions. |
-| `diff` | `a`, `b` | no | Compare two sessions message-by-message (great for loom branches). |
 | `blame` | `file` | no | Which agent session wrote this code, and what was it thinking? A session whose own tool output made the commit ranks first, `exact`. |
 | `doctor` | — | yes | Why a context window keeps filling: pressure by source, overhead, compaction frequency. |
 
