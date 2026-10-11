@@ -28,7 +28,7 @@ pub mod reduce;
 pub mod store;
 pub mod views;
 
-pub use decide::{is_decide_note, options_of, parse_deadline, parse_decide_note, DecideNote, AS_PROPOSED};
+pub use decide::{options_of, parse_deadline, parse_decide_note, DecideNote, AS_PROPOSED};
 pub use model::{RetiredEvent, TaskEvent, TaskEventKind, TaskState, RETIRED_TAGS};
 pub use project::{
     age_short, blocks, effective_display, in_scope, inbox, involves, is_blocked, list, parse_duration, parse_since,
@@ -106,25 +106,11 @@ pub fn append(
     })
 }
 
-/// [`append`] for several events by one actor, appended as ONE unit
-/// ([`TaskStore::append_agent_events`]): all land or none does. The outcome's `effective_state`
-/// is the LAST event's task after the batch; `events` holds all of them in append order.
-pub fn append_batch(
-    store: &TaskStore,
-    from: &str,
-    kinds: Vec<(Option<String>, TaskEventKind)>,
-    warnings: Vec<String>,
-) -> anyhow::Result<BatchOutcome> {
-    let candidates: Vec<TaskEvent> = kinds
-        .into_iter()
-        .map(|(task_id, kind)| new_event(task_id.as_deref(), from, kind))
-        .collect();
-    append_events(store, candidates, warnings)
-}
-
-/// [`append_batch`] for events the caller already built with [`new_event`] — for a batch whose
-/// later events name the task the FIRST one opens (`cv task decide`: the `opened` id must be
-/// known before the `tagged`/`posed`/`resolved` that follow it are built).
+/// [`append`] for several events the caller built with [`new_event`], appended as ONE unit
+/// ([`TaskStore::append_agent_events`]): all land or none does. Later events may name the task
+/// the FIRST one opens (`cv task decide`: the `opened` id must be known before the
+/// `tagged`/`posed`/`resolved` that follow it are built). The outcome's `effective_state` is the
+/// LAST event's task after the batch; `events` holds all of them in append order.
 pub fn append_events(
     store: &TaskStore,
     candidates: Vec<TaskEvent>,
@@ -144,7 +130,7 @@ pub fn append_events(
     })
 }
 
-/// What one batch append produced (see [`append_batch`]).
+/// What one batch append produced (see [`append_events`]).
 #[derive(Debug)]
 pub struct BatchOutcome {
     pub events: Vec<TaskEvent>,

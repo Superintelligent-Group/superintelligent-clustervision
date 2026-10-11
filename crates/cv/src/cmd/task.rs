@@ -617,21 +617,16 @@ fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventK
         return append_and_report(Some(id), from, close);
     };
     let store = TaskStore::default_store();
-    let report = task::append_batch(
-        &store,
+    let note = task::new_event(
+        Some(id),
         from,
-        vec![
-            (
-                Some(id.to_string()),
-                TaskEventKind::Noted {
-                    text,
-                    session_ref: None,
-                },
-            ),
-            (Some(id.to_string()), close),
-        ],
-        Vec::new(),
-    )?;
+        TaskEventKind::Noted {
+            text,
+            session_ref: None,
+        },
+    );
+    let close = task::new_event(Some(id), from, close);
+    let report = task::append_events(&store, vec![note, close], Vec::new())?;
     for w in report.replay_warnings.iter().chain(&report.warnings) {
         eprintln!("⚠ {}", sanitize_line(w));
     }

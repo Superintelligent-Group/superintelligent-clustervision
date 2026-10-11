@@ -37,11 +37,6 @@ pub struct DecideNote {
 /// accepting it means "do what the note says".
 pub const AS_PROPOSED: &str = "as proposed";
 
-/// Is this note a decision note (leading `DECIDE`)?
-pub fn is_decide_note(text: &str) -> bool {
-    text.trim_start().starts_with("DECIDE")
-}
-
 /// Does the note mention `DECIDE` after its first sentence (a decision buried in a report)?
 pub fn mentions_decide_mid_text(text: &str) -> bool {
     let t = text.trim_start();
@@ -241,7 +236,7 @@ fn matching_paren(s: &str) -> Option<usize> {
 }
 
 /// Drop every `(…)` group (nested ones included) and tidy the spacing.
-pub fn strip_parentheticals(s: &str) -> String {
+fn strip_parentheticals(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut depth = 0i32;
     for c in s.chars() {
@@ -444,8 +439,6 @@ mod tests {
             "JOIN-SOLANA works. DECIDE: one enrollment per tip, raise the floor or batch."
         ));
         assert!(!mentions_decide_mid_text(TANK));
-        assert!(is_decide_note("  DECIDE (X): y"));
-        assert!(!is_decide_note("decide: lower-case is a word, not the convention"));
         let n = parse_decide_note("DECIDE (X, default stands if silent)").unwrap();
         assert_eq!(n.title, "X");
     }
