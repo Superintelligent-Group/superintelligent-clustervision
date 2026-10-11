@@ -11,22 +11,23 @@ harness changes, regenerating it is how you find out.
 | [`openclaw/`](openclaw/) | `tests/fixtures/openclaw/openclaw-agent.sqlite` | a `~/pug/openclaw` checkout with deps installed, Node ≥ 22.5 |
 | [`codex/`](codex/) | no fixture — a **smoke test** that Codex accepts a cv-emitted rollout | an installed `codex`, python3 |
 | [`hermes/`](hermes/) | `tests/fixtures/hermes/state-v30.db` | a `~/pug/hermes-agent` checkout, python3 |
+| [`devin/`](devin/) | `tests/fixtures/devin/sessions-v17-3000.11.3.db` | python3 only — **hand-written**: the Devin CLI is closed source, so `generate.py` spells the live schema verbatim and fills it synthetically (the exception to "the harness wrote it") |
 
-All four were run end to end on 2026-09-19 against the pinned checkouts. Each one checks its own
-prerequisites first and names the missing one; none of them fails obscurely when a checkout, a
-binary or an env var is absent.
+The first four were run end to end on 2026-09-19 against the pinned checkouts; the Devin generator
+was added 2026-10-04. Each one checks its own prerequisites first and names the missing one; none of
+them fails obscurely when a checkout, a binary or an env var is absent.
 
 None of these needs a paid model call: Goose talks to a stub OpenAI server in this directory, Codex
-is pointed at a provider whose base URL is a closed port, and OpenClaw and Hermes are driven through
-their own store APIs with no model in the loop.
+is pointed at a provider whose base URL is a closed port, OpenClaw and Hermes are driven through
+their own store APIs with no model in the loop, and Devin's needs no harness at all.
 
-**They all write to a throwaway home** — `GOOSE_PATH_ROOT`, `OPENCLAW_STATE_DIR`, `CODEX_HOME`,
-`HERMES_HOME` — and each refuses to start when the variable is unset or points at the real one.
+**The four real-writer generators write to a throwaway home** — `GOOSE_PATH_ROOT`, `OPENCLAW_STATE_DIR`,
+`CODEX_HOME`, `HERMES_HOME` — and each refuses to start when the variable is unset or points at the real one.
 Hermes needs that guard the most: with `HERMES_HOME` unset Hermes does *not* refuse, it warns and
 falls back to `~/.hermes`. Keep that habit in anything you add here.
 
-**Every generator can write somewhere other than the committed fixture** (`--out` for goose, `OUT`
-for hermes, `OPENCLAW_OUT` for openclaw). Regenerate to a scratch path and diff before replacing
+**Every generator can write somewhere other than the committed fixture** (`--out` for goose and devin,
+`OUT` for hermes, `OPENCLAW_OUT` for openclaw). Regenerate to a scratch path and diff before replacing
 anything — see each README's "what a regenerated fixture does not match" section, because three of
 the four have a real answer to that question.
 
