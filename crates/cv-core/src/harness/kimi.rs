@@ -158,7 +158,12 @@ impl Adapter for Kimi {
                 } else {
                     continue;
                 };
-                if let Some(r) = scan(&id, &transcript, &dir, cwd.clone(), default_model.clone()) {
+                // Keyed on the transcript, as kimi-code's scan is: it grows on every turn and is what
+                // the scan reads whole. A rename that only rewrites `state.json` shows at the next turn.
+                let hit = crate::discover_cache::cached_scan(&transcript, || {
+                    scan(&id, &transcript, &dir, cwd.clone(), default_model.clone())
+                });
+                if let Some(r) = hit {
                     out.push(r);
                 }
             }
