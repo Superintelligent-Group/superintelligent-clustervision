@@ -829,12 +829,12 @@ decide · resolve · split · events · serve · inbox · sweep
 
 `propose`, `reroute`, `pass`, `refute`, `verify`, `debt` and `stats` were removed in 0.15.0 with the land facet; each errors with a pointer. This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the three laws, and a worked end-to-end example.
 
-### `cv board` (removed)
+### The coordination board (removed)
 
 The coordination board went away in 0.15.0: in 85 days of real swarms, 3,317 of its 3,319 lines
 were auto-mirrored task events. The task log is the fleet's record — `cv task note` to say
 something, `cv task events --since <id>` to follow it, `cv task claim` to hold work. Every
-`cv board` spelling errors with that pointer and exit 2.
+The old `board` spelling errors with that pointer and exit 2.
 
 ### `cv scry`
 
