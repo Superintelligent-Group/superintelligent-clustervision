@@ -1156,43 +1156,44 @@ fn error_paths_exit_nonzero_with_stderr() {
     let (_, err) = w.cv_fails(&["resume", "nonexistent-id"]);
     assert!(err.contains("no session matching"), "{err}");
 
-    let (_, err) = w.cv_fails(&["diff", "alphasess", "nonexistent-id"]);
-    assert!(err.contains("no session matching"), "{err}");
-
     let (_, err) = w.cv_fails(&["show", "alphasess", "--harness", "marsrover"]);
     assert!(err.contains("unknown harness"), "{err}");
 
-    // Every 0.10 name that 0.11.0 removed or renamed: gone, but never silently — each one exits 2
-    // (a caller mistake, not a failure) with a line naming the version and the replacement.
-    let removed: &[(&[&str], &str)] = &[
+    // Every name a release removed or renamed: gone, but never silently — each one exits 2 (a
+    // caller mistake, not a failure) with a line naming the version and the replacement.
+    let removed: &[(&[&str], &str, &str)] = &[
         // `convert` folded into `port`.
         (
             &["convert", "alphasess", "--to", "marsrover"],
+            "0.11.0",
             "cv port <id> --harness <harness>",
         ),
         // `query` only ever printed the field reference; that is `schema`.
-        (&["query"], "cv schema"),
+        (&["query"], "0.11.0", "cv schema"),
         // `recall` superseded by the one build-context verb. (`distill` was a 0.11 stub that pointed
         // here too; the name now means `cv distill`, the transcript reshaper.)
-        (&["recall", "zebrafish"], "cv pack <task>"),
+        (&["recall", "zebrafish"], "0.11.0", "cv pack <task>"),
         // Fetching a tool's output is a Read, not a prune option.
         (
             &["prune", "alphasess", "--retrieve", "t1"],
+            "0.11.0",
             "cv cat <session> <tool_use_id>",
         ),
         // `--to`/`--to-dir` say where; the flags now say what.
-        (&["port", "alphasess", "--to", "codex"], "use `--harness <harness>`"),
-        (&["port", "alphasess", "--to-dir", "/tmp/nope"], "use `--cwd <dir>`"),
+        (&["port", "alphasess", "--to", "codex"], "0.11.0", "use `--harness <harness>`"),
+        (&["port", "alphasess", "--to-dir", "/tmp/nope"], "0.11.0", "use `--cwd <dir>`"),
         // `prune --thinking` was a boolean "snip reasoning too"; `--thinking <mode>` now names what
         // an EMIT does with reasoning, and one word may not mean two things.
-        (&["prune", "alphasess", "--thinking"], "use `--drop-thinking`"),
+        (&["prune", "alphasess", "--thinking"], "0.11.0", "use `--drop-thinking`"),
+        // `diff` was a role+text prefix compare; export both and use a real diff.
+        (&["diff", "alphasess", "betasess"], "0.15.0", "cv export <id> --format md"),
     ];
-    for (args, pointer) in removed {
+    for (args, version, pointer) in removed {
         let (ok, code, out, err) = w.cv(args);
         assert!(!ok, "cv {args:?} must not still work\nstdout:\n{out}");
         assert_eq!(code, 2, "cv {args:?} must exit 2 (caller mistake)\nstderr:\n{err}");
         assert!(!err.contains("panicked"), "cv {args:?} panicked:\n{err}");
-        assert!(err.contains("0.11.0"), "cv {args:?} must say when it went away:\n{err}");
+        assert!(err.contains(version), "cv {args:?} must say when it went away:\n{err}");
         assert!(err.contains(pointer), "cv {args:?} must point at {pointer:?}:\n{err}");
     }
     // The pointers are real: the replacement parses (it fails on the harness, not the grammar).
@@ -1240,16 +1241,12 @@ fn blame_outside_repo_and_missing_file() {
     );
 }
 
-// ───────────────────────────── diff / tree happy paths ─────────────────────────────
+// ───────────────────────────── tree happy path ─────────────────────────────
 
 #[test]
-fn diff_and_tree_render() {
-    let w = World::new("difftree");
+fn tree_renders() {
+    let w = World::new("tree");
     standard_corpus(&w);
-
-    let (out, _) = w.cv_ok(&["diff", "alphasess", "betasess"]);
-    assert!(out.contains("only-in-A"), "{out}");
-    assert!(out.contains("0 shared"), "different sessions share no prefix:\n{out}");
 
     let (out, _) = w.cv_ok(&["tree", "alphasess"]);
     assert!(out.contains("# alpha adventures"), "{out}");

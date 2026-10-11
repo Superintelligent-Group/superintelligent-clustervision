@@ -81,7 +81,6 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
             "deferrals",
             "timeline",
             "stats",
-            "diff",
             "blame",
             "doctor",
         ],
@@ -439,13 +438,6 @@ enum Cmd {
         /// sub-agents (slower than the catalog-only default); `--json` adds a `tokens` object.
         #[arg(long)]
         tokens: bool,
-    },
-    /// Compare two sessions message-by-message (great for loom branches).
-    Diff {
-        a: String,
-        b: String,
-        #[arg(long)]
-        harness: Option<String>,
     },
     /// Code provenance: which agent session wrote this code, and what was it thinking?
     ///
@@ -1028,6 +1020,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         rest: Vec<String>,
     },
+    // ───────────────────────────── Removed in 0.15.0 (hidden stubs) ─────────────────────────────
+    #[command(hide = true)]
+    Diff {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
 }
 
 /// The clap tree with the grouped listing attached (`after_help` is computed from the tree itself,
@@ -1358,7 +1356,6 @@ fn run() -> Result<()> {
             limit,
             json,
         } => browse::cmd_timeline(harness, cwd, query, limit, json),
-        Cmd::Diff { a, b, harness } => view::cmd_diff(&a, &b, harness),
         Cmd::Distill {
             id,
             harness,
@@ -1474,6 +1471,9 @@ fn run() -> Result<()> {
         Cmd::Recall { .. } => usage(
             "`cv recall` was removed in 0.11.0 — use `cv search <query>` to find content, or `cv pack <task>` to build context",
         ),
+        Cmd::Diff { .. } => usage(
+            "`cv diff` was removed in 0.15.0 — `cv export <id> --format md` each session and diff the two files",
+        ),
     }
 }
 
@@ -1555,7 +1555,7 @@ mod tests {
             }
         }
         // Old names are hidden stubs, never visible commands.
-        for old in ["convert", "query", "recall"] {
+        for old in ["convert", "query", "recall", "diff"] {
             assert!(!visible.contains(&old), "{old} must be hidden");
             assert!(
                 cmd.get_subcommands().any(|s| s.get_name() == old),

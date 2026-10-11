@@ -35,7 +35,7 @@ The principle behind all of it: **one name, one meaning, no grammar to memorize.
 
 | Group | What they have in common | Commands |
 | --- | --- | --- |
-| **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`timeline`](#cv-timeline) [`stats`](#cv-stats) [`diff`](#cv-diff) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
+| **[Read](#read)** | read-only over existing sessions | [`ls`](#cv-ls) [`show`](#cv-show) [`cat`](#cv-cat) [`search`](#cv-search) [`events`](#cv-events) [`touched`](#cv-touched) [`tools`](#cv-tools) [`tree`](#cv-tree) [`workflow`](#cv-workflow) [`compaction`](#cv-compaction) [`prompts`](#cv-prompts) [`lanes`](#cv-lanes) [`deferrals`](#cv-deferrals) [`timeline`](#cv-timeline) [`stats`](#cv-stats) [`blame`](#cv-blame) [`doctor`](#cv-doctor) |
 | **[Reshape](#reshape)** | produce a **new** session id from existing ones; the source is never touched | [`prune`](#cv-prune) [`rewind`](#cv-rewind) [`distill`](#cv-distill) [`fork`](#cv-fork) [`adopt`](#cv-adopt) [`splice`](#cv-splice) [`loom`](#cv-loom) [`port`](#cv-port) [`redact`](#cv-redact) [`resume`](#cv-resume) |
 | **[Export](#export)** | produce something that is *not* a session | [`export`](#cv-export) [`dataset`](#cv-dataset) [`pack`](#cv-pack) |
 | **[Fleet & live](#fleet--live)** | multi-agent coordination and live views | [`task`](#cv-task) [`board`](#cv-board) [`scry`](#cv-scry) [`share`](#cv-share) |
@@ -57,7 +57,7 @@ An **ambiguous** prefix is never resolved by guessing: cv lists the candidates a
 
 | flag | meaning | on |
 | --- | --- | --- |
-| `--harness <h>` | filter to, or target, one harness — never spelled `--to` | `ls` `show` `cat` `search` `events` `tools` `tree` `workflow` `compaction` `timeline` `diff` `doctor` `prune` `rewind` `splice` `loom` `port` `redact` `resume` `export` `dataset` `pack` `scry` `share` |
+| `--harness <h>` | filter to, or target, one harness — never spelled `--to` | `ls` `show` `cat` `search` `events` `tools` `tree` `workflow` `compaction` `timeline` `doctor` `prune` `rewind` `splice` `loom` `port` `redact` `resume` `export` `dataset` `pack` `scry` `share` |
 | `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping | `ls` `timeline` `splice` `loom` `port` `scry` |
 | `--out <dir\|file>` | write somewhere other than the real store | `rewind` `splice` `loom` `port` `dataset` `pack` `share` |
 | `--json` | machine output | `ls` `show` `search` `events` `touched` `tools` `workflow` `compaction` `timeline` `stats` `doctor` `prune` `rewind` `schema` `task list/show/inbox/debt/stats` `board read/unanswered` |
@@ -503,29 +503,6 @@ date range:
   earliest created: 2025-09-02 10:11
   latest updated:   2026-05-29 18:44
 ```
-
-### `cv diff`
-
-Compare two sessions message-by-message: a shared prefix marked `=`, then the divergence — `<` for messages only in A, `>` for messages only in B. Great for inspecting two [`loom`](#cv-loom) branches that started from the same root.
-
-```sh
-cv diff da9174f4 4f2a0c11
-cv diff claude:da91 codex:019e            # per-side harness prefixes
-```
-
-```text
-A claude   da9174f4  87 msg
-B claude   4f2a0c11  91 msg
-
-= user      walk the type checker and find where flux is ignored
-= assistant here's the plan …
-< assistant let's start with the walker
-> assistant let's start with the constraint solver
-
-42 shared, 45 only-in-A, 49 only-in-B
-```
-
-Each side may carry its own `harness:id` prefix, so you can diff sessions that live in *different* harnesses. A side without a recognized prefix falls back to the shared `--harness`.
 
 ### `cv blame`
 

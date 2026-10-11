@@ -1,4 +1,4 @@
-//! `cv show` / `cv export` / `cv tree` / `cv diff` / `cv redact` — reading sessions,
+//! `cv show` / `cv export` / `cv tree` / `cv redact` — reading sessions,
 //! plus the streaming renderer (`stream_session_render`) and its header/message helpers.
 
 use crate::util::{
@@ -681,66 +681,6 @@ fn tree_line(m: &Message) -> String {
         format!(" [{}]", tags.join(", "))
     };
     format!("{role}{tagstr}  {preview}")
-}
-
-// ---------- diff ----------
-
-/// Compare two sessions message-by-message: a shared prefix (`=`) then a divergence marked
-/// `<` (only in A) / `>` (only in B). Comparison is on role + `Message::text()`.
-pub(crate) fn cmd_diff(a: &str, b: &str, harness: Option<String>) -> Result<()> {
-    let default = parse_harness(&harness)?;
-    // Each side may carry its own `harness:id` prefix so the two sessions can live in *different*
-    // harnesses; a side with no prefix falls back to the shared `--harness` (or unconstrained).
-    let (ra, aa) = resolve(a, default)?;
-    let (rb, ab) = resolve(b, default)?;
-    let sa = aa.parse(&ra)?;
-    let sb = ab.parse(&rb)?;
-
-    println!(
-        "A {:8} {:8}  {} msg",
-        sa.harness.as_str(),
-        short_id(&sa.id),
-        sa.messages.len()
-    );
-    println!(
-        "B {:8} {:8}  {} msg",
-        sb.harness.as_str(),
-        short_id(&sb.id),
-        sb.messages.len()
-    );
-    println!();
-
-    let key = |m: &Message| (m.role, m.text().unwrap_or_default());
-    let na = sa.messages.len();
-    let nb = sb.messages.len();
-
-    // Shared prefix: matching role+text from the top.
-    let mut shared = 0;
-    while shared < na && shared < nb && key(&sa.messages[shared]) == key(&sb.messages[shared]) {
-        println!("= {}", diff_line(&sa.messages[shared]));
-        shared += 1;
-    }
-    // After divergence, list A's remainder then B's remainder.
-    for m in &sa.messages[shared..] {
-        println!("< {}", diff_line(m));
-    }
-    for m in &sb.messages[shared..] {
-        println!("> {}", diff_line(m));
-    }
-
-    println!(
-        "\n{shared} shared, {} only-in-A, {} only-in-B",
-        na - shared,
-        nb - shared
-    );
-    Ok(())
-}
-
-/// One-line `role: text-preview` for a diff row.
-fn diff_line(m: &Message) -> String {
-    let role = cv_core::render::role_label(m.role);
-    let text = m.text().unwrap_or_default();
-    format!("{role:9} {}", truncate(&text, 80))
 }
 
 // ---------- rendering helpers ----------
