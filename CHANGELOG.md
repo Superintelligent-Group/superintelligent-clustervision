@@ -19,6 +19,7 @@
 - **`cv lanes --recent N [--cwd DIR] --unfinished`** replaces `cv adopt --list` / `--orphans`: a project's recent forests in one table, each row tagged with its session.
 - **`cv formats` is flat** (the census); `formats check` is the `formats_manifest` test — it always needed a checkout.
 - The 0.11 tombstones are gone: `cv convert|query|recall`, `prune --thinking|--retrieve|--range`, `port --to|--to-dir|--from`, `--to` on `splice|loom|pack` are now plain unknown names.
+- `cvd --version` no longer goes stale on a branch (its build.rs watches the resolved ref, as `cv`'s does); cv-mcp's unknown-harness error names all 23 harnesses.
 
 ## 0.14.0 — 2026-10-10
 

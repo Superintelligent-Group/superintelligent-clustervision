@@ -1718,7 +1718,10 @@ fn parse_harness(args: &Value) -> anyhow::Result<Option<Harness>> {
         None => Ok(None),
         Some(s) => match Harness::parse(s) {
             Some(h) => Ok(Some(h)),
-            None => anyhow::bail!("unknown harness: {s:?} (expected one of claude, codex, grok, opencode, gemini)"),
+            None => anyhow::bail!(
+                "unknown harness: {s:?} (expected one of {})",
+                Harness::ALL.iter().map(|h| h.as_str()).collect::<Vec<_>>().join(", ")
+            ),
         },
     }
 }

@@ -1,5 +1,6 @@
-//! `cv recipes` — the agent quickstart: the ten things agents do with cv, each as one command line
-//! plus the JSON keys it returns. Printed verbatim; `cv --help` points here.
+//! `cv recipes` — the agent quickstart: the things agents do with cv, each as one command line
+//! plus the JSON keys it returns. Printed verbatim; `cv --help` points here. The test asserts the
+//! numbering is dense and that no removed name is mentioned.
 
 use anyhow::Result;
 
@@ -118,7 +119,7 @@ pub(crate) fn cmd_recipes() -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn ten_recipes_and_no_old_names() {
+    fn every_recipe_present_and_no_old_names() {
         let r = super::RECIPES;
         for n in 1..=14 {
             assert!(r.contains(&format!("{n:>2}. ")), "recipe {n} missing");

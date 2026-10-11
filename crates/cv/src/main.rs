@@ -980,8 +980,8 @@ enum Cmd {
         #[arg(hide = true)]
         legacy: Option<String>,
     },
-    /// The agent quickstart: the ten things agents do with cv, each as one command line with the
-    /// JSON keys it returns.
+    /// The agent quickstart: the things agents do with cv, each as one command line with the JSON
+    /// keys it returns.
     Recipes,
 
     // ───────────────────────────── Removed (hidden stubs: error with a pointer, exit 2) ─────────────────────────────
@@ -1447,7 +1447,7 @@ mod tests {
     }
 
     /// The clap tree is well-formed (debug asserts: conflicting ids, bad defaults, …).
-    /// Building the clap tree is deep: `Cli::command()` for ~40 commands with their args is a
+    /// Building the clap tree is deep: `Cli::command()` for every command with its args is a
     /// large stack frame in a debug build, and the default 2 MB test-thread stack overflows on
     /// it (the binary's main thread has 8 MB and is fine). Run the tree-building tests on a
     /// thread sized like main.

@@ -398,7 +398,7 @@ wasm-pack build crates/cv-web --target web --out-dir ../../web/pkg --no-default-
 Run the daemon's HTTP API alongside the static site:
 
 ```sh
-cvd serve --addr 127.0.0.1:7777   # CORS-enabled
+cvd serve --host 127.0.0.1 --port 7777   # CORS for local origins only
 ```
 
 Open the **📡 Fleet** tab (base URL `http://localhost:7777`, channel `fleet`).
