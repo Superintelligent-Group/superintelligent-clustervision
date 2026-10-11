@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "opencode"
+version = "1.18.20"
+generated = "2026-10-11"
+model = "glm-5.3-flash via Z.ai coding endpoint, through chat_proxy.py"
+model_calls = 40
+scenarios = ["chat","resume","reasoning","tools","parallel_tools","tool_error","permission_denied","todo","image","subagent","compaction","model_switch","mcp","skill","custom_command","plan_agent","agent_switch","user_shell","fork","webfetch","provider_error","interrupt","revert"]
+skipped = ["background: 1.x has no background shell or background sub-agent"]
+thinned = ["kv rows models-dev:*","event rows"]
+generator_commit = "1266b7a"

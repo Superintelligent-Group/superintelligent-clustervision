@@ -12,6 +12,7 @@
 - `cv ls --enrich` keeps only each session's user turns while reading it: 720 MB to 80 MB peak on the largest sessions.
 - `cv cat` stops reading at the tool call it prints instead of holding the whole session.
 - OpenCode 2.x: sessions in its new `session_v2`/`session_message` tables are read (2.x databases looked empty before); a migrated 1.x database shows each session once.
+- OpenCode corpus: real stores from 1.18.20 and 2.0.25, plus 2.0.25's migration of the 1.18.20 store.
 
 ## 0.15.1 — 2026-10-11
 

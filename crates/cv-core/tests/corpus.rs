@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cv_core::harness::codex::Codex;
+use cv_core::harness::opencode::OpenCode;
 use cv_core::ir::{Block, MessageKind};
 use cv_core::Adapter;
 use cv_testkit::World;
@@ -31,10 +32,20 @@ fn codex(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Codex::with_home(&version_dir.join(".codex")))
 }
 
-const HARNESSES: &[CorpusHarness] = &[CorpusHarness {
-    name: "codex",
-    adapter: codex,
-}];
+fn opencode(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(OpenCode::with_data_dir(&version_dir.join(".local/share/opencode")))
+}
+
+const HARNESSES: &[CorpusHarness] = &[
+    CorpusHarness {
+        name: "codex",
+        adapter: codex,
+    },
+    CorpusHarness {
+        name: "opencode",
+        adapter: opencode,
+    },
+];
 
 fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")

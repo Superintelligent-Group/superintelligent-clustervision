@@ -1,0 +1,472 @@
+{
+  "sessions": [
+    {
+      "id": "ses_ed3616409fferBaC9qQB6a6WXH",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 3,
+      "sequence": [
+        "user/prompt",
+        "assistant/error",
+        "tool/tool_result"
+      ],
+      "blocks": {
+        "text": 1,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "shell"
+      ],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed361656affempYmYSx59q94aY",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/error"
+      ],
+      "blocks": {
+        "text": 2
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-error",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed3618a5effeRf7pmSi3ysOXTb",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "webfetch",
+        "webfetch"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed3619746ffeGyxDIU3yeQA9qY",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 14,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "system/injected_context",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 11,
+        "thinking": 6,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "skill"
+      ],
+      "usage_messages": 6,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "forked_from": "ses_ed363c019ffevp7AApKr42DK1L"
+      },
+      "model": "glm-alt",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed361b8c4ffeMkvDLqGmGkb2lH",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 8,
+      "sequence": [
+        "system/notice",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "system/notice",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 8,
+        "thinking": 2
+      },
+      "tools": [],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed3620ef4ffe4newuRv41dyzJo",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 10,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 4,
+        "tool_result": 5,
+        "tool_use": 5
+      },
+      "tools": [
+        "grep",
+        "glob",
+        "shell",
+        "shell",
+        "read"
+      ],
+      "usage_messages": 5,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed3622942ffebJnRN3VVK10H2O",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "skill"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed3623b9affetMteFU3kqkc0fF",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "execute"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed36288f7ffebA2DsIgDkaZy7W",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 6,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "system/compaction_boundary",
+        "assistant/compaction_summary",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 5,
+        "thinking": 2
+      },
+      "tools": [],
+      "usage_messages": 3,
+      "compaction_boundaries": [
+        2
+      ],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed362ab11ffeFcJqUXekeHVpCa",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "ses_ed362eed1ffebZR2VGSZEwUk4J"
+      },
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed362eed1ffebZR2VGSZEwUk4J",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 12,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/injected_context",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/subagent_return",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 8,
+        "thinking": 4,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "shell",
+        "subagent"
+      ],
+      "usage_messages": 6,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 1,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed363073dffesCc3c0VjiYLZ72",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "ses_ed3630f2fffep3VjD1CYlboZjV"
+      },
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed3630f2fffep3VjD1CYlboZjV",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "subagent"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed363190dffelyvLBVgF2duScO",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "image": 1,
+        "text": 2,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed363866dffelpAKYJKrUxOXKu",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 15,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/injected_context"
+      ],
+      "blocks": {
+        "text": 8,
+        "thinking": 5,
+        "tool_result": 5,
+        "tool_use": 5
+      },
+      "tools": [
+        "read",
+        "read",
+        "edit",
+        "shell",
+        "shell"
+      ],
+      "usage_messages": 7,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "ses_ed363c019ffevp7AApKr42DK1L",
+      "path": ".local/share/opencode/opencode.db",
+      "messages": 12,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "system/injected_context",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "system/model_change",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 9,
+        "thinking": 5,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "skill"
+      ],
+      "usage_messages": 5,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-alt",
+      "skipped_lines": 0
+    }
+  ]
+}

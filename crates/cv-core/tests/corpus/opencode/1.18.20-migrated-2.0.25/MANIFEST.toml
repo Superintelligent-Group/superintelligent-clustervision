@@ -1,0 +1,9 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "opencode"
+version = "2.0.25"
+generated = "2026-10-11"
+migrated_from = "1.18.20 (tests/corpus/opencode/1.18.20)"
+how = "opencode 2.0.25 serve over a copy of that store; its v1 to v2 migration ran at startup"
+model_calls = 0
+thinned = ["kv rows models-dev:*","event rows"]
+generator_commit = "1266b7a"
