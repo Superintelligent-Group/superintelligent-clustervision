@@ -14,9 +14,9 @@ store = [
 ]
 
 [upstream]
-repo = "Kimi Code bundle (@moonshot-ai/kimi-code 0.39.1, dist/main.mjs)"
-commit = "0.39.1"
-date = "2026-09-19"
+repo = "Kimi Code bundle (@moonshot-ai/kimi-code, dist/main.mjs; corpus 0.39.1, 2.1.1, 0.39.1-then-2.1.1)"
+commit = "2.1.1"
+date = "2026-10-11"
 
 [types]
 "record.turn.prompt" = { status = "ignored", note = "UI twin of append_message" }
@@ -39,6 +39,25 @@ date = "2026-09-19"
 "record.runtime.set_binding" = { status = "carried", note = "" }
 "record.staleGuard.recorded" = { status = "carried", note = "" }
 "record.interruptionReminder.recorded" = { status = "carried", note = "" }
+# Found in the 2026-10-11 corpus (tests/corpus/kimi-code/): 0.39.1 and 2.1.1 both write these.
+"record.cron.*" = { status = "carried", note = "CronCreate/CronDelete" }
+"record.goal.*" = { status = "carried", note = "CreateGoal/UpdateGoal" }
+"record.plan.revision" = { status = "carried", note = "plan file; 2.x rewrites 0.x's path to sha256+bytes in place" }
+"record.mcp.tools_discovered" = { status = "carried", note = "" }
+# 2.x only.
+"record.agent.message.appended" = { status = "carried", note = "a second copy of every message" }
+"record.agent.turn.started" = { status = "carried", note = "" }
+"record.agent.turn.ended" = { status = "carried", note = "" }
+"record.agent.switched" = { status = "carried", note = "the branch an /undo moves to" }
+"record.context.undone" = { status = "carried", note = "twin of context.undo" }
+"record.prompt.completed" = { status = "carried", note = "" }
+"record.prompt.aborted" = { status = "carried", note = "" }
+"record.prompt.steered" = { status = "carried", note = "" }
+"record.turn.step.retrying" = { status = "carried", note = "API error retries" }
+"record.turn.step.interrupted" = { status = "carried", note = "" }
+"record.file_history.*" = { status = "carried", note = "edit snapshots in file-history/" }
+"record.forked" = { status = "carried", note = "the cut in a kimi fork; lineage comes from state.json forkedFrom" }
+"record.subagent.started" = { status = "carried", note = "" }
 "part.text" = { status = "generic", note = "" }
 "part.image_url" = { status = "generic", note = "" }
 "agent.main" = { status = "generic", note = "the session" }

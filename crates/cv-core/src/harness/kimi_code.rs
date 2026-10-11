@@ -48,6 +48,17 @@
 //!   the summary that seeds the next window (both origin Harness).
 //! - `task.terminated{info{taskId, description, status, exitCode, command}, outputTail}` → a
 //!   `Notice`/Harness (background command finished); `turn.cancel` → a `Notice`/Human.
+//! - `context.undo{count}` (`/undo`) and `context.clear` → a `Branch`/Human: the undone turns stay
+//!   in the log but leave the model's context. (2.x pairs the undo with `agent.switched` and
+//!   `context.undone`, both carried.)
+//! - 2.x: `subagent.spawned{subagentId, subagentName, parentToolCallId, description, swarmIndex?}`
+//!   → `SubagentSpawn`/Harness, `subagent.completed{resultSummary, usage}` / `subagent.failed` →
+//!   `SubagentReturn`/Subagent, queued behind the spawning step's reply (the child's usage stays in
+//!   the bag; its own transcript counts it). `state.json.forkedFrom` (`kimi fork`) →
+//!   `lineage.forked_from`; the fork's wire marks the cut with a carried `forked` record.
+//! - 2.x also writes UI/queue twins of the conversation records, all carried: `agent.message.appended`
+//!   (a second copy of every message), `agent.turn.started/ended`, `prompt.completed/aborted/steered`,
+//!   `turn.step.retrying/interrupted`, `file_history.*` (edit snapshots under `file-history/`).
 //! - Everything else (`usage.record`, `llm.request`, `llm.tools_snapshot`, `turn.*`,
 //!   `permission.*`, `tools.*`, `token_counting.*`, `task.started`, `plan_mode.*`,
 //!   `swarm_mode.*`, `full_compaction.*`, …) is bookkeeping: dropped by the lean passes, carried
@@ -106,10 +117,13 @@ impl KimiCode {
         KimiCode { root }
     }
 
-    /// Test-only: point the adapter at an explicit root.
-    #[cfg(test)]
-    fn for_root(root: PathBuf) -> Self {
-        KimiCode { root: Some(root) }
+    /// An adapter over an explicit Kimi Code home (the dir holding `sessions/`), instead of
+    /// `$KIMI_CODE_HOME` / `~/.kimi-code` — for the harness corpus and other tests, without
+    /// mutating the process environment.
+    pub fn with_home(home: &Path) -> Self {
+        KimiCode {
+            root: Some(home.to_path_buf()).filter(|p| p.exists()),
+        }
     }
 }
 
@@ -212,7 +226,14 @@ impl Adapter for KimiCode {
                 // The id as Kimi Code writes it (`session_<uuid>`); cv keys the session by the bare uuid.
                 bag.insert("native_id".into(), Value::String(native.to_string()));
             }
-            for key in ["archived", "lastTurnReason", "titleKind", "isCustomTitle", "lastPrompt"] {
+            for key in [
+                "archived",
+                "lastTurnReason",
+                "titleKind",
+                "isCustomTitle",
+                "lastPrompt",
+                "forkedFrom",
+            ] {
                 if let Some(v) = state.get(key).filter(|v| !v.is_null()) {
                     bag.insert(key.to_string(), v.clone());
                 }
@@ -236,6 +257,11 @@ impl Adapter for KimiCode {
                     bag.insert("agents".into(), Value::Object(subs));
                 }
             }
+            // `kimi fork` (2.x): `state.json.forkedFrom` names the source (`session_<uuid>`).
+            s.lineage.forked_from = state
+                .get("forkedFrom")
+                .and_then(Value::as_str)
+                .map(|f| f.strip_prefix("session_").unwrap_or(f).to_string());
         } else {
             // A sub-agent's own session: the parent is the session it lives in (its uuid), the
             // nickname is the agent dir. `parentAgentId` says which agent spawned it (`main`, or
@@ -654,6 +680,77 @@ impl Ctx<'_> {
                     if let Some(tail) = v.get("outputTail") {
                         bag.insert("outputTail".into(), tail.clone());
                     }
+                }
+                sink.message(m)
+            }
+            "subagent.spawned" | "subagent.completed" | "subagent.failed" => {
+                // Kimi Code 2.x records a sub-agent's life on the parent's wire (0.x left only the
+                // `Agent` call and its result). The records land inside the spawning step, so they
+                // queue behind its tool results; the child's own transcript is `agents/<id>/`.
+                let id = v.get("subagentId").and_then(Value::as_str).unwrap_or("?");
+                let (kind, origin, text) = match ty {
+                    "subagent.spawned" => {
+                        let name = v.get("subagentName").and_then(Value::as_str).unwrap_or("agent");
+                        let desc = v.get("description").and_then(Value::as_str).unwrap_or("");
+                        (
+                            MessageKind::SubagentSpawn,
+                            Origin::Harness,
+                            format!("[sub-agent {id} ({name}) spawned] {desc}"),
+                        )
+                    }
+                    "subagent.completed" => {
+                        let summary = v.get("resultSummary").and_then(Value::as_str).unwrap_or("");
+                        (
+                            MessageKind::SubagentReturn,
+                            Origin::Subagent,
+                            format!("[sub-agent {id} returned] {summary}"),
+                        )
+                    }
+                    _ => (
+                        MessageKind::SubagentReturn,
+                        Origin::Subagent,
+                        format!("[sub-agent {id} failed]"),
+                    ),
+                };
+                let mut m = note(text, ts, kind, origin, ty);
+                let bag = m.harness_extra_mut(Harness::KimiCode);
+                // The child's `usage` stays in the bag: its own transcript already counts it.
+                for key in [
+                    "usage",
+                    "subagentId",
+                    "parentToolCallId",
+                    "parentAgentId",
+                    "swarmIndex",
+                    "runInBackground",
+                ] {
+                    if let Some(x) = v.get(key).filter(|x| !x.is_null()) {
+                        bag.insert(key.to_string(), x.clone());
+                    }
+                }
+                match self.step.as_mut() {
+                    Some(step) => {
+                        step.results.push(m);
+                        Flow::Continue
+                    }
+                    None => sink.message(m),
+                }
+            }
+            "context.undo" | "context.clear" => {
+                let f = self.flush_step(sink);
+                if f == Flow::Stop {
+                    return self.stop();
+                }
+                // `/undo` drops the last `count` turns from the model's context (they stay in the
+                // log); `context.clear` empties it. What follows does not continue what precedes.
+                let count = v.get("count").and_then(Value::as_u64);
+                let text = match (ty, count) {
+                    ("context.undo", Some(n)) => format!("[undo: the last {n} turn(s) left the context]"),
+                    ("context.undo", None) => "[undo]".to_string(),
+                    _ => "[context cleared]".to_string(),
+                };
+                let mut m = note(text, ts, MessageKind::Branch, Origin::Human, ty);
+                if let Some(n) = count {
+                    m.harness_extra_mut(Harness::KimiCode).insert("count".into(), n.into());
                 }
                 sink.message(m)
             }
@@ -1093,7 +1190,7 @@ mod tests {
     #[test]
     fn sub_agent_wire_parses_as_its_own_session_with_lineage() {
         let root = fixture_root();
-        let a = KimiCode::for_root(root.clone());
+        let a = KimiCode::with_home(&root);
         let main = a.discover().unwrap().remove(0);
         let subs = subagent_refs(&main);
         assert_eq!(subs.len(), 1, "{subs:?}");
@@ -1136,7 +1233,7 @@ mod tests {
     #[test]
     fn discovers_sessions_from_the_walk_and_honours_tombstones() {
         let root = fixture_root();
-        let refs = KimiCode::for_root(root.clone()).discover().unwrap();
+        let refs = KimiCode::with_home(&root).discover().unwrap();
         assert_eq!(refs.len(), 1, "the tombstoned session_dead dir is skipped: {refs:?}");
         let r = &refs[0];
         assert_eq!(r.id, SID, "bare uuid, `session_` stripped");
@@ -1152,7 +1249,7 @@ mod tests {
     #[test]
     fn parses_steps_into_assistant_and_tool_turns() {
         let root = fixture_root();
-        let a = KimiCode::for_root(root.clone());
+        let a = KimiCode::with_home(&root);
         let r = a.discover().unwrap().remove(0);
         let s = a.parse(&r).unwrap();
         assert_eq!(s.harness, Harness::KimiCode);
@@ -1293,7 +1390,7 @@ mod tests {
     #[test]
     fn complete_mode_carries_bookkeeping_records() {
         let root = fixture_root();
-        let a = KimiCode::for_root(root.clone());
+        let a = KimiCode::with_home(&root);
         let r = a.discover().unwrap().remove(0);
         let s = crate::stream::collect_with(&a, &r, &ParseOptions::complete()).unwrap();
         let carried: Vec<&str> = s
@@ -1331,6 +1428,88 @@ mod tests {
             15,
             "{:?}",
             s.messages.iter().map(|m| m.role).collect::<Vec<_>>()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// `/undo` (`context.undo{count}`) is a branch: the undone turns stay in the log but leave the
+    /// context. A `kimi fork` (2.x) names its source in `state.json.forkedFrom`.
+    #[test]
+    fn undo_is_a_branch_and_fork_names_its_source() {
+        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+        let sdir = root
+            .join("sessions")
+            .join("wd_p_000000000000")
+            .join(format!("session_{SID}"));
+        let main = sdir.join("agents").join("main");
+        fs::create_dir_all(&main).unwrap();
+        fs::write(
+            sdir.join("state.json"),
+            r#"{"id":"session_x","version":2,"cwd":"/p","forkedFrom":"session_0e0e0e0e-0000-0000-0000-000000000000"}"#,
+        )
+        .unwrap();
+        let lines = [
+            r#"{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Say ok."}],"origin":{"kind":"user"}},"time":1}"#,
+            r#"{"type":"agent.switched","agentId":"main","branch":"b1","reason":"undo","base":{"branch":"main","line":7},"turns":1,"time":2}"#,
+            r#"{"type":"context.undo","agentId":"main","count":1,"time":2}"#,
+            r#"{"type":"context.undone","agentId":"main","turns":1,"fromTurnId":0,"time":2}"#,
+            r#"{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Say hi."}],"origin":{"kind":"user"}},"time":3}"#,
+        ];
+        fs::write(main.join("wire.jsonl"), lines.join("\n") + "\n").unwrap();
+        let a = KimiCode::with_home(&root);
+        let r = a.discover().unwrap().pop().unwrap();
+        let s = a.parse(&r).unwrap();
+        let kinds: Vec<MessageKind> = s.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(kinds, [MessageKind::Prompt, MessageKind::Branch, MessageKind::Prompt]);
+        assert_eq!(s.messages[1].origin, Origin::Human);
+        assert_eq!(
+            s.lineage.forked_from.as_deref(),
+            Some("0e0e0e0e-0000-0000-0000-000000000000")
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// 2.x writes `subagent.spawned` / `subagent.completed` on the parent's wire inside the
+    /// spawning step: they follow the step's reply, and the child's usage is not the parent's.
+    #[test]
+    fn subagent_records_are_spawn_and_return_after_the_step() {
+        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+        let main = root
+            .join("sessions")
+            .join("wd_p_000000000000")
+            .join(format!("session_{SID}"))
+            .join("agents")
+            .join("main");
+        fs::create_dir_all(&main).unwrap();
+        let lines = [
+            r#"{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"s1","turnId":"0","step":1},"time":1}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"t","stepUuid":"s1","toolCallId":"t1","name":"Agent","args":{}},"time":2}"#,
+            r#"{"type":"subagent.spawned","subagentId":"agent-0","subagentName":"coder","parentToolCallId":"t1","description":"say ok","time":3}"#,
+            r#"{"type":"subagent.completed","subagentId":"agent-0","resultSummary":"ok","usage":{"inputOther":5,"output":1},"time":4}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"t1","result":{"output":"ok"}},"time":5}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"s1","turnId":"0","step":1,"finishReason":"tool_calls"},"time":6}"#,
+        ];
+        fs::write(main.join("wire.jsonl"), lines.join("\n") + "\n").unwrap();
+        let a = KimiCode::with_home(&root);
+        let r = a.discover().unwrap().pop().unwrap();
+        let s = a.parse(&r).unwrap();
+        let kinds: Vec<MessageKind> = s.messages.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                MessageKind::Reply,
+                MessageKind::SubagentSpawn,
+                MessageKind::SubagentReturn,
+                MessageKind::ToolResult
+            ]
+        );
+        assert_eq!(s.messages[2].origin, Origin::Subagent);
+        assert!(s.messages[2].usage.is_none());
+        assert_eq!(
+            s.messages[1]
+                .harness_extra(Harness::KimiCode)
+                .and_then(|x| x.get("parentToolCallId")),
+            Some(&Value::String("t1".into()))
         );
         fs::remove_dir_all(&root).ok();
     }
