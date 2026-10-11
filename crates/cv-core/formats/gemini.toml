@@ -12,14 +12,15 @@ store = [
   "~/.cache/.gemini/tmp/<project>/chats/ (sandbox root)",
   "~/.gemini/tmp/<project>/checkpoint-*.json",
   "~/.gemini/tmp/<project>/logs.json",
+  "~/.gemini/tmp/<project>/<sessionId>/{plans/*.md, tracker/*.json} (not sessions; not read)",
   "~/.gemini/projects.json",
   "~/.gemini/history/<id>/.project_root",
 ]
 
 [upstream]
 repo = "https://github.com/google-gemini/gemini-cli (~/pug/gemini-cli)"
-commit = "cfbcaa8"
-date = "2026-09-19"
+commit = "573846625 (tag v0.63.0, on a release branch; also diffed: v0.46.0 85b0c55c1, main 9b6e026)"
+date = "2026-10-11"
 
 [types]
 "control.$set" = { status = "generic", note = "metadata update" }

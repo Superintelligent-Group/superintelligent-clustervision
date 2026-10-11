@@ -75,6 +75,14 @@ impl Gemini {
             .collect();
         Gemini { roots }
     }
+
+    /// Rooted at one runtime dir (a `.gemini` or `.cache/.gemini`): reads `<dir>/tmp`, and the
+    /// registry beside it. For tests and the corpus; never consults the process environment.
+    pub fn with_home(runtime: &Path) -> Self {
+        Gemini {
+            roots: vec![runtime.join("tmp")],
+        }
+    }
 }
 
 impl Adapter for Gemini {
@@ -110,16 +118,22 @@ impl Adapter for Gemini {
     }
 }
 
-/// Keep one [`SessionRef`] per session id across roots (a sandboxed and an unsandboxed run of the
-/// same project could, in principle, both hold a copy): the most recently updated wins, and the
-/// input order is otherwise preserved.
+/// Keep one [`SessionRef`] per session id across files and roots (a sandboxed and an unsandboxed run
+/// of the same project could both hold a copy, and a resumed 0.46.0 process leaves a stub): a file
+/// with turns beats one without, then the most recently updated wins; input order is otherwise
+/// preserved.
 fn dedupe_by_id(refs: Vec<SessionRef>) -> Vec<SessionRef> {
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut out: Vec<SessionRef> = Vec::with_capacity(refs.len());
     for r in refs {
         match seen.get(&r.id) {
             Some(&i) => {
-                if r.updated_at > out[i].updated_at {
+                // A file with turns beats a startup stub: a resumed 0.46.0 process writes a second
+                // `session-<ts>-<id>.jsonl` for the same id holding only the `<session_context>`
+                // preamble (later gemini-cli deletes it, `deleteCurrentSessionIfNotResumableAsync`),
+                // and it is the NEWER file. Between equals the most recently updated wins.
+                let key = |r: &SessionRef| (r.message_count > 0, r.updated_at);
+                if key(&r) > key(&out[i]) {
                     out[i] = r;
                 }
             }
@@ -461,8 +475,7 @@ fn stream_legacy_json_recording(path: &Path, harness: Harness, sink: &mut dyn Me
 
     let mut session = record_metadata(&meta, harness, Some(path.to_path_buf()));
     let summary = session.title.take();
-    let mut session_model: Option<String> = None;
-    let mut title: Option<String> = None;
+    let mut st = EmitState::default();
 
     for item in raw_msgs {
         // Parse just this one message; it (and its owned strings) drop at the end of the iteration.
@@ -470,13 +483,13 @@ fn stream_legacy_json_recording(path: &Path, harness: Harness, sink: &mut dyn Me
             continue;
         };
         let Some(obj) = rm.as_object() else { continue };
-        if emit_record_message(harness, obj, &mut session_model, &mut title, sink) == Flow::Stop {
+        if emit_record_message(harness, obj, &mut st, sink) == Flow::Stop {
             break;
         }
     }
 
-    session.model = session_model;
-    session.title = summary.or(title);
+    session.model = st.session_model;
+    session.title = summary.or(st.title);
     Ok(Some(session))
 }
 
@@ -544,21 +557,20 @@ fn stream_jsonl_recording(path: &Path, harness: Harness, sink: &mut dyn MessageS
 
     let mut session = record_metadata(&replay.metadata, harness, Some(path.to_path_buf()));
     let summary = session.title.take();
-    let mut session_model: Option<String> = None;
-    let mut title: Option<String> = None;
+    let mut st = EmitState::default();
 
     // Emit retained messages in order, dropping each raw Value as we go (so we never hold the
     // reassembled array and the IR messages at the same time).
     for id in &replay.order {
         let Some(rm) = replay.msgs.remove(id) else { continue };
         let Some(obj) = rm.as_object() else { continue };
-        if emit_record_message(harness, obj, &mut session_model, &mut title, sink) == Flow::Stop {
+        if emit_record_message(harness, obj, &mut st, sink) == Flow::Stop {
             break;
         }
     }
 
-    session.model = session_model;
-    session.title = summary.or(title);
+    session.model = st.session_model;
+    session.title = summary.or(st.title);
     Ok(Some(session))
 }
 
@@ -569,13 +581,28 @@ fn stream_jsonl_recording(path: &Path, harness: Harness, sink: &mut dyn MessageS
 #[derive(Default)]
 struct RecordingReplay {
     metadata: serde_json::Map<String, Value>,
-    /// Insertion order of message ids (replacement keeps the original position).
+    /// Insertion order of message keys (replacement keeps the original position). A key is the
+    /// record's `type` and `id` ([`replay_key`]): a resume's `$set.messages` (re-synced from the API
+    /// history) can give the tool-response `user` turn the SAME id as the `gemini` turn that made the
+    /// call (seen on 0.63.0), and keying by id alone let it overwrite the assistant turn.
     order: Vec<String>,
     msgs: BTreeMap<String, Value>,
     /// Whether a real metadata line (sessionId + projectHash) was seen.
     saw_meta: bool,
     /// How many `$rewindTo` records were replayed (names the synthetic Branch markers).
     rewinds: usize,
+}
+
+/// A message record's replay key, `<type>\u{1f}<id>` (see [`RecordingReplay::order`]).
+fn replay_key(rec: &Value) -> Option<String> {
+    let id = rec.get("id").and_then(Value::as_str)?;
+    let ty = rec.get("type").and_then(Value::as_str).unwrap_or("");
+    Some(format!("{ty}\u{1f}{id}"))
+}
+
+/// The id part of a [`replay_key`].
+fn key_id(key: &str) -> &str {
+    key.split_once('\u{1f}').map_or(key, |(_, id)| id)
 }
 
 impl RecordingReplay {
@@ -586,7 +613,7 @@ impl RecordingReplay {
         }
         if let Some(rewind) = rec.get("$rewindTo").and_then(Value::as_str) {
             // Drop the rewind target and everything after it.
-            if let Some(pos) = self.order.iter().position(|id| id == rewind) {
+            if let Some(pos) = self.order.iter().position(|k| key_id(k) == rewind) {
                 for id in self.order.drain(pos..) {
                     self.msgs.remove(&id);
                 }
@@ -613,11 +640,11 @@ impl RecordingReplay {
                     self.msgs.clear();
                     if let Some(arr) = v.as_array() {
                         for m in arr {
-                            if let Some(id) = m.get("id").and_then(Value::as_str) {
-                                if !self.msgs.contains_key(id) {
-                                    self.order.push(id.to_string());
+                            if let Some(key) = replay_key(m) {
+                                if !self.msgs.contains_key(&key) {
+                                    self.order.push(key.clone());
                                 }
-                                self.msgs.insert(id.to_string(), m.clone());
+                                self.msgs.insert(key, m.clone());
                             }
                         }
                     }
@@ -627,14 +654,14 @@ impl RecordingReplay {
             }
             return;
         }
-        if let Some(id) = rec.get("id").and_then(Value::as_str).map(str::to_string) {
+        if let Some(key) = replay_key(&rec) {
             // A message record (must have an id and a type/content); a junk record with an id but
             // no message shape is ignored either way.
             if rec.get("type").is_some() || rec.get("content").is_some() {
-                if !self.msgs.contains_key(&id) {
-                    self.order.push(id.clone());
+                if !self.msgs.contains_key(&key) {
+                    self.order.push(key.clone());
                 }
-                self.msgs.insert(id, rec);
+                self.msgs.insert(key, rec);
             }
             return;
         }
@@ -868,17 +895,29 @@ fn record_metadata(rec: &serde_json::Map<String, Value>, harness: Harness, sourc
     }
 }
 
+/// Cross-message state of one recording's emission.
+#[derive(Default)]
+struct EmitState {
+    /// The first assistant `model` seen; becomes `Session::model`.
+    session_model: Option<String>,
+    /// The first prompt's text: the fallback title when the record has no `summary`.
+    title: Option<String>,
+    /// Tool call ids whose result was already emitted from a `toolCalls[]` entry. gemini-cli also
+    /// records each tool response as a `user` record of bare `functionResponse` parts (the wire
+    /// turn, `recordSyntheticMessage` in `geminiChat.ts`; 0.46.0 and later), and a resume re-syncs it
+    /// into `$set.messages` once more; those copies are not new results.
+    answered: std::collections::HashSet<String>,
+}
+
 /// Translate one raw `ConversationRecord` message (`obj`) into 0..2 IR [`Message`]s and hand them to
 /// `sink` (an assistant turn may also emit a trailing [`Role::Tool`] turn for its tool results).
 ///
-/// Threads two pieces of cross-message state: `session_model` (first assistant `model` seen, becomes
-/// `Session::model`) and `title` (first user turn's text, the fallback title when the record has no
-/// `summary`). Returns the sink's [`Flow`] so a streaming caller can stop early.
+/// Threads [`EmitState`] across messages. Returns the sink's [`Flow`] so a streaming caller can stop
+/// early.
 fn emit_record_message(
     harness: Harness,
     obj: &serde_json::Map<String, Value>,
-    session_model: &mut Option<String>,
-    title: &mut Option<String>,
+    st: &mut EmitState,
     sink: &mut dyn MessageSink,
 ) -> Flow {
     let mty = obj.get("type").and_then(Value::as_str).unwrap_or("user");
@@ -893,8 +932,8 @@ fn emit_record_message(
             // The first model seen becomes `Session::model`; a turn records its own only when it
             // differs (`Message::model` is the exception, not the rule — IR diet).
             if let Some(model) = obj.get("model").and_then(Value::as_str) {
-                match session_model.as_deref() {
-                    None => *session_model = Some(model.to_string()),
+                match st.session_model.as_deref() {
+                    None => st.session_model = Some(model.to_string()),
                     Some(m0) if m0 != model => m.model = Some(model.to_string()),
                     _ => {}
                 }
@@ -902,7 +941,8 @@ fn emit_record_message(
             m.usage = obj.get("tokens").and_then(parse_tokens);
 
             // Thoughts → Thinking blocks (subject + description).
-            if let Some(thoughts) = obj.get("thoughts").and_then(Value::as_array) {
+            let thoughts = obj.get("thoughts").and_then(Value::as_array);
+            if let Some(thoughts) = thoughts {
                 for t in thoughts {
                     let subj = t.get("subject").and_then(Value::as_str).unwrap_or("");
                     let desc = t.get("description").and_then(Value::as_str).unwrap_or("");
@@ -924,12 +964,33 @@ fn emit_record_message(
                 }
             }
 
-            // Assistant content: string, or array of Parts (text / inlineData / functionCall).
-            push_content_blocks(&mut m.content, obj.get("content"));
+            // Assistant content: string, or array of Parts (text / inlineData / functionCall). A
+            // record re-synced from the API history (`updateMessagesFromHistory`, every `$set.messages`
+            // since 0.46.0) carries its thoughts and calls twice: as `thought`/`functionCall` parts
+            // in `content` AND in `thoughts[]`/`toolCalls[]`. The structured fields win; the parts
+            // are kept only when the fields are absent (older records, checkpoints).
+            let calls = obj.get("toolCalls").and_then(Value::as_array);
+            let call_ids: std::collections::HashSet<&str> = calls
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.get("id").and_then(Value::as_str))
+                .collect();
+            let has_thoughts = thoughts.is_some_and(|t| !t.is_empty());
+            let mut parts = Vec::new();
+            push_content_blocks(&mut parts, obj.get("content"));
+            m.content.extend(parts.into_iter().filter(|b| match b {
+                Block::Thinking { .. } => !has_thoughts,
+                Block::ToolUse { id, .. } => !call_ids.contains(id.as_str()),
+                _ => true,
+            }));
 
-            // Tool calls (gemini-cli ToolCallRecord) → ToolUse + paired ToolResult.
+            // Tool calls (gemini-cli ToolCallRecord) → ToolUse + paired ToolResult. A call with an
+            // `agentId` ran a sub-agent (`invoke_agent`), whose own recording is
+            // `chats/<this session>/<agentId>.jsonl`: the turn is a SubagentSpawn, its result a
+            // SubagentReturn.
             let mut tool_results: Vec<Block> = Vec::new();
-            if let Some(calls) = obj.get("toolCalls").and_then(Value::as_array) {
+            let mut agent_ids: Vec<Value> = Vec::new();
+            if let Some(calls) = calls {
                 for c in calls {
                     let name = c.get("name").and_then(Value::as_str).unwrap_or("tool");
                     let call_id = c
@@ -938,6 +999,9 @@ fn emit_record_message(
                         .map(str::to_string)
                         .unwrap_or_else(|| format!("{name}-call"));
                     let input = c.get("args").cloned().unwrap_or(Value::Null);
+                    if let Some(a) = c.get("agentId").and_then(Value::as_str) {
+                        agent_ids.push(Value::String(a.to_string()));
+                    }
                     m.content.push(Block::ToolUse {
                         id: call_id.clone(),
                         name: name.to_string(),
@@ -954,6 +1018,7 @@ fn emit_record_message(
                     // turn, so a `ToolSearch` that found nothing vanished from a round trip. A call
                     // with no `status` yet has not completed and still contributes no result.
                     if !content.is_empty() || status.is_some() {
+                        st.answered.insert(call_id.clone());
                         tool_results.push(Block::ToolResult {
                             tool_use_id: call_id,
                             content: content.into(),
@@ -966,6 +1031,12 @@ fn emit_record_message(
                 }
             }
 
+            let spawned = !agent_ids.is_empty();
+            if spawned {
+                m.kind = MessageKind::SubagentSpawn;
+                m.harness_extra_mut(harness)
+                    .insert("subagent_ids".into(), Value::Array(agent_ids));
+            }
             if !m.content.is_empty() && sink.message(m) == Flow::Stop {
                 return Flow::Stop;
             }
@@ -973,6 +1044,10 @@ fn emit_record_message(
             // functionResponses back as a user turn, but kept distinct in the IR).
             if !tool_results.is_empty() {
                 let mut tm = Message::new(Role::Tool);
+                if spawned {
+                    tm.kind = MessageKind::SubagentReturn;
+                    tm.origin = Origin::Subagent;
+                }
                 tm.timestamp = ts;
                 tm.content = tool_results;
                 if sink.message(tm) == Flow::Stop {
@@ -1014,15 +1089,54 @@ fn emit_record_message(
                 return Flow::Stop;
             }
         }
+        _ if is_tool_response_turn(obj.get("content")) => {
+            // A `user` record of bare `functionResponse` parts: the tool output fed back to the
+            // model (see [`EmitState::answered`]). A copy of results already emitted is dropped;
+            // otherwise (no `toolCalls[]` result to pair with) it is the Tool turn itself.
+            let mut blocks = Vec::new();
+            push_content_blocks(&mut blocks, obj.get("content"));
+            blocks.retain(|b| match b {
+                Block::ToolResult { tool_use_id, .. } => st.answered.insert(tool_use_id.clone()),
+                _ => true,
+            });
+            if !blocks.is_empty() {
+                let mut m = Message::new(Role::Tool);
+                m.id = id;
+                m.timestamp = ts;
+                m.content = blocks;
+                if sink.message(m) == Flow::Stop {
+                    return Flow::Stop;
+                }
+            }
+        }
         _ => {
             // user (and anything else) → a human prompt, or context gemini-cli injected.
             let mut m = Message::new(Role::User);
             m.id = id;
             m.timestamp = ts;
             push_content_blocks(&mut m.content, obj.get("content"));
+            // A BeforeAgent hook's `additionalContext` rides in the SAME record as the prompt, as a
+            // trailing `<hook_context>` part (0.46.0, 0.63.0): split it off into its own Hook turn.
+            let mut hook = Message::of_kind(Role::System, MessageKind::InjectedContext, Origin::Hook);
+            if m.content.len() > 1 {
+                let (hooked, rest): (Vec<Block>, Vec<Block>) = std::mem::take(&mut m.content).into_iter().partition(
+                    |b| matches!(b, Block::Text { text } if text.trim_start().starts_with("<hook_context>")),
+                );
+                m.content = rest;
+                hook.content = hooked;
+                if m.content.is_empty() {
+                    m.content = std::mem::take(&mut hook.content);
+                }
+            }
             type_user_turn(&mut m);
-            if title.is_none() {
-                *title = m
+            // `displayContent`: what the user typed when it differs from what the model got (a
+            // custom `/command` before expansion, an `@file` prompt before the file was inlined).
+            if let Some(typed) = obj.get("displayContent").map(display_text).filter(|t| !t.is_empty()) {
+                m.harness_extra_mut(harness)
+                    .insert("display_text".into(), Value::String(typed));
+            }
+            if st.title.is_none() {
+                st.title = m
                     .text()
                     .filter(|t| !is_ignored_user_content(t))
                     .map(|t| crate::ir::truncate(&t, 80));
@@ -1030,9 +1144,37 @@ fn emit_record_message(
             if !m.content.is_empty() && sink.message(m) == Flow::Stop {
                 return Flow::Stop;
             }
+            if !hook.content.is_empty() {
+                hook.timestamp = ts;
+                if sink.message(hook) == Flow::Stop {
+                    return Flow::Stop;
+                }
+            }
         }
     }
     Flow::Continue
+}
+
+/// The text of a `displayContent` (`PartListUnion`): a string, or its parts' `text` joined.
+fn display_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.as_str().or_else(|| p.get("text").and_then(Value::as_str)))
+            .collect::<Vec<_>>()
+            .join(""),
+        Value::Object(_) => v.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Whether a record's `content` is a non-empty list of `functionResponse` parts and nothing else.
+fn is_tool_response_turn(content: Option<&Value>) -> bool {
+    let Some(Value::Array(parts)) = content else {
+        return false;
+    };
+    !parts.is_empty() && parts.iter().all(|p| p.get("functionResponse").is_some())
 }
 
 /// Map a `ConversationRecord` (as a JSON object) onto an IR [`Session`] — the whole-`Session`
@@ -1049,17 +1191,16 @@ fn record_to_session(rec: &serde_json::Map<String, Value>, harness: Harness, sou
     let raw_msgs = rec.get("messages").and_then(Value::as_array).unwrap_or(&empty);
 
     let mut sink = CollectSink::default();
-    let mut session_model: Option<String> = None;
-    let mut title: Option<String> = None;
+    let mut st = EmitState::default();
     for rm in raw_msgs {
         let Some(obj) = rm.as_object() else { continue };
-        if emit_record_message(harness, obj, &mut session_model, &mut title, &mut sink) == Flow::Stop {
+        if emit_record_message(harness, obj, &mut st, &mut sink) == Flow::Stop {
             break;
         }
     }
 
-    session.model = session_model;
-    session.title = summary.or(title);
+    session.model = st.session_model;
+    session.title = summary.or(st.title);
     session.messages = sink.messages;
     session
 }
@@ -1271,6 +1412,22 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
             m.kind = MessageKind::ToolResult;
             m.origin = Origin::Harness;
         } else if role == Role::User {
+            // The API history merges consecutive user parts into one Content, so a 0.63.0 checkpoint
+            // holds the `<session_context>` preamble and the first prompt as two parts of ONE turn.
+            // Split the leading injected parts off into their own InjectedContext turn.
+            let lead = m
+                .content
+                .iter()
+                .take_while(
+                    |b| matches!(b, Block::Text { text } if is_ignored_user_content(text) && !text.trim().is_empty()),
+                )
+                .count();
+            if lead > 0 && lead < m.content.len() {
+                let mut ctx = Message::new(Role::User);
+                ctx.content = m.content.drain(..lead).collect();
+                type_user_turn(&mut ctx);
+                messages.push(ctx);
+            }
             type_user_turn(&mut m);
         }
         if m.role == Role::User && title.is_none() {
@@ -1908,5 +2065,111 @@ mod tests {
         );
         assert!(refs[0].path.ends_with("session_modern.jsonl"));
         let _ = fs::remove_dir_all(&runtime);
+    }
+
+    /// The 0.63.0 resume shape: a `$set.messages` re-sync from the API history carries the
+    /// assistant turn's thoughts and calls as parts AND as `thoughts[]`/`toolCalls[]`, a `user`
+    /// tool-response turn sharing the assistant's id, and the original tool-response record.
+    #[test]
+    fn resynced_history_neither_doubles_nor_overwrites_turns() {
+        let call = r#"{"id":"c1","name":"read_file","args":{"file_path":"a.txt"},"status":"success","timestamp":"2026-10-11T00:00:02.000Z","result":[{"functionResponse":{"id":"c1","name":"read_file","response":{"output":"alpha"}}}]}"#;
+        let fr = r#"[{"functionResponse":{"id":"c1","name":"read_file","response":{"output":"alpha"}}}]"#;
+        let gem = format!(
+            r#"{{"id":"g1","timestamp":"2026-10-11T00:00:02.000Z","type":"gemini","content":[{{"text":"thinking","thought":true}},{{"functionCall":{{"id":"c1","name":"read_file","args":{{}}}}}}],"thoughts":[{{"subject":"","description":"thinking","timestamp":"2026-10-11T00:00:02.000Z"}}],"toolCalls":[{call}],"model":"gemini-2.5-flash"}}"#
+        );
+        let text = [
+            r#"{"sessionId":"s1","projectHash":"h","startTime":"2026-10-11T00:00:00.000Z","lastUpdated":"2026-10-11T00:00:00.000Z","kind":"main"}"#.to_string(),
+            r#"{"id":"u1","timestamp":"2026-10-11T00:00:01.000Z","type":"user","content":[{"text":"read a.txt"}]}"#.to_string(),
+            gem.clone(),
+            format!(r#"{{"id":"t1","timestamp":"2026-10-11T00:00:03.000Z","type":"user","content":{fr}}}"#),
+            r#"{"id":"g2","timestamp":"2026-10-11T00:00:04.000Z","type":"gemini","content":"alpha","model":"gemini-2.5-flash"}"#.to_string(),
+            format!(
+                r#"{{"$set":{{"messages":[{{"id":"u1","timestamp":"2026-10-11T00:00:01.000Z","type":"user","content":[{{"text":"read a.txt"}}]}},{gem},{{"id":"g1","timestamp":"2026-10-11T00:00:02.000Z","type":"user","content":{fr}}},{{"id":"g1","timestamp":"2026-10-11T00:00:02.000Z","type":"user","content":{fr}}},{{"id":"t1","timestamp":"2026-10-11T00:00:03.000Z","type":"user","content":{fr}}},{{"id":"g2","timestamp":"2026-10-11T00:00:04.000Z","type":"gemini","content":[{{"text":"alpha"}}],"model":"gemini-2.5-flash"}}]}}}}"#
+            ),
+        ]
+        .join("\n");
+        let s = &parse_all_str(&text, None)[0];
+        assert_eq!(
+            kinds(s),
+            vec![
+                (Role::User, MessageKind::Prompt, Origin::Human),
+                (Role::Assistant, MessageKind::Reply, Origin::Model),
+                (Role::Tool, MessageKind::ToolResult, Origin::Harness),
+                (Role::Assistant, MessageKind::Reply, Origin::Model),
+            ]
+        );
+        let reply = &s.messages[1];
+        let n = |f: fn(&Block) -> bool| reply.content.iter().filter(|b| f(b)).count();
+        assert_eq!(
+            n(|b| matches!(b, Block::Thinking { .. })),
+            1,
+            "thought part and thoughts[] are one"
+        );
+        assert_eq!(
+            n(|b| matches!(b, Block::ToolUse { .. })),
+            1,
+            "functionCall part and toolCalls[] are one"
+        );
+        assert_eq!(s.messages[2].content.len(), 1, "one result, not three");
+    }
+
+    #[test]
+    fn subagent_call_hook_context_and_display_text() {
+        let text = [
+            r#"{"sessionId":"s2","projectHash":"h","startTime":"2026-10-11T00:00:00.000Z","lastUpdated":"2026-10-11T00:00:00.000Z","kind":"main"}"#,
+            r#"{"id":"u1","timestamp":"2026-10-11T00:00:01.000Z","type":"user","content":[{"text":"Reply with exactly: hi"},{"text":"<hook_context>be brief</hook_context>"}],"displayContent":[{"text":"/hello"}]}"#,
+            r#"{"id":"g1","timestamp":"2026-10-11T00:00:02.000Z","type":"gemini","content":"","toolCalls":[{"id":"a1","name":"invoke_agent","args":{"agent_name":"codebase_investigator"},"status":"success","agentId":"child-1","timestamp":"2026-10-11T00:00:03.000Z","result":[{"functionResponse":{"id":"a1","name":"invoke_agent","response":{"output":"done"}}}]}]}"#,
+        ]
+        .join("\n");
+        let s = &parse_all_str(&text, None)[0];
+        assert_eq!(
+            kinds(s),
+            vec![
+                (Role::User, MessageKind::Prompt, Origin::Human),
+                (Role::System, MessageKind::InjectedContext, Origin::Hook),
+                (Role::Assistant, MessageKind::SubagentSpawn, Origin::Model),
+                (Role::Tool, MessageKind::SubagentReturn, Origin::Subagent),
+            ]
+        );
+        let ex = s.messages[0].harness_extra(Harness::Gemini).unwrap();
+        assert_eq!(ex["display_text"], "/hello");
+        assert_eq!(
+            s.messages[2].harness_extra(Harness::Gemini).unwrap()["subagent_ids"][0],
+            "child-1"
+        );
+        assert_eq!(s.title.as_deref(), Some("Reply with exactly: hi"));
+    }
+
+    #[test]
+    fn a_startup_stub_never_shadows_the_session_it_shares_an_id_with() {
+        let mk = |n: usize, mins: i64| {
+            let mut r = SessionRef::new("same", Harness::Gemini, format!("/x/{n}.jsonl"));
+            r.message_count = n;
+            r.updated_at = Some(chrono::DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::minutes(mins));
+            r
+        };
+        let kept = dedupe_by_id(vec![mk(4, 1), mk(0, 2)]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].message_count, 4, "the newer stub lost");
+        assert_eq!(
+            dedupe_by_id(vec![mk(2, 1), mk(3, 2)])[0].message_count,
+            3,
+            "newer real copy wins"
+        );
+    }
+
+    #[test]
+    fn a_merged_checkpoint_turn_splits_the_preamble_from_the_prompt() {
+        let text = r#"{"history":[{"role":"user","parts":[{"text":"<session_context>\nctx\n</session_context>"},{"text":"Say saved."}]},{"role":"model","parts":[{"text":"saved"}]}]}"#;
+        let s = parse_checkpoint(text, "checkpoint-x.json", None).unwrap();
+        assert_eq!(
+            kinds(&s),
+            vec![
+                (Role::System, MessageKind::InjectedContext, Origin::Harness),
+                (Role::User, MessageKind::Prompt, Origin::Human),
+                (Role::Assistant, MessageKind::Reply, Origin::Model),
+            ]
+        );
+        assert_eq!(s.title.as_deref(), Some("Say saved."));
     }
 }
