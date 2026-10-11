@@ -1,18 +1,16 @@
-//! `cv compaction` — every compaction boundary in a session: when, why (trigger), the
-//! pre-compaction context size, and the summary that seeded the next window.
+//! `cv show --kind compaction_boundary,compaction_summary` — every compaction boundary in a
+//! session: when, why (trigger), the pre-compaction context size, and the summary that seeded the
+//! next window.
 
 use crate::util::{fmt_duration, fmt_int, short_id};
 use anyhow::Result;
-use cv_core::ir::truncate;
+use cv_core::ir::{truncate, SessionRef};
 
-/// `cv compaction <id>`: list every compaction boundary in a session — when it happened, why
-/// (trigger), the pre-compaction context size, and the summary that seeded the next window. With
-/// `--summaries`, print each summary's full text.
-pub(crate) fn cmd_compaction(id: &str, harness: Option<String>, summaries: bool, json: bool) -> Result<()> {
-    let want = crate::util::parse_harness(&harness)?;
-    let (r, _adapter) = crate::util::resolve(id, want)?;
-
-    let comps = cv_core::compaction::detect(&r, true)?;
+/// List every compaction boundary in `r` — when it happened, why (trigger), the pre-compaction
+/// context size, and the summary that seeded the next window. With `summaries`, print each
+/// summary's full text.
+pub(crate) fn print_compactions(r: &SessionRef, summaries: bool, json: bool) -> Result<()> {
+    let comps = cv_core::compaction::detect(r, true)?;
 
     if json {
         // `compaction::row`: the same row `/api/session/{h}/{id}/compactions` serves.

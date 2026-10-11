@@ -87,7 +87,7 @@ date = "2026-10-04"
 "extension.compact/edited_files" = { status = "handled", note = "paths → boundary extra edited_files" }
 "extension.devin-rs/summary" = { status = "handled", note = "source → compaction trigger" }
 "extension.chisel/tool_failure" = { status = "handled", note = "reason → is_error + details.failure_reason" }
-"extension.chisel/user_question_answers" = { status = "handled", note = "verbatim → extra; cv prompts reads it" }
+"extension.chisel/user_question_answers" = { status = "handled", note = "verbatim → extra; cv show --kind answer reads it" }
 "extension.subagent/profile_name" = { status = "handled", note = "→ extra.subagent (completion rows)" }
 "extension.subagent/model" = { status = "handled", note = "→ extra.subagent" }
 "extension.subagent/agent_id" = { status = "handled", note = "→ extra.subagent; child's spawned_by_tool_use" }

@@ -23,8 +23,8 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cmd::hooks::{HookName, HooksCmd};
 use cmd::task::TaskCmd;
 use cmd::{
-    archive, browse, cat, compaction, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port,
-    recipes, schema, search, serve, share, task, tools, view, workflow,
+    archive, browse, cat, compose, config, doctor, events, formats, hooks, live, orchestrate, pack, port, recipes,
+    schema, search, serve, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
 use util::{usage, UsageError, WindowArgs};
@@ -75,10 +75,7 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
             "events",
             "touched",
             "tools",
-            "tree",
             "workflow",
-            "compaction",
-            "prompts",
             "lanes",
             "deferrals",
             "stats",
@@ -215,6 +212,22 @@ enum Cmd {
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "1",
               conflicts_with_all = ["first", "last", "range", "around"])]
         pre_compaction: Option<usize>,
+        /// Instead of the transcript, the message threading — a DAG when messages carry
+        /// `parent_id`, else a numbered list — then the sub-agent forest, over the whole session.
+        /// With `--json`, the IR itself: every message carries the same `parent_id`.
+        #[arg(long, conflicts_with_all = ["kind", "subagents", "agent", "pre_compaction"])]
+        tree: bool,
+        /// Only messages of these kinds, comma-separated, as a compact view. `prompt,answer`: what
+        /// the person said — every typed prompt and `AskUserQuestion` answer with its index and
+        /// timestamp, printed whole (`--json`: `index, timestamp, kind, text` rows; a window narrows
+        /// it). `compaction_boundary,compaction_summary`: every compaction seam — trigger,
+        /// pre-compaction size, the summary that seeded the next window (`--json`: one row per
+        /// boundary with its `pre_compaction_span`).
+        #[arg(long, value_name = "KIND,…", conflicts_with_all = ["subagents", "agent"])]
+        kind: Option<String>,
+        /// With the compaction kinds: print each summary in full, not just its head.
+        #[arg(long, requires = "kind")]
+        summaries: bool,
     },
     /// Print one tool call's full output, wherever it lives: inline in the transcript, in a
     /// `prune` sidecar, or in a persisted-output file. `--input` prints the call's arguments instead.
@@ -304,12 +317,6 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Render a session's message threading (DAG if parent_ids exist, else a numbered list).
-    Tree {
-        id: String,
-        #[arg(long)]
-        harness: Option<String>,
-    },
     /// A `Workflow`-tool run, first-class: its phase tree, the agents under each phase with their
     /// outcomes, run totals, and the driving script. Without `<run_id>`, lists the session's runs.
     Workflow {
@@ -343,33 +350,6 @@ enum Cmd {
         /// that did not finish).
         #[arg(long)]
         revive_all: bool,
-    },
-    /// Compaction boundaries in a session: every `/compact` (or auto-compaction), its trigger,
-    /// pre-compaction context size, and the summary that seeded the next window. `--summaries`
-    /// prints each full summary; `cv show <id> --pre-compaction` reads the lost pre-span.
-    Compaction {
-        id: String,
-        #[arg(long)]
-        harness: Option<String>,
-        /// Print each compaction's full summary text (not just the head).
-        #[arg(long)]
-        summaries: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Only what the person said: every human-typed prompt and every `AskUserQuestion` answer, in
-    /// order, with message indices and timestamps. The orchestrator's re-read of its brief.
-    Prompts {
-        id: String,
-        #[arg(long)]
-        harness: Option<String>,
-        /// Emit the rows as one JSON array (`index, timestamp, kind: prompt|answer, text`).
-        #[arg(long)]
-        json: bool,
-        /// Only the prompts in the span a compaction discarded — the Nth boundary's pre-span
-        /// (1-based; bare flag = the first), exactly the window `cv show --pre-compaction` reads.
-        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "1")]
-        pre_compaction: Option<usize>,
     },
     /// The sub-agent forest as a status table: one row per lane with its model, start, duration,
     /// tokens, tool calls, status and last line — and the strand class (`--stranded`): lanes that
@@ -1045,6 +1025,21 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         rest: Vec<String>,
     },
+    #[command(hide = true)]
+    Tree {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Compaction {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
+    #[command(hide = true)]
+    Prompts {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
     // Removed in 0.15.0 (the coordination board) — same hidden-stub rule.
     #[command(hide = true)]
     Board {
@@ -1123,7 +1118,23 @@ fn run() -> Result<()> {
             subagents,
             agent,
             pre_compaction,
-        } => view::cmd_show(&id, harness, json, &window, subagents, agent, pre_compaction),
+            tree,
+            kind,
+            summaries,
+        } => view::cmd_show(
+            &id,
+            harness,
+            json,
+            &window,
+            view::ShowView {
+                subagents,
+                agent,
+                pre_compaction,
+                tree,
+                kind,
+                summaries,
+            },
+        ),
         Cmd::Cat {
             session,
             tool_use_id,
@@ -1274,7 +1285,6 @@ fn run() -> Result<()> {
         Cmd::Hooks { action } => hooks::cmd_hooks(action),
         Cmd::Hook { name } => hooks::cmd_hook(name),
         Cmd::Resume { id, harness, launch } => port::cmd_resume(&id, harness, launch),
-        Cmd::Tree { id, harness } => view::cmd_tree(&id, harness),
         Cmd::Workflow {
             id,
             run_id,
@@ -1296,18 +1306,6 @@ fn run() -> Result<()> {
             timeline,
             json,
         } => tools::cmd_tools(&id, harness, agent, tool, wf, across, timeline, json),
-        Cmd::Compaction {
-            id,
-            harness,
-            summaries,
-            json,
-        } => compaction::cmd_compaction(&id, harness, summaries, json),
-        Cmd::Prompts {
-            id,
-            harness,
-            json,
-            pre_compaction,
-        } => orchestrate::cmd_prompts(&id, harness, json, pre_compaction),
         Cmd::Lanes {
             id,
             harness,
@@ -1518,6 +1516,17 @@ fn run() -> Result<()> {
             "`cv loom <base> --at N --graft <other> --from M` was removed in 0.15.0 — use `cv splice <base>:..N <other>:M..` \
              (two spans; `--session`, `--harness <h>` or `--export md` as before)",
         ),
+        Cmd::Tree { .. } => usage(
+            "`cv tree <id>` was removed in 0.15.0 — use `cv show <id> --tree` (the same threading, then the sub-agent forest)",
+        ),
+        Cmd::Compaction { .. } => usage(
+            "`cv compaction <id>` was removed in 0.15.0 — use `cv show <id> --kind compaction_boundary,compaction_summary` \
+             (`--summaries` and `--json` as before)",
+        ),
+        Cmd::Prompts { .. } => usage(
+            "`cv prompts <id>` was removed in 0.15.0 — use `cv show <id> --kind prompt,answer` \
+             (the same rows; `--json` and `--pre-compaction [N]` as before)",
+        ),
         Cmd::Board { .. } => usage(
             "`cv board` was removed in 0.15.0 — the task log is the fleet's record: `cv task note` to say something, \
              `cv task events --since <id>` to follow it, `cv task claim` to hold work",
@@ -1603,7 +1612,17 @@ mod tests {
             }
         }
         // Names removed in this release are hidden stubs, never visible commands.
-        for old in ["timeline", "redact", "diff", "board", "fork", "loom"] {
+        for old in [
+            "timeline",
+            "redact",
+            "diff",
+            "board",
+            "fork",
+            "loom",
+            "tree",
+            "compaction",
+            "prompts",
+        ] {
             assert!(!visible.contains(&old), "{old} must be hidden");
             assert!(
                 cmd.get_subcommands().any(|s| s.get_name() == old),

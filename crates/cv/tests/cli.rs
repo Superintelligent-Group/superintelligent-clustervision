@@ -1009,7 +1009,7 @@ fn error_paths_exit_nonzero_with_stderr() {
     let (_, err) = w.cv_fails(&["export", "nonexistent-id"]);
     assert!(err.contains("no session matching"), "{err}");
 
-    let (_, err) = w.cv_fails(&["tree", "nonexistent-id"]);
+    let (_, err) = w.cv_fails(&["show", "nonexistent-id", "--tree"]);
     assert!(err.contains("no session matching"), "{err}");
 
     let (_, err) = w.cv_fails(&["resume", "nonexistent-id"]);
@@ -1047,6 +1047,13 @@ fn error_paths_exit_nonzero_with_stderr() {
         (
             &["loom", "alphasess", "--at", "2", "--graft", "betasess", "--from", "1"],
             "cv splice <base>:..N <other>:M..",
+        ),
+        // `tree`, `prompts` and `compaction` were views of one session: `show` flags now.
+        (&["tree", "alphasess"], "cv show <id> --tree"),
+        (&["prompts", "alphasess", "--json"], "cv show <id> --kind prompt,answer"),
+        (
+            &["compaction", "alphasess", "--summaries"],
+            "cv show <id> --kind compaction_boundary,compaction_summary",
         ),
     ];
     for (args, pointer) in removed {
@@ -1110,14 +1117,14 @@ fn blame_outside_repo_and_missing_file() {
     );
 }
 
-// ───────────────────────────── tree happy path ─────────────────────────────
+// ───────────────────────────── show --tree ─────────────────────────────
 
 #[test]
-fn tree_renders() {
+fn show_tree_renders() {
     let w = World::new("tree");
     standard_corpus(&w);
 
-    let (out, _) = w.cv_ok(&["tree", "alphasess"]);
+    let (out, _) = w.cv_ok(&["show", "alphasess", "--tree"]);
     assert!(out.contains("# alpha adventures"), "{out}");
     assert!(out.contains("3 msg"), "{out}");
 }

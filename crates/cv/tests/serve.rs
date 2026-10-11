@@ -762,7 +762,7 @@ fn serve_compactions() {
     // with its summary, and reports the pre-compaction span — all in `/messages` index order.
     let (status, v) = get_json(port, "/api/session/claude/compactsess/compactions");
     assert_eq!(status, 200, "{v}");
-    // A bare array with the SAME field names `cv compaction --json` emits — this endpoint used to
+    // A bare array with the SAME field names `cv show --kind compaction_boundary --json` emits — this endpoint used to
     // wrap it in `{harness, id, compactions}` and rename the boundary to `index` and the span to
     // `pre_span`, so the same fact had two names depending on the door you asked.
     let arr = v.as_array().expect("compactions array");

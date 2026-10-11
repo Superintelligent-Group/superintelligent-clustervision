@@ -1,4 +1,4 @@
-//! `cv show` / `cv export` / `cv tree` — reading sessions,
+//! `cv show` (and its `--tree` / `--kind` views) / `cv export` — reading sessions,
 //! plus the streaming renderer (`stream_session_render`) and its header/message helpers.
 
 use crate::util::{
@@ -19,18 +19,97 @@ const PIPE_GUARD_BYTES: usize = 200 * 1024;
 /// How many messages each end of the head + tail view shows.
 const PIPE_GUARD_EDGE: usize = 20;
 
+/// The views `cv show` offers instead of the plain transcript (each flag documented on `Cmd::Show`).
+pub(crate) struct ShowView {
+    pub subagents: bool,
+    pub agent: Option<String>,
+    pub pre_compaction: Option<usize>,
+    pub tree: bool,
+    pub kind: Option<String>,
+    pub summaries: bool,
+}
+
+/// What `--kind` selects: each family has one compact view.
+enum KindView {
+    /// `prompt` / `answer`: what the person said (`orchestrate::print_prompts`).
+    Said { prompts: bool, answers: bool },
+    /// `compaction_boundary` / `compaction_summary`: the compaction seams, each boundary paired
+    /// with its summary (`compaction::print_compactions`).
+    Compactions,
+}
+
+fn parse_kinds(spec: &str) -> Result<KindView> {
+    const SAID: [&str; 2] = ["prompt", "answer"];
+    const SEAMS: [&str; 2] = ["compaction_boundary", "compaction_summary"];
+    let kinds: Vec<&str> = spec.split(',').map(str::trim).filter(|k| !k.is_empty()).collect();
+    let accepted = "`--kind` takes `prompt,answer` (what the person said) or \
+                    `compaction_boundary,compaction_summary` (the compaction seams)";
+    if let Some(k) = kinds.iter().find(|k| !SAID.contains(k) && !SEAMS.contains(k)) {
+        return usage(format!("no `--kind` view for {k:?} — {accepted}"));
+    }
+    let said = kinds.iter().filter(|k| SAID.contains(k)).count();
+    match (said, kinds.len() - said) {
+        (0, 0) => usage(format!("`--kind` is empty — {accepted}")),
+        (_, 0) => Ok(KindView::Said {
+            prompts: kinds.contains(&"prompt"),
+            answers: kinds.contains(&"answer"),
+        }),
+        (0, _) => Ok(KindView::Compactions),
+        _ => usage(format!("`--kind {spec}` mixes two views — {accepted}")),
+    }
+}
+
 pub(crate) fn cmd_show(
     id: &str,
     harness: Option<String>,
     json: bool,
     window: &WindowArgs,
-    subagents: bool,
-    agent: Option<String>,
-    pre_compaction: Option<usize>,
+    view: ShowView,
 ) -> Result<()> {
-    let (want, id) = split_harness_id(id, parse_harness(&harness)?);
-    // Parse the selector before any I/O so a bad `--range` errors immediately.
+    let ShowView {
+        subagents,
+        agent,
+        pre_compaction,
+        tree,
+        kind,
+        summaries,
+    } = view;
+    // Parse the selector (and `--kind`) before any I/O so a bad value errors immediately.
     let selector = window.window()?;
+    let kind = kind.as_deref().map(parse_kinds).transpose()?;
+    if summaries && !matches!(kind, Some(KindView::Compactions)) {
+        return usage("`--summaries` goes with `--kind compaction_boundary,compaction_summary`");
+    }
+
+    // The compact views read a cataloged session (never a sub-agent id) over the whole session,
+    // except that what the person said can be narrowed to a window.
+    if let Some(kind) = kind {
+        let (r, adapter) = resolve(id, parse_harness(&harness)?)?;
+        return match kind {
+            KindView::Said { prompts, answers } => {
+                if window.max_bytes.is_some() {
+                    return usage("`--max-bytes` cuts a transcript; `--kind prompt,answer` rows are printed whole");
+                }
+                let range = show_range(adapter.as_ref(), &r, window, pre_compaction)?;
+                crate::cmd::orchestrate::print_prompts(&r, adapter.as_ref(), range, prompts, answers, json)
+            }
+            KindView::Compactions => {
+                if selector.is_some() || window.max_bytes.is_some() || pre_compaction.is_some() {
+                    return usage("the compaction view covers the whole session; drop the window flags");
+                }
+                crate::cmd::compaction::print_compactions(&r, summaries, json)
+            }
+        };
+    }
+    if tree && !json {
+        if selector.is_some() || window.max_bytes.is_some() {
+            return usage("`--tree` renders the whole session; drop the window flags (or add `--json` for the IR)");
+        }
+        let (r, adapter) = resolve(id, parse_harness(&harness)?)?;
+        return print_tree(&r, adapter.as_ref());
+    }
+
+    let (want, id) = split_harness_id(id, parse_harness(&harness)?);
 
     // An `agent-…` shaped id goes straight to the sub-agent view: cv_core::find_cheap can now
     // resolve these too (its fleet-wide fallback), but this path keeps the provenance banner and
@@ -68,33 +147,7 @@ pub(crate) fn cmd_show(
         return show_subagents(&r, json);
     }
 
-    let mut range = window.bounds(|| count_messages(adapter.as_ref(), &r))?;
-
-    // `--pre-compaction <N>`: resolve the Nth (1-based) compaction's pre-span into a window. This
-    // reads the context the continued agent lost — the whole point is to retrieve it by message
-    // range without the user computing offsets by hand.
-    if let Some(n) = pre_compaction {
-        let comps = cv_core::compaction::detect(&r, false)?;
-        if comps.is_empty() {
-            bail!("{} never compacted — nothing pre-compaction to show", short_id(&r.id));
-        }
-        let idx = n.saturating_sub(1);
-        let (start, end) = cv_core::compaction::pre_compaction_span(&comps, idx).with_context(|| {
-            format!(
-                "{} compacted {} time(s); no compaction #{n} (use 1..={})",
-                short_id(&r.id),
-                comps.len(),
-                comps.len(),
-            )
-        })?;
-        eprintln!(
-            "✦ pre-compaction #{n} of {}: messages {start}..{end} (the span before boundary @msg {})",
-            comps.len(),
-            comps[idx].boundary_msg_idx,
-        );
-        range = Some((start, Some(end)));
-    }
-
+    let range = show_range(adapter.as_ref(), &r, window, pre_compaction)?;
     if json {
         return print_session_json(adapter.as_ref(), &r, range, window.max_bytes, false, None).map(|_| ());
     }
@@ -102,6 +155,39 @@ pub(crate) fn cmd_show(
     // budget is the caller saying what they want).
     let guard = selector.is_none() && pre_compaction.is_none() && window.max_bytes.is_none();
     render_text(adapter.as_ref(), &r, range, window.max_bytes, guard)
+}
+
+/// The `[start, end)` window `show` reads: the selector's, or — under `--pre-compaction <N>` — the
+/// span before the Nth (1-based) compaction boundary, the context the continued agent lost, so it
+/// is retrieved by message range without the caller computing offsets by hand.
+fn show_range(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    window: &WindowArgs,
+    pre_compaction: Option<usize>,
+) -> Result<Option<(usize, Option<usize>)>> {
+    let Some(n) = pre_compaction else {
+        return window.bounds(|| count_messages(adapter, r));
+    };
+    let comps = cv_core::compaction::detect(r, false)?;
+    if comps.is_empty() {
+        bail!("{} never compacted — nothing pre-compaction to show", short_id(&r.id));
+    }
+    let idx = n.saturating_sub(1);
+    let (start, end) = cv_core::compaction::pre_compaction_span(&comps, idx).with_context(|| {
+        format!(
+            "{} compacted {} time(s); no compaction #{n} (use 1..={})",
+            short_id(&r.id),
+            comps.len(),
+            comps.len(),
+        )
+    })?;
+    eprintln!(
+        "✦ pre-compaction #{n} of {}: messages {start}..{end} (the span before boundary @msg {})",
+        comps.len(),
+        comps[idx].boundary_msg_idx,
+    );
+    Ok(Some((start, Some(end))))
 }
 
 /// `show --json` / `export --format json`: the whole IR (incl. `extra`), windowed, and — under
@@ -519,12 +605,10 @@ pub(crate) fn redaction_summary(st: &cv_core::redact::RedactStats) -> String {
     )
 }
 
-// ---------- tree ----------
+// ---------- show --tree ----------
 
-pub(crate) fn cmd_tree(id: &str, harness: Option<String>) -> Result<()> {
-    let want = parse_harness(&harness)?;
-    let (r, adapter) = resolve(id, want)?;
-    let session = adapter.parse(&r)?;
+fn print_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<()> {
+    let session = adapter.parse(r)?;
 
     println!("# {}", session.label());
     println!("{} · {} · {} msg", session.harness, session.id, session.messages.len());
@@ -543,7 +627,7 @@ pub(crate) fn cmd_tree(id: &str, harness: Option<String>) -> Result<()> {
     // The second dimension: the sub-agent forest this session spawned. Claude sessions fan out
     // into directly-spawned (`Agent`/`Task`) sub-agents and `Workflow` sub-agents (grouped by run
     // id, with the orchestrator's journaled outcome) — invisible to flat message threading.
-    render_subagent_forest(&r);
+    render_subagent_forest(r);
     Ok(())
 }
 
@@ -586,7 +670,7 @@ fn render_subagent_forest(r: &SessionRef) {
     }
 }
 
-/// One line describing a sub-agent — `cv tree`'s forest and `cv show --subagents` share it: short
+/// One line describing a sub-agent — `cv show --tree`'s forest and `cv show --subagents` share it: short
 /// id, type, the journaled status (workflow agents), message count, and the journaled summary or,
 /// failing that, the task description — capped and sanitized (both are transcript-derived).
 fn subagent_line(s: &cv_core::SubagentInfo) -> String {

@@ -217,9 +217,9 @@ fn tool_description(cmd: &CommandSpec) -> String {
     if cmd.tool_name() == "show" {
         out.push_str(&format!(
             " Over MCP this windows by default: with none of first/last/range/around/max_bytes \
-             given it reads the LAST {SHOW_DEFAULT_LAST} messages capped at {SHOW_DEFAULT_MAX_BYTES} \
-             bytes, so a whole transcript is never pulled in by accident. Ask for a window \
-             explicitly to override."
+             (nor `kind`) given it reads the LAST {SHOW_DEFAULT_LAST} messages capped at \
+             {SHOW_DEFAULT_MAX_BYTES} bytes, so a whole transcript is never pulled in by accident. \
+             Ask for a window explicitly to override."
         ));
     }
     out
@@ -368,7 +368,8 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
     Ok(argv)
 }
 
-/// `show` without a window selector reads the tail, not the whole transcript (§6).
+/// `show` without a window selector reads the tail, not the whole transcript (§6). A `kind` view
+/// (what the person said, the compaction seams) is rows, not a transcript: it gets no default.
 fn apply_mcp_defaults(cmd: &CommandSpec, obj: &Map<String, Value>, argv: &mut Vec<String>) {
     if cmd.tool_name() != "show" {
         return;
@@ -376,7 +377,7 @@ fn apply_mcp_defaults(cmd: &CommandSpec, obj: &Map<String, Value>, argv: &mut Ve
     let windowed = WINDOW_SELECTORS
         .iter()
         .any(|k| cmd.arg(k).is_some() && present(obj, k).is_some());
-    if windowed {
+    if windowed || present(obj, "kind").is_some() {
         return;
     }
     if cmd.arg("last").is_some() {
@@ -442,7 +443,8 @@ mod tests {
               {"name":"context","kind":"option","value_type":"integer","help":"K either side","required":false,"default":"5"},
               {"name":"max_bytes","kind":"option","value_type":"integer","help":"Stop after N bytes","required":false},
               {"name":"subagents","kind":"flag","value_type":"boolean","help":"List sub-agents","required":false},
-              {"name":"pre_compaction","kind":"option","value_type":"integer","help":"Pre-compaction span","required":false}
+              {"name":"pre_compaction","kind":"option","value_type":"integer","help":"Pre-compaction span","required":false},
+              {"name":"kind","kind":"option","value_type":"string","help":"Only these kinds","required":false}
             ]}"#,
         )
     }
@@ -558,6 +560,12 @@ mod tests {
         }
         let argv = build_argv(&show(), &json!({"id": "abc", "last": 3})).unwrap();
         assert_eq!(argv, vec!["show", "abc", "--last", "3", "--json"]);
+    }
+
+    #[test]
+    fn a_kind_view_gets_no_window_default() {
+        let argv = build_argv(&show(), &json!({"id": "abc", "kind": "prompt,answer"})).unwrap();
+        assert_eq!(argv, vec!["show", "abc", "--kind", "prompt,answer", "--json"]);
     }
 
     #[test]

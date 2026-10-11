@@ -1088,7 +1088,7 @@ fn node_to_message(
         if let Some(v) = ext.get("affogato/cog-context").filter(|v| !v.is_null()) {
             bag.insert("cog_context".into(), v.clone());
         }
-        // The tool row that answers an in-band question dialog (and `cv prompts` reads).
+        // The tool row that answers an in-band question dialog (and `cv show --kind answer` reads).
         if let Some(v) = ext.get("chisel/user_question_answers").filter(|v| !v.is_null()) {
             bag.insert("user_question_answers".into(), v.clone());
         }
@@ -1330,7 +1330,7 @@ mod tests {
             "/work/summaries/sidekick/history_0123abcd.md"
         );
 
-        // cv compaction sees exactly one boundary, paired, with the summary text.
+        // `cv show --kind compaction_boundary` sees exactly one boundary, paired, with the summary text.
         let found = crate::compaction::detect_in_session(&s, true);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].summary_msg_idx, Some(9));

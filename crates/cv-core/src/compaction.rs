@@ -11,7 +11,7 @@
 //! This is **load-bearing**: the compaction summary is how a continued agent retrieves the
 //! pre-compaction context it can no longer see. A session can compact many times (the reference
 //! transcript: 11), so cv surfaces every boundary, the summary text, and the pre/post-compaction
-//! message spans — `cv compaction <session>` lists them; `cv show <session> --pre-compaction` reads
+//! message spans — `cv show <session> --kind compaction_boundary` lists them; `cv show <session> --pre-compaction` reads
 //! the span before the first boundary.
 //!
 //! Memory discipline (the project value): detection rides the streaming parse through a
@@ -64,7 +64,7 @@ impl Compaction {
 /// A [`MessageSink`] that detects every compaction boundary as the transcript streams past, pairing
 /// each `compact_boundary` with its `isCompactSummary` summary (by `parentUuid == boundary.uuid`).
 ///
-/// `keep_summaries` controls whether the (bounded) summary text is retained — `cv compaction` keeps
+/// `keep_summaries` controls whether the (bounded) summary text is retained — `cv show --kind compaction_*` keeps
 /// it; a count-only probe need not. Holds only the small [`Compaction`] rows.
 pub struct CompactionSink {
     keep_summaries: bool,
@@ -203,7 +203,7 @@ pub fn pre_compaction_span(boundaries: &[Compaction], n: usize) -> Option<(usize
     Some((start.min(b.boundary_msg_idx), b.boundary_msg_idx))
 }
 
-/// The Nth boundary as `cv compaction --json` and `GET /api/session/{h}/{id}/compactions` emit it:
+/// The Nth boundary as `cv show --kind compaction_boundary --json` and `GET /api/session/{h}/{id}/compactions` emit it:
 /// the [`Compaction`] struct's own serialization plus `pre_compaction_span` under that one name,
 /// so the same fact never has two spellings depending on the door.
 pub fn row(boundaries: &[Compaction], n: usize) -> Value {

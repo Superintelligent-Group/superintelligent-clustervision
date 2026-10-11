@@ -443,7 +443,7 @@ fn session_events(harness: &str, id: &str, query: &str) -> (u16, Value) {
 }
 
 /// `GET /api/session/{harness}/{id}/compactions` — every compaction boundary in the session, in
-/// transcript order, as `cv compaction --json` rows plus a `headline` for listings.
+/// transcript order, as `cv show --kind compaction_boundary --json` rows plus a `headline` for listings.
 ///
 /// Built on [`crate::compaction::detect`], which streams the whole transcript (memory-safe on a
 /// multi-GB session) and pairs each `compact_boundary` with the `isCompactSummary` message that

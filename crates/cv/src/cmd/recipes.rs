@@ -82,8 +82,8 @@ One selector at a time. Piped `cv show` with no selector over 200 KB prints the 
     → [{harness, session_id, title, edits, reads, last_ts, agent_id, parent_id, workflow}]
 
 11. Re-read what the person actually said (and answered)
-    cv prompts <id>                              # every human prompt + AskUserQuestion answer, with msg indices
-    cv prompts <id> --pre-compaction --json      # only the span a compaction discarded
+    cv show <id> --kind prompt,answer            # every human prompt + AskUserQuestion answer, with msg indices
+    cv show <id> --kind prompt,answer --pre-compaction --json   # only the span a compaction discarded
     → [{index, timestamp, kind: prompt|answer, text}]
 
 12. Where is every lane right now?

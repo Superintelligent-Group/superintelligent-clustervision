@@ -1,4 +1,4 @@
-//! `cv prompts` / `cv lanes` / `cv deferrals` — the orchestrator's instruments. Each answers one
+//! `cv show --kind prompt,answer` / `cv lanes` / `cv deferrals` — the orchestrator's instruments. Each answers one
 //! question an orchestrating session asks about itself during a swarm: what did the person
 //! actually say (and answer), where is every lane right now, and what did I promise to do later
 //! that no task holds.
@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::util::{fmt_local, home_rel, parse_harness, resolve, short_id};
 
-// ===================== cv prompts =====================
+// ===================== cv show --kind prompt,answer =====================
 
 /// The markers a question-dialog tool result starts with — Claude Code's two `AskUserQuestion`
 /// phrasings, and Devin CLI's `User answered your questions:`. The answers a person gives through
@@ -41,11 +41,11 @@ struct PromptRow {
 
 /// Stream `r` once and keep only what the person said: `prompt`/`human` messages and the
 /// `AskUserQuestion` answers, in order, with their message indices. `window` bounds the indices
-/// (end-exclusive) when a pre-compaction span is requested.
+/// (`[start, end)`, `None` end = through the last) when a window or pre-compaction span is given.
 fn collect_prompts(
     r: &SessionRef,
     adapter: &dyn cv_core::harness::Adapter,
-    window: Option<(usize, usize)>,
+    window: Option<(usize, Option<usize>)>,
 ) -> Result<Vec<PromptRow>> {
     let mut rows = Vec::new();
     let mut idx = 0usize;
@@ -56,7 +56,7 @@ fn collect_prompts(
             if i < s {
                 return Flow::Continue;
             }
-            if i >= e {
+            if e.is_some_and(|e| i >= e) {
                 return Flow::Stop;
             }
         }
@@ -89,40 +89,18 @@ fn collect_prompts(
     Ok(rows)
 }
 
-/// Resolve `--pre-compaction N` into the message window before the Nth boundary, the same way
-/// `cv show --pre-compaction` does, so the two commands always agree on what "the lost span" is.
-fn pre_compaction_window(r: &SessionRef, n: usize) -> Result<(usize, usize)> {
-    let comps = cv_core::compaction::detect(r, false)?;
-    if comps.is_empty() {
-        bail!("{} never compacted — nothing pre-compaction to show", short_id(&r.id));
-    }
-    let idx = n.saturating_sub(1);
-    let span = cv_core::compaction::pre_compaction_span(&comps, idx).with_context(|| {
-        format!(
-            "{} compacted {} time(s); no compaction #{n} (use 1..={})",
-            short_id(&r.id),
-            comps.len(),
-            comps.len(),
-        )
-    })?;
-    eprintln!(
-        "✦ pre-compaction #{n} of {}: messages {}..{} (the span before boundary @msg {})",
-        comps.len(),
-        span.0,
-        span.1,
-        comps[idx].boundary_msg_idx,
-    );
-    Ok(span)
-}
-
-pub(crate) fn cmd_prompts(id: &str, harness: Option<String>, json: bool, pre_compaction: Option<usize>) -> Result<()> {
-    let want = parse_harness(&harness)?;
-    let (r, adapter) = resolve(id, want)?;
-    let window = match pre_compaction {
-        Some(n) => Some(pre_compaction_window(&r, n)?),
-        None => None,
-    };
-    let rows = collect_prompts(&r, adapter.as_ref(), window)?;
+/// What the person said in `r`, within `window`: typed prompts and/or `AskUserQuestion` answers,
+/// as text (each printed whole) or as one JSON array of `index, timestamp, kind, text` rows.
+pub(crate) fn print_prompts(
+    r: &SessionRef,
+    adapter: &dyn cv_core::harness::Adapter,
+    window: Option<(usize, Option<usize>)>,
+    prompts: bool,
+    answers: bool,
+    json: bool,
+) -> Result<()> {
+    let mut rows = collect_prompts(r, adapter, window)?;
+    rows.retain(|p| if p.kind == "prompt" { prompts } else { answers });
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());

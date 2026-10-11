@@ -1,4 +1,4 @@
-//! End-to-end tests for the orchestrator's instruments: `cv prompts`, `cv lanes`, `cv deferrals`.
+//! End-to-end tests for the orchestrator's instruments: `cv show --kind prompt,answer`, `cv lanes`, `cv deferrals`.
 //! Each builds a hermetic Claude session under a temp `$HOME` — a parent transcript with human
 //! prompts, slash-command bookkeeping rows, an `AskUserQuestion` answer, a compaction, deferral
 //! phrases in the replies and the `queue-operation` notifications the harness writes when a child
@@ -158,9 +158,9 @@ fn build_world(tag: &str) -> World {
 }
 
 #[test]
-fn prompts_lists_only_the_person_and_the_answers() {
+fn show_kind_prompt_lists_only_the_person_and_the_answers() {
     let w = build_world("prompts");
-    let (out, _) = w.cv_ok(&["prompts", SID]);
+    let (out, _) = w.cv_ok(&["show", SID, "--kind", "prompt,answer"]);
     assert!(out.contains("4 typed, 1 answered"), "{out}");
     assert!(out.contains("[0] ") && out.contains("start the swarm please"), "{out}");
     assert!(
@@ -182,7 +182,7 @@ fn prompts_lists_only_the_person_and_the_answers() {
     );
     assert!(out.contains("carry on") && out.contains("\nok\n"), "{out}");
 
-    let (json, _) = w.cv_ok(&["prompts", SID, "--json"]);
+    let (json, _) = w.cv_ok(&["show", SID, "--kind", "prompt,answer", "--json"]);
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
     let kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["prompt", "answer", "prompt", "prompt", "prompt"], "{json}");
@@ -196,7 +196,7 @@ fn prompts_lists_only_the_person_and_the_answers() {
     );
 
     // --pre-compaction: only what came before the boundary.
-    let (json, err) = w.cv_ok(&["prompts", SID, "--pre-compaction", "--json"]);
+    let (json, err) = w.cv_ok(&["show", SID, "--kind", "prompt,answer", "--pre-compaction", "--json"]);
     assert!(err.contains("pre-compaction #1 of 1"), "{err}");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
     let texts: Vec<&str> = rows.iter().map(|r| r["text"].as_str().unwrap()).collect();
@@ -208,6 +208,28 @@ fn prompts_lists_only_the_person_and_the_answers() {
         !texts.iter().any(|t| t.contains("carry on")),
         "post-compaction prompt excluded: {texts:?}"
     );
+
+    // One kind of the pair narrows the rows; a window narrows them too.
+    let kinds_of = |args: &[&str]| -> Vec<String> {
+        let (json, _) = w.cv_ok(args);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        rows.iter().map(|r| r["kind"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(kinds_of(&["show", SID, "--kind", "prompt", "--json"]), ["prompt"; 4]);
+    assert_eq!(kinds_of(&["show", SID, "--kind", "answer", "--json"]), ["answer"]);
+    assert_eq!(
+        kinds_of(&["show", SID, "--kind", "prompt,answer", "--range", "0..3", "--json"]),
+        ["prompt", "answer"]
+    );
+    // A kind with no view, two views at once, or `--summaries` off the compaction view: exit 2.
+    for args in [
+        &["show", SID, "--kind", "reply"][..],
+        &["show", SID, "--kind", "prompt,compaction_boundary"],
+        &["show", SID, "--kind", "prompt", "--summaries"],
+    ] {
+        let (ok, code, _, err) = w.cv(args);
+        assert!(!ok && code == 2 && err.contains("--kind"), "{args:?}: {err}");
+    }
 }
 
 #[test]

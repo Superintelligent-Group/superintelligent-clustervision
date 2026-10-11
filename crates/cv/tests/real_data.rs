@@ -7,7 +7,7 @@
 //! CV_REAL_SESSION=<session id or prefix> cargo test --test real_data -- --ignored
 //! ```
 //!
-//! The session should be an orchestrator with sub-agents (the commands under test are `prompts`
+//! The session should be an orchestrator with sub-agents (the commands under test are `show --kind prompt,answer`
 //! and `lanes`); the assertions are the invariants any such session satisfies, not one
 //! afternoon's counts.
 
@@ -35,7 +35,7 @@ fn cv(args: &[&str]) -> (i32, String) {
 #[ignore = "needs CV_REAL_SESSION; run with --ignored"]
 fn real_prompts_are_human_lines_and_answers_only() {
     let session = real_session();
-    let (code, out) = cv(&["prompts", &session, "--json"]);
+    let (code, out) = cv(&["show", &session, "--kind", "prompt,answer", "--json"]);
     assert_eq!(code, 0, "{out}");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
     assert!(!rows.is_empty(), "a real session has at least one prompt");

@@ -2449,7 +2449,7 @@ mod tests {
 
     /// Claude Code ≥ 2.1 writes the slash-command invocation/output records as `user` rows. They
     /// are harness bookkeeping (kind `notice`, origin `harness`); the person's own `/compact` line
-    /// just before them stays a human prompt — `cv prompts` keys on exactly this split.
+    /// just before them stays a human prompt — `cv show --kind prompt` keys on exactly this split.
     #[test]
     fn slash_command_user_rows_are_harness_notices_not_prompts() {
         let text = [

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **`cv tree`, `cv prompts`, `cv compaction` are `show` views**: `show --tree`, `show --kind prompt,answer`, `show --kind compaction_boundary,compaction_summary [--summaries]`; old names exit 2.
 - Manual: a command reference and the MCP roster generated from the binary at build time; `cli.md` keeps examples and reasons, no flag lists.
 - Manual: twenty chapters are fifteen (intro, app, share, daemon, integrations, opensession merged into neighbours); the old page URLs redirect.
 - One inbox row: `cv task inbox --json` prints the page `serve` serves; MCP `task_inbox` and cvd's inbox route return its `items` (`since`, `age`, decision, notes).

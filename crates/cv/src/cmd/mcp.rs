@@ -223,8 +223,9 @@ fn instructions() -> String {
          a transcript (windowed by default: `last` 50 messages, `max_bytes` 200000 — pass `first`, \
          `last`, `range`, `around`+`context` or `max_bytes` to move the window) and `cat` one tool \
          call's full output by its tool_use_id. `pack` builds task-relevant context out of the whole \
-         corpus; `doctor` explains why a session's context window keeps filling; `workflow`, `tree` \
-         and `show --subagents` open up sub-agent forests. `prune`, `rewind`, `distill`, `splice` \
+         corpus; `doctor` explains why a session's context window keeps filling; `workflow`, `show` \
+         with `tree` or `subagents` open up sub-agent forests, and `show` with `kind` reads only what \
+         the person said (`prompt,answer`) or the compaction seams. `prune`, `rewind`, `distill`, `splice` \
          and `port` produce NEW sessions from existing ones without touching the source \
          (`rewind` = an agent as of a past message or commit, resumable). \
          To coordinate with sibling agents live, use `await_omen`/`observe_stream` (watch another \

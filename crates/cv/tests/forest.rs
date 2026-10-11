@@ -1,4 +1,4 @@
-//! End-to-end tests for the deep-Claude-harness surfaces: `cv compaction`, `cv workflow`,
+//! End-to-end tests for the deep-Claude-harness surfaces: `cv show --kind compaction_*`, `cv workflow`,
 //! `cv tools`, and `cv show --pre-compaction`. Each builds a hermetic on-disk Claude session
 //! (transcript + the `<sid>/workflows/` state/scripts + `<sid>/subagents/` agent transcripts +
 //! journal) under a temp `$HOME`, then drives the real binary and asserts on its output.
@@ -183,21 +183,33 @@ fn build_world(tag: &str) -> World {
 }
 
 #[test]
-fn compaction_lists_boundaries_and_summaries() {
+fn show_kind_compaction_lists_boundaries_and_summaries() {
     let w = build_world("compaction");
-    let (out, _) = w.cv_ok(&["compaction", "fsess"]);
+    let (out, _) = w.cv_ok(&["show", "fsess", "--kind", "compaction_boundary,compaction_summary"]);
     assert!(out.contains("compacted 2 time(s)"), "got:\n{out}");
     assert!(out.contains("manual"), "trigger surfaced:\n{out}");
     assert!(out.contains("auto"), "second trigger surfaced:\n{out}");
     assert!(out.contains("SUMMARY ONE"), "first summary head:\n{out}");
 
     // --summaries prints full text of both.
-    let (full, _) = w.cv_ok(&["compaction", "fsess", "--summaries"]);
+    let (full, _) = w.cv_ok(&[
+        "show",
+        "fsess",
+        "--kind",
+        "compaction_boundary,compaction_summary",
+        "--summaries",
+    ]);
     assert!(full.contains("SUMMARY ONE: the early context"));
     assert!(full.contains("SUMMARY TWO: the middle context"));
 
     // JSON carries pre_compaction_span.
-    let (js, _) = w.cv_ok(&["compaction", "fsess", "--json"]);
+    let (js, _) = w.cv_ok(&[
+        "show",
+        "fsess",
+        "--kind",
+        "compaction_boundary,compaction_summary",
+        "--json",
+    ]);
     let v: serde_json::Value = serde_json::from_str(&js).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 2);
     assert!(v[0].get("pre_compaction_span").is_some(), "span in json:\n{js}");

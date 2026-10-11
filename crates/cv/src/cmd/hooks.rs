@@ -42,7 +42,7 @@ const COMMIT_TAIL_BYTES: u64 = 512 * 1024;
 /// Above this size the compact hook reads the boundary from the transcript's tail instead of
 /// streaming the whole file for its message index: the stream costs ~4.5 ms/MB (release, warm;
 /// 16.5 MB measured at 70–90 ms), and the hook's budget is 100 ms cold. Below it the full
-/// `cv compaction` detection runs.
+/// compaction detection runs.
 const COMPACT_FULL_SCAN_MAX: u64 = 8 * 1024 * 1024;
 /// The tail read on the large-transcript path: the boundary the harness just wrote sits a few
 /// records from the end.
@@ -663,16 +663,16 @@ fn not_recorded_yet(id: &str) -> Value {
     context(
         "SessionStart",
         format!(
-            "context compacted; the transcript has not recorded the boundary yet — `cv compaction {id}` lists \
-             every boundary once it has, `cv show {id} --pre-compaction N` reads the span the Nth discarded."
+            "context compacted; the transcript has not recorded the boundary yet — `cv show {id} --kind compaction_boundary,compaction_summary` \
+             lists every boundary once it has, `cv show {id} --pre-compaction N` reads the span the Nth discarded."
         ),
     )
 }
 
 /// `SessionStart` (`compact`): the boundary the harness just wrote and the commands that read what
-/// it discarded. A transcript up to [`COMPACT_FULL_SCAN_MAX`] is streamed the way `cv compaction`
-/// does it (exact message index and ordinal); a larger one is read from its tail (trigger and
-/// size exact, the index left to `cv compaction`), so the hook stays inside its budget however
+/// it discarded. A transcript up to [`COMPACT_FULL_SCAN_MAX`] is streamed the way `cv show --kind
+/// compaction_boundary` does it (exact message index and ordinal); a larger one is read from its tail (trigger and
+/// size exact, the index left to that view), so the hook stays inside its budget however
 /// long the session has run.
 fn hook_compact(input: &Input) -> Result<Option<Value>> {
     let Some(path) = input.transcript_path.as_deref() else {
@@ -695,9 +695,9 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
         return Ok(Some(context(
             "SessionStart",
             format!(
-                "context compacted{what}. `cv compaction {id}` lists this session's boundaries with \
-                 their message indexes; `cv show {id} --pre-compaction N` reads what the Nth discarded (`cv prompts \
-                 {id} --pre-compaction N` just its prompts); `cv rewind {id} --at <msg>` resumes the agent as of a message."
+                "context compacted{what}. `cv show {id} --kind compaction_boundary,compaction_summary` lists this session's \
+                 boundaries with their message indexes; `cv show {id} --pre-compaction N` reads what the Nth discarded (`cv show \
+                 {id} --kind prompt,answer --pre-compaction N` just its prompts); `cv rewind {id} --at <msg>` resumes the agent as of a message."
             ),
         )));
     }
@@ -714,7 +714,7 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
     let idx = last.boundary_msg_idx;
     let mut text = format!(
         "context compacted ({trigger}, {pre}) at message {idx} — compaction #{k} of this session. \
-         `cv show {id} --pre-compaction {k}` reads what was lost (`cv prompts {id} --pre-compaction {k}` just its prompts)"
+         `cv show {id} --pre-compaction {k}` reads what was lost (`cv show {id} --kind prompt,answer --pre-compaction {k}` just its prompts)"
     );
     if idx > 0 {
         text.push_str(&format!(
