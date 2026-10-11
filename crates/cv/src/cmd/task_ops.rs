@@ -644,6 +644,116 @@ mod tests {
         assert!(Since::parse(Some("yesterday-ish"), now).is_err());
     }
 
+    /// The inbox's text, pinned whole: decisions first with the default and the alternative on
+    /// one line, a provisional answer in its own group with the veto spelled out, then actions,
+    /// then claimed work, then the two copy-paste lines; and the empty inbox names its owner.
+    #[test]
+    fn inbox_text_groups_decisions_first_and_names_the_resolve_lines() {
+        let ev = |n: u8, task: u8, ts: &str, by: &str, kind: serde_json::Value| -> task::TaskEvent {
+            let mut v = serde_json::json!({
+                "id": format!("01a0f000-0000-7000-8000-0000000000{n:02x}"),
+                "task_id": format!("01a0f000-0000-7000-8000-0000000000{task:02x}"),
+                "ts": ts, "by": by,
+            });
+            for (k, x) in kind.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        let o = "orchestrator:o";
+        let events = vec![
+            ev(
+                1,
+                1,
+                "2026-10-01T09:00:00Z",
+                o,
+                serde_json::json!({"event": "opened", "title": "K-PORTAL: who births the guest cell", "assignee": "ember"}),
+            ),
+            ev(
+                2,
+                1,
+                "2026-10-01T09:00:00Z",
+                o,
+                serde_json::json!({"event": "posed", "options": ["the concierge births it", "the receiver allocates it"], "default": "the concierge births it", "deadline": "2026-10-04T12:00:00Z"}),
+            ),
+            ev(
+                3,
+                3,
+                "2026-10-01T10:00:00Z",
+                o,
+                serde_json::json!({"event": "opened", "title": "build base: /tank or NVMe", "assignee": "ember"}),
+            ),
+            ev(
+                4,
+                3,
+                "2026-10-01T10:00:00Z",
+                o,
+                serde_json::json!({"event": "posed", "options": ["keep /tank", "move to NVMe"], "default": "keep /tank"}),
+            ),
+            ev(
+                5,
+                3,
+                "2026-10-01T10:00:00Z",
+                o,
+                serde_json::json!({"event": "resolved", "choice": "keep /tank", "provisional": true}),
+            ),
+            ev(
+                6,
+                6,
+                "2026-10-01T11:00:00Z",
+                o,
+                serde_json::json!({"event": "opened", "title": "write the docs", "assignee": "ember"}),
+            ),
+            ev(
+                7,
+                7,
+                "2026-10-01T11:30:00Z",
+                "cv",
+                serde_json::json!({"event": "opened", "title": "the claimed one"}),
+            ),
+            ev(
+                8,
+                7,
+                "2026-10-01T11:30:00Z",
+                "ember",
+                serde_json::json!({"event": "claimed", "assignee": "ember"}),
+            ),
+        ];
+        let mut r = cv_core::task::TaskReducer::new();
+        for e in &events {
+            r.apply(e).unwrap();
+        }
+        let outcome = cv_core::task::ReplayOutcome {
+            model: r.model().clone(),
+            events,
+            warnings: Vec::new(),
+            quarantined: 0,
+        };
+        let now: DateTime<Utc> = "2026-10-01T12:00:00Z".parse().unwrap();
+        let page = task::inbox_page(&outcome, "ember", None, None, false, now);
+        // The deadline renders in local time; the phrase's own unit test pins its shape.
+        let by = task::deadline_phrase("2026-10-04T12:00:00Z".parse().unwrap(), now);
+        let pad = " ".repeat(39);
+        let want = format!(
+            "decisions owed (1):\n\
+             \x20  01a0f000-0000-7000-8000-000000000001    3h  open       K-PORTAL: who births the guest cell\n\
+             {pad}⇒ default: the concierge births it · alt: the receiver allocates it · {by}\n\
+             made for you (veto?) (1):\n\
+             \x20  01a0f000-0000-7000-8000-000000000003    2h  resolved   build base: /tank or NVMe\n\
+             {pad}⇒ made: keep /tank — by orchestrator:o · veto to: move to NVMe\n\
+             assigned actions (1):\n\
+             \x20  01a0f000-0000-7000-8000-000000000006    1h  open       write the docs\n\
+             claimed work (1):\n\
+             \x20  01a0f000-0000-7000-8000-000000000007   30m  claimed    the claimed one\n\
+             resolve: cv task resolve <id> --accept-default --from ember · or --choice \"<option>\" · note: cv task note <id> -\n\
+             made for you: cv task resolve <id> --confirm --from ember · or veto with --choice \"<option>\"\n"
+        );
+        assert_eq!(render_inbox_text(&page), want);
+
+        let empty = task::inbox_page(&outcome, "nobody", None, None, false, now);
+        assert_eq!(render_inbox_text(&empty), "(inbox empty for nobody)\n");
+    }
+
     #[test]
     fn option_lists_put_the_default_first_and_deduplicate() {
         assert_eq!(

@@ -515,6 +515,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("ready") && err.contains("resolved"), "{err}");
+
+        // `--decisions` / `--actions`: a posed task is a decision, everything else an action.
+        let question = log.open("h", None, None);
+        log.push(
+            &question,
+            "h",
+            TaskEventKind::Posed {
+                options: vec!["a".into()],
+                default_choice: "a".into(),
+                deadline: None,
+                source: None,
+            },
+        );
+        let model = log.model();
+        let kind = |decisions| {
+            list(
+                &model,
+                &TaskFilter {
+                    decisions: Some(decisions),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(kind(true), std::slice::from_ref(&question));
+        assert!(!kind(false).contains(&question) && kind(false).contains(&open));
     }
 
     #[test]
