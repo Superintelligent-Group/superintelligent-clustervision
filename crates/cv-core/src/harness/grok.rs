@@ -51,6 +51,15 @@ impl Grok {
             root: root.filter(|p| p.exists()),
         }
     }
+
+    /// An adapter over an explicit Grok home (the dir holding `sessions/`, what `$GROK_HOME` names),
+    /// instead of `~/.grok` — for the harness corpus and other tests, without touching the environment.
+    pub fn with_home(grok_home: &Path) -> Self {
+        let root = grok_home.join("sessions");
+        Grok {
+            root: root.exists().then_some(root),
+        }
+    }
 }
 
 impl Adapter for Grok {
