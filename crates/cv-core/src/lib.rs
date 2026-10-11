@@ -7,7 +7,7 @@
 //! them into the common [`Session`] IR. Cross-harness porting is then `parse(A) -> IR -> emit(B)`.
 
 // The read API every door maps onto (`cv serve`, the desktop app). Native only: it reads the
-// catalog, the event store and the seek store, none of which exist on wasm32.
+// catalog and the event store, neither of which exists on wasm32.
 #[cfg(feature = "sqlite")]
 pub mod api;
 pub mod catalog;

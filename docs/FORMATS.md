@@ -248,10 +248,9 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154).
   and `base_instructions.text` → **`Session::system_prompt`**. The rest (`session_id`,
   `thread_source`, `agent_nickname`, `agent_role`, `source`, `model_provider`, `history_mode`,
   `subagent_history_start_ordinal`, `history_base`, `cli_version`, `originator`) stays in the
-  session's `extra["codex"]` bag, never flat. Per-message Codex facts are nested the same way —
-  `crate::offsets`' seek path reads `extra["codex"]["codex_event"] == "turn_context"` through
-  `harness_extra(Harness::Codex)` to flag a model-change replay hazard, and reading that key flat
-  is what once silently disabled the check and let a model-changing session look seekable.
+  session's `extra["codex"]` bag, never flat. Per-message Codex facts are nested the same way
+  (`extra["codex"]["codex_event"]`, read through `harness_extra(Harness::Codex)`); reading such a
+  key flat once silently disabled a check that depended on it.
 - **`turn_context` payload:** REQUIRED `cwd`, `approval_policy` (`untrusted|on-request|never`),
   `sandbox_policy` (`{type: danger-full-access|read-only|workspace-write|external-sandbox, …}`),
   `model`, `summary` (`auto|concise|detailed|none`); optional `turn_id`, `root_turn_id`, `effort`,

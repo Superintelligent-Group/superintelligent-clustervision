@@ -259,21 +259,6 @@ pub fn parse_reader<R: BufRead>(id: &str, reader: R, source_path: Option<PathBuf
     session
 }
 
-/// Streaming parse from a buffered reader — the memory-safe core the on-disk [`Adapter::stream`]
-/// uses. A single Claude transcript can exceed 1 GB; reading it whole (`read_to_string`)
-/// resident-spiked cv to ~65 GB across the corpus and OOM-killed it. Reading line-by-line and
-/// handing each message to `sink` keeps peak at O(largest line). Returns the [`Session`] metadata
-/// with empty `messages` (they went to the sink).
-pub fn stream_reader<R: BufRead>(
-    id: &str,
-    reader: R,
-    source_path: Option<PathBuf>,
-    opts: &ParseOptions,
-    sink: &mut dyn MessageSink,
-) -> Session {
-    stream_reader_from(id, reader, source_path, 0, opts, sink)
-}
-
 /// How many messages a full parse of the transcript's first `len` bytes yields — the count a
 /// parse would have returned when the file was `len` bytes long, since a Claude transcript only
 /// grows by appending. Streams the prefix, so peak memory is O(largest line).
@@ -295,18 +280,15 @@ pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
     Ok(n)
 }
 
-/// [`stream_reader`] generalized to a reader positioned at byte `start_off` (a **record start**)
-/// of the source — the seek-cooperation entry [`crate::offsets::stream_range`] drives after
-/// seeking to a recorded message offset. Every claude record parses independently of the skipped
-/// prefix (per-line state only feeds *session* metadata, never message content), so the messages
-/// streamed from here are identical to the tail of a full stream. With `start_off > 0` the
-/// returned `Session` metadata is partial (head records were skipped) — seek callers use the
-/// recorded metadata instead.
-pub(crate) fn stream_reader_from<R: BufRead>(
+/// Streaming parse from a buffered reader — the memory-safe core the on-disk [`Adapter::stream`]
+/// uses. A single Claude transcript can exceed 1 GB; reading it whole (`read_to_string`)
+/// resident-spiked cv to ~65 GB across the corpus and OOM-killed it. Reading line-by-line and
+/// handing each message to `sink` keeps peak at O(largest line). Returns the [`Session`] metadata
+/// with empty `messages` (they went to the sink).
+pub fn stream_reader<R: BufRead>(
     id: &str,
     reader: R,
     source_path: Option<PathBuf>,
-    start_off: u64,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Session {
@@ -316,7 +298,7 @@ pub(crate) fn stream_reader_from<R: BufRead>(
     // strings. `read_until` keeps peak at O(largest line) just like `lines()` did.
     let mut reader = reader;
     let mut buf: Vec<u8> = Vec::new();
-    let mut file_off: u64 = start_off;
+    let mut file_off: u64 = 0;
     loop {
         buf.clear();
         let n = match reader.read_until(b'\n', &mut buf) {
@@ -573,23 +555,19 @@ fn ingest_value(
         if session.model.is_none() && msg.model.as_deref() != Some(SYNTHETIC_MODEL) {
             session.model = msg.model.clone();
         }
-        // An assistant turn KEEPS the model it names, even when it matches the session default.
-        // REARCH's "IR diet" would null the duplicate, but claude transcripts are seekable: a
-        // record's parse must not depend on how much of the file preceded it, or a replay from a
-        // mid-file offset (`crate::offsets::stream_range`, behind `cv show --range`) stops being
-        // byte-identical to the full stream's suffix. The model is also the only thing that tells
-        // a windowed read, and `task`'s reviewer scan, which model was in play, since this adapter
-        // emits no `meta()`. Redundant strings are the cheaper price.
+        // An assistant turn KEEPS the model it names, even when it matches the session default:
+        // a record's parse must not depend on how much of the file preceded it, and the model is
+        // the only thing that tells a windowed read, and `task`'s reviewer scan, which model was
+        // in play, since this adapter emits no `meta()`. Redundant strings are the cheaper price.
         return sink.message(msg);
     }
     Flow::Continue
 }
 
-/// Offset-recording pass: stamp the record's byte offset so `cv index` can persist a seek point for
-/// this message (see [`crate::offsets`]) and `cv rewind` can map a message to its record. Requires
-/// the on-disk span path (`span` carries the offset); ordinary lazy/bulk/full streams never set
-/// `opts.offsets`. EVERY message-producing record must call this — one unstamped message (a
-/// rendered attachment, before this was shared) makes the whole session unseekable.
+/// Offset-stamping pass: stamp the record's byte offset so `cv rewind` can map a message to its
+/// record (see [`crate::offsets::OFFSET_KEY`]). Requires the on-disk span path (`span` carries the
+/// offset); ordinary lazy/bulk/full streams never set `opts.offsets`. EVERY message-producing
+/// record must call this — an unstamped message is one rewind cannot cut at.
 fn stamp_offset(msg: &mut Message, opts: &ParseOptions, span: Option<&SpanCtx>) {
     if opts.offsets {
         if let Some(ctx) = span {
@@ -2682,15 +2660,14 @@ mod tests {
         stream_reader(id, reader, source_path, &ParseOptions::lazy(), sink)
     }
 
-    /// The seek cooperation (REARCH Phase 2): under `lazy_offsets()` every message is stamped
-    /// with its record's byte offset, and `stream_reader_from` replayed at any stamped offset
-    /// reproduces exactly the suffix of the full stream — message-for-message, span-for-span.
+    /// The stamp `cv rewind` cuts at: under `lazy_offsets()` every message is stamped with the
+    /// byte offset of the record line that produced it, in file order.
     #[test]
-    fn offset_stamps_replay_byte_identically_from_any_message() {
-        use std::io::{Seek, SeekFrom, Write};
+    fn offset_stamps_mark_each_message_record_start() {
+        use std::io::Write;
         let big = "wide \"payload\"\n".repeat(600); // > INLINE_MAX, with escapes → a Span
         let lines = [
-            serde_json::json!({"type":"ai-title","aiTitle":"seek test"}),
+            serde_json::json!({"type":"ai-title","aiTitle":"stamp test"}),
             serde_json::json!({"type":"user","uuid":"u0","cwd":"/w","gitBranch":"main",
                 "message":{"role":"user","content":"first question"}}),
             serde_json::json!({"type":"assistant","uuid":"a1","timestamp":"2026-06-01T00:00:01Z",
@@ -2708,7 +2685,7 @@ mod tests {
             serde_json::json!({"type":"assistant","uuid":"a5","message":{"role":"assistant",
                 "model":"claude-test-1","content":[{"type":"text","text":"answer two"}]}}),
         ];
-        let dir = std::env::temp_dir().join(format!("cv-claude-seek-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("cv-claude-stamp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -2739,24 +2716,22 @@ mod tests {
             .collect();
         assert!(offs.windows(2).all(|w| w[0] < w[1]), "offsets follow file order");
 
-        for k in 1..full.len() {
-            let mut file = fs::File::open(&path).unwrap();
-            file.seek(SeekFrom::Start(offs[k])).unwrap();
-            let mut replay = CollectSink::default();
-            stream_reader_from(
-                "s",
-                BufReader::new(file),
-                Some(path.clone()),
-                offs[k],
-                &opts,
-                &mut replay,
-            );
-            assert_eq!(
-                serde_json::to_value(&full[k..]).unwrap(),
-                serde_json::to_value(&replay.messages).unwrap(),
-                "replay from message {k}'s offset must equal the full-stream suffix"
-            );
-        }
+        let bytes = fs::read(&path).unwrap();
+        let line_starts: Vec<u64> = std::iter::once(0)
+            .chain(
+                bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &b)| b == b'\n')
+                    .map(|(i, _)| i as u64 + 1),
+            )
+            .collect();
+        // Line 0 is the title record (no message); messages k sit on lines k+1.
+        assert_eq!(
+            offs,
+            line_starts[1..=full.len()],
+            "each stamp is its record's line start"
+        );
 
         // And bulk/full options never stamp (their output stays byte-identical to before).
         let mut bulk = CollectSink::default();

@@ -51,9 +51,8 @@
 //!
 //! Streaming discipline: nothing here parses a whole session. Candidates come from indexed
 //! catalog queries ([`cv_core::events::edits_touching_file`]); `--show` reuses the windowed
-//! `cv show --range` rendering path, which resolves only the messages inside the window — and,
-//! when `cv index` has recorded per-message byte offsets ([`cv_core::offsets`]), *seeks* straight
-//! to the window instead of streaming from byte 0.
+//! `cv show --range` rendering path, which resolves only the messages inside the window and stops
+//! reading at its end.
 
 use anyhow::{anyhow, bail, Context, Result};
 use cv_core::events::{self, EditEvent};

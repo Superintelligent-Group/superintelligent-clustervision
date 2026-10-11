@@ -211,10 +211,9 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     let mut changed = 0usize;
     let mut total = 0usize;
 
-    // One query for the whole event/offsets skip-tables — the per-session checks would open (and
-    // run DDL on) a fresh sqlite connection per call, which a ~2,400-session sweep pays ~2,400×.
+    // One query for the whole event skip-table — the per-session checks would open (and run DDL
+    // on) a fresh sqlite connection per call, which a ~2,400-session sweep pays ~2,400×.
     let event_sync = cv_core::events::SyncTable::load();
-    let offset_sync = cv_core::offsets::SyncTable::load();
 
     for r in cv_core::discover_all() {
         total += 1;
@@ -222,47 +221,21 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
         let (mtime, size) = cv_core::offsets::file_sig(&r.path);
         let fts_fresh = fts_is_fresh(&r, existing.get(&r.id), mtime, size);
         let events_stale = event_sync.needs_ingest(&r, mtime, size);
-        // Message byte offsets (seekable `cv show --range` — see [`cv_core::offsets`]) ride the
-        // same pass, for the harnesses whose adapters can stamp them.
-        let offsets_stale = cv_core::offsets::supported(r.harness) && offset_sync.needs_record(&r, mtime, size);
-        // Unchanged on all axes → skip entirely (no re-parse beyond the metadata scan).
-        if fts_fresh && !events_stale && !offsets_stale {
+        // Unchanged on both axes → skip entirely (no re-parse beyond the metadata scan).
+        if fts_fresh && !events_stale {
             continue;
         }
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
             continue;
         };
         let mut events = events_stale.then(|| cv_core::events::EventSink::new(r.cwd.clone()));
-        let mut offsets = offsets_stale.then(cv_core::offsets::OffsetSink::new);
-        // The recording pass needs per-message offset stamps; otherwise plain lazy. Identical for
-        // every other consumer on the tee (the stamp is one small `extra` entry nobody reads).
-        let opts = if offsets.is_some() {
-            ParseOptions::lazy_offsets()
-        } else {
-            ParseOptions::lazy()
-        };
 
-        // FTS docs current but events/offsets missing/stale (e.g. first run after upgrading, or
-        // after a catalog wipe): a catalog-only pass that never touches tantivy.
+        // FTS docs current but events missing/stale (e.g. first run after upgrading, or after a
+        // catalog wipe): a catalog-only pass that never touches tantivy.
         if fts_fresh {
-            let res = match (events.as_mut(), offsets.as_mut()) {
-                (Some(es), Some(os)) => {
-                    let mut tee = cv_core::TeeSink::new(es, os);
-                    cv_core::stream::stream_counted(&*adapter, &r, &opts, &mut tee)
-                }
-                (Some(es), None) => cv_core::stream::stream_counted(&*adapter, &r, &opts, es),
-                (None, Some(os)) => cv_core::stream::stream_counted(&*adapter, &r, &opts, os),
-                (None, None) => unreachable!("skip above covers fresh+fresh"),
-            };
-            match res {
-                Ok(_) => {
-                    if let Some(es) = &events {
-                        cv_core::events::record(&r, es.events(), mtime, size);
-                    }
-                    if let Some(os) = &offsets {
-                        cv_core::offsets::record(&r, os, mtime, size);
-                    }
-                }
+            let es = events.as_mut().expect("skip above covers fresh+fresh");
+            match cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), es) {
+                Ok(_) => cv_core::events::record(&r, es.events(), mtime, size),
                 Err(e) => eprintln!("cv-search: parse failed for {} ({}): {e:#}", r.id, r.harness),
             }
             continue;
@@ -280,7 +253,6 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
             mtime,
             size,
             events.as_mut(),
-            offsets.as_mut(),
             cv_core::events::Provenance::default(),
         ) {
             Ok(docs) => docs,
@@ -292,13 +264,10 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
                 continue;
             }
         };
-        // Only stamp events/offsets after a *complete* pass — a parse error above leaves the sync
-        // rows untouched so the session is retried next run.
+        // Only stamp events after a *complete* pass — a parse error above leaves the sync rows
+        // untouched so the session is retried next run.
         if let Some(es) = events {
             cv_core::events::record(&r, es.events(), mtime, size);
-        }
-        if let Some(os) = offsets {
-            cv_core::offsets::record(&r, &os, mtime, size);
         }
         changed += 1;
         since_commit += docs;
@@ -316,7 +285,7 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
         for r in cv_core::discover_all() {
             for sub in cv_core::subagent_tree_of(&r) {
                 seen.insert(sub.session.id.clone());
-                match index_one_subagent(&mut writer, &f, &r, &sub, &existing, &event_sync, &offset_sync) {
+                match index_one_subagent(&mut writer, &f, &r, &sub, &existing, &event_sync) {
                     Ok(0) => {}
                     Ok(docs) => {
                         changed += 1;
@@ -354,10 +323,9 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
 }
 
 /// Stream one session into bounded tantivy docs through [`ChunkSink`] — teeing the same pass into
-/// `events` and/or `offsets` when given, so the transcript is read once for all consumers.
-/// `lazy()` keeps large content as spans: the chunk sink chunk-resolves them and the other sinks
-/// never read them at all; with an offsets sink the pass runs under `lazy_offsets()` so the
-/// adapter stamps each message's byte offset for it to harvest. Returns the docs written.
+/// `events` when given, so the transcript is read once for both consumers. `lazy()` keeps large
+/// content as spans: the chunk sink chunk-resolves them and the event sink never reads them at
+/// all. Returns the docs written.
 #[allow(clippy::too_many_arguments)]
 fn index_session(
     writer: &mut IndexWriter,
@@ -367,31 +335,16 @@ fn index_session(
     mtime: i64,
     size: i64,
     events: Option<&mut cv_core::events::EventSink>,
-    offsets: Option<&mut cv_core::offsets::OffsetSink>,
     prov: cv_core::events::Provenance,
 ) -> Result<usize> {
-    use cv_core::ParseOptions;
-    let opts = if offsets.is_some() {
-        ParseOptions::lazy_offsets()
-    } else {
-        ParseOptions::lazy()
-    };
+    let opts = cv_core::ParseOptions::lazy();
     let mut sink = ChunkSink::new(writer, f, r, mtime, size, prov);
-    match (events, offsets) {
-        (Some(es), Some(os)) => {
-            let mut tee = cv_core::TeeSink::new(&mut sink, es);
-            let mut tee = cv_core::TeeSink::new(&mut tee, os);
-            cv_core::stream::stream_counted(adapter, r, &opts, &mut tee)?;
-        }
-        (Some(es), None) => {
+    match events {
+        Some(es) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
             cv_core::stream::stream_counted(adapter, r, &opts, &mut tee)?;
         }
-        (None, Some(os)) => {
-            let mut tee = cv_core::TeeSink::new(&mut sink, os);
-            cv_core::stream::stream_counted(adapter, r, &opts, &mut tee)?;
-        }
-        (None, None) => {
+        None => {
             cv_core::stream::stream_counted(adapter, r, &opts, &mut sink)?;
         }
     }
@@ -416,10 +369,9 @@ fn index_session_clean(
     mtime: i64,
     size: i64,
     events: Option<&mut cv_core::events::EventSink>,
-    offsets: Option<&mut cv_core::offsets::OffsetSink>,
     prov: cv_core::events::Provenance,
 ) -> Result<usize> {
-    match index_session(writer, f, adapter, r, mtime, size, events, offsets, prov) {
+    match index_session(writer, f, adapter, r, mtime, size, events, prov) {
         Ok(docs) => Ok(docs),
         Err(e) => {
             writer.delete_term(Term::from_field_text(f.id, &r.id));
@@ -469,14 +421,12 @@ fn index_one_subagent(
     sub: &cv_core::SubagentInfo,
     existing: &HashMap<String, (i64, i64)>,
     event_sync: &cv_core::events::SyncTable,
-    offset_sync: &cv_core::offsets::SyncTable,
 ) -> Result<usize> {
     let sr = &sub.session;
     let (mtime, size) = cv_core::offsets::file_sig(&sr.path);
     let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size);
     let events_stale = event_sync.needs_ingest(sr, mtime, size);
-    let offsets_stale = cv_core::offsets::supported(sr.harness) && offset_sync.needs_record(sr, mtime, size);
-    if fts_fresh && !events_stale && !offsets_stale {
+    if fts_fresh && !events_stale {
         return Ok(0);
     }
     let Some(adapter) = cv_core::harness::for_harness(sr.harness) else {
@@ -488,36 +438,14 @@ fn index_one_subagent(
         workflow: sub.workflow.clone(),
     };
     let mut events = events_stale.then(|| cv_core::events::EventSink::new(sr.cwd.clone()));
-    let mut offsets = offsets_stale.then(cv_core::offsets::OffsetSink::new);
-    // FTS-fresh but catalog/offsets stale: a catalog-only pass that never touches tantivy (keeps the
-    // doc set byte-stable), mirroring the top-level loop's fast path. This runs BEFORE the
+    // FTS-fresh but catalog stale: a catalog-only pass that never touches tantivy (keeps the doc
+    // set byte-stable), mirroring the top-level loop's fast path. This runs BEFORE the
     // delete-by-id below — mirroring the top-level loop's order — so a fresh agent's docs are never
     // deleted with nothing re-added in their place.
     if fts_fresh {
-        let opts = if offsets.is_some() {
-            cv_core::ParseOptions::lazy_offsets()
-        } else {
-            cv_core::ParseOptions::lazy()
-        };
-        match (events.as_mut(), offsets.as_mut()) {
-            (Some(es), Some(os)) => {
-                let mut tee = cv_core::TeeSink::new(es, os);
-                cv_core::stream::stream_counted(&*adapter, sr, &opts, &mut tee)?;
-            }
-            (Some(es), None) => {
-                cv_core::stream::stream_counted(&*adapter, sr, &opts, es)?;
-            }
-            (None, Some(os)) => {
-                cv_core::stream::stream_counted(&*adapter, sr, &opts, os)?;
-            }
-            (None, None) => return Ok(0),
-        }
-        if let Some(es) = &events {
-            cv_core::events::record_with(sr, es.events(), mtime, size, &prov);
-        }
-        if let Some(os) = &offsets {
-            cv_core::offsets::record(sr, os, mtime, size);
-        }
+        let Some(es) = events.as_mut() else { return Ok(0) };
+        cv_core::stream::stream_counted(&*adapter, sr, &cv_core::ParseOptions::lazy(), es)?;
+        cv_core::events::record_with(sr, es.events(), mtime, size, &prov);
         return Ok(0);
     }
     if existing.contains_key(&sr.id) {
@@ -532,14 +460,10 @@ fn index_one_subagent(
         mtime,
         size,
         events.as_mut(),
-        offsets.as_mut(),
         prov.clone(),
     )?;
     if let Some(es) = events {
         cv_core::events::record_with(sr, es.events(), mtime, size, &prov);
-    }
-    if let Some(os) = offsets {
-        cv_core::offsets::record(sr, &os, mtime, size);
     }
     Ok(docs)
 }
@@ -887,8 +811,7 @@ pub fn has_subagent_docs(dir: &Path) -> bool {
 /// indexer [`index_all`] drives, minus only the global `discover_all()` scan. Full rebuild: clears
 /// prior contents first. Used by tests so date-field (and chunk) indexing is exercised against the
 /// code that actually ships rather than a parallel per-doc path. `catalog = true` additionally tees
-/// each pass into the event catalog and (for supported harnesses) the message-offsets store, like
-/// `index_all` does (only set it under an isolated `CLUSTERVISION_HOME` — it writes the shared
+/// each pass into the event catalog, like `index_all` does (only set it under an isolated `CLUSTERVISION_HOME` — it writes the shared
 /// catalog db).
 #[cfg(test)]
 pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool) -> Result<usize> {
@@ -901,7 +824,6 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         };
         let (mtime, size) = cv_core::offsets::file_sig(&r.path);
         let mut es = catalog.then(|| cv_core::events::EventSink::new(r.cwd.clone()));
-        let mut os = (catalog && cv_core::offsets::supported(r.harness)).then(cv_core::offsets::OffsetSink::new);
         index_session(
             &mut writer,
             &f,
@@ -910,15 +832,11 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
             mtime,
             size,
             es.as_mut(),
-            os.as_mut(),
             cv_core::events::Provenance::default(),
         )
         .with_context(|| format!("indexing {}", r.id))?;
         if let Some(es) = es {
             cv_core::events::record(r, es.events(), mtime, size);
-        }
-        if let Some(os) = os {
-            cv_core::offsets::record(r, &os, mtime, size);
         }
     }
     writer.commit().context("committing index")?;
@@ -960,7 +878,6 @@ pub(crate) fn index_refs_incremental(dir: &Path, refs: &[cv_core::SessionRef]) -
             mtime,
             size,
             None,
-            None,
             cv_core::events::Provenance::default(),
         )
         .with_context(|| format!("indexing {}", r.id))?;
@@ -986,13 +903,12 @@ pub(crate) fn index_refs_with_subagents(dir: &Path, refs: &[cv_core::SessionRef]
     let mut writer: IndexWriter = index.writer(50_000_000).context("creating tantivy index writer")?;
     let (existing, _folded) = read_indexed_sigs(&index, &f).unwrap_or_default();
     let event_sync = cv_core::events::SyncTable::load();
-    let offset_sync = cv_core::offsets::SyncTable::load();
     let mut folded = 0usize;
     for r in refs {
         for sub in cv_core::subagent_tree_of(r) {
             // In a no-catalog test the skip tables are empty, so every agent indexes; with a catalog
             // the freshness skip behaves exactly as `index_all` does.
-            let docs = index_one_subagent(&mut writer, &f, r, &sub, &existing, &event_sync, &offset_sync)?;
+            let docs = index_one_subagent(&mut writer, &f, r, &sub, &existing, &event_sync)?;
             if docs > 0 {
                 folded += 1;
             }
@@ -1112,7 +1028,7 @@ fn stored_preview(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Option<
 }
 
 /// Most text we'll scan from a session to find a snippet window. Matches are almost always early;
-/// capping keeps snippeting a multi-GB hit bounded (and Phase-2 offsets will make it a seek).
+/// capping keeps snippeting a multi-GB hit bounded.
 const SNIPPET_SCAN_CAP: usize = 256 * 1024;
 
 /// Generate a snippet for a hit by re-reading **just that one session** (streamed, capped), finding
@@ -1918,7 +1834,6 @@ mod tests {
             111,
             4096,
             None,
-            None,
             cv_core::events::Provenance::default(),
         );
         assert!(res.is_err(), "the fixture adapter must fail");
@@ -1970,11 +1885,10 @@ mod tests {
         let mut writer: IndexWriter = index.writer(50_000_000).unwrap();
         let (existing, _) = read_indexed_sigs(&index, &f).unwrap();
         let event_sync = cv_core::events::SyncTable::load();
-        let offset_sync = cv_core::offsets::SyncTable::load();
         let subs = cv_core::subagent_tree_of(&parent);
         assert_eq!(subs.len(), 1, "fixture must discover exactly one sub-agent");
-        let docs = index_one_subagent(&mut writer, &f, &parent, &subs[0], &existing, &event_sync, &offset_sync)
-            .expect("catalog-only pass");
+        let docs =
+            index_one_subagent(&mut writer, &f, &parent, &subs[0], &existing, &event_sync).expect("catalog-only pass");
         assert_eq!(docs, 0, "catalog-only pass must not rewrite tantivy docs");
         writer.commit().unwrap();
 

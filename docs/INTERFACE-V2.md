@@ -314,17 +314,15 @@ Rules:
   `render.rs`/`html.rs` and `cv show` label a System turn by its `kind` (plus the attachment kind).
 - **`Session::model`** is the session default, and `Message::model` names the model that turn ran
   under. REARCH's "IR diet" would null a message model that merely repeats the session default;
-  **that rule is withdrawn for any seekable harness** (2026-09-19). `crate::offsets::stream_range`
-  serves `cv show --range` by parsing from a recorded mid-file byte offset, so a record's parse
-  must not depend on how much of the file preceded it. Nulling a duplicate makes it depend on
-  exactly that, and it also leaves a windowed read with no way to learn the model at all when the
-  adapter emits no `meta()`, which is the case for Claude. An adapter may still omit a model its
+  **that rule is withdrawn** (2026-09-19): a record's parse must not depend on how much of the
+  file preceded it, and nulling a duplicate makes it depend on exactly that. It also leaves a
+  windowed read with no way to learn the model at all when the adapter emits no `meta()`, which
+  is the case for Claude. An adapter may still omit a model its
   store never recorded; it may not omit one the store did record. Redundant strings are the
   cheaper price than position-dependent parsing.
-- **`events.rs`/`tools.rs` and `crate::offsets`** reach harness facts through
-  `harness_extra(Harness::X)`, never a flat key. The seek path's codex model-change hazard check
-  is the cautionary tale: it read a flat `codex_event` after the adapter had nested it, so it
-  silently stopped firing and a model-changing session looked seekable.
+- **`events.rs`/`tools.rs`** reach harness facts through `harness_extra(Harness::X)`, never a
+  flat key. The cautionary tale: the old seek store's codex model-change hazard check read a flat
+  `codex_event` after the adapter had nested it, so it silently stopped firing.
 
 ## 5. Fidelity verifier v2 (`emit_verified`)
 

@@ -260,7 +260,7 @@ fn session_head(harness: &str, id: &str) -> (u16, Value) {
 /// at `end` (after noting whether a message exists there — the `has_more` probe).
 struct WindowSink {
     resolver: crate::Resolver,
-    /// Index of the next message to arrive (pre-set to `start` on the seek path, 0 on the full).
+    /// Index of the next message to arrive.
     idx: usize,
     start: usize,
     /// Exclusive window end; `None` streams to EOF.
@@ -268,8 +268,8 @@ struct WindowSink {
     msgs: Vec<Value>,
     /// A message at `end` exists (so the window isn't the tail of the session).
     more: bool,
-    /// Session metadata the stream delivered (codex meta / the seek store's snapshot / the
-    /// parse-bridge), when any did — claude's native stream emits none.
+    /// Session metadata the stream delivered (codex meta / the parse-bridge), when any did —
+    /// claude's native stream emits none.
     meta: Option<Value>,
     fail: Option<String>,
 }
@@ -321,11 +321,10 @@ impl MessageSink for WindowSink {
 }
 
 /// `GET /api/session/{harness}/{id}/messages?start=&end=&extra=` — the window `[start, end)` of the
-/// session's messages as IR JSON, without parsing the rest of a huge transcript when possible.
+/// session's messages as IR JSON, without parsing the rest of a huge transcript.
 ///
-/// First tries the seekable-session store ([`crate::offsets::stream_range`]: jump straight to
-/// message `start`'s recorded byte offset); with no/stale offsets it falls back to a full stream
-/// that still **stops at `end`** (the `cv show --range` pattern), so the tail is never read.
+/// A lazy stream that skips the messages before `start` without materializing them and **stops
+/// at `end`** (the `cv show --range` pattern), so the tail is never read.
 /// The reply carries the window's actual indices, `total_known` (+ `total` when the stream
 /// reached EOF so the count is exact), and `has_more`.
 ///
@@ -369,7 +368,7 @@ fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
     };
     let mut sink = WindowSink {
         resolver: crate::Resolver::new(Some(r.path.clone())),
-        idx: start,
+        idx: 0,
         start,
         end,
         msgs: Vec::new(),
@@ -377,34 +376,20 @@ fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
         meta: None,
         fail: None,
     };
-    // Ask the stream for one message past the window so `has_more` is known either way.
-    let probe = end.map(|e| e.saturating_add(1));
-    let seeked = if start > 0 {
-        match crate::offsets::stream_range(&r, start, probe, &opts, &mut sink) {
-            Ok(seeked) => seeked,
-            Err(e) => return err(500, &format!("range read failed: {e:#}")),
-        }
-    } else {
-        false
-    };
-    if !seeked {
-        sink.idx = 0; // full stream counts from the top (skipping pre-window messages cheaply)
-        match adapter.stream(&r, &opts, &mut sink) {
-            // Some adapters never call `meta()` — Claude is one — so the sink would stay empty and
-            // the response say `session: null` for the single most-read harness. `stream` RETURNS
-            // the session shell it assembled; use it when nothing was pushed.
-            Ok(shell) if sink.meta.is_none() => sink.meta = Some(session_meta_json(&shell)),
-            Ok(_) => {}
-            Err(e) => return err(500, &format!("stream failed: {e:#}")),
-        }
+    match adapter.stream(&r, &opts, &mut sink) {
+        // Some adapters never call `meta()` — Claude is one — so the sink would stay empty and
+        // the response say `session: null` for the single most-read harness. `stream` RETURNS
+        // the session shell it assembled; use it when nothing was pushed.
+        Ok(shell) if sink.meta.is_none() => sink.meta = Some(session_meta_json(&shell)),
+        Ok(_) => {}
+        Err(e) => return err(500, &format!("stream failed: {e:#}")),
     }
     if let Some(f) = sink.fail {
         return err(500, &f);
     }
 
-    // The count is exact when the stream ran to EOF. The one blind spot: a seek-read that
-    // delivered nothing can't distinguish "EOF exactly at start" from "start past EOF".
-    let total_known = !sink.more && (!seeked || !sink.msgs.is_empty());
+    // The count is exact when the stream ran to EOF.
+    let total_known = !sink.more;
     ok(json!({
         "harness": r.harness.as_str(),
         "id": r.id,

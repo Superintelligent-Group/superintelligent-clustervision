@@ -51,8 +51,7 @@ pub struct ParseOptions {
     pub spans: bool,
     /// Stamp each message's source **byte offset** into
     /// `Message.extra[`[`offsets::OFFSET_KEY`](crate::offsets::OFFSET_KEY)`]` (the offset of the
-    /// record line that produced it). Only the offset-recording ingest pass
-    /// ([`offsets::OffsetSink`](crate::offsets::OffsetSink) riding `cv index`) turns this on —
+    /// record line that produced it). Only `cv rewind`'s message-to-byte pass turns this on —
     /// ordinary lazy/bulk/full consumers never see the stamp, so their output is unchanged.
     /// Adapters that don't track byte positions (everything but claude/codex JSONL) ignore it.
     /// Implies nothing by itself: the adapters only stamp on their span-tracking paths, so use
@@ -116,9 +115,9 @@ impl ParseOptions {
         }
     }
 
-    /// [`lazy()`](ParseOptions::lazy) plus per-message byte-offset stamping — the **recording**
-    /// pass `cv index` makes so [`offsets`](crate::offsets) can persist seek points. Everything
-    /// else should use plain `lazy()`.
+    /// [`lazy()`](ParseOptions::lazy) plus per-message byte-offset stamping — the pass `cv rewind`
+    /// makes to map a message to its record ([`offsets`](crate::offsets)). Everything else should
+    /// use plain `lazy()`.
     pub fn lazy_offsets() -> Self {
         ParseOptions {
             spans: true,

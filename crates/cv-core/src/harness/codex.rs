@@ -470,9 +470,7 @@ impl EventDetector {
 
 /// Bounded first pass over a rollout: are NL messages carried as `event_msg`s? (See
 /// [`EventDetector`] for the bounding rule and its corpus-measured safety margin.)
-/// `pub(crate)` so the seek path ([`crate::offsets::stream_range`]) can re-detect it with the
-/// same head-bounded read before replaying mid-file.
-pub(crate) fn detect_has_events<R: BufRead>(reader: R) -> bool {
+fn detect_has_events<R: BufRead>(reader: R) -> bool {
     let mut det = EventDetector::default();
     super::for_each_json_line(reader, |v| det.feed(&v));
     det.found
@@ -582,7 +580,7 @@ pub fn stream_jsonl<R: BufRead>(
 /// iterates line slices (tracking file offsets) and, for a giant `function_call_output` with a plain
 /// **string** output, emits a lazy [`Span`](crate::lazy::Span) for that output instead of
 /// reading/parsing the (often 100s of MB) line whole. `stamp_offsets` additionally stamps each
-/// message's record byte offset into `extra` (the [`crate::offsets`] recording pass).
+/// message's record byte offset into `extra` ([`crate::offsets::OFFSET_KEY`]).
 #[cfg(feature = "mmap")]
 pub fn stream_jsonl_spans(
     id: &str,
@@ -592,84 +590,17 @@ pub fn stream_jsonl_spans(
     stamp_offsets: bool,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    stream_spans_core(id, data, 0, source_path, has_events, None, true, stamp_offsets, sink)
-}
-
-/// Seek-replay over the source bytes from `start_off` (a **record start**) — the cooperation entry
-/// [`crate::offsets::stream_range`] drives after looking up a message's recorded offset.
-///
-/// Differences from a top-of-file stream, by design of the recording side:
-/// * `has_events` must be supplied (it's a head property; the caller re-detects it with one small
-///   bounded read — the file is signature-guarded, so the verdict matches the recording pass).
-/// * No `meta()` is emitted; the caller replays the recorded metadata snapshot itself (the head
-///   records that would populate it were skipped).
-/// * `seed_model` is the model in effect at `start_off`, so in-window `turn_context` records
-///   compare against the right baseline. Sessions with mid-stream model *changes* are never
-///   recorded as seekable (the change note needs prior state), so the session's single known
-///   model is correct everywhere.
-///
-/// Every other codex record parses independently of the skipped prefix: the only cross-record
-/// message behavior — `token_count` usage attaching to the assistant message it trails — is
-/// scoped to the *held previous* message, and a recorded offset always points at the record that
-/// *created* its message, so the follow-up attach replays inside the window.
-#[cfg(feature = "mmap")]
-pub(crate) fn stream_spans_from(
-    data: &[u8],
-    start_off: u64,
-    source_path: Option<PathBuf>,
-    has_events: bool,
-    seed_model: Option<String>,
-    stamp_offsets: bool,
-    sink: &mut dyn MessageSink,
-) -> Session {
-    stream_spans_core(
-        "",
-        data,
-        start_off,
-        source_path,
-        has_events,
-        seed_model,
-        false,
-        stamp_offsets,
-        sink,
-    )
-}
-
-/// Shared body of [`stream_jsonl_spans`] (whole file) and [`stream_spans_from`] (seek replay).
-#[cfg(feature = "mmap")]
-#[allow(clippy::too_many_arguments)]
-fn stream_spans_core(
-    id: &str,
-    data: &[u8],
-    start_off: u64,
-    source_path: Option<PathBuf>,
-    has_events: bool,
-    seed_model: Option<String>,
-    emit_meta: bool,
-    stamp_offsets: bool,
-    sink: &mut dyn MessageSink,
-) -> Session {
     let mut s = Session {
-        model: seed_model,
         source_path,
         ..Session::new(String::new(), Harness::Codex)
     };
-    if start_off as usize >= data.len() {
-        if emit_meta {
-            sink.meta(&s);
-        }
-        if s.id.is_empty() {
-            s.id = id.to_string();
-        }
-        return s;
-    }
     let mut scratch: Vec<Message> = Vec::new();
     // The span path is the lazy (never format-complete) path, so inherited prefixes are skipped.
     let mut ctx = CodexCtx::default();
     let mut meta_sent = false;
     let mut skipped = 0u64;
-    let mut off = start_off;
-    'outer: for raw_line in data[start_off as usize..].split(|&b| b == b'\n') {
+    let mut off = 0u64;
+    'outer: for raw_line in data.split(|&b| b == b'\n') {
         let line_off = off;
         off += raw_line.len() as u64 + 1; // +1 for the consumed '\n'
         let lead = raw_line.iter().take_while(|b| b.is_ascii_whitespace()).count();
@@ -695,14 +626,14 @@ fn stream_spans_core(
             continue;
         }
         if stamp_offsets {
-            // Stamp this record's byte offset on the message(s) it produced (offset recording —
-            // see [`crate::offsets::OFFSET_KEY`]). Messages a later record amends (token_count
-            // usage) keep their creating record's offset, which is the correct replay point.
+            // Stamp this record's byte offset on the message(s) it produced (see
+            // [`crate::offsets::OFFSET_KEY`]). Messages a later record amends (token_count
+            // usage) keep their creating record's offset.
             for m in &mut scratch[before..] {
                 m.extra.insert(crate::offsets::OFFSET_KEY.into(), base_off.into());
             }
         }
-        if emit_meta && !meta_sent && s.model.is_some() {
+        if !meta_sent && s.model.is_some() {
             sink.meta(&s);
             meta_sent = true;
         }
@@ -722,7 +653,7 @@ fn stream_spans_core(
     if s.id.is_empty() {
         s.id = id.to_string();
     }
-    if emit_meta && !meta_sent {
+    if !meta_sent {
         sink.meta(&s);
     }
     s
@@ -2312,14 +2243,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The seek cooperation (REARCH Phase 2): the span path under offset-stamping marks every
-    /// message with its creating record's byte offset, and `stream_spans_from` replayed at any
-    /// stamped offset (with the session model seeded) reproduces exactly the full stream's suffix
-    /// — including a `token_count` attaching usage to the held assistant inside the window, the
-    /// stale-snapshot carrier, and a giant span output.
+    /// The span path under offset-stamping marks every message with the byte offset of the record
+    /// that created it — including an assistant a later `token_count` amends, the stale-snapshot
+    /// carrier, and a giant span output.
     #[cfg(feature = "mmap")]
     #[test]
-    fn offset_stamps_replay_byte_identically_from_any_message() {
+    fn offset_stamps_mark_each_message_creating_record() {
         let big = "giant tool output line\n".repeat(400); // > INLINE_MAX → a Span
         let lines = [
             r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"seek-1","cwd":"/work"}}"#.to_string(),
@@ -2358,25 +2287,17 @@ mod tests {
                     .expect("every message stamped")
             })
             .collect();
-        assert!(offs.windows(2).all(|w| w[0] <= w[1]));
-
-        for k in 1..full.len() {
-            let mut replay = crate::stream::CollectSink::default();
-            stream_spans_from(
-                &data,
-                offs[k],
-                None,
-                has_events,
-                Some("gpt-test".into()),
-                true,
-                &mut replay,
-            );
-            assert_eq!(
-                serde_json::to_value(&full[k..]).unwrap(),
-                serde_json::to_value(&replay.messages).unwrap(),
-                "replay from message {k}'s offset must equal the full-stream suffix"
-            );
-        }
+        let line_starts: Vec<u64> = std::iter::once(0)
+            .chain(
+                data.iter()
+                    .enumerate()
+                    .filter(|(_, &b)| b == b'\n')
+                    .map(|(i, _)| i as u64 + 1),
+            )
+            .collect();
+        // user, assistant, function_call, its output, carrier, assistant: lines 2, 3, 5, 6, 7, 8.
+        let want: Vec<u64> = [2, 3, 5, 6, 7, 8].iter().map(|&l| line_starts[l]).collect();
+        assert_eq!(offs, want);
     }
 
     #[test]

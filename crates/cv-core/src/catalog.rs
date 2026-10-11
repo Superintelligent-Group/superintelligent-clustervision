@@ -102,7 +102,10 @@ mod imp {
              CREATE TABLE IF NOT EXISTS catalog_meta(
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
-             );",
+             );
+             -- The seek store (0.14 and earlier) is gone; see `crate::offsets`.
+             DROP TABLE IF EXISTS msg_offsets;
+             DROP TABLE IF EXISTS msg_offsets_schema;",
         )
         .ok()?;
         // `sessions` predates the catalog read path, which needs sub-second timestamps to

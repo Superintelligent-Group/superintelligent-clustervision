@@ -232,8 +232,8 @@ without a windowed read having to scan the whole file.
 
 The window `[start, end)` of the session's messages as IR JSON — `cv show --range` through the
 other door. Params: `start`, `end` (a malformed index is a `400`, never a silent full read),
-`extra=1` to keep each message's harness `extra` map. Jumps to the recorded byte offset when the
-seek store has one, else streams and stops at `end`. The reply carries the actual window indices,
+`extra=1` to keep each message's harness `extra` map. Streams lazily, skipping the messages before
+`start` without reading their content, and stops at `end`. The reply carries the actual window indices,
 `total_known` (+ `total` once EOF was reached) and `has_more`.
 
 #### `GET /api/session/{harness}/{id}/events`

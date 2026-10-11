@@ -995,24 +995,6 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
     } else {
         ParseOptions::bulk()
     };
-    // Windowed reads first try the seekable-session store (offsets recorded by `cv index`): jump
-    // straight to message `start`'s byte offset and parse only the window, instead of streaming
-    // from byte 0 and discarding everything before it. `stream_range` delivers one `meta()` (the
-    // recorded metadata snapshot — including the model the skipped prefix would have provided)
-    // plus exactly the window's messages, so the sink starts its index at `start`. `false` means
-    // no/stale offsets — the sink is untouched; fall through to the full stream below.
-    if start > 0 {
-        sink.idx = start;
-        if cv_core::offsets::stream_range(r, start, end, &parse_opts, &mut sink)? {
-            sink.flush_header();
-            sink.result?;
-            return Ok(RenderOutcome {
-                rendered: sink.rendered,
-                next: sink.next,
-            });
-        }
-        sink.idx = 0;
-    }
     cv_core::stream::stream_counted(adapter, r, &parse_opts, &mut sink)?;
     sink.flush_header(); // short sessions (no assistant turn / < HOLDBACK msgs) flush here
     sink.result?;
@@ -1106,26 +1088,10 @@ fn md_message(m: &Message) -> String {
 mod tests {
     use super::*;
 
-    /// `CLUSTERVISION_HOME` is process-global — these are the only env-touching unit tests in
-    /// this binary, serialized against each other.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn temp_home(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cv-view-seek-{tag}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("cv-view-render-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
-    }
-
-    /// Record message offsets for `r` the way `cv index`'s ride-along does.
-    fn record_offsets(r: &SessionRef) {
-        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
-        let (mtime, size) = cv_core::offsets::file_sig(&r.path);
-        let mut sink = cv_core::offsets::OffsetSink::new();
-        adapter
-            .stream(r, &cv_core::ParseOptions::lazy_offsets(), &mut sink)
-            .unwrap();
-        assert!(sink.seekable());
-        cv_core::offsets::record(r, &sink, mtime, size);
     }
 
     fn render(r: &SessionRef, range: Option<(usize, Option<usize>)>) -> String {
@@ -1139,10 +1105,22 @@ mod tests {
         (String::from_utf8(out).unwrap(), outcome)
     }
 
-    /// Whether a windowed render of `r` would take the seek path right now.
-    fn seekable(r: &SessionRef, start: usize) -> bool {
-        let mut sink = cv_core::CollectSink::default();
-        cv_core::offsets::stream_range(r, start, Some(start + 1), &cv_core::ParseOptions::lazy(), &mut sink).unwrap()
+    /// Render the window `range` of `r` and check its body is each message of a full eager parse,
+    /// rendered alone and concatenated. Returns the windowed render's header.
+    fn assert_window_matches_full_parse(r: &SessionRef, range: (usize, Option<usize>)) -> String {
+        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
+        let mut all = cv_core::CollectSink::default();
+        adapter.stream(r, &cv_core::ParseOptions::bulk(), &mut all).unwrap();
+        let end = range.1.unwrap_or(usize::MAX).min(all.messages.len());
+        let want: String = all.messages[range.0..end].iter().map(show_message).collect();
+        let windowed = render(r, Some(range));
+        let body_at = windowed.find("── ").unwrap_or(windowed.len());
+        assert_eq!(
+            &windowed[body_at..],
+            want,
+            "range {range:?} body must equal the full parse's slice"
+        );
+        windowed[..body_at].to_string()
     }
 
     /// A small Claude fixture: title, a user turn, a model-carrying assistant turn, one big user
@@ -1151,7 +1129,7 @@ mod tests {
         let path = home.join("s.jsonl");
         let big = "long \"quoted\" content\n".repeat(400);
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, r#"{{"type":"ai-title","aiTitle":"render seek"}}"#).unwrap();
+        writeln!(f, r#"{{"type":"ai-title","aiTitle":"render window"}}"#).unwrap();
         writeln!(
             f,
             r#"{{"type":"user","uuid":"u0","cwd":"/w","message":{{"role":"user","content":"q one"}}}}"#
@@ -1181,57 +1159,32 @@ mod tests {
         }
         drop(f);
         SessionRef {
-            id: "render-seek".into(),
+            id: "render-window".into(),
             harness: Harness::Claude,
             path,
             cwd: Some("/w".into()),
-            title: Some("render seek".into()),
+            title: Some("render window".into()),
             created_at: None,
             updated_at: None,
             message_count: 11,
         }
     }
 
-    /// THE Phase-2 contract: the same window rendered via the seek path (offsets recorded) and
-    /// via the full stream (no offsets) must be **byte-identical** — header (incl. the model the
-    /// skipped prefix provides) and body. And a stale recording falls back, output unchanged.
+    /// The windowed-render contract: a window renders byte-identically to the same messages of a
+    /// full parse, and its header carries the model the skipped prefix provides.
     #[test]
-    fn windowed_render_is_byte_identical_via_seek_and_full_stream() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn windowed_render_is_byte_identical_to_the_full_parse() {
         let home = temp_home("claude");
-        std::env::set_var("CLUSTERVISION_HOME", &home);
         let r = claude_fixture(&home);
-        let path = r.path.clone();
-        record_offsets(&r);
-        assert!(seekable(&r, 3), "recording must enable the seek path");
-
-        // Window past the model-carrying assistant turn: the header's model must come from the
-        // recorded metadata on the seek path. Compare against the full stream with no catalog.
+        let full_header = {
+            let full = render(&r, None);
+            full[..full.find("── ").unwrap()].to_string()
+        };
         for range in [(3usize, Some(6usize)), (2, Some(11)), (5, None), (1, Some(2))] {
-            let seeked = render(&r, Some((range.0, range.1)));
-            std::env::remove_var("CLUSTERVISION_HOME");
-            std::env::set_var("CLUSTERVISION_HOME", temp_home("claude-empty"));
-            assert!(!seekable(&r, range.0), "empty catalog must fall back");
-            let full = render(&r, Some((range.0, range.1)));
-            std::env::set_var("CLUSTERVISION_HOME", &home);
-            assert_eq!(seeked, full, "range {range:?} render must be byte-identical");
-            assert!(seeked.contains("claude-test"), "header model expected in {range:?}");
+            let header = assert_window_matches_full_parse(&r, range);
+            assert_eq!(header, full_header, "range {range:?} header");
+            assert!(header.contains("claude-test"), "header model expected in {range:?}");
         }
-
-        // Staleness: appending a message makes the recording stale → fallback, still correct.
-        {
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-            writeln!(
-                f,
-                r#"{{"type":"user","uuid":"uz","message":{{"role":"user","content":"appended"}}}}"#
-            )
-            .unwrap();
-        }
-        assert!(!seekable(&r, 3), "appended file must read as stale");
-        let after = render(&r, Some((9, Some(12))));
-        assert!(after.contains("follow-up 7") && after.contains("appended"));
-
-        std::env::remove_var("CLUSTERVISION_HOME");
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -1240,9 +1193,7 @@ mod tests {
     /// that fits everything reports no cut.
     #[test]
     fn byte_budget_cuts_and_reports_the_next_index() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home("budget");
-        std::env::set_var("CLUSTERVISION_HOME", temp_home("budget-empty"));
         let r = claude_fixture(&home);
 
         // Message 2 is the ~9 KB giant: a 1 KB budget renders messages 0 and 1, then stops.
@@ -1283,7 +1234,6 @@ mod tests {
         assert_eq!(oc.rendered, 8);
         assert_eq!(oc.next, None);
 
-        std::env::remove_var("CLUSTERVISION_HOME");
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -1335,13 +1285,11 @@ mod tests {
         assert_eq!(turn_label(&legacy), "system · error");
     }
 
-    /// Same contract for codex, whose metadata comes from the recorded `meta()` snapshot (the
-    /// parse-time title — `None` — must override the discovery title on both paths).
+    /// Same contract for codex, whose metadata arrives through `meta()` (the parse-time title —
+    /// `None` — overrides the discovery title).
     #[test]
-    fn codex_windowed_render_is_byte_identical_via_seek_and_full_stream() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn codex_windowed_render_is_byte_identical_to_the_full_parse() {
         let home = temp_home("codex");
-        std::env::set_var("CLUSTERVISION_HOME", &home);
 
         let path = home.join("rollout-r.jsonl");
         let big = "giant output\n".repeat(500);
@@ -1369,19 +1317,12 @@ mod tests {
             updated_at: None,
             message_count: 3,
         };
-        record_offsets(&r);
-        assert!(seekable(&r, 2));
-
         for range in [(2usize, Some(4usize)), (1, None), (3, Some(5))] {
-            let seeked = render(&r, Some((range.0, range.1)));
-            std::env::set_var("CLUSTERVISION_HOME", temp_home("codex-empty"));
-            let full = render(&r, Some((range.0, range.1)));
-            std::env::set_var("CLUSTERVISION_HOME", &home);
-            assert_eq!(seeked, full, "range {range:?} render must be byte-identical");
-            assert!(seeked.contains("gpt-test"), "header model expected in {range:?}");
+            let header = assert_window_matches_full_parse(&r, range);
+            assert!(header.contains("gpt-test"), "header model expected in {range:?}");
+            assert!(!header.contains("discovery title"), "parsed title wins in {range:?}");
         }
 
-        std::env::remove_var("CLUSTERVISION_HOME");
         std::fs::remove_dir_all(&home).ok();
     }
 }
