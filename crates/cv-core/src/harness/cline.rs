@@ -643,18 +643,19 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     emit_with_harness(session, out_dir, opts, Harness::Cline)
 }
 
-/// Shared emit core, parameterized by `harness` so `roo.rs` can reuse it with `Harness::Roo`.
-///
-/// The on-disk per-task format is byte-for-byte identical for Cline and Roo (the harness only
-/// differs at parse time / in which storage root it lives under), so `harness` is accepted for API
-/// symmetry and resume-hint flavor but doesn't change the emitted bytes.
+/// The emit core for both harnesses that write this layout: Cline and Roo (`roo::emit` passes
+/// `Harness::Roo`). The per-task bytes are identical; `harness` only names, in the resume hint,
+/// which editor extension opens the task.
 pub fn emit_with_harness(
     session: &Session,
     out_dir: &Path,
     opts: &crate::emit::EmitOptions,
     harness: Harness,
 ) -> Result<crate::harness::EmitResult> {
-    let _ = harness;
+    let extension = match harness {
+        Harness::Roo => "Roo Code",
+        _ => "Cline",
+    };
     // taskId: an explicit override, else a ms-epoch string the parser can turn back into created_at.
     let created = session.created_at.or(session.updated_at).unwrap_or_else(Utc::now);
     let new_id = opts
@@ -759,11 +760,11 @@ pub fn emit_with_harness(
 
     let resume = match &cwd {
         Some(c) => format!(
-            "open {} in Cline (task {new_id}, cwd {})",
+            "open {} in {extension} (task {new_id}, cwd {})",
             task_dir.display(),
             c.display()
         ),
-        None => format!("open {} in Cline (task {new_id})", task_dir.display()),
+        None => format!("open {} in {extension} (task {new_id})", task_dir.display()),
     };
     Ok(crate::harness::EmitResult {
         path: task_dir,

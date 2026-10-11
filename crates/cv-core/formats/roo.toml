@@ -3,7 +3,9 @@
 # under ParseOptions::complete only; ignored = known and deliberately skipped. Regenerate: tools/gen-manifests (or edit by hand).
 
 harness = "roo"
-source_files = ["harness/roo.rs"]
+# Roo has no parser or writer of its own: `harness/roo.rs` points the Cline code at Roo's roots, so
+# the vocabulary is checked against the file that actually interprets it.
+source_files = ["harness/cline.rs"]
 ignore_literals = ["base64", "url"]
 store = [
   "<globalStorage>/rooveterinaryinc.roo-cline|roo-code/tasks/<taskId>/",
@@ -25,3 +27,6 @@ date = "2026-05-29"
 "block.tool_use" = { status = "handled", note = "" }
 "block.tool_result" = { status = "handled", note = "" }
 "block.image" = { status = "handled", note = "" }
+"ui.say" = { status = "handled", note = "ui_messages timestamp enrichment" }
+"ui.ask" = { status = "generic", note = "" }
+"ui.completion_result" = { status = "generic", note = "" }
