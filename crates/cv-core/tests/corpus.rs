@@ -20,6 +20,7 @@ use cv_core::harness::codex::Codex;
 use cv_core::harness::continuedev::Continue;
 use cv_core::harness::devin::Devin;
 use cv_core::harness::gemini::Gemini;
+use cv_core::harness::goose::Goose;
 use cv_core::harness::grok::Grok;
 use cv_core::harness::kimi::Kimi;
 use cv_core::harness::kimi_code::KimiCode;
@@ -98,6 +99,10 @@ fn qwen(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Qwen::with_home(&version_dir.join(".qwen")))
 }
 
+fn goose(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Goose::with_sessions_dir(&version_dir.join("sessions")))
+}
+
 /// Harnesses that cannot be driven headless (desktop apps): their version dirs hold a schema
 /// snapshot of the store ember's installed version left on disk (`SNAPSHOT.toml` plus the
 /// `*.schema.txt` / `*.shape.txt` that `tools/harness-corpus/schema_snapshot.py` wrote), never
@@ -163,6 +168,11 @@ const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "roo",
         adapter: roo,
+        children: None,
+    },
+    CorpusHarness {
+        name: "goose",
+        adapter: goose,
         children: None,
     },
 ];

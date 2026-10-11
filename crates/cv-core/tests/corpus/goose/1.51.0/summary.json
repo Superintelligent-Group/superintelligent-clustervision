@@ -1,0 +1,592 @@
+{
+  "sessions": [
+    {
+      "id": "20261011_1",
+      "path": "sessions/sessions.db",
+      "messages": 24,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 12,
+        "thinking": 6,
+        "tool_result": 6,
+        "tool_use": 6
+      },
+      "tools": [
+        "todo__todo_write",
+        "load_skill",
+        "todo__todo_write",
+        "todo__todo_write",
+        "todo__todo_write",
+        "todo__todo_write"
+      ],
+      "usage_messages": 9,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-4.7-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_10",
+      "path": "sessions/sessions.db",
+      "messages": 7,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 3,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "todo__todo_write",
+        "shell"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_11",
+      "path": "sessions/sessions.db",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result"
+      ],
+      "blocks": {
+        "text": 2,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "todo__todo_write"
+      ],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_12",
+      "path": "sessions/sessions.db",
+      "messages": 3,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_13",
+      "path": "sessions/sessions.db",
+      "messages": 3,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_14",
+      "path": "sessions/sessions.db",
+      "messages": 7,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 3,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "todo__todo_write",
+        "chatrecall__chatrecall"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_15",
+      "path": "sessions/sessions.db",
+      "messages": 2,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context"
+      ],
+      "blocks": {
+        "text": 2
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_16",
+      "path": "sessions/sessions.db",
+      "messages": 24,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 12,
+        "thinking": 6,
+        "tool_result": 6,
+        "tool_use": 6
+      },
+      "tools": [
+        "todo__todo_write",
+        "load_skill",
+        "todo__todo_write",
+        "todo__todo_write",
+        "todo__todo_write",
+        "todo__todo_write"
+      ],
+      "usage_messages": 9,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-4.7-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_17",
+      "path": "sessions/sessions.db",
+      "messages": 4,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "user/prompt"
+      ],
+      "blocks": {
+        "image": 1,
+        "text": 2,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "Edit"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_2",
+      "path": "sessions/sessions.db",
+      "messages": 44,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 13,
+        "thinking": 13,
+        "tool_result": 16,
+        "tool_use": 16
+      },
+      "tools": [
+        "todo__todo_write",
+        "shell",
+        "shell",
+        "todo__todo_write",
+        "todo__todo_write",
+        "shell",
+        "write",
+        "edit",
+        "todo__todo_write",
+        "todo__todo_write",
+        "shell",
+        "todo__todo_write",
+        "todo__todo_write",
+        "tree",
+        "analyze",
+        "todo__todo_write"
+      ],
+      "usage_messages": 13,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_3",
+      "path": "sessions/sessions.db",
+      "messages": 9,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "todo__todo_write",
+        "read_image",
+        "todo__todo_write"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_4",
+      "path": "sessions/sessions.db",
+      "messages": 13,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "system/compaction_boundary",
+        "system/compaction_summary",
+        "system/injected_context",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 9,
+        "thinking": 4,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "todo__todo_write",
+        "todo__todo_write"
+      ],
+      "usage_messages": 4,
+      "compaction_boundaries": [
+        6
+      ],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_5",
+      "path": "sessions/sessions.db",
+      "messages": 9,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "todo__todo_write",
+        "corpus__add",
+        "todo__todo_write"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_6",
+      "path": "sessions/sessions.db",
+      "messages": 9,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "todo__todo_write",
+        "delegate",
+        "todo__todo_write"
+      ],
+      "usage_messages": 4,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_7",
+      "path": "sessions/sessions.db",
+      "messages": 3,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "20261011_6"
+      },
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_8",
+      "path": "sessions/sessions.db",
+      "messages": 5,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "todo__todo_write"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "20261011_9",
+      "path": "sessions/sessions.db",
+      "messages": 5,
+      "sequence": [
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "load_skill"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "openai/glm-5.3-flash",
+      "skipped_lines": 0
+    }
+  ]
+}

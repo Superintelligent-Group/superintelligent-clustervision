@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "goose"
+version = "1.51.0"
+generated = "2026-10-11"
+model = "glm-5.3-flash via Z.ai coding endpoint, through chat_shim.py (switch scenario: glm-4.7-flash)"
+schema_version = 16
+model_calls = 50
+scenarios = ["chat","resume","reasoning","tools","tool_error","image","compaction","mcp","subagent","todo","skill","hook_deny","max_turns","model_switch","recipe","schedule","chat_recall","approval","fork","import"]
+skipped = ["interrupt (Ctrl-C needs a terminal)","steer (interactive queue only)","bang_shell (interactive only; in goose run the model gets the text)","web_fetch (no default web tool)","rename (no goose session rename in 1.51.0)","parallel_tools (asked for; the model made its calls one per turn)"]
+generator_commit = "1266b7a"
