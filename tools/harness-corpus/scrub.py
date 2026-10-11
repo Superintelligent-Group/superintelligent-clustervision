@@ -20,7 +20,12 @@ TOKEN_RES = [re.compile(p) for p in (
     rb"xox[abpr]-[A-Za-z0-9-]{10,}", rb"AKIA[0-9A-Z]{16}", rb"AIza[0-9A-Za-z_-]{35}", rb"[Bb]earer [A-Za-z0-9._~+/-]{20,}",
     rb"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.", rb"[0-9a-f]{32}\.[A-Za-z0-9]{16}",
 )]
-EMAIL_RE = re.compile(rb"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+")
+# A JSON escape is not part of the address (`\n@dot.png` is a newline and an @-mention; in
+# `\nme@x.com` the address starts at `m`), and a file name (`me@dot.png`) is not one.
+EMAIL_RE = re.compile(
+    rb"(?:(?<=\\[nrt])|(?<![\\A-Za-z0-9._%+-]))[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9-]|\.[A-Za-z0-9])"
+    rb"(?<!\.png)(?<!\.jpg)(?<!\.jpeg)(?<!\.gif)(?<!\.txt)(?<!\.md)(?<!\.json)(?<!\.rs)(?<!\.py)"
+)
 
 
 def replacements(work, home):
