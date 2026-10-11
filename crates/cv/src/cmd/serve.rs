@@ -565,7 +565,7 @@ fn search(query: &str) -> Reply {
 /// it holds no sub-agent transcripts (so nothing an Agent/Workflow lane discussed is searchable).
 fn index_miss_note() -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(days) = index_days_behind() {
+    if let Some(days) = cv_search::fts::days_behind(&cv_search::default_tantivy_dir()) {
         parts.push(format!(
             "the index is ~{days} day(s) behind the newest session — run `cv index`"
         ));
@@ -578,19 +578,6 @@ fn index_miss_note() -> Option<String> {
         );
     }
     (!parts.is_empty()).then(|| parts.join("; "))
-}
-
-/// Whole days the FTS index lags the newest session file on disk, when ≥ 1: one stored-field scan
-/// of the index plus a metadata-only discovery sweep (a stat per session, no parsing).
-fn index_days_behind() -> Option<u64> {
-    const DAY_NS: i64 = 86_400 * 1_000_000_000;
-    let indexed = cv_search::fts::newest_indexed_mtime(&cv_search::default_tantivy_dir())?;
-    let newest_on_disk = cv_core::discover_all()
-        .iter()
-        .map(|r| cv_core::offsets::file_sig(&r.path).0)
-        .max()?;
-    let days = newest_on_disk.saturating_sub(indexed) / DAY_NS;
-    (days >= 1).then_some(days as u64)
 }
 
 /// A header-safe rendering of a note: header values are a byte channel with no escaping, so keep

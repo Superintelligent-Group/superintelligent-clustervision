@@ -8,6 +8,7 @@
 - `cv show --last N` and `cv export --last N` read the session once instead of counting it first: about half the time.
 - Kimi discovery reuses the scan cache: an unchanged transcript costs a stat, not a full read.
 - A follower of a Codex session holds only the new messages, not the whole parsed rollout (595 MB to 124 MB on a 708 MB rollout).
+- A `cv search` miss checks index staleness against the catalog instead of rescanning every harness: 0.53 s to 0.21 s.
 
 ## 0.15.1 — 2026-10-11
 

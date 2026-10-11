@@ -869,6 +869,21 @@ pub fn newest_indexed_mtime(dir: &Path) -> Option<i64> {
     sigs.values().map(|&(mt, _)| mt).max()
 }
 
+/// Whole days the index at `dir` lags the newest session file on disk, when ≥ 1 — the note a
+/// search miss prints. The sessions come from the catalog ([`cv_core::sessions`], which probes
+/// its freshness and rescans only what changed), then one stat each; a full `discover_all` here
+/// made every miss pay a fleet scan.
+pub fn days_behind(dir: &Path) -> Option<u64> {
+    const DAY_NS: i64 = 86_400 * 1_000_000_000;
+    let indexed = newest_indexed_mtime(dir)?;
+    let newest_on_disk = cv_core::sessions()
+        .iter()
+        .map(|r| cv_core::offsets::file_sig(&r.path).0)
+        .max()?;
+    let days = newest_on_disk.saturating_sub(indexed) / DAY_NS;
+    (days >= 1).then_some(days as u64)
+}
+
 /// Whether the index holds any folded-in sub-agent transcripts (the `cv index --subagents` forest,
 /// detected by a stored `parent_id` on a doc). The empty-result path uses this to nudge toward
 /// `--subagents` **only** when the forest is genuinely absent — not when a query simply didn't

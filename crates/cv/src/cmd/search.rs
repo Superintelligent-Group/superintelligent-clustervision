@@ -93,7 +93,7 @@ fn render_search_hits(
         println!("no matches for {query:?} {hint}");
         // The likely reason a recent conversation isn't findable: the index has fallen behind.
         if source == "index" {
-            if let Some(days) = index_days_behind() {
+            if let Some(days) = cv_search::fts::days_behind(&cv_search::default_tantivy_dir()) {
                 println!("(note: the index is ~{days} day(s) behind the newest session — run `cv index`)");
             }
             // The other common miss: the wanted text lives in a *sub-agent* transcript, which the
@@ -161,20 +161,6 @@ fn hit_json(h: &cv_search::Hit) -> serde_json::Value {
         workflow: h.workflow.as_deref(),
     }
     .to_json()
-}
-
-/// Whole days the FTS index lags the newest session file on disk, when ≥ 1. Cheap enough for the
-/// no-matches path it decorates: one stored-field scan of the index (the newest indexed mtime
-/// stamp) plus a metadata-only discovery sweep (a stat per session, no parsing).
-fn index_days_behind() -> Option<u64> {
-    const DAY_NS: i64 = 86_400 * 1_000_000_000;
-    let indexed = cv_search::fts::newest_indexed_mtime(&cv_search::default_tantivy_dir())?;
-    let newest_on_disk = cv_core::discover_all()
-        .iter()
-        .map(|r| cv_core::offsets::file_sig(&r.path).0)
-        .max()?;
-    let days = newest_on_disk.saturating_sub(indexed) / DAY_NS;
-    (days >= 1).then_some(days as u64)
 }
 
 fn cmd_search_live(query: &str, want: Option<Harness>, limit: usize, json: bool) -> Result<()> {
