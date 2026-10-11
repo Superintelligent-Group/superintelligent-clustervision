@@ -6,6 +6,10 @@
 - **Removed `cv task split`** (it mined `DECIDE:` notes); `cv task decide … --blocks <id>` poses the question. Exit 2 with that pointer.
 - `cv task decide` writes `opened` + `posed` only — no `decision` tag; the bare-tag refusal moved into the reducer, so MCP `task_open` gets it too.
 - `task open --tags/--blocked-by/--blocks` and the page's `discuss`/`reopen` are each one atomic append; `resolve` reports the reducer's own refusals.
+- **`cv hooks install|remove|show claude`**: five Claude Code hooks (`cv hook compact|start|lane|decisions|edit`) plus the `cv` skill, merged idempotently and removed exactly.
+- `cv lanes` reads the hook ledger (`lanes.jsonl`): a lane whose stop only the `SubagentStop` hook saw reads `stopped`, `status_source: hook_ledger`.
+- `cv doctor` prints whether the hooks are installed and the compaction policy in force (settings and environment).
+- cv-mcp runs generated tools with stdin closed, so a command that reads stdin never consumes the JSON-RPC stream.
 - Manual: `distill`, `fork`, `adopt` documented and a "Reshaping a lane" page; MCP tools and `cvd` routes match the binaries; harness counts corrected.
 - `integrations/` is gone (its recipes called MCP tools removed in 0.11); the manual's [Hooking a harness in](manual/src/integrations.md) replaces it.
 - `cv show`, `cv export --format md` and `cv share` spell a turn's label one way (`system · injected_context/hook_success`); the md header gains `- started:`, cwd is home-relative.
