@@ -193,68 +193,30 @@ export const HARNESS_LABELS = {
 
 // ---------------------------------------------------------------------------
 // Normalization — one chokepoint. Every session in the pool passes through here,
-// whichever door it came in by: cvd's HTTP API, the desktop's native commands,
-// the wasm ingest, or a dropped .json. It converges three vocabularies onto one:
-//
-//   • **IR v2** (cv 0.11+, snake_case): a BLOCK is tagged `type`; a MESSAGE has its
-//     own `kind` (prompt · reply · tool_result · injected_context · system_prompt ·
-//     notice · compaction_boundary · compaction_summary · model_change · error ·
-//     subagent_spawn · subagent_return · branch · carrier) and an `origin`
-//     (human · model · harness · hook · scheduler · subagent · import); a session
-//     carries `system_prompt` and `lineage`. This is what the components speak.
-//   • **pre-0.11 cv IR**, where a block was tagged `kind` and messages had none.
-//   • **OpenSession** interchange (camelCase: `toolUse`, `toolResult`, `createdAt`,
-//     `dataRef`, `parentId`, …), which still tags blocks with `kind` by spec.
-//
-// So: read `type` first and `kind` second for a BLOCK, and never read a block's
-// `kind` outside this file — `m.kind` and `b.type` mean different things now.
+// whichever door it came in by: `cv serve`'s HTTP API, the desktop's native `api` command, the
+// wasm ingest, or a dropped .json. Every one of them speaks the IR (OpenSession 0.3 *is* the IR):
+// a BLOCK is tagged `type`; a MESSAGE has its own `kind` (prompt · reply · tool_result ·
+// injected_context · system_prompt · notice · compaction_boundary · compaction_summary ·
+// model_change · error · subagent_spawn · subagent_return · branch · carrier) and an `origin`
+// (human · model · harness · hook · scheduler · subagent · import); a session carries
+// `system_prompt` and `lineage`; keys are snake_case. There is no second vocabulary to fold in:
+// an OpenSession 0.2 document (camelCase, blocks tagged `kind`) is refused with the same pointer
+// the CLI gives, never half-read.
 // ---------------------------------------------------------------------------
 
-function pick(obj, ...keys) {
-  for (const k of keys) if (obj?.[k] != null) return obj[k];
-  return undefined;
-}
-
-/** `toolUse` / `InjectedContext` / `TOOL_RESULT` → `tool_use` / `injected_context` / `tool_result`. */
-function snakeTag(v) {
-  if (v == null) return undefined;
-  return String(v)
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/[\s-]+/g, "_")
-    .toLowerCase();
-}
-
-/** Normalize one usage object (camel or snake) to the IR v2 snake_case keys. */
+/** A usage object's numeric fields (`input_tokens`, `output_tokens`, `cache_read_tokens`,
+ *  `cache_creation_tokens`, `reasoning_tokens`, `cost_usd`, …), or undefined when it has none. */
 function normUsage(u) {
   if (!u || typeof u !== "object") return undefined;
   const out = {};
-  const map = {
-    input_tokens: ["input_tokens", "inputTokens"],
-    output_tokens: ["output_tokens", "outputTokens"],
-    cache_read_tokens: ["cache_read_tokens", "cacheReadTokens"],
-    cache_creation_tokens: ["cache_creation_tokens", "cacheCreationTokens"],
-    reasoning_tokens: ["reasoning_tokens", "reasoningTokens"],
-    cost_usd: ["cost_usd", "costUsd"],
-  };
-  const consumed = new Set();
-  for (const [dest, srcs] of Object.entries(map)) {
-    const v = pick(u, ...srcs);
-    if (v != null) out[dest] = v;
-    for (const s of srcs) consumed.add(s);
-  }
-  // keep any other numeric fields verbatim (don't re-add the camelCase aliases
-  // we already folded into snake_case above)
-  for (const [k, v] of Object.entries(u)) {
-    if (!consumed.has(k) && !(k in out) && typeof v === "number") out[k] = v;
-  }
+  for (const [k, v] of Object.entries(u)) if (typeof v === "number") out[k] = v;
   return Object.keys(out).length ? out : undefined;
 }
 
 /** Normalize one content block onto IR v2's `type` tag. */
 function normBlock(b) {
   if (!b || typeof b !== "object") return { type: "text", text: String(b ?? "") };
-  // IR v2 tags a block with `type`; OpenSession and pre-0.11 cv tagged it `kind`.
-  const type = snakeTag(b.type ?? b.kind);
+  const type = b.type;
 
   switch (type) {
     case "text":
@@ -270,7 +232,7 @@ function normBlock(b) {
     case "tool_use":
       return {
         type: "tool_use",
-        id: pick(b, "id", "toolUseId", "tool_use_id"),
+        id: b.id,
         name: b.name,
         input: b.input,
         namespace: b.namespace,
@@ -278,25 +240,25 @@ function normBlock(b) {
     case "tool_result":
       return {
         type: "tool_result",
-        tool_use_id: pick(b, "tool_use_id", "toolUseId"),
+        tool_use_id: b.tool_use_id,
         content: b.content,
-        is_error: pick(b, "is_error", "isError") ?? false,
-        tool_name: pick(b, "tool_name", "toolName"),
+        is_error: b.is_error ?? false,
+        tool_name: b.tool_name,
         status: b.status,
         details: b.details,
       };
     case "file":
       return {
         type: "file",
-        mime: pick(b, "mime", "mediaType", "media_type"),
+        mime: b.mime,
         path: b.path,
         source: b.source,
       };
     case "image":
       return {
         type: "image",
-        media_type: pick(b, "media_type", "mediaType"),
-        data_ref: pick(b, "data_ref", "dataRef"),
+        media_type: b.media_type,
+        data_ref: b.data_ref,
       };
     default:
       // A block type this build has never heard of. Keep every field so the renderer can show
@@ -305,8 +267,8 @@ function normBlock(b) {
   }
 }
 
-/** Only for a source that predates `Message::kind` (pre-0.11 cv, OpenSession). The contract
- *  spells these defaults out: User→Prompt, Assistant→Reply, Tool→ToolResult, System→Notice. */
+/** Only for a message the UI builds itself without a kind. The contract spells these defaults
+ *  out: User→Prompt, Assistant→Reply, Tool→ToolResult, System→Notice. */
 const KIND_BY_ROLE = { user: "prompt", assistant: "reply", tool: "tool_result", system: "notice" };
 const ORIGIN_BY_KIND = { prompt: "human", reply: "model", tool_result: "harness" };
 
@@ -317,12 +279,11 @@ function normMessage(m) {
     : m.content != null ? [normBlock({ type: "text", text: String(m.content) })]
     : [];
   const role = (m.role || "user").toLowerCase();
-  // `messageKind` is what `toOpenSession` writes, so an exported doc round-trips.
-  const kind = snakeTag(pick(m, "kind", "messageKind", "message_kind")) || KIND_BY_ROLE[role] || "notice";
-  const origin = snakeTag(m.origin) || ORIGIN_BY_KIND[kind] || "harness";
+  const kind = m.kind || KIND_BY_ROLE[role] || "notice";
+  const origin = m.origin || ORIGIN_BY_KIND[kind] || "harness";
   return {
     id: m.id,
-    parent_id: pick(m, "parent_id", "parentId"),
+    parent_id: m.parent_id,
     role,
     kind,
     origin,
@@ -341,17 +302,8 @@ function normMessage(m) {
 function normLineage(l) {
   if (!l || typeof l !== "object") return undefined;
   const out = {};
-  const map = {
-    forked_from: ["forked_from", "forkedFrom"],
-    parent: ["parent", "parent_id", "parentId"],
-    spawned_by_tool_use: ["spawned_by_tool_use", "spawnedByToolUse"],
-    continued_in: ["continued_in", "continuedIn"],
-    continues: ["continues"],
-    agent_path: ["agent_path", "agentPath"],
-  };
-  for (const [dest, srcs] of Object.entries(map)) {
-    const v = pick(l, ...srcs);
-    if (v != null && v !== "") out[dest] = v;
+  for (const k of ["forked_from", "parent", "spawned_by_tool_use", "continued_in", "continues", "agent_path"]) {
+    if (l[k] != null && l[k] !== "") out[k] = l[k];
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -374,30 +326,42 @@ export function harnessExtra(m, harness) {
  */
 export function normalizeSession(s) {
   if (!s || typeof s !== "object") return null;
-  const harness = (s.harness || "openSession").toLowerCase();
+  refuseOldOpenSession(s);
   return {
     id: s.id ?? randomId(),
-    harness,
+    harness: (s.harness || "opensession").toLowerCase(),
     cwd: s.cwd,
     path: s.path,
     title: s.title,
-    display_title: pick(s, "display_title", "displayTitle"),
-    created_at: pick(s, "created_at", "createdAt"),
-    updated_at: pick(s, "updated_at", "updatedAt"),
+    display_title: s.display_title,
+    created_at: s.created_at,
+    updated_at: s.updated_at,
     model: s.model,
     git: s.git,
-    // IR v2: the system prompt the harness sent, when the store keeps it. NOT a message.
-    system_prompt: pick(s, "system_prompt", "systemPrompt"),
-    // IR v2: where this session came from and where it went.
+    // The system prompt the harness sent, when the store keeps it. NOT a message.
+    system_prompt: s.system_prompt,
+    // Where this session came from and where it went.
     lineage: normLineage(s.lineage),
     extra: s.extra,
-    source_path: pick(s, "source_path", "sourcePath"),
-    size_bytes: pick(s, "size_bytes", "sizeBytes"),
-    // Metadata-only "stub" sessions (e.g. from cvd's /api/sessions) carry a count but no messages
-    // yet; keep it so the list can show the real length before the transcript is hydrated.
-    message_count: pick(s, "message_count", "messageCount"),
+    source_path: s.source_path,
+    size_bytes: s.size_bytes,
+    // Metadata-only "stub" sessions (from `/api/sessions`) carry a count but no messages yet;
+    // keep it so the list can show the real length before the transcript is hydrated.
+    message_count: s.message_count,
     messages: Array.isArray(s.messages) ? s.messages.map(normMessage) : [],
   };
+}
+
+/** An OpenSession document other than 0.3 (a 0.2 `openSession` marker, camelCase keys) is an
+ *  error naming the cure, exactly as `cv` refuses it — never a session read half-right. */
+function refuseOldOpenSession(s) {
+  const found = s.open_session ?? s.openSession;
+  if (found != null && found !== OPEN_SESSION_VERSION) {
+    throw new Error(
+      `OpenSession ${found} document; this reads ${OPEN_SESSION_VERSION} only — re-export the session ` +
+      "with `cv export --format json`, or apply the renames in docs/OPENSESSION.md \"0.2 → 0.3\"",
+    );
+  }
 }
 
 /**
@@ -409,7 +373,7 @@ export function normalizeSessions(data) {
   if (data && typeof data === "object") {
     // A single OpenSession doc, or a wrapper { sessions: [...] }.
     if (Array.isArray(data.sessions)) return data.sessions.map(normalizeSession).filter(Boolean);
-    if (data.open_session || data.openSession || data.messages || data.harness) {
+    if (data.open_session || data.openSession || data.messages || data.harness) { // refused if not 0.3
       const one = normalizeSession(data);
       return one ? [one] : [];
     }
@@ -464,7 +428,7 @@ export function toOpenSession(session) {
   });
 }
 
-/** The OpenSession version this writes. Readers still accept 0.2 (see `normalizeSession`). */
+/** The OpenSession version this writes and the only one it reads (see `refuseOldOpenSession`). */
 export const OPEN_SESSION_VERSION = "0.3";
 
 /** Drop undefined/null/empty-object fields for tidy JSON. */

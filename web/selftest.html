@@ -143,12 +143,26 @@ check("IR v2 `type` survives normalization", () => {
   eq(codex.messages[6].content[1].type, "tool_use", "tool_use block");
 });
 
-check("OpenSession camelCase block kinds fold onto `type`", () => {
+check("an OpenSession 0.3 document is read as the IR it is", () => {
   const blocks = open.messages.flatMap((m) => m.content).map((b) => b.type);
-  has(blocks.join(","), "tool_use", "toolUse → tool_use");
-  has(blocks.join(","), "tool_result", "toolResult → tool_result");
-  eq(open.messages[2].content[0].tool_use_id, "c1", "toolUseId → tool_use_id");
-  eq(open.messages[2].content[0].is_error, false, "isError → is_error");
+  has(blocks.join(","), "tool_use", "tool_use block");
+  has(blocks.join(","), "tool_result", "tool_result block");
+  eq(open.messages[2].content[0].tool_use_id, "c1", "tool_use_id");
+  eq(open.messages[2].content[0].is_error, false, "is_error");
+  eq(open.harness, "opensession", "harness");
+});
+
+check("an OpenSession 0.2 document is refused with the CLI's pointer, never half-read", () => {
+  for (const doc of [
+    { openSession: "0.2", id: "x", messages: [{ role: "user", content: [{ kind: "text", text: "hi" }] }] },
+    { open_session: "0.2", id: "y", messages: [] },
+  ]) {
+    let err = null;
+    try { normalizeSessions(doc); } catch (e) { err = e; }
+    truthy(err, `a ${JSON.stringify(doc).slice(0, 40)} document must throw`);
+    has(String(err.message), "reads 0.3 only", "names the version it reads");
+    has(String(err.message), "cv export --format json", "names the cure");
+  }
 });
 
 check("message `kind` and `origin` are carried, not invented", () => {
@@ -160,11 +174,10 @@ check("message `kind` and `origin` are carried, not invented", () => {
   eq(claude.messages[9].origin, "scheduler", "scheduler-origin prompt");
 });
 
-check("a source without kinds gets the contract's role defaults", () => {
-  eq(open.messages[0].kind, "prompt", "user →");
-  eq(open.messages[1].kind, "reply", "assistant →");
-  eq(open.messages[2].kind, "tool_result", "tool →");
-  eq(open.messages[0].origin, "human", "prompt origin");
+check("a message the UI builds without a kind gets the contract's role default", () => {
+  const built = normalizeSession({ id: "ui", messages: [{ role: "assistant", content: [] }] });
+  eq(built.messages[0].kind, "reply", "assistant →");
+  eq(built.messages[0].origin, "model", "reply origin");
 });
 
 check("an unknown message kind is preserved verbatim, not coerced", () => {
@@ -180,14 +193,14 @@ check("session keys are snake_case; `system_prompt` and `lineage` arrive", () =>
   eq(claude.lineage.continued_in, "c0ffee-claude-002", "lineage.continued_in");
   eq(codex.lineage.forked_from, "feed-codex-6", "lineage.forked_from");
   eq(codex.lineage.agent_path, "reviewer", "lineage.agent_path");
-  eq(open.created_at, "2026-05-29T10:00:00Z", "createdAt → created_at");
+  eq(open.created_at, "2026-05-29T10:00:00Z", "created_at");
 });
 
-check("usage carries reasoning tokens and cost, in both spellings", () => {
+check("usage carries reasoning tokens and cost", () => {
   eq(codex.messages[3].usage.reasoning_tokens, 1408, "reasoning_tokens");
   eq(codex.messages[3].usage.cost_usd, 0.0214, "cost_usd");
-  eq(open.messages[1].usage.reasoning_tokens, 64, "reasoningTokens → reasoning_tokens");
-  eq(open.messages[1].usage.cost_usd, 0.0071, "costUsd → cost_usd");
+  eq(open.messages[1].usage.reasoning_tokens, 64, "reasoning_tokens (0.3 doc)");
+  eq(open.messages[1].usage.cost_usd, 0.0071, "cost_usd (0.3 doc)");
   const tot = sumTokens(codex);
   eq(Math.round(tot.cost * 1e4), 545, "summed cost (¢×100)");
   eq(tot.reasoning, 2308, "summed reasoning tokens");

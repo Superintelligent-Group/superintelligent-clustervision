@@ -301,32 +301,34 @@ export const SAMPLE_SESSIONS = [
     ]
   },
   {
-    // An OpenSession-format (camelCase, blocks tagged `kind`) session, to exercise the JSON loader
-    // / normalizer. Dropping a .json shaped like this loads directly — no wasm. None of these
-    // messages declare a `kind`, so the normalizer's role defaults have to carry them.
-    openSession: "0.2",
-    harness: "openSession",
+    // An OpenSession 0.3 document — which IS the IR, plus the version marker — to exercise the
+    // JSON loader. Dropping a .json shaped like this (what `cv export --format json` writes) loads
+    // directly, no wasm.
+    open_session: "0.3",
+    harness: "opensession",
     id: "open-demo-42",
     cwd: "/Users/ember/lab/opensession",
     title: "OpenSession round-trip demo",
     model: "gpt-5-codex",
-    createdAt: "2026-05-29T10:00:00Z",
-    updatedAt: "2026-05-29T10:08:00Z",
+    created_at: "2026-05-29T10:00:00Z",
+    updated_at: "2026-05-29T10:08:00Z",
     git: { branch: "main", commit: "deadbeef", remote: "git@github.com:ember/open.git" },
     messages: [
-      { id: "o1", role: "user", timestamp: "2026-05-29T10:00:00Z",
-        content: [{ kind: "text", text: "Prove the camelCase OpenSession shape loads and renders." }] },
-      { id: "o2", parentId: "o1", role: "assistant", timestamp: "2026-05-29T10:01:00Z", model: "gpt-5-codex",
-        usage: { inputTokens: 900, outputTokens: 120, cacheReadTokens: 4000, reasoningTokens: 64, costUsd: 0.0071 },
+      { id: "o1", role: "user", kind: "prompt", origin: "human", timestamp: "2026-05-29T10:00:00Z",
+        content: [{ type: "text", text: "Prove an OpenSession 0.3 document loads and renders." }] },
+      { id: "o2", parent_id: "o1", role: "assistant", kind: "reply", origin: "model",
+        timestamp: "2026-05-29T10:01:00Z", model: "gpt-5-codex",
+        usage: { input_tokens: 900, output_tokens: 120, cache_read_tokens: 4000, reasoning_tokens: 64, cost_usd: 0.0071 },
         content: [
-          { kind: "thinking", redacted: true },
-          { kind: "text", text: "Here's a tool call using the OpenSession `toolUse` kind:" },
-          { kind: "toolUse", id: "c1", name: "Bash", input: { command: "cargo test --workspace" } }
+          { type: "thinking", text: "", redacted: true },
+          { type: "text", text: "Here's a tool call, tagged `type` like every block:" },
+          { type: "tool_use", id: "c1", name: "Bash", input: { command: "cargo test --workspace" } }
         ] },
-      { id: "o3", parentId: "o2", role: "tool", timestamp: "2026-05-29T10:02:00Z",
-        content: [{ kind: "toolResult", toolUseId: "c1", toolName: "Bash", status: "ok", isError: false,
+      { id: "o3", parent_id: "o2", role: "tool", kind: "tool_result", origin: "harness",
+        timestamp: "2026-05-29T10:02:00Z",
+        content: [{ type: "tool_result", tool_use_id: "c1", tool_name: "Bash", status: "ok", is_error: false,
           content: "running 128 tests\n…\ntest result: ok. 128 passed; 0 failed",
-          details: { exitCode: 0, durationMs: 8421 } }] }
+          details: { exit_code: 0, duration_ms: 8421 } }] }
     ]
   }
 ];

@@ -109,8 +109,8 @@ class CvLoom extends HTMLElement {
 
   _composed() {
     const b = this._branch();
+    // An IR session; `toOpenSession` adds the 0.3 marker when it is downloaded.
     return {
-      openSession: "0.2",
       harness: "opensession",
       id: b.composedId,
       title: this._title + (this._branches.length > 1 ? ` — ${b.name}` : ""),
@@ -412,6 +412,8 @@ class CvLoom extends HTMLElement {
     const placeholder = {
       id: randomId(),
       role: "assistant",
+      kind: "reply",
+      origin: "model",
       model: getModel(),
       content: [{ type: "text", text: "" }],
       timestamp: new Date().toISOString(),
