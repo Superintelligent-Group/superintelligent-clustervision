@@ -1,7 +1,8 @@
 //! Wire-format golden test: `tests/fixtures/golden-events-v1.jsonl` is a committed task event
-//! log containing the v1 header record and at least one specimen of **every** `TaskEventKind`
-//! variant. This test replays it through the reducer and asserts the reduced model matches the
-//! committed snapshot `tests/fixtures/golden-model-v1.json`, byte for byte.
+//! log containing the v1 header record, at least one specimen of **every** live `TaskEventKind`
+//! variant, and one of every kind retired in 0.15.0 (the land facet) — so it is also the replay
+//! fixture for an old log. This test replays it through the reducer and asserts the reduced model
+//! matches the committed snapshot `tests/fixtures/golden-model-v1.json`, byte for byte.
 //!
 //! If this test fails: the wire format or the reducer semantics changed. If that was intentional,
 //! regenerate the fixtures (`GOLDEN_REGEN=1 cargo test -p clustervision-core --test wire_golden`),
@@ -12,7 +13,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use cv_core::task::{TaskEvent, TaskReducer};
+use cv_core::task::{TaskEvent, TaskReducer, RETIRED_TAGS};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -20,10 +21,11 @@ fn fixtures_dir() -> PathBuf {
 
 const HEADER_LINE: &str = r#"{"format":"cv-task-log","v":1}"#;
 
-/// Every wire tag the fixture must contain a specimen of. When you add a `TaskEventKind`
+/// Every live wire tag the fixture must contain a specimen of. When you add a `TaskEventKind`
 /// variant, add its tag here and a specimen event to the fixture — this list is the tripwire
-/// that keeps the golden log exhaustive.
-const ALL_EVENT_TAGS: &[&str] = &[
+/// that keeps the golden log exhaustive. The retired tags ([`RETIRED_TAGS`]) must all appear too:
+/// the fixture is the proof that a pre-0.15.0 log still replays.
+const LIVE_EVENT_TAGS: &[&str] = &[
     "opened",
     "claimed",
     "released",
@@ -36,15 +38,6 @@ const ALL_EVENT_TAGS: &[&str] = &[
     "posed",
     "resolved",
     "status_set",
-    "revision_proposed",
-    "review_rerouted",
-    "review_passed",
-    "review_refuted",
-    "source_unavailable",
-    "merge_failed",
-    "merged_local",
-    "reconcile_failed",
-    "landed",
 ];
 
 #[test]
@@ -81,18 +74,29 @@ fn golden_log_replays_identically_forever() {
     // Exhaustiveness: the fixture must exercise the whole event grammar, or the byte-stability
     // guarantee silently shrinks to the variants it happens to contain.
     let seen: std::collections::BTreeSet<&str> = events.iter().map(|e| e.kind.tag()).collect();
-    for tag in ALL_EVENT_TAGS {
+    for tag in LIVE_EVENT_TAGS {
         assert!(
             seen.contains(tag),
             "golden log has no {tag:?} specimen — every TaskEventKind variant must appear"
         );
     }
-    for tag in &seen {
+    for tag in RETIRED_TAGS {
         assert!(
-            ALL_EVENT_TAGS.contains(tag),
-            "golden log contains {tag:?}, which ALL_EVENT_TAGS does not list — update the roster"
+            seen.contains(tag),
+            "golden log has no retired {tag:?} specimen — it is the replay fixture for old logs"
         );
     }
+    for tag in &seen {
+        assert!(
+            LIVE_EVENT_TAGS.contains(tag) || RETIRED_TAGS.contains(tag),
+            "golden log contains {tag:?}, which neither roster lists — update LIVE_EVENT_TAGS"
+        );
+    }
+    let retired = events.iter().filter(|e| e.kind.is_retired()).count();
+    assert_eq!(
+        retired, 10,
+        "the fixture holds ten land-facet lines; each must read as retired"
+    );
 
     let model = TaskReducer::reduce(&events).unwrap_or_else(|e| {
         panic!(
@@ -134,12 +138,18 @@ fn golden_log_replays_identically_forever() {
 /// files is that the *repo history* then pins the bytes.
 fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
     use chrono::{DateTime, Utc};
-    use cv_core::task::{
-        DoneCheck, DoneCheckKind, IndependenceCheck, MergeFailure, ReviewReceipts, Revision, TaskEventKind,
-    };
+    use cv_core::task::TaskEventKind;
+    use serde_json::json;
 
     fn hex(c: char) -> String {
         std::iter::repeat_n(c, 40).collect()
+    }
+    /// A retired land-facet specimen, built from the bytes it had on the wire (the Rust types
+    /// that wrote them are gone; the bytes are frozen forever).
+    fn retired(v: serde_json::Value) -> TaskEventKind {
+        let kind: TaskEventKind = serde_json::from_value(v).expect("retired specimen parses");
+        assert!(kind.is_retired(), "{kind:?}");
+        kind
     }
     let ts = |minute: u32| -> DateTime<Utc> { format!("2026-07-16T12:{minute:02}:00Z").parse().unwrap() };
     let id = |n: u64| format!("00000000-0000-7000-8000-{n:012}");
@@ -204,96 +214,63 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
         &a,
         "agent:author",
         3,
-        TaskEventKind::RevisionProposed {
-            revision: Revision {
-                n: 1,
-                branch: "issue/42-gate".into(),
-                worktree: Some("/wt/alpha".into()),
-                upstream: "origin/main".into(),
-                base: hex('a'),
-                review_sha: hex('b'),
-                patch_id: hex('c'),
-                reviewer: Some("agent:reviewer".into()),
-                session_ref: Some("sess-alpha-001".into()),
-            },
-        },
+        retired(json!({"event": "revision_proposed", "revision": {
+            "n": 1, "branch": "issue/42-gate", "worktree": "/wt/alpha", "upstream": "origin/main",
+            "base": hex('a'), "review_sha": hex('b'), "patch_id": hex('c'),
+            "reviewer": "agent:reviewer", "session_ref": "sess-alpha-001"}})),
     );
     push(
         &mut events,
         &a,
         "agent:reviewer",
         4,
-        TaskEventKind::ReviewRerouted {
-            from: "agent:reviewer".into(),
-            to: "agent:other".into(),
-        },
+        retired(json!({"event": "review_rerouted", "from": "agent:reviewer", "to": "agent:other"})),
     );
     push(
         &mut events,
         &a,
         "agent:other",
         5,
-        TaskEventKind::ReviewPassed {
-            reviewer: "agent:other".into(),
-            session_ref: Some("sess-review-002".into()),
-            independence: Some(IndependenceCheck {
-                author_family: Some("anthropic".into()),
-                reviewer_family: Some("openai".into()),
-                independent: Some(true),
-            }),
-            receipts: Some(ReviewReceipts {
-                saw_change: Some(true),
-                ran_checks: Some(true),
-                turns: Some(14),
-            }),
-        },
+        retired(
+            json!({"event": "review_passed", "reviewer": "agent:other", "session_ref": "sess-review-002",
+            "independence": {"author_family": "anthropic", "reviewer_family": "openai", "independent": true},
+            "receipts": {"saw_change": true, "ran_checks": true, "turns": 14}}),
+        ),
     );
     push(
         &mut events,
         &a,
         "cv-verify",
         6,
-        TaskEventKind::SourceUnavailable {
-            detail: "worktree /wt/alpha vanished".into(),
-        },
+        retired(json!({"event": "source_unavailable", "detail": "worktree /wt/alpha vanished"})),
     );
     push(
         &mut events,
         &a,
         "cv-verify",
         7,
-        TaskEventKind::MergeFailed {
-            reason: MergeFailure::NonFastForward {},
-        },
+        retired(json!({"event": "merge_failed", "reason": {"kind": "non_fast_forward"}})),
     );
     push(
         &mut events,
         &a,
         "cv-verify",
         8,
-        TaskEventKind::MergedLocal {
-            from_sha: hex('d'),
-            to_sha: hex('b'),
-        },
+        retired(json!({"event": "merged_local", "from_sha": hex('d'), "to_sha": hex('b')})),
     );
     push(
         &mut events,
         &a,
         "cv-verify",
         9,
-        TaskEventKind::ReconcileFailed {
-            detail: "post-merge fetch of origin failed".into(),
-        },
+        retired(json!({"event": "reconcile_failed", "detail": "post-merge fetch of origin failed"})),
     );
     push(
         &mut events,
         &a,
         "cv-verify",
         10,
-        TaskEventKind::Landed {
-            upstream_head: hex('e'),
-            observed_patch_id: hex('c'),
-        },
+        retired(json!({"event": "landed", "upstream_head": hex('e'), "observed_patch_id": hex('c')})),
     );
     push(
         &mut events,
@@ -302,14 +279,9 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
         11,
         TaskEventKind::Done {
             observed: Some("observed on origin/main by cv-verify".into()),
-            // A checked completion: cv ran the predicate and recorded the observed pass (pins the
-            // DoneCheck wire shape into the golden log).
-            check: Some(DoneCheck {
-                kind: DoneCheckKind::Cmd {
-                    cmd: "cargo test -p demo".into(),
-                },
-                result: "exit 0".into(),
-            }),
+            // The retired `check` field (0.15.0): kept on the wire as the bytes a pre-0.15.0 cv
+            // wrote, read through, never derived from.
+            check: Some(json!({"check": "cmd", "cmd": "cargo test -p demo", "result": "exit 0"})),
         },
     );
 
@@ -352,35 +324,19 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
         &b,
         "agent:other",
         16,
-        TaskEventKind::RevisionProposed {
-            revision: Revision {
-                n: 1,
-                branch: "issue/7-fix".into(),
-                worktree: None,
-                upstream: "origin/main".into(),
-                base: hex('1'),
-                review_sha: hex('2'),
-                patch_id: hex('3'),
-                reviewer: Some("agent:reviewer".into()),
-                session_ref: None,
-            },
-        },
+        retired(json!({"event": "revision_proposed", "revision": {
+            "n": 1, "branch": "issue/7-fix", "upstream": "origin/main",
+            "base": hex('1'), "review_sha": hex('2'), "patch_id": hex('3'), "reviewer": "agent:reviewer"}})),
     );
     push(
         &mut events,
         &b,
         "agent:reviewer",
         17,
-        TaskEventKind::ReviewRefuted {
-            reviewer: "agent:reviewer".into(),
-            session_ref: Some("sess-review-003".into()),
-            // A no-contact refute: pins that undetermined sub-observations stay off the wire.
-            receipts: Some(ReviewReceipts {
-                saw_change: Some(false),
-                ran_checks: None,
-                turns: Some(2),
-            }),
-        },
+        retired(
+            json!({"event": "review_refuted", "reviewer": "agent:reviewer", "session_ref": "sess-review-003",
+            "receipts": {"saw_change": false, "turns": 2}}),
+        ),
     );
     push(
         &mut events,

@@ -1,24 +1,23 @@
-//! Read-side projections over the [`TaskReadModel`]: filtered lists, per-assignee inboxes, and
-//! the worktree-debt view. Pure functions over the model — no I/O.
+//! Read-side projections over the [`TaskReadModel`]: filtered lists and per-assignee inboxes.
+//! Pure functions over the model — no I/O.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::model::{RevisionState, TaskState};
-use super::reduce::{EffectiveState, TaskProjection, TaskReadModel};
+use super::model::TaskState;
+use super::reduce::{TaskProjection, TaskReadModel};
 
 /// Filter for [`list`]. Empty filter = all tasks.
 #[derive(Clone, Debug, Default)]
 pub struct TaskFilter {
-    /// Match against the *effective* state string (`open`, `claimed`, `ready`, `landed`, ...).
+    /// Match against the state string (`open`, `claimed`, `resolved`, `done`, ...).
     pub state: Option<String>,
     pub assignee: Option<String>,
     pub repo: Option<PathBuf>,
-    /// When false (default), terminal tasks (done/abandoned/superseded, landed included) are
-    /// hidden unless `state` explicitly asks for them.
+    /// When false (default), terminal tasks (done/abandoned/superseded/resolved) are hidden
+    /// unless `state` explicitly asks for them.
     pub include_terminal: bool,
     /// Only tasks carrying this tag (exact, case-sensitive — tags are stored as given).
     pub tag: Option<String>,
@@ -32,21 +31,9 @@ pub struct TaskFilter {
     pub decisions: Option<bool>,
 }
 
-/// The effective-state vocabulary [`TaskFilter::state`] accepts: every base [`TaskState`] plus
-/// every revision-layer [`super::model::RevisionState`] string, as [`list`] matches them.
-pub const STATE_VOCABULARY: [&str; 11] = [
-    "open",
-    "claimed",
-    "done",
-    "abandoned",
-    "superseded",
-    "resolved",
-    "awaiting_review",
-    "ready",
-    "merged_local",
-    "landed",
-    "refuted",
-];
+/// The state vocabulary [`TaskFilter::state`] accepts: every [`TaskState`] string, as [`list`]
+/// matches them.
+pub const STATE_VOCABULARY: [&str; 6] = ["open", "claimed", "done", "abandoned", "superseded", "resolved"];
 
 /// List tasks matching `filter`, oldest first (task ids are time-sortable uuid v7).
 ///
@@ -67,7 +54,7 @@ pub fn list<'m>(model: &'m TaskReadModel, filter: &TaskFilter) -> Result<Vec<&'m
         .values()
         .filter(|t| {
             if let Some(state) = &filter.state {
-                if t.effective_state().as_str() != state {
+                if t.state.as_str() != state {
                     return false;
                 }
             } else if !filter.include_terminal && t.state.is_terminal() {
@@ -107,20 +94,14 @@ pub fn in_scope(t: &TaskProjection, since: Option<DateTime<Utc>>, endpoint: Opti
     }
 }
 
-/// Is `endpoint` a party to this task: its opener, assignee, a note's author, a revision's
-/// author or reviewer, or the decision's poser/resolver? `web:<name>` is `<name>` acting through
-/// `cv task serve`, so it matches `<name>` too.
+/// Is `endpoint` a party to this task: its opener, assignee, a note's author, or the decision's
+/// poser/resolver? `web:<name>` is `<name>` acting through `cv task serve`, so it matches
+/// `<name>` too.
 pub fn involves(t: &TaskProjection, endpoint: &str) -> bool {
     let is = |by: &str| same_actor(by, endpoint);
     is(&t.opened_by)
         || t.assignee.as_deref().is_some_and(is)
         || t.notes.iter().any(|n| is(&n.by))
-        || t.revisions.iter().any(|r| {
-            is(&r.proposed_by)
-                || r.active_reviewer.as_deref().is_some_and(is)
-                || r.pass.as_ref().is_some_and(|p| is(&p.reviewer))
-                || r.refute.as_ref().is_some_and(|p| is(&p.reviewer))
-        })
         || t.decision
             .as_ref()
             .is_some_and(|d| is(&d.posed_by) || d.resolution.as_ref().is_some_and(|r| is(&r.by)))
@@ -134,9 +115,7 @@ pub fn same_actor(a: &str, b: &str) -> bool {
 }
 
 /// The endpoint an actor string stands for: `web:ember` acts as `ember`. This is the ONE place the
-/// alias is defined — the reducer's holder checks ([`same_actor`]) and the store's token gate
-/// (`identity::authorize`) both resolve through it, so an alias can never be a way around a
-/// binding its canonical endpoint made.
+/// alias is defined; the reducer's holder checks ([`same_actor`]) resolve through it.
 pub fn canonical_actor(a: &str) -> &str {
     a.strip_prefix("web:").unwrap_or(a)
 }
@@ -280,18 +259,14 @@ pub enum InboxReason {
     AssignedOpen,
     /// You claimed it; it is yours to finish.
     ClaimedByYou,
-    /// A revision awaits your review verdict.
-    AwaitingYourReview,
-    /// Your reviewed revision is ready/merged-local but not observed landed — land it.
-    YourUnlandedWork,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct InboxEntry<'m> {
     pub task: &'m TaskProjection,
     pub reason: InboxReason,
-    /// When this entry started waiting — the aging anchor (G8): propose time for a review,
-    /// pass time for unlanded work, the task's last event otherwise.
+    /// When this entry started waiting — the aging anchor (G8): the pose for a decision, the
+    /// provisional resolve for a veto window, the task's last event otherwise.
     pub since: DateTime<Utc>,
 }
 
@@ -319,23 +294,7 @@ pub fn inbox<'m>(model: &'m TaskReadModel, endpoint: &str) -> Vec<InboxEntry<'m>
             }
             continue;
         }
-        let reason_since = if let Some(rev) = task.current_revision() {
-            match rev.state {
-                RevisionState::AwaitingReview if rev.active_reviewer.as_deref() == Some(endpoint) => {
-                    Some((InboxReason::AwaitingYourReview, rev.proposed_at))
-                }
-                RevisionState::Ready | RevisionState::MergedLocal
-                    if task.assignee.as_deref() == Some(endpoint) || task.opened_by == endpoint =>
-                {
-                    let since = rev.pass.as_ref().map(|p| p.ts).unwrap_or(task.last_ts);
-                    Some((InboxReason::YourUnlandedWork, since))
-                }
-                _ => base_inbox_reason(task, endpoint),
-            }
-        } else {
-            base_inbox_reason(task, endpoint)
-        };
-        if let Some((reason, since)) = reason_since {
+        if let Some((reason, since)) = base_inbox_reason(task, endpoint) {
             entries.push(InboxEntry { task, reason, since });
         }
     }
@@ -367,84 +326,6 @@ fn base_inbox_reason(task: &TaskProjection, endpoint: &str) -> Option<(InboxReas
     }
 }
 
-/// One row of the worktree-debt view: reviewed work not observed on its upstream.
-#[derive(Clone, Debug, Serialize)]
-pub struct DebtEntry<'m> {
-    pub task: &'m TaskProjection,
-    pub revision_n: u32,
-    pub branch: String,
-    pub upstream: String,
-    pub state: RevisionState,
-    /// When the revision reached its current unlanded-but-reviewed state (pass time), for aging.
-    pub since: DateTime<Utc>,
-    pub issues: Vec<String>,
-}
-
-/// Unlanded reviewed work, grouped by repo (`None` key = tasks with no repo recorded), oldest
-/// first within each group. This is the "unlanded work must be loudly visible" surface.
-pub fn debt(model: &TaskReadModel) -> BTreeMap<Option<PathBuf>, Vec<DebtEntry<'_>>> {
-    let mut groups: BTreeMap<Option<PathBuf>, Vec<DebtEntry<'_>>> = BTreeMap::new();
-    for task in model.tasks.values() {
-        if task.state.is_terminal() {
-            continue;
-        }
-        let Some(rev) = task.current_revision() else { continue };
-        if !matches!(rev.state, RevisionState::Ready | RevisionState::MergedLocal) {
-            continue;
-        }
-        let since = rev.pass.as_ref().map(|p| p.ts).unwrap_or(task.last_ts);
-        groups.entry(task.repo.clone()).or_default().push(DebtEntry {
-            task,
-            revision_n: rev.revision.n,
-            branch: rev.revision.branch.clone(),
-            upstream: rev.revision.upstream.clone(),
-            state: rev.state,
-            since,
-            issues: rev.issues.iter().map(|i| i.describe()).collect(),
-        });
-    }
-    for entries in groups.values_mut() {
-        entries.sort_by_key(|e| e.since);
-    }
-    groups
-}
-
-/// One aged awaiting-review row: a proposed revision whose reviewer has not spoken. The sibling
-/// of the debt view (G8) — a dead reviewer is honest state that nobody sees unless it ages on a
-/// surface the owner reads.
-#[derive(Clone, Debug, Serialize)]
-pub struct AwaitingReviewEntry<'m> {
-    pub task: &'m TaskProjection,
-    pub revision_n: u32,
-    pub branch: String,
-    /// The only endpoint whose verdict can advance the revision (None until a verdict binds).
-    pub reviewer: Option<String>,
-    /// Propose time — age since the review was requested.
-    pub since: DateTime<Utc>,
-}
-
-/// Revisions currently awaiting review, oldest first. Pure projection: it renders age, it never
-/// escalates.
-pub fn awaiting_review(model: &TaskReadModel) -> Vec<AwaitingReviewEntry<'_>> {
-    let mut rows: Vec<AwaitingReviewEntry<'_>> = model
-        .tasks
-        .values()
-        .filter(|t| !t.state.is_terminal())
-        .filter_map(|task| {
-            let rev = task.current_revision()?;
-            (rev.state == RevisionState::AwaitingReview).then(|| AwaitingReviewEntry {
-                task,
-                revision_n: rev.revision.n,
-                branch: rev.revision.branch.clone(),
-                reviewer: rev.active_reviewer.clone(),
-                since: rev.proposed_at,
-            })
-        })
-        .collect();
-    rows.sort_by_key(|e| e.since);
-    rows
-}
-
 /// Compact human age for terminal rows: `42s`, `12m`, `5h`, `3d`. Truncating division at each
 /// unit boundary; future timestamps (clock skew) saturate to `0s`, never a negative.
 pub fn age_short(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
@@ -455,52 +336,6 @@ pub fn age_short(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
         3_600..=86_399 => format!("{}h", secs / 3_600),
         _ => format!("{}d", secs / 86_400),
     }
-}
-
-/// Non-terminal tasks in `repo` whose CURRENT revision carries `branch` (or, when `worktree` is
-/// given, the same worktree path). Pure scan for the propose-time collision warning: two live
-/// tasks pointing at one branch usually means two agents about to trample each other.
-pub fn branch_carriers<'m>(
-    model: &'m TaskReadModel,
-    repo: &Path,
-    branch: &str,
-    worktree: Option<&Path>,
-) -> Vec<&'m TaskProjection> {
-    model
-        .tasks
-        .values()
-        .filter(|t| !t.state.is_terminal())
-        .filter(|t| t.repo.as_deref() == Some(repo))
-        .filter(|t| {
-            t.current_revision().is_some_and(|r| {
-                r.revision.branch == branch || (worktree.is_some() && r.revision.worktree.as_deref() == worktree)
-            })
-        })
-        .collect()
-}
-
-/// Advisory propose-time collision warnings (never a block): one line per OTHER non-terminal
-/// task whose current revision already carries this revision's branch or worktree in `repo`.
-/// Shared by the CLI and MCP propose paths; callers sanitize at render.
-pub fn propose_collision_warnings(
-    model: &TaskReadModel,
-    task_id: &str,
-    repo: &Path,
-    revision: &super::model::Revision,
-) -> Vec<String> {
-    branch_carriers(model, repo, &revision.branch, revision.worktree.as_deref())
-        .into_iter()
-        .filter(|t| t.task_id != task_id)
-        .map(|t| {
-            format!(
-                "branch {} is already carried by task {} ({}) — two tasks proposing one branch \
-                 usually means a collision",
-                revision.branch,
-                &t.task_id[..t.task_id.len().min(8)],
-                t.title
-            )
-        })
-        .collect()
 }
 
 /// Resolve a task-id prefix (short id) to the unique matching task id.
@@ -522,23 +357,16 @@ pub fn resolve_id<'m>(model: &'m TaskReadModel, prefix: &str) -> Result<&'m str,
     }
 }
 
-/// Effective-state helper for callers that need a display string with the layer visible.
+/// The task's state as the string every surface prints and filters on.
 pub fn effective_display(task: &TaskProjection) -> String {
-    match task.effective_state() {
-        EffectiveState::Base(s) => s.as_str().to_string(),
-        EffectiveState::Revision(s) => format!("rev:{}", s.as_str()),
-    }
+    task.state.as_str().to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::model::{Revision, TaskEvent, TaskEventKind};
+    use crate::task::model::{TaskEvent, TaskEventKind};
     use crate::task::reduce::TaskReducer;
-
-    fn sha(c: char) -> String {
-        std::iter::repeat_n(c, 40).collect()
-    }
 
     struct Log {
         events: Vec<TaskEvent>,
@@ -592,38 +420,8 @@ mod tests {
         }
     }
 
-    fn propose_and_pass(log: &mut Log, task: &str) {
-        log.push(
-            task,
-            "agent:author",
-            TaskEventKind::RevisionProposed {
-                revision: Revision {
-                    n: 1,
-                    branch: "task/x".into(),
-                    worktree: None,
-                    upstream: "origin/main".into(),
-                    base: sha('0'),
-                    review_sha: sha('1'),
-                    patch_id: sha('b'),
-                    reviewer: Some("agent:reviewer".into()),
-                    session_ref: None,
-                },
-            },
-        );
-        log.push(
-            task,
-            "agent:reviewer",
-            TaskEventKind::ReviewPassed {
-                reviewer: "agent:reviewer".into(),
-                session_ref: None,
-                independence: None,
-                receipts: None,
-            },
-        );
-    }
-
     #[test]
-    fn list_filters_by_effective_state_and_hides_terminal_by_default() {
+    fn list_filters_by_state_and_hides_terminal_by_default() {
         let mut log = Log::new();
         let open = log.open("h", None, None);
         let done = log.open("h", None, None);
@@ -636,31 +434,30 @@ mod tests {
                 check: None,
             },
         );
-        let ready = log.open("h", Some("/tmp/repo"), None);
+        let claimed = log.open("h", Some("/tmp/repo"), None);
         log.push(
-            &ready,
+            &claimed,
             "agent:author",
             TaskEventKind::Claimed {
                 assignee: "agent:author".into(),
             },
         );
-        propose_and_pass(&mut log, &ready);
 
         let model = log.model();
         let all = list(&model, &TaskFilter::default()).unwrap();
         assert_eq!(all.len(), 2, "done task hidden by default");
         assert!(all.iter().any(|t| t.task_id == open));
 
-        let ready_only = list(
+        let claimed_only = list(
             &model,
             &TaskFilter {
-                state: Some("ready".into()),
+                state: Some("claimed".into()),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(ready_only.len(), 1);
-        assert_eq!(ready_only[0].task_id, ready);
+        assert_eq!(claimed_only.len(), 1);
+        assert_eq!(claimed_only[0].task_id, claimed);
 
         let done_only = list(
             &model,
@@ -672,10 +469,20 @@ mod tests {
         .unwrap();
         assert_eq!(done_only.len(), 1);
         assert_eq!(done_only[0].task_id, done);
+
+        let err = list(
+            &model,
+            &TaskFilter {
+                state: Some("ready".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("ready") && err.contains("resolved"), "{err}");
     }
 
     #[test]
-    fn inbox_covers_all_four_reasons() {
+    fn inbox_covers_assigned_and_claimed() {
         let mut log = Log::new();
         let assigned = log.open("human", None, Some("agent:a"));
         let claimed = log.open("human", None, None);
@@ -686,106 +493,19 @@ mod tests {
                 assignee: "agent:a".into(),
             },
         );
-        let review = log.open("human", Some("/tmp/r"), None);
-        log.push(
-            &review,
-            "agent:a",
-            TaskEventKind::Claimed {
-                assignee: "agent:a".into(),
-            },
-        );
-        log.push(
-            &review,
-            "agent:a",
-            TaskEventKind::RevisionProposed {
-                revision: Revision {
-                    n: 1,
-                    branch: "task/r".into(),
-                    worktree: None,
-                    upstream: "origin/main".into(),
-                    base: sha('7'),
-                    review_sha: sha('2'),
-                    patch_id: sha('c'),
-                    reviewer: Some("agent:b".into()),
-                    session_ref: None,
-                },
-            },
-        );
-        let unlanded = log.open("human", Some("/tmp/r"), None);
-        log.push(
-            &unlanded,
-            "agent:a",
-            TaskEventKind::Claimed {
-                assignee: "agent:a".into(),
-            },
-        );
-        propose_and_pass(&mut log, &unlanded);
+        let someone_elses = log.open("human", None, Some("agent:b"));
 
         let model = log.model();
-
         let a: Vec<_> = inbox(&model, "agent:a");
         let reasons: Vec<(String, InboxReason)> = a.iter().map(|e| (e.task.task_id.clone(), e.reason)).collect();
+        assert_eq!(reasons.len(), 2, "{reasons:?}");
         assert!(reasons.contains(&(assigned.clone(), InboxReason::AssignedOpen)));
         assert!(reasons.contains(&(claimed.clone(), InboxReason::ClaimedByYou)));
-        assert!(reasons.contains(&(unlanded.clone(), InboxReason::YourUnlandedWork)));
-        // The review task is claimed by a, but its revision awaits b — for a it shows as claimed.
-        assert!(reasons.contains(&(review.clone(), InboxReason::ClaimedByYou)));
 
         let b: Vec<_> = inbox(&model, "agent:b");
         assert_eq!(b.len(), 1);
-        assert_eq!(b[0].reason, InboxReason::AwaitingYourReview);
-        assert_eq!(b[0].task.task_id, review);
-    }
-
-    #[test]
-    fn debt_lists_unlanded_reviewed_work_by_repo() {
-        let mut log = Log::new();
-        let landed = log.open("h", Some("/tmp/r1"), None);
-        propose_and_pass(&mut log, &landed);
-        log.push(
-            &landed,
-            "verifier",
-            TaskEventKind::Landed {
-                upstream_head: sha('f'),
-                observed_patch_id: sha('b'),
-            },
-        );
-        let owed = log.open("h", Some("/tmp/r1"), None);
-        propose_and_pass(&mut log, &owed);
-        let owed2 = log.open("h", Some("/tmp/r2"), None);
-        propose_and_pass(&mut log, &owed2);
-        log.push(
-            &owed2,
-            "verifier",
-            TaskEventKind::MergedLocal {
-                from_sha: sha('e'),
-                to_sha: sha('1'),
-            },
-        );
-
-        let model = log.model();
-        let groups = debt(&model);
-        assert_eq!(groups.len(), 2);
-        let r1 = &groups[&Some(PathBuf::from("/tmp/r1"))];
-        assert_eq!(r1.len(), 1, "landed task owes nothing");
-        assert_eq!(r1[0].task.task_id, owed);
-        assert_eq!(r1[0].state, RevisionState::Ready);
-        let r2 = &groups[&Some(PathBuf::from("/tmp/r2"))];
-        assert_eq!(r2[0].state, RevisionState::MergedLocal);
-    }
-
-    fn revision(n: u32, reviewer: Option<&str>) -> Revision {
-        Revision {
-            n,
-            branch: format!("task/x{n}"),
-            worktree: None,
-            upstream: "origin/main".into(),
-            base: sha('0'),
-            review_sha: sha('1'),
-            patch_id: sha('b'),
-            reviewer: reviewer.map(String::from),
-            session_ref: None,
-        }
+        assert_eq!(b[0].reason, InboxReason::AssignedOpen);
+        assert_eq!(b[0].task.task_id, someone_elses);
     }
 
     #[test]
@@ -805,206 +525,54 @@ mod tests {
     }
 
     #[test]
-    fn awaiting_review_ages_since_propose_and_clears_on_verdict() {
-        let mut log = Log::new();
-        let old = log.open("h", Some("/tmp/r"), None);
-        log.push_at(
-            &old,
-            "agent:author",
-            "2026-07-13T12:00:00Z",
-            TaskEventKind::RevisionProposed {
-                revision: revision(1, Some("agent:reviewer")),
-            },
-        );
-        let newer = log.open("h", Some("/tmp/r"), None);
-        log.push_at(
-            &newer,
-            "agent:author",
-            "2026-07-16T09:00:00Z",
-            TaskEventKind::RevisionProposed {
-                revision: revision(1, None),
-            },
-        );
-
-        let model = log.model();
-        let rows = awaiting_review(&model);
-        assert_eq!(rows.len(), 2);
-        // Oldest first, propose time is the anchor, reviewer endpoint rides along.
-        assert_eq!(rows[0].task.task_id, old);
-        assert_eq!(rows[0].since.to_rfc3339(), "2026-07-13T12:00:00+00:00");
-        assert_eq!(rows[0].reviewer.as_deref(), Some("agent:reviewer"));
-        assert_eq!(rows[1].task.task_id, newer);
-        assert_eq!(rows[1].reviewer, None);
-
-        // A pass clears the entry (it moves to the debt view instead) ...
-        log.push(
-            &old,
-            "agent:reviewer",
-            TaskEventKind::ReviewPassed {
-                reviewer: "agent:reviewer".into(),
-                session_ref: None,
-                independence: None,
-                receipts: None,
-            },
-        );
-        // ... a refute clears the other.
-        log.push(
-            &newer,
-            "agent:b",
-            TaskEventKind::ReviewRefuted {
-                reviewer: "agent:b".into(),
-                session_ref: None,
-                receipts: None,
-            },
-        );
-        let model = log.model();
-        assert!(awaiting_review(&model).is_empty());
-    }
-
-    #[test]
-    fn awaiting_review_follows_supersede() {
-        let mut log = Log::new();
-        let t = log.open("h", Some("/tmp/r"), None);
-        log.push_at(
-            &t,
-            "agent:author",
-            "2026-07-10T00:00:00Z",
-            TaskEventKind::RevisionProposed {
-                revision: revision(1, Some("agent:reviewer")),
-            },
-        );
-        // Re-propose: rev1 is auto-superseded, only rev2 should age.
-        log.push_at(
-            &t,
-            "agent:author",
-            "2026-07-15T00:00:00Z",
-            TaskEventKind::RevisionProposed {
-                revision: revision(2, Some("agent:reviewer")),
-            },
-        );
-        let model = log.model();
-        let rows = awaiting_review(&model);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].revision_n, 2);
-        assert_eq!(rows[0].since.to_rfc3339(), "2026-07-15T00:00:00+00:00");
-    }
-
-    #[test]
     fn inbox_is_oldest_first_with_waiting_anchors() {
         let mut log = Log::new();
-        // Reviewed-unlanded work: `since` must be the PASS time, not the propose time.
-        let unlanded = log.open("h", Some("/tmp/r"), None);
-        log.push(
-            &unlanded,
-            "agent:a",
-            TaskEventKind::Claimed {
-                assignee: "agent:a".into(),
+        // A decision ages from its POSE, not from the notes that follow it.
+        let decision = log.open("h", None, Some("agent:a"));
+        log.push_at(
+            &decision,
+            "h",
+            "2026-07-12T00:00:00Z",
+            TaskEventKind::Posed {
+                options: vec!["keep".into(), "drop".into()],
+                default_choice: "keep".into(),
+                deadline: None,
+                source: None,
             },
         );
         log.push_at(
-            &unlanded,
+            &decision,
+            "h",
+            "2026-07-16T00:00:00Z",
+            TaskEventKind::Noted {
+                text: "still thinking?".into(),
+                session_ref: None,
+            },
+        );
+        // A claimed task whose last event is between the pose and the note.
+        let claimed = log.open("h", None, None);
+        log.push_at(
+            &claimed,
             "agent:a",
             "2026-07-14T00:00:00Z",
-            TaskEventKind::RevisionProposed {
-                revision: revision(1, Some("agent:r")),
-            },
-        );
-        log.push_at(
-            &unlanded,
-            "agent:r",
-            "2026-07-15T00:00:00Z",
-            TaskEventKind::ReviewPassed {
-                reviewer: "agent:r".into(),
-                session_ref: None,
-                independence: None,
-                receipts: None,
-            },
-        );
-        // A review awaiting agent:a, proposed EARLIER than the pass above — sorts first.
-        let review = log.open("h", Some("/tmp/r"), None);
-        log.push_at(
-            &review,
-            "agent:b",
-            "2026-07-12T00:00:00Z",
-            TaskEventKind::RevisionProposed {
-                revision: revision(1, Some("agent:a")),
+            TaskEventKind::Claimed {
+                assignee: "agent:a".into(),
             },
         );
 
         let model = log.model();
         let entries = inbox(&model, "agent:a");
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].task.task_id, review, "stalest at top");
-        assert_eq!(entries[0].reason, InboxReason::AwaitingYourReview);
-        assert_eq!(entries[0].since.to_rfc3339(), "2026-07-12T00:00:00+00:00");
-        assert_eq!(entries[1].task.task_id, unlanded);
-        assert_eq!(entries[1].reason, InboxReason::YourUnlandedWork);
+        assert_eq!(entries[0].task.task_id, decision, "stalest at top");
+        assert_eq!(entries[0].reason, InboxReason::DecisionOwed);
         assert_eq!(
-            entries[1].since.to_rfc3339(),
-            "2026-07-15T00:00:00+00:00",
-            "unlanded work ages from the pass, not the propose"
+            entries[0].since.to_rfc3339(),
+            "2026-07-12T00:00:00+00:00",
+            "a decision ages from the pose, not the last note"
         );
-    }
-
-    #[test]
-    fn branch_carriers_flags_live_same_branch_same_repo_only() {
-        let mut log = Log::new();
-        let rev_on = |branch: &str, worktree: Option<&str>| Revision {
-            n: 1,
-            branch: branch.into(),
-            worktree: worktree.map(PathBuf::from),
-            upstream: "origin/main".into(),
-            base: sha('0'),
-            review_sha: sha('1'),
-            patch_id: sha('b'),
-            reviewer: None,
-            session_ref: None,
-        };
-        let propose = |log: &mut Log, task: &str, branch: &str, wt: Option<&str>| {
-            log.push(
-                task,
-                "agent:author",
-                TaskEventKind::RevisionProposed {
-                    revision: rev_on(branch, wt),
-                },
-            );
-        };
-
-        let carrier = log.open("h", Some("/tmp/r"), None);
-        propose(&mut log, &carrier, "task/x", Some("/wt/x"));
-        // Same branch but a DIFFERENT repo: not a collision.
-        let other_repo = log.open("h", Some("/tmp/other"), None);
-        propose(&mut log, &other_repo, "task/x", None);
-        // Same repo, different branch, same WORKTREE: still a collision.
-        let wt_clash = log.open("h", Some("/tmp/r"), None);
-        propose(&mut log, &wt_clash, "task/y", Some("/wt/x"));
-        // Same branch, same repo, but the task is terminal: not a collision.
-        let dead = log.open("h", Some("/tmp/r"), None);
-        propose(&mut log, &dead, "task/x", None);
-        log.push(&dead, "h", TaskEventKind::Abandoned { reason: "gone".into() });
-
-        let model = log.model();
-        let repo = PathBuf::from("/tmp/r");
-        let by_branch = branch_carriers(&model, &repo, "task/x", None);
-        assert_eq!(by_branch.len(), 1);
-        assert_eq!(by_branch[0].task_id, carrier);
-
-        let by_worktree = branch_carriers(&model, &repo, "task/z", Some(Path::new("/wt/x")));
-        let ids: Vec<&str> = by_worktree.iter().map(|t| t.task_id.as_str()).collect();
-        assert!(
-            ids.contains(&carrier.as_str()) && ids.contains(&wt_clash.as_str()),
-            "{ids:?}"
-        );
-
-        // The warning builder excludes the proposing task itself and names the carrier.
-        let proposing = log.open("h", Some("/tmp/r"), None);
-        let model = log.model();
-        let w = propose_collision_warnings(&model, &proposing, &repo, &rev_on("task/x", None));
-        assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w[0].contains("task/x") && w[0].contains(&carrier[..8]), "{}", w[0]);
-        // The carrier proposing on ITS OWN branch again warns about nobody.
-        let w = propose_collision_warnings(&model, &carrier, &repo, &rev_on("task/x", None));
-        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(entries[1].task.task_id, claimed);
+        assert_eq!(entries[1].reason, InboxReason::ClaimedByYou);
+        assert_eq!(entries[1].since.to_rfc3339(), "2026-07-14T00:00:00+00:00");
     }
 
     #[test]

@@ -2,25 +2,15 @@
 //! the same [`TaskReducer::apply`] runs during live appends and during replay, so live state and
 //! replayed state cannot diverge (replay parity).
 //!
-//! Ported from mission-control's `ramspace-core/src/land_request.rs` (its one keeper). The land
-//! facet keeps that reducer's invariants byte-for-byte where possible. **Deliberate deviations:**
+//! The machine: a base lifecycle `Open → Claimed → Done`, terminals `Abandoned`/`Superseded`,
+//! `Noted` for progress (accepted on a terminal task too, marked `post_close`: terminal is about
+//! state, not the record); a decision facet (`Posed`, answered by `Resolved`, provisional-then-
+//! confirm the one override); a pinned STATUS. Ids are uuid v7 and idempotent: a byte-identical
+//! re-append is a no-op, id reuse with different content is loud.
 //!
-//! 1. Content-addressed `record_hash` ids → uuid v7 event ids. The hash chain existed to make ids
-//!    unforgeable — an authority property law 3 removes. Idempotency semantics are preserved on
-//!    the id: byte-identical re-append is a no-op, id reuse with different content is loud.
-//! 2. `Landed` is reachable from `Ready` as well as `MergedLocal`. Nobody merges on the task's
-//!    behalf here; a branch routinely lands via forge PR with no local-integration step, and
-//!    "the reviewed patch is observed on upstream" is state-complete by itself.
-//! 3. `MergeFailed` reasons are verification findings (observations), not merge-attempt outcomes
-//!    (`attempt_id` dropped) — cv never runs a merge.
-//! 4. Typed `EndpointId` → plain `String`, matching the board's `from` convention.
-//!
-//! On top of the ported facet sits a base lifecycle for tasks that never involve code review:
-//! `Open → Claimed → Done`, terminals `Abandoned`/`Superseded`, `Noted` for progress (accepted on
-//! a terminal task too, marked `post_close`: terminal is about state, not the record). The two
-//! layers meet in exactly two rules: a revision may only be proposed on a non-terminal task, and
-//! `Done` is refused while a revision is live (you can always kill a task, never silently
-//! complete one that has unlanded reviewed code).
+//! The land facet retired in 0.15.0 left nine event kinds in old logs
+//! ([`super::model::RETIRED_TAGS`]); they apply as no-ops, so such a log folds to the model it
+//! would have without them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -28,10 +18,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::model::{
-    DoneCheck, IndependenceCheck, MergeFailure, ReviewReceipts, Revision, RevisionState, TaskEvent, TaskEventKind,
-    TaskState,
-};
+use super::model::{TaskEvent, TaskEventKind, TaskState};
 
 /// Errors from applying an event. During a CAS append these reject the candidate event; during
 /// replay they abort loudly (a log that stops reducing is corruption, not something to skip).
@@ -51,34 +38,10 @@ pub enum ReduceError {
         state: String,
         event: &'static str,
     },
-    #[error("task {task_id}: {event} requires a proposed revision")]
-    MissingRevision { task_id: String, event: &'static str },
-    #[error("task {task_id}: reviewer {actual} is not the active reviewer {expected}")]
-    ReviewerMismatch {
-        task_id: String,
-        expected: String,
-        actual: String,
-    },
-    #[error("task {task_id}: cannot complete while revision {revision} is {state} (kill or land it first)")]
-    DoneWithLiveRevision {
-        task_id: String,
-        revision: u32,
-        state: String,
-    },
-    #[error("task {task_id}: merged to_sha {actual_to_sha} is not the reviewed sha {expected_review_sha}")]
-    MergeTargetMismatch {
-        task_id: String,
-        expected_review_sha: String,
-        actual_to_sha: String,
-    },
-    #[error("task {task_id}: observed patch-id {observed} does not match the reviewed revision's {expected}")]
-    PatchIdMismatch {
-        task_id: String,
-        expected: String,
-        observed: String,
-    },
     #[error("invalid {field}: {value:?}")]
     InvalidField { field: &'static str, value: String },
+    #[error("event kind {tag:?} is not one this cv knows (neither live nor retired) — upgrade cv or repair the log")]
+    UnknownKind { tag: String },
     #[error("task {task_id} already has a posed decision (amend by posing a new task, never by rewriting)")]
     AlreadyPosed { task_id: String },
     #[error("task {task_id}: {event} requires a posed decision (this task is work, not a question — use done)")]
@@ -112,33 +75,6 @@ pub enum ReduceError {
     },
 }
 
-/// A recorded anomaly that did not change state (the task/revision stays actionable).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum TaskIssue {
-    SourceUnavailable { detail: String, event_id: String },
-    MergeFailed { reason: MergeFailure, event_id: String },
-    ReconcileFailed { detail: String, event_id: String },
-}
-
-impl TaskIssue {
-    pub fn describe(&self) -> String {
-        match self {
-            TaskIssue::SourceUnavailable { detail, .. } => format!("source unavailable: {detail}"),
-            TaskIssue::MergeFailed { reason, .. } => reason.describe(),
-            TaskIssue::ReconcileFailed { detail, .. } => format!("reconcile failed: {detail}"),
-        }
-    }
-
-    /// The event that recorded this issue (for dedup by the verifier's anti-spam rule).
-    pub fn event_id(&self) -> &str {
-        match self {
-            TaskIssue::SourceUnavailable { event_id, .. }
-            | TaskIssue::MergeFailed { event_id, .. }
-            | TaskIssue::ReconcileFailed { event_id, .. } => event_id,
-        }
-    }
-}
-
 /// A progress note.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Note {
@@ -152,86 +88,6 @@ pub struct Note {
     /// changes nothing else. Omitted from the wire when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub post_close: bool,
-}
-
-/// Read model for one revision of a task.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RevisionProjection {
-    pub revision: Revision,
-    pub state: RevisionState,
-    /// When the revision was proposed (the propose event's timestamp) — the anchor for aging
-    /// AwaitingReview work: a dead reviewer is honest state nobody sees unless it ages visibly.
-    pub proposed_at: DateTime<Utc>,
-    /// Who appended the propose event (`by`) — the revision's author endpoint (the batting-average
-    /// attribution for the stats projection). `default` so projections serialized before the
-    /// field existed still deserialize (as `""`).
-    #[serde(default)]
-    pub proposed_by: String,
-    /// The only endpoint whose verdict can advance this revision. Bound at propose time (if the
-    /// revision named a reviewer) or by the first verdict; reroute is the only reassignment.
-    pub active_reviewer: Option<String>,
-    pub pass: Option<PassEvidence>,
-    pub refute: Option<RefuteEvidence>,
-    pub reroutes: Vec<RerouteEvidence>,
-    /// `(from_sha, to_sha)` observed by the verifier.
-    pub local_merge: Option<(String, String)>,
-    /// `(upstream_head, observed_patch_id)` observed by the verifier.
-    pub landed: Option<(String, String)>,
-    /// When the verifier observed the land (the `Landed` event's timestamp) — the end anchor for
-    /// time-to-land in the stats projection. `None` until landed. `default` so projections
-    /// serialized before the field existed still deserialize.
-    #[serde(default)]
-    pub landed_at: Option<DateTime<Utc>>,
-    pub issues: Vec<TaskIssue>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PassEvidence {
-    pub reviewer: String,
-    pub event_id: String,
-    pub ts: DateTime<Utc>,
-    pub session_ref: Option<String>,
-    pub independence: Option<IndependenceCheck>,
-    /// Advisory reviewer receipts; `None` on verdicts recorded without a reviewer session (and on
-    /// events appended before the field existed — `default` keeps those deserializing).
-    #[serde(default)]
-    pub receipts: Option<ReviewReceipts>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RefuteEvidence {
-    pub reviewer: String,
-    pub event_id: String,
-    pub ts: DateTime<Utc>,
-    pub session_ref: Option<String>,
-    /// Advisory reviewer receipts, as on [`PassEvidence`].
-    #[serde(default)]
-    pub receipts: Option<ReviewReceipts>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RerouteEvidence {
-    pub from: String,
-    pub to: String,
-    pub event_id: String,
-}
-
-/// What a task is *effectively* doing right now: its base state, unless a revision is live (or
-/// landed), in which case the revision's state is the truth that matters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "layer", content = "state")]
-pub enum EffectiveState {
-    Base(TaskState),
-    Revision(RevisionState),
-}
-
-impl EffectiveState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EffectiveState::Base(s) => s.as_str(),
-            EffectiveState::Revision(s) => s.as_str(),
-        }
-    }
 }
 
 /// The decision facet of a task (present once a `posed` event applied): the question's options,
@@ -318,14 +174,11 @@ pub struct TaskProjection {
     pub opened_at: DateTime<Utc>,
     pub last_event_id: String,
     pub last_ts: DateTime<Utc>,
-    pub revisions: Vec<RevisionProjection>,
     pub notes: Vec<Note>,
     pub superseded_by: Option<String>,
     pub abandoned_reason: Option<String>,
+    /// The evidence the agent offered with its `done` — self-reported free text, never checked.
     pub done_observed: Option<String>,
-    /// How the completion was verified, when a passing check was attached to the `Done`. `None` =
-    /// self-reported (the view/provenance layer labels the two distinctly).
-    pub done_check: Option<DoneCheck>,
     /// The union of every `tagged` event's labels, in first-seen order. Omitted from the wire when
     /// empty, so a log that never tagged anything serializes exactly as it did before tags existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -386,30 +239,14 @@ impl TaskProjection {
             opened_at: event.ts,
             last_event_id: event.id.clone(),
             last_ts: event.ts,
-            revisions: Vec::new(),
             notes: Vec::new(),
             superseded_by: None,
             abandoned_reason: None,
             done_observed: None,
-            done_check: None,
             tags: Vec::new(),
             blocked_by: Vec::new(),
             decision: None,
             status: None,
-        }
-    }
-
-    /// The current (latest) revision, if any.
-    pub fn current_revision(&self) -> Option<&RevisionProjection> {
-        self.revisions.last()
-    }
-
-    pub fn effective_state(&self) -> EffectiveState {
-        match self.current_revision() {
-            Some(rev) if !rev.state.is_terminal() || rev.state == RevisionState::Landed => {
-                EffectiveState::Revision(rev.state)
-            }
-            _ => EffectiveState::Base(self.state),
         }
     }
 
@@ -529,21 +366,18 @@ impl TaskReducer {
                     post_close: task.state.is_terminal(),
                 });
             }
-            TaskEventKind::Done { observed, check } => {
+            TaskEventKind::Done { observed, .. } => {
                 require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
                 if task.decision.is_some() {
                     return Err(ReduceError::DecisionNeedsResolve {
                         task_id: task.task_id.clone(),
                     });
                 }
-                require_no_live_revision(task)?;
                 task.done_observed = observed.clone();
-                task.done_check = check.clone();
                 task.state = TaskState::Done;
             }
             TaskEventKind::Abandoned { reason } => {
-                // Always available on a non-terminal task, live revision or not: you can always
-                // kill a task.
+                // Always available on a non-terminal task: you can always kill a task.
                 require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
                 task.abandoned_reason = Some(reason.clone());
                 task.state = TaskState::Abandoned;
@@ -578,9 +412,6 @@ impl TaskReducer {
                 source,
             } => {
                 require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
-                // A task carrying unlanded reviewed code is work, not a question: posing it would
-                // let `resolved` close it past the live revision that `done` refuses to close past.
-                require_no_live_revision(task)?;
                 if task.decision.is_some() {
                     return Err(ReduceError::AlreadyPosed {
                         task_id: task.task_id.clone(),
@@ -620,9 +451,6 @@ impl TaskReducer {
                 } else {
                     require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
                 }
-                // Same gate as `done`: a resolution is terminal, and terminal is never reached over
-                // a live revision (a log posed before this rule existed is still refused here).
-                require_no_live_revision(task)?;
                 let task_id = task.task_id.clone();
                 let Some(decision) = task.decision.as_mut() else {
                     return Err(ReduceError::MissingDecision {
@@ -681,155 +509,17 @@ impl TaskReducer {
                 });
             }
 
-            // ── land facet ────────────────────────────────────────────────
-            TaskEventKind::RevisionProposed { revision } => {
-                require_base(task, kind, &[TaskState::Open, TaskState::Claimed])?;
-                // A live prior revision is auto-superseded: the only cure for a refute, and the
-                // only way reviewed content changes, is a new revision.
-                if let Some(prev) = task.revisions.last_mut() {
-                    if !prev.state.is_terminal() {
-                        prev.state = RevisionState::Superseded;
-                    }
-                }
-                task.revisions.push(RevisionProjection {
-                    active_reviewer: revision.reviewer.clone(),
-                    revision: revision.clone(),
-                    state: RevisionState::AwaitingReview,
-                    proposed_at: event.ts,
-                    proposed_by: event.by.clone(),
-                    landed_at: None,
-                    pass: None,
-                    refute: None,
-                    reroutes: Vec::new(),
-                    local_merge: None,
-                    landed: None,
-                    issues: Vec::new(),
-                });
-            }
-            TaskEventKind::ReviewRerouted { from, to } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                require_revision_state(&task_id, rev, kind, &[RevisionState::AwaitingReview])?;
-                require_reviewer(&task_id, rev, from)?;
-                if from == to {
-                    return Err(ReduceError::InvalidField {
-                        field: "reroute reviewer",
-                        value: to.clone(),
+            // ── retired kinds (0.15.0) ────────────────────────────────────
+            TaskEventKind::Retired(r) => {
+                // A kind cv itself used to write replays as a no-op: the log keeps the record, the
+                // model derives nothing from it (not even `last_ts`). A tag cv never wrote is a
+                // different matter — refused, so a log from a newer cv is loud, never misread.
+                if !r.is_known() {
+                    return Err(ReduceError::UnknownKind {
+                        tag: r.tag_str().to_string(),
                     });
                 }
-                rev.active_reviewer = Some(to.clone());
-                rev.reroutes.push(RerouteEvidence {
-                    from: from.clone(),
-                    to: to.clone(),
-                    event_id: event.id.clone(),
-                });
-            }
-            TaskEventKind::ReviewPassed {
-                reviewer,
-                session_ref,
-                independence,
-                receipts,
-            } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                require_revision_state(&task_id, rev, kind, &[RevisionState::AwaitingReview])?;
-                require_reviewer(&task_id, rev, reviewer)?;
-                rev.active_reviewer = Some(reviewer.clone());
-                rev.pass = Some(PassEvidence {
-                    reviewer: reviewer.clone(),
-                    event_id: event.id.clone(),
-                    ts: event.ts,
-                    session_ref: session_ref.clone(),
-                    independence: independence.clone(),
-                    receipts: receipts.clone(),
-                });
-                rev.state = RevisionState::Ready;
-            }
-            TaskEventKind::ReviewRefuted {
-                reviewer,
-                session_ref,
-                receipts,
-            } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                require_revision_state(
-                    &task_id,
-                    rev,
-                    kind,
-                    &[RevisionState::AwaitingReview, RevisionState::Ready],
-                )?;
-                require_reviewer(&task_id, rev, reviewer)?;
-                rev.active_reviewer = Some(reviewer.clone());
-                rev.refute = Some(RefuteEvidence {
-                    reviewer: reviewer.clone(),
-                    event_id: event.id.clone(),
-                    ts: event.ts,
-                    session_ref: session_ref.clone(),
-                    receipts: receipts.clone(),
-                });
-                rev.state = RevisionState::Refuted;
-            }
-
-            // ── verifier-only observations ────────────────────────────────
-            TaskEventKind::SourceUnavailable { detail } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                require_revision_state(&task_id, rev, kind, &[RevisionState::Ready])?;
-                rev.issues.push(TaskIssue::SourceUnavailable {
-                    detail: detail.clone(),
-                    event_id: event.id.clone(),
-                });
-            }
-            TaskEventKind::MergeFailed { reason } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                require_revision_state(&task_id, rev, kind, &[RevisionState::Ready])?;
-                rev.issues.push(TaskIssue::MergeFailed {
-                    reason: reason.clone(),
-                    event_id: event.id.clone(),
-                });
-            }
-            TaskEventKind::MergedLocal { from_sha, to_sha } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                require_revision_state(&task_id, rev, kind, &[RevisionState::Ready])?;
-                if !to_sha.eq_ignore_ascii_case(&rev.revision.review_sha) {
-                    return Err(ReduceError::MergeTargetMismatch {
-                        task_id,
-                        expected_review_sha: rev.revision.review_sha.clone(),
-                        actual_to_sha: to_sha.clone(),
-                    });
-                }
-                rev.local_merge = Some((from_sha.clone(), to_sha.clone()));
-                rev.state = RevisionState::MergedLocal;
-            }
-            TaskEventKind::ReconcileFailed { detail } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                require_revision_state(&task_id, rev, kind, &[RevisionState::MergedLocal])?;
-                rev.issues.push(TaskIssue::ReconcileFailed {
-                    detail: detail.clone(),
-                    event_id: event.id.clone(),
-                });
-            }
-            TaskEventKind::Landed {
-                upstream_head,
-                observed_patch_id,
-            } => {
-                let task_id = task.task_id.clone();
-                let rev = require_revision(task, kind)?;
-                // Deviation 2: Ready → Landed is legal (forge-PR lands skip local integration).
-                require_revision_state(&task_id, rev, kind, &[RevisionState::Ready, RevisionState::MergedLocal])?;
-                if !observed_patch_id.eq_ignore_ascii_case(&rev.revision.patch_id) {
-                    return Err(ReduceError::PatchIdMismatch {
-                        task_id,
-                        expected: rev.revision.patch_id.clone(),
-                        observed: observed_patch_id.clone(),
-                    });
-                }
-                rev.landed = Some((upstream_head.clone(), observed_patch_id.clone()));
-                rev.landed_at = Some(event.ts);
-                rev.state = RevisionState::Landed;
+                return Ok(());
             }
         }
         task.touch(event);
@@ -841,20 +531,6 @@ impl TaskEventKind {
     /// `tag()` but usable in `ReduceError`'s `&'static str` fields.
     fn tag_static(&self) -> &'static str {
         self.tag()
-    }
-}
-
-/// The terminal-over-live-code gate shared by `done`, `posed` and `resolved`: a task whose current
-/// revision is still live (not refuted/superseded/landed) cannot be completed or turned into a
-/// question — kill or land the revision first. Only the land facet's own events move it.
-fn require_no_live_revision(task: &TaskProjection) -> Result<(), ReduceError> {
-    match task.current_revision() {
-        Some(rev) if !rev.state.is_terminal() => Err(ReduceError::DoneWithLiveRevision {
-            task_id: task.task_id.clone(),
-            revision: rev.revision.n,
-            state: rev.state.as_str().to_string(),
-        }),
-        _ => Ok(()),
     }
 }
 
@@ -870,49 +546,6 @@ fn require_base(task: &TaskProjection, kind: &TaskEventKind, allowed: &[TaskStat
     }
 }
 
-fn require_revision<'t>(
-    task: &'t mut TaskProjection,
-    kind: &TaskEventKind,
-) -> Result<&'t mut RevisionProjection, ReduceError> {
-    let task_id = task.task_id.clone();
-    task.revisions.last_mut().ok_or(ReduceError::MissingRevision {
-        task_id,
-        event: kind.tag_static(),
-    })
-}
-
-fn require_revision_state(
-    task_id: &str,
-    rev: &RevisionProjection,
-    kind: &TaskEventKind,
-    allowed: &[RevisionState],
-) -> Result<(), ReduceError> {
-    if allowed.contains(&rev.state) {
-        Ok(())
-    } else {
-        Err(ReduceError::InvalidTransition {
-            task_id: task_id.to_string(),
-            state: rev.state.as_str().to_string(),
-            event: kind.tag_static(),
-        })
-    }
-}
-
-/// Reviewer binding: only the active reviewer's verdict counts. If no reviewer is bound yet
-/// (revision proposed without one), the first verdict binds — recorded, visible, and law 2 makes
-/// independence advisory rather than the reducer's job.
-fn require_reviewer(task_id: &str, rev: &RevisionProjection, actual: &str) -> Result<(), ReduceError> {
-    match &rev.active_reviewer {
-        None => Ok(()),
-        Some(expected) if expected == actual => Ok(()),
-        Some(expected) => Err(ReduceError::ReviewerMismatch {
-            task_id: task_id.to_string(),
-            expected: expected.clone(),
-            actual: actual.to_string(),
-        }),
-    }
-}
-
 // ── shape validation (pure, no I/O) ──────────────────────────────────────────
 
 fn require_nonempty(field: &'static str, value: &str) -> Result<(), ReduceError> {
@@ -924,45 +557,6 @@ fn require_nonempty(field: &'static str, value: &str) -> Result<(), ReduceError>
     } else {
         Ok(())
     }
-}
-
-fn require_hex(field: &'static str, value: &str, lens: &[usize]) -> Result<(), ReduceError> {
-    if lens.contains(&value.len()) && value.chars().all(|c| c.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(ReduceError::InvalidField {
-            field,
-            value: value.to_string(),
-        })
-    }
-}
-
-/// Git object ids: sha1 (40 hex) or sha256 (64 hex) repos.
-fn require_git_oid(field: &'static str, value: &str) -> Result<(), ReduceError> {
-    require_hex(field, value, &[40, 64])
-}
-
-/// `git patch-id` output is always 40 hex.
-fn require_patch_id(field: &'static str, value: &str) -> Result<(), ReduceError> {
-    require_hex(field, value, &[40])
-}
-
-fn validate_revision(revision: &Revision) -> Result<(), ReduceError> {
-    if revision.n == 0 {
-        return Err(ReduceError::InvalidField {
-            field: "revision.n",
-            value: "0".to_string(),
-        });
-    }
-    require_nonempty("revision.branch", &revision.branch)?;
-    require_nonempty("revision.upstream", &revision.upstream)?;
-    require_git_oid("revision.base", &revision.base)?;
-    require_git_oid("revision.review_sha", &revision.review_sha)?;
-    require_patch_id("revision.patch_id", &revision.patch_id)?;
-    if let Some(reviewer) = &revision.reviewer {
-        require_nonempty("revision.reviewer", reviewer)?;
-    }
-    Ok(())
 }
 
 fn validate_event_shape(event: &TaskEvent) -> Result<(), ReduceError> {
@@ -1046,34 +640,7 @@ fn validate_event_shape(event: &TaskEvent) -> Result<(), ReduceError> {
         }
         TaskEventKind::Resolved { choice, .. } => require_nonempty("choice", choice),
         TaskEventKind::StatusSet { text } => require_nonempty("text", text),
-        TaskEventKind::RevisionProposed { revision } => validate_revision(revision),
-        TaskEventKind::ReviewRerouted { from, to } => {
-            require_nonempty("from", from)?;
-            require_nonempty("to", to)
-        }
-        TaskEventKind::ReviewPassed { reviewer, .. } => require_nonempty("reviewer", reviewer),
-        TaskEventKind::ReviewRefuted { reviewer, .. } => require_nonempty("reviewer", reviewer),
-        TaskEventKind::SourceUnavailable { detail } => require_nonempty("detail", detail),
-        TaskEventKind::MergeFailed { .. } => Ok(()),
-        TaskEventKind::MergedLocal { from_sha, to_sha } => {
-            require_git_oid("from_sha", from_sha)?;
-            require_git_oid("to_sha", to_sha)?;
-            if from_sha.eq_ignore_ascii_case(to_sha) {
-                return Err(ReduceError::InvalidField {
-                    field: "merge edge",
-                    value: format!("{from_sha}..{to_sha}"),
-                });
-            }
-            Ok(())
-        }
-        TaskEventKind::ReconcileFailed { detail } => require_nonempty("detail", detail),
-        TaskEventKind::Landed {
-            upstream_head,
-            observed_patch_id,
-        } => {
-            require_git_oid("upstream_head", upstream_head)?;
-            require_patch_id("observed_patch_id", observed_patch_id)
-        }
+        TaskEventKind::Retired(_) => Ok(()),
     }
 }
 
@@ -1082,12 +649,7 @@ mod tests {
     use super::*;
 
     const AUTHOR: &str = "agent:author";
-    const REVIEWER: &str = "agent:reviewer";
     const OTHER: &str = "agent:other";
-
-    fn sha(c: char) -> String {
-        std::iter::repeat_n(c, 40).collect()
-    }
 
     struct Log {
         events: Vec<TaskEvent>,
@@ -1145,257 +707,7 @@ mod tests {
         }
     }
 
-    fn revision(n: u32, reviewer: Option<&str>) -> Revision {
-        Revision {
-            n,
-            branch: format!("task/demo-r{n}"),
-            worktree: None,
-            upstream: "origin/main".into(),
-            base: sha('0'),
-            review_sha: sha(char::from_digit(n, 10).unwrap()),
-            patch_id: sha('b'),
-            reviewer: reviewer.map(String::from),
-            session_ref: None,
-        }
-    }
-
-    fn propose(log: &mut Log, task: &str, n: u32) {
-        log.push(
-            task,
-            AUTHOR,
-            TaskEventKind::RevisionProposed {
-                revision: revision(n, Some(REVIEWER)),
-            },
-        );
-    }
-
-    fn pass(log: &mut Log, task: &str, reviewer: &str) -> TaskEvent {
-        log.push(
-            task,
-            reviewer,
-            TaskEventKind::ReviewPassed {
-                reviewer: reviewer.to_string(),
-                session_ref: None,
-                independence: None,
-                receipts: None,
-            },
-        )
-    }
-
     // ── ported roster (names kept from mission-control) ──────────────────
-
-    #[test]
-    fn happy_path_is_replay_equal_and_local_merge_is_not_landed() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Claimed {
-                assignee: AUTHOR.into(),
-            },
-        );
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::MergedLocal {
-                from_sha: sha('e'),
-                to_sha: sha('1'),
-            },
-        );
-
-        // Live fold == replay fold.
-        let mut live = TaskReducer::new();
-        for ev in &log.events {
-            live.apply(ev).unwrap();
-        }
-        let replayed = log.reduce().unwrap();
-        assert_eq!(live.model(), &replayed);
-
-        // Local merge is NOT landed.
-        let t = &replayed.tasks[&task];
-        let rev = t.current_revision().unwrap();
-        assert_eq!(rev.state, RevisionState::MergedLocal);
-        assert!(rev.state.is_actionable() && !rev.state.is_terminal());
-        assert!(rev.landed.is_none());
-        assert_eq!(
-            t.effective_state(),
-            EffectiveState::Revision(RevisionState::MergedLocal)
-        );
-
-        // Then the verifier observes the land; only now is it terminal.
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::Landed {
-                upstream_head: sha('f'),
-                observed_patch_id: sha('b'),
-            },
-        );
-        let m = log.reduce().unwrap();
-        let rev = m.tasks[&task].current_revision().unwrap().clone();
-        assert_eq!(rev.state, RevisionState::Landed);
-        assert!(rev.state.is_terminal());
-        assert_eq!(rev.landed, Some((sha('f'), sha('b'))));
-    }
-
-    #[test]
-    fn source_and_merge_failures_leave_ready_actionable() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::SourceUnavailable {
-                detail: "worktree gone".into(),
-            },
-        );
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::MergeFailed {
-                reason: MergeFailure::NonFastForward {},
-            },
-        );
-        let m = log.reduce().unwrap();
-        let rev = m.tasks[&task].current_revision().unwrap();
-        assert_eq!(rev.state, RevisionState::Ready);
-        assert!(rev.state.is_actionable());
-        assert_eq!(rev.issues.len(), 2);
-    }
-
-    #[test]
-    fn refute_after_pass_is_terminal_and_cannot_be_cured() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-        log.push(
-            &task,
-            REVIEWER,
-            TaskEventKind::ReviewRefuted {
-                reviewer: REVIEWER.into(),
-                session_ref: None,
-                receipts: None,
-            },
-        );
-        let m = log.reduce().unwrap();
-        assert_eq!(m.tasks[&task].current_revision().unwrap().state, RevisionState::Refuted);
-
-        // A later pass on the refuted revision fails closed.
-        pass(&mut log, &task, REVIEWER);
-        let err = log.reduce().unwrap_err();
-        assert!(
-            matches!(err, ReduceError::InvalidTransition { event, .. } if event == "review_passed"),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn reroute_changes_the_only_reviewer_whose_verdict_can_apply() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        log.push(
-            &task,
-            REVIEWER,
-            TaskEventKind::ReviewRerouted {
-                from: REVIEWER.into(),
-                to: OTHER.into(),
-            },
-        );
-
-        // Old reviewer's verdict no longer applies.
-        pass(&mut log, &task, REVIEWER);
-        let err = log.reduce().unwrap_err();
-        assert!(matches!(err, ReduceError::ReviewerMismatch { .. }), "{err:?}");
-        log.events.pop();
-
-        // New reviewer's does.
-        pass(&mut log, &task, OTHER);
-        let m = log.reduce().unwrap();
-        let rev = m.tasks[&task].current_revision().unwrap();
-        assert_eq!(rev.state, RevisionState::Ready);
-        assert_eq!(rev.pass.as_ref().unwrap().reviewer, OTHER);
-        assert_eq!(rev.reroutes.len(), 1);
-    }
-
-    #[test]
-    fn supersession_is_terminal_before_ref_movement() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Superseded {
-                by_task: "other-task".into(),
-            },
-        );
-        let m = log.reduce().unwrap();
-        let t = &m.tasks[&task];
-        assert_eq!(t.state, TaskState::Superseded);
-        assert!(t.state.is_terminal());
-
-        // Nothing further applies to a superseded task.
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Claimed {
-                assignee: AUTHOR.into(),
-            },
-        );
-        assert!(matches!(
-            log.reduce().unwrap_err(),
-            ReduceError::InvalidTransition { .. }
-        ));
-    }
-
-    #[test]
-    fn reconcile_failure_stays_merged_local_and_blocks_relanding() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::MergedLocal {
-                from_sha: sha('e'),
-                to_sha: sha('1'),
-            },
-        );
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::ReconcileFailed {
-                detail: "torn log tail".into(),
-            },
-        );
-        let m = log.reduce().unwrap();
-        let rev = m.tasks[&task].current_revision().unwrap();
-        assert_eq!(rev.state, RevisionState::MergedLocal);
-        assert_eq!(rev.issues.len(), 1);
-
-        // A second MergedLocal cannot re-apply from MergedLocal.
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::MergedLocal {
-                from_sha: sha('e'),
-                to_sha: sha('1'),
-            },
-        );
-        assert!(matches!(
-            log.reduce().unwrap_err(),
-            ReduceError::InvalidTransition { .. }
-        ));
-    }
 
     #[test]
     fn unknown_request_and_wrong_open_id_fail_closed() {
@@ -1460,40 +772,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn merge_and_landed_evidence_must_match_reviewed_content() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-
-        // MergedLocal whose to_sha is not the reviewed sha: refused.
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::MergedLocal {
-                from_sha: sha('e'),
-                to_sha: sha('9'),
-            },
-        );
-        assert!(matches!(
-            log.reduce().unwrap_err(),
-            ReduceError::MergeTargetMismatch { .. }
-        ));
-        log.events.pop();
-
-        // Landed whose patch-id is not the reviewed revision's: refused.
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::Landed {
-                upstream_head: sha('f'),
-                observed_patch_id: sha('9'),
-            },
-        );
-        assert!(matches!(log.reduce().unwrap_err(), ReduceError::PatchIdMismatch { .. }));
-    }
-
     // ── new roster (base lifecycle + facet interplay) ─────────────────────
 
     #[test]
@@ -1523,7 +801,6 @@ mod tests {
         assert_eq!(t.assignee.as_deref(), Some(OTHER));
         assert_eq!(t.notes.len(), 1);
         assert_eq!(t.done_observed.as_deref(), Some("screenshot.png"));
-        assert_eq!(t.effective_state(), EffectiveState::Base(TaskState::Done));
 
         // Claim races: a second Claimed on a claimed task is refused (CAS at the store makes
         // this "first writer wins").
@@ -1540,119 +817,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn done_is_blocked_while_a_revision_is_live() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Claimed {
-                assignee: AUTHOR.into(),
-            },
-        );
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Done {
-                observed: None,
-                check: None,
-            },
-        );
-        assert!(matches!(
-            log.reduce().unwrap_err(),
-            ReduceError::DoneWithLiveRevision { .. }
-        ));
-        log.events.pop();
-
-        // But you can always kill it.
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Abandoned {
-                reason: "wrong approach".into(),
-            },
-        );
-        assert_eq!(log.reduce().unwrap().tasks[&task].state, TaskState::Abandoned);
-        log.events.pop();
-
-        // And once the revision lands, Done goes through.
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::Landed {
-                upstream_head: sha('f'),
-                observed_patch_id: sha('b'),
-            },
-        );
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Done {
-                observed: None,
-                check: None,
-            },
-        );
-        let m = log.reduce().unwrap();
-        assert_eq!(m.tasks[&task].state, TaskState::Done);
-    }
-
-    #[test]
-    fn reproposal_supersedes_the_prior_revision() {
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        log.push(
-            &task,
-            REVIEWER,
-            TaskEventKind::ReviewRefuted {
-                reviewer: REVIEWER.into(),
-                session_ref: None,
-                receipts: None,
-            },
-        );
-        propose(&mut log, &task, 2);
-        pass(&mut log, &task, REVIEWER);
-
-        let m = log.reduce().unwrap();
-        let t = &m.tasks[&task];
-        assert_eq!(t.revisions.len(), 2);
-        assert_eq!(t.revisions[0].state, RevisionState::Refuted); // terminal stays terminal
-        assert_eq!(t.revisions[1].state, RevisionState::Ready);
-        assert_eq!(t.effective_state(), EffectiveState::Revision(RevisionState::Ready));
-
-        // A live (non-terminal) revision gets auto-superseded by a re-proposal.
-        propose(&mut log, &task, 3);
-        let m = log.reduce().unwrap();
-        let t = &m.tasks[&task];
-        assert_eq!(t.revisions[1].state, RevisionState::Superseded);
-        assert_eq!(t.revisions[2].state, RevisionState::AwaitingReview);
-    }
-
-    #[test]
-    fn landed_is_reachable_directly_from_ready() {
-        // Deviation 2: a forge-PR land has no MergedLocal step; observation is state-complete.
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        pass(&mut log, &task, REVIEWER);
-        log.push(
-            &task,
-            "verifier",
-            TaskEventKind::Landed {
-                upstream_head: sha('f'),
-                observed_patch_id: sha('b'),
-            },
-        );
-        let m = log.reduce().unwrap();
-        let rev = m.tasks[&task].current_revision().unwrap();
-        assert_eq!(rev.state, RevisionState::Landed);
-        assert!(rev.local_merge.is_none());
-    }
-
     fn posed(options: &[&str], default: &str) -> TaskEventKind {
         TaskEventKind::Posed {
             options: options.iter().map(|s| s.to_string()).collect(),
@@ -1660,72 +824,6 @@ mod tests {
             deadline: None,
             source: None,
         }
-    }
-
-    /// A live reviewed revision gates `posed` and `resolved` exactly as it gates `done`: neither a
-    /// pose over live code nor a resolution of a decision that later grew a revision reaches a
-    /// terminal state with unlanded reviewed content. A refuted (terminal) revision lifts the gate.
-    #[test]
-    fn pose_and_resolve_are_refused_while_a_revision_is_live() {
-        // propose, then pose: refused while awaiting review and while ready.
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        propose(&mut log, &task, 1);
-        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
-        assert!(matches!(
-            log.reduce(),
-            Err(ReduceError::DoneWithLiveRevision { revision: 1, ref state, .. }) if state == "awaiting_review"
-        ));
-        log.events.pop();
-        pass(&mut log, &task, REVIEWER);
-        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
-        assert!(matches!(
-            log.reduce(),
-            Err(ReduceError::DoneWithLiveRevision { revision: 1, ref state, .. }) if state == "ready"
-        ));
-        log.events.pop();
-        // A refute ends the revision; the pose then goes through.
-        log.push(
-            &task,
-            REVIEWER,
-            TaskEventKind::ReviewRefuted {
-                reviewer: REVIEWER.into(),
-                session_ref: None,
-                receipts: None,
-            },
-        );
-        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
-        assert!(log.reduce().unwrap().tasks[&task].is_decision());
-
-        // pose, then propose, then resolve: the resolution is refused over the live revision.
-        let mut log = Log::new();
-        let task = log.open(AUTHOR);
-        log.push(&task, AUTHOR, posed(&["keep", "delete"], "keep"));
-        propose(&mut log, &task, 1);
-        log.push(
-            &task,
-            OTHER,
-            TaskEventKind::Resolved {
-                choice: "keep".into(),
-                note: None,
-                provisional: false,
-            },
-        );
-        assert!(matches!(
-            log.reduce(),
-            Err(ReduceError::DoneWithLiveRevision { revision: 1, .. })
-        ));
-        log.events.pop();
-        // `done` is still refused for the decision reason, so the only way past is the land facet.
-        log.push(
-            &task,
-            AUTHOR,
-            TaskEventKind::Done {
-                observed: None,
-                check: None,
-            },
-        );
-        assert!(matches!(log.reduce(), Err(ReduceError::DecisionNeedsResolve { .. })));
     }
 
     /// The decision facet: posing makes a task a decision; resolving answers it with one of the
@@ -1794,7 +892,6 @@ mod tests {
         let t = &m.tasks[&task];
         assert_eq!(t.state, TaskState::Resolved);
         assert!(t.state.is_terminal());
-        assert_eq!(t.effective_state().as_str(), "resolved");
         let r = t.decision.as_ref().unwrap().resolution.as_ref().unwrap();
         assert_eq!(
             (r.choice.as_str(), r.by.as_str(), r.accepted_default),
@@ -1915,7 +1012,7 @@ mod tests {
                 log.push(&task, AUTHOR, k);
             }
             let before = log.reduce().unwrap().tasks[&task].clone();
-            assert_eq!(before.effective_state().as_str(), name);
+            assert_eq!(before.state.as_str(), name);
             log.push(
                 &task,
                 OTHER,
@@ -1925,7 +1022,6 @@ mod tests {
                 },
             );
             let after = log.reduce().unwrap().tasks[&task].clone();
-            assert_eq!(after.effective_state(), before.effective_state(), "{name}: state moved");
             assert_eq!(after.state, before.state, "{name}");
             assert_eq!(after.decision, before.decision, "{name}: the resolution is untouched");
             assert_eq!(after.notes.len(), 2, "{name}");
@@ -2095,11 +1191,7 @@ mod tests {
             (s.text.as_str(), s.by.as_str(), s.revisions),
             ("gen 2: tip bbb; next: merge C", OTHER, 2)
         );
-        assert_eq!(
-            m.tasks[&task].effective_state().as_str(),
-            "claimed",
-            "a status never moves state"
-        );
+        assert_eq!(m.tasks[&task].state.as_str(), "claimed", "a status never moves state");
         // The opener still may; a third party may not.
         log.push(&task, AUTHOR, status("gen 3"));
         log.reduce().unwrap();
@@ -2125,5 +1217,37 @@ mod tests {
             log.reduce().unwrap().tasks[&task].status.as_ref().unwrap().text,
             "gen 3"
         );
+    }
+
+    /// The land facet's retired kinds replay as no-ops — a log written before 0.15.0 folds to the
+    /// same model as if they were never there, and none of them gates `done` — while a tag this cv
+    /// never wrote is refused (a log from a newer cv is loud, never misread).
+    #[test]
+    fn retired_kinds_are_no_ops_and_unknown_kinds_are_refused() {
+        let mut log = Log::new();
+        let task = log.open(AUTHOR);
+        let before = log.reduce().unwrap();
+        let retired = |tag: &str| -> TaskEventKind {
+            serde_json::from_value(serde_json::json!({"event": tag, "reviewer": "r", "detail": "d"})).unwrap()
+        };
+        for tag in crate::task::model::RETIRED_TAGS {
+            log.push(&task, "cv-verify", retired(tag));
+        }
+        let after = log.reduce().unwrap();
+        assert_eq!(after, before, "nine retired events change nothing, not even last_ts");
+        log.push(
+            &task,
+            AUTHOR,
+            TaskEventKind::Done {
+                observed: Some("my word".into()),
+                check: None,
+            },
+        );
+        assert_eq!(log.reduce().unwrap().tasks[&task].state, TaskState::Done);
+        log.push(&task, AUTHOR, retired("teleported"));
+        assert!(matches!(
+            log.reduce().unwrap_err(),
+            ReduceError::UnknownKind { ref tag } if tag == "teleported"
+        ));
     }
 }

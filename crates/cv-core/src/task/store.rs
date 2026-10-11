@@ -17,12 +17,12 @@
 //! release. This is what makes `claim` a race-free first-writer-wins with zero extra lock kinds,
 //! and it guarantees the log never contains an event the reducer would refuse on replay.
 //!
-//! # Law 1 at the seam
+//! # Retired kinds at the seam
 //!
-//! [`TaskStore::append_agent_event`] — the only path the CLI verbs and MCP tools use — rejects
-//! verifier-only kinds (`MergedLocal`, `Landed`, ...). Only the git verifier calls
-//! [`TaskStore::append_verifier_event`]. The reducer itself cannot enforce this (it must replay
-//! verifier events); the store seam is where "observed, not attested" becomes mechanical.
+//! [`TaskStore::append_agent_event`] — the only path the CLI verbs and MCP tools use — refuses
+//! the kinds retired in 0.15.0 ([`super::model::RETIRED_TAGS`]). The reducer itself cannot
+//! (it must replay them from old logs); the store seam is where "never written again" is
+//! mechanical.
 //!
 //! # Growth & retention (the compaction plan)
 //!
@@ -45,7 +45,7 @@ use chrono::Utc;
 
 use crate::lockfile::FileLock;
 
-use super::model::{TaskEvent, TaskEventKind, VERIFIER_BY};
+use super::model::{TaskEvent, TaskEventKind};
 use super::reduce::{TaskReadModel, TaskReducer};
 
 /// The log-format header record: the first line of every log this cv creates. Readers skip a
@@ -77,38 +77,22 @@ pub struct ReplayOutcome {
 }
 
 /// Handle on a task log directory. Cheap to construct; every operation opens files fresh.
-///
-/// The optional `token` is the TOFU per-endpoint credential the handle presents on writes: the
-/// store's append seam authenticates identity-bearing events against the endpoint bindings
-/// ([`super::identity`]) using it. `None` is the solo/human path (unbound endpoints stay trusted).
 #[derive(Clone, Debug)]
 pub struct TaskStore {
     dir: PathBuf,
-    token: Option<String>,
 }
 
 impl TaskStore {
-    /// The default store at [`super::tasks_dir`], presenting no token.
+    /// The default store at [`super::tasks_dir`].
     pub fn default_store() -> TaskStore {
         TaskStore {
             dir: super::tasks_dir(),
-            token: None,
         }
     }
 
-    /// A store rooted at `dir` (testing and embedding), presenting no token.
+    /// A store rooted at `dir` (testing and embedding).
     pub fn at(dir: impl Into<PathBuf>) -> TaskStore {
-        TaskStore {
-            dir: dir.into(),
-            token: None,
-        }
-    }
-
-    /// This handle, but presenting `token` on identity-bearing appends (the TOFU credential). The
-    /// front-ends build the store with the resolved [`super::token`] before appending.
-    pub fn with_token(mut self, token: Option<String>) -> TaskStore {
-        self.token = token;
-        self
+        TaskStore { dir: dir.into() }
     }
 
     pub fn dir(&self) -> &Path {
@@ -128,8 +112,7 @@ impl TaskStore {
     ///
     /// Events the reducer refuses are **quarantined**: skipped with a loud warning (line number +
     /// reason) and counted, so one poisoned interior line degrades the model instead of bricking
-    /// the CLI, cvd, and every append at once. Verifier-only events whose `by` is not the
-    /// verifier identity get a provenance warning (never a rejection — old logs and tests exist).
+    /// the CLI, cvd, and every append at once.
     pub fn replay(&self) -> Result<ReplayOutcome> {
         let (raw, mut warnings) = self.read_events()?;
         let path = self.events_path();
@@ -149,17 +132,6 @@ impl TaskStore {
                 }
             }
         }
-        for ev in &events {
-            if ev.kind.is_verifier_only() && ev.by != VERIFIER_BY {
-                warnings.push(format!(
-                    "task {}: verifier-only event '{}' appended by '{}' — landing state may be \
-                     attested, not observed",
-                    &ev.task_id[..ev.task_id.len().min(8)],
-                    ev.kind.tag(),
-                    ev.by
-                ));
-            }
-        }
         Ok(ReplayOutcome {
             model: reducer.into_model(),
             events,
@@ -168,14 +140,9 @@ impl TaskStore {
         })
     }
 
-    /// Agent-facing append: rejects verifier-only kinds (law 1), then CAS-appends.
+    /// Agent-facing append: refuses retired kinds (never written again), then CAS-appends.
     pub fn append_agent_event(&self, event: TaskEvent) -> Result<TaskEvent> {
-        if event.kind.is_verifier_only() {
-            bail!(
-                "event kind '{}' is verifier-only: landing state is observed by `cv task verify`, never asserted",
-                event.kind.tag()
-            );
-        }
+        refuse_retired(&event)?;
         self.append(event)
     }
 
@@ -184,19 +151,10 @@ impl TaskStore {
     /// either all of them land or none does. `cv task done --note-file F` uses it so a lane
     /// cannot lose its evidence by ordering (the note, then the terminal event).
     pub fn append_agent_events(&self, events: Vec<TaskEvent>) -> Result<Vec<TaskEvent>> {
-        if let Some(e) = events.iter().find(|e| e.kind.is_verifier_only()) {
-            bail!(
-                "event kind '{}' is verifier-only: landing state is observed by `cv task verify`, never asserted",
-                e.kind.tag()
-            );
+        for e in &events {
+            refuse_retired(e)?;
         }
         self.append_all(events)
-    }
-
-    /// Verifier-only append: same CAS, no kind restriction. Callers other than the git verifier
-    /// (and its tests) must not use this.
-    pub fn append_verifier_event(&self, event: TaskEvent) -> Result<TaskEvent> {
-        self.append(event)
     }
 
     /// The locked CAS: replay → apply candidate → append. Returns the appended event.
@@ -210,8 +168,8 @@ impl TaskStore {
         Ok(out.pop().expect("one event in, one out"))
     }
 
-    /// [`Self::append`] for a batch: validate every candidate in order, authenticate every one,
-    /// then bind and write them all in one `write_all`.
+    /// [`Self::append`] for a batch: validate every candidate in order, then write them all in one
+    /// `write_all`.
     fn append_all(&self, events: Vec<TaskEvent>) -> Result<Vec<TaskEvent>> {
         if events.is_empty() {
             return Ok(events);
@@ -244,27 +202,6 @@ impl TaskStore {
             reducer
                 .apply(event)
                 .map_err(|e| anyhow::anyhow!("event rejected: {e}"))?;
-        }
-
-        // Identity gate (TOFU): after the events are validated but before any is written,
-        // authenticate each `by` claim against the endpoint bindings. Runs under the same lock as
-        // the append and binding write, so load-decide-bind-append is atomic. Non-identity events
-        // proceed untouched; a bound endpoint without the matching token is rejected here, before
-        // anything is bound or written.
-        let mut binds = Vec::new();
-        for event in &events {
-            let decision = super::identity::authorize(
-                &self.dir,
-                &event.by,
-                event.kind.is_identity_bearing(),
-                self.token.as_deref(),
-            )?;
-            if let super::identity::Decision::Bind { endpoint, hash } = decision {
-                binds.push((endpoint, hash));
-            }
-        }
-        for (endpoint, hash) in &binds {
-            super::identity::commit(&self.dir, endpoint, hash)?;
         }
 
         // First append to a fresh log stamps the format header (older, header-less logs stay
@@ -360,6 +297,18 @@ impl TaskStore {
     }
 }
 
+/// The agent-facing seam: a kind cv retired is never written again, whatever constructed it.
+fn refuse_retired(event: &TaskEvent) -> Result<()> {
+    if event.kind.is_retired() {
+        bail!(
+            "event kind '{}' was retired in 0.15.0 with the task land facet and is never written again \
+             (an existing log that holds it still replays)",
+            event.kind.tag()
+        );
+    }
+    Ok(())
+}
+
 /// If `line` is a log-format header record, its declared version (`v` missing reads as 0, which
 /// is ≤ current and therefore skipped — keep it dumb).
 fn header_version(line: &str) -> Option<u64> {
@@ -383,11 +332,6 @@ pub fn new_event(task_id: Option<&str>, by: &str, kind: TaskEventKind) -> TaskEv
 /// Convenience: agent-facing append to the default store.
 pub fn append_agent_event(task_id: Option<&str>, by: &str, kind: TaskEventKind) -> Result<TaskEvent> {
     TaskStore::default_store().append_agent_event(new_event(task_id, by, kind))
-}
-
-/// Convenience: verifier append to the default store.
-pub fn append_verifier_event(task_id: &str, by: &str, kind: TaskEventKind) -> Result<TaskEvent> {
-    TaskStore::default_store().append_verifier_event(new_event(Some(task_id), by, kind))
 }
 
 /// Convenience: replay the default store.
@@ -521,24 +465,33 @@ mod tests {
         assert!(!t.notes[0].post_close, "the note preceded the close");
     }
 
+    /// A retired kind is never written again, however it was constructed — and a log that already
+    /// holds one still replays, the retired line folding to nothing.
     #[test]
-    fn agent_append_rejects_verifier_only_kinds() {
+    fn agent_append_rejects_retired_kinds_but_replay_still_reads_them() {
         let dir = tmp_tasks();
         let store = TaskStore::at(&dir);
         let task = open_task(&store);
+        let landed: TaskEventKind = serde_json::from_value(serde_json::json!({
+            "event": "landed", "upstream_head": "a".repeat(40), "observed_patch_id": "b".repeat(40)
+        }))
+        .unwrap();
         let err = store
-            .append_agent_event(new_event(
-                Some(&task),
-                "agent:sneaky",
-                TaskEventKind::Landed {
-                    upstream_head: "a".repeat(40),
-                    observed_patch_id: "b".repeat(40),
-                },
-            ))
+            .append_agent_event(new_event(Some(&task), "agent:sneaky", landed.clone()))
             .unwrap_err();
-        assert!(err.to_string().contains("verifier-only"), "{err}");
-        // Nothing was appended.
-        assert_eq!(store.replay().unwrap().events.len(), 1);
+        assert!(err.to_string().contains("retired in 0.15.0"), "{err}");
+        assert_eq!(store.replay().unwrap().events.len(), 1, "nothing was appended");
+
+        // An old log with the line already in it: read, replayed, state untouched.
+        let mut f = OpenOptions::new().append(true).open(store.events_path()).unwrap();
+        let old = new_event(Some(&task), "cv-verify", landed);
+        writeln!(f, "{}", serde_json::to_string(&old).unwrap()).unwrap();
+        drop(f);
+        let outcome = store.replay().unwrap();
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert_eq!(outcome.events.len(), 2);
+        assert_eq!(outcome.events[1].kind.tag(), "landed");
+        assert_eq!(outcome.model.tasks[&task].state, TaskState::Open);
     }
 
     #[test]
