@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `integrations/` is gone (its recipes called MCP tools removed in 0.11); the manual's [Hooking a harness in](manual/src/integrations.md) replaces it.
+
 ## 0.14.0 — 2026-10-10
 
 0.12.0 and 0.13.0 were bumped in `Cargo.toml` but never tagged or published; tags and crates.io

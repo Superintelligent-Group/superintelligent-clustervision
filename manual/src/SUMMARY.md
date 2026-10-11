@@ -13,6 +13,7 @@
 
 - [The daemon: `cvd`](daemon.md)
 - [MCP — agents reading each other's minds](mcp.md)
+- [Hooking a harness in](integrations.md)
 - [The coordination board](board.md)
 - [The task substrate](tasks.md)
 - [Running a swarm: the orchestrator's instruments](swarm.md)

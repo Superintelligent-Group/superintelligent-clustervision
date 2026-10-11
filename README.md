@@ -104,7 +104,7 @@ cv scry
   - a **Structure** explorer (`<cv-forest>`) — Overview / Forest / Workflows / Tools / Compaction tabs that turn a run's anatomy into something you can drill through.
 
   The browser build is zero-install — drop a harness zip, nothing uploaded (all WASM).
-- **🔌 Harness integrations** — plug clustervision into the agents' own hooks/MCP/plugins ([`integrations/`](integrations/)): SessionEnd → archive + post to the board, SessionStart → `cv pack` the prior context back in.
+- **🔌 Hooks** — two Claude Code hooks make a harness use clustervision while it runs: SessionEnd → `cvd sync` archives everything, SessionStart → `cv ls --cwd` surfaces this project's prior sessions. Recipe in the manual's [Hooking a harness in](manual/src/integrations.md).
 
 ## 📖 Manual
 
