@@ -11,6 +11,12 @@
 //! The land facet retired in 0.15.0 left nine event kinds in old logs
 //! ([`super::model::RETIRED_TAGS`]); they apply as no-ops, so such a log folds to the model it
 //! would have without them.
+//!
+//! Two kinds of rule live here. [`TaskReducer::apply`] says what the log *means* and never
+//! tightens: every line ever written must fold the same way forever. [`TaskReducer::admit`] says
+//! what may be *written today* against the current model — the store runs it on every candidate
+//! before `apply` — and may tighten between releases (a retired kind, a bare `decision` tag) without
+//! touching how an old log replays. Both are pure, so CLI, MCP and HTTP get the same refusals.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -73,6 +79,20 @@ pub enum ReduceError {
         assignee: String,
         by: String,
     },
+
+    // ── write-time rules ([`TaskReducer::admit`]) ────────────────────────
+    #[error(
+        "event kind {tag:?} was retired in 0.15.0 with the task land facet and is never written again \
+         (an existing log that holds it still replays)"
+    )]
+    RetiredKind { tag: String },
+    #[error(
+        "task {task_id}: a decision is posed, not tagged — a `decision` tag with no options gives the decider \
+         nothing to choose. Pose it:\n  cv task decide {title:?} --for <who> --default \"<the option that stands if \
+         nobody speaks>\" [--option \"<alternative>\"]…\n  (`--default` is required; `--provisional` proceeds on it \
+         now with a veto window; `--blocks <id>` makes a task wait on the answer)"
+    )]
+    BareDecisionTag { task_id: String, title: String },
 }
 
 /// A progress note.
@@ -287,6 +307,32 @@ impl TaskReducer {
 
     pub fn into_model(self) -> TaskReadModel {
         self.model
+    }
+
+    /// May `event` be WRITTEN now, given the model so far? Replay never asks this — an old log is
+    /// folded by [`apply`](Self::apply) alone — so a rule here tightens what new writers may say
+    /// without changing what any existing line means. The store runs it on every candidate of an
+    /// agent-facing append, which is why CLI, MCP and HTTP cannot disagree about it.
+    pub fn admit(&self, event: &TaskEvent) -> Result<(), ReduceError> {
+        match &event.kind {
+            TaskEventKind::Retired(r) => Err(ReduceError::RetiredKind {
+                tag: r.tag_str().to_string(),
+            }),
+            // One way to pose a decision: a `decision` tag on a task with nothing posed made an
+            // inbox card with no options and no buttons (two such cards, 10-01). The tag is what
+            // `pose` wrote before 0.15.0 and what hands wrote before `decide` existed; old logs
+            // keep it, new writers pose.
+            TaskEventKind::Tagged { tags } if tags.iter().any(|t| t == super::project::DECISION_TAG) => {
+                match self.model.tasks.get(&event.task_id) {
+                    Some(task) if task.decision.is_none() => Err(ReduceError::BareDecisionTag {
+                        task_id: task.task_id.clone(),
+                        title: task.title.clone(),
+                    }),
+                    _ => Ok(()),
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
     pub fn apply(&mut self, event: &TaskEvent) -> Result<(), ReduceError> {
@@ -1241,5 +1287,73 @@ mod tests {
             log.reduce().unwrap_err(),
             ReduceError::UnknownKind { ref tag } if tag == "teleported"
         ));
+    }
+
+    /// Write-time rules are not replay rules: a bare `decision` tag is refused by `admit` on a task
+    /// with nothing posed, admitted once a decision is posed, and `apply` folds the old shape
+    /// (`tagged decision` before `posed`, or alone) exactly as it always did. A retired kind is
+    /// refused by `admit` and a no-op under `apply`.
+    #[test]
+    fn admit_refuses_what_replay_still_folds() {
+        let mut log = Log::new();
+        let work = log.open(AUTHOR);
+        let mut r = TaskReducer::new();
+        for ev in &log.events {
+            r.apply(ev).unwrap();
+        }
+        let bare = TaskEvent {
+            id: "00000000-0000-7000-8000-0000000000aa".into(),
+            task_id: work.clone(),
+            ts: "2026-07-16T12:00:00Z".parse().unwrap(),
+            by: AUTHOR.into(),
+            kind: TaskEventKind::Tagged {
+                tags: vec!["deploy".into(), "decision".into()],
+            },
+        };
+        let err = r.admit(&bare).unwrap_err();
+        assert!(
+            matches!(&err, ReduceError::BareDecisionTag { title, .. } if title == "demo task"),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cv task decide \"demo task\"") && msg.contains("--default"),
+            "{msg}"
+        );
+        // Replay of the same event: the log keeps what was written.
+        r.apply(&bare).unwrap();
+        assert_eq!(r.model().tasks[&work].tags, ["deploy", "decision"]);
+
+        // Posed first: the tag is admitted (a decision may be tagged anything).
+        let posed = log.push(
+            &work,
+            AUTHOR,
+            TaskEventKind::Posed {
+                options: vec!["a".into()],
+                default_choice: "a".into(),
+                deadline: None,
+                source: None,
+            },
+        );
+        let mut r2 = TaskReducer::new();
+        r2.apply(&log.events[0]).unwrap();
+        r2.apply(&posed).unwrap();
+        r2.admit(&bare).unwrap();
+        // A tag without `decision` is nobody's business.
+        let plain = TaskEvent {
+            kind: TaskEventKind::Tagged {
+                tags: vec!["lean".into()],
+            },
+            ..bare.clone()
+        };
+        r.admit(&plain).unwrap();
+
+        let retired: TaskEvent = serde_json::from_str(&format!(
+            r#"{{"id":"00000000-0000-7000-8000-0000000000bb","task_id":"{work}","ts":"2026-07-16T12:00:00Z","by":"cv-verify","event":"landed","upstream_head":"e"}}"#
+        ))
+        .unwrap();
+        assert!(matches!(r.admit(&retired), Err(ReduceError::RetiredKind { tag }) if tag == "landed"));
+        r.apply(&retired).unwrap();
+        assert_eq!(r.model().tasks[&work].state, TaskState::Open);
     }
 }

@@ -1,7 +1,7 @@
 //! The composite task operations and read views the CLI verbs and `cv task serve` share, so the
-//! page and the shell are one store: posing a decision (`opened` + `tagged` + `posed`), resolving
-//! one, splitting `DECIDE` notes into decisions, the event feed (`cv task events` ≡
-//! `GET /api/events`), and the inbox page (`cv task inbox` ≡ `GET /api/inbox`).
+//! page and the shell are one store: posing a decision (`opened` + `posed`, one unit), resolving
+//! one, the event feed (`cv task events` ≡ `GET /api/events`), and the inbox page
+//! (`cv task inbox` ≡ `GET /api/inbox`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::util::fmt_local;
 
-// ───────────────────────────── pose / resolve / split ─────────────────────────────
+// ───────────────────────────── pose / resolve ─────────────────────────────
 
 /// Everything a decision is opened with.
 #[derive(Clone, Debug, Default)]
@@ -32,7 +32,8 @@ pub(crate) struct DecisionSpec {
     pub repo: Option<PathBuf>,
     pub issue: Option<String>,
     pub tags: Vec<String>,
-    /// The note event this decision was split from.
+    /// The note event this decision was posed from (an old log's `cv task split` wrote these; the
+    /// page's `reopen` of such a decision carries it forward).
     pub source: Option<String>,
     /// Tasks (full ids) this decision blocks.
     pub blocks: Vec<String>,
@@ -53,11 +54,12 @@ pub(crate) fn option_list(default_choice: &str, options: &[String]) -> Vec<Strin
     out
 }
 
-/// Pose a decision: three events (`opened`, `tagged decision`, `posed`) plus one `blocked_by` per
-/// task it blocks, plus the provisional `resolved` when `spec.provisional` — appended as ONE unit
-/// (`TaskStore::append_agent_events`), so a decision is never left half-posed. Returns the events
-/// in append order and the advisory warnings.
-pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<(Vec<TaskEvent>, Vec<String>)> {
+/// The events that pose a decision, in append order: `opened` (assigned to the decider) and
+/// `posed` (the options, the default, the deadline) — one creating event per decision, plus a
+/// `tagged` only for the caller's own tags, one `blocked_by` per task it blocks, and the
+/// provisional `resolved` when `spec.provisional`. Built, not written: [`pose`] appends them as
+/// ONE unit, and the page's `reopen` adds its notes to the same unit.
+pub(crate) fn pose_events(from: &str, spec: &DecisionSpec) -> Result<Vec<TaskEvent>> {
     if spec.default_choice.trim().is_empty() {
         bail!("a decision needs a --default (the option that stands if nobody speaks)");
     }
@@ -65,12 +67,6 @@ pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<
         bail!("a decision needs --for <who> (whose inbox it lands in)");
     }
     let options = option_list(&spec.default_choice, &spec.options);
-    let mut tags = vec![task::DECISION_TAG.to_string()];
-    for t in &spec.tags {
-        if !tags.iter().any(|have| have == t) {
-            tags.push(t.clone());
-        }
-    }
     let default_choice = spec.default_choice.trim().to_string();
     let opened = task::new_event(
         None,
@@ -87,7 +83,6 @@ pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<
     let id = opened.task_id.clone();
     let mut candidates = vec![
         opened,
-        task::new_event(Some(&id), from, TaskEventKind::Tagged { tags }),
         task::new_event(
             Some(&id),
             from,
@@ -99,6 +94,15 @@ pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<
             },
         ),
     ];
+    let mut tags: Vec<String> = Vec::new();
+    for t in &spec.tags {
+        if !tags.iter().any(|have| have == t) {
+            tags.push(t.clone());
+        }
+    }
+    if !tags.is_empty() {
+        candidates.push(task::new_event(Some(&id), from, TaskEventKind::Tagged { tags }));
+    }
     for other in &spec.blocks {
         candidates.push(task::new_event(
             Some(other),
@@ -117,32 +121,17 @@ pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<
             },
         ));
     }
-    let out = task::append_events(store, candidates, Vec::new())?;
+    Ok(candidates)
+}
+
+/// Pose a decision: [`pose_events`] appended as ONE unit (`TaskStore::append_agent_events`), so
+/// a decision is never left half-posed. Returns the events in append order and the advisory
+/// warnings.
+pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<(Vec<TaskEvent>, Vec<String>)> {
+    let out = task::append_events(store, pose_events(from, &spec)?, Vec::new())?;
     let mut warnings = out.replay_warnings;
     warnings.extend(out.warnings);
     Ok((out.events, warnings))
-}
-
-/// One way to pose a decision. A bare `decision` tag on a task with nothing posed made an inbox
-/// card with no options and no buttons (two such cards, 10-01): refuse it, naming the verb that
-/// poses one and its required `--default`. `existing` is the task being tagged (`None` = opening).
-/// A task that already carries a posed decision may be tagged anything.
-pub(crate) fn refuse_bare_decision_tag(tags: &[String], title: &str, existing: Option<&TaskProjection>) -> Result<()> {
-    if !tags.iter().any(|t| t == task::DECISION_TAG) || existing.is_some_and(TaskProjection::is_decision) {
-        return Ok(());
-    }
-    let mut msg = format!(
-        "a decision is posed, not tagged — a `decision` tag with no options gives the decider nothing to choose. Pose it:\n  \
-         cv task decide {title:?} --for <who> --default \"<the option that stands if nobody speaks>\" [--option \"<alternative>\"]…\n\
-         (`--default` is required; add `--provisional` to proceed on it now with a veto window)"
-    );
-    if let Some(t) = existing {
-        msg.push_str(&format!(
-            "\nto make this task wait on the answer: add `--blocks {}` to the decide",
-            &t.task_id[..13.min(t.task_id.len())]
-        ));
-    }
-    bail!(msg)
 }
 
 /// What a resolution says: the literal choice, or the posed default.
@@ -166,8 +155,9 @@ impl Answer {
 }
 
 /// Resolve a decision (full task id) with `answer`. `from` is the resolver and is recorded.
-/// `provisional`: resolve it on its default on the decider's behalf, with a veto window (the
-/// reducer refuses a provisional non-default choice).
+/// `provisional`: resolve it on its default on the decider's behalf, with a veto window. The
+/// rules — a posed decision, a known option, provisional only on the default — are the reducer's;
+/// this only turns `--accept-default` / `--confirm` into the literal choice they stand for.
 pub(crate) fn resolve(
     store: &TaskStore,
     model: &TaskReadModel,
@@ -179,46 +169,21 @@ pub(crate) fn resolve(
 ) -> Result<task::AppendOutcome> {
     let t = model.tasks.get(id).with_context(|| format!("no task {id}"))?;
     let short = &id[..13.min(id.len())];
-    let Some(d) = t.decision.as_ref() else {
-        bail!("task {short} is not a decision (nothing was posed) — finish it with `cv task done`");
+    let decision = || {
+        t.decision.as_ref().with_context(|| {
+            format!("task {short} is not a decision (nothing was posed) — finish it with `cv task done`")
+        })
     };
     let choice = match answer {
         Answer::Choice(c) => c,
-        Answer::AcceptDefault => d.default_choice.clone(),
-        Answer::Confirm => match d.resolution.as_ref().filter(|r| r.provisional) {
+        Answer::AcceptDefault => decision()?.default_choice.clone(),
+        Answer::Confirm => match decision()?.resolution.as_ref().filter(|r| r.provisional) {
             Some(r) => r.choice.clone(),
             None => bail!(
                 "task {short} has no provisional resolution to confirm — answer it with --choice or --accept-default"
             ),
         },
     };
-    if provisional && choice != d.default_choice {
-        bail!(
-            "a provisional resolution stands on the default ({:?}); only the decider chooses otherwise",
-            d.default_choice
-        );
-    }
-    if !d.options.iter().any(|o| o == &choice) {
-        // Be helpful before the reducer refuses: a case-insensitive / prefix match is almost
-        // always the intended option; name it instead of guessing.
-        let near: Vec<&str> = d
-            .options
-            .iter()
-            .filter(|o| o.eq_ignore_ascii_case(&choice) || o.to_lowercase().starts_with(&choice.to_lowercase()))
-            .map(String::as_str)
-            .collect();
-        if let [one] = near.as_slice() {
-            bail!("{choice:?} is not an option as written — did you mean --choice {one:?}?");
-        }
-        bail!(
-            "{choice:?} is not one of the posed options:\n{}",
-            d.options
-                .iter()
-                .map(|o| format!("  --choice {o:?}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-    }
     let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     task::append(
         store,
@@ -233,115 +198,10 @@ pub(crate) fn resolve(
     )
 }
 
-/// One `DECIDE` note on a task and what it would become.
-#[derive(Clone, Debug)]
-pub(crate) struct SplitItem {
-    pub note_event_id: String,
-    pub note_by: String,
-    pub note_ts: DateTime<Utc>,
-    pub note_text: String,
-    pub title: String,
-    pub default_choice: String,
-    pub options: Vec<String>,
-    /// Already split: the decision task that carries this note as its `source`.
-    pub existing: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SplitPlan {
-    pub parent: String,
-    pub items: Vec<SplitItem>,
-    /// Notes that mention `DECIDE` after their first sentence — reported, never split.
-    pub mid_text: usize,
-}
-
-/// What `cv task split <id>` would do, from the model alone.
-pub(crate) fn plan_split(model: &TaskReadModel, parent: &str) -> Result<SplitPlan> {
-    let t = model.tasks.get(parent).with_context(|| format!("no task {parent}"))?;
-    let by_source: HashMap<&str, &str> = model
-        .tasks
-        .values()
-        .filter_map(|d| {
-            d.decision
-                .as_ref()
-                .and_then(|dec| dec.source.as_deref())
-                .map(|s| (s, d.task_id.as_str()))
-        })
-        .collect();
-    let mut items = Vec::new();
-    let mut mid_text = 0;
-    for n in &t.notes {
-        if cv_core::task::decide::mentions_decide_mid_text(&n.text) {
-            mid_text += 1;
-        }
-        let Some(parsed) = task::parse_decide_note(&n.text) else {
-            continue;
-        };
-        let (default_choice, options) = task::options_of(&parsed);
-        items.push(SplitItem {
-            note_event_id: n.event_id.clone(),
-            note_by: n.by.clone(),
-            note_ts: n.ts,
-            note_text: n.text.clone(),
-            title: parsed.title,
-            default_choice,
-            options,
-            existing: by_source.get(n.event_id.as_str()).map(|s| s.to_string()),
-        });
-    }
-    Ok(SplitPlan {
-        parent: parent.to_string(),
-        items,
-        mid_text,
-    })
-}
-
-/// `(note event id, new decision task id)` per decision a split created.
-pub(crate) type SplitCreated = Vec<(String, String)>;
-
-/// Execute a plan: one decision per not-yet-split note, assigned like the parent, carrying the
-/// parent's repo/issue, with the note as its body and source, blocking the parent.
-/// Returns what was created and the advisory warnings.
-pub(crate) fn run_split(
-    store: &TaskStore,
-    model: &TaskReadModel,
-    from: &str,
-    plan: &SplitPlan,
-) -> Result<(SplitCreated, Vec<String>)> {
-    let t = &model.tasks[&plan.parent];
-    let Some(for_who) = t.assignee.clone() else {
-        bail!(
-            "task {} has no assignee — split needs to know who owes the decisions (assign it first)",
-            &plan.parent[..13]
-        );
-    };
-    let mut created = Vec::new();
-    let mut warnings = Vec::new();
-    for item in plan.items.iter().filter(|i| i.existing.is_none()) {
-        let spec = DecisionSpec {
-            title: item.title.clone(),
-            body: item.note_text.clone(),
-            for_who: for_who.clone(),
-            default_choice: item.default_choice.clone(),
-            options: item.options.clone(),
-            deadline: None,
-            repo: t.repo.clone(),
-            issue: t.issue.clone(),
-            tags: vec!["split".into()],
-            source: Some(item.note_event_id.clone()),
-            blocks: vec![plan.parent.clone()],
-            provisional: false,
-        };
-        let (events, w) = pose(store, from, spec)?;
-        warnings.extend(w);
-        created.push((item.note_event_id.clone(), events[0].task_id.clone()));
-    }
-    Ok((created, warnings))
-}
-
-/// `note event id → decision task id` for every decision split from a note (what `show` uses to
-/// point a `DECIDE` note at its decision).
-pub(crate) fn split_children(model: &TaskReadModel) -> HashMap<String, String> {
+/// `note event id → decision task id` for every decision that names a note as its `source` (what
+/// `cv task split` wrote until 0.15.0; `show` and the page still point such a note at its
+/// decision).
+pub(crate) fn decisions_from_notes(model: &TaskReadModel) -> HashMap<String, String> {
     model
         .tasks
         .values()
@@ -641,7 +501,7 @@ pub(crate) struct NoteView {
     /// Appended after the task closed (the page renders "(after close)").
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub post_close: bool,
-    /// The decision this note was split into, when it was.
+    /// The decision posed from this note, when one names it as its `source`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split_into: Option<String>,
 }
@@ -768,7 +628,7 @@ pub(crate) fn inbox_page(
         model,
         who,
         plen: task::unique_prefix_len(model.tasks.keys().map(String::as_str), 8),
-        children: split_children(model),
+        children: decisions_from_notes(model),
         authors: last_authors(&outcome.events),
         now,
     };

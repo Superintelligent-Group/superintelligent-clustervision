@@ -508,27 +508,30 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             vec![out.event]
         }
         "discuss" => {
+            // One unit: the note and the `discuss` tag land together.
             let detail = text("text").unwrap_or_else(|| "(no detail)".into());
-            let note = task::append(
+            let out = task::append_events(
                 &store,
-                Some(&id),
-                &by,
-                TaskEventKind::Noted {
-                    text: format!("NEEDS DISCUSSION: {detail}"),
-                    session_ref: None,
-                },
+                vec![
+                    task::new_event(
+                        Some(&id),
+                        &by,
+                        TaskEventKind::Noted {
+                            text: format!("NEEDS DISCUSSION: {detail}"),
+                            session_ref: None,
+                        },
+                    ),
+                    task::new_event(
+                        Some(&id),
+                        &by,
+                        TaskEventKind::Tagged {
+                            tags: vec![task::DISCUSS_TAG.into()],
+                        },
+                    ),
+                ],
                 Vec::new(),
             )?;
-            let tag = task::append(
-                &store,
-                Some(&id),
-                &by,
-                TaskEventKind::Tagged {
-                    tags: vec!["discuss".into()],
-                },
-                Vec::new(),
-            )?;
-            vec![note.event, tag.event]
+            out.events
         }
         "claim" => {
             let out = task::append(
@@ -552,35 +555,28 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             }
             // Terminal is terminal: the record of the close stays. The task comes back as a NEW
             // task carrying the same title/body/assignee (and, for a decision, the same options),
-            // and the closed one gets a note pointing at it.
-            let mut events = Vec::new();
-            let new_id = match &t.decision {
-                Some(d) => {
-                    let (evs, _) = task_ops::pose(
-                        &store,
-                        &by,
-                        DecisionSpec {
-                            title: t.title.clone(),
-                            body: t.body.clone(),
-                            for_who: t.assignee.clone().unwrap_or_else(|| who.trim().to_string()),
-                            default_choice: d.default_choice.clone(),
-                            options: d.options.clone(),
-                            deadline: None,
-                            repo: t.repo.clone(),
-                            issue: t.issue.clone(),
-                            tags: vec!["reopened".into()],
-                            source: d.source.clone(),
-                            blocks: Vec::new(),
-                            provisional: false,
-                        },
-                    )?;
-                    let id = evs[0].task_id.clone();
-                    events.extend(evs);
-                    id
-                }
+            // tagged `reopened`, and each side notes the other — all as ONE unit.
+            let assignee = t.assignee.clone().unwrap_or_else(|| who.trim().to_string());
+            let mut events = match &t.decision {
+                Some(d) => task_ops::pose_events(
+                    &by,
+                    &DecisionSpec {
+                        title: t.title.clone(),
+                        body: t.body.clone(),
+                        for_who: assignee,
+                        default_choice: d.default_choice.clone(),
+                        options: d.options.clone(),
+                        deadline: None,
+                        repo: t.repo.clone(),
+                        issue: t.issue.clone(),
+                        tags: vec!["reopened".into()],
+                        source: d.source.clone(),
+                        blocks: Vec::new(),
+                        provisional: false,
+                    },
+                )?,
                 None => {
-                    let out = task::append(
-                        &store,
+                    let opened = task::new_event(
                         None,
                         &by,
                         TaskEventKind::Opened {
@@ -589,50 +585,41 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                             repo: t.repo.clone(),
                             issue: t.issue.clone(),
                             channel: None,
-                            assignee: t.assignee.clone().or_else(|| Some(who.trim().to_string())),
+                            assignee: Some(assignee),
                         },
-                        Vec::new(),
-                    )?;
-                    let id = out.event.task_id.clone();
-                    events.push(out.event);
-                    let tagged = task::append(
-                        &store,
-                        Some(&id),
-                        &by,
-                        TaskEventKind::Tagged {
-                            tags: vec!["reopened".into()],
-                        },
-                        Vec::new(),
-                    )?;
-                    events.push(tagged.event);
-                    id
+                    );
+                    let new_id = opened.task_id.clone();
+                    vec![
+                        opened,
+                        task::new_event(
+                            Some(&new_id),
+                            &by,
+                            TaskEventKind::Tagged {
+                                tags: vec!["reopened".into()],
+                            },
+                        ),
+                    ]
                 }
             };
-            // Each side points at the other: the new task says where it came from, and the closed
-            // one gets a post-close note (it stays closed; a note never changes state).
-            let note = task::append(
-                &store,
+            let new_id = events[0].task_id.clone();
+            events.push(task::new_event(
                 Some(&new_id),
                 &by,
                 TaskEventKind::Noted {
                     text: format!("reopened from {} ({})", &id[..13], task::effective_display(t)),
                     session_ref: None,
                 },
-                Vec::new(),
-            )?;
-            events.push(note.event);
-            let back = task::append(
-                &store,
+            ));
+            // The closed one stays closed: a note never changes state.
+            events.push(task::new_event(
                 Some(&id),
                 &by,
                 TaskEventKind::Noted {
                     text: format!("reopened as {}", &new_id[..13]),
                     session_ref: None,
                 },
-                Vec::new(),
-            )?;
-            events.push(back.event);
-            events
+            ));
+            task::append_events(&store, events, Vec::new())?.events
         }
         other => bail!("unknown action {other:?}"),
     };

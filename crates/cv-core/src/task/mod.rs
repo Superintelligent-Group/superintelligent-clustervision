@@ -21,19 +21,17 @@
 //! Storage is a single append-only event log (`$CLUSTERVISION_HOME/tasks/events.jsonl`) under a
 //! crash-safe flock.
 
-pub mod decide;
 pub mod model;
 pub mod project;
 pub mod reduce;
 pub mod store;
 pub mod views;
 
-pub use decide::{options_of, parse_deadline, parse_decide_note, DecideNote, AS_PROPOSED};
 pub use model::{RetiredEvent, TaskEvent, TaskEventKind, TaskState, RETIRED_TAGS};
 pub use project::{
-    age_short, blocks, effective_display, in_scope, inbox, involves, is_blocked, list, parse_duration, parse_since,
-    resolve_id, same_actor, unique_prefix_len, uuid_v7_timestamp, InboxEntry, InboxReason, TaskFilter, DECISION_TAG,
-    DISCUSS_TAG, STATE_VOCABULARY,
+    age_short, blocks, effective_display, in_scope, inbox, involves, is_blocked, list, parse_deadline, parse_duration,
+    parse_since, resolve_id, same_actor, unique_prefix_len, uuid_v7_timestamp, InboxEntry, InboxReason, TaskFilter,
+    DECISION_TAG, DISCUSS_TAG, STATE_VOCABULARY,
 };
 pub use reduce::{Decision, Note, PinnedStatus, ReduceError, Resolution, TaskProjection, TaskReadModel, TaskReducer};
 pub use store::{new_event, replay, ReplayOutcome, TaskStore};

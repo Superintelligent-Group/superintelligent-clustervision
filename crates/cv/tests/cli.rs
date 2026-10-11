@@ -1493,6 +1493,8 @@ fn task_land_facet_verbs_and_flags_are_removed_with_pointers() {
         &["task", "stats"],
         &["task", "claim", &id, "--from", "a", "--token", "t"],
         &["task", "done", &id, "--check-cmd", "true"],
+        &["task", "split", &id, "--dry-run"],
+        &["task", "watch", "ember"],
     ];
     for args in removed {
         let (ok, code, out, err) = w.cv(args);
@@ -1866,7 +1868,6 @@ fn task_decide_resolve_round_trip() {
         out.contains("resolve:  cv task resolve") && out.contains("--from ember"),
         "{out}"
     );
-    assert!(out.contains("tags:     decision"), "{out}");
     let (json, _) = w.cv_ok(&["task", "show", &d, "--json"]);
     let t: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(t["decision"]["default"], "the concierge births it");
@@ -1890,12 +1891,13 @@ fn task_decide_resolve_round_trip() {
         "{json}"
     );
 
-    // Wrong verb, wrong option, no identity.
+    // Wrong verb, wrong option (the reducer's refusal names the options), no identity.
     let (_, err) = w.cv_fails(&["task", "done", &d]);
     assert!(err.contains("answer it with resolve"), "{err}");
     let (_, err) = w.cv_fails(&["task", "resolve", &d, "--choice", "burn it", "--from", "ember"]);
     assert!(
-        err.contains("not one of the posed options") && err.contains("--choice \"the receiver allocates it\""),
+        err.contains("\"burn it\" is not one of the posed options")
+            && err.contains("the concierge births it | the receiver allocates it"),
         "{err}"
     );
     let (_, err) = w.cv_fails(&[
@@ -1908,8 +1910,8 @@ fn task_decide_resolve_round_trip() {
         "ember",
     ]);
     assert!(
-        err.contains("did you mean --choice \"the receiver allocates it\""),
-        "{err}"
+        err.contains("is not one of the posed options"),
+        "options are literal:\n{err}"
     );
     let (_, err) = w.cv_fails(&["task", "resolve", &d, "--accept-default"]);
     assert!(
@@ -2088,117 +2090,37 @@ claimed body
     let _ = d;
 }
 
-/// `split` turns each leading-DECIDE note into its own decision (title from the label and the
-/// question, default from the `Default =`/`if silent:`/`Recommend:` clause, options from
-/// `alternative =`), assigned like the parent and blocking it; the notes stay and `show` points
-/// each at its decision; a second split creates nothing; mid-text DECIDEs are reported, not split.
+/// `show --notes-last N` keeps the newest N notes, `--notes-grep` the matching ones; both say how
+/// many of the total they kept.
 #[test]
-fn task_split_turns_decide_notes_into_decisions() {
-    let w = World::new("split");
+fn task_show_notes_last_and_grep() {
+    let w = World::new("notes-filter");
     let (out, _) = w.cv_ok(&[
         "task",
         "open",
         "EMBER: everything only ember can do",
         "--assignee",
         "ember",
-        "--repo",
-        w.base.to_str().unwrap(),
     ]);
     let parent = opened_task_id(&out);
-    let notes = [
-        "DECIDE: move the build base from /tank (slow) to NVMe? Default if silent: keep /tank.",
+    for n in [
+        "move the build base from /tank (slow) to NVMe?",
         "PUSH also ~/dev/cv: one unsigned commit.",
-        "DECIDE (K-PORTAL, default stands if silent): who births a guest cell — default = the concierge births it; alternative = the receiver allocates it (then F pays).",
-        "DECIDE (DEOS.md §5, defaults stand if silent; the doc has the full argument): (1) quotes: REFERENCED by default; (2) web face: LOCAL ONLY.",
-        "JOIN-SOLANA works. DECIDE: one enrollment per tip, raise the floor or batch.",
-    ];
-    for n in notes {
+        "K-PORTAL: who births a guest cell",
+        "JOIN-SOLANA works.",
+    ] {
         w.cv_ok(&["task", "note", &parent, n, "--from", "orchestrator:x"]);
     }
-    let (out, _) = w.cv_ok(&["task", "split", &parent, "--dry-run"]);
-    assert!(
-        out.contains("# 3 DECIDE note(s)") && out.contains("(dry run: nothing written)"),
-        "{out}"
-    );
-    assert!(out.contains("1 other note(s) mention DECIDE mid-text"), "{out}");
-    let (list, _) = w.cv_ok(&["task", "list"]);
-    assert_eq!(
-        list.lines()
-            .filter(|l| l.starts_with(|c: char| c.is_ascii_hexdigit()))
-            .count(),
-        1,
-        "dry run wrote nothing:\n{list}"
-    );
-
-    let (out, _) = w.cv_ok(&["task", "split", &parent, "--from", "orchestrator:x"]);
-    assert!(out.contains("3 decision(s) created, each blocking"), "{out}");
-    assert!(
-        out.contains("move the build base from /tank to NVMe?"),
-        "title from the question, parens stripped:\n{out}"
-    );
-    assert!(out.contains("default: keep /tank"), "{out}");
-    assert!(out.contains("K-PORTAL: who births a guest cell"), "{out}");
-    assert!(
-        out.contains("option:  the receiver allocates it (then F pays)"),
-        "{out}"
-    );
-    assert!(
-        out.contains("DEOS.md §5: quotes: REFERENCED by default") && out.contains("default: as proposed"),
-        "{out}"
-    );
-
-    // The inbox: three decisions first, then the parent as an assigned action.
-    let (out, _) = w.cv_ok(&["task", "inbox", "ember"]);
-    assert!(out.starts_with("decisions owed (3):"), "{out}");
-    assert!(out.contains("assigned actions (1):"), "{out}");
-    assert!(
-        out.contains("⇒ default: the concierge births it · alt: the receiver allocates it (then F pays)"),
-        "{out}"
-    );
-
-    // Relations and provenance: the parent is blocked by each decision; each decision carries
-    // the note it came from as its source; `show` on the parent points each note at its child.
-    let (json, _) = w.cv_ok(&["task", "show", &parent, "--json"]);
-    let t: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(t["blocked_by"].as_array().unwrap().len(), 3, "{json}");
     let (out, _) = w.cv_ok(&["task", "show", &parent, "--brief"]);
-    assert!(out.contains("⊘ BLOCKED"), "{out}");
-    assert_eq!(out.matches("→ split into ").count(), 3, "{out}");
-    assert!(out.contains("notes:    5 of 5 (newest last) — one line each"), "{out}");
-    let (list, _) = w.cv_ok(&["task", "list", "--decisions", "--json"]);
-    let ds: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();
-    assert_eq!(ds.len(), 3);
-    for d in &ds {
-        assert!(d["decision"]["source"].is_string(), "{d}");
-        assert_eq!(d["assignee"], "ember");
-        assert_eq!(d["repo"], t["repo"]);
-        assert!(d["tags"].as_array().unwrap().iter().any(|x| x == "split"), "{d}");
-    }
-
-    // Idempotent: nothing new on a second run.
-    let (out, _) = w.cv_ok(&["task", "split", &parent]);
-    assert!(out.contains("0 decision(s) created"), "{out}");
-    assert_eq!(out.matches("(already split →").count(), 3, "{out}");
-
-    // Resolving one decision unblocks nothing yet (two remain); resolving all three unblocks.
-    for d in &ds {
-        w.cv_ok(&[
-            "task",
-            "resolve",
-            d["task_id"].as_str().unwrap(),
-            "--accept-default",
-            "--from",
-            "ember",
-        ]);
-    }
-    let (out, _) = w.cv_ok(&["task", "show", &parent]);
-    assert!(!out.contains("⊘ BLOCKED"), "{out}");
-    // --notes-last / --notes-grep
+    assert!(out.contains("notes:    4 of 4 (newest last) — one line each"), "{out}");
     let (out, _) = w.cv_ok(&["task", "show", &parent, "--brief", "--notes-last", "2"]);
-    assert!(out.contains("notes:    2 of 5"), "{out}");
-    assert!(!out.contains("DECIDE: move the build base"), "{out}");
+    assert!(out.contains("notes:    2 of 4"), "{out}");
+    assert!(
+        !out.contains("move the build base") && out.contains("JOIN-SOLANA"),
+        "{out}"
+    );
     let (out, _) = w.cv_ok(&["task", "show", &parent, "--notes-grep", "k-portal"]);
-    assert!(out.contains("notes:    1 of 5") && out.contains("K-PORTAL"), "{out}");
+    assert!(out.contains("notes:    1 of 4") && out.contains("K-PORTAL"), "{out}");
 }
 
 /// `note <id> -` and `--body -` read stdin; a relative `--issue` is absolutized at open time
@@ -2669,7 +2591,10 @@ fn task_serve_records_the_same_events_as_the_cli() {
     );
     assert!(out.contains("web:ember") && out.contains("reading PAY first"), "{out}");
     assert!(out.contains("NEEDS DISCUSSION: what is a unit?"), "{out}");
-    assert!(out.contains("tags:     decision, discuss"), "{out}");
+    assert!(
+        out.contains("tags:     discuss"),
+        "a decision is posed, never tagged:\n{out}"
+    );
     let (out, _) = w.cv_ok(&["task", "show", &a, "--brief"]);
     assert!(
         out.contains("[done]") && out.contains("self-reported") && out.contains("(pushed)"),

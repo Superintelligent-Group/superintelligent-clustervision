@@ -139,9 +139,9 @@ impl TaskStore {
         })
     }
 
-    /// Agent-facing append: refuses retired kinds (never written again), then CAS-appends.
+    /// Agent-facing append: the write-time rules ([`TaskReducer::admit`] — retired kinds, bare
+    /// `decision` tags) and the CAS, in one locked step.
     pub fn append_agent_event(&self, event: TaskEvent) -> Result<TaskEvent> {
-        refuse_retired(&event)?;
         self.append(event)
     }
 
@@ -150,9 +150,6 @@ impl TaskStore {
     /// either all of them land or none does. `cv task done --note-file F` uses it so a lane
     /// cannot lose its evidence by ordering (the note, then the terminal event).
     pub fn append_agent_events(&self, events: Vec<TaskEvent>) -> Result<Vec<TaskEvent>> {
-        for e in &events {
-            refuse_retired(e)?;
-        }
         self.append_all(events)
     }
 
@@ -197,9 +194,12 @@ impl TaskStore {
                 )
             })?;
         }
+        // Each candidate is admitted (what may be written today) and applied (what it will mean)
+        // against the exact state it lands after — the previous candidates of the batch included.
         for event in &events {
             reducer
-                .apply(event)
+                .admit(event)
+                .and_then(|()| reducer.apply(event))
                 .map_err(|e| anyhow::anyhow!("event rejected: {e}"))?;
         }
 
@@ -297,17 +297,6 @@ impl TaskStore {
 }
 
 /// The agent-facing seam: a kind cv retired is never written again, whatever constructed it.
-fn refuse_retired(event: &TaskEvent) -> Result<()> {
-    if event.kind.is_retired() {
-        bail!(
-            "event kind '{}' was retired in 0.15.0 with the task land facet and is never written again \
-             (an existing log that holds it still replays)",
-            event.kind.tag()
-        );
-    }
-    Ok(())
-}
-
 /// If `line` is a log-format header record, its declared version (`v` missing reads as 0, which
 /// is ≤ current and therefore skipped — keep it dumb).
 fn header_version(line: &str) -> Option<u64> {

@@ -157,13 +157,11 @@ whole inbox as a Markdown page (bodies, the first line of every note) to paste a
 
 **Decisions are a kind of task.** An orchestrator poses one with a default that stands if you say
 nothing, the alternatives, and an optional deadline; resolving records *who* chose, which is why
-`resolve` wants an identity. A task that already carries `DECIDE (…): …` notes becomes decisions
-with `cv task split <id>`.
+`resolve` wants an identity. One event poses a decision, one answers it.
 
 ```sh
 cv task decide "K-PORTAL: who births the guest cell" --for ember \
     --default "the concierge births it" --option "the receiver allocates it" --by 3d --body -
-cv task split 01a0f54c                                 # every leading-DECIDE note → its own decision, blocking the task
 cv task events --since <last-event-id> --kind resolved,done,noted   # the poll surface: JSON lines, next cursor on stderr
 cv task events --assignee ember --not-by $CV_ENDPOINT --since 2h   # what ember did on their tasks, minus your own
 ```

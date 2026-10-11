@@ -164,6 +164,41 @@ pub fn parse_since(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String>
     ))
 }
 
+/// Parse a `--by` deadline: a duration from `now` (`3d`, `48h`, `1w`), a bare date (`2026-10-03`
+/// = the end of that local day), a local datetime (`2026-10-03T18:00`), or RFC 3339.
+pub fn parse_deadline(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+    let s = s.trim();
+    if let Some(d) = parse_duration(s) {
+        return Ok(now + d);
+    }
+    if let Ok(t) = DateTime::parse_from_rfc3339(s) {
+        return Ok(t.with_timezone(&Utc));
+    }
+    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(s, fmt) {
+            if let Some(t) = Local.from_local_datetime(&ndt).single() {
+                return Ok(t.with_timezone(&Utc));
+            }
+        }
+    }
+    if let Ok(nd) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let ndt = nd.and_hms_opt(23, 59, 59).expect("end of day exists");
+        if let Some(t) = Local.from_local_datetime(&ndt).single() {
+            return Ok(t.with_timezone(&Utc));
+        }
+    }
+    Err(format!(
+        "cannot read {s:?} as a deadline: a duration (3d, 48h, 1w), a date (2026-10-03), a datetime \
+         (2026-10-03T18:00) or RFC 3339"
+    ))
+}
+
 /// `30m` / `2h` / `3d` / `1w` / `45s` → a duration. Whole numbers only.
 pub fn parse_duration(s: &str) -> Option<chrono::Duration> {
     let s = s.trim();
@@ -214,9 +249,10 @@ pub fn blocks<'m>(model: &'m TaskReadModel, task_id: &str) -> Vec<&'m TaskProjec
         .collect()
 }
 
-/// The tag that marks a task as a *decision owed* by its assignee rather than work to do — the
-/// inbox groups these first (`decisions owed`), because a decision nobody sees is the slowest
-/// blocker a fleet has.
+/// The tag that marked a task as a decision before `posed` existed (and that `pose` kept writing
+/// until 0.15.0). A tag-only decision in an old log still lands in its assignee's inbox under
+/// `decisions owed`; a new one is refused at write time ([`super::ReduceError::BareDecisionTag`]) —
+/// a decision is posed, with options, never tagged.
 pub const DECISION_TAG: &str = "decision";
 /// A decision the decider parked for discussion (`cv task discuss` / the page's "needs discussion"):
 /// it stays open and resolvable, but it is no longer *owed* — the ball is with whoever posed it.
@@ -573,6 +609,22 @@ mod tests {
         assert_eq!(entries[1].task.task_id, claimed);
         assert_eq!(entries[1].reason, InboxReason::ClaimedByYou);
         assert_eq!(entries[1].since.to_rfc3339(), "2026-07-14T00:00:00+00:00");
+    }
+
+    #[test]
+    fn deadlines_read_durations_dates_and_datetimes() {
+        let now: DateTime<Utc> = "2026-10-01T12:00:00Z".parse().unwrap();
+        assert_eq!(parse_deadline("3d", now).unwrap(), now + chrono::Duration::days(3));
+        assert_eq!(
+            parse_deadline("2026-10-05T10:00:00Z", now).unwrap(),
+            "2026-10-05T10:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let d = parse_deadline("2026-10-03", now).unwrap();
+        assert!(
+            d > "2026-10-02T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            "end of local day"
+        );
+        assert!(parse_deadline("whenever", now).is_err());
     }
 
     #[test]

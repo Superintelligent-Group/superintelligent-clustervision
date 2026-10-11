@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use cv_core::ir::truncate;
 use cv_core::sanitize::sanitize_line;
-use cv_core::task::{self, TaskEventKind, TaskReadModel, TaskRow, TaskStore};
+use cv_core::task::{self, TaskEvent, TaskEventKind, TaskReadModel, TaskRow, TaskStore};
 
 use super::task_ops::{self, DecisionSpec, EventFilter, Since};
 use crate::util::{fmt_local, usage};
@@ -433,19 +433,6 @@ pub(crate) enum TaskCmd {
         #[arg(long, hide = true)]
         token: Option<String>,
     },
-    /// Turn every leading-`DECIDE` note on a task into its own decision task (title = the label
-    /// and the question's first clause; default = the text after `Default =`/`Default if
-    /// silent:`/`Recommend:`; options = the `alternative =` clauses), assigned to the task's
-    /// assignee and blocking the task. The notes stay; `show` points each at its decision.
-    Split {
-        id: String,
-        /// Print what would be created without writing anything.
-        #[arg(long = "dry-run")]
-        dry_run: bool,
-        /// Acting endpoint recorded in `by`. Default: $CV_ENDPOINT.
-        #[arg(long)]
-        from: Option<String>,
-    },
     /// New task events since a point in time, one JSON line each (the poll surface: hand the
     /// last event id back as the next `--since`). `--text` renders one human line per event.
     Events {
@@ -522,6 +509,12 @@ pub(crate) enum TaskCmd {
         since: Option<String>,
     },
     // ───────────── Removed in 0.15.0 (hidden stubs: pointer, exit 2) ─────────────
+    /// `split` turned `DECIDE:` notes into decisions; `decide` poses one directly.
+    #[command(hide = true)]
+    Split {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
     /// `watch` was `events --assignee <who> --not-by $CV_ENDPOINT` under a second name.
     #[command(hide = true)]
     Watch {
@@ -610,13 +603,33 @@ fn note_arg(note: Option<String>, note_file: Option<PathBuf>) -> Result<Option<S
     Ok(Some(text).filter(|t| !t.trim().is_empty()))
 }
 
+/// Append several events as ONE unit ([`task::append_events`]): all land or none does. One
+/// confirmation line per event, each with its own task's state after the batch.
+fn append_batch(events: Vec<TaskEvent>) -> Result<()> {
+    let store = TaskStore::default_store();
+    let report = task::append_events(&store, events, Vec::new())?;
+    for w in report.replay_warnings.iter().chain(&report.warnings) {
+        eprintln!("⚠ {}", sanitize_line(w));
+    }
+    let after = store.replay()?;
+    for ev in &report.events {
+        let state = after
+            .model
+            .tasks
+            .get(&ev.task_id)
+            .map(task::effective_display)
+            .unwrap_or_else(|| "?".into());
+        println!("✦ {} {} → {}", ev.kind.tag(), prefix(&ev.task_id, 13), state);
+    }
+    Ok(())
+}
+
 /// Close a task with an optional note first, as ONE unit (the note, then `close`): both land or
 /// neither does, so a lane cannot lose its evidence by ordering.
 fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventKind) -> Result<()> {
     let Some(text) = note else {
         return append_and_report(Some(id), from, close);
     };
-    let store = TaskStore::default_store();
     let note = task::new_event(
         Some(id),
         from,
@@ -625,16 +638,7 @@ fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventK
             session_ref: None,
         },
     );
-    let close = task::new_event(Some(id), from, close);
-    let report = task::append_events(&store, vec![note, close], Vec::new())?;
-    for w in report.replay_warnings.iter().chain(&report.warnings) {
-        eprintln!("⚠ {}", sanitize_line(w));
-    }
-    let state = report.effective_state.unwrap_or_else(|| "?".into());
-    for ev in &report.events {
-        println!("✦ {} {} → {}", ev.kind.tag(), prefix(&ev.task_id, 13), state);
-    }
-    Ok(())
+    append_batch(vec![note, task::new_event(Some(id), from, close)])
 }
 
 fn resolve<'m>(model: &'m cv_core::task::TaskReadModel, prefix: &str) -> Result<&'m str> {
@@ -708,7 +712,6 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 None => text_or_stdin(body)?,
             };
             let tags = tags.as_deref().map(parse_tags).unwrap_or_default();
-            task_ops::refuse_bare_decision_tag(&tags, &title, None)?;
             // Relations name other tasks: resolve every prefix BEFORE the open, so a typo refuses
             // the whole command instead of leaving a task opened with half its relations.
             let (blocked_by, blocks) = {
@@ -721,7 +724,9 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 (res(blocked_by)?, res(blocks)?)
             };
             let from = from_or_cv(from);
-            let id = append_event(
+            // One unit: the task, its tags and its relations land together or not at all — a
+            // refused tag (a bare `decision`) or a refused relation leaves no half-opened task.
+            let opened = task::new_event(
                 None,
                 &from,
                 TaskEventKind::Opened {
@@ -732,16 +737,24 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                     channel: None,
                     assignee,
                 },
-            )?;
+            );
+            let id = opened.task_id.clone();
+            let mut batch = vec![opened];
             if !tags.is_empty() {
-                append_and_report(Some(&id), &from, TaskEventKind::Tagged { tags })?;
+                batch.push(task::new_event(Some(&id), &from, TaskEventKind::Tagged { tags }));
             }
             for b in blocked_by {
-                append_and_report(Some(&id), &from, TaskEventKind::BlockedBy { task: b })?;
+                batch.push(task::new_event(Some(&id), &from, TaskEventKind::BlockedBy { task: b }));
             }
             for other in blocks {
-                append_and_report(Some(&other), &from, TaskEventKind::BlockedBy { task: id.clone() })?;
+                batch.push(task::new_event(
+                    Some(&other),
+                    &from,
+                    TaskEventKind::BlockedBy { task: id.clone() },
+                ));
             }
+            append_batch(batch)?;
+            println!("{id}");
             Ok(())
         }
         TaskCmd::List {
@@ -992,7 +1005,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                         None => {}
                     }
                 }
-                let children = task_ops::split_children(&outcome.model);
+                let children = task_ops::decisions_from_notes(&outcome.model);
                 let selected: Vec<&cv_core::task::Note> = t
                     .notes
                     .iter()
@@ -1141,8 +1154,6 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             if tags.is_empty() {
                 bail!("no tags given (comma-separated, e.g. `deploy,lean`)");
             }
-            let t = &outcome.model.tasks[&id];
-            task_ops::refuse_bare_decision_tag(&tags, &t.title, Some(t))?;
             append_and_report(Some(&id), &from_or_cv(from), TaskEventKind::Tagged { tags })
         }
         TaskCmd::Block { id, by_task, from } => {
@@ -1324,85 +1335,10 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             }
             Ok(())
         }
-        TaskCmd::Split { id, dry_run, from } => {
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            let plan = task_ops::plan_split(&outcome.model, &id)?;
-            let plen = prefix_len(&outcome.model);
-            let t = &outcome.model.tasks[&id];
-            if plan.items.is_empty() {
-                println!(
-                    "no leading-DECIDE notes on {} ({} note(s){})",
-                    prefix(&id, plen),
-                    t.notes.len(),
-                    if plan.mid_text > 0 {
-                        format!(
-                            "; {} mention DECIDE mid-text — split takes notes that START with DECIDE",
-                            plan.mid_text
-                        )
-                    } else {
-                        String::new()
-                    }
-                );
-                return Ok(());
-            }
-            println!(
-                "# {} DECIDE note(s) on {} — {}{}",
-                plan.items.len(),
-                prefix(&id, plen),
-                sanitize_line(&t.title),
-                if dry_run { " (dry run: nothing written)" } else { "" }
-            );
-            for (i, item) in plan.items.iter().enumerate() {
-                println!(
-                    "{:>2}. {}{}",
-                    i + 1,
-                    sanitize_line(&item.title),
-                    match &item.existing {
-                        Some(c) => format!("  (already split → {})", prefix(c, plen)),
-                        None => String::new(),
-                    }
-                );
-                println!("    default: {}", sanitize_line(&item.default_choice));
-                for o in item.options.iter().skip(1) {
-                    println!("    option:  {}", sanitize_line(o));
-                }
-                println!(
-                    "    from note by {} at {}",
-                    sanitize_line(&item.note_by),
-                    fmt_local(item.note_ts, "%m-%d %H:%M")
-                );
-            }
-            if plan.mid_text > 0 {
-                println!(
-                    "({} other note(s) mention DECIDE mid-text; not split — move the DECIDE to the front of a note to split it)",
-                    plan.mid_text
-                );
-            }
-            if dry_run {
-                return Ok(());
-            }
-            let store = TaskStore::default_store();
-            let (created, warnings) = task_ops::run_split(&store, &outcome.model, &from_or_cv(from), &plan)?;
-            for w in &warnings {
-                eprintln!("⚠ {}", sanitize_line(w));
-            }
-            println!();
-            for (_, child) in &created {
-                println!(
-                    "✦ decision {} posed for {}",
-                    prefix(child, 13),
-                    sanitize_line(t.assignee.as_deref().unwrap_or("-"))
-                );
-            }
-            println!(
-                "{} decision(s) created, each blocking {} · `cv task inbox {}` lists them first",
-                created.len(),
-                prefix(&id, plen),
-                sanitize_line(t.assignee.as_deref().unwrap_or("<assignee>"))
-            );
-            Ok(())
-        }
+        TaskCmd::Split { .. } => usage(
+            "`cv task split` was removed in 0.15.0 — it mined `DECIDE:` notes for questions; pose one directly: \
+             `cv task decide \"<title>\" --for <who> --default \"<option>\" [--option …] [--blocks <id>]`",
+        ),
         TaskCmd::Events {
             since,
             kind,

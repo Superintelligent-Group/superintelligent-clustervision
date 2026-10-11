@@ -824,10 +824,10 @@ The fleet's durable dispatch objects: open/claim/note/done, and the decisions po
 
 ```text
 open · list · show · claim · release · note · status · tag · block · done · abandon · supersede
-decide · resolve · split · events · serve · inbox · sweep
+decide · resolve · events · serve · inbox · sweep
 ```
 
-`propose`, `reroute`, `pass`, `refute`, `verify`, `debt` and `stats` were removed in 0.15.0 with the land facet; each errors with a pointer. This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the three laws, and a worked end-to-end example.
+`propose`, `reroute`, `pass`, `refute`, `verify`, `debt` and `stats` were removed in 0.15.0 with the land facet, `split` and `watch` with it; each errors with a pointer. This is a big enough topic to get its own chapter — see **[the task substrate](tasks.md)** for the lifecycle, the three laws, and a worked end-to-end example.
 
 ### The coordination board (removed)
 
