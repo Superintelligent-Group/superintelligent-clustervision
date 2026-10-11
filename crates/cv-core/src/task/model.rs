@@ -46,8 +46,10 @@ pub enum TaskEventKind {
         repo: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         issue: Option<String>,
-        /// Board channel task notifications post to.
-        channel: String,
+        /// Retired in 0.15.0 with the coordination board (the channel task events were mirrored
+        /// to). Read through so a pre-0.15.0 line re-serializes to its own bytes; never written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assignee: Option<String>,
     },
@@ -258,7 +260,7 @@ mod tests {
                 body: "b".into(),
                 repo: Some(PathBuf::from("/tmp/x")),
                 issue: Some("#1".into()),
-                channel: "tasks".into(),
+                channel: None,
                 assignee: None,
             },
             TaskEventKind::Claimed { assignee: "a".into() },

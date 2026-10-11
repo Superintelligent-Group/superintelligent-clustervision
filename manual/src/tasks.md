@@ -43,8 +43,7 @@ open ──claim──► claimed ──done──► done
 ```
 
 - **`open`** — anyone can open a task (`cv task open <title>`), optionally with `--repo`
-  (what `list --repo` filters on and `sweep` reads), `--assignee`, `--issue`, a `--body`, and a
-  `--channel` for board notifications (default `tasks` — every task event posts a one-liner there).
+  (what `list --repo` filters on and `sweep` reads), `--assignee`, `--issue` and a `--body`.
 - **`claim` / `release`** — claiming is a durable, race-free **first-writer-wins**: the store
   validates each append against a replay of the log *under the lock*, so when N agents race,
   exactly one claim lands and the rest get a rejection, not a duplicate.
@@ -181,7 +180,7 @@ and every cv front-end derives its default actor from it — the *bare* command 
 right identity. Nothing verifies the string (law 2); it exists so a forgotten flag can't
 misattribute the durable record forever.
 
-- **Chat-grade verbs** (`open`, `note`, `done`, `abandon`, `supersede`; board posts) fall back
+- **Chat-grade verbs** (`open`, `note`, `done`, `abandon`, `supersede`) fall back
   to a deliberate default sink — `cv` on the CLI (a human at a shell owes no ceremony),
   `agent` over MCP.
 - **Identity-bearing verbs** — `claim`, `release`, `status`, `resolve`, whose endpoint string

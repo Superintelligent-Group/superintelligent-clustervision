@@ -186,7 +186,7 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
             body: "port the gate onto multi-commit review debts".into(),
             repo: Some("/repo/alpha".into()),
             issue: Some("#42".into()),
-            channel: "tasks".into(),
+            channel: Some("tasks".into()),
             assignee: Some("agent:author".into()),
         },
     );
@@ -296,7 +296,7 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
             body: String::new(),
             repo: None,
             issue: None,
-            channel: "tasks".into(),
+            channel: Some("tasks".into()),
             assignee: None,
         },
     );
@@ -359,7 +359,7 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
             body: String::new(),
             repo: None,
             issue: None,
-            channel: "tasks".into(),
+            channel: Some("tasks".into()),
             assignee: None,
         },
     );
@@ -400,7 +400,7 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
             body: "default = the concierge births it; alternative = the receiver allocates it".into(),
             repo: None,
             issue: None,
-            channel: "tasks".into(),
+            channel: Some("tasks".into()),
             assignee: Some("ember".into()),
         },
     );
@@ -450,7 +450,7 @@ fn regenerate(log_path: &std::path::Path, snap_path: &std::path::Path) {
             body: String::new(),
             repo: None,
             issue: None,
-            channel: "tasks".into(),
+            channel: Some("tasks".into()),
             assignee: Some("ember".into()),
         },
     );

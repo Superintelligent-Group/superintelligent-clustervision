@@ -35,9 +35,9 @@ toml.workspace = true
 # Floor at 0.9.11 — RUSTSEC-2026-0186 patched there (advisory against 0.9.10).
 memmap2 = { version = ">=0.9.11, <0.10", optional = true }
 
-# Real OS advisory locks for the board's per-channel lockfile (flock on unix, LockFileEx on
-# windows) — already in the workspace tree via tantivy. wasm32 has neither file locking nor
-# cross-process concurrency, so the board falls back to a plain open there.
+# Real OS advisory locks for the task log's lockfile (flock on unix, LockFileEx on windows) —
+# already in the workspace tree via tantivy. wasm32 has neither file locking nor cross-process
+# concurrency, so the store falls back to a plain open there.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 

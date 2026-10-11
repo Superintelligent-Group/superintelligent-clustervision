@@ -479,7 +479,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             vec![out.event]
         }
         "done" => {
-            let out = task::append_and_notify(
+            let out = task::append(
                 &store,
                 Some(&id),
                 &by,
@@ -495,7 +495,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             let Some(t) = text("text") else {
                 bail!("a note needs text")
             };
-            let out = task::append_and_notify(
+            let out = task::append(
                 &store,
                 Some(&id),
                 &by,
@@ -509,7 +509,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
         }
         "discuss" => {
             let detail = text("text").unwrap_or_else(|| "(no detail)".into());
-            let note = task::append_and_notify(
+            let note = task::append(
                 &store,
                 Some(&id),
                 &by,
@@ -519,7 +519,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 },
                 Vec::new(),
             )?;
-            let tag = task::append_and_notify(
+            let tag = task::append(
                 &store,
                 Some(&id),
                 &by,
@@ -531,7 +531,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             vec![note.event, tag.event]
         }
         "claim" => {
-            let out = task::append_and_notify(
+            let out = task::append(
                 &store,
                 Some(&id),
                 &by,
@@ -543,7 +543,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             vec![out.event]
         }
         "release" => {
-            let out = task::append_and_notify(&store, Some(&id), &by, TaskEventKind::Released {}, Vec::new())?;
+            let out = task::append(&store, Some(&id), &by, TaskEventKind::Released {}, Vec::new())?;
             vec![out.event]
         }
         "reopen" => {
@@ -568,7 +568,6 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                             deadline: None,
                             repo: t.repo.clone(),
                             issue: t.issue.clone(),
-                            channel: t.channel.clone(),
                             tags: vec!["reopened".into()],
                             source: d.source.clone(),
                             blocks: Vec::new(),
@@ -580,7 +579,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                     id
                 }
                 None => {
-                    let out = task::append_and_notify(
+                    let out = task::append(
                         &store,
                         None,
                         &by,
@@ -589,14 +588,14 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                             body: t.body.clone(),
                             repo: t.repo.clone(),
                             issue: t.issue.clone(),
-                            channel: t.channel.clone(),
+                            channel: None,
                             assignee: t.assignee.clone().or_else(|| Some(who.trim().to_string())),
                         },
                         Vec::new(),
                     )?;
                     let id = out.event.task_id.clone();
                     events.push(out.event);
-                    let tagged = task::append_and_notify(
+                    let tagged = task::append(
                         &store,
                         Some(&id),
                         &by,
@@ -611,7 +610,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
             };
             // Each side points at the other: the new task says where it came from, and the closed
             // one gets a post-close note (it stays closed; a note never changes state).
-            let note = task::append_and_notify(
+            let note = task::append(
                 &store,
                 Some(&new_id),
                 &by,
@@ -622,7 +621,7 @@ fn act(id: &str, verb: &str, who: &str, body: &Value) -> Result<Value> {
                 Vec::new(),
             )?;
             events.push(note.event);
-            let back = task::append_and_notify(
+            let back = task::append(
                 &store,
                 Some(&id),
                 &by,

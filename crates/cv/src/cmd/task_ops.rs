@@ -31,7 +31,6 @@ pub(crate) struct DecisionSpec {
     pub deadline: Option<DateTime<Utc>>,
     pub repo: Option<PathBuf>,
     pub issue: Option<String>,
-    pub channel: String,
     pub tags: Vec<String>,
     /// The note event this decision was split from.
     pub source: Option<String>,
@@ -72,11 +71,6 @@ pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<
             tags.push(t.clone());
         }
     }
-    let channel = if spec.channel.is_empty() {
-        "tasks".to_string()
-    } else {
-        spec.channel.clone()
-    };
     let default_choice = spec.default_choice.trim().to_string();
     let opened = task::new_event(
         None,
@@ -86,7 +80,7 @@ pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<
             body: spec.body.clone(),
             repo: spec.repo.clone(),
             issue: spec.issue.clone(),
-            channel,
+            channel: None,
             assignee: Some(spec.for_who.trim().to_string()),
         },
     );
@@ -123,7 +117,7 @@ pub(crate) fn pose(store: &TaskStore, from: &str, spec: DecisionSpec) -> Result<
             },
         ));
     }
-    let out = task::append_events_and_notify(store, candidates, Vec::new())?;
+    let out = task::append_events(store, candidates, Vec::new())?;
     let mut warnings = out.replay_warnings;
     warnings.extend(out.warnings);
     Ok((out.events, warnings))
@@ -226,7 +220,7 @@ pub(crate) fn resolve(
         );
     }
     let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
-    task::append_and_notify(
+    task::append(
         store,
         Some(id),
         from,
@@ -306,7 +300,7 @@ pub(crate) fn plan_split(model: &TaskReadModel, parent: &str) -> Result<SplitPla
 pub(crate) type SplitCreated = Vec<(String, String)>;
 
 /// Execute a plan: one decision per not-yet-split note, assigned like the parent, carrying the
-/// parent's repo/issue/channel, with the note as its body and source, blocking the parent.
+/// parent's repo/issue, with the note as its body and source, blocking the parent.
 /// Returns what was created and the advisory warnings.
 pub(crate) fn run_split(
     store: &TaskStore,
@@ -333,7 +327,6 @@ pub(crate) fn run_split(
             deadline: None,
             repo: t.repo.clone(),
             issue: t.issue.clone(),
-            channel: t.channel.clone(),
             tags: vec!["split".into()],
             source: Some(item.note_event_id.clone()),
             blocks: vec![plan.parent.clone()],

@@ -23,7 +23,6 @@ pub struct TaskRow {
     pub effective_state: String,
     pub assignee: Option<String>,
     pub repo: Option<PathBuf>,
-    pub channel: String,
     /// Timestamps ride the HTTP row only ([`TaskRow::full`]); the MCP row shipped without them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opened_at: Option<DateTime<Utc>>,
@@ -46,7 +45,6 @@ impl TaskRow {
             effective_state: project::effective_display(t),
             assignee: t.assignee.clone(),
             repo: t.repo.clone(),
-            channel: t.channel.clone(),
             opened_at: None,
             last_ts: None,
             tags: t.tags.clone(),
@@ -131,7 +129,7 @@ mod tests {
                 body: String::new(),
                 repo: Some(PathBuf::from("/tmp/r")),
                 issue: None,
-                channel: "tasks".into(),
+                channel: None,
                 assignee: None,
             },
         };
@@ -158,9 +156,7 @@ mod tests {
         let brief = serde_json::to_value(TaskRow::brief(t)).unwrap();
         assert_eq!(
             serde_json::to_string(&brief).unwrap(),
-            format!(
-                r#"{{"id":"{id}","title":"t","effective_state":"claimed","assignee":"agent:a","repo":"/tmp/r","channel":"tasks"}}"#
-            ),
+            format!(r#"{{"id":"{id}","title":"t","effective_state":"claimed","assignee":"agent:a","repo":"/tmp/r"}}"#),
         );
         let full = serde_json::to_value(TaskRow::full(t)).unwrap();
         let keys: Vec<&str> = full.as_object().unwrap().keys().map(String::as_str).collect();
@@ -172,7 +168,6 @@ mod tests {
                 "effective_state",
                 "assignee",
                 "repo",
-                "channel",
                 "opened_at",
                 "last_ts"
             ],

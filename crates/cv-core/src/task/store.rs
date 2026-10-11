@@ -1,14 +1,14 @@
 //! Durable task event log: a single append-only JSONL file with locked compare-and-swap appends.
 //!
-//! `$CLUSTERVISION_HOME/tasks/events.jsonl` + sibling `events.lock`, using the same crash-safe
-//! flock + `O_APPEND` single-`write_all` recipe as the board (see [`crate::lockfile`]).
+//! `$CLUSTERVISION_HOME/tasks/events.jsonl` + sibling `events.lock`: a crash-safe flock +
+//! `O_APPEND` single-`write_all` recipe (see [`crate::lockfile`]).
 //!
-//! # Why not a board channel
+//! # Loud, not lenient
 //!
-//! The board's reader deliberately *skips* malformed lines — right for chat, fatal for a replayed
-//! event log (a silently dropped `Refuted` would resurrect a dead revision). Here interior
-//! garbage is **loud** (surfaced as warnings on every read) and only a *trailing* partial line —
-//! the one torn shape the locked writer can produce by crashing mid-append — is tolerated.
+//! A chat reader may skip malformed lines; a replayed event log may not (a silently dropped
+//! event changes history). Here interior garbage is **loud** (surfaced as warnings on every read)
+//! and only a *trailing* partial line — the one torn shape the locked writer can produce by
+//! crashing mid-append — is tolerated.
 //!
 //! # The CAS append
 //!
@@ -31,9 +31,8 @@
 //! time; not forever. The planned compaction is **snapshot + tail**: periodically fold the
 //! log's stable prefix into a snapshot of the read model, keep the live tail as raw events,
 //! and retire the prefix to an archive file — **preserving the audit prefix** (retired events
-//! stay on disk and re-verifiable; they just stop being replayed on every read). The sibling
-//! plan for the board's chatter (presence beats, routine posts) is segment retirement. Neither
-//! is implemented yet; whoever picks this up should keep the CAS append's invariant intact —
+//! stay on disk and re-verifiable; they just stop being replayed on every read). This
+//! is not implemented yet; whoever picks this up should keep the CAS append's invariant intact —
 //! a snapshot the appender validates against must be exactly the fold of the retired prefix.
 
 use std::fs::{self, File, OpenOptions};
@@ -357,7 +356,7 @@ mod tests {
             body: String::new(),
             repo: None,
             issue: None,
-            channel: "tasks".into(),
+            channel: None,
             assignee: None,
         }
     }

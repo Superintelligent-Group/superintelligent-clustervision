@@ -1,8 +1,8 @@
 //! 📋 The task substrate — durable, replayable dispatch objects for agent fleets.
 //!
-//! Where the [`crate::board`] lets agents *talk*, tasks let a fleet *commit to work* and let a
-//! human see what has been said about it. A task is a durable object with a replay-derived
-//! lifecycle; a decision is a task with a posed question.
+//! Tasks let a fleet *commit to work* and let a human see what has been said about it. A task
+//! is a durable object with a replay-derived lifecycle; a decision is a task with a posed
+//! question. The log is the fleet's one record: follow it with `cv task events --since <id>`.
 //!
 //! # The three laws
 //!
@@ -18,8 +18,8 @@
 //! reviewer receipts, completion checks) lived here too. Its nine event kinds are
 //! [`model::RETIRED_TAGS`]: a log that holds them still replays, as state-neutral events.
 //!
-//! Storage is a single append-only event log (`$CLUSTERVISION_HOME/tasks/events.jsonl`) with the
-//! same crash-safe flock recipe as the board.
+//! Storage is a single append-only event log (`$CLUSTERVISION_HOME/tasks/events.jsonl`) under a
+//! crash-safe flock.
 
 pub mod decide;
 pub mod model;
@@ -39,31 +39,6 @@ pub use reduce::{Decision, Note, PinnedStatus, ReduceError, Resolution, TaskProj
 pub use store::{new_event, replay, ReplayOutcome, TaskStore};
 pub use views::{InboxDecision, InboxRow, TaskRow};
 
-/// Best-effort board notification for an appended task event (never called while the store lock
-/// is held — the append has already returned). Failures are returned for the caller to warn
-/// about, never to fail the operation. The body names the task's title (truncated) so
-/// `cv board read tasks` reads as a timeline, not a list of ids.
-pub fn notify_board(event: &TaskEvent, channel: &str, title: Option<&str>) -> anyhow::Result<()> {
-    let short = &event.task_id[..event.task_id.len().min(8)];
-    let body = match title {
-        Some(t) => format!(
-            "task {short}: {} — {}",
-            event.kind.tag(),
-            crate::ir::truncate(&crate::sanitize::sanitize_line(t), 80)
-        ),
-        None => format!("task {short}: {}", event.kind.tag()),
-    };
-    crate::board::post(
-        channel,
-        &event.by,
-        &body,
-        Some("task"),
-        vec![format!("task:{}", event.task_id), format!("ev:{}", event.kind.tag())],
-        Some(event.task_id.clone()),
-    )?;
-    Ok(())
-}
-
 /// The fleet identity convention (audit G4): the spawner sets `CV_ENDPOINT=agent:<pane>` in each
 /// agent's environment, and cv front-ends derive their default `--from` here — the *bare*
 /// command records the right actor. This is environment, not assertion: nothing verifies the
@@ -76,7 +51,7 @@ pub fn default_endpoint() -> Option<String> {
 }
 
 /// Identity resolution (G4) for verbs where the actor is bookkeeping, not semantics
-/// (open/note/done/abandon/supersede, board chat): explicit actor wins, else the spawner-set
+/// (open/note/done/abandon/supersede): explicit actor wins, else the spawner-set
 /// `CV_ENDPOINT`, else the surface's deliberate default sink — `"cv"` for CLI chat-grade verbs
 /// (a human at a shell owes no ceremony), `"agent"` for MCP (the legacy anonymous sink).
 pub fn actor(explicit: Option<String>, default_sink: &str) -> String {
@@ -104,8 +79,7 @@ pub struct AppendOutcome {
     /// `None` only if the appended event's task vanished from the replay (should not happen —
     /// the append CAS validated against it).
     pub effective_state: Option<String>,
-    /// The caller's carried-in warnings plus a failed board notification, if any. This is the
-    /// set MCP ships in its JSON reply.
+    /// The caller's carried-in advisory warnings — the set MCP ships in its JSON reply.
     pub warnings: Vec<String>,
     /// Warnings from the post-append replay (log corruption etc.) — kept separate so surfaces
     /// that already showed the pre-append replay's warnings don't double-report.
@@ -113,23 +87,17 @@ pub struct AppendOutcome {
 }
 
 /// The one agent-facing append path shared by the CLI and MCP: append the event through the
-/// store's CAS, replay for the task's channel + new state, best-effort notify the task's board
-/// channel (a notification failure is a warning, never an error — task state is already
-/// durable).
-pub fn append_and_notify(
+/// store's CAS, then replay for the task's new state.
+pub fn append(
     store: &TaskStore,
     task_id: Option<&str>,
     from: &str,
     kind: TaskEventKind,
-    mut warnings: Vec<String>,
+    warnings: Vec<String>,
 ) -> anyhow::Result<AppendOutcome> {
     let event = store.append_agent_event(new_event(task_id, from, kind))?;
     let outcome = store.replay()?;
     let proj = outcome.model.tasks.get(&event.task_id);
-    let channel = proj.map(|t| t.channel.clone()).unwrap_or_else(|| "tasks".into());
-    if let Err(e) = notify_board(&event, &channel, proj.map(|t| t.title.as_str())) {
-        warnings.push(format!("board notification failed (task state is durable): {e}"));
-    }
     Ok(AppendOutcome {
         effective_state: proj.map(effective_display),
         event,
@@ -138,11 +106,10 @@ pub fn append_and_notify(
     })
 }
 
-/// [`append_and_notify`] for several events by one actor, appended as ONE unit
-/// ([`TaskStore::append_agent_events`]): all land or none does. Each event is notified on its
-/// task's board channel. The outcome's `event` is the LAST event and `effective_state` is its
-/// task's state after the batch; `events` holds all of them in append order.
-pub fn append_batch_and_notify(
+/// [`append`] for several events by one actor, appended as ONE unit
+/// ([`TaskStore::append_agent_events`]): all land or none does. The outcome's `effective_state`
+/// is the LAST event's task after the batch; `events` holds all of them in append order.
+pub fn append_batch(
     store: &TaskStore,
     from: &str,
     kinds: Vec<(Option<String>, TaskEventKind)>,
@@ -152,26 +119,19 @@ pub fn append_batch_and_notify(
         .into_iter()
         .map(|(task_id, kind)| new_event(task_id.as_deref(), from, kind))
         .collect();
-    append_events_and_notify(store, candidates, warnings)
+    append_events(store, candidates, warnings)
 }
 
-/// [`append_batch_and_notify`] for events the caller already built with [`new_event`] — for a
-/// batch whose later events name the task the FIRST one opens (`cv task decide`: the `opened`
-/// id must be known before the `tagged`/`posed`/`resolved` that follow it are built).
-pub fn append_events_and_notify(
+/// [`append_batch`] for events the caller already built with [`new_event`] — for a batch whose
+/// later events name the task the FIRST one opens (`cv task decide`: the `opened` id must be
+/// known before the `tagged`/`posed`/`resolved` that follow it are built).
+pub fn append_events(
     store: &TaskStore,
     candidates: Vec<TaskEvent>,
-    mut warnings: Vec<String>,
+    warnings: Vec<String>,
 ) -> anyhow::Result<BatchOutcome> {
     let events = store.append_agent_events(candidates)?;
     let outcome = store.replay()?;
-    for event in &events {
-        let proj = outcome.model.tasks.get(&event.task_id);
-        let channel = proj.map(|t| t.channel.clone()).unwrap_or_else(|| "tasks".into());
-        if let Err(e) = notify_board(event, &channel, proj.map(|t| t.title.as_str())) {
-            warnings.push(format!("board notification failed (task state is durable): {e}"));
-        }
-    }
     let effective_state = events
         .last()
         .and_then(|e| outcome.model.tasks.get(&e.task_id))
@@ -184,7 +144,7 @@ pub fn append_events_and_notify(
     })
 }
 
-/// What one batch append produced (see [`append_batch_and_notify`]).
+/// What one batch append produced (see [`append_batch`]).
 #[derive(Debug)]
 pub struct BatchOutcome {
     pub events: Vec<TaskEvent>,

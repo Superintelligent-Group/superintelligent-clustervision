@@ -988,7 +988,7 @@ fn serve_tasks_routes() {
                 body: String::new(),
                 repo: None,
                 issue: None,
-                channel: "tasks".into(),
+                channel: None,
                 assignee: Some("agent:a".into()),
             },
         ))
@@ -1013,7 +1013,7 @@ fn serve_tasks_routes() {
                 body: String::new(),
                 repo: Some("/tmp/pelican-repo".into()),
                 issue: None,
-                channel: "tasks".into(),
+                channel: None,
                 assignee: None,
             },
         ))

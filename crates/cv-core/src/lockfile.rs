@@ -1,4 +1,4 @@
-//! Cross-process advisory file lock shared by the append-only stores (board channels, task log).
+//! Cross-process advisory file lock for the append-only task log.
 //!
 //! RAII guard for an OS `flock`-style **exclusive lock** on a dedicated `.lock` file. Closing the
 //! file (drop) releases the lock, and the kernel releases it on process death too — so a crashed

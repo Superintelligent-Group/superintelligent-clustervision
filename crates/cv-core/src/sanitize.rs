@@ -1,7 +1,6 @@
-//! One shared sanitizer for terminal-bound untrusted text (task titles/bodies/notes, branch
-//! names, board message bodies/senders).
+//! One shared sanitizer for terminal-bound untrusted text (task titles/bodies/notes, endpoints).
 //!
-//! The task and board logs are replayed forever, so a poisoned record can never be cured at the
+//! The task log is replayed forever, so a poisoned record can never be cured at the
 //! send path — every *reader* strips control characters itself (comms canon: "every consumer
 //! sanitizes untrusted message text itself"). One ESC sequence in a task title would otherwise
 //! corrupt every terminal that ever runs `cv task list`, eternally.

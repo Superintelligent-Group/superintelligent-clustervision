@@ -282,7 +282,6 @@ fn task_tool_list() -> Value {
                     "body": { "type": "string", "description": "Details / acceptance criteria." },
                     "repo": { "type": "string", "description": "Absolute path of the git repo the work happens in (`task_list` filters on it; `cv task sweep` reads it)." },
                     "issue": { "type": "string", "description": "External issue/work handle, free-form." },
-                    "channel": { "type": "string", "description": "Board channel for task notifications (default 'tasks')." },
                     "assignee": { "type": "string", "description": "Endpoint this task is assigned to, if pre-assigned." },
                     "from": { "type": "string", "description": "Who's opening. Defaults to $CV_ENDPOINT, else 'agent'." }
                 },
@@ -551,8 +550,8 @@ fn task_resolve(outcome: &cv_core::task::ReplayOutcome, prefix: &str) -> anyhow:
         .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Append an agent event + board notification through the shared core path; return a JSON
-/// report of the event and new state.
+/// Append an agent event through the shared core path; return a JSON report of the event and
+/// new state.
 fn task_append(
     task_id: Option<&str>,
     from: &str,
@@ -560,7 +559,7 @@ fn task_append(
     warnings: Vec<String>,
 ) -> anyhow::Result<String> {
     let store = cv_core::task::TaskStore::default_store();
-    let report = cv_core::task::append_and_notify(&store, task_id, from, kind, warnings)?;
+    let report = cv_core::task::append(&store, task_id, from, kind, warnings)?;
     Ok(serde_json::to_string_pretty(&json!({
         "event": report.event,
         "effective_state": report.effective_state,
@@ -570,6 +569,12 @@ fn task_append(
 
 fn task_open(args: &Value) -> anyhow::Result<String> {
     let title = arg_str(args, "title").context("`title` is required")?.to_string();
+    if args.get("channel").is_some() {
+        anyhow::bail!(
+            "`channel` was removed in 0.15.0 with the coordination board — task events are mirrored nowhere; \
+             follow them with `cv task events --since <id>`"
+        );
+    }
     let repo = match arg_str(args, "repo") {
         Some(r) => Some(
             std::path::Path::new(r)
@@ -586,7 +591,7 @@ fn task_open(args: &Value) -> anyhow::Result<String> {
             body: arg_str(args, "body").unwrap_or("").to_string(),
             repo,
             issue: arg_str(args, "issue").map(String::from),
-            channel: arg_str(args, "channel").unwrap_or("tasks").to_string(),
+            channel: None,
             assignee: arg_str(args, "assignee").map(String::from),
         },
         Vec::new(),

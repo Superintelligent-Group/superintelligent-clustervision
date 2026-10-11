@@ -125,6 +125,17 @@ fn refuse_token(token: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// `--channel` named the board channel task events were mirrored to; the board is gone.
+fn refuse_channel(channel: Option<String>) -> Result<()> {
+    if channel.is_some() {
+        return usage(
+            "`--channel` was removed in 0.15.0 with the coordination board — task events are mirrored \
+             nowhere; follow them with `cv task events --since <id>`",
+        );
+    }
+    Ok(())
+}
+
 /// The pointer every retired land-facet verb prints (exit 2).
 fn removed_land_verb(verb: &str) -> Result<()> {
     usage(format!(
@@ -153,9 +164,10 @@ pub(crate) enum TaskCmd {
         /// (the record outlives the shell it was typed in).
         #[arg(long)]
         issue: Option<String>,
-        /// Board channel task notifications post to.
-        #[arg(long, default_value = "tasks")]
-        channel: String,
+        // Removed in 0.15.0 with the coordination board — hidden so the old flag errors with a
+        // pointer (exit 2).
+        #[arg(long, hide = true)]
+        channel: Option<String>,
         #[arg(long)]
         assignee: Option<String>,
         /// Comma-separated tags (`deploy,lean`); `list --tag` filters on them. `decision` is refused
@@ -374,8 +386,8 @@ pub(crate) enum TaskCmd {
         repo: Option<PathBuf>,
         #[arg(long)]
         issue: Option<String>,
-        #[arg(long, default_value = "tasks")]
-        channel: String,
+        #[arg(long, hide = true)]
+        channel: Option<String>,
         /// Extra tags (`decision` is always added).
         #[arg(long, value_name = "A,B")]
         tags: Option<String>,
@@ -578,7 +590,7 @@ fn append_and_report(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> 
 /// and relations to the task it just created).
 fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Result<String> {
     let store = TaskStore::default_store();
-    let report = task::append_and_notify(&store, task_id, from, kind, Vec::new())?;
+    let report = task::append(&store, task_id, from, kind, Vec::new())?;
     for w in report.replay_warnings.iter().chain(&report.warnings) {
         eprintln!("⚠ {}", sanitize_line(w));
     }
@@ -612,7 +624,7 @@ fn close_with_note(id: &str, from: &str, note: Option<String>, close: TaskEventK
         return append_and_report(Some(id), from, close);
     };
     let store = TaskStore::default_store();
-    let report = task::append_batch_and_notify(
+    let report = task::append_batch(
         &store,
         from,
         vec![
@@ -730,6 +742,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             blocks,
             from,
         } => {
+            refuse_channel(channel)?;
             let repo = match repo {
                 Some(r) => Some(
                     r.canonicalize()
@@ -764,7 +777,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                     body,
                     repo,
                     issue,
-                    channel,
+                    channel: None,
                     assignee,
                 },
             )?;
@@ -941,7 +954,6 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 if let Some(issue) = &t.issue {
                     println!("  issue:    {}", sanitize_line(issue));
                 }
-                println!("  channel:  #{}", sanitize_line(&t.channel));
                 println!("  assignee: {}", sanitize_line(t.assignee.as_deref().unwrap_or("-")));
                 if !t.tags.is_empty() {
                     println!("  tags:     {}", sanitize_line(&t.tags.join(", ")));
@@ -1235,6 +1247,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             token,
         } => {
             refuse_token(token)?;
+            refuse_channel(channel)?;
             let repo = match repo {
                 Some(r) => Some(
                     r.canonicalize()
@@ -1268,7 +1281,6 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                 deadline,
                 repo,
                 issue,
-                channel,
                 tags: tags.as_deref().map(parse_tags).unwrap_or_default(),
                 source: None,
                 blocks,
@@ -1539,7 +1551,6 @@ mod tests {
             body: String::new(),
             repo: None,
             issue: None,
-            channel: "tasks".into(),
             state: TaskState::Open,
             assignee: Some("agent:a".into()),
             opened_by: "h".into(),

@@ -167,7 +167,6 @@ pub struct TaskProjection {
     pub body: String,
     pub repo: Option<PathBuf>,
     pub issue: Option<String>,
-    pub channel: String,
     pub state: TaskState,
     pub assignee: Option<String>,
     pub opened_by: String,
@@ -220,8 +219,8 @@ impl TaskProjection {
             body,
             repo,
             issue,
-            channel,
             assignee,
+            ..
         } = kind
         else {
             unreachable!("opened() is only called with Opened events");
@@ -232,7 +231,6 @@ impl TaskProjection {
             body: body.clone(),
             repo: repo.clone(),
             issue: issue.clone(),
-            channel: channel.clone(),
             state: TaskState::Open,
             assignee: assignee.clone(),
             opened_by: event.by.clone(),
@@ -564,14 +562,8 @@ fn validate_event_shape(event: &TaskEvent) -> Result<(), ReduceError> {
     require_nonempty("task_id", &event.task_id)?;
     require_nonempty("by", &event.by)?;
     match &event.kind {
-        TaskEventKind::Opened {
-            title,
-            channel,
-            assignee,
-            ..
-        } => {
+        TaskEventKind::Opened { title, assignee, .. } => {
             require_nonempty("title", title)?;
-            require_nonempty("channel", channel)?;
             if let Some(a) = assignee {
                 require_nonempty("assignee", a)?;
             }
@@ -694,7 +686,7 @@ mod tests {
                     body: String::new(),
                     repo: Some(PathBuf::from("/tmp/repo")),
                     issue: None,
-                    channel: "tasks".into(),
+                    channel: None,
                     assignee: None,
                 },
             };
@@ -733,7 +725,7 @@ mod tests {
                 body: String::new(),
                 repo: None,
                 issue: None,
-                channel: "tasks".into(),
+                channel: None,
                 assignee: None,
             },
         };
@@ -1088,7 +1080,7 @@ mod tests {
                     body: String::new(),
                     repo: None,
                     issue: None,
-                    channel: "tasks".into(),
+                    channel: None,
                     assignee: Some(DECIDER.into()),
                 },
             });

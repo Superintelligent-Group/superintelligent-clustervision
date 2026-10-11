@@ -409,7 +409,7 @@ mod tests {
                     body: String::new(),
                     repo: repo.map(PathBuf::from),
                     issue: None,
-                    channel: "tasks".into(),
+                    channel: None,
                     assignee: assignee.map(String::from),
                 },
             });
