@@ -2430,15 +2430,28 @@ fn task_inbox_unread_and_events_since() {
     let (_, err) = w.cv_fails(&["task", "events", "--since", "whenever"]);
     assert!(err.contains("cannot read"), "{err}");
 
-    // watch: what ember did on their tasks, minus the caller's own events.
+    // What ember did on their tasks, minus the caller's own events: `events` with two flags.
     let (ok, _, out, _) = w.cv_env(
-        &["task", "watch", "--assignee", "ember", "--since", "1d"],
+        &[
+            "task",
+            "events",
+            "--assignee",
+            "ember",
+            "--not-by",
+            "orchestrator:x",
+            "--since",
+            "1d",
+        ],
         &[("CV_ENDPOINT", "orchestrator:x")],
     );
     assert!(ok);
     let rows: Vec<serde_json::Value> = out.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(rows.len(), 2, "{out}");
     assert!(rows.iter().all(|r| r["event"] == "noted"), "{out}");
+    // `watch` was that query under a second name; the name errors with the spelling.
+    let (ok, code, _, err) = w.cv(&["task", "watch", "--assignee", "ember"]);
+    assert!(!ok && code == 2, "{err}");
+    assert!(err.contains("removed in 0.15.0") && err.contains("--not-by"), "{err}");
 }
 
 // ───────────────────────────── cv task serve ─────────────────────────────

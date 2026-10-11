@@ -165,7 +165,7 @@ cv task decide "K-PORTAL: who births the guest cell" --for ember \
     --default "the concierge births it" --option "the receiver allocates it" --by 3d --body -
 cv task split 01a0f54c                                 # every leading-DECIDE note → its own decision, blocking the task
 cv task events --since <last-event-id> --kind resolved,done,noted   # the poll surface: JSON lines, next cursor on stderr
-cv task watch --assignee ember --since 2h              # what ember did on their tasks, minus your own events
+cv task events --assignee ember --not-by $CV_ENDPOINT --since 2h   # what ember did on their tasks, minus your own
 ```
 
 For agents, the substrate is built on one law: **cv never claims to have observed what it has

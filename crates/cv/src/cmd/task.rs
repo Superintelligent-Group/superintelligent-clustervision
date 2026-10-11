@@ -471,19 +471,6 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         text: bool,
     },
-    /// What `<assignee>` did on their tasks since `--since`: `events --assignee <who>` minus the
-    /// caller's own events (so an orchestrator polling at each check-in sees only the news).
-    Watch {
-        #[arg(long)]
-        assignee: String,
-        #[arg(long, value_name = "WHEN")]
-        since: Option<String>,
-        /// Whose events to hide. Default: $CV_ENDPOINT.
-        #[arg(long = "not-by", value_name = "WHO")]
-        not_by: Option<String>,
-        #[arg(long)]
-        text: bool,
-    },
     /// A local web inbox served by cv itself: decisions with their options as buttons, actions,
     /// claimed work, notes — every button records the same event the CLI would. Loopback only
     /// unless `--bind 0.0.0.0:<port>` is passed explicitly (then any device on the LAN can act as
@@ -534,7 +521,13 @@ pub(crate) enum TaskCmd {
         #[arg(long, value_name = "WHEN", conflicts_with = "all")]
         since: Option<String>,
     },
-    // ───────────── Removed in 0.15.0 with the land facet (hidden stubs: pointer, exit 2) ─────────────
+    // ───────────── Removed in 0.15.0 (hidden stubs: pointer, exit 2) ─────────────
+    /// `watch` was `events --assignee <who> --not-by $CV_ENDPOINT` under a second name.
+    #[command(hide = true)]
+    Watch {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        rest: Vec<String>,
+    },
     #[command(hide = true)]
     Propose {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
@@ -1477,24 +1470,10 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             };
             print_events(&outcome, &f, text)
         }
-        TaskCmd::Watch {
-            assignee,
-            since,
-            not_by,
-            text,
-        } => {
-            let outcome = replay_loud()?;
-            let now = Utc::now();
-            let f = EventFilter {
-                since: Since::parse(since.as_deref(), now)?,
-                kinds: Vec::new(),
-                by: None,
-                not_by: not_by.or_else(task::default_endpoint),
-                assignee: Some(assignee),
-                task: None,
-            };
-            print_events(&outcome, &f, text)
-        }
+        TaskCmd::Watch { .. } => usage(
+            "`cv task watch` was removed in 0.15.0 — it was an alias: \
+             `cv task events --assignee <who> --not-by $CV_ENDPOINT [--since <when>] [--text]`",
+        ),
         TaskCmd::Serve {
             bind,
             assignee,
@@ -1520,7 +1499,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
     }
 }
 
-/// `cv task events` / `cv task watch`: one line per event, JSON by default (the poll surface),
+/// `cv task events`: one line per event, JSON by default (the poll surface),
 /// `--text` for people. The next cursor (the last event id) goes to stderr so stdout stays pure.
 fn print_events(outcome: &cv_core::task::ReplayOutcome, f: &EventFilter, text: bool) -> Result<()> {
     let events = task_ops::select_events(outcome, f);
