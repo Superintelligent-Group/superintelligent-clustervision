@@ -20,6 +20,7 @@ use cv_core::harness::codex::Codex;
 use cv_core::harness::continuedev::Continue;
 use cv_core::harness::devin::Devin;
 use cv_core::harness::gemini::Gemini;
+use cv_core::harness::grok::Grok;
 use cv_core::harness::kimi::Kimi;
 use cv_core::harness::kimi_code::KimiCode;
 use cv_core::harness::opencode::OpenCode;
@@ -42,6 +43,10 @@ struct CorpusHarness {
 
 fn codex(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Codex::with_home(&version_dir.join(".codex")))
+}
+
+fn grok(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Grok::with_home(&version_dir.join(".grok")))
 }
 
 fn claude_adapter(version_dir: &Path) -> Box<dyn Adapter> {
@@ -128,6 +133,11 @@ const HARNESSES: &[CorpusHarness] = &[
     CorpusHarness {
         name: "gemini",
         adapter: gemini,
+        children: None,
+    },
+    CorpusHarness {
+        name: "grok",
+        adapter: grok,
         children: None,
     },
     CorpusHarness {

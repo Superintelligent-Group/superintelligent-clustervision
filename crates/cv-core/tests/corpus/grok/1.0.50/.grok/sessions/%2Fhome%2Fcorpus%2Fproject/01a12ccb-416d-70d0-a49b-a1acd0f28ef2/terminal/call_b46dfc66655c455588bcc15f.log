@@ -1,0 +1,7 @@
+---
+total 8
+drwxr-xr-x  3 corpus  wheel   96 Oct 11 21:03 [34m.[39;49m[0m
+drwxr-xr-x  3 corpus  wheel   96 Oct 11 21:03 [34m..[39;49m[0m
+-rw-r--r--  1 corpus  wheel  475 Oct 11 21:03 corpus-hello.rhai
+---
+/home/corpus/project/.grok/workflows/corpus-hello.rhai

@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "c5f345ba-402c-46e9-838e-6c95011d9809",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.c01965b1d14143e0bef10a853c7deb88",
+  "attempt_id": "at1.bcd157e7263f4b90939886e0e48a3309",
+  "session_summary": "Five Word Hello Greeting Request",
+  "created_at": "2026-10-11T21:03:58.137008Z",
+  "updated_at": "2026-10-11T21:04:37.583299Z",
+  "num_messages": 29,
+  "num_chat_messages": 9,
+  "current_model_id": "glm-5.3",
+  "next_trace_turn": 5,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "da893300-2198-4b50-a26a-63c22bb1a172",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:04:37.583299Z",
+  "generated_title": "Five Word Hello Greeting Request",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}

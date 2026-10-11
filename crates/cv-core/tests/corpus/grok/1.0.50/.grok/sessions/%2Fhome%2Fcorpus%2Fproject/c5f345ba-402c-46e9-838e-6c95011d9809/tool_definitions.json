@@ -1,0 +1,182 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "list_dir",
+      "description": "List the files and directories in 'target_directory'. The path can be relative to the workspace root or absolute. The list leaves out dot-files and files that .gitignore ignores. For a large directory, the list shows file counts by extension.",
+      "parameters": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "required": [
+          "target_directory"
+        ],
+        "type": "object",
+        "properties": {
+          "target_directory": {
+            "description": "Directory to list.",
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_tool",
+      "description": "Find MCP tools by keyword and get their input schemas.\n\nIf the result status is \"partial\", some servers are still connecting.",
+      "parameters": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "description": "Keywords to match against tool names, server names, and descriptions. Include the server name and the action, for example \"linear create issue\".",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of results. The default is 5.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255,
+            "default": 5
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "use_tool",
+      "description": "Call an MCP tool that you found with `search_tool`. Use exactly one of these forms.\n\n- `tool_name` with `tool_input`, which holds the arguments.\n- `tool_name` with `tool_input_file`, a UTF-8 JSON file that holds only the arguments object.\n- `file`, a UTF-8 JSON file with `tool_name` and a `tool_input` object.\n\nA file must be a complete regular file of at most 8 MiB. A file needs Read permission and then the normal MCP approval. The arguments are passed to the MCP tool unchanged. They must match the input schema of the tool.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tool_name": {
+            "description": "Name of the MCP tool.",
+            "type": "string"
+          },
+          "tool_input": {
+            "description": "Arguments for the MCP tool. They must match its input schema.",
+            "type": "object",
+            "additionalProperties": true
+          },
+          "tool_input_file": {
+            "description": "UTF-8 JSON file that holds only the complete arguments object.",
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "description": "UTF-8 JSON file with tool_name and a tool_input object.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "description": "Name of the MCP tool.",
+                "type": "string"
+              },
+              "tool_input": {
+                "description": "Arguments for the MCP tool. They must match its input schema.",
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "tool_name",
+              "tool_input"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "tool_input_file"
+                  ]
+                },
+                {
+                  "required": [
+                    "file"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "tool_name": {
+                "description": "Name of the MCP tool.",
+                "type": "string"
+              },
+              "tool_input_file": {
+                "description": "UTF-8 JSON file that holds only the complete arguments object.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "tool_name",
+              "tool_input_file"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "tool_input"
+                  ]
+                },
+                {
+                  "required": [
+                    "file"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "file": {
+                "description": "UTF-8 JSON file with tool_name and a tool_input object.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "file"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "tool_name"
+                  ]
+                },
+                {
+                  "required": [
+                    "tool_input"
+                  ]
+                },
+                {
+                  "required": [
+                    "tool_input_file"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+]

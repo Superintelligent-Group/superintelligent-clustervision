@@ -1,0 +1,57 @@
+{
+  "version": 4,
+  "state": {
+    "run_id": "wf_01a12ccc34f17fd08742bc87671e06ad",
+    "revision": 9,
+    "name": "corpus-hello",
+    "objective": "Two agents each reply with one word",
+    "status": "complete",
+    "phases": [
+      {
+        "title": "Say",
+        "detail": "Each agent replies with one word"
+      }
+    ],
+    "current_phase": "Say",
+    "agent_budget": 128,
+    "agents_used": 2,
+    "agent_usage_incomplete": false,
+    "elapsed_ms_floor": 10199,
+    "history": [
+      {
+        "event": "workflow_started",
+        "at": "2026-10-11T21:09:02.870582+00:00"
+      },
+      {
+        "event": "phase_entered",
+        "detail": "Say",
+        "at": "2026-10-11T21:09:02.884119+00:00"
+      },
+      {
+        "event": "workflow_completed",
+        "at": "2026-10-11T21:09:13.069785+00:00"
+      }
+    ],
+    "journal_path": "workflows/wf_01a12ccc34f17fd08742bc87671e06ad/journal.jsonl",
+    "result_summary": "{\"ok\":true,\"yes\":true}",
+    "agents": [
+      {
+        "agent_id": "01a12ccc-3531-7753-8ef7-696cf4c82b27",
+        "label": "say-ok",
+        "phase": "Say",
+        "state": "done",
+        "tokens_used": 4741,
+        "duration_ms": 4806
+      },
+      {
+        "agent_id": "01a12ccc-484a-7ee3-8f82-fd47e909eb28",
+        "label": "say-yes",
+        "phase": "Say",
+        "state": "done",
+        "tokens_used": 4760,
+        "duration_ms": 5213
+      }
+    ]
+  },
+  "script_revision": 0
+}

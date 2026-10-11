@@ -1,0 +1,8 @@
+{
+  "workflows": [
+    {
+      "run_id": "wf_01a12ccc34f17fd08742bc87671e06ad",
+      "objective": "Two agents each reply with one word"
+    }
+  ]
+}

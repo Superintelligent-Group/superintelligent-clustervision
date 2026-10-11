@@ -1,0 +1,18 @@
+{
+  "subagent_id": "01a12ccc-3531-7753-8ef7-696cf4c82b27",
+  "attempt_id": "at1.f83e8c524d454644b207d5b65d6c2b2f",
+  "parent_session_id": "01a12ccb-416d-70d0-a49b-a1acd0f28ef2",
+  "child_session_id": "01a12ccc-3531-7753-8ef7-696cf4c82b27",
+  "subagent_type": "general-purpose",
+  "description": "say-ok",
+  "prompt": "Reply with the single word ok. Do not use any tools.",
+  "status": "completed",
+  "started_at": "2026-10-11T21:09:02.909166Z",
+  "completed_at": "2026-10-11T21:09:07.717097Z",
+  "duration_ms": 4806,
+  "tool_calls": 0,
+  "turns": 1,
+  "effective_context_source": "new",
+  "child_cwd": "/home/corpus/project",
+  "effective_model_id": "corpus-glm"
+}

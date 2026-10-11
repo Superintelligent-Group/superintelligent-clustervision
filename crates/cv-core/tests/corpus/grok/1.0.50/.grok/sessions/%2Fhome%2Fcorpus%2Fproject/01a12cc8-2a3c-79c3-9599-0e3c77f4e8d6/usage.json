@@ -1,0 +1,157 @@
+{
+  "sessionId": "01a12cc8-2a3c-79c3-9599-0e3c77f4e8d6",
+  "updatedAt": "2026-10-11T21:04:44.587914+00:00",
+  "session": {
+    "inputTokens": 16202,
+    "outputTokens": 628,
+    "cachedReadTokens": 12160,
+    "cacheCreationTokens": 0,
+    "reasoningTokens": 579,
+    "totalTokens": 16830,
+    "modelCalls": 5,
+    "turnCount": 5,
+    "primaryModelId": "glm-5.3",
+    "modelUsage": {
+      "glm-5.3-flash": {
+        "inputTokens": 5704,
+        "outputTokens": 418,
+        "cachedReadTokens": 4480,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 399,
+        "totalTokens": 6122,
+        "modelCalls": 2
+      },
+      "glm-5.3": {
+        "inputTokens": 10498,
+        "outputTokens": 210,
+        "cachedReadTokens": 7680,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 180,
+        "totalTokens": 10708,
+        "modelCalls": 3
+      }
+    }
+  },
+  "turns": [
+    {
+      "turnNumber": 1,
+      "endedAt": "2026-10-11T21:04:07.747826+00:00",
+      "inputTokens": 2666,
+      "outputTokens": 356,
+      "cachedReadTokens": 1856,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 347,
+      "totalTokens": 3022,
+      "modelCalls": 1,
+      "turnCount": 1,
+      "primaryModelId": "glm-5.3-flash",
+      "modelUsage": {
+        "glm-5.3-flash": {
+          "inputTokens": 2666,
+          "outputTokens": 356,
+          "cachedReadTokens": 1856,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 347,
+          "totalTokens": 3022,
+          "modelCalls": 1
+        }
+      }
+    },
+    {
+      "turnNumber": 2,
+      "endedAt": "2026-10-11T21:04:13.826527+00:00",
+      "inputTokens": 3038,
+      "outputTokens": 62,
+      "cachedReadTokens": 2624,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 52,
+      "totalTokens": 3100,
+      "modelCalls": 1,
+      "turnCount": 1,
+      "primaryModelId": "glm-5.3-flash",
+      "modelUsage": {
+        "glm-5.3-flash": {
+          "inputTokens": 3038,
+          "outputTokens": 62,
+          "cachedReadTokens": 2624,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 52,
+          "totalTokens": 3100,
+          "modelCalls": 1
+        }
+      }
+    },
+    {
+      "turnNumber": 3,
+      "endedAt": "2026-10-11T21:04:19.447259+00:00",
+      "inputTokens": 3120,
+      "outputTokens": 29,
+      "cachedReadTokens": 1856,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 25,
+      "totalTokens": 3149,
+      "modelCalls": 1,
+      "turnCount": 1,
+      "primaryModelId": "glm-5.3",
+      "modelUsage": {
+        "glm-5.3": {
+          "inputTokens": 3120,
+          "outputTokens": 29,
+          "cachedReadTokens": 1856,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 25,
+          "totalTokens": 3149,
+          "modelCalls": 1
+        }
+      }
+    },
+    {
+      "turnNumber": 5,
+      "endedAt": "2026-10-11T21:04:37.550181+00:00",
+      "inputTokens": 3543,
+      "outputTokens": 68,
+      "cachedReadTokens": 2304,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 50,
+      "totalTokens": 3611,
+      "modelCalls": 1,
+      "turnCount": 1,
+      "primaryModelId": "glm-5.3",
+      "modelUsage": {
+        "glm-5.3": {
+          "inputTokens": 3543,
+          "outputTokens": 68,
+          "cachedReadTokens": 2304,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 50,
+          "totalTokens": 3611,
+          "modelCalls": 1
+        }
+      }
+    },
+    {
+      "turnNumber": 6,
+      "endedAt": "2026-10-11T21:04:44.587914+00:00",
+      "inputTokens": 3835,
+      "outputTokens": 113,
+      "cachedReadTokens": 3520,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 105,
+      "totalTokens": 3948,
+      "modelCalls": 1,
+      "turnCount": 1,
+      "primaryModelId": "glm-5.3",
+      "modelUsage": {
+        "glm-5.3": {
+          "inputTokens": 3835,
+          "outputTokens": 113,
+          "cachedReadTokens": 3520,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 105,
+          "totalTokens": 3948,
+          "modelCalls": 1
+        }
+      }
+    }
+  ]
+}

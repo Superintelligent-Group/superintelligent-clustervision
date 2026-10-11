@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a12cc9-eafa-7c50-9da1-929449f3db16",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.29c1ec9aa17c41f5bcc61d4c6acf1f24",
+  "attempt_id": "at1.a4b33fc07762431fa0102e4277450a8a",
+  "session_summary": "Spawn Subagent to Read a.txt First Line",
+  "created_at": "2026-10-11T21:06:32.836927Z",
+  "updated_at": "2026-10-11T21:06:54.116455Z",
+  "num_messages": 17,
+  "num_chat_messages": 13,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "d2320752-7aaa-4eb5-a789-d6710202ea2a",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:06:54.116455Z",
+  "generated_title": "Spawn Subagent to Read a.txt First Line",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}

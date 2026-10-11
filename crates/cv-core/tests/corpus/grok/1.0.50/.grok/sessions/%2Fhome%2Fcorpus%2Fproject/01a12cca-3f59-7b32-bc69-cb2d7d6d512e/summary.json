@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a12cca-3f59-7b32-bc69-cb2d7d6d512e",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.2602e8920ca74445b4355391ec26acee",
+  "attempt_id": "at1.aab5f149d729432d87d61248251624ad",
+  "session_summary": "Background command wait and monitor output test",
+  "created_at": "2026-10-11T21:06:54.435422Z",
+  "updated_at": "2026-10-11T21:07:19.616615Z",
+  "num_messages": 31,
+  "num_chat_messages": 18,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "5daab636-a15e-4b11-aac1-4bb424d4899d",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:07:19.616615Z",
+  "generated_title": "Background command wait and monitor output test",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}

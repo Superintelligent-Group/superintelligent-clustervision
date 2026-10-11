@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "grok"
+version = "1.0.50"
+generated = "2026-10-11"
+model = "glm-5.3-flash (switch target glm-5.3) as BYOK [model.*] entries via Z.ai's chat endpoint, through key_proxy.py"
+model_calls = 71
+scenarios = ["chat","resume","model_switch","compaction","fork_session","reasoning","hooks","agents_md","tools","parallel_tools","tool_error","output_cap","write","rewind_points","image_tool_result","image_mention","todo","plan_mode","subagent","subagent_output","background_command","monitor","scheduler","mcp","skill","workflow","interrupt"]
+skipped = []
+generator_commit = "cbf3137"
+rescrubbed = "with b6cd30e (the generator's own scrub, cbf3137, broke one JSON line; the same copy of the run was scrubbed again)"

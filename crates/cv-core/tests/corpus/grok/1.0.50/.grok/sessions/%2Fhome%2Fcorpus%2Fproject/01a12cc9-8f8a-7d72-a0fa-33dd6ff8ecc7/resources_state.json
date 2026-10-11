@@ -1,0 +1,16 @@
+{
+  "params": {
+    "grok_build.UseTool": {
+      "native_tool_correction": true
+    },
+    "grok_build.ReadFile": {
+      "cursor_rules_on_read": false,
+      "max_output_bytes": null
+    }
+  },
+  "state": {
+    "grok_build.ReportedTaskCompletions": {
+      "reported": []
+    }
+  }
+}

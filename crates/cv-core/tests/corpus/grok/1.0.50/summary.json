@@ -1,0 +1,542 @@
+{
+  "sessions": [
+    {
+      "id": "01a12cc8-2a3c-79c3-9599-0e3c77f4e8d6",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cc8-2a3c-79c3-9599-0e3c77f4e8d6",
+      "messages": 11,
+      "sequence": [
+        "system/system_prompt",
+        "user/compaction_summary",
+        "user/prompt",
+        "user/compaction_summary",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 11
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cc9-0806-7330-8990-40e816059701",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cc9-0806-7330-8990-40e816059701",
+      "messages": 8,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "read_file"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cc9-3777-7433-9002-1a019b89513c",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cc9-3777-7433-9002-1a019b89513c",
+      "messages": 6,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cc9-53ac-7e30-8f29-13ceffae8133",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cc9-53ac-7e30-8f29-13ceffae8133",
+      "messages": 10,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "todo_write",
+        "todo_write"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cc9-8f8a-7d72-a0fa-33dd6ff8ecc7",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cc9-8f8a-7d72-a0fa-33dd6ff8ecc7",
+      "messages": 10,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "enter_plan_mode",
+        "exit_plan_mode"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cc9-eafa-7c50-9da1-929449f3db16",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cc9-eafa-7c50-9da1-929449f3db16",
+      "messages": 10,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 8,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "spawn_subagent",
+        "get_command_or_subagent_output"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cca-0386-72b1-8e87-4fbd51c3c0a2",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cca-0386-72b1-8e87-4fbd51c3c0a2",
+      "messages": 6,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "read_file"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "agent_path": "general-purpose"
+      },
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cca-3f59-7b32-bc69-cb2d7d6d512e",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cca-3f59-7b32-bc69-cb2d7d6d512e",
+      "messages": 14,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 9,
+        "tool_result": 4,
+        "tool_use": 4
+      },
+      "tools": [
+        "run_terminal_command",
+        "get_command_or_subagent_output",
+        "monitor",
+        "get_command_or_subagent_output"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cca-a300-7ae3-a1e8-05bb05f10110",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cca-a300-7ae3-a1e8-05bb05f10110",
+      "messages": 12,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 9,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "scheduler_create",
+        "scheduler_list",
+        "scheduler_delete"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12cca-f6b7-7aa3-8efa-83af35f7ffc8",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12cca-f6b7-7aa3-8efa-83af35f7ffc8",
+      "messages": 10,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "search_tool",
+        "use_tool"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12ccb-3631-7221-a22b-32e193eba415",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12ccb-3631-7221-a22b-32e193eba415",
+      "messages": 6,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 6
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12ccb-416d-70d0-a49b-a1acd0f28ef2",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12ccb-416d-70d0-a49b-a1acd0f28ef2",
+      "messages": 16,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 11,
+        "tool_result": 5,
+        "tool_use": 5
+      },
+      "tools": [
+        "workflow",
+        "run_terminal_command",
+        "read_file",
+        "workflow",
+        "workflow"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12ccc-3531-7753-8ef7-696cf4c82b27",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12ccc-3531-7753-8ef7-696cf4c82b27",
+      "messages": 4,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "agent_path": "general-purpose"
+      },
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "01a12ccc-484a-7ee3-8f82-fd47e909eb28",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/01a12ccc-484a-7ee3-8f82-fd47e909eb28",
+      "messages": 4,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "agent_path": "general-purpose"
+      },
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "68296463-1ae1-40d1-9d6d-9a359b549ed9",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/68296463-1ae1-40d1-9d6d-9a359b549ed9",
+      "messages": 5,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context"
+      ],
+      "blocks": {
+        "text": 5
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "corpus-glm",
+      "skipped_lines": 0
+    },
+    {
+      "id": "6d06861e-3a9d-49c0-ab78-1b7048e77885",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/6d06861e-3a9d-49c0-ab78-1b7048e77885",
+      "messages": 27,
+      "sequence": [
+        "system/system_prompt",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "user/injected_context",
+        "assistant/reply",
+        "tool/tool_result",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 14,
+        "tool_result": 7,
+        "tool_use": 7
+      },
+      "tools": [
+        "read_file",
+        "read_file",
+        "search_replace",
+        "run_terminal_command",
+        "run_terminal_command",
+        "run_terminal_command",
+        "write"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "c5f345ba-402c-46e9-838e-6c95011d9809",
+      "path": ".grok/sessions/%2Fhome%2Fcorpus%2Fproject/c5f345ba-402c-46e9-838e-6c95011d9809",
+      "messages": 8,
+      "sequence": [
+        "system/system_prompt",
+        "user/compaction_summary",
+        "user/prompt",
+        "user/compaction_summary",
+        "user/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 8
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "glm-5.3",
+      "skipped_lines": 0
+    }
+  ]
+}

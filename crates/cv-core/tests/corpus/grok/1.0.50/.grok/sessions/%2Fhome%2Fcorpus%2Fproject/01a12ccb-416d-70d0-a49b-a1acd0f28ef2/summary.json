@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a12ccb-416d-70d0-a49b-a1acd0f28ef2",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.6aa166f7602416e9ca5fceea3ed8aac",
+  "attempt_id": "at1.674677ff5e9f4148842387a9edc200c3",
+  "session_summary": "Run corpus-hello workflow and report output",
+  "created_at": "2026-10-11T21:08:00.503770Z",
+  "updated_at": "2026-10-11T21:09:13.087338Z",
+  "num_messages": 37,
+  "num_chat_messages": 22,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "a4240140-fc42-4ad5-b9f9-d10bd3cf37b8",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:09:13.087338Z",
+  "generated_title": "Run corpus-hello workflow and report output",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}

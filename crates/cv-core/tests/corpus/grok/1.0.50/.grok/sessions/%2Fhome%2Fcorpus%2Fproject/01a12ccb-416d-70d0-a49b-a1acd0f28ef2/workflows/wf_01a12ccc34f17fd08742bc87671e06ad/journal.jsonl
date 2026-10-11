@@ -1,0 +1,2 @@
+{"seq":0,"kind":"spawn_agent","req_hash":"555e61bb5e709c69a7ca228395078bb1","result":{"agent_id":"01a12ccc-3531-7753-8ef7-696cf4c82b27","success":true,"output":"ok","cancelled":false,"tokens_used":4741,"duration_ms":4806},"at_ms":1791752947773}
+{"seq":1,"kind":"spawn_agent","req_hash":"022a81e1593cc8e0f7c2c20e8b53da07","result":{"agent_id":"01a12ccc-484a-7ee3-8f82-fd47e909eb28","success":true,"output":"yes","cancelled":false,"tokens_used":4760,"duration_ms":5213},"at_ms":1791752953063}

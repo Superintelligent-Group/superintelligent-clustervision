@@ -1,0 +1,18 @@
+{
+  "subagent_id": "01a12cca-0386-72b1-8e87-4fbd51c3c0a2",
+  "attempt_id": "at1.19bc7918c2bb4459a749cab5ddf442b7",
+  "parent_session_id": "01a12cc9-eafa-7c50-9da1-929449f3db16",
+  "child_session_id": "01a12cca-0386-72b1-8e87-4fbd51c3c0a2",
+  "subagent_type": "general-purpose",
+  "description": "Read a.txt first line",
+  "prompt": "Read a.txt and reply with its first line. The file is located in your working directory (/home/corpus/project). Your reply should be just the first line of that file.",
+  "status": "completed",
+  "started_at": "2026-10-11T21:06:39.117574Z",
+  "completed_at": "2026-10-11T21:06:48.709902Z",
+  "duration_ms": 9587,
+  "tool_calls": 1,
+  "turns": 1,
+  "effective_context_source": "new",
+  "child_cwd": "/home/corpus/project",
+  "effective_model_id": "corpus-glm"
+}

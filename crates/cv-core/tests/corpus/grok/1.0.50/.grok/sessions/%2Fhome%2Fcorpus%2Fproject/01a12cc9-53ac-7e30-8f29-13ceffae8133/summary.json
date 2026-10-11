@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a12cc9-53ac-7e30-8f29-13ceffae8133",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.33577196f1614463a9421860af91ae50",
+  "attempt_id": "at1.4fe8f450e8a2400884ef1ab2b56939eb",
+  "session_summary": "Testing todo_write: create and complete todos",
+  "created_at": "2026-10-11T21:05:54.107101Z",
+  "updated_at": "2026-10-11T21:06:09.065737Z",
+  "num_messages": 13,
+  "num_chat_messages": 11,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "eed844a4-f844-4a41-a72a-be6036697aa7",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:06:09.065737Z",
+  "generated_title": "Testing todo_write: create and complete todos",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}

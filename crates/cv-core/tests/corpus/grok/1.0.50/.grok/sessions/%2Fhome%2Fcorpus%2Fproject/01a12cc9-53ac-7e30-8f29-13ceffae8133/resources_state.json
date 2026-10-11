@@ -1,0 +1,26 @@
+{
+  "params": {
+    "grok_build.UseTool": {
+      "native_tool_correction": true
+    }
+  },
+  "state": {
+    "grok_build.ReportedTaskCompletions": {
+      "reported": []
+    },
+    "grok_build.Todo": {
+      "todos": {
+        "alpha": {
+          "content": "alpha",
+          "priority": "medium",
+          "status": "completed"
+        },
+        "beta": {
+          "content": "beta",
+          "priority": "medium",
+          "status": "pending"
+        }
+      }
+    }
+  }
+}

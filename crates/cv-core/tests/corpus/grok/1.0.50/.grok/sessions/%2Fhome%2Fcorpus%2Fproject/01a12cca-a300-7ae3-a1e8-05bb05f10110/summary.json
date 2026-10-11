@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a12cca-a300-7ae3-a1e8-05bb05f10110",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.1145572565bc42a797bf8e2b85f83193",
+  "attempt_id": "at1.18164d663d294205a2ac8f2f517e1b87",
+  "session_summary": "Use scheduler_create to run the prompt 'say tick' every 30",
+  "created_at": "2026-10-11T21:07:19.944307Z",
+  "updated_at": "2026-10-11T21:07:41.049369Z",
+  "num_messages": 21,
+  "num_chat_messages": 15,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "05484d31-c9ec-445c-a4b6-b208770f50da",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:07:41.049369Z",
+  "generated_title": "Use scheduler_create to run the prompt 'say tick' every 30",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}

@@ -1,0 +1,24 @@
+{
+  "info": {
+    "id": "01a12ccc-3531-7753-8ef7-696cf4c82b27",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "01a12ccc-3531-7753-8ef7-696cf4c82b27",
+  "attempt_id": "at1.f83e8c524d454644b207d5b65d6c2b2f",
+  "session_summary": "",
+  "created_at": "2026-10-11T21:09:02.924197Z",
+  "updated_at": "2026-10-11T21:09:07.734205Z",
+  "num_messages": 3,
+  "num_chat_messages": 4,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "subagent",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:09:07.734205Z",
+  "agent_name": "general-purpose",
+  "sandbox_profile": "off"
+}

@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a12cc9-3777-7433-9002-1a019b89513c",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.fed7222632764c2c80d3e9c936791438",
+  "attempt_id": "at1.6d1dbb4b26074122b9fef1be871fe034",
+  "session_summary": "@dot.png An image is attached. Do not use tools. Reply",
+  "created_at": "2026-10-11T21:05:46.883390Z",
+  "updated_at": "2026-10-11T21:05:53.729581Z",
+  "num_messages": 5,
+  "num_chat_messages": 7,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "8584b949-2626-421d-a327-eae5d41344ef",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:05:53.729581Z",
+  "generated_title": "@dot.png An image is attached. Do not use tools. Reply",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}

@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a12cc9-0806-7330-8990-40e816059701",
+    "cwd": "/home/corpus/project"
+  },
+  "agent_id": "ag1.e874f402e90a48758590c3e4d018dcde",
+  "attempt_id": "at1.d4a84b7cc89d4edbb9322ec20e90034b",
+  "session_summary": "Use read_file on dot.png once, then, without any other tool",
+  "created_at": "2026-10-11T21:05:34.742300Z",
+  "updated_at": "2026-10-11T21:05:46.499631Z",
+  "num_messages": 9,
+  "num_chat_messages": 10,
+  "current_model_id": "corpus-glm",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/home/corpus/project/",
+  "head_commit": "d0e3d84b184e1800e4746a8a81706c1bb43ff0aa",
+  "head_branch": "main",
+  "request_id": "ac9d781d-943b-4dcd-88ef-31d29987a8af",
+  "grok_home": "/home/corpus/.grok",
+  "last_active_at": "2026-10-11T21:05:46.499631Z",
+  "generated_title": "Use read_file on dot.png once, then, without any other tool",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off"
+}
