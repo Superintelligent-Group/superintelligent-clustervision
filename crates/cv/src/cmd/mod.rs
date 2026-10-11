@@ -10,6 +10,7 @@ pub(crate) mod distill;
 pub(crate) mod doctor;
 pub(crate) mod events;
 pub(crate) mod formats;
+pub(crate) mod hooks;
 pub(crate) mod live;
 pub(crate) mod orchestrate;
 pub(crate) mod pack;

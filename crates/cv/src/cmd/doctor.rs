@@ -60,7 +60,11 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&rep.to_json())?);
+        let mut v = rep.to_json();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("hooks".into(), crate::cmd::hooks::doctor_json());
+        }
+        println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
     print_report(&rep, &label, targets.len());
@@ -74,6 +78,12 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
         format!("session {label}")
     };
     println!("# compaction doctor — {scope}\n");
+
+    // The cybernetic layer: are the hooks that make compaction visible from inside the session
+    // installed, and which compaction knobs are in force (settings + environment).
+    for line in crate::cmd::hooks::doctor_lines() {
+        println!("{line}");
+    }
 
     // Compaction summary.
     if rep.compactions == 0 {

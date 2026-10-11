@@ -19,9 +19,10 @@ pub(crate) use util::short_id;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use cmd::hooks::{HookName, HooksCmd};
 use cmd::task::TaskCmd;
 use cmd::{
-    browse, cat, compaction, compose, config, doctor, events, formats, live, orchestrate, pack, port, recipes, schema,
+    browse, cat, compaction, compose, config, doctor, events, hooks, formats, live, orchestrate, pack, port, recipes, schema,
     search, share, task, tools, view, workflow,
 };
 use std::path::PathBuf;
@@ -92,7 +93,7 @@ pub(crate) const GROUPS: &[(&str, &[&str])] = &[
     ),
     ("Export", &["export", "dataset", "pack"]),
     ("Fleet & live", &["task", "scry", "share"]),
-    ("System", &["index", "config", "schema", "formats", "recipes"]),
+    ("System", &["index", "config", "schema", "formats", "recipes", "hooks", "hook"]),
 ];
 
 /// The group a visible command belongs to (`None` for hidden stubs and unknown names).
@@ -983,6 +984,18 @@ enum Cmd {
     /// The agent quickstart: the things agents do with cv, each as one command line with the JSON
     /// keys it returns.
     Recipes,
+    /// Wire cv into Claude Code: install / remove / show the five hooks (`cv hook …`) and the `cv`
+    /// skill in its settings. Idempotent and reversible; agents set this up for themselves.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksCmd,
+    },
+    /// One hook's body, run by Claude Code: reads the hook JSON on stdin, prints a line or two of
+    /// hook JSON (or nothing). `cv hooks install claude` writes the entries that call these.
+    Hook {
+        #[arg(value_enum)]
+        name: HookName,
+    },
 
     // ───────────────────────────── Removed (hidden stubs: error with a pointer, exit 2) ─────────────────────────────
     #[command(hide = true)]
@@ -1216,6 +1229,8 @@ fn run() -> Result<()> {
             legacy,
         } => formats::cmd_formats(harness, recent, json, legacy),
         Cmd::Recipes => recipes::cmd_recipes(),
+        Cmd::Hooks { action } => hooks::cmd_hooks(action),
+        Cmd::Hook { name } => hooks::cmd_hook(name),
         Cmd::Resume { id, harness, launch } => port::cmd_resume(&id, harness, launch),
         Cmd::Tree { id, harness } => view::cmd_tree(&id, harness),
         Cmd::Workflow {
