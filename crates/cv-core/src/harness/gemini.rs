@@ -1443,29 +1443,8 @@ mod tests {
         // gemini-cli writes context of its own as `user` records — `isIgnoredUserContent`
         // (`utils/sessionUtils.ts:97`): slash commands, `?` queries, the `<session_context>` preamble,
         // `<hook_context>` hook output — and `info` / `warning` / `error` records.
-        let text = concat!(
-            r#"{"sessionId":"k1","projectHash":"h","startTime":"2026-03-01T00:00:00.000Z","lastUpdated":"2026-03-01T00:00:09.000Z","kind":"main"}"#,
-            "\n",
-            r#"{"id":"u1","timestamp":"2026-03-01T00:00:01.000Z","type":"user","content":"<session_context>\nToday is Sunday.\n</session_context>"}"#,
-            "\n",
-            r#"{"id":"u2","timestamp":"2026-03-01T00:00:02.000Z","type":"user","content":"<hook_context>\nlint: ok\n</hook_context>"}"#,
-            "\n",
-            r#"{"id":"u3","timestamp":"2026-03-01T00:00:03.000Z","type":"user","content":"/memory show"}"#,
-            "\n",
-            r#"{"id":"u4","timestamp":"2026-03-01T00:00:04.000Z","type":"user","content":"?what does this do"}"#,
-            "\n",
-            r#"{"id":"u5","timestamp":"2026-03-01T00:00:05.000Z","type":"user","content":"fix the build"}"#,
-            "\n",
-            r#"{"id":"g1","timestamp":"2026-03-01T00:00:06.000Z","type":"gemini","model":"gemini-3-pro","content":"On it."}"#,
-            "\n",
-            r#"{"id":"i1","timestamp":"2026-03-01T00:00:07.000Z","type":"info","content":"Session compacted."}"#,
-            "\n",
-            r#"{"id":"w1","timestamp":"2026-03-01T00:00:08.000Z","type":"warning","content":"Rate limited; retrying."}"#,
-            "\n",
-            r#"{"id":"e1","timestamp":"2026-03-01T00:00:09.000Z","type":"error","content":"429 Resource exhausted"}"#,
-            "\n",
-        );
-        let sessions = parse_all_str(text, None);
+        let text = fixture("session_ignored_user_content.jsonl");
+        let sessions = parse_all_str(&text, None);
         assert_eq!(sessions.len(), 1);
         let s = &sessions[0];
         assert_eq!(
@@ -1500,17 +1479,8 @@ mod tests {
 
     #[test]
     fn message_model_only_when_it_differs_from_the_session() {
-        let text = concat!(
-            r#"{"sessionId":"m1","projectHash":"h","startTime":"2026-03-01T00:00:00.000Z","lastUpdated":"2026-03-01T00:00:03.000Z","kind":"main"}"#,
-            "\n",
-            r#"{"id":"u1","timestamp":"2026-03-01T00:00:01.000Z","type":"user","content":"hi"}"#,
-            "\n",
-            r#"{"id":"g1","timestamp":"2026-03-01T00:00:02.000Z","type":"gemini","model":"gemini-3-pro","content":"hello"}"#,
-            "\n",
-            r#"{"id":"g2","timestamp":"2026-03-01T00:00:03.000Z","type":"gemini","model":"gemini-3-flash","content":"(fallback) hello"}"#,
-            "\n",
-        );
-        let s = &parse_all_str(text, None)[0];
+        let text = fixture("session_model_fallback.jsonl");
+        let s = &parse_all_str(&text, None)[0];
         assert_eq!(s.model.as_deref(), Some("gemini-3-pro"));
         assert_eq!(s.messages[1].model, None);
         assert_eq!(s.messages[2].model.as_deref(), Some("gemini-3-flash"));

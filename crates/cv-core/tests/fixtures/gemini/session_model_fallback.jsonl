@@ -1,0 +1,4 @@
+{"sessionId":"m1","projectHash":"h","startTime":"2026-03-01T00:00:00.000Z","lastUpdated":"2026-03-01T00:00:03.000Z","kind":"main"}
+{"id":"u1","timestamp":"2026-03-01T00:00:01.000Z","type":"user","content":"hi"}
+{"id":"g1","timestamp":"2026-03-01T00:00:02.000Z","type":"gemini","model":"gemini-3-pro","content":"hello"}
+{"id":"g2","timestamp":"2026-03-01T00:00:03.000Z","type":"gemini","model":"gemini-3-flash","content":"(fallback) hello"}
