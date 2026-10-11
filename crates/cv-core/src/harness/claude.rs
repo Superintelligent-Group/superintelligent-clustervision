@@ -7,6 +7,10 @@
 //! threaded via `uuid`/`parentUuid`.
 
 use super::{parse_ts, Adapter};
+
+/// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
+/// spelled once, and the one journal parser.
+pub mod sidecar;
 use crate::ir::*;
 use crate::ir::{Lineage, MessageKind, Origin};
 use crate::lazy::{Span, Text, INLINE_MAX};
@@ -808,10 +812,7 @@ fn persisted_output(text: &str) -> Option<(String, Option<String>)> {
 /// `<projects>/<encoded>/<sid>/subagents/<agent>.jsonl` — a sibling `subagents/` dir next to the
 /// parent's `<sid>.jsonl`. Returned as lightweight refs (newest first), scanned in parallel.
 pub fn subagent_refs(parent_path: &std::path::Path) -> Vec<SessionRef> {
-    let Some(stem) = parent_path.file_stem().and_then(|s| s.to_str()) else {
-        return vec![];
-    };
-    let Some(dir) = parent_path.parent().map(|d| d.join(stem).join("subagents")) else {
+    let Some(dir) = sidecar::subagents_dir(parent_path) else {
         return vec![];
     };
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -880,10 +881,7 @@ impl SubagentInfo {
 /// workflow tier (which on a heavy session is the *majority* of the agents) and drops the
 /// meta/journal sidecars that carry each agent's purpose and outcome. Newest first.
 pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
-    let Some(stem) = parent_path.file_stem().and_then(|s| s.to_str()) else {
-        return vec![];
-    };
-    let Some(base) = parent_path.parent().map(|d| d.join(stem).join("subagents")) else {
+    let Some(base) = sidecar::subagents_dir(parent_path) else {
         return vec![];
     };
 
@@ -894,12 +892,11 @@ pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
 
     // Tier 2: workflow sub-agents at `subagents/workflows/<wf>/agent-*.jsonl`, grouped by run id,
     // each annotated with the result the workflow `journal.jsonl` recorded for its agentId.
-    let wf_root = base.join("workflows");
-    if let Ok(rd) = fs::read_dir(&wf_root) {
+    if let Some(rd) = sidecar::workflow_runs_dir(parent_path).and_then(|d| fs::read_dir(d).ok()) {
         let wf_dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
         let groups = crate::par_flat_map(wf_dirs, |wf_dir| {
             let run_id = wf_dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let journal = read_workflow_journal(&wf_dir.join("journal.jsonl"));
+            let journal = sidecar::journal_results(&wf_dir);
             agents_in_dir(&wf_dir, Some((&run_id, &journal)))
         });
         out.extend(groups);
@@ -909,9 +906,8 @@ pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
     out
 }
 
-/// A workflow `journal.jsonl` reduced to `agentId → (status, summary)` — the orchestrator's
-/// journaled result per agent (both fields optional: string results carry no separate status).
-type JournalResults = std::collections::HashMap<String, (Option<String>, Option<String>)>;
+/// A run's journal as [`sidecar::journal_results`] reads it: `agentId → full result`.
+type JournalResults = std::collections::BTreeMap<String, Value>;
 
 /// Scan one directory for `agent-*.jsonl` transcripts, pairing each with its `*.meta.json` sidecar
 /// and (for workflow dirs) the journaled result for its agentId. `wf` is `Some((run_id, journal))`
@@ -935,7 +931,10 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>) -> 
         let session = scan(&p).ok()?;
         let meta = read_meta(&p.with_extension("meta.json"));
         let agent_id = session.id.strip_prefix("agent-").unwrap_or(&session.id).to_string();
-        let (status, summary) = wf.and_then(|(_, j)| j.get(&agent_id).cloned()).unwrap_or((None, None));
+        let (status, summary) = wf
+            .and_then(|(_, j)| j.get(&agent_id))
+            .map(sidecar::result_summary)
+            .unwrap_or((None, None));
         Some(SubagentInfo {
             session,
             agent_type: meta.0,
@@ -959,47 +958,6 @@ fn read_meta(path: &std::path::Path) -> (Option<String>, Option<String>, Option<
     };
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     (s("agentType"), s("description"), s("toolUseId"))
-}
-
-/// Parse a workflow `journal.jsonl` into a map from `agentId` → `(status, summary)`, taking the
-/// last `result` record for each agent (a `result` supersedes the earlier `started`). The journal
-/// is the orchestrator's structured-output log — the sub-agent's real return value, which never
-/// appears in the parent transcript.
-///
-/// The `result` payload comes in two shapes across workflows: a **structured object**
-/// `{status, summary, …}` (status vocabularies are per-workflow: `done`/`partial`/`GREEN`/
-/// `proven`/`blocked`/…), or a **plain string** (the agent's whole freeform return, with no
-/// separate status). Both are normalized here.
-fn read_workflow_journal(path: &std::path::Path) -> JournalResults {
-    let mut map = std::collections::HashMap::new();
-    let Ok(file) = fs::File::open(path) else {
-        return map;
-    };
-    super::for_each_json_line(BufReader::new(file), |v| {
-        if v.get("type").and_then(Value::as_str) == Some("result") {
-            if let Some(agent_id) = v.get("agentId").and_then(Value::as_str) {
-                let (status, summary) = match v.get("result") {
-                    // Structured form: pull status + summary; if there's no `summary` key fall back
-                    // to the object's compact JSON so the outcome isn't lost.
-                    Some(obj @ Value::Object(_)) => {
-                        let status = obj.get("status").and_then(Value::as_str).map(str::to_string);
-                        let summary = obj
-                            .get("summary")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                            .or_else(|| Some(obj.to_string()));
-                        (status, summary)
-                    }
-                    // Plain-string form: the whole string is the summary, no separate status.
-                    Some(Value::String(s)) => (None, Some(s.clone())),
-                    _ => (None, None),
-                };
-                map.insert(agent_id.to_string(), (status, summary));
-            }
-        }
-        Flow::Continue
-    });
-    map
 }
 
 /// The sub-agent's final return value as text: the last assistant text turn in its transcript
@@ -2697,40 +2655,6 @@ mod tests {
             notices["a1"].ts.map(|t| t.to_rfc3339()).as_deref(),
             Some("2026-10-01T00:06:00+00:00")
         );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn workflow_journal_handles_object_and_string_results() {
-        use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("cv-wfj-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let jpath = dir.join("journal.jsonl");
-        let mut f = std::fs::File::create(&jpath).unwrap();
-        // Object form (status + summary), a started-only agent (no result), and a string form.
-        writeln!(f, r#"{{"type":"started","key":"k1","agentId":"aaa"}}"#).unwrap();
-        writeln!(
-            f,
-            r#"{{"type":"result","key":"k1","agentId":"aaa","result":{{"status":"done","summary":"closed the lane"}}}}"#
-        )
-        .unwrap();
-        writeln!(f, r#"{{"type":"started","key":"k2","agentId":"bbb"}}"#).unwrap();
-        writeln!(
-            f,
-            r#"{{"type":"result","key":"k3","agentId":"ccc","result":"freeform return text"}}"#
-        )
-        .unwrap();
-        drop(f);
-
-        let map = read_workflow_journal(&jpath);
-        assert_eq!(
-            map.get("aaa"),
-            Some(&(Some("done".to_string()), Some("closed the lane".to_string())))
-        );
-        // started-only agent has no journaled result.
-        assert!(!map.contains_key("bbb"));
-        // string result becomes the summary, with no status.
-        assert_eq!(map.get("ccc"), Some(&(None, Some("freeform return text".to_string()))));
         std::fs::remove_dir_all(&dir).ok();
     }
 

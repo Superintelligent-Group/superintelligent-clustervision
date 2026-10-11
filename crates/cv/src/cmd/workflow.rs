@@ -935,10 +935,9 @@ fn mine_lane(a: &cv_core::WorkflowAgent, run_id: &str, session_path: Option<&std
     let (Some(id), Some(sp)) = (a.agent_id.as_deref(), session_path) else {
         return rev;
     };
-    let Some(stem) = sp.file_stem().and_then(|s| s.to_str()) else {
+    let Some(dir) = cv_core::harness::claude::sidecar::workflow_run_dir(sp, run_id) else {
         return rev;
     };
-    let dir = sp.with_file_name(stem).join("subagents").join("workflows").join(run_id);
     let bare = id.strip_prefix("agent-").unwrap_or(id);
     let path = dir.join(format!("agent-{bare}.jsonl"));
     let Ok(text) = std::fs::read_to_string(&path) else {

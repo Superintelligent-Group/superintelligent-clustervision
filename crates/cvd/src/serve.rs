@@ -1173,12 +1173,8 @@ fn workflow_script(harness: &str, id: &str, wf: &str) -> (u16, Value) {
         Err(e) => return err(500, &e.to_string()),
     };
     // `<dir>/<stem>/workflows/scripts/` next to the transcript file.
-    let Some(stem) = r.path.file_stem().and_then(|s| s.to_str()) else {
+    let Some(scripts_dir) = cv_core::harness::claude::sidecar::workflows_dir(&r.path).map(|d| d.join("scripts")) else {
         return err(404, "session has no sidecar tree");
-    };
-    let scripts_dir = match r.path.parent() {
-        Some(d) => d.join(stem).join("workflows").join("scripts"),
-        None => return err(404, "session has no sidecar tree"),
     };
     // The filename is `<some-slug>-<wf>.js`; match by the run-id suffix.
     let found = std::fs::read_dir(&scripts_dir).ok().and_then(|rd| {

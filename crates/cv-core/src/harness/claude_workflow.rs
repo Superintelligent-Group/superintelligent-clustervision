@@ -19,6 +19,7 @@
 //! This module reads (1) and (2) into a [`Workflow`] so `cv workflow <runId>` can show
 //! phases → agents → outcomes + the script — making workflows queryable on their own terms.
 
+use super::claude::sidecar;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -197,7 +198,7 @@ impl Workflow {
     /// `subagents/workflows/<runId>/agent-<id>.jsonl` is the return the orchestrator never got to
     /// journal — the harvestable work.
     pub fn attach_journal(&mut self, parent_path: &Path) {
-        let results = journal_results(parent_path, &self.run_id);
+        let results = run_journal(parent_path, &self.run_id);
         if results.is_empty() {
             self.attach_transcript_returns(parent_path);
             return;
@@ -218,13 +219,7 @@ impl Workflow {
     /// from its transcript in the run's debris dir. Only fills agents whose transcript exists and
     /// ends in assistant text; the rest stay `None` (honest: no return was recorded anywhere).
     fn attach_transcript_returns(&mut self, parent_path: &Path) {
-        let Some(stem) = parent_path.file_stem().and_then(|s| s.to_str()) else {
-            return;
-        };
-        let Some(dir) = parent_path
-            .parent()
-            .map(|d| d.join(stem).join("subagents").join("workflows").join(&self.run_id))
-        else {
+        let Some(dir) = sidecar::workflow_run_dir(parent_path, &self.run_id) else {
             return;
         };
         if !dir.is_dir() {
@@ -245,44 +240,17 @@ impl Workflow {
     }
 }
 
-/// A run's `journal.jsonl` reduced to `agentId → full result Value` (the LAST result per agent —
-/// a re-issued agent journals more than once). Empty when the journal is absent or unreadable.
-pub fn journal_results(parent_path: &Path, run_id: &str) -> BTreeMap<String, Value> {
-    let mut map = BTreeMap::new();
-    let Some(stem) = parent_path.file_stem().and_then(|s| s.to_str()) else {
-        return map;
-    };
-    let Some(journal) = parent_path.parent().map(|d| {
-        d.join(stem)
-            .join("subagents")
-            .join("workflows")
-            .join(run_id)
-            .join("journal.jsonl")
-    }) else {
-        return map;
-    };
-    let Ok(txt) = fs::read_to_string(&journal) else {
-        return map;
-    };
-    for line in txt.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if v.get("type").and_then(Value::as_str) != Some("result") {
-            continue;
-        }
-        if let (Some(id), Some(r)) = (v.get("agentId").and_then(Value::as_str), v.get("result")) {
-            map.insert(id.to_string(), r.clone());
-        }
-    }
-    map
+/// A run's journaled results ([`sidecar::journal_results`]) by parent transcript + run id.
+fn run_journal(parent_path: &Path, run_id: &str) -> BTreeMap<String, Value> {
+    sidecar::workflow_run_dir(parent_path, run_id)
+        .map(|d| sidecar::journal_results(&d))
+        .unwrap_or_default()
 }
 
 /// The directory holding a session's workflow *state* files: `<sessionId>/workflows/`. (Distinct
 /// from `<sessionId>/subagents/workflows/`, which holds the per-run agent transcripts.)
 fn workflows_dir(parent_path: &Path) -> Option<PathBuf> {
-    let stem = parent_path.file_stem()?.to_str()?;
-    parent_path.parent().map(|d| d.join(stem).join("workflows"))
+    sidecar::workflows_dir(parent_path)
 }
 
 /// Every workflow run a session launched, read from its `workflows/wf_*.json` state files (newest
@@ -754,10 +722,6 @@ pub fn launches(session_path: &Path) -> Vec<WorkflowLaunch> {
 pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
     let mut ghosts = compute_ghosts(launches(session_path), &workflows(session_path));
     let mut orphans = orphan_scripts(session_path);
-    let stem_dir = session_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|stem| session_path.parent().map(|d| d.join(stem)));
     for g in &mut ghosts {
         let Some(name) = g.name.as_deref() else { continue };
         // Consume one same-named orphan script per ghost (each launch persists its own script).
@@ -765,8 +729,7 @@ pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
             continue;
         };
         let (_, rid) = orphans.swap_remove(pos);
-        if let Some(base) = &stem_dir {
-            let debris = base.join("subagents").join("workflows").join(&rid);
+        if let Some(debris) = sidecar::workflow_run_dir(session_path, &rid) {
             g.debris_agents = Some(
                 fs::read_dir(&debris)
                     .into_iter()
@@ -779,7 +742,7 @@ pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
                     })
                     .count(),
             );
-            g.journal_result_count = Some(journal_results(session_path, &rid).len());
+            g.journal_result_count = Some(sidecar::journal_results(&debris).len());
         }
         g.run_id = Some(rid);
     }

@@ -280,8 +280,7 @@ pub fn find_subagent_parents(agent_id: &str) -> Vec<SessionRef> {
     let mut refs = sessions();
     refs.retain(|r| r.harness == Harness::Claude);
     let mut out = par_filter_map(refs, move |r| {
-        let stem = r.path.file_stem()?.to_str()?.to_string();
-        let base = r.path.parent()?.join(stem).join("subagents");
+        let base = harness::claude::sidecar::subagents_dir(&r.path)?;
         let has_match = |dir: &std::path::Path| {
             std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
                 e.file_name()
@@ -290,7 +289,8 @@ pub fn find_subagent_parents(agent_id: &str) -> Vec<SessionRef> {
             })
         };
         let hit = has_match(&base)
-            || std::fs::read_dir(base.join("workflows"))
+            || harness::claude::sidecar::workflow_runs_dir(&r.path)
+                .and_then(|d| std::fs::read_dir(d).ok())
                 .into_iter()
                 .flatten()
                 .flatten()
