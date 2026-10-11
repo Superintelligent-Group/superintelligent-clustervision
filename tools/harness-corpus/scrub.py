@@ -1,6 +1,6 @@
 """Scrub a generated corpus in place: throwaway paths -> /home/corpus, then refuse anything secret.
 
-    python3 -I scrub.py --work WORK --home CORPUS_HOME --dir OUT
+    python3 -I scrub.py --work WORK --home CORPUS_HOME --dir OUT [--also FROM=TO ...]
 
 Rewrites text files and every TEXT/BLOB cell of every sqlite table (then VACUUMs). Afterwards it
 scans every file for key material (the literal keys named in $CORPUS_KEY_FILES, common token
@@ -83,6 +83,42 @@ def fix(b, reps):
     return EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).endswith((b".invalid", b".example")) or b"@openai" in m.group(0) else EMAIL.encode(), b)
 
 
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def zstd():
+    """Python 3.14's compression.zstd; zstd cells (OpenClaw's event_zstd) cannot be scrubbed without it."""
+    try:
+        from compression import zstd as z
+    except ImportError:
+        sys.exit("scrub: this store has zstd-compressed sqlite cells; run scrub.py with python >= 3.14")
+    return z
+
+
+def fix_blob(v, reps):
+    """A zstd frame is scrubbed inside (decompress, rewrite, recompress at level 1 with a checksum)."""
+    if not v.startswith(ZSTD_MAGIC):
+        return fix(v, reps), None
+    z = zstd()
+    raw = z.decompress(v)
+    new = fix(raw, reps)
+    if new == raw:
+        return v, None
+    return z.compress(new, options={z.CompressionParameter.compression_level: 1,
+                                    z.CompressionParameter.checksum_flag: 1}), len(new)
+
+
+def sqlite_expanded(path):
+    """The decompressed contents of every zstd cell, so the secret scan sees inside them."""
+    con = sqlite3.connect(path)
+    out = []
+    for (t,) in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall():
+        for row in con.execute(f'SELECT * FROM "{t}"'):
+            out += [zstd().decompress(v) for v in row if isinstance(v, bytes) and v.startswith(ZSTD_MAGIC)]
+    con.close()
+    return b"\n".join(out)
+
+
 def is_sqlite(path):
     with open(path, "rb") as f:
         return f.read(16) == b"SQLite format 3\x00"
@@ -92,18 +128,31 @@ def scrub_sqlite(path, reps):
     con = sqlite3.connect(path)
     for (t,) in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall():
         cols = [r[1] for r in con.execute(f'PRAGMA table_info("{t}")')]
-        rows = con.execute(f'SELECT rowid, * FROM "{t}"').fetchall()
+        # WITHOUT ROWID tables (OpenClaw's) are matched on every original column instead.
+        try:
+            rows = con.execute(f'SELECT rowid, * FROM "{t}"').fetchall()
+            by_rowid = True
+        except sqlite3.OperationalError:
+            rows = [(None, *r) for r in con.execute(f'SELECT * FROM "{t}"').fetchall()]
+            by_rowid = False
         for row in rows:
-            new = []
-            for v in row[1:]:
+            new = list(row[1:])
+            for i, v in enumerate(row[1:]):
                 if isinstance(v, str):
-                    v = fix(v.encode(), reps).decode()
+                    new[i] = fix(v.encode(), reps).decode()
                 elif isinstance(v, bytes):
-                    v = fix(v, reps)
-                new.append(v)
+                    new[i], raw_len = fix_blob(v, reps)
+                    # `<x>_zstd` keeps its uncompressed size in `<x>_utf8_bytes` (OpenClaw transcript_events)
+                    size_col = cols[i].removesuffix("_zstd") + "_utf8_bytes"
+                    if raw_len is not None and cols[i].endswith("_zstd") and size_col in cols:
+                        new[cols.index(size_col)] = raw_len
             if list(row[1:]) != new:
                 sets = ", ".join(f'"{c}" = ?' for c in cols)
-                con.execute(f'UPDATE "{t}" SET {sets} WHERE rowid = ?', [*new, row[0]])
+                if by_rowid:
+                    con.execute(f'UPDATE "{t}" SET {sets} WHERE rowid = ?', [*new, row[0]])
+                else:
+                    where = " AND ".join(f'"{c}" IS ?' for c in cols)
+                    con.execute(f'UPDATE "{t}" SET {sets} WHERE {where}', [*new, *row[1:]])
     con.commit()
     con.execute("VACUUM")
     con.close()
@@ -114,8 +163,14 @@ def main():
     p.add_argument("--work", required=True)
     p.add_argument("--home", required=True)
     p.add_argument("--dir", required=True)
+    p.add_argument("--also", action="append", default=[], metavar="FROM=TO",
+                   help="an extra literal rewrite, e.g. a harness install prefix the store records")
     a = p.parse_args()
     reps = replacements(a.work, a.home)
+    for kv in a.also:
+        frm, _, to = kv.partition("=")
+        reps += [(frm, to), (frm.replace("/", "\\/"), to.replace("/", "\\/"))]
+    reps = sorted(set(reps), key=lambda r: -len(r[0]))
     rename_paths(a.dir, reps)
     files = [os.path.join(d, f) for d, _, fs in os.walk(a.dir) for f in fs]
     for path in files:
@@ -139,6 +194,8 @@ def main():
     for path in files:
         with open(path, "rb") as f:
             b = f.read()
+        if is_sqlite(path):
+            b += sqlite_expanded(path)
         why = [n for n, hit in (
             ("a literal key", any(k in b for k in keys)),
             ("a token shape", any(r.search(b) for r in TOKEN_RES)),

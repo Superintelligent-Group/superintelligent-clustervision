@@ -5,7 +5,8 @@
 #   corpus_guard VAR...          -> refuse unless each named env var is set, non-empty, inside $WORK,
 #                                   and not ember's real home or anything under it
 #   corpus_load_key VAR FILE     -> export VAR from FILE without ever printing it
-#   corpus_scrub DIR             -> rewrite $WORK paths to /home/corpus in every file (sqlite too),
+#   corpus_scrub DIR [--also FROM=TO ...]
+#                                -> rewrite $WORK paths to /home/corpus in every file (sqlite too),
 #                                   then fail on anything that looks like a secret or a real path
 #   corpus_size_check DIR        -> warn over 300 KB, fail over 1 MB
 #   corpus_manifest DIR k=v...   -> write DIR/MANIFEST.toml
@@ -50,7 +51,7 @@ corpus_load_key() {
 }
 
 corpus_scrub() {
-  CORPUS_REAL_HOME="$REAL_HOME" python3 -I "$CORPUS_LIB_DIR/scrub.py" --work "$WORK" --home "$CORPUS_HOME" --dir "$1"
+  CORPUS_REAL_HOME="$REAL_HOME" python3 -I "$CORPUS_LIB_DIR/scrub.py" --work "$WORK" --home "$CORPUS_HOME" --dir "$@"
 }
 
 corpus_size_check() {
