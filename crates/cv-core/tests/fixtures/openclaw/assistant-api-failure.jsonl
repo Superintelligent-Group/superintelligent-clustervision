@@ -1,0 +1,4 @@
+{"type":"session","version":4,"id":"s-e","timestamp":"2026-09-19T12:00:00.000Z","cwd":"/w"}
+{"type":"message","id":"u1","parentId":null,"timestamp":"2026-09-19T12:00:01.000Z","message":{"role":"user","content":"go"}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-09-19T12:00:02.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","stopReason":"error","errorMessage":"overloaded","errorCode":529,"errorType":"api","content":[]}}
+{"type":"message","id":"s1","parentId":"a1","timestamp":"2026-09-19T12:00:03.000Z","message":{"role":"system","content":"You are OpenClaw."}}

@@ -1,0 +1,9 @@
+{"type":"session","version":4,"id":"s-sql","timestamp":"2026-09-19T10:00:00.000Z","cwd":"/work/sql","parentSession":"s-parent"}
+{"type":"message","id":"u1","parentId":null,"timestamp":"2026-09-19T10:00:01.000Z","message":{"role":"user","content":"hello from sqlite"}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-09-19T10:00:02.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","content":[{"type":"text","text":"first answer"}]}}
+{"type":"message","id":"a2","parentId":"u1","timestamp":"2026-09-19T10:00:03.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","content":[{"type":"text","text":"second answer (side branch)"}]}}
+{"type":"leaf","id":"l1","parentId":"a2","targetId":"a1"}
+{"type":"message","id":"u2","parentId":"a1","timestamp":"2026-09-19T10:00:04.000Z","message":{"role":"user","content":"continue"}}
+{"type":"session_info","id":"si","parentId":"u2","timestamp":"2026-09-19T10:00:05.000Z","name":"Named session"}
+{"type":"compaction","id":"c1","parentId":"si","timestamp":"2026-09-19T10:00:06.000Z","summary":"summary of earlier","firstKeptEntryId":"u2","tokensBefore":1234}
+{"type":"message","id":"a3","parentId":"c1","timestamp":"2026-09-19T10:00:07.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","content":[{"type":"text","text":"after compaction"}]}}

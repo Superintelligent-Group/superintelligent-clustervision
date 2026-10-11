@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"s1","timestamp":"2026-01-01T00:00:00Z","cwd":"/w"}
+{"type":"message","id":"a1","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"first"}}
+ÿş€
+{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"second"}}

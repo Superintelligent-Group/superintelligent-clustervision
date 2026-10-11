@@ -1500,56 +1500,26 @@ mod tests {
         SessionRef::new("test-session", Harness::OpenClaw, path)
     }
 
+    /// A fixture's text, without its final newline (the text the old inline `[..].join("\n")` built).
+    fn fixture_text(name: &str) -> String {
+        let r = fixture_ref(name);
+        let text = fs::read_to_string(&r.path).unwrap_or_else(|e| panic!("reading {}: {e}", r.path.display()));
+        text.strip_suffix('\n').map(str::to_string).unwrap_or(text)
+    }
+
     fn parse_fixture(name: &str) -> Session {
         let r = fixture_ref(name);
         let text = fs::read_to_string(&r.path).unwrap_or_else(|e| panic!("reading {}: {e}", r.path.display()));
         parse_text(&text, &r)
     }
 
-    /// The three transcript tables of `src/state/openclaw-agent-schema.sql` (column names verbatim;
-    /// cross-table foreign keys to `conversations` dropped).
-    #[cfg(feature = "sqlite")]
-    const STORE_DDL: &str = "
-        CREATE TABLE session_nodes (
-          session_key TEXT NOT NULL PRIMARY KEY, current_session_id TEXT NOT NULL,
-          entry_json TEXT NOT NULL, legacy_acp_migration_json TEXT,
-          entry_valid INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, status TEXT,
-          created_at INTEGER, parent_session_key TEXT, spawned_by TEXT, fork_source_session_key TEXT,
-          fork_source_session_id TEXT, fork_source_entry_id TEXT, label TEXT, display_name TEXT,
-          category TEXT, icon TEXT, pinned_at INTEGER, archived_at INTEGER, last_read_at INTEGER,
-          last_interaction_at INTEGER, last_activity_at INTEGER) STRICT;
-        CREATE TABLE session_windows (
-          session_id TEXT NOT NULL PRIMARY KEY, session_key TEXT NOT NULL, previous_session_id TEXT,
-          reason TEXT, session_scope TEXT NOT NULL DEFAULT 'conversation', created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL, transcript_updated_at INTEGER DEFAULT NULL,
-          transcript_observed_at INTEGER DEFAULT NULL, started_at INTEGER, ended_at INTEGER, status TEXT,
-          chat_type TEXT, channel TEXT, account_id TEXT, primary_conversation_id TEXT,
-          model_provider TEXT, model TEXT, agent_harness_id TEXT, parent_session_key TEXT,
-          spawned_by TEXT, display_name TEXT,
-          FOREIGN KEY (session_key) REFERENCES session_nodes(session_key) ON DELETE CASCADE) STRICT;
-        CREATE TABLE transcript_events (
-          session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT NOT NULL,
-          created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq),
-          FOREIGN KEY (session_id) REFERENCES session_windows(session_id) ON DELETE CASCADE) STRICT;
-    ";
-
     /// A v4 transcript with a rewind: `a2` is a sibling answer, the `leaf` control selects `a1`,
     /// the session is then named, compacted, and continued. Visible branch: u1 a1 u2 (si) c1 a3.
     fn branchy_events() -> Vec<String> {
-        vec![
-            r#"{"type":"session","version":4,"id":"s-sql","timestamp":"2026-09-19T10:00:00.000Z","cwd":"/work/sql","parentSession":"s-parent"}"#,
-            r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-09-19T10:00:01.000Z","message":{"role":"user","content":"hello from sqlite"}}"#,
-            r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-09-19T10:00:02.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","content":[{"type":"text","text":"first answer"}]}}"#,
-            r#"{"type":"message","id":"a2","parentId":"u1","timestamp":"2026-09-19T10:00:03.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","content":[{"type":"text","text":"second answer (side branch)"}]}}"#,
-            r#"{"type":"leaf","id":"l1","parentId":"a2","targetId":"a1"}"#,
-            r#"{"type":"message","id":"u2","parentId":"a1","timestamp":"2026-09-19T10:00:04.000Z","message":{"role":"user","content":"continue"}}"#,
-            r#"{"type":"session_info","id":"si","parentId":"u2","timestamp":"2026-09-19T10:00:05.000Z","name":"Named session"}"#,
-            r#"{"type":"compaction","id":"c1","parentId":"si","timestamp":"2026-09-19T10:00:06.000Z","summary":"summary of earlier","firstKeptEntryId":"u2","tokensBefore":1234}"#,
-            r#"{"type":"message","id":"a3","parentId":"c1","timestamp":"2026-09-19T10:00:07.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","content":[{"type":"text","text":"after compaction"}]}}"#,
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+        fixture_text("branchy-v4.jsonl")
+            .split('\n')
+            .map(str::to_string)
+            .collect()
     }
 
     #[cfg(feature = "sqlite")]
@@ -1558,7 +1528,9 @@ mod tests {
         fs::create_dir_all(&agent_dir).unwrap();
         let db = agent_dir.join("openclaw-agent.sqlite");
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch(STORE_DDL).unwrap();
+        // The three transcript tables of OpenClaw's `src/state/openclaw-agent-schema.sql` (column
+        // names verbatim; cross-table foreign keys to `conversations` dropped).
+        conn.execute_batch(&fixture_text("transcript-tables.sql")).unwrap();
         conn.execute(
             "INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
@@ -1917,16 +1889,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         // a pre-migration copy of the same session, plus a genuinely legacy one
         fs::write(sessions.join("s-sql.jsonl"), branchy_events().join("\n") + "\n").unwrap();
-        fs::write(
-            sessions.join("legacy-1.jsonl"),
-            concat!(
-                r#"{"type":"session","version":3,"id":"legacy-1","timestamp":"2026-05-01T00:00:00Z","cwd":"/old"}"#,
-                "\n",
-                r#"{"type":"message","id":"m1","parentId":null,"timestamp":"2026-05-01T00:00:01Z","message":{"role":"user","content":"old prompt"}}"#,
-                "\n"
-            ),
-        )
-        .unwrap();
+        fs::write(sessions.join("legacy-1.jsonl"), fixture_text("legacy-1.jsonl") + "\n").unwrap();
         // archive siblings that must NOT become sessions
         fs::write(sessions.join("legacy-1.trajectory.jsonl"), "{}\n").unwrap();
         fs::write(
@@ -1997,17 +1960,7 @@ mod tests {
         // A `reset` boundary is a System note; `model_change` names the model when no assistant
         // turn has; `label` lands in Session.extra; `custom` (extension state) stays out of the
         // lean stream and is carried under `complete`.
-        let text = [
-            r#"{"type":"session","version":4,"id":"s-r","timestamp":"2026-09-19T11:00:00.000Z","cwd":"/w"}"#,
-            r#"{"type":"model_change","id":"mc","parentId":null,"timestamp":"2026-09-19T11:00:00.500Z","provider":"anthropic","modelId":"claude-sonnet-5"}"#,
-            r#"{"type":"message","id":"u1","parentId":"mc","timestamp":"2026-09-19T11:00:01.000Z","message":{"role":"user","content":"before reset"}}"#,
-            r#"{"type":"reset","id":"r1","parentId":"u1","timestamp":"2026-09-19T11:00:02.000Z","reason":"idle"}"#,
-            r#"{"type":"message","id":"u2","parentId":"r1","timestamp":"2026-09-19T11:00:03.000Z","message":{"role":"user","content":"after reset"}}"#,
-            r#"{"type":"label","id":"lb","parentId":"u2","timestamp":"2026-09-19T11:00:04.000Z","targetId":"u2","label":"pinned prompt"}"#,
-            r#"{"type":"custom","id":"cx","parentId":"lb","timestamp":"2026-09-19T11:00:05.000Z","customType":"openclaw.cache-ttl","data":{"ttl":60}}"#,
-            r#"{"type":"custom_message","id":"cm","parentId":"cx","timestamp":"2026-09-19T11:00:06.000Z","customType":"ext.note","content":"an extension note","display":true}"#,
-        ]
-        .join("\n");
+        let text = fixture_text("reset-and-side-entries.jsonl");
         let r = fixture_ref("unused.jsonl");
         let s = parse_text(&text, &r);
         assert_eq!(s.model.as_deref(), Some("claude-sonnet-5"));
@@ -2058,22 +2011,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cv-openclaw-bin-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s1.jsonl");
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(
-            br#"{"type":"session","version":3,"id":"s1","timestamp":"2026-01-01T00:00:00Z","cwd":"/w"}"#,
-        );
-        bytes.push(b'\n');
-        bytes.extend_from_slice(
-            br#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"first"}}"#,
-        );
-        bytes.push(b'\n');
-        bytes.extend_from_slice(&[0xFF, 0xFE, 0x80, 0x81]); // undecodable garbage line
-        bytes.push(b'\n');
-        bytes.extend_from_slice(
-            br#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"second"}}"#,
-        );
-        bytes.push(b'\n');
-        fs::write(&path, &bytes).unwrap();
+        // Line 3 of the fixture is undecodable garbage (FF FE 80 81).
+        fs::copy(fixture_ref("non-utf8-line.jsonl").path, &path).unwrap();
 
         let r = SessionRef::new("s1", Harness::OpenClaw, path);
         let s = OpenClaw { roots: vec![] }.parse(&r).unwrap();
@@ -2240,13 +2179,7 @@ mod tests {
 
     #[test]
     fn assistant_api_failure_is_an_error_turn() {
-        let text = [
-            r#"{"type":"session","version":4,"id":"s-e","timestamp":"2026-09-19T12:00:00.000Z","cwd":"/w"}"#,
-            r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-09-19T12:00:01.000Z","message":{"role":"user","content":"go"}}"#,
-            r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-09-19T12:00:02.000Z","message":{"role":"assistant","model":"claude-opus-4","provider":"anthropic","stopReason":"error","errorMessage":"overloaded","errorCode":529,"errorType":"api","content":[]}}"#,
-            r#"{"type":"message","id":"s1","parentId":"a1","timestamp":"2026-09-19T12:00:03.000Z","message":{"role":"system","content":"You are OpenClaw."}}"#,
-        ]
-        .join("\n");
+        let text = fixture_text("assistant-api-failure.jsonl");
         let s = parse_text(&text, &fixture_ref("unused.jsonl"));
         let a1 = &s.messages[1];
         assert_eq!(
