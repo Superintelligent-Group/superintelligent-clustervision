@@ -32,7 +32,7 @@ Every `generate.sh` sources `lib.sh`:
 
 `scrub.py` rewrites every file, including every TEXT/BLOB cell of every sqlite table (then VACUUM):
 the throwaway home becomes `/home/corpus`, so the project becomes `/home/corpus/project`. The rest of
-`$WORK` becomes `/home/corpus/.work`, the real user name becomes `corpus`, and account ids and
+`$WORK` becomes `/home/corpus/.work`, `~/tools/harness-versions` becomes `/opt/harness-versions`, the real user name becomes `corpus`, and account ids and
 emails become `corpus@example.invalid`. It then **refuses**, naming each file but never the match, if
 any of these is left anywhere:
 

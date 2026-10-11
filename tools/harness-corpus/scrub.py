@@ -27,6 +27,10 @@ def replacements(work, home):
     for base in {work, os.path.realpath(work), work.replace("/private/", "/", 1)}:
         h = home.replace(work, base, 1)
         reps += [(h, PLACEHOLDER_HOME), (base, PLACEHOLDER_HOME + "/.work")]
+    # The harness's own install dir (a system prompt can list paths inside it, e.g. bundled skills).
+    real_home = os.environ.get("CORPUS_REAL_HOME", "")
+    if real_home:
+        reps.append((os.path.join(real_home, "tools", "harness-versions"), "/opt/harness-versions"))
     # file:// URLs and JSON-escaped slashes carry the same paths
     reps += [(a.replace("/", "\\/"), b.replace("/", "\\/")) for a, b in list(reps)]
     return sorted(set(reps), key=lambda r: -len(r[0]))
