@@ -117,7 +117,7 @@ if want tools; then  # 2 read/edit/shell, 3 parallel calls, 4 a tool error, 5 th
   run --session-id "$id" -y -p "Read a.txt and b.txt at the same time (two parallel read_file calls), then reply with their combined line count."
   run -r "$id" -y -p "Use the replace tool to change TODO to DONE in notes.txt, then run the shell command: cat notes.txt"
   run -r "$id" -y -p "Run the shell command: cat missing-file.txt   and tell me the error in one line."
-  SCEN+=("tools" "parallel_tools" "tool_error" "thoughts" "file_checkpoint")
+  SCEN+=("tools" "parallel_tools" "tool_error" "thoughts")
 fi
 if want background; then  # background shell (run_shell_command is_background)
   run -y -p "Run the shell command 'sleep 1; echo bg-done' in the background (run_shell_command with is_background set to true), then say started."

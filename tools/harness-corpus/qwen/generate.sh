@@ -106,14 +106,14 @@ if want chat; then   # 1 multi-turn chat + 9 resume (--resume <id> appends to th
   QWEN_DISABLE_AUTO_TITLE=0 run --session-id "$id" "Say hello in five words."
   run -r "$id" "Now say it in French."
   run -r "$id" "Which language did you use first? One word."
-  SCEN+=("chat" "resume" "auto_title")
+  SCEN+=("chat" "resume")
 fi
 if want tools; then  # 2 read/edit/shell, 3 parallel calls, 4 a tool error, 5 reasoning
   id="$(newid)"
   run --session-id "$id" -y "Read a.txt and b.txt at the same time (two parallel read_file calls), then reply with their combined line count."
   run -r "$id" -y "Use the edit tool to change TODO to DONE in notes.txt, then run the shell command: cat notes.txt"
   run -r "$id" -y "Run the shell command: cat missing-file.txt   and tell me the error in one line."
-  SCEN+=("tools" "parallel_tools" "tool_error" "reasoning" "file_history")
+  SCEN+=("tools" "parallel_tools" "tool_error" "reasoning")
 fi
 if want background; then
   run -y "Run the shell command 'sleep 1; echo bg-done' in the background (run_shell_command with is_background true), then say started."
@@ -159,7 +159,7 @@ if want hook; then   # a UserPromptSubmit hook's additionalContext
 fi
 if want memory; then
   run -y "Use save_memory to remember that the corpus project's favourite colour is teal. Then say done."
-  SCEN+=("memory")
+  : # save_memory was not offered headless on 0.25.1 (see SKIP)
 fi
 if want web; then
   run -y "Use web_fetch to fetch https://example.com and tell me its title in five words or fewer."
