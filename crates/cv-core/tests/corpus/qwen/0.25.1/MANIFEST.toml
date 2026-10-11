@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "qwen"
+version = "0.25.1"
+generated = "2026-10-11"
+model = "glm-5.3-flash via Z.ai coding endpoint, through chat_proxy.py (OpenAI-compatible auth)"
+model_switch_name = "glm-4.7-flash (the name Qwen Code recorded for the switch; the proxy answered with glm-5.3-flash)"
+model_calls = 61
+scenarios = ["chat","resume","tools","parallel_tools","tool_error","reasoning","background_shell","image","at_command","todo_write","task_tracker","plan_mode","mcp","subagent","skill","custom_command","hook","web_fetch","model_switch","compress","fork","cron","goal"]
+skipped = ["exit_plan_mode (not offered headless)","save_memory (not offered headless)","custom_title (no record written)","rewind/branch (interactive)","a cron fire (the process exits first)"]
+generator_commit = "b72d5b3 (run from the working tree that commit records; MANIFEST generator_commit and skipped filled in after it)"

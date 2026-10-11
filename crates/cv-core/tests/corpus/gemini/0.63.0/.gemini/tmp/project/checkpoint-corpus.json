@@ -1,0 +1,24 @@
+{
+  "history": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "<session_context>\nThis is the Gemini CLI. We are setting up the context for our chat.\nToday's date is Sunday, October 11, 2026 (formatted according to the user's locale).\nMy operating system is: darwin\nThe project's temporary directory is: /home/corpus/.gemini/tmp/project\n- **Workspace Directories:**\n  - /home/corpus/project\n- **Directory Structure:**\n\nShowing up to 200 items (files + folders). Folders or files indicated with ... contain more items not shown, were ignored, or the display limit (200 items) was reached.\n\n/home/corpus/project/\n├───a.txt\n├───b.txt\n├───dot.png\n├───notes.txt\n└───.git/...\n\n\n</session_context>"
+        },
+        {
+          "text": "Say the word saved."
+        }
+      ]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "text": "saved"
+        }
+      ]
+    }
+  ],
+  "authType": "gemini-api-key"
+}

@@ -1,0 +1,29 @@
+{
+  "agentId": "general-purpose-call_aef88df0d81241659680dfa0",
+  "agentType": "general-purpose",
+  "description": "Reply with the word ok",
+  "parentSessionId": "698cf212-e0c5-4e7c-8cee-b035567fa40a",
+  "toolUseId": "call_aef88df0d81241659680dfa0",
+  "parentAgentId": null,
+  "createdAt": "2026-10-11T20:45:35.152Z",
+  "status": "completed",
+  "isBackgrounded": false,
+  "lastUpdatedAt": "2026-10-11T20:45:40.510Z",
+  "resolvedApprovalMode": "yolo",
+  "persistedCliFlags": {
+    "approvalMode": "yolo",
+    "bare": false,
+    "safeMode": false,
+    "sandbox": null,
+    "screenReader": false,
+    "model": "glm-5.3-flash",
+    "authType": "openai",
+    "baseUrl": "http://127.0.0.1:61534/v1",
+    "maxSessionTurns": -1,
+    "maxToolCalls": -1,
+    "maxSubagentDepth": 5
+  },
+  "subagentName": "general-purpose",
+  "resumeCount": 0,
+  "depth": 0
+}

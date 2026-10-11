@@ -1,0 +1,558 @@
+{
+  "sessions": [
+    {
+      "id": "07d33283-e845-495b-85f2-a6ac5b38cb2c",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-40-07d33283.jsonl",
+      "messages": 9,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "thinking": 4,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "read_file"
+      ],
+      "usage_messages": 4,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "175f9bfa-3904-499d-956b-bb44b4bc8ee0",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-44-175f9bfa.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "activate_skill"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "313bb4ce-1192-45d4-a235-090dd2adcb87",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-42-313bb4ce.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "write_todos"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "34083ef1-7d5b-4f0d-8f07-5dcae44739b8",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-46-34083ef1.jsonl",
+      "messages": 3,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "5a103596-54f7-4d46-aa1e-9571012ac296",
+      "path": ".gemini/tmp/project/chats/6787db8b-f917-458c-be33-141586e81c31/5a103596-54f7-4d46-aa1e-9571012ac296.jsonl",
+      "messages": 9,
+      "sequence": [
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result"
+      ],
+      "blocks": {
+        "text": 5,
+        "thinking": 4,
+        "tool_result": 8,
+        "tool_use": 8
+      },
+      "tools": [
+        "list_directory",
+        "grep_search",
+        "read_file",
+        "read_file",
+        "read_file",
+        "read_file",
+        "grep_search",
+        "complete_task"
+      ],
+      "usage_messages": 4,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {
+        "parent": "6787db8b-f917-458c-be33-141586e81c31"
+      },
+      "model": "gemini-2.5-pro",
+      "skipped_lines": 0
+    },
+    {
+      "id": "5cff8def-7cc5-4cd8-b27f-c7aca6a21384",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-42-5cff8def.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "run_shell_command"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "5f80c81c-3fcb-4c55-87e3-34fd518ba0e2",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-45-5f80c81c.jsonl",
+      "messages": 15,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 7,
+        "tool_result": 6,
+        "tool_use": 6
+      },
+      "tools": [
+        "web_fetch",
+        "web_fetch",
+        "web_fetch",
+        "web_fetch",
+        "web_fetch",
+        "web_fetch"
+      ],
+      "usage_messages": 7,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "6787db8b-f917-458c-be33-141586e81c31",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-43-6787db8b.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/subagent_spawn",
+        "tool/subagent_return",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "invoke_agent"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 1,
+      "subagent_returns": 1,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "6b31613f-9d04-49b1-b222-134347e5db45",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-42-6b31613f.jsonl",
+      "messages": 9,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 3,
+        "tool_result": 4,
+        "tool_use": 4
+      },
+      "tools": [
+        "read_file",
+        "read_file",
+        "write_file",
+        "exit_plan_mode"
+      ],
+      "usage_messages": 4,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "72753eef-8f92-4c3d-92b1-654a63d54f65",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-41-72753eef.jsonl",
+      "messages": 17,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 7,
+        "thinking": 5,
+        "tool_result": 6,
+        "tool_use": 6
+      },
+      "tools": [
+        "read_file",
+        "read_file",
+        "read_file",
+        "replace",
+        "run_shell_command",
+        "run_shell_command"
+      ],
+      "usage_messages": 8,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "74a80b4e-c4bf-444e-8f60-ff187d40998e",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-45-74a80b4e.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "google_web_search"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "7e54ae84-7185-4aa6-8072-3f1ca8576fdb",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-46-7e54ae84.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 5,
+        "thinking": 2
+      },
+      "tools": [],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "b7b3b933-3b70-4438-888e-76d2dadaa62c",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-46-b7b3b933.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 5,
+        "thinking": 2
+      },
+      "tools": [],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "b9a8fbfd-e017-4a29-90f5-3cfecd2fd0c9",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-43-b9a8fbfd.jsonl",
+      "messages": 5,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1,
+        "tool_result": 1,
+        "tool_use": 1
+      },
+      "tools": [
+        "mcp_corpus_add"
+      ],
+      "usage_messages": 2,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "checkpoint-corpus",
+      "path": ".gemini/tmp/project/checkpoint-corpus.json",
+      "messages": 3,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3
+      },
+      "tools": [],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": null,
+      "skipped_lines": 0
+    },
+    {
+      "id": "d203a0c8-d022-4307-815a-a5f025b682b9",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-42-d203a0c8.jsonl",
+      "messages": 3,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "image": 1,
+        "text": 5,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "d769f168-d76c-4edd-90d4-f2dac53e1387",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-44-d769f168.jsonl",
+      "messages": 3,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "e68391a8-52ef-417d-ad96-e10a8c8cc01b",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-42-e68391a8.jsonl",
+      "messages": 7,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 3,
+        "thinking": 2,
+        "tool_result": 2,
+        "tool_use": 2
+      },
+      "tools": [
+        "tracker_create_task",
+        "tracker_list_tasks"
+      ],
+      "usage_messages": 3,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    },
+    {
+      "id": "fd029930-3b26-4b01-bb69-83e9d92dc532",
+      "path": ".gemini/tmp/project/chats/session-2026-10-11T20-44-fd029930.jsonl",
+      "messages": 4,
+      "sequence": [
+        "system/injected_context",
+        "user/prompt",
+        "system/injected_context",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 4,
+        "thinking": 1
+      },
+      "tools": [],
+      "usage_messages": 1,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "lineage": {},
+      "model": "gemini-2.5-flash",
+      "skipped_lines": 0
+    }
+  ]
+}

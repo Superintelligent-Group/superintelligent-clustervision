@@ -18,9 +18,11 @@ use cv_core::harness::cline::Cline;
 use cv_core::harness::codex::Codex;
 use cv_core::harness::continuedev::Continue;
 use cv_core::harness::devin::Devin;
+use cv_core::harness::gemini::Gemini;
 use cv_core::harness::kimi::Kimi;
 use cv_core::harness::kimi_code::KimiCode;
 use cv_core::harness::opencode::OpenCode;
+use cv_core::harness::qwen::Qwen;
 use cv_core::harness::roo::Roo;
 use cv_core::ir::{Block, MessageKind};
 use cv_core::{Adapter, SessionRef};
@@ -69,6 +71,14 @@ fn roo(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Roo::with_home(version_dir))
 }
 
+fn gemini(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Gemini::with_home(&version_dir.join(".gemini")))
+}
+
+fn qwen(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(Qwen::with_home(&version_dir.join(".qwen")))
+}
+
 /// Harnesses that cannot be driven headless (desktop apps): their version dirs hold a schema
 /// snapshot of the store ember's installed version left on disk (`SNAPSHOT.toml` plus the
 /// `*.schema.txt` / `*.shape.txt` that `tools/harness-corpus/schema_snapshot.py` wrote), never
@@ -97,6 +107,11 @@ const HARNESSES: &[CorpusHarness] = &[
         children: None,
     },
     CorpusHarness {
+        name: "gemini",
+        adapter: gemini,
+        children: None,
+    },
+    CorpusHarness {
         name: "opencode",
         adapter: opencode,
         children: None,
@@ -110,6 +125,11 @@ const HARNESSES: &[CorpusHarness] = &[
         name: "kimi-code",
         adapter: kimi_code,
         children: Some(cv_core::harness::kimi_code::subagent_refs),
+    },
+    CorpusHarness {
+        name: "qwen",
+        adapter: qwen,
+        children: None,
     },
     CorpusHarness {
         name: "roo",

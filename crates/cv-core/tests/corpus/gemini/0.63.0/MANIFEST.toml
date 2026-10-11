@@ -1,0 +1,10 @@
+# Written by tools/harness-corpus. Never regenerate a committed version in place.
+harness = "gemini"
+version = "0.63.0"
+generated = "2026-10-11"
+model = "glm-5.3-flash via Z.ai coding endpoint, through generate_content_shim.py (gemini-api-key auth with GOOGLE_GEMINI_BASE_URL)"
+gemini_model_profile = "gemini-2.5-flash (the model name Gemini CLI recorded; gemini-2.5-flash-lite for the switch)"
+model_calls = 58
+scenarios = ["chat","resume","tools","parallel_tools","tool_error","thoughts","background_shell","image","write_todos","task_tracker","plan_mode","mcp","subagent","skill","custom_command","hook","web_fetch","web_search","model_switch","compress","chat_save"]
+skipped = ["rewind (/rewind is interactive)","ask_user (needs a person)","info/warning/error records (written by the interactive UI)","restore checkpoints (TUI only)"]
+generator_commit = "b72d5b3 (run from the working tree that commit records; MANIFEST generator_commit and skipped filled in after it)"

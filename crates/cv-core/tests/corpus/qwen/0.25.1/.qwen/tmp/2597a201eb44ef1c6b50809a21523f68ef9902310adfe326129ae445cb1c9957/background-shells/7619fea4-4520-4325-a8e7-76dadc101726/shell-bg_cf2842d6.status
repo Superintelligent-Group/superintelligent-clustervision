@@ -1,0 +1,11 @@
+{
+  "id": "bg_cf2842d6",
+  "status": "completed",
+  "command": "sleep 1; echo bg-done",
+  "cwd": "/home/corpus/project",
+  "startTime": "2026-10-11T20:43:17.623Z",
+  "updatedAt": "2026-10-11T20:43:18.636Z",
+  "pid": 34112,
+  "endTime": "2026-10-11T20:43:18.636Z",
+  "exitCode": 0
+}

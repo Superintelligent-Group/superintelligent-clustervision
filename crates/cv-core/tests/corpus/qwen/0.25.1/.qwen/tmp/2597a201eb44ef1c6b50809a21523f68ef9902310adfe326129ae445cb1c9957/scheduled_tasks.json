@@ -1,0 +1,10 @@
+[
+  {
+    "id": "retvaq7s",
+    "cron": "0 9 * * *",
+    "prompt": "say tick",
+    "recurring": true,
+    "createdAt": 1791751719144,
+    "lastFiredAt": 1791751680000
+  }
+]
