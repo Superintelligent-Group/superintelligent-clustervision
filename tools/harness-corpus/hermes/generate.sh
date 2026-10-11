@@ -131,7 +131,9 @@ htty() {
 }
 hermes_cmd() { (cd "$PROJECT" && "$BIN" "$@" </dev/null >>"$WORK/exec.log" 2>&1) || echo "    ($1 $2: exit $?)"; intact "$1"; }
 want() { case " $ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-SCEN=(); SKIP=()
+SCEN=()
+# Persisted affordances this generator does not reach (AFFORDANCES.md says why for each).
+SKIP=("steer" "clarify" "web_search" "rollback" "kanban" "cron_run")
 
 if want chat; then      # 1 multi-turn chat + 9 resume; reasoning on every turn (GLM thinking)
   hq -q "Say hello in five words."
@@ -195,6 +197,7 @@ if want tty; then       # slash commands only the interactive CLI dispatches
        -l "/queue Say the word queued." -l "Say the word three." \
        -l "Without using tools, write about 3000 words on the history of the number zero." \
        -l "Without using tools, write about 3000 words on the history of the abacus." \
+       -l "Without using tools, write about 3000 words on the history of the slide rule." \
        -l "Say the word five." \
        -l "/compress here 1" -l "Say the word four." \
        -l "/branch" -l "Say the word branched." \
