@@ -201,23 +201,27 @@ impl Trigger {
 pub(super) fn command_rows(view: JsonView<'_>, cap: usize) -> Result<Option<(String, Vec<String>)>> {
     let mut prefix = Prefix::new(cap);
     let mut trigger = Trigger::default();
-    let mut patch = Patch::default();
     let exists = command_chunks(view, |chunk| {
         prefix.push(chunk);
         trigger.push(chunk);
-        patch.push(chunk);
         Ok(())
     })?;
-    Ok(exists.then(|| {
-        (
-            prefix.finish(),
-            if trigger.marker || trigger.apply {
-                patch.finish()
-            } else {
-                Vec::new()
-            },
-        )
-    }))
+    if !exists {
+        return Ok(None);
+    }
+    // Establish whether patch targets are demanded before retaining any candidate path line.
+    // Otherwise a giant fake header in an ordinary command would allocate despite emitting no edit.
+    let files = if trigger.marker || trigger.apply {
+        let mut patch = Patch::default();
+        command_chunks(view, |chunk| {
+            patch.push(chunk);
+            Ok(())
+        })?;
+        patch.finish()
+    } else {
+        Vec::new()
+    };
+    Ok(Some((prefix.finish(), files)))
 }
 
 pub(super) fn patch_rows(view: JsonView<'_>) -> Result<Vec<String>> {
@@ -256,6 +260,31 @@ pub(super) fn file_key(view: JsonView<'_>, keys: &[&str]) -> Result<Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trigger_matches_whole_string_across_every_boundary() {
+        for text in [
+            "λ *** Begin Patch",
+            "  apply_patch",
+            "apply_patch_suffix",
+            "apply_patc",
+            "ordinary",
+            "\u{2003}apply_patch",
+        ] {
+            let expected = text.contains("*** Begin Patch") || text.trim_start().starts_with("apply_patch");
+            for split in text.char_indices().map(|(at, _)| at).chain(std::iter::once(text.len())) {
+                let mut trigger = Trigger::default();
+                trigger.push(&text[..split]);
+                trigger.push(&text[split..]);
+                assert_eq!(trigger.marker || trigger.apply, expected, "{text:?}, split {split}");
+            }
+            let mut trigger = Trigger::default();
+            for ch in text.chars() {
+                trigger.push(ch.encode_utf8(&mut [0; 4]));
+            }
+            assert_eq!(trigger.marker || trigger.apply, expected);
+        }
+    }
+
     #[test]
     fn chunked_patch_matches_owned_oracle() {
         for text in [
