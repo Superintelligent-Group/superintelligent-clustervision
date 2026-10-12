@@ -252,9 +252,11 @@ pub(super) fn ingest(
         compact_summary: record.is_compact_summary == Some(true),
         sync_agent_return,
         slash_command: bare
-            && (head.trim_start().starts_with("<command-name>")
-                || head.trim_start().starts_with("<local-command-stdout>")),
-        user: user_kind_from_head(user_origin, &head),
+            && (head.text.trim_start().starts_with("<command-name>")
+                || head.text.trim_start().starts_with("<local-command-stdout>")),
+        user: head
+            .user
+            .unwrap_or_else(|| user_kind_from_head(user_origin, &head.text)),
     };
     let (role, kind, origin) = classify_conversation(role, class, false);
     let mut bag = Map::new();
@@ -305,9 +307,9 @@ fn content<'a>(
     raw: &Raw<'a>,
     head_origin: Option<Origin>,
     span: Option<&SpanCtx>,
-) -> Option<(Vec<Block>, Cow<'a, str>, bool)> {
+) -> Option<(Vec<Block>, Head<'a>, bool)> {
     let mut blocks = Vec::new();
-    let mut head = Cow::Borrowed("");
+    let mut head = Head::default();
     let Some(raw) = raw.0 else {
         return Some((blocks, head, false));
     };
@@ -331,19 +333,19 @@ struct Items<'s, 'c> {
     head_origin: Option<Origin>,
 }
 impl<'de, 's, 'c> DeserializeSeed<'de> for Items<'s, 'c> {
-    type Value = (Vec<Block>, Cow<'de, str>);
+    type Value = (Vec<Block>, Head<'de>);
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_seq(self)
     }
 }
 impl<'de, 's, 'c> Visitor<'de> for Items<'s, 'c> {
-    type Value = (Vec<Block>, Cow<'de, str>);
+    type Value = (Vec<Block>, Head<'de>);
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("content blocks")
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut blocks = Vec::new();
-        let mut head = Cow::Borrowed("");
+        let mut head = Head::default();
         let mut first = true;
         while let Some(Object(item)) = seq.next_element::<Object<Item<'de>>>()? {
             if first {
@@ -555,12 +557,21 @@ fn decoded_len(body: &str) -> Option<usize> {
     Some(len + bytes.len() - at)
 }
 
-/// User classification normally needs only a short trimmed prefix. A harness task notification
-/// is the exception: its summary determines whether it is an agent/workflow return.
-fn classification_head(raw: &RawValue, origin: Origin) -> Option<Cow<'_, str>> {
+#[derive(Default)]
+struct Head<'a> {
+    text: Cow<'a, str>,
+    user: Option<(MessageKind, Origin)>,
+}
+
+/// Keep the actual prefix and an explicit classification projection. A notification's first
+/// complete summary can occur after a giant output; inspect it without owning the decoded body.
+fn classification_head(raw: &RawValue, origin: Origin) -> Option<Head<'_>> {
     let body = raw.get().strip_prefix('"')?.strip_suffix('"')?;
     if !body.contains('\\') {
-        return Some(Cow::Borrowed(body));
+        return Some(Head {
+            text: Cow::Borrowed(body),
+            user: Some(user_kind_from_head(origin, body)),
+        });
     }
     let mut prefix = String::new();
     decoded_chars(raw, |c| {
@@ -570,10 +581,135 @@ fn classification_head(raw: &RawValue, origin: Origin) -> Option<Cow<'_, str>> {
         prefix.push(c);
         prefix.len() < 64
     })?;
-    if origin == Origin::Harness && prefix.starts_with("<task-notification>") {
-        return serde_json::from_str::<Str<'_>>(raw.get()).ok().map(|s| s.0);
+    let user = if origin == Origin::Harness && prefix.starts_with("<task-notification>") {
+        if notification_returns_agent(raw)? {
+            (MessageKind::SubagentReturn, Origin::Subagent)
+        } else {
+            (MessageKind::InjectedContext, Origin::Harness)
+        }
+    } else {
+        user_kind_from_head(origin, &prefix)
+    };
+    Some(Head {
+        text: Cow::Owned(prefix),
+        user: Some(user),
+    })
+}
+
+/// Match tag_inner's first opening tag and its first following closing tag. Decoder windows and
+/// tag/word suffixes are bounded; a promising summary without a close remains absent. Ingest has
+/// already syntax-validated the whole record and checked Value compatibility. A decoder failure
+/// still discards all tentative state, before any session or sink mutation.
+fn notification_returns_agent(raw: &RawValue) -> Option<bool> {
+    let body = raw.get().strip_prefix('"')?.strip_suffix('"')?;
+    let mut summary = NotificationSummary::default();
+    crate::lazy::decode_json_body(&mut std::io::Cursor::new(body.as_bytes()), &mut |chunk| {
+        summary.push(chunk)
+    })
+    .ok()?;
+    Some(summary.complete && ((summary.agent_possible && summary.agent == 6) || summary.workflow_found))
+}
+
+struct NotificationSummary {
+    opened: bool,
+    complete: bool,
+    pending: String,
+    scratch: String,
+    leading: bool,
+    agent_possible: bool,
+    agent: usize,
+    workflow_found: bool,
+    workflow: usize,
+}
+impl Default for NotificationSummary {
+    fn default() -> Self {
+        Self {
+            opened: false,
+            complete: false,
+            pending: String::new(),
+            scratch: String::new(),
+            leading: true,
+            agent_possible: true,
+            agent: 0,
+            workflow_found: false,
+            workflow: 0,
+        }
     }
-    Some(Cow::Owned(prefix))
+}
+impl NotificationSummary {
+    fn push(&mut self, chunk: &str) {
+        if self.complete {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.push_str(&self.pending);
+        self.scratch.push_str(chunk);
+        self.pending.clear();
+        let mut body = self.scratch.as_str();
+        if !self.opened {
+            if let Some(at) = body.find("<summary>") {
+                self.opened = true;
+                body = &body[at + 9..];
+            } else {
+                let n = suffix(body.as_bytes(), b"<summary>", false);
+                self.pending.push_str(&body[body.len() - n..]);
+                return;
+            }
+        }
+        if let Some(at) = body.find("</summary>") {
+            body = &body[..at];
+            self.complete = true;
+        } else {
+            let n = suffix(body.as_bytes(), b"</summary>", false);
+            self.pending.push_str(&body[body.len() - n..]);
+            body = &body[..body.len() - n];
+        }
+        if self.leading {
+            body = body.trim_start();
+            self.leading = body.is_empty();
+        }
+        if self.agent_possible && self.agent < 6 {
+            let n = body.len().min(6 - self.agent);
+            if body.as_bytes()[..n] == b"Agent "[self.agent..self.agent + n] {
+                self.agent += n;
+            } else {
+                self.agent_possible = false;
+            }
+        }
+        if !self.workflow_found {
+            const WORD: &[u8] = b"workflow";
+            // Only a proper suffix can bridge windows. Never copy the complete summary.
+            let mut bridge = [0; 14];
+            bridge[..self.workflow].copy_from_slice(&WORD[..self.workflow]);
+            let n = body.len().min(7);
+            bridge[self.workflow..self.workflow + n].copy_from_slice(&body.as_bytes()[..n]);
+            let bridge = &bridge[..self.workflow + n];
+            let contains = |bytes: &[u8]| {
+                memchr::memchr2_iter(b'w', b'W', bytes).any(|at| {
+                    bytes
+                        .get(at..at + 8)
+                        .is_some_and(|word| word.eq_ignore_ascii_case(WORD))
+                })
+            };
+            self.workflow_found = contains(bridge) || contains(body.as_bytes());
+            self.workflow = suffix(if body.len() < 7 { bridge } else { body.as_bytes() }, WORD, true);
+        }
+    }
+}
+
+/// Longest proper suffix matching an ASCII tag/word prefix (therefore a UTF-8 boundary).
+fn suffix(body: &[u8], wanted: &[u8], insensitive: bool) -> usize {
+    (1..wanted.len().min(body.len() + 1))
+        .rev()
+        .find(|&n| {
+            let end = &body[body.len() - n..];
+            if insensitive {
+                end.eq_ignore_ascii_case(&wanted[..n])
+            } else {
+                end == &wanted[..n]
+            }
+        })
+        .unwrap_or(0)
 }
 
 fn text(raw: &RawValue, span: Option<&SpanCtx>) -> Option<Text> {
@@ -617,6 +753,115 @@ fn json_prefix(raw: &RawValue, prefix: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_notification_classification_matches_complete_summary_oracle() {
+        let mut bodies = vec![
+            "<task-notification><summary>Agent a completed</summary>".to_string(),
+            "<task-notification><summary>agent a completed</summary>".into(),
+            "<task-notification><summary>  \u{2003}Agent a completed</summary>".into(),
+            "<task-notification><summary>WoRkFlOw completed</summary>".into(),
+            "<task-notification><summary>work</summary>flow".into(),
+            "<task-notification>workflow<summary>command done</summary>".into(),
+            "<task-notification><summary>command done</summary><summary>Agent a</summary>".into(),
+            "<task-notification><summary>Agent a".into(),
+            "<task-notification><summary>workflow</Summary>".into(),
+            "<task-notification><summary></summary><summary>workflow</summary>".into(),
+            "<task-notification></summary><summ<summary>workflow</summary>".into(),
+            "<task-notification><summary><summary>Agent a</summary></summary>".into(),
+            "<task-notification><summary>wo🦝rkflow</summary>".into(),
+            "<task-notification><summary>wwoWorkflow done</summary>".into(),
+            "[Request interrupted by user]".into(),
+            "<command-name>/help</command-name>".into(),
+        ];
+        for summary in ["Agent completed", "worKflow done", "command done", "Agent unclosed"] {
+            let close = if summary.ends_with("unclosed") {
+                ""
+            } else {
+                "</summary>"
+            };
+            bodies.push(format!(
+                "\u{2003}<task-notification>{}<summary>{summary}{close}",
+                "ignored\n🦝".repeat(20_000)
+            ));
+        }
+        for body in bodies {
+            for origin in [Origin::Harness, Origin::Human, Origin::Scheduler] {
+                // Force both escaped and unescaped JSON representations, including escaped tags.
+                for source in [
+                    serde_json::to_string(&format!("{body}\n")).unwrap(),
+                    serde_json::to_string(&format!("{body}\n"))
+                        .unwrap()
+                        .replace('<', r"\u003c"),
+                ] {
+                    let raw: &RawValue = serde_json::from_str(&source).unwrap();
+                    let decoded: String = serde_json::from_str(&source).unwrap();
+                    let head = decoded.trim_start();
+                    let expected = if head.starts_with("[Request interrupted by user") {
+                        (MessageKind::InjectedContext, Origin::Harness)
+                    } else if origin != Origin::Harness {
+                        (MessageKind::Prompt, origin)
+                    } else if head.starts_with("<task-notification>")
+                        && tag_inner(head, "summary").is_some_and(|summary| {
+                            let summary = summary.trim_start();
+                            summary.starts_with("Agent ") || summary.to_ascii_lowercase().contains("workflow")
+                        })
+                    {
+                        (MessageKind::SubagentReturn, Origin::Subagent)
+                    } else {
+                        (MessageKind::InjectedContext, Origin::Harness)
+                    };
+                    assert_eq!(classification_head(raw, origin).unwrap().user, Some(expected));
+                }
+            }
+            for content in [
+                serde_json::json!(body),
+                serde_json::json!([{"type":"text","text":body}]),
+            ] {
+                assert_modes(
+                    &serde_json::json!({"type":"user","isMeta":true,"message":{"content":content}}).to_string(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn notification_summary_crosses_windows_and_discards_late_decode_failure() {
+        for body in [
+            "🦝<summary>\u{2003}Agent completed</summary>outside workflow",
+            "<summary>woRkFlOw done</summary>",
+            "<summary>work</summary>flow<summary>Agent ignored</summary>",
+            "<summary>Agent unclosed",
+            "<summary><summary>workflow</summary>",
+        ] {
+            let expected = tag_inner(body, "summary").is_some_and(|summary| {
+                let summary = summary.trim_start();
+                summary.starts_with("Agent ") || summary.to_ascii_lowercase().contains("workflow")
+            });
+            for width in 1..24 {
+                let mut summary = NotificationSummary::default();
+                let mut start = 0;
+                while start < body.len() {
+                    let mut end = (start + width).min(body.len());
+                    while !body.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    summary.push(&body[start..end]);
+                    start = end;
+                }
+                assert_eq!(
+                    summary.complete && ((summary.agent_possible && summary.agent == 6) || summary.workflow_found),
+                    expected,
+                    "width {width}"
+                );
+            }
+        }
+        // RawValue permits this surrogate. Even a completed positive summary in an earlier
+        // window must not publish classification if the defensive decoder later rejects input.
+        let invalid = format!("\"<summary>Agent complete</summary>{}\\ud800\"", "a".repeat(70_000));
+        let raw: &RawValue = serde_json::from_str(&invalid).unwrap();
+        assert_eq!(notification_returns_agent(raw), None);
+    }
 
     fn assert_modes(text: &str) {
         let dir = cv_testkit::temp_dir("claude-borrowed-parity");

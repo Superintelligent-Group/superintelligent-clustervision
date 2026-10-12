@@ -854,7 +854,14 @@ fn user_kind_from_head(origin: Origin, head: &str) -> (MessageKind, Origin) {
     }
     if head.starts_with("<task-notification>") {
         let summary = tag_inner(head, "summary").unwrap_or("").trim_start();
-        if summary.starts_with("Agent ") || summary.to_ascii_lowercase().contains("workflow") {
+        if summary.starts_with("Agent ")
+            || memchr::memchr2_iter(b'w', b'W', summary.as_bytes()).any(|at| {
+                summary
+                    .as_bytes()
+                    .get(at..at + 8)
+                    .is_some_and(|word| word.eq_ignore_ascii_case(b"workflow"))
+            })
+        {
             return (MessageKind::SubagentReturn, Origin::Subagent);
         }
     }
