@@ -324,7 +324,7 @@ impl Adapter for Claude {
                     #[cfg(unix)]
                     let _ = map.advise(memmap2::Advice::Sequential);
                     let s = stream_bytes_at(
-                        new_session(&r.id, Some(r.path.clone())),
+                        new_session_for(&r.id, Some(r.path.clone()), opts),
                         &map,
                         0,
                         opts,
@@ -336,7 +336,7 @@ impl Adapter for Claude {
                 }
             }
             let s = stream_reader_at(
-                new_session(&r.id, Some(r.path.clone())),
+                new_session_for(&r.id, Some(r.path.clone()), opts),
                 BufReader::new(&file),
                 0,
                 opts,
@@ -435,7 +435,7 @@ pub fn stream_str(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    let mut session = new_session(id, source_path);
+    let mut session = new_session_for(id, source_path, opts);
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
     let sink = &mut spawns;
     // Pure-string path (parse_str, tests): no file offsets, so all content stays inline.
@@ -486,7 +486,7 @@ pub fn stream_reader<R: BufRead>(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    stream_reader_at(new_session(id, source_path), reader, 0, opts, sink, None)
+    stream_reader_at(new_session_for(id, source_path, opts), reader, 0, opts, sink, None)
 }
 
 /// [`stream_reader`] over a reader positioned `file_off` bytes into the transcript, accumulating
@@ -649,13 +649,18 @@ fn ingest_bytes(
 
 /// An empty Claude [`Session`] shell, ready to accumulate records. A sub-agent transcript (by its
 /// path) starts with its lineage already filled in — see [`apply_subagent_lineage`].
+#[cfg(test)]
 fn new_session(id: &str, source_path: Option<PathBuf>) -> Session {
+    new_session_for(id, source_path, &ParseOptions::full())
+}
+
+fn new_session_for(id: &str, source_path: Option<PathBuf>, opts: &ParseOptions) -> Session {
     let mut s = Session {
         source_path,
         ..Session::new(id.to_string(), Harness::Claude)
     };
     if let Some(p) = s.source_path.clone() {
-        apply_subagent_lineage(&mut s, &p);
+        apply_subagent_lineage(&mut s, &p, !opts.usage_identity || opts.extra || opts.complete);
     }
     s
 }
@@ -665,7 +670,7 @@ fn new_session(id: &str, source_path: Option<PathBuf>) -> Session {
 /// `Agent`/`Task` tool call in the parent that spawned it (plus the agent type and description).
 /// Both become first-class [`Lineage`]; the Claude-only facts (agent type, description, workflow
 /// run) go to `extra["claude"]`. A top-level session path leaves everything untouched.
-fn apply_subagent_lineage(s: &mut Session, path: &std::path::Path) {
+fn apply_subagent_lineage(s: &mut Session, path: &std::path::Path, rich: bool) {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return;
     };
@@ -688,6 +693,11 @@ fn apply_subagent_lineage(s: &mut Session, path: &std::path::Path) {
         return;
     };
     s.lineage.parent = Some(parent_stem);
+    // Usage needs transcript/model/response identities, not the auxiliary task description.
+    // Keep path-derived parentage so the unrelated fork sibling scan remains ineligible.
+    if !rich {
+        return;
+    }
     let (agent_type, description, tool_use_id) = read_meta(&path.with_extension("meta.json"));
     s.lineage.spawned_by_tool_use = tool_use_id;
     let bag = s.harness_extra_mut(Harness::Claude);
@@ -3078,6 +3088,30 @@ mod tests {
                 "cold and cached refs preserve both tiers and ordering"
             );
         }
+
+        let mut sink = CollectSink::default();
+        let usage = stream_reader(
+            "a111",
+            BufReader::new(fs::File::open(subs.join("agent-a111.jsonl")).unwrap()),
+            Some(subs.join("agent-a111.jsonl")),
+            &ParseOptions::usage(),
+            &mut sink,
+        );
+        assert_eq!(usage.lineage.parent.as_deref(), Some("sess"));
+        assert!(usage.lineage.spawned_by_tool_use.is_none());
+        assert!(!usage.extra.contains_key("claude"));
+        let path = Some(subs.join("agent-a111.jsonl"));
+        let full = new_session_for("a111", path.clone(), &ParseOptions::full());
+        let both = new_session_for(
+            "a111",
+            path,
+            &ParseOptions {
+                usage_identity: true,
+                ..ParseOptions::full()
+            },
+        );
+        assert_eq!(serde_json::to_vec(&full).unwrap(), serde_json::to_vec(&both).unwrap());
+        assert_eq!(full.lineage.spawned_by_tool_use.as_deref(), Some("toolu_77"));
 
         let direct = tree.iter().find(|s| s.agent_id() == "a111").expect("direct agent");
         assert_eq!(direct.agent_type.as_deref(), Some("general-purpose"));
