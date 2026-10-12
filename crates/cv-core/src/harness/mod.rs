@@ -232,6 +232,32 @@ pub trait Adapter: Send + Sync {
     fn store_affordances(&self, _r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         Vec::new()
     }
+
+    /// The version of the state this adapter puts in a [`Checkpoint`], when its
+    /// [`stream`](Adapter::stream) offers checkpoints at all (only on an append-only transcript
+    /// file). It is part of every stored mark's version, so changing what the state holds, or what
+    /// a record parses to, means bumping it. `None`: the adapter never offers one.
+    ///
+    /// [`Checkpoint`]: crate::stream::Checkpoint
+    fn resume_format(&self) -> Option<u32> {
+        None
+    }
+
+    /// Continue a [`stream`](Adapter::stream) of `r` from `from`, a checkpoint an earlier stream of
+    /// the same file (then shorter) took: read from `from.offset` on with the adapter state it
+    /// kept, so `sink` sees exactly the messages the whole stream would deliver after that point,
+    /// and the returned session is the one the whole stream returns. `Ok(None)`: this adapter, or
+    /// this file, cannot resume from it (no state, a different layout); nothing reached `sink`.
+    /// The caller has checked that the bytes before `from.offset` are the ones it was taken on.
+    fn resume(
+        &self,
+        _r: &SessionRef,
+        _opts: &ParseOptions,
+        _sink: &mut dyn MessageSink,
+        _from: &crate::stream::Checkpoint,
+    ) -> Result<Option<Session>> {
+        Ok(None)
+    }
 }
 
 /// `parse` on a concrete adapter (`Claude::detect().parse(&r)`): the same

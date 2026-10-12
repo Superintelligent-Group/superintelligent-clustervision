@@ -45,7 +45,7 @@ use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::lazy::{json_string_span, RawValue, Text};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -231,6 +231,70 @@ impl Adapter for Codex {
             sink,
         ))
     }
+
+    fn resume_format(&self) -> Option<u32> {
+        Some(RESUME_FORMAT)
+    }
+
+    /// Only the span path of a plain `.jsonl` rollout takes checkpoints, so only it resumes: the
+    /// mmap from `from.offset` on, with the session and [`CodexCtx`] the checkpoint kept.
+    /// `has_events` is decided again from the head (it never changes once the head is written);
+    /// a different verdict declines.
+    fn resume(
+        &self,
+        r: &SessionRef,
+        opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        from: &Checkpoint,
+    ) -> Result<Option<Session>> {
+        #[cfg(feature = "mmap")]
+        {
+            if !opts.spans || is_zst_path(&r.path) || !is_jsonl_path(&r.path) {
+                return Ok(None);
+            }
+            let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
+                return Ok(None);
+            };
+            if detect_has_events(open_rollout(&r.path)?) != state.has_events {
+                return Ok(None);
+            }
+            let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            let map = unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mapping {}", r.path.display()))?;
+            if (map.len() as u64) < from.offset {
+                return Ok(None);
+            }
+            #[cfg(unix)]
+            let _ = map.advise(memmap2::Advice::Sequential);
+            Ok(Some(stream_jsonl_spans_at(
+                &r.id,
+                &map,
+                state,
+                from.offset,
+                opts.offsets,
+                sink,
+            )))
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            let _ = (r, opts, sink, from);
+            Ok(None)
+        }
+    }
+}
+
+/// What a checkpoint's adapter state means: bump when [`ResumeState`], [`CodexCtx`], or what a
+/// record parses to, changes.
+const RESUME_FORMAT: u32 = 1;
+
+/// The span path's whole state between records, when nothing is held back.
+#[cfg(feature = "mmap")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ResumeState {
+    session: Session,
+    ctx: CodexCtx,
+    has_events: bool,
+    meta_sent: bool,
+    skipped: u64,
 }
 
 /// A `rollout-*.jsonl.zst`: Codex's in-place compression of cold rollouts (readable only with the
@@ -271,8 +335,8 @@ fn read_rollout_to_string(path: &Path) -> Result<String> {
 }
 
 /// Per-parse state shared by the full and streaming paths (both call [`dispatch_line`] per
-/// record), so their outputs stay identical.
-#[derive(Default)]
+/// record), so their outputs stay identical. A checkpoint keeps it whole.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct CodexCtx {
     /// Format-complete parse: keep inherited-prefix records (tagged `inherited`) instead of
     /// skipping them.
@@ -619,17 +683,41 @@ pub fn stream_jsonl_spans(
     stamp_offsets: bool,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    let mut s = Session {
-        source_path,
-        ..Session::new(String::new(), Harness::Codex)
+    let state = ResumeState {
+        session: Session {
+            source_path,
+            ..Session::new(String::new(), Harness::Codex)
+        },
+        // The span path is the lazy (never format-complete) path, so inherited prefixes are skipped.
+        ctx: CodexCtx::default(),
+        has_events,
+        meta_sent: false,
+        skipped: 0,
     };
+    stream_jsonl_spans_at(id, data, state, 0, stamp_offsets, sink)
+}
+
+/// [`stream_jsonl_spans`] from byte `at` of `data` with `state` (a checkpoint's, or a fresh one at
+/// 0). After every whole line that leaves nothing held back it offers the sink a [`Checkpoint`].
+#[cfg(feature = "mmap")]
+fn stream_jsonl_spans_at(
+    id: &str,
+    data: &[u8],
+    state: ResumeState,
+    at: u64,
+    stamp_offsets: bool,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    let ResumeState {
+        session: mut s,
+        mut ctx,
+        has_events,
+        mut meta_sent,
+        mut skipped,
+    } = state;
     let mut scratch: Vec<Message> = Vec::new();
-    // The span path is the lazy (never format-complete) path, so inherited prefixes are skipped.
-    let mut ctx = CodexCtx::default();
-    let mut meta_sent = false;
-    let mut skipped = 0u64;
-    let mut off = 0u64;
-    let mut start = 0usize;
+    let mut off = at;
+    let mut start = at as usize;
     'outer: while start < data.len() {
         let end = memchr::memchr(b'\n', &data[start..]).map_or(data.len(), |i| start + i);
         let raw_line = &data[start..end];
@@ -690,6 +778,11 @@ pub fn stream_jsonl_spans(
             scratch.clear();
             break 'outer;
         }
+        // Quiescent: nothing held back, and the line was finished (a partial last line is read
+        // again, whole, by whoever resumes here).
+        if scratch.is_empty() && end < data.len() && sink.wants_checkpoint(off) {
+            checkpoint_at(off, &s, &ctx, has_events, meta_sent, skipped, sink);
+        }
     }
     // EOF: emit the held trailing message, if any (no token_count followed it).
     for m in scratch.drain(..) {
@@ -705,6 +798,39 @@ pub fn stream_jsonl_spans(
         sink.meta(&s);
     }
     s
+}
+
+/// Offer `sink` the checkpoint after the line ending at `off`.
+#[cfg(feature = "mmap")]
+fn checkpoint_at(
+    off: u64,
+    s: &Session,
+    ctx: &CodexCtx,
+    has_events: bool,
+    meta_sent: bool,
+    skipped: u64,
+    sink: &mut dyn MessageSink,
+) {
+    #[derive(serde::Serialize)]
+    struct StateRef<'a> {
+        session: &'a Session,
+        ctx: &'a CodexCtx,
+        has_events: bool,
+        meta_sent: bool,
+        skipped: u64,
+    }
+    let mut cp = Checkpoint::new(off);
+    cp.put(
+        crate::stream::ADAPTER_LAYER,
+        &StateRef {
+            session: s,
+            ctx,
+            has_events,
+            meta_sent,
+            skipped,
+        },
+    );
+    sink.checkpoint(&mut cp);
 }
 
 /// If a giant line (`v`, parsed by [`lean::parse`] with its `output` captured `raw`) is a

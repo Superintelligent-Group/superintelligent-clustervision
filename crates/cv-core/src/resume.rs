@@ -1,0 +1,273 @@
+//! Byte marks: where a pass over a grown append-only transcript picks back up.
+//!
+//! A pass that streams through [`stream::stream_resumable`](crate::stream::stream_resumable)
+//! takes [`Checkpoint`]s as it goes; its last one, stored here as a **mark** per transcript file,
+//! lets the next pass over the same file (grown by an append) read only what came after it. A
+//! mark is trusted only while it still describes the file: the file is at least `offset` bytes
+//! long, the bytes before `offset` (and the file's head) hash as they did, and the mark was
+//! written by this very parser ([`version`]: the cv release, the affordance view, the adapter's
+//! state format and the consumer's). Anything else means a whole pass, which writes a new mark.
+//!
+//! The marks live in the catalog db beside the counts and events they continue (`resume_marks`);
+//! like the rest of the catalog it is a cache, best-effort throughout.
+
+use crate::harness::Adapter;
+use crate::ir::SessionRef;
+use crate::stream::Checkpoint;
+use std::path::Path;
+
+/// How many bytes the prefix hash reads at the head of the file and again just before the mark.
+const HASH_SPAN: u64 = 4096;
+
+/// A stored mark minus its state: enough to tell whether it still describes the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkHead {
+    pub offset: u64,
+    pub hash: u64,
+    pub version: String,
+}
+
+impl MarkHead {
+    /// The head of a mark for `cp`, taken on `path` by a pass at `version`. `None` when the file
+    /// can no longer be read up to the checkpoint.
+    pub fn of(path: &Path, cp: &Checkpoint, version: &str) -> Option<MarkHead> {
+        Some(MarkHead {
+            offset: cp.offset,
+            hash: prefix_hash(path, cp.offset)?,
+            version: version.to_string(),
+        })
+    }
+
+    /// Whether this mark still describes `path`, now `size` bytes long, for a pass at `version`.
+    pub fn holds(&self, path: &Path, size: u64, version: &str) -> bool {
+        self.version == version && size >= self.offset && prefix_hash(path, self.offset) == Some(self.hash)
+    }
+}
+
+/// The version a mark records and must match: the cv release, the affordance view, the adapter's
+/// checkpoint format and `consumer` (the caller's own state format). `None`: the adapter takes no
+/// checkpoints.
+pub fn version(adapter: &dyn Adapter, consumer: &str) -> Option<String> {
+    Some(format!(
+        "{}/view{}/{}{}/{consumer}",
+        env!("CARGO_PKG_VERSION"),
+        crate::affordance::VIEW_VERSION,
+        adapter.harness().as_str(),
+        adapter.resume_format()?
+    ))
+}
+
+/// FNV-1a (64-bit) over the first [`HASH_SPAN`] bytes of `path` and the [`HASH_SPAN`] bytes
+/// before `offset` (overlapping on a short file). `None` when the file is shorter than `offset`.
+pub fn prefix_hash(path: &Path, offset: u64) -> Option<u64> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    if f.metadata().ok()?.len() < offset {
+        return None;
+    }
+    let mut head = vec![0u8; offset.min(HASH_SPAN) as usize];
+    f.read_exact(&mut head).ok()?;
+    let from = offset.saturating_sub(HASH_SPAN);
+    let mut tail = vec![0u8; (offset - from) as usize];
+    f.seek(SeekFrom::Start(from)).ok()?;
+    f.read_exact(&mut tail).ok()?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in head.iter().chain(&tail).chain(&offset.to_le_bytes()) {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    Some(h)
+}
+
+/// A session and its new mark (`None`: it has none any more), for [`update`].
+pub type MarkUpdate = (SessionRef, Option<(MarkHead, Checkpoint)>);
+
+#[cfg(feature = "sqlite")]
+mod imp {
+    use super::*;
+    use rusqlite::{params, Connection};
+    use std::collections::HashMap;
+
+    fn open() -> Option<Connection> {
+        let conn = crate::catalog::open_db()?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS resume_marks(
+                 harness TEXT NOT NULL,
+                 id      TEXT NOT NULL,
+                 path    TEXT NOT NULL,
+                 offset  INTEGER NOT NULL,
+                 hash    INTEGER NOT NULL,
+                 version TEXT NOT NULL,
+                 state   TEXT NOT NULL,
+                 PRIMARY KEY(harness, id, path)
+             );",
+        )
+        .ok()?;
+        Some(conn)
+    }
+
+    fn key(r: &SessionRef) -> (String, String, String) {
+        (
+            r.harness.as_str().to_string(),
+            r.id.clone(),
+            r.path.to_string_lossy().into_owned(),
+        )
+    }
+
+    /// Every mark's head, loaded with one query for a sweep (the states, which can be tens of KB
+    /// each, are read only for the sessions that resume: [`state`]).
+    pub struct MarkTable {
+        rows: HashMap<(String, String, String), MarkHead>,
+    }
+
+    impl MarkTable {
+        pub fn load() -> MarkTable {
+            let load = || -> Option<HashMap<(String, String, String), MarkHead>> {
+                let conn = open()?;
+                let mut stmt = conn
+                    .prepare("SELECT harness, id, path, offset, hash, version FROM resume_marks")
+                    .ok()?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            (row.get(0)?, row.get(1)?, row.get(2)?),
+                            MarkHead {
+                                offset: row.get::<_, i64>(3)? as u64,
+                                hash: row.get::<_, i64>(4)? as u64,
+                                version: row.get(5)?,
+                            },
+                        ))
+                    })
+                    .ok()?;
+                Some(rows.flatten().collect())
+            };
+            MarkTable {
+                rows: load().unwrap_or_default(),
+            }
+        }
+
+        pub fn get(&self, r: &SessionRef) -> Option<&MarkHead> {
+            self.rows.get(&key(r))
+        }
+    }
+
+    /// The checkpoint `r`'s mark holds, when it is still the one `head` describes.
+    pub fn state(r: &SessionRef, head: &MarkHead) -> Option<Checkpoint> {
+        let conn = open()?;
+        let (h, i, p) = key(r);
+        let (offset, hash, version, text): (i64, i64, String, String) = conn
+            .query_row(
+                "SELECT offset, hash, version, state FROM resume_marks WHERE harness=?1 AND id=?2 AND path=?3",
+                params![h, i, p],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .ok()?;
+        let same = MarkHead {
+            offset: offset as u64,
+            hash: hash as u64,
+            version,
+        } == *head;
+        let cp: Checkpoint = serde_json::from_str(&text).ok()?;
+        (same && cp.offset == head.offset).then_some(cp)
+    }
+
+    /// Bring each session's mark up to date in one transaction: the new mark replaces the old,
+    /// `None` drops it (the next pass over that file reads it whole).
+    pub fn update(marks: &[MarkUpdate]) {
+        if marks.is_empty() {
+            return;
+        }
+        let Some(mut conn) = open() else { return };
+        let Ok(tx) = conn.transaction() else { return };
+        {
+            let Ok(mut put) = tx.prepare(
+                "INSERT OR REPLACE INTO resume_marks(harness,id,path,offset,hash,version,state)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            ) else {
+                return;
+            };
+            let Ok(mut drop) = tx.prepare("DELETE FROM resume_marks WHERE harness=?1 AND id=?2 AND path=?3") else {
+                return;
+            };
+            for (r, mark) in marks {
+                let (h, i, p) = key(r);
+                let _ = match mark {
+                    Some((head, cp)) => {
+                        let Ok(text) = serde_json::to_string(cp) else { continue };
+                        put.execute(params![
+                            h,
+                            i,
+                            p,
+                            head.offset as i64,
+                            head.hash as i64,
+                            head.version,
+                            text
+                        ])
+                    }
+                    None => drop.execute(params![h, i, p]),
+                };
+            }
+        }
+        let _ = tx.commit();
+    }
+}
+
+#[cfg(feature = "sqlite")]
+pub use imp::{state, update, MarkTable};
+
+/// Without the catalog there are no marks: every pass reads the whole file.
+#[cfg(not(feature = "sqlite"))]
+pub struct MarkTable;
+#[cfg(not(feature = "sqlite"))]
+impl MarkTable {
+    pub fn load() -> MarkTable {
+        MarkTable
+    }
+    pub fn get(&self, _r: &SessionRef) -> Option<&MarkHead> {
+        None
+    }
+}
+#[cfg(not(feature = "sqlite"))]
+pub fn state(_r: &SessionRef, _head: &MarkHead) -> Option<Checkpoint> {
+    None
+}
+#[cfg(not(feature = "sqlite"))]
+pub fn update(_marks: &[MarkUpdate]) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mark holds while the file only grows; changing a byte before it, cutting the file
+    /// short of it, or another parser version all break it.
+    #[test]
+    fn a_mark_holds_across_an_append_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("cv-mark-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let line = |i: usize| format!("{{\"n\":{i},\"pad\":\"{}\"}}\n", "x".repeat(i % 97));
+        let body: String = (0..400).map(line).collect();
+        std::fs::write(&path, &body).unwrap();
+        let offset = body[..body.len() / 2].rfind('\n').unwrap() as u64 + 1;
+        let head = MarkHead::of(&path, &Checkpoint::new(offset), "v1").unwrap();
+        let size = |p: &Path| std::fs::metadata(p).unwrap().len();
+
+        assert!(head.holds(&path, size(&path), "v1"));
+        assert!(!head.holds(&path, size(&path), "v2"), "another version");
+
+        let grown = format!("{body}{}", line(401));
+        std::fs::write(&path, &grown).unwrap();
+        assert!(head.holds(&path, size(&path), "v1"), "an append keeps it");
+
+        // One byte changed just before the mark, then one in the head: both break it.
+        for at in [offset as usize - 10, 7] {
+            let mut b = grown.clone().into_bytes();
+            b[at] = b'y';
+            std::fs::write(&path, &b).unwrap();
+            assert!(!head.holds(&path, size(&path), "v1"), "byte {at} changed");
+        }
+        std::fs::write(&path, &grown.as_bytes()[..offset as usize - 1]).unwrap();
+        assert!(!head.holds(&path, size(&path), "v1"), "truncated before the mark");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

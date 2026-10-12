@@ -454,6 +454,16 @@ impl MessageSink for AffordanceSink<'_> {
     fn meta(&mut self, s: &Session) {
         self.inner.meta(s);
     }
+
+    /// Never while a synchronous spawn waits for its result: which result returns it is state no
+    /// checkpoint carries.
+    fn wants_checkpoint(&mut self, offset: u64) -> bool {
+        self.open.is_empty() && self.inner.wants_checkpoint(offset)
+    }
+
+    fn checkpoint(&mut self, cp: &mut crate::stream::Checkpoint) {
+        self.inner.checkpoint(cp);
+    }
 }
 
 fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMap<String, Returns>) {
@@ -1134,6 +1144,16 @@ impl Counter {
             let (Hit::Call { kind, .. } | Hit::Message { kind, .. } | Hit::Detail { kind, .. }) = hit;
             *self.counts.entry(kind).or_default() += 1;
         }
+    }
+
+    /// What the messages so far showed (a resumable pass's checkpoint keeps it).
+    pub fn counts(&self) -> &Counts {
+        &self.counts
+    }
+
+    /// Continue from the counts a checkpoint kept.
+    pub fn restore(&mut self, counts: Counts) {
+        self.counts = counts;
     }
 
     /// The whole session's counts: what the messages showed, the session's own rows

@@ -15,6 +15,7 @@
 use crate::harness::Adapter;
 use crate::ir::{Message, Session, SessionRef};
 use anyhow::Result;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// Knobs controlling how much of each message an adapter materializes. Everything off (the
 /// [`Default`]) is the cheapest faithful pass; full-fidelity callers opt back in.
@@ -150,6 +151,69 @@ pub trait MessageSink {
 
     /// Session metadata, possibly emitted before the first message. Default: ignore.
     fn meta(&mut self, _session: &Session) {}
+
+    /// The adapter is between records, holding nothing back, `offset` bytes into the file: may it
+    /// take a [`Checkpoint`] here? Only a sink that can put everything it holds into one says
+    /// yes, so a pass through any other sink never takes one. Default: no.
+    fn wants_checkpoint(&mut self, _offset: u64) -> bool {
+        false
+    }
+
+    /// Add this sink's state to `cp` (the adapter's is already in) and pass it on to any sink
+    /// this one wraps. Called only after [`wants_checkpoint`](MessageSink::wants_checkpoint) said
+    /// yes. Default: nothing to add.
+    fn checkpoint(&mut self, _cp: &mut Checkpoint) {}
+}
+
+/// A point a pass over an append-only transcript can resume from: `offset` is the byte after the
+/// last whole line read, and `state` holds what each layer of the pass held there, by layer
+/// (`adapter`, `counter`, and each consumer's own key). Resuming at `offset` with every layer
+/// restored from `state` gives what the whole pass would have given from there on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub offset: u64,
+    pub state: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Checkpoint {
+    pub fn new(offset: u64) -> Self {
+        Checkpoint {
+            offset,
+            state: Default::default(),
+        }
+    }
+
+    /// Store `layer`'s state (serialization of these plain structs cannot fail; if it did, the
+    /// layer would be missing and a resume would decline).
+    pub fn put(&mut self, layer: &str, state: &impl Serialize) {
+        if let Ok(v) = serde_json::to_value(state) {
+            self.state.insert(layer.to_string(), v);
+        }
+    }
+
+    /// `layer`'s state, when it is there and still reads as `T`.
+    pub fn get<T: DeserializeOwned>(&self, layer: &str) -> Option<T> {
+        serde_json::from_value(self.state.get(layer)?.clone()).ok()
+    }
+
+    /// How many messages the pass had delivered at this point (the counter layer's count): the
+    /// index the first resumed message gets.
+    pub fn messages(&self) -> Option<usize> {
+        self.get::<CounterState>(COUNTER_LAYER).map(|c| c.messages)
+    }
+}
+
+/// A sink that drops every message and holds nothing, so it can always be checkpointed: the
+/// consumer of a pass that only counts.
+pub struct Discard;
+
+impl MessageSink for Discard {
+    fn message(&mut self, _m: Message) -> Flow {
+        Flow::Continue
+    }
+    fn wants_checkpoint(&mut self, _offset: u64) -> bool {
+        true
+    }
 }
 
 /// Any `FnMut(Message) -> Flow` is a sink — the ergonomic form for ad-hoc consumers.
@@ -190,6 +254,15 @@ impl MessageSink for TeeSink<'_> {
     fn meta(&mut self, s: &Session) {
         self.a.meta(s);
         self.b.meta(s);
+    }
+
+    fn wants_checkpoint(&mut self, offset: u64) -> bool {
+        self.a.wants_checkpoint(offset) && self.b.wants_checkpoint(offset)
+    }
+
+    fn checkpoint(&mut self, cp: &mut Checkpoint) {
+        self.a.checkpoint(cp);
+        self.b.checkpoint(cp);
     }
 
     fn message(&mut self, m: Message) -> Flow {
@@ -315,6 +388,146 @@ pub fn stream_counting(
     Ok((session, counted))
 }
 
+/// What a [`stream_resumable`] pass gives back.
+pub struct Resumed {
+    pub session: Session,
+    /// What the whole session counted (the resumed part added to the checkpoint's), `None` when
+    /// the sink stopped early.
+    pub counted: Option<Counted>,
+    /// The last checkpoint the pass took (`None` when it took none, or stopped early): the mark
+    /// the next pass over the grown file resumes from.
+    pub last: Option<Checkpoint>,
+}
+
+/// [`stream_counting`] for a pass that can be continued: it takes a [`Checkpoint`] each time the
+/// file has advanced `every` bytes past the last one (where the adapter and every sink allow), and
+/// given `from` it starts there instead of at byte 0, with the counts restored from it. The
+/// caller restores its own sinks from `from` and checks that `from` still describes the file.
+/// `Ok(None)`: the adapter cannot resume from `from` and touched nothing — read the session
+/// whole instead.
+pub fn stream_resumable(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    every: u64,
+    from: Option<&Checkpoint>,
+) -> Result<Option<Resumed>> {
+    let mut counting = Counting::new(r, sink, Some(every));
+    let session = match from {
+        Some(cp) => {
+            let Some(state) = cp.get::<CounterState>(COUNTER_LAYER) else {
+                return Ok(None);
+            };
+            counting.restore(state, cp.offset);
+            match adapter.resume(r, opts, &mut counting, cp)? {
+                Some(s) => s,
+                None => return Ok(None),
+            }
+        }
+        None => adapter.stream(r, opts, &mut counting)?,
+    };
+    let last = counting.last.take().filter(|_| !counting.stopped);
+    let counted = (!counting.stopped).then(|| Counted {
+        turns: counting.turns,
+        counts: counting.affordances.finish(&session, &adapter.store_affordances(r)),
+    });
+    Ok(Some(Resumed { session, counted, last }))
+}
+
+/// The [`Checkpoint`] layer an adapter keeps its own state under.
+pub const ADAPTER_LAYER: &str = "adapter";
+
+/// The [`Checkpoint`] layer the counting wrapper keeps its state under.
+const COUNTER_LAYER: &str = "counter";
+
+/// What the counting wrapper holds at a checkpoint.
+#[derive(Serialize, Deserialize)]
+struct CounterState {
+    messages: usize,
+    turns: usize,
+    counts: std::collections::BTreeMap<String, u32>,
+}
+
+/// The wrapper every counted pass streams through: turns, messages and affordances as they go
+/// by, and (in a resumable pass) the checkpoints.
+struct Counting<'a> {
+    inner: &'a mut dyn MessageSink,
+    messages: usize,
+    turns: usize,
+    affordances: crate::affordance::Counter,
+    stopped: bool,
+    /// Take a checkpoint every this many bytes (`None`: never).
+    every: Option<u64>,
+    last_offset: u64,
+    last: Option<Checkpoint>,
+}
+
+impl<'a> Counting<'a> {
+    fn new(r: &SessionRef, inner: &'a mut dyn MessageSink, every: Option<u64>) -> Self {
+        Counting {
+            inner,
+            messages: 0,
+            turns: 0,
+            affordances: crate::affordance::Counter::new(r),
+            stopped: false,
+            every,
+            last_offset: 0,
+            last: None,
+        }
+    }
+
+    fn restore(&mut self, state: CounterState, offset: u64) {
+        self.messages = state.messages;
+        self.turns = state.turns;
+        let counts = state
+            .counts
+            .iter()
+            .filter_map(|(k, n)| Some((crate::affordance::Kind::parse(k)?, *n)))
+            .collect();
+        self.affordances.restore(counts);
+        self.last_offset = offset;
+    }
+}
+
+impl MessageSink for Counting<'_> {
+    fn meta(&mut self, s: &Session) {
+        self.inner.meta(s);
+    }
+    fn message(&mut self, m: Message) -> Flow {
+        self.messages += 1;
+        self.turns += usize::from(m.is_turn());
+        self.affordances.note(&m);
+        let flow = self.inner.message(m);
+        self.stopped |= flow == Flow::Stop;
+        flow
+    }
+    fn wants_checkpoint(&mut self, offset: u64) -> bool {
+        !self.stopped
+            && self.every.is_some_and(|e| offset >= self.last_offset.saturating_add(e))
+            && self.inner.wants_checkpoint(offset)
+    }
+    fn checkpoint(&mut self, cp: &mut Checkpoint) {
+        let counts = self
+            .affordances
+            .counts()
+            .iter()
+            .map(|(k, n)| (k.as_str().to_string(), *n))
+            .collect();
+        cp.put(
+            COUNTER_LAYER,
+            &CounterState {
+                messages: self.messages,
+                turns: self.turns,
+                counts,
+            },
+        );
+        self.inner.checkpoint(cp);
+        self.last_offset = cp.offset;
+        self.last = Some(cp.clone());
+    }
+}
+
 /// `adapter.stream` with every message counted: the turns and the affordance [`Counter`]
 /// (`None` when the sink stopped early, so the counts would be partial).
 ///
@@ -325,30 +538,7 @@ fn stream_with_counter(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<(Session, Option<(usize, crate::affordance::Counter)>)> {
-    struct Counting<'a> {
-        inner: &'a mut dyn MessageSink,
-        turns: usize,
-        affordances: crate::affordance::Counter,
-        stopped: bool,
-    }
-    impl MessageSink for Counting<'_> {
-        fn meta(&mut self, s: &Session) {
-            self.inner.meta(s);
-        }
-        fn message(&mut self, m: Message) -> Flow {
-            self.turns += usize::from(m.is_turn());
-            self.affordances.note(&m);
-            let flow = self.inner.message(m);
-            self.stopped |= flow == Flow::Stop;
-            flow
-        }
-    }
-    let mut counting = Counting {
-        inner: sink,
-        turns: 0,
-        affordances: crate::affordance::Counter::new(r),
-        stopped: false,
-    };
+    let mut counting = Counting::new(r, sink, None);
     let session = adapter.stream(r, opts, &mut counting)?;
     let counted = (!counting.stopped).then_some((counting.turns, counting.affordances));
     Ok((session, counted))
@@ -406,5 +596,132 @@ mod tests {
         assert_eq!(tee.message(text_msg("three")), Flow::Stop);
         assert_eq!(a.seen, vec!["one"]);
         assert_eq!(b.seen, vec!["one", "two", "three"]);
+    }
+
+    /// Keeps every message (as JSON) and every checkpoint it is offered.
+    #[derive(Default)]
+    struct Keep {
+        msgs: Vec<serde_json::Value>,
+        cps: Vec<Checkpoint>,
+    }
+    impl MessageSink for Keep {
+        fn message(&mut self, m: Message) -> Flow {
+            self.msgs.push(serde_json::to_value(&m).unwrap());
+            Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _offset: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, cp: &mut Checkpoint) {
+            self.cps.push(cp.clone());
+        }
+    }
+
+    /// The claude and codex transcripts of the harness corpus (the two adapters that resume).
+    fn corpus_transcripts() -> Vec<SessionRef> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+        let mut out = Vec::new();
+        for (dir, harness) in [
+            ("claude", crate::ir::Harness::Claude),
+            ("codex", crate::ir::Harness::Codex),
+        ] {
+            for e in walkdir::WalkDir::new(root.join(dir)).sort_by_file_name() {
+                let p = e.unwrap().into_path();
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                let top = match harness {
+                    crate::ir::Harness::Claude => p
+                        .parent()
+                        .and_then(|d| d.parent())
+                        .is_some_and(|d| d.ends_with("projects")),
+                    _ => name.starts_with("rollout-"),
+                };
+                if top && name.ends_with(".jsonl") {
+                    out.push(transcript(harness, p));
+                }
+            }
+        }
+        out
+    }
+
+    fn transcript(harness: crate::ir::Harness, path: std::path::PathBuf) -> SessionRef {
+        SessionRef {
+            id: path.file_stem().unwrap().to_string_lossy().into_owned(),
+            harness,
+            path,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        }
+    }
+
+    /// One pass: the messages, the session (as JSON), the counts, and every checkpoint offered.
+    fn pass(r: &SessionRef, from: Option<&Checkpoint>) -> (Keep, serde_json::Value, Counted) {
+        let adapter = crate::harness::for_harness(r.harness).unwrap();
+        let mut keep = Keep::default();
+        let done = stream_resumable(&*adapter, r, &ParseOptions::lazy(), &mut keep, 1, from)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{} declined to resume", r.path.display()));
+        let session = serde_json::to_value(&done.session).unwrap();
+        (keep, session, done.counted.expect("a whole pass counts"))
+    }
+
+    /// Resuming at any checkpoint a pass took reproduces the rest of that pass: the same messages
+    /// from the checkpoint's message on, the same session, the same counts, and the same later
+    /// checkpoints. Over every claude and codex transcript of the corpus, at up to a dozen
+    /// checkpoints spread through each.
+    #[test]
+    fn a_resumed_pass_is_the_rest_of_the_whole_pass() {
+        let transcripts = corpus_transcripts();
+        assert!(transcripts.len() >= 20, "corpus moved? found {}", transcripts.len());
+        let mut resumed = 0;
+        for r in &transcripts {
+            let (full, session, counted) = pass(r, None);
+            assert!(full.cps.len() > 1, "{}: no checkpoints", r.path.display());
+            let step = (full.cps.len() / 12).max(1);
+            for (i, cp) in full.cps.iter().enumerate().step_by(step) {
+                let (rest, s, c) = pass(r, Some(cp));
+                let n = cp.messages().unwrap();
+                let at = format!("{} @ {}", r.path.display(), cp.offset);
+                assert_eq!(rest.msgs, full.msgs[n..], "{at}: messages");
+                assert_eq!(s, session, "{at}: session");
+                assert_eq!((c.turns, &c.counts), (counted.turns, &counted.counts), "{at}: counts");
+                assert!(rest.cps == full.cps[i + 1..], "{at}: later checkpoints");
+                resumed += 1;
+            }
+        }
+        assert!(resumed > 200, "only {resumed} resumes");
+    }
+
+    /// The append case: a pass over a file whose writer stopped mid-line takes its last checkpoint
+    /// before that line; once the line and more are appended, resuming there gives what a whole
+    /// pass over the grown file gives.
+    #[test]
+    fn a_pass_resumes_across_an_append_that_finishes_a_partial_line() {
+        let dir = std::env::temp_dir().join(format!("cv-resume-{}", uuid::Uuid::new_v4()));
+        for src in corpus_transcripts().into_iter().step_by(4) {
+            let bytes = std::fs::read(&src.path).unwrap();
+            let cut = bytes.len() * 2 / 3;
+            assert_ne!(bytes[cut - 1], b'\n', "pick a cut inside a line");
+            let path = dir.join(src.path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &bytes[..cut]).unwrap();
+            let r = transcript(src.harness, path.clone());
+            let (head, _, _) = pass(&r, None);
+            let last = head.cps.last().unwrap().clone();
+            assert!(last.offset < cut as u64);
+            assert_eq!(bytes[last.offset as usize - 1], b'\n');
+
+            std::fs::write(&path, &bytes).unwrap();
+            let (full, session, counted) = pass(&r, None);
+            let (rest, s, c) = pass(&r, Some(&last));
+            let n = last.messages().unwrap();
+            assert_eq!(head.msgs[..n], full.msgs[..n]);
+            assert_eq!(rest.msgs, full.msgs[n..], "{}", src.path.display());
+            assert_eq!(s, session, "{}", src.path.display());
+            assert_eq!((c.turns, c.counts), (counted.turns, counted.counts));
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

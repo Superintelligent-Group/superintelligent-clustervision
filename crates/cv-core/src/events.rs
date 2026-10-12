@@ -21,7 +21,7 @@
 //! results / no-ops, never failing the caller.
 
 use crate::ir::{truncate, Block, Harness, Message, Session, SessionRef};
-use crate::stream::{Flow, MessageSink};
+use crate::stream::{Checkpoint, Flow, MessageSink};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -93,6 +93,28 @@ impl EventSink {
     pub fn into_events(self) -> Vec<Event> {
         self.events
     }
+
+    /// The sink a checkpoint kept (see [`MessageSink::checkpoint`]), continuing with the message
+    /// index and cwd it had there: its events start at that index, for [`record_from`]. `None`
+    /// when the checkpoint was taken without one.
+    pub fn resume(cp: &Checkpoint) -> Option<EventSink> {
+        let st: EventState = cp.get(EVENTS_LAYER)?;
+        Some(EventSink {
+            cwd: st.cwd,
+            msg_idx: st.msg_idx,
+            events: Vec::new(),
+        })
+    }
+}
+
+/// The [`Checkpoint`] layer an [`EventSink`] keeps its state under.
+const EVENTS_LAYER: &str = "events";
+
+/// What an [`EventSink`] holds at a checkpoint: the rows so far are in the catalog already.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EventState {
+    msg_idx: usize,
+    cwd: Option<PathBuf>,
 }
 
 impl MessageSink for EventSink {
@@ -106,6 +128,20 @@ impl MessageSink for EventSink {
         extract_into(&m, self.msg_idx, self.cwd.as_deref(), &mut self.events);
         self.msg_idx += 1;
         Flow::Continue
+    }
+
+    fn wants_checkpoint(&mut self, _offset: u64) -> bool {
+        true
+    }
+
+    fn checkpoint(&mut self, cp: &mut Checkpoint) {
+        cp.put(
+            EVENTS_LAYER,
+            &EventState {
+                msg_idx: self.msg_idx,
+                cwd: self.cwd.clone(),
+            },
+        );
     }
 }
 
@@ -645,6 +681,13 @@ mod db {
     /// session passes an empty [`Provenance`] (this is exactly what [`record`] does); the columns
     /// stay NULL and existing queries are unaffected.
     pub fn record_with(r: &SessionRef, events: &[Event], mtime_ns: i64, size: i64, prov: &Provenance) {
+        record_from(r, 0, events, mtime_ns, size, prov);
+    }
+
+    /// [`record_with`] for a pass that resumed at message `from`: only the rows of messages
+    /// `from` and later are replaced by `events` (all of which are), the earlier ones stay as the
+    /// pass that read them stored them. The same dedup rule, within the new rows.
+    pub fn record_from(r: &SessionRef, from: usize, events: &[Event], mtime_ns: i64, size: i64, prov: &Provenance) {
         let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
         let harness = r.harness.as_str();
@@ -666,7 +709,10 @@ mod db {
         ) else {
             return;
         };
-        let _ = tx.execute("DELETE FROM events WHERE session=?1", params![session]);
+        let _ = tx.execute(
+            "DELETE FROM events WHERE session=?1 AND msg_idx>=?2",
+            params![session, from as i64],
+        );
         {
             let Ok(mut intern) = tx.prepare("INSERT OR IGNORE INTO event_targets(target) VALUES(?1)") else {
                 return;
@@ -984,7 +1030,7 @@ mod db {
 #[cfg(feature = "sqlite")]
 pub use db::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_with, sessions_editing, sessions_touching, SyncTable,
+    record_from, record_with, sessions_editing, sessions_touching, SyncTable,
 };
 
 /// No-op fallbacks without sqlite: extraction still works (the sink is pure), persistence and
@@ -1009,6 +1055,15 @@ mod db_stub {
     }
     pub fn record(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64) {}
     pub fn record_with(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64, _prov: &Provenance) {}
+    pub fn record_from(
+        _r: &SessionRef,
+        _from: usize,
+        _events: &[Event],
+        _mtime_ns: i64,
+        _size: i64,
+        _prov: &Provenance,
+    ) {
+    }
     pub fn ingest_ref(_r: &SessionRef) -> Result<usize> {
         Ok(0)
     }
@@ -1037,7 +1092,7 @@ mod db_stub {
 #[cfg(not(feature = "sqlite"))]
 pub use db_stub::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_with, sessions_editing, sessions_touching, SyncTable,
+    record_from, record_with, sessions_editing, sessions_touching, SyncTable,
 };
 
 #[cfg(test)]

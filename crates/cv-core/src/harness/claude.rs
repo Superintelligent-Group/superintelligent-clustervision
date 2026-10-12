@@ -21,7 +21,7 @@ use super::wire::anthropic;
 use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
 use crate::lazy::{Span, Text, INLINE_MAX};
-use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
+use crate::stream::{Checkpoint, CollectSink, Flow, MessageSink, ParseOptions, ADAPTER_LAYER};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 pub use emit::{emit, verify_claude_resumable};
@@ -222,12 +222,32 @@ impl Adapter for Claude {
         // 1.35 GB polyana transcript). `BufReader::lines()` keeps peak at O(largest line); handing
         // each message to `sink` (instead of accumulating a `Vec`) keeps it at O(largest message).
         let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
-        let mut s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
-        // A `--fork-session` copy names no source; the records it shares with one do ([`fork`]).
-        if s.lineage.parent.is_none() && s.lineage.forked_from.is_none() {
-            s.lineage.forked_from = fork::source(&r.path);
-        }
-        Ok(s)
+        let s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
+        Ok(with_fork_source(s, &r.path))
+    }
+
+    fn resume_format(&self) -> Option<u32> {
+        Some(RESUME_FORMAT)
+    }
+
+    /// The state at a line boundary is the session accumulated so far (the spawn tracker holds
+    /// nothing there: Claude's spawns all return later, as their own records).
+    fn resume(
+        &self,
+        r: &SessionRef,
+        opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        from: &Checkpoint,
+    ) -> Result<Option<Session>> {
+        use std::io::{Seek as _, SeekFrom};
+        let Some(session) = from.get::<Session>(ADAPTER_LAYER) else {
+            return Ok(None);
+        };
+        let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+        file.seek(SeekFrom::Start(from.offset))
+            .with_context(|| format!("seeking {}", r.path.display()))?;
+        let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink);
+        Ok(Some(with_fork_source(s, &r.path)))
     }
 
     /// The task list (`TaskCreate`/`TaskUpdate`) Claude Code keeps beside the transcripts:
@@ -235,6 +255,19 @@ impl Adapter for Claude {
     fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         task_list(&r.path, &r.id).into_iter().collect()
     }
+}
+
+/// What a checkpoint's adapter state means: bump when the session the stream accumulates, or what
+/// a record parses to, changes.
+const RESUME_FORMAT: u32 = 1;
+
+/// A `--fork-session` copy names no source; the records it shares with one do ([`fork`]). Runs
+/// after every stream, whole or resumed, since it reads other files.
+fn with_fork_source(mut s: Session, path: &Path) -> Session {
+    if s.lineage.parent.is_none() && s.lineage.forked_from.is_none() {
+        s.lineage.forked_from = fork::source(path);
+    }
+    s
 }
 
 /// Fully parse a Claude `.jsonl` transcript from its text contents into a [`Session`] (full
@@ -310,7 +343,19 @@ pub fn stream_reader<R: BufRead>(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    let mut session = new_session(id, source_path);
+    stream_reader_at(new_session(id, source_path), reader, 0, opts, sink)
+}
+
+/// [`stream_reader`] over a reader positioned `file_off` bytes into the transcript, accumulating
+/// into `session` (the state a checkpoint at `file_off` kept, or a fresh shell at 0). After every
+/// whole line it offers the sink a [`Checkpoint`] holding the session so far.
+fn stream_reader_at<R: BufRead>(
+    mut session: Session,
+    reader: R,
+    mut file_off: u64,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Session {
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
     let sink = &mut spawns;
     // Read raw bytes (not `lines()`) so we know each record's byte offset in the file — that's what
@@ -318,7 +363,6 @@ pub fn stream_reader<R: BufRead>(
     // strings. `read_until` keeps peak at O(largest line) just like `lines()` did.
     let mut reader = reader;
     let mut buf: Vec<u8> = Vec::new();
-    let mut file_off: u64 = 0;
     loop {
         buf.clear();
         let n = match reader.read_until(b'\n', &mut buf) {
@@ -330,6 +374,12 @@ pub fn stream_reader<R: BufRead>(
             break;
         }
         file_off += n as u64;
+        // Only after a line its writer finished: a partial last line is re-read whole next time.
+        if buf[n - 1] == b'\n' && sink.wants_checkpoint(file_off) {
+            let mut cp = Checkpoint::new(file_off);
+            cp.put(ADAPTER_LAYER, &session);
+            sink.checkpoint(&mut cp);
+        }
     }
     session
 }
