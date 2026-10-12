@@ -23,6 +23,7 @@ const COMPACTED_KEEP: &[&str] = &["message", "window_number", "window_id", "comp
 /// A parsed record line, and (giant lines only) the raw `output` of its `response_item` payload.
 pub(super) struct LeanLine<'a> {
     pub v: Value,
+    #[cfg_attr(not(all(feature = "mmap", not(target_arch = "wasm32"))), allow(dead_code))]
     pub output: Option<&'a RawValue>,
 }
 

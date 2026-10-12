@@ -46,7 +46,9 @@ pub use emit::emit;
 use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
-use crate::lazy::{json_string_span, RawValue, Text};
+use crate::lazy::Text;
+#[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+use crate::lazy::{json_string_span, RawValue};
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
