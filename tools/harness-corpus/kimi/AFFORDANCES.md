@@ -14,7 +14,7 @@ is `sessions/<md5(cwd)>/<uuid>/`.
 | tool error | `wire.jsonl` `ToolResult.return_value.is_error` | yes | `ToolResult{is_error}` |
 | thinking | `think` parts; 1.49+ also an empty one per step | yes | `Thinking` (empty dropped) |
 | image input (`ReadMediaFile`) | `image_url` part in the `tool` record | yes | `Image` inside the `ToolResult` |
-| todo list (`SetTodoList`) | tool call + `state.json.todos` | yes | `ToolUse`; `state.json` not read |
+| todo list (`SetTodoList`) | tool call + `state.json.todos` | yes | `ToolUse`; `state.json.todos` is the session's `plan`/`state` row |
 | plan mode | tool calls + `state.json.plan_mode/plan_slug`; a plan-mode reminder in `context.jsonl` | yes | `ToolUse`; reminder `injected_context` |
 | background shell, `TaskOutput` | `tasks/<id>/{spec,runtime,control,consumer}.json`, `output.log`; `notifications/<id>/{event,delivery}.json`; a `<notification>` user record | yes | the `<notification>` record `injected_context`/Scheduler; task files not read |
 | sub-agent (`Agent`) | `subagents/<agent_id>/{context.jsonl,wire.jsonl,meta.json,prompt.txt,output}` | yes | child `Session` (`lineage.parent`, `agent_path`; `meta.json` in `extra["kimi"]["subagent"]`) |

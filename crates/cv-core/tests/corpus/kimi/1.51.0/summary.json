@@ -142,6 +142,7 @@
         "checkpoint/state": 1,
         "plan/enter": 1,
         "plan/exit": 1,
+        "plan/state": 1,
         "plan/write": 1,
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1

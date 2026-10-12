@@ -20,7 +20,8 @@
 //!   [`subagent_refs`] lists them, parsed with `lineage.parent` = the session and `agent_path` =
 //!   the agent id. Also in a session dir, read by nothing here: `tasks/<id>/` (background shells:
 //!   `spec.json`, `runtime.json`, `output.log`, …) and `notifications/<id>/` (`event.json`,
-//!   `delivery.json`); `state.json` also keeps `todos`, `plan_mode`, `approval`.
+//!   `delivery.json`); `state.json` also keeps `todos` (read as the session's `plan` state,
+//!   [`Adapter::store_affordances`]), `plan_mode`, `approval`.
 //! - **Legacy (flat form):** `sessions/<hash>/<uuid>.jsonl` — the transcript only, no sidecar/dir.
 //!   (kimi-cli migrates these to the dir form on next open; we still read them in place.)
 //!
@@ -344,6 +345,25 @@ impl Adapter for Kimi {
         super::note_skipped_lines(&mut s, skipped);
 
         Ok(s)
+    }
+
+    /// The todo list `SetTodoList` keeps in the session dir's `state.json` (`todos: [{title,
+    /// status}]`). A legacy flat session (no `context.jsonl` in its dir) has no state file.
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        if !r.path.join("context.jsonl").is_file() {
+            return Vec::new();
+        }
+        let Some(todos) = fs::read_to_string(r.path.join("state.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v.get("todos").cloned())
+        else {
+            return Vec::new();
+        };
+        let items = crate::affordance::items_of(&todos);
+        crate::affordance::plan_state(crate::affordance::Kind::Plan, "state.json", items)
+            .into_iter()
+            .collect()
     }
 }
 
