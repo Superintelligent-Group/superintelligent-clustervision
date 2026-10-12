@@ -164,3 +164,12 @@ target, verify the boolean oracle, and enforce the same 8 MiB / 2 MiB native hea
 The collector's peak is reported as a negative control, without applying the reducer budget
 to its deliberately retained IR. A single giant argument still requires a record-sized Value;
 this gate promises bounded history retention, not lazy argument materialization.
+
+`tools` streams through the production `ToolHistogram::from_stream` used by forest tools;
+`tools-collect` uses the previous EventSink collection followed by `from_events`. Both force
+lazy parsing and report the complete small histogram as `detail`, so exact output parity needs
+no additional digest or transcript materialization. Neither updates the catalog. Callback counts
+are not observed by the composed histogram API. Use fixed-size tool calls with distinct targets
+and one tool name to distinguish retained event history from demanded histogram output. The old
+path includes EventSink's per-record checkpoint requests; the histogram consumer never resumes
+from or stores them.

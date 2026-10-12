@@ -140,7 +140,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--warm-discover] [--query EXPR] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
+                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -355,6 +355,18 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail = serde_json::to_value(counter.finish(&s, &adapter.store_affordances(r)))?;
             }
         }
+        "tools" | "tools-collect" => {
+            let histogram = if a.operation == "tools" {
+                cv_core::tools::ToolHistogram::from_stream(adapter, r)?
+            } else {
+                // The production path before histogram reduction: includes EventSink's unused
+                // per-record checkpoints, because the forest reader requested them too.
+                let mut sink = cv_core::events::EventSink::new(r.cwd.clone());
+                adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+                cv_core::tools::ToolHistogram::from_events(sink.events())
+            };
+            out.detail = serde_json::to_value(histogram)?;
+        }
         "doctor" => {
             let mut report = cv_core::doctor::Report::default();
             let mut pass = report.session(Some(r.path.clone()));
@@ -562,7 +574,7 @@ fn main() -> Result<()> {
             "effective_mode": match a.operation.as_str() {
                 "affordances" => "full",
                 "affordance-read" => "production-defined",
-                "query" | "query-collect" => "lazy",
+                "query" | "query-collect" | "tools" | "tools-collect" => "lazy",
                 "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" => "not-applicable",
                 _ => &a.mode,
             },
