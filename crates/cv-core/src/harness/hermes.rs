@@ -878,7 +878,9 @@ impl ReplayDedup {
         match m.role {
             Role::User => {
                 if let Some(text) = single_text(m) {
-                    self.recent_user_texts.insert(text)?;
+                    if !text.is_empty() {
+                        self.recent_user_texts.insert(text)?;
+                    }
                 }
             }
             Role::Assistant => {
@@ -953,7 +955,17 @@ impl ReplayTexts {
         Ok(self.memory.iter().any(|t| t == text))
     }
     fn insert(&mut self, text: String) -> Result<()> {
-        if self.spill.is_none() && self.bytes.saturating_add(text.capacity()) > REPLAY_TEXT_MEMORY {
+        // Include the backing Vec's actual/potential slot allocation, not just string payloads.
+        let slots = if self.memory.len() == self.memory.capacity() {
+            self.memory.capacity().max(2).saturating_mul(2)
+        } else {
+            self.memory.capacity()
+        };
+        let estimated = self
+            .bytes
+            .saturating_add(text.capacity())
+            .saturating_add(slots.saturating_mul(std::mem::size_of::<String>()));
+        if self.spill.is_none() && estimated > REPLAY_TEXT_MEMORY {
             let spill = ReplayTextSpill::new()?;
             let conn = spill.conn.as_ref().unwrap();
             let transaction = conn.unchecked_transaction()?;
@@ -1485,6 +1497,25 @@ mod tests {
     }
 
     /// A message's `extra["hermes"]` bag (the only place a Hermes message fact may live).
+    #[test]
+    fn replay_text_memory_budget_includes_tiny_entry_slots() {
+        let mut texts = ReplayTexts::default();
+        for i in 0..40000 {
+            texts.insert(i.to_string()).unwrap();
+        }
+        assert!(texts.spill.is_some(), "small strings still consume entry storage");
+        assert!(texts.contains("0").unwrap());
+        assert!(texts.contains("39999").unwrap());
+        let mut dedup = ReplayDedup::default();
+        let mut message = Message::new(Role::User);
+        message.content.push(Block::Text { text: "".into() });
+        for _ in 0..40000 {
+            dedup.observe(&message).unwrap();
+        }
+        assert!(dedup.recent_user_texts.memory.is_empty());
+        assert!(dedup.recent_user_texts.spill.is_none());
+    }
+
     #[test]
     fn replay_text_spill_keeps_exact_equality_and_releases_on_clear() {
         let mut texts = ReplayTexts::default();
