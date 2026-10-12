@@ -10,28 +10,19 @@
 
 use std::time::Instant;
 
-use cv_core::{Adapter, Flow, Message, MessageSink, ParseOptions, SessionRef};
+use cv_core::{Adapter, Flow, Message, ParseOptions, SessionRef, TryFnSink};
 
 /// The pass a counts recount runs per session: a lazy stream, every message counted.
 fn count_pass(adapter: &dyn Adapter, r: &SessionRef) -> (usize, cv_core::affordance::Counts) {
-    struct Sink {
-        n: usize,
-        counter: cv_core::affordance::Counter,
-    }
-    impl MessageSink for Sink {
-        fn message(&mut self, m: Message) -> Flow {
-            self.n += 1;
-            self.counter.note(&m);
-            Flow::Continue
-        }
-    }
-    let mut sink = Sink {
-        n: 0,
-        counter: cv_core::affordance::Counter::new(r),
-    };
-    let s = adapter.stream(r, &ParseOptions::lazy(), &mut sink).expect("stream");
-    let n = sink.n;
-    (n, sink.counter.finish(&s, &adapter.store_affordances(r)))
+    let mut n = 0;
+    let mut counter = cv_core::affordance::Counter::new(r);
+    let mut sink = TryFnSink::new(|m: Message| {
+        n += 1;
+        counter.note(&m)?;
+        Ok(Flow::Continue)
+    });
+    let s = adapter.try_stream(r, &ParseOptions::lazy(), &mut sink).expect("stream");
+    (n, counter.finish(&s, &adapter.store_affordances(r)))
 }
 
 fn best_of<T>(runs: usize, mut f: impl FnMut() -> T) -> (f64, T) {
