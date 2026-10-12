@@ -449,12 +449,6 @@ fn peek_byte(reader: &mut impl std::io::BufRead) -> Option<u8> {
     reader.fill_buf().ok()?.first().copied()
 }
 
-fn read_byte(reader: &mut impl std::io::BufRead) -> Option<u8> {
-    let byte = peek_byte(reader)?;
-    reader.consume(1);
-    Some(byte)
-}
-
 /// Read exactly one scalar, consuming the same invalid subsequence as `from_utf8_lossy`.
 /// A byte that starts the next scalar is left in the reader, including after an invalid prefix.
 fn read_scalar(reader: &mut impl std::io::BufRead) -> Result<char, ()> {
@@ -508,83 +502,82 @@ fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str
     }
 }
 
-/// Strict JSON-body decoder. Unescaped bodies deliberately bypass this validator in
-/// `stream_body`, matching `unescape_json_body` even for raw quotes/control bytes.
+/// Decode complete JSON-body windows through serde's optimized string parser. At most one
+/// incomplete escape or UTF-8 scalar carries into the next fixed-size source window.
 fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) -> Result<bool, ()> {
+    const WINDOW: usize = 64 * 1024;
+    let mut raw = Vec::with_capacity(WINDOW);
+    let mut quoted = Vec::with_capacity(WINDOW + 2);
     let mut has_escape = false;
     loop {
-        let bytes = reader.fill_buf().map_err(|_| ())?;
-        if bytes.is_empty() {
+        while raw.len() < WINDOW {
+            let bytes = reader.fill_buf().map_err(|_| ())?;
+            if bytes.is_empty() {
+                break;
+            }
+            let n = (WINDOW - raw.len()).min(bytes.len());
+            raw.extend_from_slice(&bytes[..n]);
+            reader.consume(n);
+        }
+        let eof = raw.len() < WINDOW;
+        if raw.is_empty() {
             return Ok(has_escape);
         }
-        let end = bytes
-            .iter()
-            .position(|&b| b == b'\\' || b == b'"' || b < 0x20)
-            .unwrap_or(bytes.len());
-        let valid = match std::str::from_utf8(&bytes[..end]) {
-            Ok(s) => {
-                f(s);
-                s.len()
-            }
-            Err(e) => {
-                let valid = e.valid_up_to();
-                // SAFETY: `valid_up_to` is the validated UTF-8 prefix.
-                f(unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) });
-                valid
-            }
+        let mut end = if eof {
+            raw.len()
+        } else {
+            complete_json_window_prefix(&raw)
         };
-        reader.consume(valid);
-        if valid != 0 {
-            continue;
-        }
-        if end != 0 {
-            let scalar = read_scalar(reader)?;
-            f(scalar.encode_utf8(&mut [0; 4]));
-            continue;
-        }
-        if read_byte(reader) != Some(b'\\') {
-            return Err(());
-        }
-        has_escape = true;
-        let scalar = match read_byte(reader).ok_or(())? {
-            b'"' => '"',
-            b'\\' => '\\',
-            b'/' => '/',
-            b'b' => '\u{0008}',
-            b'f' => '\u{000c}',
-            b'n' => '\n',
-            b'r' => '\r',
-            b't' => '\t',
-            b'u' => {
-                let first = read_hex_quad(reader)?;
-                let code = if (0xd800..0xdc00).contains(&first) {
-                    if read_byte(reader) != Some(b'\\') || read_byte(reader) != Some(b'u') {
-                        return Err(());
-                    }
-                    let second = read_hex_quad(reader)?;
-                    if !(0xdc00..0xe000).contains(&second) {
-                        return Err(());
-                    }
-                    0x10000 + ((first as u32 - 0xd800) << 10) + second as u32 - 0xdc00
-                } else {
-                    first as u32
-                };
-                char::from_u32(code).ok_or(())?
+        if !eof && raw[end - 1] >= 0x80 {
+            let mut tail = end.saturating_sub(4);
+            while tail > 0 && (raw[tail] & 0xc0) == 0x80 {
+                tail -= 1;
             }
-            _ => return Err(()),
-        };
-        f(scalar.encode_utf8(&mut [0; 4]));
+            if let Err(e) = std::str::from_utf8(&raw[tail..end]) {
+                if e.error_len().is_none() {
+                    end = tail + e.valid_up_to();
+                }
+            }
+        }
+        has_escape |= raw[..end].contains(&b'\\');
+        quoted.clear();
+        quoted.push(b'"');
+        quoted.extend_from_slice(&raw[..end]);
+        quoted.push(b'"');
+        let mut decoder = serde_json::Deserializer::from_slice(&quoted);
+        decoder.deserialize_str(JsonWindow(f)).map_err(|_| ())?;
+        decoder.end().map_err(|_| ())?;
+        raw.drain(..end);
+        if eof {
+            return Ok(has_escape);
+        }
     }
 }
 
-fn read_hex_quad(reader: &mut impl std::io::BufRead) -> Result<u16, ()> {
-    let mut value = 0;
-    for _ in 0..4 {
-        let digit = read_byte(reader).ok_or(())?;
-        let digit = (digit as char).to_digit(16).ok_or(())?;
-        value = (value << 4) | digit as u16;
+/// The callback borrows serde's decode scratch; neither pass needs an owned decoded String.
+struct JsonWindow<'a, F>(&'a mut F);
+
+impl<'de, F: FnMut(&str)> Visitor<'de> for JsonWindow<'_, F> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON string window")
     }
-    Ok(value)
+
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<(), E> {
+        (self.0)(s);
+        Ok(())
+    }
+}
+
+/// Only the last escape can cross a window cut. Twelve bytes cover a surrogate pair;
+/// back up over a preceding backslash run so the tail scanner retains its escape parity.
+fn complete_json_window_prefix(raw: &[u8]) -> usize {
+    let mut start = raw.len().saturating_sub(12);
+    while start > 0 && raw[start - 1] == b'\\' {
+        start -= 1;
+    }
+    start + complete_escape_prefix(&raw[start..])
 }
 
 /// The longest prefix of `raw` (a JSON string body) that ends on a *complete* escape sequence —
@@ -594,8 +587,10 @@ fn complete_escape_prefix(raw: &[u8]) -> usize {
     let mut i = 0usize;
     while i < raw.len() {
         if raw[i] != b'\\' {
-            i += 1;
-            continue;
+            let Some(next) = memchr::memchr(b'\\', &raw[i..]) else {
+                break;
+            };
+            i += next;
         }
         // An escape starts here: 2 bytes (`\n`, `\"`, …), 6 (`\uXXXX`), or 12 (a `\uD8xx\uDCxx`
         // surrogate pair — a cut between the halves would leave an unparseable lone surrogate).
@@ -674,6 +669,46 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn json_window_tail_matches_complete_escape_scan() {
+        let bodies = [
+            r#"plain\\\\\\\"\n\u0041\uD834\uDD1Etail"#.to_owned(),
+            format!("{}uD834\\uDD1E", "\\".repeat(101)),
+            format!("{}uD834\\uDD1E", "\\".repeat(100)),
+        ];
+        for body in bodies {
+            for end in 0..=body.len() {
+                assert_eq!(
+                    complete_json_window_prefix(&body.as_bytes()[..end]),
+                    complete_escape_prefix(&body.as_bytes()[..end]),
+                    "{body:?}, cut {end}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunks_preserve_json_windows_at_every_escape_and_unicode_cut() {
+        let suffixes = [
+            r#"é😀\"\\\/\b\f\n\r\t\u0041\uD834\uDD1Etail"#.to_owned(),
+            r"\uD834\uDD1Etail".to_owned(),
+            format!("{}uD834\\u0041tail", "\\".repeat(200)),
+            format!("{}uD834\\uDD1Etail", "\\".repeat(201)),
+        ];
+        for suffix in suffixes {
+            for padding in 65500..65550 {
+                let body = format!("{}{suffix}", "a".repeat(padding));
+                let expected: String = serde_json::from_str(&format!("\"{body}\"")).unwrap();
+                for window in [7, 65536] {
+                    assert_eq!(chunked_body(body.as_bytes(), true, window, 7), expected);
+                }
+                // An invalid tail must retain raw text, including escapes decoded in prior windows.
+                let malformed = format!("{body}\\q");
+                assert_eq!(chunked_body(malformed.as_bytes(), true, 7, 7), malformed);
             }
         }
     }
