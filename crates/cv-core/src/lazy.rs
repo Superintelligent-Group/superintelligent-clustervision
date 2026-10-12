@@ -1114,7 +1114,9 @@ fn validate_value_json_body(reader: &mut impl std::io::BufRead) -> Result<bool, 
     json_body_windows(reader, &mut |quoted| {
         if memchr::memmem::find(quoted, b"\\u").is_some() {
             let mut decoder = serde_json::Deserializer::from_slice(quoted);
-            decoder.deserialize_str(JsonWindow(&mut |_: &str| true)).map_err(|_| ())?;
+            decoder
+                .deserialize_str(JsonWindow(&mut |_: &str| true))
+                .map_err(|_| ())?;
             decoder.end().map_err(|_| ())?;
         } else {
             serde_json::from_slice::<&serde_json::value::RawValue>(quoted).map_err(|_| ())?;
