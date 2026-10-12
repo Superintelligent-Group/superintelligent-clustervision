@@ -1756,17 +1756,19 @@ fn keep_extra_top(key: &str, val: &Value) -> bool {
         && !matches!((key, val), ("isSidechain", Value::Bool(false)))
 }
 
-fn collect_extra_owned(
-    top: impl IntoIterator<Item = (String, Value)>,
-    msg: impl IntoIterator<Item = (String, Value)>,
-    extra: &mut Map<String, Value>,
-) {
-    extra.extend(top.into_iter().filter(|(k, v)| keep_extra_top(k, v)));
-    extra.extend(
-        msg.into_iter()
-            .filter(|(_, v)| !v.is_null())
-            .map(|(k, v)| (format!("{MESSAGE_EXTRA_PREFIX}{k}"), v)),
-    );
+fn collect_extra_owned(mut top: Map<String, Value>, mut msg: Map<String, Value>, extra: &mut Map<String, Value>) {
+    // Source maps preserve insertion order. Emit the historical roster order while moving
+    // selected Values, so rich parsing changes neither serialized bytes nor retained ownership.
+    for &key in CLAUDE_EXTRA_TOP {
+        if let Some(value) = top.remove(key).filter(|v| keep_extra_top(key, v)) {
+            extra.insert(key.to_owned(), value);
+        }
+    }
+    for &key in CLAUDE_EXTRA_MSG {
+        if let Some(value) = msg.remove(key).filter(|v| !v.is_null()) {
+            extra.insert(format!("{MESSAGE_EXTRA_PREFIX}{key}"), value);
+        }
+    }
 }
 
 /// Preserve Claude-specific record fields that the IR has no first-class home for, into the
@@ -1780,14 +1782,18 @@ fn collect_extra_owned(
 /// were rewritten or dropped between parse and emit.
 fn collect_extra(v: &Value, msg: &Value, extra: &mut Map<String, Value>) {
     collect_extra_owned(
-        CLAUDE_EXTRA_TOP.iter().filter_map(|&k| {
-            v.get(k)
-                .filter(|v| keep_extra_top(k, v))
-                .map(|v| (k.to_owned(), v.clone()))
-        }),
+        CLAUDE_EXTRA_TOP
+            .iter()
+            .filter_map(|&k| {
+                v.get(k)
+                    .filter(|v| keep_extra_top(k, v))
+                    .map(|v| (k.to_owned(), v.clone()))
+            })
+            .collect(),
         CLAUDE_EXTRA_MSG
             .iter()
-            .filter_map(|&k| msg.get(k).filter(|v| !v.is_null()).map(|v| (k.to_owned(), v.clone()))),
+            .filter_map(|&k| msg.get(k).filter(|v| !v.is_null()).map(|v| (k.to_owned(), v.clone())))
+            .collect(),
         extra,
     );
 }

@@ -952,6 +952,11 @@ mod tests {
             let mut actual = stream_reader("session", reader, Some(path.clone()), &opts, &mut actual_sink);
             actual.messages = actual_sink.messages;
             actual.materialize();
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                serde_json::to_vec(&expected).unwrap(),
+                "raw serialized bytes mode {opts:?}"
+            );
             let actual = serde_json::to_value(actual).unwrap();
             let expected = serde_json::to_value(expected).unwrap();
             #[cfg(feature = "mmap")]
@@ -1052,6 +1057,9 @@ mod tests {
         }
         assert_modes(
             r#"{"type":"user","isSidechain":false,"userType":"external","slug":"first","slug":null,"\u0061gentId":"escaped-key","message":{"id":"first","id":"last","stop_details":null,"content":"text"}}"#,
+        );
+        assert_modes(
+            r#"{"type":"assistant","userType":"internal","attributionSkill":"skill","slug":"slug","agentId":"agent","logicalParentUuid":"parent","isMeta":true,"isApiErrorMessage":true,"requestId":"request","errorDetails":{"b":2,"a":1},"message":{"stop_details":{"z":3,"a":1},"stop_sequence":"stop","stop_reason":"end","id":"api","model":"m","content":"error"}}"#,
         );
         // The historical lean codec permits malformed ignored sidecar fields; rich decoding
         // rejects the entire Value. Eligibility fallback must keep that mode boundary.
