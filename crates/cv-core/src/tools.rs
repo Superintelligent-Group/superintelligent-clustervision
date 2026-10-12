@@ -82,14 +82,26 @@ impl ToolHistogram {
         }
     }
 
+    fn note_message(&mut self, m: &Message, idx: usize, cwd: Option<&std::path::Path>, scratch: &mut Vec<Event>) {
+        events::extract_into(m, idx, cwd, scratch);
+        for event in scratch.iter() {
+            self.note(event);
+        }
+        scratch.clear();
+        // Reuse ordinary calls' row storage, but do not retain a giant multi-file patch's buffer
+        // while the next message parses. At most 64 event slots remain between messages.
+        if scratch.capacity() > 64 {
+            *scratch = Vec::new();
+        }
+    }
+
     /// Build from already-parsed messages, dropping each message's extracted event rows after
     /// tallying them. The caller's messages are borrowed; no transcript or event list is cloned.
     pub fn from_messages<'a>(msgs: impl IntoIterator<Item = &'a Message>, cwd: Option<&std::path::Path>) -> Self {
         let mut h = Self::default();
+        let mut scratch = Vec::new();
         for (i, m) in msgs.into_iter().enumerate() {
-            for event in events::extract(m, i, cwd) {
-                h.note(&event);
-            }
+            h.note_message(m, i, cwd, &mut scratch);
         }
         h
     }
@@ -101,6 +113,7 @@ impl ToolHistogram {
             cwd: r.cwd.clone(),
             msg_idx: 0,
             histogram: Self::default(),
+            scratch: Vec::new(),
         };
         adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
         Ok(sink.histogram)
@@ -143,6 +156,7 @@ struct HistogramSink {
     cwd: Option<std::path::PathBuf>,
     msg_idx: usize,
     histogram: ToolHistogram,
+    scratch: Vec<Event>,
 }
 
 impl MessageSink for HistogramSink {
@@ -154,9 +168,8 @@ impl MessageSink for HistogramSink {
     }
 
     fn message(&mut self, message: Message) -> Flow {
-        for event in events::extract(&message, self.msg_idx, self.cwd.as_deref()) {
-            self.histogram.note(&event);
-        }
+        self.histogram
+            .note_message(&message, self.msg_idx, self.cwd.as_deref(), &mut self.scratch);
         self.msg_idx += 1;
         Flow::Continue
     }
@@ -422,6 +435,7 @@ mod tests {
             cwd: None,
             msg_idx: 0,
             histogram: ToolHistogram::default(),
+            scratch: Vec::new(),
         };
         let mut shell = crate::Session::new("histogram", crate::Harness::Claude);
         shell.cwd = Some("/first".into());
@@ -436,10 +450,21 @@ mod tests {
         assert_eq!(sink.histogram.distinct(), 1);
         assert_eq!(sink.histogram.total_calls, 2000);
         assert_eq!(sink.histogram.tools["Edit"].edits, 2000);
+        assert!(sink.scratch.is_empty());
+        assert!(sink.scratch.capacity() <= 64);
+        let burst = asst(
+            (0..200)
+                .map(|i| tool_use("Edit", json!({"file_path":format!("burst-{i}.rs")})))
+                .collect(),
+        );
+        sink.message(burst);
+        assert_eq!(sink.histogram.total_calls, 2200);
+        assert_eq!(sink.scratch.capacity(), 0);
         let mut discovered = HistogramSink {
             cwd: Some("/discovery".into()),
             msg_idx: 0,
             histogram: ToolHistogram::default(),
+            scratch: Vec::new(),
         };
         discovered.meta(&shell);
         assert_eq!(discovered.cwd.as_deref(), Some(std::path::Path::new("/discovery")));

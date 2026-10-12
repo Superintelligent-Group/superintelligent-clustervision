@@ -183,7 +183,7 @@ pub fn extract(m: &Message, msg_idx: usize, cwd: Option<&Path>) -> Vec<Event> {
     out
 }
 
-fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) {
+pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) {
     let ts = m.timestamp.map(|t| t.timestamp());
     for b in &m.content {
         match b {
