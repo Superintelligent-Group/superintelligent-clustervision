@@ -14,18 +14,19 @@ pub(super) fn line(bytes: &[u8]) -> Option<(bool, bool)> {
     if text.is_empty() {
         return None;
     }
-    serde_json::from_str::<&RawValue>(text).ok()?;
+    let top = if text.starts_with('{') {
+        Some(serde_json::from_str::<Fields<'_>>(text).ok()?)
+    } else {
+        serde_json::from_str::<&RawValue>(text).ok()?;
+        None
+    };
     if !super::super::store::json::value_compatible(text.as_bytes()) {
         return None;
     }
-    if !text.starts_with('{') {
+    let Some(top) = top else {
         return Some((false, false));
-    }
-    let top: Fields<'_> = serde_json::from_str(text).ok()?;
-    let payload = match top.payload.filter(|raw| raw.get().starts_with('{')) {
-        Some(raw) => serde_json::from_str::<Fields<'_>>(raw.get()).ok()?,
-        None => return Some((false, false)),
     };
+    let payload = top.payload;
     let event = equals(top.kind, b"event_msg")
         && (equals(payload.kind, b"user_message") || equals(payload.kind, b"agent_message"));
     let response = equals(top.kind, b"response_item")
@@ -44,8 +45,7 @@ fn equals(raw: Option<&RawValue>, expected: &[u8]) -> bool {
 #[derive(Default)]
 struct Fields<'a> {
     kind: Option<&'a RawValue>,
-    payload: Option<&'a RawValue>,
-    role: Option<&'a RawValue>,
+    payload: Payload<'a>,
 }
 
 // Derived struct deserialization rejects duplicates; Value instead keeps the last field, even
@@ -63,8 +63,10 @@ impl<'de> Deserialize<'de> for Fields<'de> {
                 while let Some(key) = map.next_key::<Key>()? {
                     match key {
                         Key::Type => fields.kind = Some(map.next_value()?),
-                        Key::Payload => fields.payload = Some(map.next_value()?),
-                        Key::Role => fields.role = Some(map.next_value()?),
+                        Key::Payload => fields.payload = map.next_value()?,
+                        Key::Role => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
                         Key::Other => {
                             map.next_value::<IgnoredAny>()?;
                         }
@@ -74,6 +76,61 @@ impl<'de> Deserialize<'de> for Fields<'de> {
             }
         }
         d.deserialize_map(V)
+    }
+}
+
+/// Project payload discriminants while its syntax is parsed, rather than scanning a borrowed
+/// payload again. Scalars and arrays remain valid records but cannot carry NL authority.
+#[derive(Default)]
+struct Payload<'a> {
+    kind: Option<&'a RawValue>,
+    role: Option<&'a RawValue>,
+}
+impl<'de> Deserialize<'de> for Payload<'de> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Payload<'de>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a payload value")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Payload::default())
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(Payload::default())
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(Payload::default())
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(Payload::default())
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(Payload::default())
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(Payload::default())
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(Payload::default())
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields = Payload::default();
+                while let Some(key) = map.next_key::<Key>()? {
+                    match key {
+                        Key::Type => fields.kind = Some(map.next_value()?),
+                        Key::Role => fields.role = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(fields)
+            }
+        }
+        d.deserialize_any(V)
     }
 }
 
