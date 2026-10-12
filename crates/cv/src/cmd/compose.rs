@@ -577,7 +577,7 @@ pub(crate) fn cmd_dataset(
         None => Box::new(std::io::BufWriter::new(std::io::stdout())),
     };
 
-    // Stream the corpus one session at a time (parse -> emit -> drop) so memory stays bounded.
+    // Each lazy pass stages a record until EOF and filters succeed, retaining no message history.
     let mut emitted = 0usize;
     let mut skipped = 0usize;
     let mut ctx = EmitCtx {
@@ -655,33 +655,24 @@ impl EmitCtx<'_> {
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
             return Ok(Flow::Continue);
         };
-        // Lazy opts: large content stays a span (held as a 16-byte ref), and `write_record` streams
-        // it straight to the writer in chunks — so even a 700 MB record never materializes. `extra`
-        // isn't read by dataset rendering, so it's skipped too.
-        let session = match cv_core::stream::collect_with(adapter.as_ref(), r, &cv_core::ParseOptions::lazy()) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("cv dataset: skipping {} ({}): {e:#}", r.id, r.harness);
+        let record = match cv_core::dataset::stage_record(
+            adapter.as_ref(),
+            r,
+            self.fmt,
+            self.redact_opts,
+            self.min_messages,
+            self.query,
+            self.text_sets,
+        ) {
+            Ok(record) => record,
+            Err(error) if error.is::<cv_core::dataset::InputError>() => {
+                eprintln!("cv dataset: skipping {} ({}): {error:#}", r.id, r.harness);
                 return Ok(Flow::Continue);
             }
+            Err(error) => return Err(error),
         };
-        if session.messages.len() < self.min_messages {
-            *self.skipped += 1;
-            return Ok(Flow::Continue);
-        }
-        // Full evaluation now that we have the parsed session (resolves model/git/text/tool/… that
-        // the catalog-cheap prefilter left as Unknown).
-        if let Some(q) = self.query {
-            if !crate::cmd::query::matches_full(q, r, &session, self.text_sets)? {
-                *self.skipped += 1;
-                return Ok(Flow::Continue);
-            }
-        }
-        // Stream the record directly to the writer (chunked, JSON-escaped per chunk — never holds the
-        // whole record). `--redact` scrubs one materialized message at a time inside the writer.
-        let wrote = cv_core::dataset::write_record(&session, &mut self.writer, self.fmt, self.redact_opts)?;
-        if wrote {
-            writeln!(self.writer)?;
+        if let Some(record) = record {
+            record.publish(self.writer)?;
             *self.emitted += 1;
             if self.limit.is_some_and(|l| *self.emitted >= l) {
                 return Ok(Flow::LimitHit);

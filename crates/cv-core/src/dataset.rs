@@ -5,13 +5,15 @@
 //! - `sharegpt` → `{"conversations":[{"from","value"}]}`
 //!
 //! Unsloth Studio, TRL, and HuggingFace `datasets` load these with no bespoke adapter (Studio's
-//! importer auto-detects both). One session → one line; the caller streams the corpus (so memory
-//! stays O(one session)) and optionally applies [`crate::redact`] first.
+//! importer auto-detects both). One session → one line; [`RecordWriter`] accepts one message at a
+//! time without retaining transcript history. Callers stage a record until filtering succeeds.
 //!
 //! Tool calls/results are folded into the message text as fenced `tool_call` / `tool_result`
 //! blocks (v1: the model learns the tool-use *pattern* in-band, and it imports as plain chatml).
 //! Reasoning is kept in a `<thinking>` wrapper — it's high-signal for distilling into smaller
 //! models, and a downstream filter can strip it if a given run wants answer-only SFT.
+
+mod deferred;
 
 use crate::ir::{Block, Message, MessageKind, Role, Session};
 
@@ -74,7 +76,7 @@ const SPAN_CHUNK: usize = 1 << 20; // 1 MiB
 fn render_blocks_into(
     blocks: &[Block],
     resolver: &crate::lazy::Resolver,
-    emit: &mut dyn FnMut(&str),
+    emit: &mut dyn FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     render_blocks_impl(blocks, resolver, None, emit)
 }
@@ -94,34 +96,35 @@ fn render_blocks_impl(
     blocks: &[Block],
     resolver: &crate::lazy::Resolver,
     mut redact: Option<RedactCtx<'_>>,
-    emit: &mut dyn FnMut(&str),
+    emit: &mut dyn FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut started = false;
-    let sep = |started: &mut bool, emit: &mut dyn FnMut(&str)| {
+    let sep = |started: &mut bool, emit: &mut dyn FnMut(&str) -> anyhow::Result<()>| {
         if *started {
-            emit("\n\n");
+            emit("\n\n")?;
         }
         *started = true;
+        Ok::<_, anyhow::Error>(())
     };
     for b in blocks {
         match b {
             Block::Text { text } => {
                 if let Some((opts, stats)) = redact.as_mut() {
-                    let s = text.resolve(resolver);
+                    let s = text.try_resolve(resolver)?;
                     if s.trim().is_empty() {
                         continue;
                     }
-                    sep(&mut started, emit);
-                    emit(&crate::redact::scrub_cow(&s, opts, stats));
+                    sep(&mut started, emit)?;
+                    emit(&crate::redact::scrub_cow(&s, opts, stats))?;
                 } else if let Some(s) = text.inline_str() {
                     if s.trim().is_empty() {
                         continue;
                     }
-                    sep(&mut started, emit);
-                    emit(s);
+                    sep(&mut started, emit)?;
+                    emit(s)?;
                 } else if let Some(sp) = text.as_span() {
-                    sep(&mut started, emit);
-                    resolver.for_each_chunk(sp, SPAN_CHUNK, |c| emit(c));
+                    sep(&mut started, emit)?;
+                    resolver.try_for_each_chunk(sp, SPAN_CHUNK, &mut *emit)?;
                 }
             }
             Block::Thinking { text, redacted, .. } => {
@@ -129,39 +132,39 @@ fn render_blocks_impl(
                     continue;
                 }
                 if let Some((opts, stats)) = redact.as_mut() {
-                    let s = text.resolve(resolver);
+                    let s = text.try_resolve(resolver)?;
                     if s.trim().is_empty() {
                         continue;
                     }
-                    sep(&mut started, emit);
-                    emit("<thinking>\n");
-                    emit(&crate::redact::scrub_cow(&s, opts, stats));
-                    emit("\n</thinking>");
+                    sep(&mut started, emit)?;
+                    emit("<thinking>\n")?;
+                    emit(&crate::redact::scrub_cow(&s, opts, stats))?;
+                    emit("\n</thinking>")?;
                 } else if let Some(s) = text.inline_str() {
                     if s.trim().is_empty() {
                         continue;
                     }
-                    sep(&mut started, emit);
-                    emit("<thinking>\n");
-                    emit(s);
-                    emit("\n</thinking>");
+                    sep(&mut started, emit)?;
+                    emit("<thinking>\n")?;
+                    emit(s)?;
+                    emit("\n</thinking>")?;
                 } else if let Some(sp) = text.as_span() {
-                    sep(&mut started, emit);
-                    emit("<thinking>\n");
-                    resolver.for_each_chunk(sp, SPAN_CHUNK, |c| emit(c));
-                    emit("\n</thinking>");
+                    sep(&mut started, emit)?;
+                    emit("<thinking>\n")?;
+                    resolver.try_for_each_chunk(sp, SPAN_CHUNK, &mut *emit)?;
+                    emit("\n</thinking>")?;
                 }
             }
             Block::ToolUse { name, input, .. } => {
-                sep(&mut started, emit);
-                emit("```tool_call\n");
-                emit(name);
-                emit(" ");
-                struct TextWriter<'a>(&'a mut dyn FnMut(&str));
+                sep(&mut started, emit)?;
+                emit("```tool_call\n")?;
+                emit(name)?;
+                emit(" ")?;
+                struct TextWriter<'a>(&'a mut dyn FnMut(&str) -> anyhow::Result<()>);
                 impl std::io::Write for TextWriter<'_> {
                     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
                         let text = std::str::from_utf8(bytes).map_err(std::io::Error::other)?;
-                        (self.0)(text);
+                        (self.0)(text).map_err(std::io::Error::other)?;
                         Ok(bytes.len())
                     }
                     fn flush(&mut self) -> std::io::Result<()> {
@@ -177,39 +180,39 @@ fn render_blocks_impl(
                 } else {
                     input.write_canonical(&mut writer)?;
                 }
-                emit("\n```");
+                emit("\n```")?;
             }
             Block::ToolResult { content, is_error, .. } => {
-                sep(&mut started, emit);
+                sep(&mut started, emit)?;
                 emit(if *is_error {
                     "```tool_result error\n"
                 } else {
                     "```tool_result\n"
-                });
+                })?;
                 if let Some((opts, stats)) = redact.as_mut() {
-                    let s = content.resolve(resolver);
-                    emit(&crate::redact::scrub_cow(&s, opts, stats));
+                    let s = content.try_resolve(resolver)?;
+                    emit(&crate::redact::scrub_cow(&s, opts, stats))?;
                 } else if let Some(s) = content.inline_str() {
-                    emit(s);
+                    emit(s)?;
                 } else if let Some(sp) = content.as_span() {
-                    resolver.for_each_chunk(sp, SPAN_CHUNK, |c| emit(c));
+                    resolver.try_for_each_chunk(sp, SPAN_CHUNK, &mut *emit)?;
                 }
-                emit("\n```");
+                emit("\n```")?;
             }
             Block::Image { media_type, .. } => {
-                sep(&mut started, emit);
-                emit("[image");
+                sep(&mut started, emit)?;
+                emit("[image")?;
                 if let Some(m) = media_type.as_deref() {
-                    emit(": ");
-                    emit(m);
+                    emit(": ")?;
+                    emit(m)?;
                 }
-                emit("]");
+                emit("]")?;
             }
             Block::File { path, mime, .. } => {
-                sep(&mut started, emit);
-                emit("[file: ");
-                emit(path.as_deref().or(mime.as_deref()).unwrap_or("attachment"));
-                emit("]");
+                sep(&mut started, emit)?;
+                emit("[file: ")?;
+                emit(path.as_deref().or(mime.as_deref()).unwrap_or("attachment"))?;
+                emit("]")?;
             }
         }
     }
@@ -241,84 +244,252 @@ pub enum Format {
 /// is never held in memory. Returns `false` (writing nothing) when the session has no non-empty turns.
 /// With `redact`, each demanded field is scrubbed before rendering. A source or writer error
 /// may leave a prefix in `w`; publish the record only after this function succeeds.
-pub fn write_record<W: std::io::Write>(
+pub fn write_record<W: std::io::Write + ?Sized>(
     session: &Session,
     w: &mut W,
     fmt: Format,
     redact: Option<&crate::redact::RedactOptions>,
 ) -> std::io::Result<bool> {
-    // Cheap pre-scan: skip the whole record if every exportable turn is empty (no resolve needed).
-    let chat = matches!(fmt, Format::Chatml);
-    let exportable = |m: &Message| training_role(m, chat).is_some() && !message_is_empty(m);
-    if !session.messages.iter().any(exportable) {
-        return Ok(false);
-    }
-    let (array_key, role_key, content_key) = match fmt {
-        Format::Chatml => ("messages", "role", "content"),
-        Format::ShareGpt => ("conversations", "from", "value"),
-    };
-
-    // serde_json's `Map` is a BTreeMap, so a one-shot `json!({role, content})` serializes its keys
-    // in lexicographic order. Match that exactly: emit the smaller key first.
-    let role_first = role_key < content_key;
-
+    let mut record = RecordWriter::new(w, fmt, redact);
     let resolver = session.resolver();
-    write!(w, "{{\"{array_key}\":[")?;
-    let mut first = true;
-    for m in &session.messages {
-        let Some(role) = training_role(m, chat) else {
-            continue;
+    for message in &session.messages {
+        record.message(message, &resolver)?;
+    }
+    record.finish()
+}
+
+/// Incremental training record renderer. Retains formatting state only; each message is rendered
+/// and dropped by the caller. Empty messages do not open the record. Errors can leave a prefix in
+/// the writer, so callers must stage bytes until the complete source pass and its filters succeed.
+pub struct RecordWriter<'a, W: std::io::Write + ?Sized> {
+    writer: &'a mut W,
+    fmt: Format,
+    redact: Option<&'a crate::redact::RedactOptions>,
+    started: bool,
+}
+
+impl<'a, W: std::io::Write + ?Sized> RecordWriter<'a, W> {
+    pub fn new(writer: &'a mut W, fmt: Format, redact: Option<&'a crate::redact::RedactOptions>) -> Self {
+        Self {
+            writer,
+            fmt,
+            redact,
+            started: false,
+        }
+    }
+
+    /// Render one model-visible, nonempty message, preserving the whole-session writer's key
+    /// order, separators, redaction and role spelling. Returns whether this message contributed.
+    pub fn message(&mut self, message: &Message, resolver: &crate::lazy::Resolver) -> std::io::Result<bool> {
+        let chat = matches!(self.fmt, Format::Chatml);
+        let Some(role) = training_role(message, chat) else {
+            return Ok(false);
         };
-        if message_is_empty(m) {
-            continue;
+        if message_is_empty(message) {
+            return Ok(false);
         }
-        if !first {
+        let (array_key, role_key, content_key) = match self.fmt {
+            Format::Chatml => ("messages", "role", "content"),
+            Format::ShareGpt => ("conversations", "from", "value"),
+        };
+        // Keep the established lexicographic outer keys and insertion-ordered tool JSON.
+        let role_first = role_key < content_key;
+        let w = &mut self.writer;
+        if self.started {
             w.write_all(b",")?;
+        } else {
+            write!(w, "{{\"{array_key}\":[")?;
         }
-        first = false;
+        self.started = true;
         if role_first {
             write!(w, "{{\"{role_key}\":\"{role}\",\"{content_key}\":\"")?;
         } else {
             write!(w, "{{\"{content_key}\":\"")?;
         }
-        let mut err: std::io::Result<()> = Ok(());
-        {
-            let mut emit = |piece: &str| {
-                if err.is_ok() {
-                    err = write_json_escaped(w, piece);
-                }
-            };
-            if let Some(opts) = redact {
-                // Scrub per block — resolve, scrub, emit, drop — so the peak is one field and a
-                // clean message is never cloned (the old path cloned + materialized each message).
-                let mut stats = crate::redact::RedactStats::default();
-                render_blocks_impl(&m.content, &resolver, Some((opts, &mut stats)), &mut emit)
-                    .map_err(std::io::Error::other)?;
-            } else {
-                render_blocks_into(&m.content, &resolver, &mut emit).map_err(std::io::Error::other)?;
-            }
+        let mut emit = |piece: &str| write_json_escaped(w, piece).map_err(anyhow::Error::from);
+        if let Some(opts) = self.redact {
+            let mut stats = crate::redact::RedactStats::default();
+            render_blocks_impl(&message.content, resolver, Some((opts, &mut stats)), &mut emit)
+                .map_err(std::io::Error::other)?;
+        } else {
+            render_blocks_into(&message.content, resolver, &mut emit).map_err(std::io::Error::other)?;
         }
-        err?;
         if role_first {
             w.write_all(b"\"}")?;
         } else {
             write!(w, "\",\"{role_key}\":\"{role}\"}}")?;
         }
+        Ok(true)
     }
-    w.write_all(b"]}")?;
-    Ok(true)
+
+    /// Close the JSON record, or write nothing when no message contributed. No trailing newline.
+    pub fn finish(self) -> std::io::Result<bool> {
+        if self.started {
+            self.writer.write_all(b"]}")?;
+        }
+        Ok(self.started)
+    }
+}
+
+/// An adapter failed before a complete dataset record was available. Corpus callers may report
+/// this input and continue; demanded rendering, query and staging failures are returned directly.
+#[derive(Debug)]
+pub struct InputError(anyhow::Error);
+impl std::fmt::Display for InputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+impl std::error::Error for InputError {}
+
+/// A complete, accepted record stored in bounded private staging. Publish only this successful
+/// result; skipped records and failed passes never expose their staged prefix to corpus output.
+pub struct StagedRecord(crate::harness::store::bytes::ByteSource);
+impl StagedRecord {
+    /// Copy the JSONL record, including its newline, to the corpus destination.
+    pub fn publish<W: std::io::Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.0.copy_to(writer)?;
+        Ok(())
+    }
+}
+
+/// Render and query one lazy stream without collecting its message history. Records are staged
+/// until successful EOF, raw-message minimum and full query evaluation. Filtered histories stage
+/// message projections with source descriptors and render only accepted records. Unfiltered
+/// histories stage bytes directly. Redaction still demands one complete text/tool field at a time;
+/// ordinary rendering resolves giant payloads in chunks. Source metadata scales with distinct
+/// captured source paths/identities, while message/byte retention spills under fixed budgets.
+#[allow(clippy::too_many_arguments)]
+pub fn stage_record(
+    adapter: &dyn crate::harness::Adapter,
+    r: &crate::ir::SessionRef,
+    fmt: Format,
+    redact: Option<&crate::redact::RedactOptions>,
+    min_messages: usize,
+    query: Option<&crate::SessionQuery>,
+    text_sets: &crate::query::TextSets,
+) -> anyhow::Result<Option<StagedRecord>> {
+    use std::io::Write;
+    struct Sink<'a> {
+        record: RecordWriter<'a, std::io::BufWriter<crate::harness::store::bytes::ByteStage>>,
+        deferred: Option<crate::spill::Ordered<deferred::DeferredMessage>>,
+        min_messages: usize,
+        wait_query: bool,
+        sources: crate::json::SourceRegistry,
+        resolver: crate::lazy::Resolver,
+        facts: Option<crate::query::QueryReducer<'a>>,
+        messages: usize,
+        error: Option<anyhow::Error>,
+        failed: bool,
+    }
+    impl crate::MessageSink for Sink<'_> {
+        fn message(&mut self, message: Message) -> crate::Flow {
+            self.messages += 1;
+            let result = (|| {
+                if let Some(facts) = &mut self.facts {
+                    facts.observe(&message)?;
+                }
+                if let Some(deferred) = &mut self.deferred {
+                    if training_role(&message, matches!(self.record.fmt, Format::Chatml)).is_some()
+                        && !message_is_empty(&message)
+                    {
+                        deferred.push(deferred::DeferredMessage::new(message, &mut self.sources))?;
+                    }
+                    if !self.wait_query && self.messages >= self.min_messages {
+                        for row in self.deferred.take().expect("deferred messages").rows()? {
+                            let message = row?.restore(&self.sources)?;
+                            self.record.message(&message, &self.resolver)?;
+                        }
+                    }
+                } else {
+                    self.record.message(&message, &self.resolver)?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })();
+            match result {
+                Ok(()) => crate::Flow::Continue,
+                Err(error) => {
+                    self.failed = true;
+                    self.error = Some(error);
+                    crate::Flow::Stop
+                }
+            }
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.error.take()
+        }
+    }
+    let mut bytes = std::io::BufWriter::with_capacity(64 * 1024, crate::harness::store::bytes::ByteStage::new());
+    let mut sink = Sink {
+        record: RecordWriter::new(&mut bytes, fmt, redact),
+        deferred: (query.is_some_and(|q| !q.is_empty()) || min_messages > 0).then(Default::default),
+        min_messages,
+        wait_query: query.is_some_and(|q| !q.is_empty()),
+        sources: Default::default(),
+        resolver: crate::lazy::Resolver::new(Some(r.path.clone())),
+        facts: query.map(crate::query::QueryReducer::new),
+        messages: 0,
+        error: None,
+        failed: false,
+    };
+    let counted_query = query.is_some_and(crate::SessionQuery::needs_counted);
+    let source = counted_query.then(|| crate::source::Probe::default().snapshot(r));
+    let read = if counted_query {
+        crate::stream::stream_counting(adapter, r, &crate::ParseOptions::lazy(), &mut sink)
+    } else {
+        crate::stream::stream_counted(adapter, r, &crate::ParseOptions::lazy(), &mut sink)
+            .map(|session| (session, None))
+    };
+    let (session, counted) = match read {
+        Ok(done) => done,
+        Err(error) if sink.failed => return Err(error),
+        Err(error) => return Err(InputError(error).into()),
+    };
+    let counts = counted.as_ref().map(|c| c.counts.clone());
+    if let Some(counted) = counted {
+        counted.record_with_source(r, source.as_ref().expect("counted source"));
+    }
+    if sink.messages < min_messages {
+        return Ok(None);
+    }
+    if let Some(facts) = sink.facts.take() {
+        if !facts.matches(r, &session, text_sets, counts)? {
+            return Ok(None);
+        }
+    }
+    if let Some(deferred) = sink.deferred.take() {
+        for row in deferred.rows()? {
+            let message = row?.restore(&sink.sources)?;
+            sink.record.message(&message, &sink.resolver)?;
+        }
+    }
+    if !sink.record.finish()? {
+        return Ok(None);
+    }
+    bytes.write_all(b"\n")?;
+    Ok(Some(StagedRecord(
+        bytes.into_inner().map_err(|e| e.into_error())?.finish()?,
+    )))
 }
 
 /// Write `s` to `w` as the *body* of a JSON string (no surrounding quotes), JSON-escaped exactly as
 /// `serde_json` would. Escaping is context-free, so escaping each chunk and concatenating equals
 /// escaping the whole — keeping streamed output byte-identical to a one-shot `serde_json::to_string`.
-fn write_json_escaped<W: std::io::Write>(w: &mut W, s: &str) -> std::io::Result<()> {
+fn write_json_escaped<W: std::io::Write + ?Sized>(w: &mut W, s: &str) -> std::io::Result<()> {
     if s.is_empty() {
         return Ok(());
     }
-    let quoted = serde_json::to_string(s).map_err(std::io::Error::other)?;
-    // `quoted` is `"…escaped…"`; write the body between the quotes.
-    w.write_all(&quoted.as_bytes()[1..quoted.len() - 1])
+    let mut remaining = s;
+    while !remaining.is_empty() {
+        let mut end = remaining.len().min(SPAN_CHUNK);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let quoted = serde_json::to_string(&remaining[..end]).map_err(std::io::Error::other)?;
+        w.write_all(&quoted.as_bytes()[1..quoted.len() - 1])?;
+        remaining = &remaining[end..];
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -494,5 +665,264 @@ mod tests {
         let v = record(&s, Format::ShareGpt).unwrap();
         assert_eq!(v["conversations"][0]["from"], "human");
         assert_eq!(v["conversations"][0]["value"], "hi");
+    }
+
+    #[test]
+    fn staged_records_match_collected_bytes_and_full_query_semantics() {
+        let world = cv_testkit::World::in_process("staged-dataset-equivalence");
+        let rich = "escaped\n\"🌙\" sk-abcDEF1234567890ghijkl".repeat(300);
+        let path = world.write_session(
+            "dataset",
+            &[
+                json!({"type":"user","uuid":"u","message":{"role":"user","content":"hello"}}),
+                json!({"type":"assistant","uuid":"early","message":{"role":"assistant","model":"EarlyModel",
+                "content":[{"type":"thinking","thinking":rich},
+                    {"type":"tool_use","id":"call","name":"Edit","input":{"file_path":"a.rs","content":rich}}]}}),
+                json!({"type":"user","uuid":"result","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"call","is_error":true,"content":rich}]}}),
+                json!({"type":"system","uuid":"notice","subtype":"api_error","error":{"message":"notice"}}),
+                json!({"type":"assistant","uuid":"late","cwd":"/late/work","gitBranch":"FeatureBranch",
+                "message":{"role":"assistant","model":"LateModel","content":"done"}}),
+            ],
+        );
+        let r = crate::ir::SessionRef::new("dataset", Harness::Claude, path);
+        let adapter = crate::harness::for_harness(r.harness).unwrap();
+        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::ParseOptions::lazy()).unwrap();
+        let opts = crate::redact::RedactOptions::default();
+        for fmt in [Format::Chatml, Format::ShareGpt] {
+            for redact in [None, Some(&opts)] {
+                for expression in [
+                    "",
+                    "model:early AND model:late",
+                    "git:feature",
+                    "tool:edit AND has:errors",
+                    "touched:/late/work/a.rs",
+                    "NOT tool:edit",
+                    "has:plan",
+                    "NOT has:goal",
+                    "text:hit",
+                    "text:miss OR model:early",
+                ] {
+                    let query = crate::SessionQuery::parse(expression).unwrap();
+                    let texts = crate::query::TextSets::resolve(&query, |needle| {
+                        if needle == "hit" {
+                            std::collections::HashSet::from([r.id.clone()])
+                        } else {
+                            Default::default()
+                        }
+                    });
+                    for min in [0, full.messages.len(), full.messages.len() + 1] {
+                        let mut expected = Vec::new();
+                        let matched = full.messages.len() >= min
+                            && crate::query::matches_full(&query, &r, &full, &texts).unwrap();
+                        if matched && write_record(&full, &mut expected, fmt, redact).unwrap() {
+                            expected.push(b'\n');
+                        }
+                        let staged =
+                            stage_record(adapter.as_ref(), &r, fmt, redact, min, Some(&query), &texts).unwrap();
+                        let mut actual = Vec::new();
+                        if let Some(record) = staged {
+                            record.publish(&mut actual).unwrap();
+                        }
+                        assert_eq!(actual, expected, "query={expression:?}, min={min}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_record_spelling_is_byte_exact() {
+        let mut notice = msg(
+            Role::System,
+            vec![Block::Text {
+                text: "never trains".into(),
+            }],
+        );
+        notice.kind = MessageKind::Notice;
+        let messages = vec![
+            notice,
+            msg(Role::User, vec![Block::Text { text: " ".into() }]),
+            msg(
+                Role::User,
+                vec![Block::Text {
+                    text: "a\n\"🌙\"".into(),
+                }],
+            ),
+            msg(
+                Role::Assistant,
+                vec![Block::ToolUse {
+                    id: "t".into(),
+                    name: "Tool".into(),
+                    namespace: None,
+                    input: json!({"z":2,"a":"quoted\t"}).into(),
+                }],
+            ),
+        ];
+        let resolver = crate::lazy::Resolver::new(None);
+        for (fmt, expected) in [
+            (
+                Format::Chatml,
+                r#"{"messages":[{"content":"a\n\"🌙\"","role":"user"},{"content":"```tool_call\nTool {\"z\":2,\"a\":\"quoted\\t\"}\n```","role":"assistant"}]}"#,
+            ),
+            (
+                Format::ShareGpt,
+                r#"{"conversations":[{"from":"human","value":"a\n\"🌙\""},{"from":"gpt","value":"```tool_call\nTool {\"z\":2,\"a\":\"quoted\\t\"}\n```"}]}"#,
+            ),
+        ] {
+            let mut bytes = Vec::new();
+            let mut record = RecordWriter::new(&mut bytes, fmt, None);
+            for message in &messages {
+                record.message(message, &resolver).unwrap();
+            }
+            assert!(record.finish().unwrap());
+            assert_eq!(std::str::from_utf8(&bytes).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn unreadable_demanded_text_aborts_plain_and_redacted_records() {
+        let path = std::env::temp_dir().join(format!("cv-dataset-missing-{}", uuid::Uuid::new_v4()));
+        let text = crate::lazy::Text::Span(crate::lazy::Span {
+            source: Some(path),
+            offset: 0,
+            len: 8192,
+            escaped: false,
+        });
+        let session = session(vec![msg(Role::User, vec![Block::Text { text }])]);
+        let opts = crate::redact::RedactOptions::default();
+        for redact in [None, Some(&opts)] {
+            assert!(write_record(&session, &mut Vec::new(), Format::Chatml, redact).is_err());
+        }
+    }
+
+    #[test]
+    fn unreadable_demanded_tool_value_aborts_record() {
+        let world = cv_testkit::World::in_process("dataset-json-failure");
+        let path = world.base.join("argument.json");
+        let bytes = br#"{"rich":"selected value"}"#;
+        std::fs::write(&path, bytes).unwrap();
+        let input = crate::json::Json::source(&path, 0, bytes.len() as u64).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let session = session(vec![msg(
+            Role::Assistant,
+            vec![Block::ToolUse {
+                id: "call".into(),
+                name: "Tool".into(),
+                namespace: None,
+                input,
+            }],
+        )]);
+        let opts = crate::redact::RedactOptions::default();
+        for redact in [None, Some(&opts)] {
+            assert!(write_record(&session, &mut Vec::new(), Format::Chatml, redact).is_err());
+        }
+    }
+
+    #[test]
+    fn giant_inline_escaping_preserves_unicode_and_control_bytes() {
+        let text = "🌙\n\"\t\\".repeat(SPAN_CHUNK / 4);
+        let mut bytes = Vec::new();
+        write_json_escaped(&mut bytes, &text).unwrap();
+        let expected = serde_json::to_string(&text).unwrap();
+        assert_eq!(bytes, expected.as_bytes()[1..expected.len() - 1]);
+    }
+
+    #[test]
+    fn rejected_filters_never_demand_training_text() {
+        struct MissingText(std::path::PathBuf);
+        impl crate::harness::Adapter for MissingText {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> anyhow::Result<Vec<crate::ir::SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &crate::ir::SessionRef,
+                _: &crate::ParseOptions,
+                sink: &mut dyn crate::MessageSink,
+            ) -> anyhow::Result<Session> {
+                let mut message = msg(
+                    Role::Assistant,
+                    vec![Block::Text {
+                        text: crate::lazy::Text::Span(crate::lazy::Span {
+                            source: Some(self.0.clone()),
+                            offset: 0,
+                            len: 8192,
+                            escaped: false,
+                        }),
+                    }],
+                );
+                message.model = Some("present".into());
+                sink.try_message(message)?;
+                let mut session = Session::new(&r.id, r.harness);
+                session.source_path = Some(r.path.clone());
+                Ok(session)
+            }
+        }
+        let world = cv_testkit::World::in_process("dataset-filter-before-render");
+        let path = world.write_session("filtered", &[]);
+        let r = crate::ir::SessionRef::new("filtered", Harness::Claude, path);
+        let adapter = MissingText(world.base.join("missing-text"));
+        let miss = crate::SessionQuery::parse("model:absent").unwrap();
+        let hit = crate::SessionQuery::parse("model:present").unwrap();
+        let opts = crate::redact::RedactOptions::default();
+        for redact in [None, Some(&opts)] {
+            for (min, query) in [(2, None), (0, Some(&miss))] {
+                assert!(
+                    stage_record(&adapter, &r, Format::Chatml, redact, min, query, &Default::default())
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            let error = stage_record(&adapter, &r, Format::Chatml, redact, 0, Some(&hit), &Default::default())
+                .err()
+                .unwrap();
+            assert!(!error.is::<InputError>(), "accepted payload failures remain fatal");
+        }
+    }
+
+    #[test]
+    fn late_adapter_failure_discards_staged_prefix() {
+        struct Fails;
+        impl crate::harness::Adapter for Fails {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> anyhow::Result<Vec<crate::ir::SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                _: &crate::ir::SessionRef,
+                _: &crate::ParseOptions,
+                sink: &mut dyn crate::MessageSink,
+            ) -> anyhow::Result<Session> {
+                sink.try_message(msg(
+                    Role::User,
+                    vec![Block::Text {
+                        text: "valid prefix".into(),
+                    }],
+                ))?;
+                anyhow::bail!("late input unavailable")
+            }
+        }
+        let world = cv_testkit::World::in_process("staged-dataset-read-failure");
+        let path = world.write_session("fail", &[]);
+        let r = crate::ir::SessionRef::new("fail", Harness::Claude, path);
+        let error = stage_record(&Fails, &r, Format::Chatml, None, 0, None, &Default::default())
+            .err()
+            .unwrap();
+        assert!(error.is::<InputError>());
+        assert!(error.to_string().contains("late input unavailable"));
+        assert!(crate::catalog::AffordanceTable::load().counts(&r).is_none());
     }
 }

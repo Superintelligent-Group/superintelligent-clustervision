@@ -3,6 +3,7 @@
 ## Unreleased
 
 - LM Studio partial reads keep selected text in source spans and stream regenerated variants without materializing complete turns.
+- Dataset export streams messages into bounded private staging, preserving filters and exact training formats without retaining transcript history.
 
 - Large Claude tool arguments stay source-backed in partial reads; changed sources fail explicitly instead of publishing incomplete results.
 - Portable structured-argument projections use bounded file windows instead of loading encoded values.

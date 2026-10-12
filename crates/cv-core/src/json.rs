@@ -10,6 +10,9 @@
 //! string scratch in both builds;
 //! object key/order state grows with object width. Neither limitation is hidden by this API.
 
+mod transport;
+pub(crate) use transport::{SourceDescriptor, SourceRegistry};
+
 use crate::harness::store::document;
 #[cfg(not(feature = "mmap"))]
 use crate::harness::store::document::range::{Range, RangeSource};
@@ -61,14 +64,14 @@ impl std::error::Error for InvalidJson {}
 
 /// Capture before an adapter validates its source. Only already accepted complete values may use
 /// validated_range afterward; this avoids validating each giant input again at producer handoff.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct JsonSource(Arc<CapturedSource>);
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct CapturedSource {
     path: PathBuf,
     identity: Identity,
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Identity {
     len: u64,
     modified: SystemTime,
