@@ -66,9 +66,9 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Kimi | Context stream + pending usage message, rotated prefix dedup | Wire sidecar uses raw ranges and lazy output spans; structural lookup state and mutable trailing usage remain |
 | Kimi Code | One LLM step buffered; source-projected inventory; sidecar output references | Step and structured carriers can be large; mutable state/wire semantics |
 | Grok | History stream + pending reasoning; metadata-projected discovery and sidecars | One history record and retained tool metadata; enrichment can revise old messages |
-| Cline/Roo legacy | mmap raw history items, one record at a time | Full discovery/UI sidecar trees; no lazy text |
+| Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
-| Continue | mmap raw history items; tool-answer dedup | Metadata-only discovery now skips bodies; stream records and mutable snapshots remain |
+| Continue | Native/positioned typed header and selected-record source views; lazy payloads and tool-answer dedup | JSON-encoded arguments, selected composites, answer-ID state and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
 | Cursor SQLite | Indexed composer key range; prepared bubble lookups | Composed sessions/blobs; global/workspace dependencies |
@@ -103,7 +103,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Matched-query spool CPU cost and demanded owned producer fields remain |
-| Pack/tools/token stats | Tool histograms fold bounded per-message event scratch; pack excerpts use a ring | Stats usage aggregation and repeated passes; preserve duplicate precedence and float addition order |
+| Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; usage rows stage in bounded private storage | Exact dedup disk I/O, repeated usage scans and model roster growth; preserve duplicate precedence and float addition order |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
 
@@ -459,7 +459,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Native SDK, exports and OpenSession source-backed readers; bounded export metadata cache.
 - [x] Shared positioned portable document views: 32 frozen count/discovery scale cases retain flat live Rust heap.
 - [x] LM Studio selected records and variants use schema projections in native/portable readers; lazy ordinary text and thinking retain source spans.
-- [ ] Portable giant full-output/compatibility completion; composite payloads and Continue selected records.
+- [x] Continue selected-record projections with native/portable typed acceptance and source-mutation checks.
+- [ ] Portable giant full-output/compatibility completion; encoded arguments and selected composite payloads.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
@@ -478,7 +479,12 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
 - [x] Lane summaries project relevant messages without resolving unrelated bodies.
 - [x] Ordered usage staging/shared exact dedup and semantic source/model reuse implementations; scoped ordering/identity oracles.
-- [ ] Final stats/Hermes cached-spill CPU and semantic end-to-end evidence; fallible lazy Text demands and dataset stream/filter staging (active lanes).
+- [x] Checked lazy Text demands in JSON output, archive and search; failures propagate before publication.
+- [x] Dataset filter/output staging preserves late selection and byte fidelity with bounded history retention.
+- [ ] Final stats/Hermes cached-spill CPU, matched-query dataset CPU and full semantic end-to-end evidence.
+- [ ] Remove escaped-output CPU regressions against matched release controls; preserve malformed-text fallback and exact canonical output.
+- [ ] Stream whole CLI JSON show/export through bounded staging; selected messages and final strings are still collected today.
+- [ ] Exact session-ranked search limits and pre-limit CLI/HTTP filters; current chunk/candidate overfetch can hide matching sessions.
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
@@ -493,6 +499,27 @@ universal heap bounds for the unfinished paths.
 The full gate roster is `.github/workflows/ci.yml`, including release parse budget, manual build,
 search without default features, dist plan, wasm-pack, the separate desktop workspace and web
 selftest. `PERF-HANDOFF.md`'s inline gate list omits several of these.
+
+Post-reboot integration adds the completed source projections, checked search reads, bounded archive
+writer and positional exact-set I/O. Focused native checks pass for IR JSON output (6), Continue
+(16), exact-set spill (5), usage statistics (7) and Claude subagents (2). These are composition
+checks, not a second full-repository gate run or a release.
+
+The isolated usage gate now covers both mapped and buffered readers at 16,000/64,000 calls.
+Requested Rust heap is flat at 881,993 bytes for native Claude and 244,509 for native Codex;
+portable values are 862,007 and 235,180. Independent provider totals, duplicate counts, model
+buckets and temporary-file cleanup pass in all eight cases. These fixtures hold the model roster
+and per-record metadata small; they do not bound arbitrary output cardinality or native memory.
+The diagnostic binaries use the development profile; no throughput inference follows from these
+allocation measurements. Escaped-output timing comparisons are being repeated with explicit,
+matched release builds before drawing conclusions from earlier seconds-scale probe reports.
+
+The production semantic projection check passes at 100 MB decoded payload: arguments, plain text
+and escaped text use 136,982 / 134,813 / 163,539 bytes of additional requested Rust heap. The
+escaped source occupies 600 MB. The test executes the native adapter, body/label projection and
+atomic vector save with a fake embedder; unchanged refresh rejects any parse, embed or save call.
+It excludes real model allocations and model throughput. CI runs this isolated check and the
+native/portable usage-history gate explicitly.
 
 
 ## Structured tool arguments: migrated consumers, activated Claude producer

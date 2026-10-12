@@ -73,17 +73,20 @@ jobs:
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only events
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only active --format zed
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only portable-docs
+          python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only stats
           python3 tools/perf-sqlite-check.py --probe /tmp/cv-store-probe-mmap
 
       # Exercises the production worker/tee/channel/Tantivy path, not a queue-only mock.
       # Four 100MB arguments refute the old unbounded queue under the same 384MiB Rust cap.
-      - name: Production FTS queue heap budget
+      - name: Production search heap budgets
         run: |
           probe_root=$(mktemp -d)
           trap 'rm -rf "$probe_root"' EXIT
           mkdir "$probe_root/catalog"
           python3 tools/perf-fixture.py claude "$probe_root/input" --shape sweep-arguments --payload-bytes 100000000
           CV_SWEEP_INPUT_PROBE="$probe_root/input/sweep.jsonl" CV_SWEEP_INPUT_BYTES=100000000 CV_SWEEP_HASH_BODY=1 CLUSTERVISION_HOME="$probe_root/catalog" cargo test -p cv-search --no-default-features --features probe-heap fts::tests::production_sweep_heap_probe -- --ignored --exact --nocapture
+          # Fake vectors isolate actual parsing/projection/save retention without a model download.
+          CV_SWEEP_INPUT_PROBE="$probe_root/input/sweep.jsonl" CV_SWEEP_INPUT_BYTES=100000000 CLUSTERVISION_HOME="$probe_root/catalog" cargo test -p cv-search --features probe-heap semantic::tests::production_semantic_heap_probe -- --ignored --exact --nocapture
 
       # Every `cv <cmd>` and MCP tool name the manual mentions exists in `cv schema --commands` or
       # a live `tools/list`. The roster is generated from the clap tree so the binary cannot skew;
