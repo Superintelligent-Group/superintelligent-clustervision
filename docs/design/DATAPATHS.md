@@ -329,13 +329,31 @@ search without default features, dist plan, wasm-pack, the separate desktop work
 selftest. `PERF-HANDOFF.md`'s inline gate list omits several of these.
 
 
-## Next shared representation: structured tool arguments
+## Structured tool arguments: migrated consumers, activated Claude producer
 
-The remaining giant-leaf case is proved at the IR boundary: a 25/100 MB ToolUse input costs
-25/100 MB even with a discard sink. Rich Claude parsing now removes the second transient copy,
-and FTS/semantic consumers no longer create uncapped serialized copies, but Value and Tee clones
-still scale with the argument. A source-backed `Json` value is the accepted next direction;
-implementation starts as an independent owned/source abstraction before changing Block.input.
+The motivating counterexample remains a producer control: a 25/100 MB owned ToolUse input costs
+25/100 MB even with a discard sink. `Block::ToolUse.input` now uses the complete owned/source
+`Json` abstraction instead of requiring a Value. Doctor, events/affordances, query/tool reducers,
+search body generation, rendering, mutation and their callers have migrated to explicit fallible
+demands. Typed field views, canonical length, bounded prefixes and canonical writers avoid whole
+input materialization when that is not requested. Selected full output and mutation explicitly
+resolve the complete value.
+
+Direct native `Json::source` probes include construction and strict validation, then length or
+streamed canonical output. Plain 25/100 MB inputs use 1,908 B peak Rust allocation above baseline
+for length; escaped 16/64 MiB sources use 230,532 B, flat at both sizes. Separate writer/hash runs
+use 1,893 B / 230,517 B respectively and match independent Python canonical lengths and hashes.
+These establish the primitive's bounded payload working set, not adapter or end-to-end index
+bounds. The initial portable probe still owned the selected encoded range; the subsequently
+landed positioned-range bridge (`3c89ac5`) needs its own allocation proof before extending this
+native claim.
+
+Native Claude producer activation is integrated. Arguments with at most 4,096 encoded bytes
+remain owned; larger inputs use source ranges in lazy and lazy-extra modes. Full/bulk/complete
+and arbitrary byte helpers retain their owned behavior. Composed giant-input allocator and
+resolved-output checks are underway; their final source-identity repetition is still needed
+before extending the primitive evidence above to end-to-end consumers. Other native producers
+remain separate work.
 
 Its wire contract stays an actual JSON value. Owned/full/deserialized input remains supported;
 selected output and mutation can explicitly materialize. Bounded consumers request typed fields,
@@ -343,10 +361,12 @@ canonical length or canonical text chunks. Canonical means serde_json Value seri
 preserve_order: first key insertion position, last duplicate value, original array order and
 normalized scalar formatting. Neither sorted keys nor raw minification is equivalent. Missing or
 changed source is an error, distinct from a missing key; it must prevent freshness publication.
-The current Flow-only sink protocol needs an explicit error propagation design before enabling
-lazy producers. No null placeholders, partial Values or second parallel message protocol.
+`Adapter::try_stream`, fallible callback sinks and fallible consumer finalizers now carry source
+and extraction errors through publication boundaries. Failed event passes cannot become valid
+after their error is drained; query errors cannot become negative matches. No null placeholders,
+partial Values or second parallel message protocol.
 
-The shared source walker should reuse document navigation and bounded string decoding. Immediate
+The shared source walker reuses document navigation and bounded string decoding. Immediate
 object key/range state may grow with structural complexity; arrays should stream. Source-buffer
 limits in portable adapters and full selected output remain separate. Producers only opt in after
 doctor, events, query, search, rendering and mutable consumers have explicit demands and pass
