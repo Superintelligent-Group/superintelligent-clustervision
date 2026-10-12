@@ -462,6 +462,8 @@ fn block(item: Item<'_>, span: Option<&SpanCtx>) -> Option<Option<Block>> {
             id: owned(item.id).unwrap_or_default(),
             name: owned(item.name).unwrap_or_default(),
             input: match item.input.0 {
+                // Small encoded inputs cost less to own than to capture and re-open individually.
+                Some(v) if v.get().len() <= INLINE_MAX => serde_json::from_str::<Value>(v.get()).ok()?.into(),
                 Some(v) => match span.and_then(|ctx| ctx.json_inputs.map(|inputs| (ctx, inputs))) {
                     Some((ctx, inputs)) => inputs.input(v, ctx)?,
                     None => serde_json::from_str::<Value>(v.get()).ok()?.into(),

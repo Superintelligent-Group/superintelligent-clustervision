@@ -30,7 +30,7 @@ use chrono::{DateTime, Utc};
 pub use emit::{emit, verify_claude_resumable};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -52,6 +52,8 @@ struct SpanCtx<'a> {
 struct JsonInputs {
     source: JsonSource,
     error: RefCell<Option<anyhow::Error>>,
+    record_source: Cell<bool>,
+    has_sources: Cell<bool>,
 }
 
 impl JsonInputs {
@@ -62,12 +64,17 @@ impl JsonInputs {
         Ok(Some(Self {
             source: JsonSource::capture(path)?,
             error: RefCell::new(None),
+            record_source: Cell::new(false),
+            has_sources: Cell::new(false),
         }))
     }
 
-    fn check(&self) -> bool {
+    fn check_record(&self) -> bool {
         if self.error.borrow().is_some() {
             return false;
+        }
+        if !self.record_source.get() {
+            return true;
         }
         if let Err(error) = self.source.check() {
             *self.error.borrow_mut() = Some(error);
@@ -94,7 +101,10 @@ impl JsonInputs {
             self.source.validated_range(offset, raw.get().len() as u64)
         })();
         match result {
-            Ok(input) => Some(input),
+            Ok(input) => {
+                self.record_source.set(true);
+                Some(input)
+            }
             Err(error) => {
                 if self.error.borrow().is_none() {
                     *self.error.borrow_mut() = Some(error);
@@ -108,7 +118,11 @@ impl JsonInputs {
         if let Some(error) = self.error.borrow_mut().take() {
             return Err(error);
         }
-        self.source.check()
+        if self.has_sources.get() {
+            self.source.check()
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -560,8 +574,11 @@ fn ingest_bytes(
     sink: &mut dyn MessageSink,
     json_inputs: Option<&JsonInputs>,
 ) -> Flow {
-    if json_inputs.is_some_and(|inputs| !inputs.check()) {
-        return Flow::Stop;
+    if let Some(inputs) = json_inputs {
+        if inputs.error.borrow().is_some() {
+            return Flow::Stop;
+        }
+        inputs.record_source.set(false);
     }
     // Trim leading/trailing ASCII whitespace (incl. the trailing `\n`), tracking how far the content
     // shifted so span offsets stay relative to the file.
@@ -580,8 +597,17 @@ fn ingest_bytes(
         let flow = borrowed::ingest(session, slice, opts, sink, ctx.as_ref());
         // A failed source capture/range is an operation error, never eligibility for the owned
         // fallback codec. In particular, do not materialize a giant input after invalidation.
-        if json_inputs.is_some_and(|inputs| !inputs.check()) {
-            return Flow::Stop;
+        if let Some(inputs) = json_inputs {
+            if flow.is_none() && inputs.error.borrow().is_none() {
+                // Eligibility failed before publication: discard any candidate ranges alongside
+                // the borrowed blocks and keep the existing owned fallback's behavior.
+                inputs.record_source.set(false);
+            } else if inputs.record_source.get() {
+                inputs.has_sources.set(true);
+            }
+            if !inputs.check_record() {
+                return Flow::Stop;
+            }
         }
         if let Some(flow) = flow {
             return flow;
@@ -597,7 +623,7 @@ fn ingest_bytes(
     // Only defer large content to spans when the consumer asked for it (partial-access). Bulk/full
     // consumers read everything, so inline content is cheaper (no mmap on resolve).
     let flow = ingest_value(session, &v, opts, sink, ctx.as_ref());
-    if json_inputs.is_some_and(|inputs| !inputs.check()) {
+    if json_inputs.is_some_and(|inputs| !inputs.check_record()) {
         Flow::Stop
     } else {
         flow
@@ -3034,13 +3060,19 @@ mod tests {
     fn native_json_inputs_preserve_values_modes_and_exact_ranges() {
         let world = cv_testkit::World::in_process("claude-json-inputs");
         let path = world.proj.join("source.jsonl");
-        let inputs = [
-            r#"{"large":"a\nb","duplicate":1,"duplicate":2}"#,
-            "[null,true,3]",
-            r#""encoded JSON stays a string""#,
-            "false",
-            "1.5",
-            "null",
+        let big = serde_json::to_string(&"a\nβ".repeat(INLINE_MAX)).unwrap();
+        let inputs = vec![
+            format!("{{\"large\":{big},\"duplicate\":1,\"duplicate\":2}}"),
+            format!("[{big},null,true,3]"),
+            big,
+            r#"{"small":"a\nb"}"#.to_owned(),
+            "[null,true,3]".to_owned(),
+            r#""encoded JSON stays a string""#.to_owned(),
+            "false".to_owned(),
+            "1.5".to_owned(),
+            "null".to_owned(),
+            format!("\"{}\"", "x".repeat(INLINE_MAX - 2)),
+            format!("\"{}\"", "x".repeat(INLINE_MAX - 1)),
         ];
         let mut text = String::new();
         for (i, input) in inputs.iter().enumerate() {
@@ -3074,13 +3106,13 @@ mod tests {
                 };
                 match input {
                     Json::Source(range) => {
-                        assert!(opts.spans && !opts.complete && i < inputs.len());
+                        assert!(opts.spans && !opts.complete && i < inputs.len() && inputs[i].len() > INLINE_MAX);
                         let start = range.offset() as usize;
                         assert_eq!(&text[start..start + range.len() as usize], inputs[i]);
                         assert_eq!(range.path(), path);
                     }
                     Json::Owned(value) => {
-                        assert!(!opts.spans || opts.complete || i == inputs.len());
+                        assert!(!opts.spans || opts.complete || i == inputs.len() || inputs[i].len() <= INLINE_MAX);
                         if i == inputs.len() {
                             assert!(value.is_null());
                         }
@@ -3165,8 +3197,9 @@ mod tests {
     fn native_json_inputs_reject_changed_source_and_resume_exact_ranges() {
         let world = cv_testkit::World::in_process("claude-json-input-errors");
         let path = world.proj.join("source.jsonl");
+        let padding = "x".repeat(INLINE_MAX);
         let line = |id: &str| {
-            format!("{{\"type\":\"assistant\",\"uuid\":\"{id}\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"{id}\",\"name\":\"custom_tool\",\"input\":{{\"id\":\"{id}\"}}}}]}}}}\n")
+            format!("{{\"type\":\"assistant\",\"uuid\":\"{id}\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"{id}\",\"name\":\"custom_tool\",\"input\":{{\"id\":\"{id}\",\"padding\":\"{padding}\"}}}}]}}}}\n")
         };
         let first = line("first");
         let text = format!("{first}{}", line("second"));
@@ -3226,6 +3259,56 @@ mod tests {
         assert_eq!(deleting.calls, 1);
         assert_eq!(deleting.checkpoints, 0);
         assert!(deleting.captured.unwrap().resolve().is_err());
+    }
+
+    #[test]
+    fn native_json_inputs_check_completion_only_after_source_publication() {
+        let world = cv_testkit::World::in_process("claude-json-input-completion");
+        let path = world.proj.join("source.jsonl");
+        let record = |input: Value| {
+            serde_json::json!({
+                "type": "assistant", "uuid": "a", "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": "t", "name": "custom_tool", "input": input}]}
+            })
+            .to_string()
+                + "\n"
+        };
+        let tiny = record(serde_json::json!({"path": "x"}));
+        let reference = SessionRef::new("source", Harness::Claude, path.clone());
+        let adapter = Claude::with_config_dir(&world.proj);
+        fs::write(&path, &tiny).unwrap();
+        let mut owned = None;
+        let mut remove_tiny = |message: Message| {
+            owned = Some(message);
+            fs::remove_file(&path).unwrap();
+            Flow::Stop
+        };
+        adapter
+            .stream(&reference, &ParseOptions::lazy(), &mut remove_tiny)
+            .unwrap();
+        assert!(matches!(
+            &owned.unwrap().content[0],
+            Block::ToolUse {
+                input: Json::Owned(_),
+                ..
+            }
+        ));
+        // A later callback that emits only owned inputs need not stat the source on that record,
+        // but completion must reject invalidation of an earlier published Source descriptor.
+        let large = record(serde_json::json!({"body": "x".repeat(INLINE_MAX)}));
+        fs::write(&path, large + &tiny).unwrap();
+        let mut calls = 0;
+        let mut remove_later = |_: Message| {
+            calls += 1;
+            if calls == 2 {
+                fs::remove_file(&path).unwrap();
+            }
+            Flow::Continue
+        };
+        assert!(adapter
+            .stream(&reference, &ParseOptions::lazy(), &mut remove_later)
+            .is_err());
+        assert_eq!(calls, 2);
     }
 
     #[test]
