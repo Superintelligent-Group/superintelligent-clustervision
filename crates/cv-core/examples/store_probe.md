@@ -177,9 +177,12 @@ giant outputs and whole selected ChatGPT mappings are not included in these boun
 `--only doctor` checks giant Claude/Codex/Gemini decoded attribution in lazy-extra mode against
 separate full-mode processes, optionally using the supplied old baseline. Default CI's suite
 includes stores/chunks, the five native active formats and the composed doctor pass. The doctor
-gate compares lazy-extra with the full report oracle in separate processes. Portable resolver promises are checked
-separately; cold no-mmap document readers may still own the source bytes and are not admitted
-to the native adapter limits.
+gate compares lazy-extra with the full report oracle in separate processes. Portable resolver promises are checked separately. CI also runs `--only portable-docs`:
+Cline SDK, OpenSession, and both account archives have a distinct 2 MiB heap ceiling and
+256 KiB growth allowance on the same 16/64 MiB plain/escaped cold inputs. Each discovery uses
+a fresh catalog. Separate small lazy/full and discovery digests compare portable output with
+the native reader. This is a positioned-source payload bound, not a bound on arbitrary selected
+output or archive/session cardinality.
 `--only active --format zed` explicitly opts into compressed-thread discovery/streaming with
 fixed-size messages, retaining the same budgets; native SQLite allocations remain excluded.
 
@@ -245,8 +248,34 @@ existing corpus versions. `--records` controls row count separately from total
 `--payload-bytes`; manifests report both logical payload and physical database size.
 Devin metadata cases isolate session-wide navigation retention, while prompt-only
 Hermes inputs exercise replay dedup without an assistant clearing the look-back.
-Cursor inline and OpenCode parts intentionally exercise a single large native record
-or logical message: report these separately from row-count scaling.
+Cursor inline and legacy conversation shapes store the same growing history in one SQLite
+cell; their bounded replay is included alongside external bubbles. OpenCode's many-parts shape
+is deliberately outside the gate because one emitted logical message owns its demanded parts.
+
+CI runs `python3 tools/perf-sqlite-check.py --probe MMAP_HEAP_PROBE`. The ten cases cover these
+five formats at 8/32 MB, with approximately 128 KB payloads per row. The bound is 2 MiB plus
+2 KiB per structural row: compact Devin forests and Cursor headers may grow, but retaining whole
+payloads cannot fit. Feature/counter validation rejects an uninstrumented binary, callback
+counts prevent skipped output, and owned temporary directories must be empty after each process.
+The driver removes only its own sources by default; `--out NEW_DIR` retains evidence. Native
+SQLite allocation and mmap residency are excluded. `--baseline OLD_PROBE` checks preserved-order
+message/metadata digests in separate runs; `--escaped` supports a focused decoding check.
+
+`perf-fixture.py claude|codex NEW_DIR --shape usage --records CALLS` generates tiny provider usage
+records. Claude repeats each response ID in two assistant records; Codex emits independent
+last-usage records with cumulative totals. The manifest gives independent expected fields and
+duplicates; payload bytes are not the scale knob. `check-heap-budget.py ... --only stats` runs
+16k/64k calls in native and portable processes with a 2 MiB ceiling and 256 KiB growth allowance,
+checks exact provider totals and model/harness buckets, and verifies ordinary temporary cleanup.
+This bound assumes tiny usage records and a fixed model roster, not arbitrary output cardinality.
+
+The separate search CI oracle uses `--shape sweep-arguments --payload-bytes 100000000` and four
+logical copies plus 32 tiny sessions. It executes production planning, parse, tee, queue, tokenizing,
+commit and compaction with actual 4 MiB chunk settings, independent full-body hashes and freshness
+checks. The existing 384 MiB additional live Rust heap ceiling includes Tantivy's Rust arenas;
+the queue charge alone is capped at 64 MiB. A compact document can reach about 16 MiB. This is
+not a 4 MiB document limit or a total RSS/native heap guarantee. See the search example's
+`sweep_probe.md` for the exact isolated command and optional unbounded negative control.
 
 `checked-chunks` and `checked-prefix` report demanded source failures. The prefix budget counts
 raw encoded bytes, with UTF-8/escape boundary handling; it is distinct from `json-prefix`'s
