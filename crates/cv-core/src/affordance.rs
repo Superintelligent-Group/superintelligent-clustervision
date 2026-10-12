@@ -11,10 +11,13 @@
 //! tool a [`MessageKind::SubagentSpawn`] and a synchronous spawn's result a
 //! [`MessageKind::SubagentReturn`].
 
+pub(crate) mod input;
 mod text;
 
 use crate::ir::{Block, Harness, Message, MessageKind, Origin, Role, Session};
+use crate::json::{Json, JsonView};
 use crate::stream::{Flow, MessageSink};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -246,35 +249,72 @@ pub enum Returns {
     Later,
 }
 
-fn flag(input: &Value, key: &str) -> bool {
-    input.get(key).and_then(Value::as_bool) == Some(true)
+fn flag(input: JsonView<'_>, key: &str) -> Result<bool> {
+    input
+        .get(key)?
+        .map(|v| v.as_bool())
+        .transpose()
+        .map(|v| v.flatten() == Some(true))
 }
 
-fn str_at<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
-    input.get(key).and_then(Value::as_str)
-}
-
-/// The cron-style tools that take an `action` argument (Hermes `cronjob`, OpenClaw `cron`).
-fn action_verb(input: &Value) -> &'static str {
-    match str_at(input, "action").unwrap_or("") {
-        "create" | "add" | "new" | "schedule" => "create",
-        "remove" | "delete" | "cancel" | "rm" => "delete",
-        "list" | "ls" | "status" | "get" | "show" => "list",
-        "run" | "run_now" | "trigger" => "fire",
-        "kill" | "stop" | "terminate" => "stop",
+/// The cron-style tools that take an action argument. Compare the complete string without
+/// materializing a potentially giant ignored action value.
+fn action_verb(input: JsonView<'_>) -> Result<&'static str> {
+    const WORDS: &[&str] = &[
+        "create",
+        "add",
+        "new",
+        "schedule",
+        "remove",
+        "delete",
+        "cancel",
+        "rm",
+        "list",
+        "ls",
+        "status",
+        "get",
+        "show",
+        "run",
+        "run_now",
+        "trigger",
+        "kill",
+        "stop",
+        "terminate",
+    ];
+    let action = input
+        .get("action")?
+        .map(|v| input::word(v, WORDS))
+        .transpose()?
+        .flatten();
+    Ok(match action {
+        Some(0..=3) => "create",
+        Some(4..=7) => "delete",
+        Some(8..=12) => "list",
+        Some(13..=15) => "fire",
+        Some(16..=18) => "stop",
         _ => "update",
-    }
+    })
 }
 
 /// The one table: `(harness, tool name, input)` → `(kind, action)`, or `None` for a tool that is not
 /// an affordance. Scoped by harness only where a name means different things in different
 /// harnesses (`task` is a sub-agent in OpenCode; `Bash` is a background job only when told to be).
-pub fn classify_tool(h: Harness, name: &str, input: &Value) -> Option<(Kind, &'static str)> {
+/// Compatibility for already-owned side-store data and callers of the public Value API.
+/// Owned views cannot encounter source failures.
+pub fn classify_tool(h: Harness, name: &str, value: &Value) -> Option<(Kind, &'static str)> {
+    classify_tool_view(h, name, JsonView::from(value)).expect("owned JSON classification")
+}
+
+pub fn classify_tool_json(h: Harness, name: &str, value: &Json) -> Result<Option<(Kind, &'static str)>> {
+    value.with_view(|view| classify_tool_view(h, name, view))
+}
+
+pub fn classify_tool_view(h: Harness, name: &str, input: JsonView<'_>) -> Result<Option<(Kind, &'static str)>> {
     use Harness as H;
     use Kind::*;
     // OpenClaw names a deferred core tool `openclaw:core:<tool>`.
     let name = name.rsplit(':').next().unwrap_or(name);
-    Some(match (h, name) {
+    Ok(Some(match (h, name) {
         // plan: whole-list writes
         (
             _,
@@ -306,22 +346,22 @@ pub fn classify_tool(h: Harness, name: &str, input: &Value) -> Option<(Kind, &'s
         (_, "CronDelete" | "cron_delete" | "scheduler_delete") => (Schedule, "delete"),
         (_, "CronList" | "cron_list" | "scheduler_list") => (Schedule, "list"),
         (H::Hermes, "cronjob" | "cronjob_manage") | (H::OpenClaw, "cron" | "automations") => {
-            (Schedule, action_verb(input))
+            (Schedule, action_verb(input)?)
         }
         // background jobs
-        (_, "Bash") if flag(input, "run_in_background") => (BackgroundJob, "start"),
-        (_, "run_terminal_command") if flag(input, "background") || flag(input, "is_background") => {
+        (_, "Bash") if flag(input, "run_in_background")? => (BackgroundJob, "start"),
+        (_, "run_terminal_command") if flag(input, "background")? || flag(input, "is_background")? => {
             (BackgroundJob, "start")
         }
-        (_, "run_shell_command") if flag(input, "is_background") => (BackgroundJob, "start"),
-        (H::Hermes, "terminal") | (H::OpenClaw, "exec") if flag(input, "background") => (BackgroundJob, "start"),
+        (_, "run_shell_command") if flag(input, "is_background")? => (BackgroundJob, "start"),
+        (H::Hermes, "terminal") | (H::OpenClaw, "exec") if flag(input, "background")? => (BackgroundJob, "start"),
         (_, "Monitor" | "monitor") => (BackgroundJob, "start"),
         (_, "BashOutput" | "TaskOutput" | "get_command_or_subagent_output" | "WaitFor" | "CheckBackgroundJob") => {
             (BackgroundJob, "read")
         }
         (H::Kimi | H::KimiCode, "TaskList") => (BackgroundJob, "read"),
         (_, "KillShell" | "TaskStop" | "kill_command_or_subagent") => (BackgroundJob, "stop"),
-        (H::Hermes, "process" | "process_manage") | (H::OpenClaw, "process") => match action_verb(input) {
+        (H::Hermes, "process" | "process_manage") | (H::OpenClaw, "process") => match action_verb(input)? {
             "stop" => (BackgroundJob, "stop"),
             _ => (BackgroundJob, "read"),
         },
@@ -337,8 +377,8 @@ pub fn classify_tool(h: Harness, name: &str, input: &Value) -> Option<(Kind, &'s
         | (_, "AskQuestion")
         | (H::Hermes, "clarify")
         | (H::OpenCode, "question") => (Question, "ask"),
-        _ => return None,
-    })
+        _ => return Ok(None),
+    }))
 }
 
 /// Whether `(h, name)` spawns a sub-agent, and how its result relates to the return.
@@ -378,29 +418,41 @@ fn deferred_keys(h: Harness) -> (&'static str, &'static str) {
 
 /// `tool_call{name, arguments}` (or OpenClaw's `{id, args}`) → the inner tool's call, namespaced
 /// [`DEFERRED`]. Anything else (including a wrapper without a string name) is left alone.
-pub fn unwrap_deferred(h: Harness, b: &mut Block) {
+pub fn unwrap_deferred(h: Harness, b: &mut Block) -> Result<()> {
     if let Block::ToolUse {
         name, input, namespace, ..
     } = b
     {
         if name != DEFERRED || namespace.is_some() {
-            return;
+            return Ok(());
         }
         let (name_key, args_key) = deferred_keys(h);
-        let Some(inner) = input.get(name_key).and_then(Value::as_str).map(str::to_string) else {
-            return;
+        let Some(inner) = input.with_view(|view| input::field_string(view, name_key))? else {
+            return Ok(());
         };
-        let args = input.get(args_key).cloned().unwrap_or(Value::Null);
+        // Move an owned wrapper's child instead of cloning its argument tree. Source children
+        // keep the validated range/identity and do not materialize descendants.
+        let args = match input {
+            Json::Owned(value) => Json::Owned(
+                value
+                    .as_object_mut()
+                    .and_then(|object| object.remove(args_key))
+                    .unwrap_or(Value::Null),
+            ),
+            Json::Source(_) => input.select(args_key)?.unwrap_or_default(),
+        };
         *name = inner;
         *input = args;
         *namespace = Some(DEFERRED.to_string());
     }
+    Ok(())
 }
 
-/// The inverse of [`unwrap_deferred`], for an emitter whose store spells the wrapper: an unwrapped
-/// call goes back to `h`'s `tool_call` shape. `None` for any other block.
-pub fn rewrap_deferred(h: Harness, b: &Block) -> Option<Block> {
-    match b {
+/// Complete replay boundary for stores that spell deferred calls as wrappers. The returned
+/// owned wire object demands every argument; ordinary classification uses the unwrapped source
+/// descriptor and never calls this materializing operation.
+pub fn rewrap_deferred(h: Harness, b: &Block) -> Result<Option<Block>> {
+    Ok(match b {
         Block::ToolUse {
             id,
             name,
@@ -410,16 +462,16 @@ pub fn rewrap_deferred(h: Harness, b: &Block) -> Option<Block> {
             let (name_key, args_key) = deferred_keys(h);
             let mut wrapped = serde_json::Map::new();
             wrapped.insert(name_key.into(), Value::String(name.clone()));
-            wrapped.insert(args_key.into(), input.clone());
+            wrapped.insert(args_key.into(), input.resolve()?.into_owned());
             Some(Block::ToolUse {
                 id: id.clone(),
                 name: DEFERRED.to_string(),
-                input: Value::Object(wrapped),
+                input: Json::Owned(Value::Object(wrapped)),
                 namespace: None,
             })
         }
         _ => None,
-    }
+    })
 }
 
 /// A sink wrapper an adapter puts around its sink. It unwraps `tool_call` (for the harnesses whose
@@ -431,6 +483,8 @@ pub struct AffordanceSink<'a> {
     harness: Harness,
     inner: &'a mut dyn MessageSink,
     open: std::collections::HashMap<String, Returns>,
+    error: Option<anyhow::Error>,
+    failed: bool,
 }
 
 impl<'a> AffordanceSink<'a> {
@@ -439,38 +493,68 @@ impl<'a> AffordanceSink<'a> {
             harness,
             inner,
             open: Default::default(),
+            error: None,
+            failed: false,
         }
     }
 }
 
 impl MessageSink for AffordanceSink<'_> {
-    fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.inner.take_error()
-    }
     fn dependency(&mut self, path: &std::path::Path) {
-        self.inner.dependency(path);
+        if !self.failed {
+            self.inner.dependency(path);
+        }
     }
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        if let Some(error) = self.error.take().or_else(|| self.inner.take_error()) {
+            self.failed = true;
+            return Some(error);
+        }
+        self.failed
+            .then(|| anyhow::anyhow!("affordance consumer has already failed"))
+    }
+
     fn message(&mut self, mut m: Message) -> Flow {
+        if self.failed {
+            return Flow::Stop;
+        }
         if matches!(self.harness, Harness::Hermes | Harness::OpenClaw) {
-            let h = self.harness;
-            m.content.iter_mut().for_each(|b| unwrap_deferred(h, b));
+            for block in &mut m.content {
+                if let Err(error) = unwrap_deferred(self.harness, block) {
+                    self.failed = true;
+                    self.error = Some(error);
+                    return Flow::Stop;
+                }
+            }
         }
         refine_spawn(self.harness, &mut m, &mut self.open);
-        self.inner.message(m)
+        match self.inner.try_message(m) {
+            Ok(flow) => flow,
+            Err(error) => {
+                self.failed = true;
+                self.error = Some(error);
+                Flow::Stop
+            }
+        }
     }
 
     fn meta(&mut self, s: &Session) {
+        if self.failed {
+            return;
+        }
         self.inner.meta(s);
     }
 
     /// Never while a synchronous spawn waits for its result: which result returns it is state no
     /// checkpoint carries.
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
-        self.open.is_empty() && self.inner.wants_checkpoint(offset)
+        !self.failed && self.open.is_empty() && self.inner.wants_checkpoint(offset)
     }
 
     fn checkpoint(&mut self, cp: &mut crate::stream::Checkpoint) {
-        self.inner.checkpoint(cp);
+        if !self.failed {
+            self.inner.checkpoint(cp);
+        }
     }
 }
 
@@ -530,34 +614,57 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
 /// the first of `content`/`step`/`description`/`title`/`subject`/`text`/`task`/`name`; or a
 /// markdown checklist / numbered list in a string under one of those keys.
 pub fn items_of(v: &Value) -> Vec<Item> {
-    const LISTS: [&str; 7] = ["todos", "plan", "items", "tasks", "checklist", "content", "markdown"];
-    for key in LISTS {
-        match v.get(key) {
-            Some(Value::Array(a)) => return a.iter().filter_map(item_of).collect(),
-            // Keyed by id (Grok `plan.json` `todos: {id: {...}}`).
-            Some(Value::Object(o)) if key == "todos" => return o.values().filter_map(item_of).collect(),
-            Some(Value::String(s)) => {
-                // A JSON list in a string (Roo `new_task{todos: "[]"}`) or a markdown list.
-                if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(s) {
-                    return a.iter().filter_map(item_of).collect();
-                }
-                let md = markdown_items(s);
-                if !md.is_empty() {
-                    return md;
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Value::Array(a) = v {
-        return a.iter().filter_map(item_of).collect();
-    }
-    item_of(v).into_iter().collect()
+    items_of_view(JsonView::from(v)).expect("owned JSON items")
 }
 
-/// One element of a plan list: an object with a text field and maybe a status, or a bare string.
+pub fn items_of_view(view: JsonView<'_>) -> Result<Vec<Item>> {
+    const LISTS: &[&str] = &["todos", "plan", "items", "tasks", "checklist", "content", "markdown"];
+    for &key in LISTS {
+        let Some(value) = view.get(key)? else {
+            continue;
+        };
+        if let Some(array) = value.array()? {
+            return array.map(|v| item_of_view(v?)).filter_map(|v| v.transpose()).collect();
+        }
+        if key == "todos" {
+            let mut out = Vec::new();
+            if value.for_each_entry(|_, child| {
+                if let Some(item) = item_of_view(child)? {
+                    out.push(item);
+                }
+                Ok(())
+            })? {
+                return Ok(out);
+            }
+        }
+        // Embedded JSON lists require their selected encoded string with the current backend.
+        // This explicitly materializes that field, never unrelated tool arguments.
+        if let Some(text) = input::string(value)? {
+            if let Ok(Value::Array(array)) = serde_json::from_str::<Value>(&text) {
+                return array
+                    .iter()
+                    .map(|v| item_of_view(JsonView::from(v)))
+                    .filter_map(|v| v.transpose())
+                    .collect();
+            }
+            let markdown = markdown_items(&text);
+            if !markdown.is_empty() {
+                return Ok(markdown);
+            }
+        }
+    }
+    if let Some(array) = view.array()? {
+        return array.map(|v| item_of_view(v?)).filter_map(|v| v.transpose()).collect();
+    }
+    Ok(item_of_view(view)?.into_iter().collect())
+}
+
 pub fn item_of(v: &Value) -> Option<Item> {
-    const TEXT: [&str; 9] = [
+    item_of_view(JsonView::from(v)).expect("owned JSON item")
+}
+
+pub fn item_of_view(view: JsonView<'_>) -> Result<Option<Item>> {
+    const TEXT: &[&str] = &[
         "content",
         "subject",
         "title",
@@ -568,28 +675,30 @@ pub fn item_of(v: &Value) -> Option<Item> {
         "name",
         "goal",
     ];
-    match v {
-        Value::String(s) if !s.trim().is_empty() => Some(Item {
-            content: s.trim().to_string(),
-            status: None,
-        }),
-        Value::Object(o) => {
-            let content = TEXT
-                .iter()
-                .find_map(|k| o.get(*k).and_then(Value::as_str))
-                .filter(|c| !c.trim().is_empty())?;
-            let status = o
-                .get("status")
-                .or_else(|| o.get("state"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            Some(Item {
-                content: content.to_string(),
-                status,
-            })
-        }
-        _ => None,
+    // A plain-string item is trimmed; object content retains its original whitespace.
+    if view.is_string()? {
+        return Ok(input::item_string(view, true)?.map(|content| Item { content, status: None }));
     }
+    for &key in TEXT {
+        let Some(value) = view.get(key)? else {
+            continue;
+        };
+        if !value.is_string()? {
+            continue;
+        }
+        let Some(content) = input::item_string(value, false)? else {
+            return Ok(None);
+        };
+        let status = match view.get("status")? {
+            Some(value) => Some(value),
+            None => view.get("state")?,
+        }
+        .map(input::string)
+        .transpose()?
+        .flatten();
+        return Ok(Some(Item { content, status }));
+    }
+    Ok(None)
 }
 
 /// `- [x] done`, `[ ] todo`, `[-] doing`, `1. step`, `* step` lines.
@@ -638,24 +747,59 @@ pub fn items_summary(items: &[Item]) -> String {
 }
 
 /// The summary line for one tool-call row.
-fn call_summary(kind: Kind, input: &Value, items: &[Item]) -> String {
-    if !items.is_empty() {
-        return items_summary(items);
+fn item_summary(view: JsonView<'_>) -> Result<Option<String>> {
+    if view.is_string()? {
+        return Ok(input::trimmed_prefix(view, 120)?.filter(|text| !text.is_empty()));
     }
-    // An item-wise update: which item, and what it became.
-    if let Some(status) = str_at(input, "status").filter(|_| kind == Kind::Plan) {
-        let which = ["taskId", "task_id", "id", "subject"].iter().find_map(|k| {
-            input.get(*k).and_then(|v| {
-                v.as_str()
-                    .map(str::to_string)
-                    .or_else(|| v.as_u64().map(|n| n.to_string()))
-            })
-        });
-        if let Some(which) = which {
-            return crate::ir::truncate(&format!("{which} → {status}"), 120);
+    for key in [
+        "content",
+        "subject",
+        "title",
+        "step",
+        "description",
+        "text",
+        "task",
+        "name",
+        "goal",
+    ] {
+        if let Some(value) = view.get(key)? {
+            if value.is_string()? {
+                return input::nonblank_prefix(value, 120);
+            }
         }
     }
-    const KEYS: [&str; 16] = [
+    Ok(None)
+}
+
+fn call_summary(kind: Kind, view: JsonView<'_>, items: &[Item]) -> Result<String> {
+    if !items.is_empty() {
+        return Ok(items_summary(items));
+    }
+    if kind == Kind::Plan {
+        if let Some(status) = view
+            .get("status")?
+            .map(|v| input::prefix(v, 120))
+            .transpose()?
+            .flatten()
+        {
+            for key in ["taskId", "task_id", "id", "subject"] {
+                if let Some(which) = view
+                    .get(key)?
+                    .map(|v| input::scalar_prefix(v, 120))
+                    .transpose()?
+                    .flatten()
+                {
+                    let mut text = input::Prefix::new(120);
+                    text.push(&which);
+                    text.push(" → ");
+                    text.push(&status);
+                    return Ok(text.finish());
+                }
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    for key in [
         "description",
         "subject",
         "prompt",
@@ -672,36 +816,56 @@ fn call_summary(kind: Kind, input: &Value, items: &[Item]) -> String {
         "reason",
         "id",
         "taskId",
-    ];
-    let mut parts = Vec::new();
-    for k in KEYS {
-        if let Some(s) = input.get(k).and_then(|v| {
-            v.as_str()
-                .map(str::to_string)
-                .or_else(|| v.as_u64().map(|n| n.to_string()))
-        }) {
-            parts.push(s);
+    ] {
+        if let Some(value) = view
+            .get(key)?
+            .map(|v| input::scalar_prefix(v, 120))
+            .transpose()?
+            .flatten()
+        {
+            parts.push(value);
             if parts.len() == 2 || kind != Kind::Schedule {
                 break;
             }
         }
     }
     if parts.is_empty() {
-        if let Some(q) = input.get("questions").and_then(Value::as_array).and_then(|a| a.first()) {
-            if let Some(s) = q.get("question").and_then(Value::as_str) {
-                parts.push(s.to_string());
+        if let Some(questions) = view.get("questions")?.map(JsonView::array).transpose()?.flatten() {
+            if let Some(first) = questions.into_iter().next() {
+                if let Some(text) = first?
+                    .get("question")?
+                    .map(|v| input::prefix(v, 120))
+                    .transpose()?
+                    .flatten()
+                {
+                    parts.push(text);
+                }
             }
         }
-        if let Some(t) = input.get("tasks").and_then(Value::as_array).and_then(|a| a.first()) {
-            if let Some(s) = item_of(t) {
-                parts.push(s.content);
+        if let Some(tasks) = view.get("tasks")?.map(JsonView::array).transpose()?.flatten() {
+            if let Some(first) = tasks.into_iter().next() {
+                if let Some(text) = item_summary(first?)? {
+                    parts.push(text);
+                }
             }
         }
-        if let Some(s) = str_at(input, "status") {
-            parts.push(s.to_string());
+        if let Some(status) = view
+            .get("status")?
+            .map(|v| input::prefix(v, 120))
+            .transpose()?
+            .flatten()
+        {
+            parts.push(status);
         }
     }
-    crate::ir::truncate(&parts.join(" · "), 120)
+    let mut text = input::Prefix::new(120);
+    for (index, part) in parts.iter().enumerate() {
+        if index != 0 {
+            text.push(" · ");
+        }
+        text.push(part);
+    }
+    Ok(text.finish())
 }
 
 /// Record-shaped affordances: messages the harness wrote that no `MessageKind` names.
@@ -773,7 +937,7 @@ enum Hit<'a> {
         action: &'static str,
         id: &'a str,
         name: &'a str,
-        input: &'a Value,
+        input: &'a Json,
     },
     Message {
         kind: Kind,
@@ -880,14 +1044,14 @@ fn detail_hits<'a>(
     }
 }
 
-fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summaries: bool) -> Vec<Hit<'a>> {
+fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summaries: bool) -> Result<Vec<Hit<'a>>> {
     let mut out = Vec::new();
     let mut spawn_calls = 0;
     for b in &m.content {
         let Block::ToolUse { id, name, input, .. } = b else {
             continue;
         };
-        let Some((kind, action)) = classify_tool(h, name, input) else {
+        let Some((kind, action)) = classify_tool_json(h, name, input)? else {
             continue;
         };
         // A spawn is a spawn when the adapter said so (the message kind); a harness that marks
@@ -927,7 +1091,7 @@ fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summar
         out.push(Hit::Message { kind, action, tool });
     }
     detail_hits(h, m, resolver, summaries, &mut out);
-    out
+    Ok(out)
 }
 
 /// A row the session carries once rather than at a message.
@@ -1037,19 +1201,19 @@ pub fn session_rows(s: &Session) -> Vec<Affordance> {
 /// Every affordance the transcript shows: the session's own rows ([`session_rows`]) first, then
 /// message order. Safe on a lazy parse: text is read through the session's resolver, a few KB at
 /// most per message.
-pub fn of_session(s: &Session) -> Vec<Affordance> {
+pub fn of_session(s: &Session) -> Result<Vec<Affordance>> {
     let resolver = s.resolver();
     let mut out = session_rows(s);
     for (i, m) in s.messages.iter().enumerate() {
-        out.extend(message_rows(s.harness, m, i, &resolver));
+        out.extend(message_rows(s.harness, m, i, &resolver)?);
     }
-    out
+    Ok(out)
 }
 
 /// Render one message's hits identically for whole-session and streamed views.
-fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy::Resolver) -> Vec<Affordance> {
+fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy::Resolver) -> Result<Vec<Affordance>> {
     let mut out = Vec::new();
-    for hit in hits(harness, m, resolver, true) {
+    for hit in hits(harness, m, resolver, true)? {
         out.push(match hit {
             Hit::Call {
                 kind,
@@ -1059,7 +1223,7 @@ fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy:
                 input,
             } => {
                 let items = if matches!(kind, Kind::Plan | Kind::Goal) {
-                    items_of(input)
+                    input.with_view(items_of_view)?
                 } else {
                     Vec::new()
                 };
@@ -1070,7 +1234,7 @@ fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy:
                     timestamp: m.timestamp,
                     tool: Some(name.to_string()),
                     tool_use_id: Some(id.to_string()),
-                    summary: call_summary(kind, input, &items),
+                    summary: input.with_view(|view| call_summary(kind, view, &items))?,
                     items,
                     source: Source::ToolCall,
                 }
@@ -1108,7 +1272,7 @@ fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy:
             },
         });
     }
-    out
+    Ok(out)
 }
 
 /// The view's version, stored beside the catalog's counts: bump it whenever a kind, a table row or
@@ -1136,8 +1300,8 @@ impl Counter {
         }
     }
 
-    pub fn note(&mut self, m: &Message) -> anyhow::Result<()> {
-        for hit in hits(self.harness, m, &self.resolver, false) {
+    pub fn note(&mut self, m: &Message) -> Result<()> {
+        for hit in hits(self.harness, m, &self.resolver, false)? {
             let (Hit::Call { kind, .. } | Hit::Message { kind, .. } | Hit::Detail { kind, .. }) = hit;
             *self.counts.entry(kind).or_default() += 1;
         }
@@ -1169,6 +1333,7 @@ pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) ->
     let resolver = crate::lazy::Resolver::new(Some(r.path.clone()));
     let mut messages = Vec::new();
     let mut index = 0;
+    let mut error = None;
     // Retain full metadata and tool details while reducing complete content spans into bounded
     // summaries. Only the resulting rows survive each streamed message.
     let s = crate::stream::stream_counted(
@@ -1176,11 +1341,20 @@ pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) ->
         r,
         &crate::stream::ParseOptions::lazy_extra(),
         &mut |m: Message| {
-            messages.extend(message_rows(r.harness, &m, index, &resolver));
+            match message_rows(r.harness, &m, index, &resolver) {
+                Ok(rows) => messages.extend(rows),
+                Err(failure) => {
+                    error = Some(failure);
+                    return Flow::Stop;
+                }
+            }
             index += 1;
             Flow::Continue
         },
     )?;
+    if let Some(error) = error {
+        return Err(error);
+    }
     // Session facts can arrive at EOF; they still precede message rows, exactly as of_session.
     let mut rows = session_rows(&s);
     rows.extend(messages);
@@ -1245,7 +1419,7 @@ mod tests {
                     id: "plan".into(),
                     name: "TodoWrite".into(),
                     namespace: None,
-                    input: json!({"todos":[{"content":"preserve fidelity", "status":"pending"}]}),
+                    input: json!({"todos":[{"content":"preserve fidelity", "status":"pending"}]}).into(),
                 });
                 sink.message(call);
                 let mut hook = Message::new(Role::System);
@@ -1294,7 +1468,7 @@ mod tests {
         };
         let adapter: &dyn crate::harness::Adapter = &fixture;
         let full = adapter.parse(&r).unwrap();
-        let mut expected = of_session(&full);
+        let mut expected = of_session(&full).unwrap();
         expected.extend(adapter.store_affordances(&r));
         let actual = read(adapter, &r).unwrap();
         assert_eq!(
@@ -1306,6 +1480,44 @@ mod tests {
         assert!(actual.iter().any(|a| a.summary == "late closing tag"));
         assert!(actual.iter().any(|a| a.kind == Kind::Checkpoint));
         std::fs::remove_file(text_path).unwrap();
+    }
+
+    #[test]
+    fn source_arguments_match_owned_rows_and_fail_atomically() {
+        let path = std::env::temp_dir().join(format!("cv-affordance-input-{}", uuid::Uuid::new_v4()));
+        for value in [
+            json!({"todos": {"b": {"content":"  keep spacing  ","status":null,"state":"done"}, "a":"  plain  "}, "ignored":"x".repeat(1024 * 1024)}),
+            json!({"taskId":17,"subject":"λ".repeat(121),"status":"pending","ignored":"x".repeat(1024 * 1024)}),
+            json!({"todos":"[{\"content\":\"a\",\"status\":\"done\"}]"}),
+        ] {
+            let bytes = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let source = Json::source(&path, 0, bytes.len() as u64).unwrap();
+            let make = |input| {
+                let mut session = Session::new("argument-oracle", Harness::Claude);
+                let mut message = Message::new(Role::Assistant);
+                message.content.push(Block::ToolUse {
+                    id: "call".into(),
+                    name: "TodoWrite".into(),
+                    namespace: None,
+                    input,
+                });
+                session.messages.push(message);
+                session
+            };
+            let owned = make(value.into());
+            let lazy = make(source);
+            assert_eq!(
+                serde_json::to_vec(&of_session(&owned).unwrap()).unwrap(),
+                serde_json::to_vec(&of_session(&lazy).unwrap()).unwrap()
+            );
+            std::fs::remove_file(&path).unwrap();
+            assert!(of_session(&lazy).is_err());
+            let reference = crate::SessionRef::new("argument-oracle", Harness::Claude, &path);
+            let mut counter = Counter::new(&reference);
+            assert!(counter.note(&lazy.messages[0]).is_err());
+            assert!(counter.finish(&lazy, &[]).is_empty());
+        }
     }
 
     #[test]
@@ -1341,20 +1553,21 @@ mod tests {
             let orig = Block::ToolUse {
                 id: "c".into(),
                 name: DEFERRED.into(),
-                input: wrapped.clone(),
+                input: wrapped.clone().into(),
                 namespace: None,
             };
             let mut b = orig.clone();
-            unwrap_deferred(h, &mut b);
+            unwrap_deferred(h, &mut b).unwrap();
             let Block::ToolUse { name, namespace, .. } = &b else {
                 unreachable!()
             };
             assert_ne!(name, DEFERRED);
             assert_eq!(namespace.as_deref(), Some(DEFERRED));
-            let Some(Block::ToolUse { name, input, .. }) = rewrap_deferred(h, &b) else {
+            let Some(Block::ToolUse { name, input, .. }) = rewrap_deferred(h, &b).unwrap() else {
                 panic!("rewraps")
             };
-            assert_eq!((name.as_str(), input), (DEFERRED, wrapped));
+            assert_eq!(name, DEFERRED);
+            assert_eq!(input.resolve().unwrap().as_ref(), &wrapped);
         }
         // Grok `plan.json` keys its todos by id.
         let grok = json!({"todos": {"t1": {"content": "a", "status": "pending"}}});
@@ -1425,14 +1638,14 @@ mod tests {
                 None,
             ),
         ];
-        let rows = of_session(&s);
+        let rows = of_session(&s).unwrap();
         assert_eq!(
             kinds_actions(&rows),
             [(Kind::Approval, "deny"), (Kind::Approval, "deny")]
         );
         assert_eq!(rows[0].tool_use_id.as_deref(), Some("a"));
         s.harness = Harness::Codex;
-        assert!(of_session(&s).is_empty());
+        assert!(of_session(&s).unwrap().is_empty());
         let mut oc = Session::new("o", Harness::OpenCode);
         oc.messages = vec![result(
             "d",
@@ -1440,7 +1653,7 @@ mod tests {
             true,
             None,
         )];
-        assert_eq!(kinds_actions(&of_session(&oc)), [(Kind::Approval, "deny")]);
+        assert_eq!(kinds_actions(&of_session(&oc).unwrap()), [(Kind::Approval, "deny")]);
     }
 
     /// What a harness keeps once per session (modes, a checkpoint tally, OpenCode's ruleset and
@@ -1456,7 +1669,7 @@ mod tests {
         note_checkpoints(bag, 1, ["a.txt", "b.txt"]);
         s.messages
             .push(result("x", "ok", false, Some(json!({"restorable": ["/w/a.txt"]}))));
-        let rows = of_session(&s);
+        let rows = of_session(&s).unwrap();
         assert_eq!(
             kinds_actions(&rows),
             [
@@ -1474,7 +1687,7 @@ mod tests {
             Harness::Claude,
             std::path::PathBuf::from("/nonexistent"),
         ));
-        s.messages.iter().for_each(|m| counter.note(m));
+        s.messages.iter().for_each(|m| counter.note(m).unwrap());
         let counts = counter.finish(&s, &[]);
         assert_eq!(counts.get(&Kind::Approval), Some(&1));
         assert_eq!(counts.get(&Kind::Checkpoint), Some(&2));
@@ -1489,7 +1702,7 @@ mod tests {
             "revert".into(),
             json!({"messageID": "msg_1", "snapshot": "912f5c898f9e"}),
         );
-        let rows = of_session(&oc);
+        let rows = of_session(&oc).unwrap();
         assert_eq!(
             kinds_actions(&rows),
             [(Kind::Approval, "state"), (Kind::Checkpoint, "restore")]
@@ -1511,7 +1724,7 @@ mod tests {
             reply.content.push(Block::ToolUse {
                 id: call.into(),
                 name: "delegate_task".into(),
-                input: json!({}),
+                input: json!({}).into(),
                 namespace: None,
             });
             sink.message(reply);
