@@ -1359,6 +1359,135 @@ impl<'c> EventReader<'c> {
             error: None,
         })
     }
+
+    fn point(conn: &'c rusqlite::Connection) -> Result<Self> {
+        let zstd = super::store::sqlite::columns(conn, "transcript_events").contains("event_zstd");
+        let payload = if zstd {
+            "event_json, event_zstd"
+        } else {
+            "event_json, NULL"
+        };
+        Ok(Self {
+            stmt: conn.prepare(&format!(
+                "SELECT seq, {payload} FROM transcript_events WHERE session_id = ?1 AND seq = ?2"
+            ))?,
+        })
+    }
+
+    fn at(&mut self, session_id: &str, seq: i64) -> Result<Option<Value>> {
+        Ok(self.stmt.query_row(rusqlite::params![session_id, seq], |row| {
+            decode_event_row(row, parse_line).map(|(_, v)| v)
+        })?)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn decode_event_row(
+    row: &rusqlite::Row<'_>,
+    parse: fn(&str) -> Option<Value>,
+) -> rusqlite::Result<(i64, Option<Value>)> {
+    let seq = row.get(0)?;
+    // SQLite owns these bytes for the lifetime of the row. Parse them before advancing rather
+    // than copying every TEXT/BLOB cell into Rust, including on the navigation-only pass.
+    let json = row.get_ref(1)?;
+    let zstd = row.get_ref(2)?;
+    let text = json
+        .as_str_or_null()
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, json.data_type(), Box::new(e)))?;
+    let compressed = zstd
+        .as_blob_or_null()
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, zstd.data_type(), Box::new(e)))?;
+    let value = match (text, compressed) {
+        (Some(text), _) => parse(text),
+        (None, Some(z)) => decompress_zstd(z).and_then(|bytes| std::str::from_utf8(&bytes).ok().and_then(parse)),
+        (None, None) => None,
+    };
+    Ok((seq, value))
+}
+
+/// The tree selector needs only these fields. Validate everything else without owning its
+/// strings, arrays or objects. Unlike `IgnoredAny`, this retains Value's number-range and nesting
+/// checks, so an unreadable payload stays an unreadable row in the navigation pass too.
+#[cfg(feature = "sqlite")]
+fn navigation_line(text: &str) -> Option<Value> {
+    struct Navigation;
+    impl<'de> serde::de::Visitor<'de> for Navigation {
+        type Value = Value;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an event object")
+        }
+
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> std::result::Result<Value, M::Error> {
+            let mut out = serde_json::Map::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if matches!(
+                    key.as_str(),
+                    "type" | "id" | "parentId" | "targetId" | "appendParentId" | "appendMode" | "firstKeptEntryId"
+                ) {
+                    out.insert(key, map.next_value()?);
+                } else {
+                    map.next_value::<DiscardValue>()?;
+                }
+            }
+            Ok(Value::Object(out))
+        }
+    }
+    use serde::de::Deserializer as _;
+    let mut de = serde_json::Deserializer::from_str(text);
+    match (&mut de).deserialize_map(Navigation) {
+        Ok(v) if de.end().is_ok() => Some(v),
+        // Complete mode also carries valid non-object JSON records. Their source value is read
+        // later; a null projection has the same (absent) navigation fields.
+        _ => serde_json::from_str::<DiscardValue>(text).ok().map(|_| Value::Null),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+struct DiscardValue;
+
+#[cfg(feature = "sqlite")]
+impl<'de> serde::Deserialize<'de> for DiscardValue {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
+        struct Discard;
+        impl<'de> serde::de::Visitor<'de> for Discard {
+            type Value = DiscardValue;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(DiscardValue)
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
+                Ok(DiscardValue)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
+                Ok(DiscardValue)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
+                Ok(DiscardValue)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<Self::Value, E> {
+                Ok(DiscardValue)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<Self::Value, E> {
+                Ok(DiscardValue)
+            }
+            fn visit_seq<S: serde::de::SeqAccess<'de>>(self, mut seq: S) -> std::result::Result<Self::Value, S::Error> {
+                while seq.next_element::<DiscardValue>()?.is_some() {}
+                Ok(DiscardValue)
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> std::result::Result<Self::Value, M::Error> {
+                while map.next_key::<DiscardValue>()?.is_some() {
+                    map.next_value::<DiscardValue>()?;
+                }
+                Ok(DiscardValue)
+            }
+        }
+        de.deserialize_any(Discard)
+    }
 }
 
 /// A SQLite cursor whose decoded payload is dropped before the next row. Keep SQL errors apart
@@ -1380,15 +1509,7 @@ impl Iterator for EventRows<'_> {
         loop {
             let decoded = (|| -> rusqlite::Result<Option<(i64, Option<Value>)>> {
                 let Some(row) = self.rows.next()? else { return Ok(None) };
-                let seq = row.get(0)?;
-                let json: Option<String> = row.get(1)?;
-                let zstd: Option<Vec<u8>> = row.get(2)?;
-                let text = match (json, zstd) {
-                    (Some(j), _) => Some(j),
-                    (None, Some(z)) => decompress_zstd(&z).and_then(|b| String::from_utf8(b).ok()),
-                    (None, None) => None,
-                };
-                Ok(Some((seq, text.as_deref().and_then(self.parse))))
+                decode_event_row(row, self.parse).map(Some)
             })();
             match decoded {
                 Ok(Some((seq, Some(v)))) => return Some((seq, v)),
@@ -1432,18 +1553,62 @@ fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
 #[cfg(feature = "sqlite")]
 fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
     let conn = open_ro(&r.path)?;
-    let facts = sqlite_key_facts(&conn, &r.id)?;
-    let mut reader = EventReader::new(&conn)?;
-    let mut rows = reader.rows(&r.id, parse_line)?;
-    let entries = rows.by_ref().map(|(_, v)| v).collect();
-    let skipped = rows.finish()?;
-    let mut s = stream_rows(
-        rows_from_values(entries, opts.complete).into_iter(),
-        r,
-        &facts,
-        opts,
-        sink,
-    );
+    // Navigation and payload reads must see the same history: a concurrent leaf update cannot
+    // change which rows the second pass emits. A deferred read transaction writes no store data.
+    let snapshot = conn.unchecked_transaction()?;
+    let facts = sqlite_key_facts(&snapshot, &r.id)?;
+    let mut reader = EventReader::new(&snapshot)?;
+    let mut navigation = reader.rows(&r.id, navigation_line)?;
+    let mut has_leaf = false;
+    for (_, v) in navigation.by_ref() {
+        has_leaf |= is_leaf_control(&v);
+    }
+    // Match the original whole-transcript diagnostics even if the sink stops at its first turn.
+    let skipped = navigation.finish()?;
+    let mut s = if has_leaf {
+        // Retain navigation fields only, never the message/tool payloads on abandoned branches.
+        // The selector is shared with JSONL, including complete-mode carriers and normalized parents.
+        let mut navigation = reader.rows(&r.id, navigation_line)?;
+        let mut entries = Vec::new();
+        for (seq, mut v) in navigation.by_ref() {
+            if !v.is_object() {
+                v = Value::Object(Default::default());
+            }
+            v.as_object_mut().unwrap().insert("cv_sql_seq".into(), seq.into());
+            entries.push(v);
+        }
+        navigation.finish()?;
+        let mut selected = rows_from_values(entries, opts.complete).into_iter();
+        let mut payloads = EventReader::point(&snapshot)?;
+        let mut error = None;
+        let rows = std::iter::from_fn(|| loop {
+            let mut row = selected.next()?;
+            let seq = row.v["cv_sql_seq"]
+                .as_i64()
+                .expect("navigation row has its source sequence");
+            match payloads.at(&r.id, seq) {
+                Ok(Some(v)) => {
+                    row.v = v;
+                    return Some(row);
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    error = Some(e);
+                    return None;
+                }
+            }
+        });
+        let s = stream_rows(rows, r, &facts, opts, sink);
+        if let Some(e) = error {
+            return Err(e);
+        }
+        s
+    } else {
+        let mut events = reader.rows(&r.id, parse_line)?;
+        let s = stream_rows(events.by_ref().map(|(_, v)| Row::active(v)), r, &facts, opts, sink);
+        events.finish()?;
+        s
+    };
     super::note_skipped_lines(&mut s, skipped);
     Ok(s)
 }
@@ -1876,6 +2041,102 @@ mod tests {
             .join("agents");
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn navigation_projection_preserves_tree_selection_and_payload_validation() {
+        for name in ["branchy-v4.jsonl", "reset-and-side-entries.jsonl", "v3-full.jsonl"] {
+            let text = fixture_text(name);
+            let entries: Vec<Value> = text.lines().filter_map(parse_line).collect();
+            let mut projected: Vec<Value> = text.lines().filter_map(navigation_line).collect();
+            assert_eq!(projected.len(), entries.len());
+            for (index, v) in projected.iter_mut().enumerate() {
+                v.as_object_mut().unwrap().insert("source".into(), index.into());
+                assert!(v.get("message").is_none());
+            }
+            for complete in [false, true] {
+                let expected: Vec<_> = rows_from_values(entries.clone(), complete)
+                    .into_iter()
+                    .map(|r| (r.active, r.parent, r.v))
+                    .collect();
+                let actual: Vec<_> = rows_from_values(projected.clone(), complete)
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            r.active,
+                            r.parent,
+                            entries[r.v["source"].as_u64().unwrap() as usize].clone(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "{name}, complete={complete}");
+            }
+        }
+        let nested = format!("{{\"ignored\":{}0{}}}", "[".repeat(140), "]".repeat(140));
+        for text in [
+            "null",
+            "true",
+            "42",
+            "[]",
+            "\"a string\"",
+            "{}",
+            "{\"ignored\":1e1000}",
+            "{\"ignored\":\"\\uD800\"}",
+            "{\"ignored\": [1,]}",
+            &nested,
+        ] {
+            assert_eq!(navigation_line(text).is_some(), parse_line(text).is_some(), "{text}");
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn flat_sqlite_stream_matches_replay_and_counts_late_corruption_on_stop() {
+        let agents = tmp_agents();
+        let mut events: Vec<String> = fixture_text("v3-full.jsonl").lines().map(str::to_string).collect();
+        events.extend(["unreadable".into(), "{\"ignored\":1e1000}".into()]);
+        let db = write_store(&agents, "flat", &events);
+        let r = discover_sqlite(&db).unwrap().remove(0);
+        let conn = open_ro(&db).unwrap();
+        let facts = sqlite_key_facts(&conn, &r.id).unwrap();
+        let entries: Vec<Value> = events.iter().filter_map(|v| parse_line(v)).collect();
+        for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+            let mut expected = crate::stream::CollectSink::default();
+            let mut reference = stream_rows(
+                rows_from_values(entries.clone(), opts.complete).into_iter(),
+                &r,
+                &facts,
+                &opts,
+                &mut expected,
+            );
+            super::super::note_skipped_lines(&mut reference, 2);
+            let mut actual = crate::stream::CollectSink::default();
+            let result = stream_sqlite(&r, &opts, &mut actual).unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual.messages).unwrap(),
+                serde_json::to_value(&expected.messages).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&result).unwrap(),
+                serde_json::to_value(&reference).unwrap()
+            );
+        }
+        struct StopAfterOne(usize);
+        impl MessageSink for StopAfterOne {
+            fn message(&mut self, _: Message) -> Flow {
+                self.0 += 1;
+                Flow::Stop
+            }
+        }
+        let mut sink = StopAfterOne(0);
+        let s = stream_sqlite(&r, &ParseOptions::lazy(), &mut sink).unwrap();
+        assert_eq!(sink.0, 1);
+        assert_eq!(s.extra["cv"]["skipped_lines"], 2);
+        let mut point = EventReader::point(&conn).unwrap();
+        point.at(&r.id, 0).unwrap();
+        assert_eq!(point.stmt.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        fs::remove_dir_all(agents.parent().unwrap()).unwrap();
     }
 
     #[cfg(feature = "sqlite")]
