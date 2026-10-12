@@ -43,9 +43,13 @@
 //! namespace (`rooveterinaryinc.roo-cline` / `rooveterinaryinc.roo-code`) and `~/.roo/`. The real
 //! parsing lives here as `pub` helpers; `roo.rs` reuses them with Roo's paths + `Harness::Roo`.
 
-use super::wire::{anthropic, text_parts};
+mod prompt;
+
+use super::store::document::{array_iter, Fields, Index, Raw};
+use super::wire::anthropic;
 use super::Adapter;
 use crate::ir::*;
+use crate::json::{InvalidJson, JsonSource, JsonView};
 use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -214,30 +218,35 @@ pub fn discover_in(roots: &[PathBuf], harness: Harness) -> Vec<SessionRef> {
 /// Cheap metadata-only scan of one task dir into a `SessionRef`.
 fn scan(dir: &Path, id: &str, harness: Harness) -> Option<SessionRef> {
     let history = dir.join("api_conversation_history.json");
-    let text = fs::read_to_string(&history).ok()?;
-    let arr: Value = serde_json::from_str(&text).ok()?;
-    let msgs = arr.as_array()?;
-
-    let mut cwd = None;
-    let mut title = None;
-    let mut message_count = 0usize;
-    for m in msgs {
-        let role = m.get("role").and_then(Value::as_str).unwrap_or("");
-        if matches!(role, "user" | "assistant") {
-            message_count += 1;
-        }
-        if role == "user" {
-            let text = text_parts(m.get("content"));
-            if cwd.is_none() {
-                cwd = extract_cwd(&text);
-            }
-            if title.is_none() {
-                if let Some(t) = clean_user_title(&text) {
-                    title = Some(crate::ir::truncate(&t, 80));
+    let source = JsonSource::capture(&history).ok()?;
+    let (mut cwd, title, message_count) = source
+        .read_document(|view| {
+            let messages = view.array()?.context("history array")?;
+            let mut cwd = None;
+            let mut title = None;
+            let mut message_count = 0;
+            for view in messages {
+                let view = view?;
+                let Some(record) = Fields::parse(view, &["role", "content"])? else {
+                    continue;
+                };
+                let role = record.string("role")?.unwrap_or_default();
+                if matches!(role.as_str(), "user" | "assistant") {
+                    message_count += 1;
+                }
+                if role == "user" && (cwd.is_none() || title.is_none()) {
+                    let summary = prompt::summarize(|feed| visit_text(record.get("content"), true, feed))?;
+                    if cwd.is_none() {
+                        cwd = summary.cwd;
+                    }
+                    if title.is_none() {
+                        title = summary.title;
+                    }
                 }
             }
-        }
-    }
+            Ok((cwd, title, message_count))
+        })
+        .ok()?;
 
     // created_at from the taskId (epoch millis); fall back to history mtime.
     let created_at = task_id_to_time(id);
@@ -280,16 +289,9 @@ pub fn parse_task_dir(dir: &Path, id: &str, harness: Harness) -> Result<Session>
     Ok(session)
 }
 
-/// Streaming core: read a task dir and emit each [`Message`] to `sink`, dropping it before the next,
-/// so peak memory is O(largest message) rather than O(transcript). Returns the session metadata with
-/// an **empty** `messages` vec. Shared by both Cline's and Roo's `stream`.
-///
-/// The OOM fix lives here: we do **not** `serde_json::from_str::<Value>` the whole
-/// `api_conversation_history.json` (a single JSON document holding the message array). Instead we
-/// memory-map it (or `fs::read` it when the `mmap` feature is off) and deserialize only the array
-/// *structure* as `Vec<&RawValue>` — borrowing the bytes, so each message stays a cheap slice into
-/// the mapped file. We then parse one message `Value` at a time and emit it, keeping at most one
-/// message + the (file-backed, reclaimable) mapping + the slice vec resident.
+/// Stream a task's chronological array through the shared validated source view. Bodies and
+/// complete tool arguments remain source ranges in lazy mode; metadata is reduced as it arrives.
+/// Full parsing owns the requested output. Shared by Cline and Roo; returns no collected messages.
 pub fn stream_task_dir(
     dir: &Path,
     id: &str,
@@ -297,7 +299,6 @@ pub fn stream_task_dir(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    let _ = opts; // Cline/Roo have no fat `extra` sidecar to gate; full fidelity either way.
     let history = dir.join("api_conversation_history.json");
 
     let mut session = Session {
@@ -305,15 +306,26 @@ pub fn stream_task_dir(
         ..Session::new(id.to_string(), harness)
     };
 
-    // Sidecar metadata is small; resolve timestamps up front. cwd-from-metadata is only a *fallback*
+    // Resolve sidecar timestamps without retaining their text payloads. cwd-from-metadata is only a *fallback*
     // (the first user turn's <environment_details> wins, mirroring the old parse order), so it's
     // applied after the body — kept here for the early `meta` signal only.
-    let meta_cwd = cwd_from_metadata(dir);
+    for name in [
+        "api_conversation_history.json",
+        "task_metadata.json",
+        "ui_messages.json",
+        "history_item.json",
+    ] {
+        sink.dependency(&dir.join(name));
+    }
+    if let Some(error) = sink.take_error() {
+        return Err(error);
+    }
+    let meta_cwd = metadata_cwd(dir)?;
     session.cwd = meta_cwd.clone();
     session.created_at = task_id_to_time(id);
     session.updated_at = newest_mtime(dir).or(session.created_at);
     // ui_messages.json gives the most precise created/updated and the first user turn's timestamp.
-    let (ui_created, ui_updated, first_user_ts) = ui_message_times(dir);
+    let (ui_created, ui_updated, first_user_ts) = ui_message_times(dir)?;
     if let Some(c) = ui_created {
         session.created_at = Some(c);
     }
@@ -325,10 +337,39 @@ pub fn stream_task_dir(
 
     // Roo (3.5x) writes `history_item.json` beside each task: its task-history row, which is where
     // a `new_task` child names its parent (`parentTaskId`, `rootTaskId`) and the task's mode lives.
-    if let Some(hi) = fs::read_to_string(dir.join("history_item.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-    {
+    if let Some(hi) = optional_document(&dir.join("history_item.json"), |view| {
+        Ok(Value::Object(
+            Fields::parse(
+                view,
+                &[
+                    "parentTaskId",
+                    "rootTaskId",
+                    "mode",
+                    "apiConfigName",
+                    "status",
+                    "tokensIn",
+                    "tokensOut",
+                    "totalCost",
+                    "ts",
+                ],
+            )?
+            .map(|fields| {
+                fields.project(&[
+                    "parentTaskId",
+                    "rootTaskId",
+                    "mode",
+                    "apiConfigName",
+                    "status",
+                    "tokensIn",
+                    "tokensOut",
+                    "totalCost",
+                    "ts",
+                ])
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        ))
+    })? {
         session.lineage.parent = hi.get("parentTaskId").and_then(Value::as_str).map(str::to_string);
         let bag = session.harness_extra_mut(harness);
         for k in [
@@ -357,48 +398,71 @@ pub fn stream_task_dir(
     // metadata fallback after the body if the transcript yielded nothing.
     session.cwd = None;
 
-    // Memory-map (or read) the history document. A missing/empty/corrupt file yields an
-    // empty-message session rather than an error (tolerant, as before).
-    let Some(bytes) = read_history_bytes(&history) else {
+    let Some(source) = JsonSource::capture(&history).ok() else {
         session.cwd = meta_cwd;
         return Ok(session);
     };
-    // Parse ONLY the array structure, borrowing the bytes: each item is a `&RawValue` slice, not an
-    // owned message. If the document isn't a JSON array (corrupt / `{}`), tolerate it.
-    let items: Vec<&RawValue> = match serde_json::from_slice(bytes.as_ref()) {
-        Ok(items) => items,
-        Err(_) => {
-            session.cwd = meta_cwd;
-            return Ok(session);
-        }
+    let span_path = if history.is_absolute() {
+        history.clone()
+    } else {
+        std::env::current_dir()?.join(&history)
     };
-
+    sink.dependency(&history);
+    if let Some(error) = sink.take_error() {
+        return Err(error);
+    }
     let mut stamped_first_user = false;
-    for item in &items {
-        // ONE message Value at a time (small), parsed from the borrowed slice. Dropped at the end of
-        // the loop body before the next item is touched.
-        let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
-            continue;
-        };
-        if let Some(b) = condense_boundary(&v, harness) {
-            if sink.message(b) == Flow::Stop {
-                break;
-            }
-        }
-        if let Some(mut msg) = parse_message(&v, &mut session) {
-            // Stamp the first user turn with the ui_messages first timestamp (best-effort), matching
-            // the old `enrich_from_ui_messages` behavior.
-            if !stamped_first_user && msg.role == Role::User {
-                stamped_first_user = true;
-                if let Some(ts) = first_user_ts {
-                    msg.timestamp.get_or_insert(ts);
+    let result = source.read_archive(|items| {
+        let mut has_sources = false;
+        for view in items.into_iter().flatten() {
+            let Some(view) = view? else { continue };
+            let Some(record) = Fields::parse(view, MESSAGE_FIELDS)? else {
+                continue;
+            };
+            let metadata = Value::Object(record.project(&MESSAGE_FIELDS[..MESSAGE_FIELDS.len() - 1])?);
+            if let Some(boundary) = condense_boundary(&metadata, harness) {
+                if sink.try_message(boundary)? == Flow::Stop {
+                    break;
                 }
             }
-            if sink.message(msg) == Flow::Stop {
-                break;
+            if let Some(mut message) = view_message(view, &record, &metadata, &mut session, opts.spans, &span_path)? {
+                if !stamped_first_user && message.role == Role::User {
+                    stamped_first_user = true;
+                    if let Some(ts) = first_user_ts {
+                        message.timestamp.get_or_insert(ts);
+                    }
+                }
+                let sourced = message.content.iter().any(|block| {
+                    matches!(
+                        block,
+                        Block::ToolUse {
+                            input: crate::Json::Source(_),
+                            ..
+                        }
+                    )
+                });
+                has_sources |= sourced;
+                if sourced {
+                    source.check()?;
+                }
+                let flow = sink.try_message(message)?;
+                if sourced {
+                    source.check()?;
+                }
+                if flow == Flow::Stop {
+                    break;
+                }
             }
         }
-        drop(v);
+        if has_sources {
+            source.check()?;
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        if !error.is::<InvalidJson>() {
+            return Err(error);
+        }
     }
 
     // cwd fallback: the first user turn's <environment_details> wins; only if it yielded nothing do
@@ -408,45 +472,6 @@ pub fn stream_task_dir(
     }
 
     Ok(session)
-}
-
-/// Memory-map the history file (default `mmap` feature) or fall back to a resident `fs::read`. The
-/// returned `HistoryBytes` derefs to `&[u8]`; for the mmap path it is file-backed and reclaimable by
-/// the OS under pressure. `None` on any I/O error (tolerant: caller yields an empty session).
-fn read_history_bytes(path: &Path) -> Option<HistoryBytes> {
-    #[cfg(feature = "mmap")]
-    {
-        let file = fs::File::open(path).ok()?;
-        // SAFETY: standard mmap-of-a-file caveat — concurrent external truncation could fault. These
-        // are the user's own transcript files, read-only, same as every other adapter's read.
-        let map = unsafe { memmap2::Mmap::map(&file).ok()? };
-        Some(HistoryBytes::Mapped(map))
-    }
-    #[cfg(not(feature = "mmap"))]
-    {
-        let buf = fs::read(path).ok()?;
-        Some(HistoryBytes::Owned(buf))
-    }
-}
-
-/// A byte buffer for the history document: a memory map under the `mmap` feature, otherwise an owned
-/// `Vec<u8>`. Both `AsRef<[u8]>` so the `serde_json::from_slice` call is identical.
-enum HistoryBytes {
-    #[cfg(feature = "mmap")]
-    Mapped(memmap2::Mmap),
-    #[cfg(not(feature = "mmap"))]
-    Owned(Vec<u8>),
-}
-
-impl AsRef<[u8]> for HistoryBytes {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            #[cfg(feature = "mmap")]
-            HistoryBytes::Mapped(m) => m.as_ref(),
-            #[cfg(not(feature = "mmap"))]
-            HistoryBytes::Owned(v) => v.as_slice(),
-        }
-    }
 }
 
 /// Pure parser: an `api_conversation_history.json` *array* text → `Session`. No filesystem access,
@@ -459,13 +484,14 @@ pub fn parse_history_str(id: &str, text: &str, harness: Harness, source_path: Op
         ..Session::new(id.to_string(), harness)
     };
 
-    // Borrow the array structure as raw items; tolerate corrupt / non-array documents.
-    let items: Vec<&RawValue> = match serde_json::from_str(text) {
-        Ok(items) => items,
-        Err(_) => return session,
+    let Ok(root) = serde_json::from_str::<&RawValue>(text) else {
+        return session;
     };
-
-    for item in &items {
+    let index = Index::default();
+    let Some(items) = array_iter(Raw::new(root.get(), &index)) else {
+        return session;
+    };
+    for item in items {
         let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
             continue;
         };
@@ -480,12 +506,9 @@ pub fn parse_history_str(id: &str, text: &str, harness: Harness, source_path: Op
 /// Convert one Anthropic message object into an IR `Message`. Captures cwd/title from the first
 /// user turn into `session` as a side effect.
 fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
-    let role = match v.get("role").and_then(Value::as_str)? {
-        "user" => Role::User,
-        "assistant" => Role::Assistant,
-        "system" => Role::System,
-        _ => return None,
-    };
+    if !matches!(v.get("role").and_then(Value::as_str)?, "user" | "assistant" | "system") {
+        return None;
+    }
 
     let mut blocks = Vec::new();
     match v.get("content") {
@@ -500,29 +523,51 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
         _ => {}
     }
 
+    message_with_blocks(v, blocks, session, None, None)
+}
+
+fn message_with_blocks(
+    v: &Value,
+    blocks: Vec<Block>,
+    session: &mut Session,
+    summary: Option<prompt::Summary>,
+    system_text: Option<String>,
+) -> Option<Message> {
+    let role = match v.get("role").and_then(Value::as_str)? {
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        "system" => Role::System,
+        _ => return None,
+    };
     // Side effects from the first user turn: pull cwd + a clean title out of the prompt text, and
     // note the harness-injected `<task>` / `<environment_details>` wrappers (which are embedded in
     // the human's own text, so the turn stays a Prompt — we just flag that it carried them).
     let mut wraps_task = false;
     let mut wraps_env = false;
     if role == Role::User {
-        let plain = blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Text { text } => text.inline_str(),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        wraps_task = plain.contains("<task>");
-        wraps_env = plain.contains("<environment_details>");
+        let summary = summary.unwrap_or_else(|| {
+            let plain = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Text { text } => text.inline_str(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            prompt::Summary {
+                cwd: extract_cwd(&plain),
+                title: clean_user_title(&plain).map(|t| crate::ir::truncate(&t, 80)),
+                task: plain.contains("<task>"),
+                environment: plain.contains("<environment_details>"),
+            }
+        });
+        wraps_task = summary.task;
+        wraps_env = summary.environment;
         if session.cwd.is_none() {
-            session.cwd = extract_cwd(&plain);
+            session.cwd = summary.cwd;
         }
         if session.title.is_none() {
-            if let Some(t) = clean_user_title(&plain) {
-                session.title = Some(crate::ir::truncate(&t, 80));
-            }
+            session.title = summary.title;
         }
     }
 
@@ -541,7 +586,7 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
     }
     m.content = blocks;
     if role == Role::System && session.system_prompt.is_none() {
-        if let Some(t) = m.text() {
+        if let Some(t) = system_text.or_else(|| m.text()) {
             if !t.trim().is_empty() {
                 session.system_prompt = Some(t);
             }
@@ -571,6 +616,146 @@ fn parse_message(v: &Value, session: &mut Session) -> Option<Message> {
         }
     }
     Some(m)
+}
+
+const MESSAGE_FIELDS: &[&str] = &["role", "isSummary", "condenseId", "condenseParent", "ts", "content"];
+
+/// Enumerate only body text views; None is an empty parsed Text block.
+fn text_views<'a>(
+    content: Option<JsonView<'a>>,
+    discovery: bool,
+    mut visit: impl FnMut(Option<JsonView<'a>>) -> Result<()>,
+) -> Result<()> {
+    let Some(content) = content else { return Ok(()) };
+    if content.is_string()? {
+        visit(Some(content))?;
+    } else if let Some(parts) = content.array()? {
+        for part in parts {
+            let Some(part) = Fields::parse(part?, &["type", "text"])? else {
+                continue;
+            };
+            let text = if let Some(view) = part.get("text") {
+                view.is_string()?.then_some(view)
+            } else {
+                None
+            };
+            if if discovery {
+                text.is_none()
+            } else {
+                part.string("type")?.as_deref() != Some("text")
+            } {
+                continue;
+            }
+            visit(text)?;
+        }
+    }
+    Ok(())
+}
+/// Feed the same joined text as text_parts (discovery) or parsed Text blocks (streaming).
+fn visit_text(content: Option<JsonView<'_>>, discovery: bool, feed: &mut dyn FnMut(&str)) -> Result<()> {
+    let mut first = true;
+    text_views(content, discovery, |text| {
+        if !first {
+            feed("\n");
+        }
+        first = false;
+        if let Some(text) = text {
+            text.for_each_str_chunk(|chunk| {
+                feed(chunk);
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })
+}
+fn view_message(
+    view: JsonView<'_>,
+    record: &Fields<'_>,
+    metadata: &Value,
+    session: &mut Session,
+    spans: bool,
+    history: &Path,
+) -> Result<Option<Message>> {
+    if !spans {
+        return Ok(parse_message(view.resolve()?.as_ref(), session));
+    }
+    let content = record.get("content");
+    let summary = if metadata.get("role").and_then(Value::as_str) == Some("user") {
+        Some(prompt::summarize(|feed| visit_text(content, false, feed))?)
+    } else {
+        None
+    };
+    let system_text =
+        if metadata.get("role").and_then(Value::as_str) == Some("system") && session.system_prompt.is_none() {
+            let mut text = String::new();
+            text_views(content, false, |view| {
+                let mut started = false;
+                if let Some(view) = view {
+                    view.for_each_str_chunk(|chunk| {
+                        if !chunk.is_empty() && !started {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            started = true;
+                        }
+                        text.push_str(chunk);
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
+            Some(text)
+        } else {
+            None
+        };
+    let mut blocks = Vec::new();
+    if let Some(content) = content {
+        if let Some(text) = content.text(true)? {
+            blocks.push(Block::Text { text });
+        } else if let Some(parts) = content.array()? {
+            for part in parts {
+                let part = part?;
+                let reasoning = Fields::parse(part, &["type", "text"])?;
+                let block = if reasoning
+                    .as_ref()
+                    .map(|r| r.string("type"))
+                    .transpose()?
+                    .flatten()
+                    .as_deref()
+                    == Some("reasoning")
+                {
+                    Some(Block::Thinking {
+                        text: reasoning
+                            .unwrap()
+                            .get("text")
+                            .map(|v| v.text(true))
+                            .transpose()?
+                            .flatten()
+                            .unwrap_or_default(),
+                        signature: None,
+                        encrypted: None,
+                        redacted: false,
+                    })
+                } else {
+                    anthropic::block_from_view(part, &anthropic::ANTHROPIC, true)?
+                };
+                if let Some(block) = block {
+                    blocks.push(block);
+                }
+            }
+        }
+    }
+    for block in &mut blocks {
+        let text = match block {
+            Block::Text { text } | Block::Thinking { text, .. } => Some(text),
+            Block::ToolResult { content, .. } => Some(content),
+            _ => None,
+        };
+        if let Some(crate::Text::Span(span)) = text {
+            span.source = Some(history.to_path_buf());
+        }
+    }
+    Ok(message_with_blocks(metadata, blocks, session, summary, system_text))
 }
 
 /// Roo writes model reasoning as `{type: "reasoning", text, summary: []}` (Cline uses Anthropic's
@@ -855,16 +1040,32 @@ fn newest_mtime(dir: &Path) -> Option<DateTime<Utc>> {
 /// Best-effort cwd from `task_metadata.json`. Different Cline/Roo versions key it differently
 /// (`cwd`, `workspace`, `workspacePath`, …) — probe the common ones.
 fn cwd_from_metadata(dir: &Path) -> Option<PathBuf> {
-    let text = fs::read_to_string(dir.join("task_metadata.json")).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    for key in ["cwd", "workspace", "workspacePath", "workspaceFolder", "cwd_path"] {
-        if let Some(p) = v.get(key).and_then(Value::as_str) {
-            if !p.is_empty() {
-                return Some(PathBuf::from(p));
+    metadata_cwd(dir).ok().flatten()
+}
+fn metadata_cwd(dir: &Path) -> Result<Option<PathBuf>> {
+    Ok(optional_document(&dir.join("task_metadata.json"), |view| {
+        let keys = ["cwd", "workspace", "workspacePath", "workspaceFolder", "cwd_path"];
+        let Some(fields) = Fields::parse(view, &keys)? else {
+            return Ok(None);
+        };
+        for key in keys {
+            if let Some(path) = fields.string(key)?.filter(|p| !p.is_empty()) {
+                return Ok(Some(PathBuf::from(path)));
             }
         }
+        Ok(None)
+    })?
+    .flatten())
+}
+fn optional_document<T>(path: &Path, visit: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<Option<T>> {
+    let Ok(source) = JsonSource::capture(path) else {
+        return Ok(None);
+    };
+    match source.read_document(visit) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.is::<InvalidJson>() => Ok(None),
+        Err(error) => Err(error),
     }
-    None
 }
 
 /// Read timestamp hints from `ui_messages.json` (an array of `{ts: epoch_ms, type, say/ask, text}`
@@ -878,37 +1079,126 @@ fn cwd_from_metadata(dir: &Path) -> Option<PathBuf> {
 /// `(created_at, updated_at, last_api_start)` extracted from a task's `ui_messages.json`.
 type UiTimes = (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
 
-/// Small file (one entry per UI event, no transcript bodies), so a plain `from_str::<Value>` here is
-/// fine — the OOM concern is `api_conversation_history.json`, not this sidecar.
-fn ui_message_times(dir: &Path) -> UiTimes {
-    let Ok(text) = fs::read_to_string(dir.join("ui_messages.json")) else {
-        return (None, None, None);
-    };
-    let Ok(arr) = serde_json::from_str::<Value>(&text) else {
-        return (None, None, None);
-    };
-    let Some(items) = arr.as_array() else {
-        return (None, None, None);
-    };
-
-    let mut first_ts: Option<DateTime<Utc>> = None;
-    let mut last_ts: Option<DateTime<Utc>> = None;
-    for it in items {
-        if let Some(ts) = it.get("ts").and_then(Value::as_i64) {
-            if let Some(dt) = DateTime::<Utc>::from_timestamp_millis(ts) {
-                first_ts.get_or_insert(dt);
-                last_ts = Some(dt);
+/// Reduce timestamps while skipping UI text payloads under the original whole-Value boundary.
+fn ui_message_times(dir: &Path) -> Result<UiTimes> {
+    Ok(optional_document(&dir.join("ui_messages.json"), |view| {
+        let mut first_ts = None;
+        let mut last_ts = None;
+        if let Some(items) = view.array()? {
+            for item in items {
+                let Some(fields) = Fields::parse(item?, &["ts"])? else {
+                    continue;
+                };
+                if let Some(ts) = fields
+                    .get("ts")
+                    .map(JsonView::as_number)
+                    .transpose()?
+                    .flatten()
+                    .and_then(|n| n.as_i64())
+                {
+                    if let Some(dt) = DateTime::<Utc>::from_timestamp_millis(ts) {
+                        first_ts.get_or_insert(dt);
+                        last_ts = Some(dt);
+                    }
+                }
             }
         }
-    }
-    // created and first_user_ts are both the first event's ts (as the old code used `f` for both).
-    (first_ts, last_ts, first_ts)
+        Ok((first_ts, last_ts, first_ts))
+    })?
+    .unwrap_or_default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn native_task_views_match_owned_messages_metadata_and_invalid_record_boundaries() {
+        let world = cv_testkit::World::new("cline-source-views");
+        let dir = world.base.join("1717000000000");
+        fs::create_dir(&dir).unwrap();
+        let history = dir.join("api_conversation_history.json");
+        let body = "雪\n\"\\".repeat(8192);
+        let prompt = format!("{body}<task>late selected title</task>\n# Current Working Directory (/selected) Files");
+        let records = json!([
+            {"role":"user","content":[{"type":"text","text":""},{"type":"text","text":prompt}]},
+            {"role":"assistant","content":[
+                {"type":"reasoning","text":body},
+                {"type":"tool_use","id":"call","name":"read","input":{"payload":body,"n":1}},
+                {"type":"text","text":"done"}
+            ]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":body}]},
+            {"role":"system","content":[{"type":"text","text":""},{"type":"text","text":body}]},
+            {"role":"user","content":"condensed","isSummary":true,"condenseId":"c"}
+        ]);
+        let mut wire = serde_json::to_string(&records).unwrap();
+        wire.pop();
+        wire.push_str(", {\"role\":\"user\",\"content\":\"discard\",\"unknown\":1e400}, {\"role\":\"user\",\"content\":\"discard\",\"unknown\":\"\\ud800\"}]");
+        fs::write(&history, &wire).unwrap();
+        fs::write(
+            dir.join("task_metadata.json"),
+            serde_json::to_vec(&json!({"cwd":"/fallback","ignored":body})).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("ui_messages.json"),
+            serde_json::to_vec(&json!([
+                {"ts":1717000000001_i64,"text":body},{"ts":1717000000002_i64,"text":body}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        for harness in [Harness::Cline, Harness::Roo] {
+            let expected = parse_task_dir(&dir, "1717000000000", harness).unwrap();
+            assert_eq!(expected.title.as_deref(), Some("late selected title"));
+            assert_eq!(expected.cwd, Some(PathBuf::from("/selected")));
+            assert_eq!(
+                expected.created_at,
+                DateTime::<Utc>::from_timestamp_millis(1717000000001)
+            );
+            assert_eq!(expected.system_prompt.as_deref(), Some(body.as_str()));
+            for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+                let mut sink = CollectSink::default();
+                let mut actual = stream_task_dir(&dir, "1717000000000", harness, &opts, &mut sink).unwrap();
+                actual.messages = sink.messages;
+                assert_eq!(
+                    actual.messages.iter().flat_map(|m| &m.content).any(|block| {
+                        matches!(
+                            block,
+                            Block::ToolUse {
+                                input: crate::Json::Source(_),
+                                ..
+                            }
+                        )
+                    }),
+                    opts.spans
+                );
+                if opts.spans {
+                    assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| {
+                        matches!(block, Block::Text { text: crate::Text::Span(span) } if span.source.as_deref() == Some(history.as_path()))
+                    }));
+                }
+                actual.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_string(&actual).unwrap(),
+                    serde_json::to_string(&expected).unwrap()
+                );
+            }
+            // Discovery retains its whole-Value acceptance, unlike per-child transcript replay.
+            assert!(scan(&dir, "1717000000000", harness).is_none());
+        }
+        fs::write(&history, serde_json::to_vec(&records).unwrap()).unwrap();
+        let r = scan(&dir, "1717000000000", Harness::Cline).unwrap();
+        assert_eq!(r.title.as_deref(), Some("late selected title"));
+        assert_eq!(r.cwd, Some(PathBuf::from("/selected")));
+        assert_eq!(r.message_count, 4);
+        fs::write(&history, "[{\"role\":\"user\",\"content\":\"ok\"},]").unwrap();
+        assert!(parse_task_dir(&dir, "1717000000000", Harness::Cline)
+            .unwrap()
+            .messages
+            .is_empty());
+    }
 
     #[test]
     fn roo_reasoning_and_a_condense_summary_with_its_boundary() {
