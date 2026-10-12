@@ -36,8 +36,9 @@ pub fn read_head(path: &Path, max_bytes: usize) -> Option<String> {
 /// failures are errors. Identity is captured for this demand, without a historical source stamp.
 pub fn read_head_checked(path: &Path, max_bytes: usize) -> anyhow::Result<Option<String>> {
     use std::io::Read;
-    let source = match CheckedSource::open(path) {
-        Ok(source) => source,
+    let path = std::path::absolute(path)?;
+    let captured = match crate::json::JsonSource::capture(&path) {
+        Ok(captured) => captured,
         Err(error)
             if error
                 .downcast_ref::<std::io::Error>()
@@ -47,6 +48,9 @@ pub fn read_head_checked(path: &Path, max_bytes: usize) -> anyhow::Result<Option
         }
         Err(error) => return Err(error),
     };
+    // Absence is optional only at initial capture. Disappearance while opening/reading a source
+    // already observed present is a failed demand, like any other mid-demand mutation.
+    let source = CheckedSource::open_captured(path, captured)?;
     let len = usize::try_from(source.len.min(u64::try_from(max_bytes).unwrap_or(u64::MAX)))?;
     let mut bytes = vec![0; len];
     let result = source.file.try_clone()?.read_exact(&mut bytes);
@@ -259,9 +263,12 @@ struct CheckedSource {
 }
 impl CheckedSource {
     fn open(path: &Path) -> anyhow::Result<Self> {
-        use anyhow::Context;
         let path = std::path::absolute(path)?;
         let captured = crate::json::JsonSource::capture(&path)?;
+        Self::open_captured(path, captured)
+    }
+    fn open_captured(path: PathBuf, captured: crate::json::JsonSource) -> anyhow::Result<Self> {
+        use anyhow::Context;
         let file = std::fs::File::open(&path).with_context(|| format!("opening Text source {}", path.display()))?;
         let metadata = file.metadata()?;
         let len = metadata.len();
@@ -1381,6 +1388,9 @@ mod tests {
         for cap in 0..5 {
             assert_eq!(read_head_checked(&path, cap).unwrap(), read_head(&path, cap));
         }
+        let captured = crate::json::JsonSource::capture(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(CheckedSource::open_captured(path, captured).is_err());
     }
 
     #[test]
