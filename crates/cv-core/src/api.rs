@@ -4,14 +4,16 @@
 //! implementation of a noun, so a consumer cannot tell which door a row came through
 //! (docs/INTERFACE-V2.md §3) — the rows here are the same functions `cv <cmd> --json` prints with.
 //!
-//! Pure in the sense that matters: no socket, no headers, no process state. Every error is a JSON
+//! No socket or headers. Bounded source-verified read state reuses unchanged transcripts. Every error is a JSON
 //! `{"error": …}` with the status that names it (400 caller mistake, 404 absent, 410 removed with a
 //! pointer, 500 broke).
 
 use crate::ir::{Harness, SessionRef};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Flow, MessageSink};
 use crate::{Message, Session};
 use serde_json::{json, Value};
+
+mod read;
 
 /// Route a decoded path (`["api", "session", "claude", "abc"]`) plus a raw query string.
 /// Never panics; an unknown path is a 404.
@@ -228,30 +230,19 @@ fn session_head(harness: &str, id: &str) -> (u16, Value) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    let mut total = 0usize;
-    let mut counter = |_m: Message| {
-        total += 1;
-        Flow::Continue
-    };
-    let shell = match adapter.try_stream(&r, &ParseOptions::lazy(), &mut counter) {
-        Ok(shell) => shell,
+    let head = match read::head(read::shared(), adapter.as_ref(), &r) {
+        Ok(head) => head,
         Err(e) => return err(500, &format!("stream failed: {e:#}")),
     };
     let mut row = crate::rows::session_row(&r, size_of(&r));
     let map = row.as_object_mut().expect("session_row is an object");
-    // The freshly-parsed title/cwd beat the catalog's, which can be stale.
-    if let Some(t) = &shell.title {
-        map.insert("title".into(), json!(t));
+    for (key, value) in head.as_object().expect("head metadata is an object") {
+        // Parsed title/cwd replace catalog hints only when present, as before.
+        if matches!(key.as_str(), "title" | "cwd") && value.is_null() {
+            continue;
+        }
+        map.insert(key.clone(), value.clone());
     }
-    if let Some(c) = &shell.cwd {
-        map.insert("cwd".into(), json!(c.to_string_lossy()));
-    }
-    map.insert("total".into(), json!(total));
-    map.insert("model".into(), json!(shell.model));
-    map.insert("git".into(), json!(shell.git));
-    map.insert("system_prompt".into(), json!(shell.system_prompt));
-    map.insert("lineage".into(), json!(shell.lineage));
-    map.insert("extra".into(), Value::Object(shell.extra));
     ok(row)
 }
 
@@ -272,6 +263,9 @@ struct WindowSink {
     /// claude's native stream emits none.
     meta: Option<Value>,
     fail: Option<anyhow::Error>,
+    capture: bool,
+    checkpoint: Option<(usize, crate::stream::Checkpoint, Option<Value>)>,
+    reads: crate::source::ReadSet,
 }
 
 /// The `session` object a windowed read returns. Whatever a session knows about itself has to
@@ -289,6 +283,19 @@ fn session_meta_json(s: &Session) -> Value {
 }
 
 impl MessageSink for WindowSink {
+    fn dependency(&mut self, path: &std::path::Path) {
+        self.reads.record(path);
+    }
+    fn wants_checkpoint(&mut self, _: u64) -> bool {
+        self.capture && self.end.is_some_and(|end| end > self.start && self.idx == end)
+    }
+    fn checkpoint(&mut self, checkpoint: &mut crate::stream::Checkpoint) {
+        self.capture = false;
+        if read::bounded_size(&(&*checkpoint, &self.meta)).is_some() {
+            self.checkpoint = Some((self.idx, checkpoint.clone(), self.meta.clone()));
+        }
+    }
+
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.fail.take()
     }
@@ -300,6 +307,7 @@ impl MessageSink for WindowSink {
     }
 
     fn message(&mut self, m: Message) -> Flow {
+        read::note_json_sources(&m, &mut self.reads);
         let idx = self.idx;
         self.idx += 1;
         if idx < self.start {
@@ -368,28 +376,13 @@ fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
         Err(e) => return e,
     };
 
-    // Lazy spans (so unread giant fields aren't materialized) plus, when asked, the `extra` maps.
-    let opts = ParseOptions {
-        extra: want_extra,
-        ..ParseOptions::lazy()
-    };
-    let mut sink = WindowSink {
-        resolver: crate::Resolver::new(Some(r.path.clone())),
-        idx: 0,
-        start,
-        end,
-        msgs: Vec::new(),
-        more: false,
-        meta: None,
-        fail: None,
-    };
-    match adapter.try_stream(&r, &opts, &mut sink) {
-        // Some adapters never call `meta()` — Claude is one — so the sink would stay empty and
-        // the response say `session: null` for the single most-read harness. `stream` RETURNS
-        // the session shell it assembled; use it when nothing was pushed.
-        Ok(shell) if sink.meta.is_none() => sink.meta = Some(session_meta_json(&shell)),
-        Ok(_) => {}
+    let (shell, mut sink) = match read::window(read::shared(), adapter.as_ref(), &r, start, end, want_extra) {
+        Ok(value) => value,
         Err(e) => return err(500, &format!("stream failed: {e:#}")),
+    };
+    // Preserve first pushed metadata; readers which never push it use the returned shell.
+    if sink.meta.is_none() {
+        sink.meta = Some(session_meta_json(&shell));
     }
 
     // The count is exact when the stream ran to EOF.
@@ -617,6 +610,7 @@ fn err(status: u16, msg: &str) -> (u16, Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseOptions;
 
     fn window(start: usize, end: Option<usize>) -> WindowSink {
         WindowSink {
@@ -628,6 +622,9 @@ mod tests {
             more: false,
             meta: None,
             fail: None,
+            capture: false,
+            checkpoint: None,
+            reads: crate::source::ReadSet::default(),
         }
     }
 
