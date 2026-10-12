@@ -138,8 +138,8 @@ small resolved-message/metadata and fresh discovery digests in separate fidelity
 giant outputs and whole selected ChatGPT mappings are not included in these bounded claims.
 `--only doctor` checks giant Claude/Codex/Gemini decoded attribution in lazy-extra mode against
 separate full-mode processes, optionally using the supplied old baseline. Default CI's suite
-includes stores/chunks and the five native active formats. Doctor remains an opt-in check until
-the rich Claude parser satisfies the same limits. Portable resolver promises are checked
+includes stores/chunks, the five native active formats and the composed doctor pass. The doctor
+gate compares lazy-extra with the full report oracle in separate processes. Portable resolver promises are checked
 separately; cold no-mmap document readers may still own the source bytes and are not admitted
 to the native adapter limits.
 `--only active --format zed` explicitly opts into compressed-thread discovery/streaming with
