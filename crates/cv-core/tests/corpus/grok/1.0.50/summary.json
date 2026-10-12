@@ -28,7 +28,8 @@
       "subagent_returns": 0,
       "affordances": {
         "checkpoint/create": 1,
-        "fork/fork": 1
+        "fork/fork": 1,
+        "hook/run": 6
       },
       "lineage": {
         "forked_from": "c5f345ba-402c-46e9-838e-6c95011d9809"
@@ -64,7 +65,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
-        "checkpoint/create": 1
+        "checkpoint/create": 1,
+        "hook/run": 1
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -92,7 +94,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
-        "checkpoint/create": 1
+        "checkpoint/create": 1,
+        "hook/run": 1
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -130,6 +133,7 @@
       "subagent_returns": 0,
       "affordances": {
         "checkpoint/create": 1,
+        "hook/run": 1,
         "plan/write": 2
       },
       "lineage": {},
@@ -168,6 +172,7 @@
       "subagent_returns": 0,
       "affordances": {
         "checkpoint/create": 1,
+        "hook/run": 1,
         "plan/enter": 1,
         "plan/exit": 1
       },
@@ -208,6 +213,7 @@
       "affordances": {
         "background_job/read": 1,
         "checkpoint/create": 1,
+        "hook/run": 1,
         "subagent_spawn/spawn": 1
       },
       "lineage": {},
@@ -288,7 +294,8 @@
       "affordances": {
         "background_job/read": 2,
         "background_job/start": 1,
-        "checkpoint/create": 1
+        "checkpoint/create": 1,
+        "hook/run": 1
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -329,6 +336,7 @@
       "subagent_returns": 0,
       "affordances": {
         "checkpoint/create": 1,
+        "hook/run": 1,
         "schedule/create": 1,
         "schedule/delete": 1,
         "schedule/list": 1
@@ -368,7 +376,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
-        "checkpoint/create": 1
+        "checkpoint/create": 1,
+        "hook/run": 1
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -396,7 +405,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
-        "checkpoint/create": 1
+        "checkpoint/create": 1,
+        "hook/run": 1
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -442,7 +452,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
-        "checkpoint/create": 1
+        "checkpoint/create": 1,
+        "hook/run": 1
       },
       "lineage": {},
       "model": "corpus-glm",
@@ -524,7 +535,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "hook/run": 1
+      },
       "lineage": {},
       "model": "corpus-glm",
       "skipped_lines": 0
@@ -582,7 +595,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
-        "checkpoint/create": 5
+        "checkpoint/create": 5,
+        "hook/run": 6
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -612,7 +626,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
-        "checkpoint/create": 4
+        "checkpoint/create": 4,
+        "hook/run": 5
       },
       "lineage": {},
       "model": "glm-5.3",

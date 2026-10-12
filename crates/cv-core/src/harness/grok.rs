@@ -15,7 +15,8 @@
 //! - `updates.jsonl` — an ACP-style `session/update` event stream (plus `_x.ai/session/update`).
 //!   We mine `tool_call`/`tool_call_update` entries (keyed by `toolCallId`) to *enrich* tool calls
 //!   with a human `title`, a `kind`, file `locations`, and a `completed`/`failed` status that lets us
-//!   set `ToolResult.is_error` correctly (chat_history alone doesn't mark errors).
+//!   set `ToolResult.is_error` correctly (chat_history alone doesn't mark errors). Its
+//!   `hook_execution` updates are the session's hook runs (`hook`/`run` affordance rows).
 //! - `events.jsonl` — timing / permission lifecycle (`tool_started`, `permission_*`,
 //!   `tool_completed{outcome,duration_ms}`, `turn_*`). Not needed for content; we don't ingest it.
 //!
@@ -196,8 +197,9 @@ impl Adapter for Grok {
         Ok(s)
     }
 
-    /// The todo list `todo_write` keeps in the session directory: `plan.json` `{todos: {id: …}}`,
-    /// then the per-prompt restore points of `rewind_points.jsonl`.
+    /// The todo list `todo_write` keeps in the session directory (`plan.json` `{todos: {id: …}}`),
+    /// then the per-prompt restore points of `rewind_points.jsonl`, then every hook run
+    /// `updates.jsonl` recorded ([`hook_runs`]).
     fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
         let plan = fs::read_to_string(r.path.join("plan.json"))
             .ok()
@@ -206,7 +208,10 @@ impl Adapter for Grok {
                 let items = crate::affordance::items_of(&v);
                 crate::affordance::plan_state(crate::affordance::Kind::Plan, "plan.json", items)
             });
-        plan.into_iter().chain(rewind_points(&r.path)).collect()
+        plan.into_iter()
+            .chain(rewind_points(&r.path))
+            .chain(hook_runs(&r.path))
+            .collect()
     }
 }
 
@@ -237,6 +242,55 @@ fn rewind_points(dir: &Path) -> Vec<crate::affordance::Affordance> {
             Affordance::store_event(Kind::Checkpoint, "create", ts, "rewind_points.jsonl", &summary)
         })
         .collect()
+}
+
+/// The hook runs `updates.jsonl` records as `hook_execution` updates (`{event_name, runs: [{name,
+/// status: {status, elapsed_ms}}]}`), one `hook`/`run` row each. Grok keeps no hook output, so
+/// these say a hook ran and how it ended, not what it told the model. Only lines naming
+/// `hook_execution` are parsed.
+fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
+    use crate::affordance::{Affordance, Kind};
+    let Ok(text) = fs::read_to_string(dir.join("updates.jsonl")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| l.contains("\"hook_execution\"")) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(u) = v.pointer("/params/update") else {
+            continue;
+        };
+        if u.get("sessionUpdate").and_then(Value::as_str) != Some("hook_execution") {
+            continue;
+        }
+        let event = u.get("event_name").and_then(Value::as_str).unwrap_or("hook");
+        let timestamp = v
+            .pointer("/params/_meta/agentTimestampMs")
+            .and_then(Value::as_i64)
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .or_else(|| {
+                v.get("timestamp")
+                    .and_then(Value::as_i64)
+                    .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+            });
+        for run in u.get("runs").and_then(Value::as_array).into_iter().flatten() {
+            let name = run.get("name").and_then(Value::as_str).unwrap_or("");
+            let status = run.pointer("/status/status").and_then(Value::as_str).unwrap_or("");
+            let mut summary = format!("{event}: {name} · {status}");
+            if let Some(ms) = run.pointer("/status/elapsed_ms").and_then(Value::as_u64) {
+                summary.push_str(&format!(" · {ms} ms"));
+            }
+            out.push(Affordance::store_event(
+                Kind::Hook,
+                "run",
+                timestamp,
+                "updates.jsonl",
+                &summary,
+            ));
+        }
+    }
+    out
 }
 
 /// Subagent nickname + Grok-specific session facts from `summary.json`: a subagent's `agent_name`

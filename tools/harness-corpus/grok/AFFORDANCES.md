@@ -16,7 +16,7 @@ The IR column is how cv reads it after this lane's adapter changes.
 | session title / summaries / recap | `models.session_summary` | `summary.json` `generated_title`, `session_summary`, `title_refresh_idx` | yes (chat session) | session title |
 | AGENTS.md rules | project `AGENTS.md` | `<rules>` in the `<user_info>` user line, `prompt_context.json` | yes | `InjectedContext` |
 | system prompt | — | `system_prompt.txt` + leading `system` line | yes | `Session::system_prompt` |
-| hooks | `[[hooks.<Event>]]` in config | `updates.jsonl` `hook_execution` (name, status, elapsed); output not kept | yes | not read |
+| hooks | `[[hooks.<Event>]]` in config | `updates.jsonl` `hook_execution` (name, status, elapsed); output not kept | yes | one `hook`/`run` row per run (no output to show) |
 | shell, read, edit, write, list | `run_terminal_command`, `read_file`, `search_replace`, `write`, `list_dir` | `assistant.tool_calls[]` + `tool_result` lines; `tool_call`/`tool_call_update` updates | yes | `ToolUse`/`ToolResult` (error from updates) |
 | parallel calls | two `tool_calls` in one line | — | yes | two `ToolUse` |
 | tool error | failed command | `tool_result` + `tool_call_update status: failed` | yes | `ToolResult` error |
