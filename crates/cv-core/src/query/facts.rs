@@ -11,7 +11,7 @@
 //! CLI is a silent wrong answer, not a missing feature.
 
 use crate::events::{self, Event};
-use crate::ir::{Block, Message, Role, Session, SessionRef};
+use crate::ir::{Block, Message, Session, SessionRef};
 use crate::query::{ExtFacts, Facts, FieldId, SessionQuery, Tri};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
@@ -127,6 +127,12 @@ impl<'a> SessionFacts<'a> {
 }
 
 impl ExtFacts for SessionFacts<'_> {
+    fn model(&self, needle: &str, exact: bool) -> Tri {
+        self.reduced
+            .and_then(|f| f.models.get(needle))
+            .map_or(Tri::Unknown, |m| Tri::of(if exact { m.exact } else { m.contains }))
+    }
+
     fn text(&self, needle: &str) -> Tri {
         // The id key is the session id; `needle` is already lowercased by the parser, matching the
         // map keys we inserted under.
@@ -135,7 +141,7 @@ impl ExtFacts for SessionFacts<'_> {
 
     fn tool(&self, name: &str) -> Tri {
         if let Some(facts) = self.reduced {
-            return Tri::of(facts.tools.iter().any(|t| t.contains(name)));
+            return Tri::of(facts.tools.contains(name));
         }
         Tri::of(
             self.events()
@@ -146,7 +152,7 @@ impl ExtFacts for SessionFacts<'_> {
 
     fn touched(&self, path: &str) -> Tri {
         if let Some(facts) = self.reduced {
-            return Tri::of(facts.targets.iter().any(|t| t.contains(path)));
+            return Tri::of(facts.targets.contains(path));
         }
         Tri::of(self.events().iter().any(|e| {
             matches!(e.kind, "file_edit" | "file_read")
@@ -237,11 +243,12 @@ pub fn matches_full(query: &SessionQuery, r: &SessionRef, session: &Session, tex
 }
 
 /// The transcript facts the query actually consults. Repeated calls and rich payloads contribute
-/// no retained messages or event rows. Relative file targets remain distinct until EOF because
-/// the whole-session evaluator resolves every target against the final (possibly late) cwd.
+/// no retained messages or event rows. Model/tool and matched-path state scale with query needles.
+/// Unmatched relative paths still scale with distinct source targets until EOF because the
+/// whole-session evaluator resolves every target against the final (possibly late) cwd.
 #[derive(Default)]
 struct ReducedFacts {
-    models: HashSet<String>,
+    models: HashMap<String, ModelMatch>,
     tools: HashSet<String>,
     targets: HashSet<String>,
     errors: bool,
@@ -250,76 +257,118 @@ struct ReducedFacts {
     counts: Option<crate::affordance::Counts>,
 }
 
+#[derive(Default)]
+struct ModelMatch {
+    contains: bool,
+    exact: bool,
+}
+
+impl ReducedFacts {
+    fn note_model(&mut self, model: &str) {
+        if !self.models.is_empty() {
+            let model = model.to_lowercase();
+            for (needle, matched) in &mut self.models {
+                matched.contains |= model.contains(needle.as_str());
+                matched.exact |= model == *needle;
+            }
+        }
+    }
+}
+
 struct FactSink {
     facts: ReducedFacts,
-    models: bool,
-    tools: bool,
-    targets: bool,
+    tools: Vec<String>,
+    targets: Vec<String>,
+    pending_targets: HashSet<String>,
     events: bool,
 }
 
 impl FactSink {
     fn new(query: &SessionQuery) -> Self {
-        let tools = !query.needles(FieldId::Tool).is_empty();
-        let targets = !query.needles(FieldId::Touched).is_empty();
+        let tools = query.needles(FieldId::Tool);
+        let targets = query.needles(FieldId::Touched);
         let flags = query.needles(FieldId::Has);
         Self {
-            facts: ReducedFacts::default(),
-            models: !query.needles(FieldId::Model).is_empty(),
+            facts: ReducedFacts {
+                models: query
+                    .needles(FieldId::Model)
+                    .into_iter()
+                    .map(|n| (n, ModelMatch::default()))
+                    .collect(),
+                ..Default::default()
+            },
+            events: !tools.is_empty()
+                || !targets.is_empty()
+                || flags.iter().any(|f| matches!(f.as_str(), "errors" | "tools")),
             tools,
             targets,
-            events: tools || targets || flags.iter().any(|f| matches!(f.as_str(), "errors" | "tools")),
+            pending_targets: HashSet::new(),
         }
     }
 
-    fn finish(mut self, session: &mut Session) -> ReducedFacts {
-        self.facts.targets = self
-            .facts
-            .targets
-            .into_iter()
-            .map(|p| {
-                let path = std::path::Path::new(&p);
-                match session.cwd.as_deref().filter(|_| !path.is_absolute()) {
-                    Some(cwd) => cwd.join(path).to_string_lossy().to_lowercase(),
-                    None => p.to_lowercase(),
+    fn note_target(&mut self, target: String) {
+        if self.facts.targets.len() == self.targets.len() {
+            return;
+        }
+        // A match inside the target survives a later cwd prefix. Absolute paths are already final;
+        // only unmatched relative paths can acquire a new match when the final cwd arrives.
+        let lowered = target.to_lowercase();
+        for needle in &self.targets {
+            if lowered.contains(needle) {
+                self.facts.targets.insert(needle.clone());
+            }
+        }
+        if self.facts.targets.len() == self.targets.len() {
+            self.pending_targets.clear();
+        } else if !std::path::Path::new(&target).is_absolute() {
+            self.pending_targets.insert(target);
+        }
+    }
+
+    fn finish(mut self, session: &Session) -> ReducedFacts {
+        for p in self.pending_targets.drain() {
+            let path = std::path::Path::new(&p);
+            let resolved = match session.cwd.as_deref() {
+                Some(cwd) => cwd.join(path).to_string_lossy().to_lowercase(),
+                None => p.to_lowercase(),
+            };
+            for needle in &self.targets {
+                if resolved.contains(needle) {
+                    self.facts.targets.insert(needle.clone());
                 }
-            })
-            .collect();
-        // Only model IDs are projected into the evaluator's existing Session input. These are
-        // private query facts, not an IR transcript or a serialized read result.
-        session.messages = self
-            .facts
-            .models
-            .drain()
-            .map(|model| {
-                let mut m = Message::new(Role::Assistant);
-                m.model = Some(model);
-                m
-            })
-            .collect();
+            }
+        }
+        if let Some(model) = session.model.as_deref() {
+            self.facts.note_model(model);
+        }
         self.facts
     }
 }
 
 impl crate::MessageSink for FactSink {
-    fn message(&mut self, mut m: Message) -> crate::Flow {
-        if self.models {
-            if let Some(model) = m.model.take() {
-                self.facts.models.insert(model);
-            }
+    fn message(&mut self, m: Message) -> crate::Flow {
+        if let Some(model) = m.model.as_deref() {
+            self.facts.note_model(model);
         }
         self.facts.images |= m.content.iter().any(|b| matches!(b, Block::Image { .. }));
         if self.events {
             for e in events::extract(&m, 0, None) {
                 self.facts.errors |= e.kind == "error";
                 self.facts.has_tools |= e.tool.is_some();
-                if self.tools {
+                if !self.tools.is_empty() {
                     if let Some(tool) = e.tool {
-                        self.facts.tools.insert(tool.to_lowercase());
+                        let tool = tool.to_lowercase();
+                        for needle in &self.tools {
+                            if tool.contains(needle) {
+                                self.facts.tools.insert(needle.clone());
+                            }
+                        }
                     }
                 }
-                if self.targets && matches!(e.kind, "file_edit" | "file_read") {
-                    self.facts.targets.extend(e.target);
+                if !self.targets.is_empty() && matches!(e.kind, "file_edit" | "file_read") {
+                    if let Some(target) = e.target {
+                        self.note_target(target);
+                    }
                 }
             }
         }
@@ -337,15 +386,26 @@ pub fn matches_streamed(
     r: &SessionRef,
     text_sets: &TextSets,
 ) -> anyhow::Result<bool> {
+    matches_streamed_with_probe(query, adapter, r, text_sets, &mut crate::source::Probe::default())
+}
+
+fn matches_streamed_with_probe(
+    query: &SessionQuery,
+    adapter: &dyn crate::harness::Adapter,
+    r: &SessionRef,
+    text_sets: &TextSets,
+    probe: &mut crate::source::Probe,
+) -> anyhow::Result<bool> {
     let mut sink = FactSink::new(query);
     let affordances = query
         .needles(FieldId::Has)
         .iter()
         .any(|flag| crate::affordance::Kind::parse(flag).is_some());
-    let mut session = if affordances {
-        // Reuse the counted pass's classifier and side-store rows instead of extracting a second
-        // set of affordance rows merely to ask which kinds occurred.
-        let source = crate::source::Probe::default().snapshot(r);
+    // Reuse the counted pass's classifier and side-store rows instead of extracting a second
+    // set of affordance rows merely to ask which kinds occurred. The operation's probe also
+    // shares sibling/directory metadata across refs, both here and on the cached fast path.
+    let session = if affordances {
+        let source = probe.snapshot(r);
         let (session, counted) = crate::stream::stream_counting(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?;
         if let Some(counted) = counted {
             sink.facts.counts = Some(counted.counts.clone());
@@ -353,9 +413,11 @@ pub fn matches_streamed(
         }
         session
     } else {
+        // Preserve the recording path's conditional side-store reads when no affordance result
+        // is demanded. Only the cached affordance fast path requires cross-ref probing here.
         crate::stream::stream_counted(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?
     };
-    let reduced = sink.finish(&mut session);
+    let reduced = sink.finish(&session);
     let facts = SessionFacts {
         reduced: Some(&reduced),
         ..SessionFacts::new(r, &session, text_sets)
@@ -400,11 +462,14 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
         return;
     }
     let table = query.needs_counted().then(crate::catalog::AffordanceTable::load);
+    let mut probe = crate::source::Probe::default();
     refs.retain(|r| {
         let cheap_facts = RefFacts {
             id: &r.id,
             text_sets,
-            counts: table.as_ref().and_then(|t| t.counts(r)),
+            counts: table
+                .as_ref()
+                .and_then(|t| t.counts_with_probe(r, &probe.snapshot(r), &mut probe)),
         };
         let cheap = query.eval(&Facts {
             r,
@@ -415,8 +480,9 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
             Tri::True => true,
             Tri::False => false,
             // Undecided: reduce it (which also records its counts for the next query).
-            Tri::Unknown => crate::harness::for_harness(r.harness)
-                .is_some_and(|a| matches_streamed(query, a.as_ref(), r, text_sets).unwrap_or(false)),
+            Tri::Unknown => crate::harness::for_harness(r.harness).is_some_and(|a| {
+                matches_streamed_with_probe(query, a.as_ref(), r, text_sets, &mut probe).unwrap_or(false)
+            }),
         }
     });
 }
@@ -424,6 +490,7 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::Role;
 
     fn missing_source() -> SessionRef {
         SessionRef {
@@ -627,20 +694,47 @@ mod tests {
             media_type: None,
             data_ref: Some("discarded image reference".repeat(8192)),
         });
-        for _ in 0..1000 {
+        for i in 0..1000 {
+            m.model = Some(format!("EarlyModel-{i}"));
+            if let Block::ToolUse { name, .. } = &mut m.content[0] {
+                *name = format!("Edit-{i}");
+            }
             assert_eq!(crate::MessageSink::message(&mut sink, m.clone()), crate::Flow::Continue);
         }
         assert_eq!(sink.facts.models.len(), 1);
         assert_eq!(sink.facts.tools.len(), 1);
         assert_eq!(sink.facts.targets.len(), 1);
         assert!(sink.facts.images);
+        assert!(sink.pending_targets.is_empty());
         let mut shell = Session::new("facts", crate::Harness::Claude);
         shell.cwd = Some("/late".into());
-        let facts = sink.finish(&mut shell);
-        assert_eq!(facts.targets, HashSet::from(["/late/a.rs".into()]));
-        assert_eq!(shell.messages.len(), 1);
-        assert!(shell.messages[0].content.is_empty());
-        assert!(shell.messages[0].extra.is_empty());
+        let facts = sink.finish(&shell);
+        assert_eq!(facts.targets, HashSet::from(["a.rs".into()]));
+
+        assert!(facts.models["early"].contains);
+        assert!(!facts.models["early"].exact);
+        assert!(shell.messages.is_empty());
+    }
+
+    #[test]
+    fn touched_reduction_discards_absolute_paths_and_waits_for_final_cwd() {
+        let query = SessionQuery::parse("touched:/late/work/a.rs AND touched:/absolute/wanted.rs").unwrap();
+        let mut sink = FactSink::new(&query);
+        for i in 0..1000 {
+            sink.note_target(format!("/absolute/unmatched-{i}.rs"));
+        }
+        assert!(sink.pending_targets.is_empty());
+        assert!(sink.facts.targets.is_empty());
+        sink.note_target("a.rs".into());
+        sink.note_target("/absolute/wanted.rs".into());
+        assert_eq!(sink.pending_targets, HashSet::from(["a.rs".into()]));
+        assert_eq!(sink.facts.targets, HashSet::from(["/absolute/wanted.rs".into()]));
+        let mut shell = Session::new("facts", crate::Harness::Claude);
+        shell.cwd = Some("/late/work".into());
+        assert_eq!(
+            sink.finish(&shell).targets,
+            HashSet::from(["/late/work/a.rs".into(), "/absolute/wanted.rs".into()])
+        );
     }
 
     #[test]

@@ -301,6 +301,11 @@ impl Tri {
 /// tantivy index and events catalog. cv-core stays free of those deps. The default impl
 /// ([`NoExt`]) answers `Unknown`, so a ref-only prefilter never wrongly excludes on these.
 pub trait ExtFacts {
+    /// A model predicate resolved without retaining messages. `Unknown` falls back to the
+    /// provided Session's model and turn models, preserving existing resolver implementations.
+    fn model(&self, _needle: &str, _exact: bool) -> Tri {
+        Tri::Unknown
+    }
     fn text(&self, _needle: &str) -> Tri {
         Tri::Unknown
     }
@@ -550,13 +555,22 @@ fn eval_term(t: &Term, f: &Facts) -> Tri {
         FieldId::Created => date_match(t.op, &t.val, f.r.created_at.or(f.r.updated_at)),
         FieldId::Updated => date_match(t.op, &t.val, f.r.updated_at.or(f.r.created_at)),
         // Parse-required.
-        FieldId::Model => match f.session {
-            None => Tri::Unknown,
-            Some(s) => {
-                let hit = |m: Option<&str>| m.is_some_and(|m| val_hit(&t.val, t.op, &m.to_lowercase()));
-                Tri::of(hit(s.model.as_deref()) || s.messages.iter().any(|msg| hit(msg.model.as_deref())))
+        FieldId::Model => {
+            let resolved = match &t.val {
+                Val::Strs(v) if !v.is_empty() => or_over(&t.val, |n| f.ext.model(n, t.op == Op::Eq)),
+                _ => Tri::Unknown,
+            };
+            if resolved != Tri::Unknown {
+                return resolved;
             }
-        },
+            match f.session {
+                None => Tri::Unknown,
+                Some(s) => {
+                    let hit = |m: Option<&str>| m.is_some_and(|m| val_hit(&t.val, t.op, &m.to_lowercase()));
+                    Tri::of(hit(s.model.as_deref()) || s.messages.iter().any(|msg| hit(msg.model.as_deref())))
+                }
+            }
+        }
         FieldId::Git => match f.session {
             None => Tri::Unknown,
             Some(s) => {

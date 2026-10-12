@@ -728,3 +728,162 @@ fn every_persisted_affordance_surfaces_in_the_view() {
         missing.join("\n")
     );
 }
+
+/// Query's independent oracle keeps the old full collector and old event/classification helpers.
+/// Explicit corpus roots must also supply explicit-root side stores: SessionFacts's convenience
+/// resolver otherwise uses the default harness home, which is a different store in this test.
+#[test]
+fn query_facts_match_collected_corpus() {
+    use cv_core::query::{ExtFacts, Facts, SessionFacts, SessionQuery, TextSets, Tri};
+    use std::collections::{HashMap, HashSet};
+
+    struct ScopedFacts<'a> {
+        full: SessionFacts<'a>,
+        kinds: HashSet<cv_core::affordance::Kind>,
+    }
+    impl ExtFacts for ScopedFacts<'_> {
+        fn tool(&self, n: &str) -> Tri {
+            self.full.tool(n)
+        }
+        fn touched(&self, n: &str) -> Tri {
+            self.full.touched(n)
+        }
+        fn text(&self, n: &str) -> Tri {
+            self.full.text(n)
+        }
+        fn has(&self, n: &str) -> Tri {
+            match cv_core::affordance::Kind::parse(n) {
+                Some(kind) => Tri::of(self.kinds.contains(&kind)),
+                None => self.full.has(n),
+            }
+        }
+    }
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    let world = World::in_process("query_corpus_oracle");
+    let mut checked = HashMap::<&str, usize>::new();
+    for harness in HARNESSES {
+        for version in subdirs(&corpus_root().join(harness.name)) {
+            // SQLite adapters may create ancillary files; only operate on our scratch copy.
+            let scratch = world
+                .base
+                .join("corpus")
+                .join(harness.name)
+                .join(version.file_name().unwrap());
+            copy_tree(&version, &scratch);
+            let adapter = (harness.adapter)(&scratch);
+            for r in adapter.discover().unwrap() {
+                let full = cv_core::stream::collect_with(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy()).unwrap();
+                let rows = cv_core::affordance::of_session(&full)
+                    .into_iter()
+                    .chain(adapter.store_affordances(&r));
+                let mut counts = cv_core::affordance::Counts::new();
+                for row in rows {
+                    *counts.entry(row.kind).or_default() += 1;
+                }
+                let texts = TextSets::default();
+                let scoped = ScopedFacts {
+                    full: SessionFacts::new(&r, &full, &texts),
+                    kinds: counts.keys().copied().collect(),
+                };
+                let mut queries = vec![
+                    "tool:absent-query-tool".to_owned(),
+                    "NOT tool:absent-query-tool".to_owned(),
+                    "model:absent-query-model".to_owned(),
+                    "NOT model:absent-query-model".to_owned(),
+                    "touched:absent-query-path".to_owned(),
+                    "has:errors".to_owned(),
+                    "has:tools".to_owned(),
+                    "has:images".to_owned(),
+                    "NOT (has:errors AND model:absent-query-model)".to_owned(),
+                    "has:tools OR has:images".to_owned(),
+                    "NOT has:tools AND NOT has:images".to_owned(),
+                ];
+                queries.extend(
+                    cv_core::affordance::Kind::ALL
+                        .iter()
+                        .map(|kind| format!("has:{}", kind.as_str())),
+                );
+                if let Some(model) = full
+                    .model
+                    .as_ref()
+                    .or_else(|| full.messages.iter().find_map(|m| m.model.as_ref()))
+                {
+                    let quoted = serde_json::to_string(model).unwrap();
+                    queries.extend([
+                        format!("model={quoted}"),
+                        format!("model:{quoted} AND NOT model:absent-query-model"),
+                    ]);
+                }
+                let events: Vec<_> = full
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, m)| cv_core::events::extract(m, i, full.cwd.as_deref()))
+                    .collect();
+                if let Some(tool) = events.iter().find_map(|e| e.tool.as_ref()) {
+                    queries.push(format!(
+                        "tool:{} AND NOT tool:absent-query-tool",
+                        serde_json::to_string(tool).unwrap()
+                    ));
+                }
+                if let Some(target) = events
+                    .iter()
+                    .filter(|e| matches!(e.kind, "file_edit" | "file_read"))
+                    .find_map(|e| e.target.as_ref())
+                {
+                    queries.push(format!("touched:{}", serde_json::to_string(target).unwrap()));
+                }
+                for source in queries {
+                    let query = SessionQuery::parse(&source).unwrap();
+                    let expected = query.matches(&Facts {
+                        r: &r,
+                        session: Some(&full),
+                        ext: &scoped,
+                    });
+                    let actual = cv_core::query::matches_streamed(&query, adapter.as_ref(), &r, &texts).unwrap();
+                    assert_eq!(
+                        actual,
+                        expected,
+                        "{} {} {}: {source}",
+                        harness.name,
+                        version.display(),
+                        r.id
+                    );
+                }
+                // Presence queries cannot reveal count inflation: compare the entire tiny counter
+                // against the old row collector, including this adapter's own side stores.
+                let mut discard = cv_core::stream::Discard;
+                let (_, counted) = cv_core::stream::stream_counting(
+                    adapter.as_ref(),
+                    &r,
+                    &cv_core::ParseOptions::lazy(),
+                    &mut discard,
+                )
+                .unwrap();
+                assert_eq!(
+                    counted.unwrap().counts,
+                    counts,
+                    "counts: {} {} {}",
+                    harness.name,
+                    version.display(),
+                    r.id
+                );
+                *checked.entry(harness.name).or_default() += 1;
+            }
+        }
+    }
+    assert!(checked.len() >= 10, "cross-harness coverage: {checked:?}");
+    eprintln!("query oracle checked native sessions: {checked:?}");
+}
