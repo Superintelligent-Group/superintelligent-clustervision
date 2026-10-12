@@ -21,7 +21,7 @@ The IR column is how cv reads it after this lane's adapter changes.
 | parallel calls | two `tool_calls` in one line | — | yes | two `ToolUse` |
 | tool error | failed command | `tool_result` + `tool_call_update status: failed` | yes | `ToolResult` error |
 | output cap | `[toolset.bash] output_byte_limit` | truncated result | yes | `ToolResult` |
-| rewind points | automatic | `rewind_points.jsonl` (file snapshots per prompt) | yes | not read |
+| rewind points | automatic | `rewind_points.jsonl` (file snapshots per prompt) | yes | `checkpoint/create` per line (store) |
 | image | `read_file` on a png, `@dot.png` mention | text only with a text model (no image block persisted) | yes (as text) | `Text` |
 | todo list | `todo_write` | `plan.json`, `plan` update | yes | `ToolUse`; `plan.json` not read |
 | plan mode | `enter_plan_mode` / `exit_plan_mode` | `plan_mode.json`, `current_mode_update` | yes | `ToolUse` |

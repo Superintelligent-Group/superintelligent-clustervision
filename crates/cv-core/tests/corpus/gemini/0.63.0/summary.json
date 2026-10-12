@@ -477,7 +477,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "checkpoint/state": 1
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0

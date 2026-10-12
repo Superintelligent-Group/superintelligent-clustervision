@@ -31,7 +31,7 @@ is `~/.gemini/tmp/<project>/chats/session-*.jsonl`. "cv" is how cv's IR represen
 | web | `web_fetch`, `google_web_search` | recording | yes | ToolUse |
 | compression | automatic (`model.compressionThreshold`) | **not persisted** (the API history is rewritten in memory; the recording keeps every turn) | forced, no trace | none |
 | `/compress` | interactive-only | headless sends it to the model as text | n/a | Prompt |
-| `/chat save <tag>` | `tmp/<project>/checkpoint-<tag>.json` (`{history: Content[], authType}`) | file | yes | its own session `checkpoint-<tag>` |
+| `/chat save <tag>` | `tmp/<project>/checkpoint-<tag>.json` (`{history: Content[], authType}`) | file | yes | its own session `checkpoint-<tag>`; `checkpoint/state` |
 | rewind | `$rewindTo` control record (`/rewind`, interactive) | recording | no (interactive only) | Branch |
 | info / warning / error notices | `info`/`warning`/`error` records (interactive UI only) | recording | no | Notice / Error |
 | file checkpoints (restore) | `general.checkpointing`: shadow git under `history/<project>/`, `tmp/<project>/checkpoints/` | TUI only; headless wrote the shadow repo, no checkpoint files | no | none |

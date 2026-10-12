@@ -22,7 +22,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -43,7 +45,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "corpus-error",
       "skipped_lines": 0
@@ -71,7 +75,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -139,7 +145,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -161,7 +169,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -190,6 +200,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "skill/load": 1
       },
       "lineage": {},
@@ -219,7 +230,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -247,7 +260,9 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -269,7 +284,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {
         "parent": "ses_ed36e0df9ffew7xZz2WbYFmoWI"
       },
@@ -300,6 +317,7 @@
       "subagent_spawns": 1,
       "subagent_returns": 1,
       "affordances": {
+        "approval/state": 1,
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
       },
@@ -325,7 +343,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -367,6 +387,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "plan/state": 1,
         "plan/write": 3
       },
@@ -423,7 +444,12 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/deny": 1,
+        "approval/state": 1,
+        "checkpoint/create": 1,
+        "checkpoint/restore": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -458,6 +484,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "skill/load": 1
       },
       "lineage": {},

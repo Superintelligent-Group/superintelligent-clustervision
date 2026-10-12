@@ -132,9 +132,11 @@
       "subagent_spawns": 1,
       "subagent_returns": 1,
       "affordances": {
+        "approval/state": 1,
         "background_job/complete": 1,
         "background_job/read": 1,
         "branch/branch": 1,
+        "checkpoint/state": 1,
         "plan/enter": 1,
         "plan/exit": 1,
         "plan/write": 1,
@@ -166,7 +168,9 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
-          "affordances": {},
+          "affordances": {
+            "checkpoint/state": 1
+          },
           "lineage": {
             "parent": "01533176-23de-4b73-8a2a-79a105793240",
             "agent_path": "a901fe706"

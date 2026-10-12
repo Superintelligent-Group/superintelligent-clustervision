@@ -14,9 +14,9 @@ the user saw: `say`/`ask` events), `history_item.json` (the task-history row), `
 | sub-agents | `new_task` (child task, own dir) | parent: tool call + ui `subtask_result`; child: `history_item.parentTaskId` | yes | child session with `lineage.parent` |
 | follow-up question | `ask_followup_question` | tool call + ui `followup` ask + the answer as `user_feedback` | yes | ToolUse, then the answer turn |
 | completion | `attempt_completion` | tool call + ui `completion_result` | yes | ToolUse |
-| checkpoints | shadow git per task | ui `checkpoint_saved` (commit hash); git repo in `checkpoints/` | yes (repo not copied) | not mapped (ui_messages unread) |
+| checkpoints | shadow git per task | ui `checkpoint_saved` (commit hash); git repo in `checkpoints/` | yes (repo not copied) | `checkpoint/create` (store, `ui_messages.json`) |
 | compaction (condense) | auto-condense; manual "Condense context" in the IDE | api history `isSummary` + `condenseId`, replaced turns `condenseParent`; ui `condense_context` | yes | CompactionBoundary + CompactionSummary; `extra.roo.condensed_into` |
-| approvals | ui `ask: tool` / `ask: command` (auto-approved here) | ui_messages only | yes (auto) | not mapped |
+| approvals | ui `ask: tool` / `ask: command` (auto-approved here) | ui_messages only | yes (auto) | `approval/ask` (store) |
 | MCP | `mcp--<server>--<tool>` | tool call | yes | ToolUse |
 | skills | `skill` | tool call | no | ToolUse |
 | images | user `image` block (base64 source) | api history | yes | Block::Image |

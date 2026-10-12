@@ -196,19 +196,47 @@ impl Adapter for Grok {
         Ok(s)
     }
 
-    /// The todo list `todo_write` keeps in the session directory: `plan.json` `{todos: {id: …}}`.
+    /// The todo list `todo_write` keeps in the session directory: `plan.json` `{todos: {id: …}}`,
+    /// then the per-prompt restore points of `rewind_points.jsonl`.
     fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
-        let Some(v) = fs::read_to_string(r.path.join("plan.json"))
+        let plan = fs::read_to_string(r.path.join("plan.json"))
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        else {
-            return Vec::new();
-        };
-        let items = crate::affordance::items_of(&v);
-        crate::affordance::plan_state(crate::affordance::Kind::Plan, "plan.json", items)
-            .into_iter()
-            .collect()
+            .and_then(|v| {
+                let items = crate::affordance::items_of(&v);
+                crate::affordance::plan_state(crate::affordance::Kind::Plan, "plan.json", items)
+            });
+        plan.into_iter().chain(rewind_points(&r.path)).collect()
     }
+}
+
+/// `rewind_points.jsonl`: one line per prompt, `{prompt_index, created_at, file_snapshots,
+/// after_snapshots}` — the files as they were before (and after) that prompt, which `/rewind`
+/// puts back. Each line is a checkpoint.
+fn rewind_points(dir: &Path) -> Vec<crate::affordance::Affordance> {
+    use crate::affordance::{Affordance, Kind};
+    let Ok(text) = fs::read_to_string(dir.join("rewind_points.jsonl")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .map(|v| {
+            let ts = v.get("created_at").and_then(Value::as_str).and_then(parse_ts);
+            let files: Vec<&str> = v
+                .get("file_snapshots")
+                .and_then(Value::as_object)
+                .map(|o| o.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            let mut summary = match v.get("prompt_index").and_then(Value::as_u64) {
+                Some(i) => format!("prompt {i}"),
+                None => "prompt".to_string(),
+            };
+            if !files.is_empty() {
+                summary.push_str(&format!(" · {}", files.join(", ")));
+            }
+            Affordance::store_event(Kind::Checkpoint, "create", ts, "rewind_points.jsonl", &summary)
+        })
+        .collect()
 }
 
 /// Subagent nickname + Grok-specific session facts from `summary.json`: a subagent's `agent_name`

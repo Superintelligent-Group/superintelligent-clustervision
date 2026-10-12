@@ -430,6 +430,29 @@ fn ingest_value(
 ) -> Flow {
     let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
 
+    // The approval mode a prompt ran under (`permissionMode` on user rows and on `permission-mode`
+    // records), and the file checkpoints `/rewind` restores: session-level affordance facts.
+    if let Some(mode) = v.get("permissionMode").and_then(Value::as_str) {
+        crate::affordance::note_mode(session.harness_extra_mut(Harness::Claude), mode);
+    }
+    match ty {
+        "file-history-snapshot" => {
+            let fresh = u64::from(v.get("isSnapshotUpdate").and_then(Value::as_bool) != Some(true));
+            let files = v.pointer("/snapshot/trackedFileBackups").and_then(Value::as_object);
+            let bag = session.harness_extra_mut(Harness::Claude);
+            crate::affordance::note_checkpoints(
+                bag,
+                fresh,
+                files.into_iter().flat_map(|f| f.keys().map(String::as_str)),
+            );
+        }
+        "file-history-delta" => {
+            let file = v.get("trackingPath").and_then(Value::as_str);
+            crate::affordance::note_checkpoints(session.harness_extra_mut(Harness::Claude), 0, file);
+        }
+        _ => {}
+    }
+
     // session-level metadata records
     match ty {
         // Titles, by precedence: an explicit `/rename` (`custom-title`) outranks the model-generated

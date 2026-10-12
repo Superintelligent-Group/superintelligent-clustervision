@@ -466,7 +466,7 @@ fn claude_corpus_workflow_runs_read_as_recorded() {
 
 /// What each corpus store persists, by the evidence in `tools/harness-corpus/<h>/AFFORDANCES.md`,
 /// as `kind` or `kind/action` (`plan/state` is a side-store row). A row applies to every version
-/// whose `harness/version` label starts with its prefix. The affordance view must surface each
+/// whose `harness/version` label starts with its prefix (exactly that label, when it ends in `$`). The affordance view must surface each
 /// one, so a harness that records a plan, a schedule or a spawn cannot quietly drop out of
 /// `cv show --kind`.
 const PERSISTED: &[(&str, &[&str])] = &[
@@ -483,12 +483,27 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "subagent_return",
             "skill",
             "hook",
+            "approval/state",
+            "approval/deny",
+            "checkpoint/state",
         ],
     ),
     ("cline/", &["subagent_spawn", "subagent_return", "question"]),
-    ("codex/", &["subagent_spawn", "subagent_return"]),
+    (
+        "codex/",
+        &["subagent_spawn", "subagent_return", "approval/state", "approval/deny"],
+    ),
     ("continue/", &["plan", "subagent_spawn"]),
-    ("devin/", &["plan", "subagent_spawn", "subagent_return"]),
+    (
+        "devin/",
+        &[
+            "plan",
+            "subagent_spawn",
+            "subagent_return",
+            "approval/state",
+            "checkpoint/create",
+        ],
+    ),
     (
         "gemini/",
         &[
@@ -499,6 +514,7 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "subagent_return",
             "skill",
             "hook",
+            "checkpoint/state",
         ],
     ),
     (
@@ -514,7 +530,14 @@ const PERSISTED: &[(&str, &[&str])] = &[
     ),
     (
         "grok/",
-        &["plan", "schedule", "background_job", "subagent_spawn", "fork"],
+        &[
+            "plan",
+            "schedule",
+            "background_job",
+            "subagent_spawn",
+            "fork",
+            "checkpoint/create",
+        ],
     ),
     (
         "hermes/",
@@ -532,7 +555,15 @@ const PERSISTED: &[(&str, &[&str])] = &[
     ("hermes/2026.8.31", &["plan", "schedule/create"]),
     (
         "kimi/",
-        &["plan", "background_job", "subagent_spawn", "subagent_return", "branch"],
+        &[
+            "plan",
+            "background_job",
+            "subagent_spawn",
+            "subagent_return",
+            "branch",
+            "approval/state",
+            "checkpoint/state",
+        ],
     ),
     (
         "kimi-code/",
@@ -544,17 +575,36 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "skill",
             "hook",
             "branch",
+            "approval/state",
         ],
     ),
-    ("kimi-code/2.1.1", &["subagent_spawn", "subagent_return", "fork"]),
+    (
+        "kimi-code/2.1.1",
+        &["subagent_spawn", "subagent_return", "fork", "checkpoint/state"],
+    ),
     (
         "openclaw/",
         &["schedule", "background_job", "subagent_spawn", "model_change"],
     ),
     ("openclaw/2026.10.1", &["subagent_return", "branch"]),
     ("opencode/", &["skill", "subagent_spawn", "subagent_return"]),
-    ("opencode/1.18.20", &["plan", "plan/state"]),
-    ("opencode/2.0.25", &["model_change", "fork", "background_job/complete"]),
+    // `1.18.20` also covers `1.18.20-migrated-2.0.25`; the migration kept neither the permission
+    // ruleset nor the revert, so those are the 1.x store's alone.
+    (
+        "opencode/1.18.20",
+        &["plan", "plan/state", "approval/deny", "checkpoint/create"],
+    ),
+    ("opencode/1.18.20$", &["approval/state", "checkpoint/restore"]),
+    (
+        "opencode/2.0.25",
+        &[
+            "model_change",
+            "fork",
+            "background_job/complete",
+            "checkpoint/create",
+            "checkpoint/restore",
+        ],
+    ),
     (
         "qwen/",
         &[
@@ -566,9 +616,19 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "skill",
             "hook",
             "fork",
+            "approval/state",
         ],
     ),
-    ("roo/", &["plan", "question", "subagent_spawn"]),
+    (
+        "roo/",
+        &[
+            "plan",
+            "question",
+            "subagent_spawn",
+            "approval/ask",
+            "checkpoint/create",
+        ],
+    ),
 ];
 
 #[test]
@@ -593,7 +653,11 @@ fn every_persisted_affordance_surfaces_in_the_view() {
                 }
             }
             for (prefix, wants) in PERSISTED {
-                if !label.starts_with(prefix) {
+                let applies = match prefix.strip_suffix('$') {
+                    Some(exact) => label == exact,
+                    None => label.starts_with(prefix),
+                };
+                if !applies {
                     continue;
                 }
                 for w in *wants {

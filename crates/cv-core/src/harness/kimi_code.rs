@@ -291,12 +291,14 @@ impl Adapter for KimiCode {
             call_names: HashMap::new(),
             seen_prompts: HashSet::new(),
             protocol_version: None,
+            facts: Map::new(),
             stopped: false,
         };
         let skipped = super::for_each_json_line(BufReader::new(file), |v| ctx.record(&v, sink));
         if !ctx.stopped {
             ctx.flush_step(sink);
         }
+        s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
         if let Some(pv) = ctx.protocol_version.take() {
             s.harness_extra_mut(Harness::KimiCode)
                 .insert("protocol_version".into(), Value::String(pv));
@@ -603,6 +605,9 @@ struct Ctx<'a> {
     /// Hashes of system prompts already surfaced (a re-bind with the same prompt is bookkeeping).
     seen_prompts: HashSet<u64>,
     protocol_version: Option<String>,
+    /// Session-level affordance facts read off bookkeeping records: the approval modes
+    /// (`permission.set_mode`) and the file-history checkpoints (`file_history.checkpoint`).
+    facts: Map<String, Value>,
     stopped: bool,
 }
 
@@ -610,6 +615,20 @@ impl Ctx<'_> {
     fn record(&mut self, v: &Value, sink: &mut dyn MessageSink) -> Flow {
         let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
         let ts = v.get("time").and_then(super::ts_from_value);
+        match ty {
+            "permission.set_mode" => {
+                let mode = v.get("mode").and_then(Value::as_str).unwrap_or("");
+                crate::affordance::note_mode(&mut self.facts, mode);
+            }
+            "file_history.checkpoint" => {
+                let files = v.get("entries").and_then(Value::as_object);
+                let files = files.into_iter().flat_map(|e| e.keys().map(String::as_str));
+                // One point per turn: a `start` phase, should one be written, opens the `end`'s.
+                let points = u64::from(v.get("phase").and_then(Value::as_str) != Some("start"));
+                crate::affordance::note_checkpoints(&mut self.facts, points, files);
+            }
+            _ => {}
+        }
         let flow = match ty {
             "metadata" => {
                 if let Some(pv) = v.get("protocol_version").and_then(Value::as_str) {

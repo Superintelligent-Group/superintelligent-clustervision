@@ -32,6 +32,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 2
       },
       "lineage": {},
@@ -79,6 +80,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 2
       },
       "lineage": {},
@@ -126,6 +128,7 @@
       "subagent_spawns": 1,
       "subagent_returns": 1,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 3,
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
@@ -212,6 +215,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 2,
         "plan/create": 2,
         "plan/read": 1,
@@ -276,6 +280,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 2
       },
       "lineage": {},
@@ -317,6 +322,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 2
       },
       "lineage": {},
@@ -358,6 +364,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/deny": 1,
+        "approval/state": 1,
         "hook/output": 2
       },
       "lineage": {},
@@ -403,6 +411,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "background_job/complete": 1,
         "background_job/start": 1,
         "hook/output": 3
@@ -454,6 +463,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 3
       },
       "lineage": {},
@@ -557,6 +567,9 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/deny": 1,
+        "approval/state": 1,
+        "checkpoint/state": 1,
         "hook/output": 7
       },
       "lineage": {},
@@ -625,6 +638,7 @@
       "subagent_spawns": 2,
       "subagent_returns": 3,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 6,
         "subagent_return/return": 3,
         "subagent_spawn/spawn": 2
@@ -750,6 +764,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 3
       },
       "lineage": {},
@@ -797,6 +812,7 @@
       "subagent_spawns": 1,
       "subagent_returns": 1,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 3,
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
@@ -866,6 +882,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 2
       },
       "lineage": {},
@@ -930,6 +947,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 6
       },
       "lineage": {},
@@ -992,6 +1010,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 3,
         "schedule/create": 3,
         "schedule/delete": 1,
@@ -1044,6 +1063,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 3,
         "skill/load": 1
       },
@@ -1091,6 +1111,7 @@
       "subagent_spawns": 1,
       "subagent_returns": 1,
       "affordances": {
+        "approval/state": 1,
         "hook/output": 3,
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1

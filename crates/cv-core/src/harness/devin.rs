@@ -121,7 +121,8 @@
 //!   extensions`: `chisel/tool_call_timing {started_at, finished_at, duration_ms}`,
 //!   `chisel/tool_result_meta {success, kind}`, `chisel/terminal_output {text, cwd, exit:
 //!   {terminal_id, exit_code}}` (exec only — its `text` duplicates `content`, not copied),
-//!   `chisel/undo [{kind, tool_name, description}]`. `telemetry.source = "tool_result"`.
+//!   `chisel/undo [{kind, tool_name, description}]` (a `restore_file` entry's `path` →
+//!   `details.restorable`). `telemetry.source = "tool_result"`.
 //! * **user**: `metadata.is_user_input: true` marks typed prompts; `extensions
 //!   ["chisel/client-message-id"]`; `metadata.created_at`.
 //! * **system**: non-prefix nodes are `<system_info>…</system_info>` (with
@@ -1082,6 +1083,19 @@ fn node_to_message(
             }
             if let Some(k) = ext.get("chisel/tool_result_meta").and_then(|v| v.get("kind")) {
                 details.insert("kind".into(), k.clone());
+            }
+            // `chisel/undo` names what `/revert` can put back: a `restore_file` entry is a file
+            // checkpoint (its `original_content` stays in the store); `irreversible` is none.
+            let restorable: Vec<Value> = ext
+                .get("chisel/undo")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|u| u.get("kind").and_then(Value::as_str) == Some("restore_file"))
+                .filter_map(|u| u.get("path").cloned())
+                .collect();
+            if !restorable.is_empty() {
+                details.insert("restorable".into(), Value::Array(restorable));
             }
             m.content.push(Block::ToolResult {
                 tool_name: tool_names.get(&tool_use_id).cloned(),

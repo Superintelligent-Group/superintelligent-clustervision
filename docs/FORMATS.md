@@ -914,7 +914,8 @@ WAL-mode and the CLI is typically running — we open READ-ONLY and never checkp
   generation_model, created_at RFC3339, telemetry}`. Tool: `tool_call_id` + extensions
   `chisel/tool_call_timing`, `chisel/tool_result_meta{success,kind}`, `chisel/terminal_output`
   (exec: `{text,cwd,exit{terminal_id,exit_code}}`; `text` duplicates `content`, dropped),
-  `chisel/undo`. User: `metadata.is_user_input` marks typed prompts. Non-prefix system rows are
+  `chisel/undo` (`[{kind: restore_file, path, original_content, expected_post_hash} | {kind:
+  irreversible, tool_name, description}]`). User: `metadata.is_user_input` marks typed prompts. Non-prefix system rows are
   `<system_info>` (with `affogato/cog-context`) and `<rules type="always-on">` blocks.
 - **Sub-agent chains:** each `subagent_heads` row names a chain head in the *same* forest — a
   whole second conversation (verified: a sidekick's own `is_system_prefix` prompt, then its
@@ -945,7 +946,8 @@ WAL-mode and the CLI is typically running — we open READ-ONLY and never checkp
   `tool_call_id` is the child's `spawned_by_tool_use`); assistant
   metrics → `Usage`, `generation_model` → `model` (and the session's
   model when `sessions.model` is `''`); tool rows pair `tool_name` from the earlier call and carry
-  `{cwd, exit_code, terminal_id, duration_ms, kind}` in `ToolResult.details`. A `user` row with
+  `{cwd, exit_code, terminal_id, duration_ms, kind}` in `ToolResult.details`, plus `restorable`
+  (the `restore_file` paths of `chisel/undo`). A `user` row with
   `extensions["subagent/handoff"]` → `Prompt`/`Origin::Subagent`, and
   `chisel/fusion_lead_model_uid` → `extra["devin"]["lead_model"]`. Sub-agent system rows'
   `agent-ext/rules-loaded` → `extra["devin"]["rules_loaded"]` (whole object) and

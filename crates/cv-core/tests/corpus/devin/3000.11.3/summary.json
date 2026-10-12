@@ -27,7 +27,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "swe-2-medium",
       "skipped_lines": 0
@@ -105,6 +107,8 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
+        "checkpoint/create": 1,
         "plan/write": 1
       },
       "lineage": {},
@@ -141,6 +145,7 @@
       "subagent_spawns": 1,
       "subagent_returns": 1,
       "affordances": {
+        "approval/state": 1,
         "subagent_return/return": 1,
         "subagent_spawn/spawn": 1
       },
@@ -177,7 +182,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {
         "parent": "smart-isthmus",
         "spawned_by_tool_use": "run_subagent:0#fe660263753a4b098c617918acefe3ea",
@@ -218,7 +225,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "swe-2-medium",
       "skipped_lines": 0

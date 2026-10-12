@@ -29,6 +29,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "branch/branch": 1,
         "hook/output": 2
       },
@@ -219,6 +220,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/state": 1,
         "background_job/complete": 1,
         "background_job/read": 1,
         "background_job/start": 1,
@@ -259,7 +261,9 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
-          "affordances": {},
+          "affordances": {
+            "approval/state": 1
+          },
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-0"
@@ -289,7 +293,9 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
-          "affordances": {},
+          "affordances": {
+            "approval/state": 1
+          },
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-1"
@@ -319,7 +325,9 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
-          "affordances": {},
+          "affordances": {
+            "approval/state": 1
+          },
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-2"
@@ -344,7 +352,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,

@@ -13,8 +13,8 @@ the generator produced. "1.x" means the `message`/`part` tables, "2.x" the `sess
 | file/shell tools | `tool` part, `state{status,input,output,metadata,time}` | `assistant.content[].tool`, `state{status,input,content[],error?}` | yes | yes | `ToolUse` + `ToolResult` (Tool message) |
 | parallel tool calls | several `tool` parts in one message | several `tool` items in one row | yes | yes | several `ToolUse` |
 | tool error | `state.status = error`, `state.error` string | `state.status = error`, `state.error{type,message}` | yes (denied `rm`) | yes (interrupted `sleep`) | `ToolResult.is_error` |
-| permission rules (deny) | the denied call is a `tool` error naming the rule | same shape (the turn was then reverted away, see MANIFEST) | yes | no | `ToolResult.is_error` |
-| saved approvals ("always allow") | `permission` table (per project) | `permission` table; `session_v2.permission` ruleset | no: headless `run` cannot answer a prompt | no | `permission` column → session `extra` |
+| permission rules (deny) | the denied call is a `tool` error naming the rule | same shape (the turn was then reverted away, see MANIFEST) | yes | no | `ToolResult.is_error`; `approval/deny` |
+| saved approvals ("always allow") | `permission` table (per project) | `permission` table; `session_v2.permission` ruleset | no: headless `run` cannot answer a prompt | no | `permission` column → session `extra`; the ruleset is `approval/state` (the table is not read) |
 | `question` tool (ask the user) | — | `question` tool call | — | no: needs an interactive answer | `ToolUse` |
 | todo list | `todowrite` tool + `todo` table | removed in 2.x | yes | — | `ToolUse`; `todo` table not read |
 | plan mode | `agent: "plan"` on the message | `agent-switched` rows + `system` reminder rows | yes | yes | bag `agent`; `Notice` + `InjectedContext` |
@@ -30,8 +30,8 @@ the generator produced. "1.x" means the `message`/`part` tables, "2.x" the `sess
 | custom command | `run --command` → expanded prompt | `POST /api/session/:id/command` | yes | no: `run` quotes the text | `Prompt` |
 | user shell (`!cmd`) | user message + an assistant message holding a `bash` tool part | `shell` row `{command, status, exit, output}` | yes | yes | 1.x `ToolUse`; 2.x `InjectedContext`/Human |
 | fork (`run --fork`) | new session, title `(fork #1)`, no link column | `session_v2.fork_session_id`, `fork_boundary` | yes | yes | 2.x `Lineage::forked_from`; 1.x none |
-| revert / undo | `session.revert` JSON (rows kept) | staged: `session_v2.revert`; committed: rows deleted | yes | yes (both) | session `extra["opencode"]["revert"]`; no `Branch` marker |
-| snapshots (checkpoints) | `step-start`/`step-finish` `snapshot`, `patch` parts; `snapshot/` git dir | `assistant.snapshot{start,end,files}` | yes (git dir not copied) | yes | bag `steps` / `patches` / `snapshot` |
+| revert / undo | `session.revert` JSON (rows kept) | staged: `session_v2.revert`; committed: rows deleted | yes | yes (both) | session `extra["opencode"]["revert"]` → `checkpoint/restore`; no `Branch` marker |
+| snapshots (checkpoints) | `step-start`/`step-finish` `snapshot`, `patch` parts; `snapshot/` git dir | `assistant.snapshot{start,end,files}` | yes (git dir not copied) | yes | bag `steps` / `patches` / `snapshot`; a patch or file-changing snapshot is `checkpoint/create` |
 | interrupt | assistant `error.name = MessageAbortedError` | assistant `error.type = aborted`, tool `tool.interrupted` | yes (`POST /session/:id/abort`) | yes (`POST /api/session/:id/interrupt`) | `Error` |
 | provider error | `error.name = APIError` | `error.type = provider.invalid-request` (our 400), `status`, `response.body` | yes | yes | `Error`, bag `error_name` |
 | retry | `retry` part | `assistant.retry` | no | no | bag `retries` / `retry` |

@@ -7,11 +7,11 @@ Store: `~/.local/share/devin/cli/sessions.db` (`sessions`, `message_nodes` fores
 | affordance | tool / record | persists? | in 3000.11.3 corpus | cv IR today |
 |---|---|---|---|---|
 | read / search | `read`, `find_file_by_name`, grep tools | assistant `tool_calls[]` + `tool` rows | read, find_file_by_name | ToolUse / ToolResult |
-| edit | `edit` | as above, plus `chisel/undo` on the result row | yes | ToolResult `details` |
+| edit | `edit` | as above, plus `chisel/undo` on the result row | yes | ToolResult `details` (`restore_file` → `restorable`: `checkpoint/create`) |
 | shell | `exec` | as above, plus `chisel/terminal_output` | yes, including a failure | ToolResult `is_error` from `chisel/tool_result_meta.success` |
-| tool permission states | ACP ToolCall / ToolCallUpdate | `tool_call_state` (14 rows here) | yes | ignored (duplicates the assistant row) |
+| tool permission states | ACP ToolCall / ToolCallUpdate | `tool_call_state` (14 rows here) | yes | ignored (duplicates the assistant row; a status, no approval decision) |
 | todo list | `todo_write` | tool call; `compact/todo_list` on a compaction wrapper | yes | ToolUse |
-| plan mode | `/plan`, `--permission-mode` | `sessions.agent_mode` (`plan`, `bypass`, ...) | yes | `extra.devin.agent_mode` |
+| plan mode | `/plan`, `--permission-mode` | `sessions.agent_mode` (`plan`, `bypass`, ...) | yes | `extra.devin.agent_mode`; `approval/state` |
 | sub-agents (run_subagent) | `run_subagent` (profiles such as `Explore`) | the child chain is a second root in `message_nodes`; the result row's `subagent/agent_id`, `subagent/chain_node_id`, `subagent/profile_name`, `subagent/model` | yes | child session `<id>/<agent_id>` with `lineage.parent`, `spawned_by_tool_use` |
 | Fusion sidekick | lead + sidekick pairing | `subagent_heads` rows | no (paid lead) | child session (fixture-tested) |
 | compaction | auto, `/compact` | `summarized_from` node pairs + `summaries/` history file | no (see README) | CompactionBoundary + CompactionSummary (fixture-tested) |

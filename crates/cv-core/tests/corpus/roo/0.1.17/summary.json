@@ -49,7 +49,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/ask": 1
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -141,6 +143,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/ask": 1,
         "question/ask": 1
       },
       "lineage": {},
@@ -217,7 +220,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/ask": 7,
+        "checkpoint/create": 2
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -277,7 +283,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/ask": 1
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -310,6 +318,7 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "approval/ask": 2,
         "plan/write": 2
       },
       "lineage": {},

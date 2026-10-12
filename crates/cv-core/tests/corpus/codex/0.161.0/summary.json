@@ -28,7 +28,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -103,7 +105,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -131,7 +135,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -172,7 +178,9 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -212,7 +220,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/deny": 1,
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -277,6 +288,7 @@
       "subagent_spawns": 1,
       "subagent_returns": 2,
       "affordances": {
+        "approval/state": 1,
         "subagent_return/return": 2,
         "subagent_spawn/spawn": 1
       },
@@ -308,7 +320,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {
         "parent": "01a12c67-69d0-7100-ab27-0b9a51e57059",
         "agent_path": "/root/reply_ok"
@@ -346,7 +360,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
-      "affordances": {},
+      "affordances": {
+        "approval/state": 1
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0

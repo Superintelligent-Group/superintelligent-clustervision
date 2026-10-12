@@ -29,14 +29,14 @@ record types (`dist/main.mjs`), and the stores in `crates/cv-core/tests/corpus/k
 | web fetch (`FetchURL`) | tool call | yes | `ToolUse` |
 | web search | no tool in the list (needs the Kimi search service) | n/a | |
 | `AskUserQuestion` | would be a tool call; prompt mode's auto permission mode withholds it | **no** (headless) | |
-| approvals | `permission.set_mode`; `permission.record_approval_result` never written in auto mode | mode only | carried |
+| approvals | `permission.set_mode`; `permission.record_approval_result` never written in auto mode | mode only | carried; `approval/state` |
 | compaction | `full_compaction.begin/complete`, `context.apply_compaction{summary, compactedCount}` | yes (auto, small window) | `compaction_boundary` + `compaction_summary` |
 | `/undo` | `context.undo{count}`; 2.x adds `agent.switched`, `context.undone` | yes (TUI) | `branch`/Human |
 | `/clear` | a new session | yes (TUI) | a separate `Session`, no link |
 | interrupt (Esc) | `turn.cancel`; 2.x adds `turn.step.interrupted`, `prompt.aborted` | yes (TUI) | `notice`/Human |
 | API error retries | 2.x `turn.step.retrying{errorName, errorMessage}` | yes (TUI, closed port) | carried |
 | fork (`kimi fork`, 2.x) | new session, `state.json.forkedFrom`, `forked` record | yes | `lineage.forked_from` |
-| file history (2.x) | `file_history.tracked/checkpoint`, `agents/main/file-history/` | yes | carried; snapshots not read |
+| file history (2.x) | `file_history.tracked/checkpoint`, `agents/main/file-history/` | yes | carried; `checkpoint/state` tally; snapshots not read |
 | memory / project instructions | `AGENTS.md` paths in `profile.bind.agentsMdPaths` | yes | system prompt; paths carried |
 | model switch | `config.update{modelAlias}` | **no**: one env-defined model | would be `system_prompt` / model |
 | usage | `step.end.usage`, `usage.record` | yes | `Message::usage` |

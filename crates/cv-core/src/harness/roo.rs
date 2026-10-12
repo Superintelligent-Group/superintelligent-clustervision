@@ -71,6 +71,63 @@ impl Adapter for Roo {
         let sink: &mut dyn MessageSink = &mut spawns;
         stream_task_dir(&r.path, &r.id, Harness::Roo, opts, sink)
     }
+
+    /// The checkpoints and permission asks `ui_messages.json` logs (the conversation file has
+    /// neither): `say: checkpoint_saved` (a shadow-git commit under `checkpoints/`) and the `ask`s
+    /// that gate a tool, a command, an MCP call or a browser launch.
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        ui_affordances(&r.path.join("ui_messages.json"))
+    }
+}
+
+fn ui_affordances(path: &Path) -> Vec<crate::affordance::Affordance> {
+    use crate::affordance::{Affordance, Kind};
+    use serde_json::Value;
+    let Some(Value::Array(events)) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in &events {
+        if e.get("partial").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let ts = e
+            .get("ts")
+            .and_then(Value::as_i64)
+            .and_then(chrono::DateTime::from_timestamp_millis);
+        let text = e.get("text").and_then(Value::as_str).unwrap_or("");
+        // An ask's `text` is JSON for a tool or MCP call, the bare command line for a command.
+        let json: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+        let field = |k: &str| json.get(k).and_then(Value::as_str).unwrap_or("");
+        match (
+            e.get("type").and_then(Value::as_str),
+            e.get("ask").or(e.get("say")).and_then(Value::as_str),
+        ) {
+            (Some("say"), Some("checkpoint_saved")) => {
+                let commit = text.get(..12).unwrap_or(text);
+                out.push(Affordance::store_event(
+                    Kind::Checkpoint,
+                    "create",
+                    ts,
+                    "checkpoint_saved",
+                    commit,
+                ));
+            }
+            (Some("ask"), Some(what @ ("tool" | "command" | "use_mcp_server" | "browser_action_launch"))) => {
+                let summary = match what {
+                    "tool" => format!("{} {}", field("tool"), field("path")),
+                    "use_mcp_server" => format!("{}.{}", field("serverName"), field("toolName")),
+                    _ => text.to_string(),
+                };
+                out.push(Affordance::store_event(Kind::Approval, "ask", ts, what, summary.trim()));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Emit `session` into Roo's per-task layout under `out_dir`: the Cline writer, tagged for Roo.

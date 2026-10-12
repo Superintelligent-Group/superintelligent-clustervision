@@ -809,6 +809,9 @@ fn apply_turn_context(s: &mut Session, out: &mut Vec<Message>, payload: Option<&
     if s.cwd.is_none() {
         s.cwd = p.get("cwd").and_then(Value::as_str).map(PathBuf::from);
     }
+    if let Some(policy) = p.get("approval_policy").and_then(Value::as_str) {
+        crate::affordance::note_mode(sbag(s), policy);
+    }
     // 0.147+ also carries the collaboration-mode settings; `model` there mirrors the top-level one.
     let settings = p.pointer("/collaboration_mode/settings");
     let model = p
@@ -962,6 +965,9 @@ fn handle_event(
                 }
             }
             let effort = t.get("reasoning_effort").and_then(Value::as_str);
+            if let Some(policy) = t.get("approval_policy").and_then(Value::as_str) {
+                crate::affordance::note_mode(sbag(s), policy);
+            }
             sbag(s).insert("thread_settings".into(), Value::Object(kept));
             note_settings_change(s, out, model, effort, ts, "thread_settings_applied", Map::new());
         }

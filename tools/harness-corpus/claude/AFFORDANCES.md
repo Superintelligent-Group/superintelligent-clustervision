@@ -22,13 +22,13 @@ The IR column is how cv reads it today (`MessageKind`/`Block`/`extra["claude"]`/
 | Read/Edit/Write/Bash | built-in tools | `tool_use` + `tool_result` + `toolUseResult` sidecar | yes | `ToolUse`/`ToolResult`, sidecar in `details` |
 | parallel tool calls | two `tool_use` in one message | consecutive assistant lines | yes | two `ToolUse` |
 | tool error | `is_error: true` | tool_result + string `toolUseResult` | yes | `ToolResult` with error |
-| permission denial | `--permission-mode dontAsk` | tool_result "Permission to use Bash has been denied" | yes | `ToolResult` (error) |
+| permission denial | `--permission-mode dontAsk` | tool_result "Permission to use Bash has been denied" | yes | `ToolResult` (error); `approval/deny` |
 | large result spill | `BASH_MAX_OUTPUT_LENGTH` | `<sessionId>/tool-results/<id>.txt` + `<persisted-output>` stub | yes | `details.persistedOutput` |
 | notebook | `NotebookEdit` | tool_use/result | yes | `ToolUse` |
-| file checkpoints / rewind | `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | `file-history-snapshot`, `file-history-delta`, `file-history/<sid>/<hash>@vN` | yes (records; `/rewind` itself is interactive) | carried |
+| file checkpoints / rewind | `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | `file-history-snapshot`, `file-history-delta`, `file-history/<sid>/<hash>@vN` | yes (records; `/rewind` itself is interactive) | carried; `checkpoint/state` (a tally: points, files) |
 | image input | stream-json user `image` block | user content block | yes | `Block::Image` |
 | image via tool | `Read` on a png | image inside `tool_result` content; copy under `$CLAUDE_CODE_TMPDIR/.../images/` | yes | nested in `ToolResult` |
-| plan mode | `--permission-mode plan` | `permissionMode: plan` on turns, `attachment.plan_mode`, `mode` | yes | `InjectedContext`; mode carried |
+| plan mode | `--permission-mode plan` | `permissionMode: plan` on turns, `attachment.plan_mode`, `mode` | yes | `InjectedContext`; `permissionMode` → `approval/state` |
 | ExitPlanMode / EnterPlanMode | tools | — | no: not offered headless | — |
 | task list | `TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet` (`CLAUDE_CODE_ENABLE_TODO_TOOLS`) | tool calls + `tasks/<sessionId>/<n>.json` | yes | `ToolUse`; `tasks/` not read |
 | TodoWrite (v1) | `TodoWrite` | — | no: 2.1.296 offers the Task* tools instead | — |

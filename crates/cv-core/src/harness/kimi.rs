@@ -245,6 +245,10 @@ impl Adapter for Kimi {
         // known before the body streams.
         s.system_prompt = peek_system_prompt(&segments[0]);
 
+        if let Some(mode) = approval_mode(&r.path) {
+            crate::affordance::note_mode(s.harness_extra_mut(Harness::Kimi), &mode);
+        }
+
         // Session metadata is known up front; hand it to the sink before the body.
         sink.meta(&s);
 
@@ -270,10 +274,13 @@ impl Adapter for Kimi {
         // compaction summary (which gets its own boundary), the rotation was a `/clear` or a
         // rewind, and what follows does not continue what precedes.
         let mut rotated: Option<String> = None;
+        // `_checkpoint` records (rewind targets), tallied for the session's affordances.
+        let mut checkpoints = 0u64;
         let skipped = for_each_segment_record(&segments, |v, starts| {
             if let Some(name) = starts {
                 rotated = Some(name.to_string());
             }
+            checkpoints += u64::from(v.get("role").and_then(Value::as_str) == Some("_checkpoint"));
             if v.get("role").and_then(Value::as_str) == Some("_usage") {
                 if let Some(p) = pending.as_mut() {
                     fold_usage_record(p, &v);
@@ -331,10 +338,32 @@ impl Adapter for Kimi {
                 sink.message(last);
             }
         }
+        if checkpoints > 0 {
+            crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), checkpoints, []);
+        }
         super::note_skipped_lines(&mut s, skipped);
 
         Ok(s)
     }
+}
+
+/// The approval mode `state.json` records (`approval{yolo, afk, auto_approve_actions}`): `yolo`
+/// and `afk` approve everything, otherwise kimi-cli asks, except for the listed actions.
+fn approval_mode(dir: &Path) -> Option<String> {
+    let v: Value = serde_json::from_str(&fs::read_to_string(dir.join("state.json")).ok()?).ok()?;
+    let a = v.get("approval")?;
+    let on = |k: &str| a.get(k).and_then(Value::as_bool) == Some(true);
+    let auto: Vec<&str> = a
+        .get("auto_approve_actions")
+        .and_then(Value::as_array)
+        .map(|l| l.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    Some(match () {
+        _ if on("yolo") => "yolo".to_string(),
+        _ if on("afk") => "afk".to_string(),
+        _ if !auto.is_empty() => format!("ask (auto: {})", auto.join(", ")),
+        _ => "ask".to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------

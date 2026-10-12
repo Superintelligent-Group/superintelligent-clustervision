@@ -24,12 +24,12 @@ is `sessions/<md5(cwd)>/<uuid>/`.
 | web search (`SearchWeb`) | needs the Moonshot search service login | **no** | |
 | `AskUserQuestion` | tool call, auto-dismissed in `--afk` | yes | `ToolUse` / `ToolResult` |
 | Ralph loop (`--max-ralph-iterations`) | the repeated prompt with an "automated loop" suffix as a `user` record | yes | `prompt`/Human |
-| checkpoints | `_checkpoint{id}` every step | yes | `carrier` under `complete` |
+| checkpoints | `_checkpoint{id}` every step | yes | `carrier` under `complete`; `checkpoint/state` tally |
 | compaction (`/compact`) | rotation to `context_N.jsonl`; new segment opens with the `<system>Previous context has been compacted` summary; `wire.jsonl` `CompactionBegin/End` | yes | `compaction_boundary` + `compaction_summary` |
 | `/clear` | rotation to `context_N.jsonl` | yes | `branch` (synthetic) |
 | rewind (`revert_to`, D-Mail) | rotation; the kept prefix is copied into the new file | **no**: no headless trigger, `SendDMail` not in the default tool set | `branch`; the copied prefix read once |
 | hooks (`[[hooks]]`) | not persisted (no record in `context.jsonl` or `wire.jsonl`) | ran, nothing to capture | |
-| approvals | `state.json.approval{yolo, afk, auto_approve_actions}`; `--afk` approves everything | mode only | not read |
+| approvals | `state.json.approval{yolo, afk, auto_approve_actions}`; `--afk` approves everything | mode only | `approval/state` |
 | interrupt | print mode has none | **no** | |
 | usage | `_usage{token_count}`, `wire.jsonl` `StatusUpdate.token_usage` | yes | `Message::usage` |
 | MCP loading | `wire.jsonl` `MCPLoadingBegin/End` | yes | ignored |

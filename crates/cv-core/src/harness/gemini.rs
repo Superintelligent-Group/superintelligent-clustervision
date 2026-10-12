@@ -1451,13 +1451,26 @@ fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -
         return None;
     }
 
-    Some(Session {
+    // The file is a `/chat save <tag>` point that `/chat resume <tag>` restores: a checkpoint.
+    let tag = id.strip_prefix("checkpoint-").unwrap_or("").to_string();
+    let mut s = Session {
         cwd: source_path.as_deref().and_then(project_cwd),
         title,
         messages,
         source_path,
         ..Session::new(id, Harness::Gemini)
-    })
+    };
+    let bag = s.harness_extra_mut(Harness::Gemini);
+    crate::affordance::note_checkpoints(bag, 1, []);
+    if let Some(cp) = bag
+        .get_mut(crate::affordance::CHECKPOINTS_KEY)
+        .and_then(Value::as_object_mut)
+    {
+        if !tag.is_empty() {
+            cp.insert("tag".into(), Value::String(tag));
+        }
+    }
+    Some(s)
 }
 
 fn checkpoint_id(file_name: &str) -> String {

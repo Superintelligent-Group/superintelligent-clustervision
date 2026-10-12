@@ -41,5 +41,5 @@ From qwen-code v0.25.1 (`packages/core/src/tools/tool-names.ts`, `services/chatR
 | attribution, file history | `attribution_snapshot`, `file_history_snapshot` | session | attribution yes | ignored |
 | worktrees | `enter_worktree`/`exit_worktree`, `--worktree` | session | no | — |
 | ask user | `ask_user_question` (needs a person) | session | no | — |
-| approvals | `--approval-mode`, `executionContext.approvalMode` on each prompt; `session_approval_mode` records | session | yes (field) | ignored |
+| approvals | `--approval-mode`, `executionContext.approvalMode` on each prompt; `session_approval_mode` records | session | yes (field) | `approvalMode` → `approval/state`; records not in corpus |
 | notebooks, LSP, image generation, omni media tools | `notebook_edit`, `lsp`, `image_gen`, `omni_*` | session | no | — |

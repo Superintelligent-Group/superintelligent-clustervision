@@ -232,7 +232,8 @@ fn stream_session_jsonl(path: &Path, sink: &mut dyn MessageSink) -> Result<Sessi
     Ok(s)
 }
 
-/// Session-level facts every record carries: id, cwd, branch, version, time span, fork origin.
+/// Session-level facts every record carries: id, cwd, branch, version, time span, fork origin,
+/// approval mode.
 fn session_facts(s: &mut Session, rec: &Map<String, Value>, is_subagent: bool) {
     let str_of = |k: &str| rec.get(k).and_then(Value::as_str);
     if !is_subagent {
@@ -256,6 +257,14 @@ fn session_facts(s: &mut Session, rec: &Map<String, Value>, is_subagent: bool) {
     if let Some(v) = str_of("version") {
         s.harness_extra_mut(Harness::Qwen)
             .insert("version".into(), Value::String(v.to_string()));
+    }
+    // The approval mode each prompt ran under (`--approval-mode`, `/approval-mode`).
+    if let Some(mode) = rec
+        .get("executionContext")
+        .and_then(|c| c.get("approvalMode"))
+        .and_then(Value::as_str)
+    {
+        crate::affordance::note_mode(s.harness_extra_mut(Harness::Qwen), mode);
     }
     if let Some(ts) = str_of("timestamp").and_then(parse_ts) {
         if s.created_at.is_none_or(|c| ts < c) {
