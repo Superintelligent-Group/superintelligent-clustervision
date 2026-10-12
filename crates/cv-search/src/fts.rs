@@ -1107,6 +1107,7 @@ struct ChunkSink<'w> {
     preview: String,
     docs: usize,
     err: Option<anyhow::Error>,
+    failed: bool,
 }
 
 /// The [`cv_core::stream::Checkpoint`] layer a [`ChunkSink`] keeps its state under.
@@ -1168,6 +1169,7 @@ impl<'w> ChunkSink<'w> {
             preview: String::new(),
             docs: 0,
             err: None,
+            failed: false,
         }
     }
 
@@ -1247,7 +1249,7 @@ impl<'w> ChunkSink<'w> {
 
     /// Flush the current buffer as one body doc (nothing when it is empty).
     fn flush(&mut self) {
-        if self.err.is_some() || self.buf.is_empty() {
+        if self.failed || self.err.is_some() || self.buf.is_empty() {
             return;
         }
         let mut doc = self.doc(KIND_BODY);
@@ -1261,7 +1263,7 @@ impl<'w> ChunkSink<'w> {
     /// current label and preview, one per session — propagating any deferred error.
     fn finish(&mut self) -> Result<()> {
         self.flush();
-        if self.err.is_none() {
+        if !self.failed && !self.failed && self.err.is_none() {
             let mut doc = self.doc(KIND_META);
             if !self.preview.is_empty() {
                 doc.add_text(self.f.preview, &self.preview);
@@ -1272,8 +1274,10 @@ impl<'w> ChunkSink<'w> {
             self.emit(doc);
         }
         if let Some(e) = self.err.take() {
+            self.failed = true;
             return Err(e);
         }
+        anyhow::ensure!(!self.failed, "search sink has already failed");
         Ok(())
     }
 }
@@ -1287,7 +1291,7 @@ impl<'w> ChunkSink<'w> {
 
     fn push_body(&mut self, mut s: &str) {
         let cap = 2 * CHUNK_BYTES;
-        while !s.is_empty() && self.err.is_none() {
+        while !s.is_empty() && !self.failed && self.err.is_none() {
             if self.buf.is_empty() {
                 self.buf_first = self.msgs;
             }
@@ -1374,7 +1378,10 @@ impl<'w> ChunkSink<'w> {
                 self.push_chunk(" ");
                 // Value Display streams serde's compact canonical JSON into fmt::Write. Unlike
                 // to_string, even a single giant string fragment goes straight to bounded docs.
-                if std::fmt::write(&mut JsonChunks::new(self), format_args!("{input}")).is_err() && self.err.is_none() {
+                if std::fmt::write(&mut JsonChunks::new(self), format_args!("{input}")).is_err()
+                    && !self.failed
+                    && self.err.is_none()
+                {
                     self.err = Some(anyhow::anyhow!("serializing tool input for search"));
                 }
                 self.push_chunk("\n");
@@ -1459,6 +1466,12 @@ impl std::fmt::Write for JsonChunks<'_, '_> {
 const PERSISTED_INDEX_CAP: usize = 1024 * 1024;
 
 impl cv_core::MessageSink for ChunkSink<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.failed |= self.err.is_some();
+        self.err
+            .take()
+            .or_else(|| self.failed.then(|| anyhow::anyhow!("search sink has already failed")))
+    }
     fn dependency(&mut self, path: &Path) {
         self.dependencies.record(path);
     }
@@ -1476,7 +1489,9 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     /// which only a stretch with little text reaches (giant tool outputs, telemetry), so a resumed
     /// pass never re-reads much.
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
-        self.err.is_none() && (self.boundary_due || offset >= self.last_checkpoint.saturating_add(CHECKPOINT_AT_MOST))
+        !self.failed
+            && self.err.is_none()
+            && (self.boundary_due || offset >= self.last_checkpoint.saturating_add(CHECKPOINT_AT_MOST))
     }
 
     /// A checkpoint is a body-doc boundary: every doc lies wholly before it or after it, so a
@@ -1500,7 +1515,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     }
     fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
         use cv_core::Block;
-        if self.err.is_some() {
+        if self.failed || self.err.is_some() {
             return cv_core::Flow::Stop;
         }
         // Move the resolver out so the chunk callbacks (which mutate `self`) don't conflict with it.

@@ -204,6 +204,7 @@ pub struct SpoolingSink {
     inner: EventSink,
     spool: EventSpool,
     error: Option<anyhow::Error>,
+    failed: bool,
 }
 
 impl SpoolingSink {
@@ -220,6 +221,7 @@ impl SpoolingSink {
             inner,
             spool: EventSpool::default(),
             error: None,
+            failed: false,
         }
     }
 
@@ -236,22 +238,32 @@ impl SpoolingSink {
     pub fn into_spool(self) -> Result<EventSpool> {
         match self.error {
             Some(error) => Err(error),
+            None if self.failed => anyhow::bail!("event spool has already failed"),
             None => Ok(self.spool),
         }
     }
 }
 
 impl MessageSink for SpoolingSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        let error = self.error.take().or_else(|| self.inner.take_error());
+        self.failed |= error.is_some();
+        error.or_else(|| self.failed.then(|| anyhow::anyhow!("event spool has already failed")))
+    }
     fn dependency(&mut self, path: &std::path::Path) {
-        self.inner.dependency(path);
+        if !self.failed && self.error.is_none() {
+            self.inner.dependency(path);
+        }
     }
 
     fn meta(&mut self, session: &Session) {
-        self.inner.meta(session);
+        if !self.failed && self.error.is_none() {
+            self.inner.meta(session);
+        }
     }
 
     fn message(&mut self, message: Message) -> Flow {
-        if self.error.is_some() {
+        if self.failed || self.error.is_some() {
             return Flow::Stop;
         }
         self.inner.message(message);
@@ -265,17 +277,32 @@ impl MessageSink for SpoolingSink {
     }
 
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
-        self.error.is_none() && self.inner.wants_checkpoint(offset)
+        !self.failed && self.error.is_none() && self.inner.wants_checkpoint(offset)
     }
 
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
-        self.inner.checkpoint(cp);
+        if !self.failed && self.error.is_none() {
+            self.inner.checkpoint(cp);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drained_spool_error_cannot_resume_delivery_or_publish_staged_rows() {
+        let mut sink = SpoolingSink::new(None);
+        sink.error = Some(anyhow::anyhow!("temporary spool write failed"));
+        assert_eq!(sink.take_error().unwrap().to_string(), "temporary spool write failed");
+        assert_eq!(sink.message(Message::new(crate::Role::User)), Flow::Stop);
+        assert!(!sink.wants_checkpoint(1));
+        assert!(
+            sink.into_spool().is_err(),
+            "draining the diagnostic must not make staged output publishable"
+        );
+    }
 
     fn event(idx: usize, target: Option<String>) -> Event {
         Event {
