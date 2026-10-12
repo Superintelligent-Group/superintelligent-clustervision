@@ -144,12 +144,12 @@
 
 use super::store::sqlite::{columns, open_ro, table_exists};
 use super::store::xdg_data_dir;
-use super::{note_skipped_lines, ts_from_epoch, Adapter};
+use super::{Adapter, note_skipped_lines, ts_from_epoch};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -511,6 +511,37 @@ type SessionRow = (
     Option<String>,
 );
 
+/// Session-wide navigation state has fixed size per node, independent of metadata payload size.
+#[derive(Default)]
+struct NodeFacts {
+    summarized_from: Option<i64>,
+    num_tokens_preceding: Option<u64>,
+    is_system_prefix: bool,
+}
+impl NodeFacts {
+    fn parse(text: &str) -> Option<Self> {
+        use crate::harness::store::document::{Index, Raw, Record};
+        let raw = serde_json::from_str::<&serde_json::value::RawValue>(text).ok()?;
+        if !crate::harness::store::json::value_compatible(raw.get().as_bytes()) {
+            return None;
+        }
+        let index = Index::default();
+        let record = Record::parse(Raw::new(raw.get(), &index))?;
+        Some(Self {
+            summarized_from: record
+                .get("summarized_from")
+                .and_then(|v| serde_json::from_str(v.get()).ok()),
+            num_tokens_preceding: record
+                .get("num_tokens_preceding")
+                .and_then(|v| serde_json::from_str(v.get()).ok()),
+            is_system_prefix: record
+                .get("is_system_prefix")
+                .and_then(|v| serde_json::from_str(v.get()).ok())
+                .unwrap_or(false),
+        })
+    }
+}
+
 fn stream_conn(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
     // Child ids split on the FIRST '/': `<session_id>/<agent_id>` — slugs never contain one.
     let (session_id, agent_id) = match r.id.split_once('/') {
@@ -531,6 +562,7 @@ fn stream_session(
     r: &SessionRef,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
+    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let cols = columns(conn, "sessions");
     let has = |c: &str| cols.contains(c);
     let sel = |c: &str| if has(c) { c.to_string() } else { "NULL".to_string() };
@@ -595,27 +627,24 @@ fn stream_session(
         .ok()
     });
 
-    // Per-chain-node metadata column (added in `add_node_metadata` — probe before selecting).
-    let node_meta: HashMap<i64, Value> = if columns(conn, "message_nodes").contains("metadata") {
-        let mut m = HashMap::new();
+    // Keep only navigation facts; arbitrary node metadata belongs to the selected row replay.
+    let has_node_metadata = columns(conn, "message_nodes").contains("metadata");
+    let mut node_meta = HashMap::new();
+    if has_node_metadata {
         if let Ok(mut stmt) = conn.prepare("SELECT node_id, metadata FROM message_nodes WHERE session_id = ?1") {
-            if let Ok(rows) = stmt.query_map([session_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
-            }) {
-                for (nid, raw) in rows.flatten() {
-                    // The column holds JSON, or the literal string 'null'.
-                    if let Some(v) = raw.and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
-                        if v.is_object() {
-                            m.insert(nid, v);
-                        }
+            if let Ok(mut rows) = stmt.query([session_id]) {
+                while let Ok(Some(row)) = rows.next() {
+                    let Ok(nid) = row.get::<_, i64>(0) else { continue };
+                    let Ok(raw) = row.get_ref(1).and_then(|v| Ok(v.as_str()?)) else {
+                        continue;
+                    };
+                    if let Some(facts) = NodeFacts::parse(raw) {
+                        node_meta.insert(nid, facts);
                     }
                 }
             }
         }
-        m
-    } else {
-        HashMap::new()
-    };
+    }
 
     // A compaction writes TWO chain nodes sharing one `summarized_from` (the old window's head —
     // still in the forest): an assistant node whose content is the summary markdown, and a system
@@ -627,11 +656,7 @@ fn stream_session(
     // node is emitted. `handoff_history` is deliberately dropped — it duplicates the handoffs.
     let mut compaction_facts: HashMap<i64, serde_json::Map<String, Value>> = HashMap::new();
     for &nid in &chain {
-        let Some(sf) = node_meta
-            .get(&nid)
-            .and_then(|m| m.get("summarized_from"))
-            .and_then(Value::as_i64)
-        else {
+        let Some(sf) = node_meta.get(&nid).and_then(|m| m.summarized_from) else {
             continue;
         };
         let entry = compaction_facts.entry(sf).or_insert_with(|| {
@@ -640,11 +665,7 @@ fn stream_session(
             o.insert("pre_chain_head".into(), json!(sf));
             o
         });
-        if let Some(ntp) = node_meta
-            .get(&nid)
-            .and_then(|m| m.get("num_tokens_preceding"))
-            .and_then(Value::as_u64)
-        {
+        if let Some(ntp) = node_meta.get(&nid).and_then(|m| m.num_tokens_preceding) {
             // The window's token cost: the larger `num_tokens_preceding` of the pair.
             let cur = entry.get("pre_tokens").and_then(Value::as_u64).unwrap_or(0);
             entry.insert("pre_tokens".into(), json!(cur.max(ntp)));
@@ -693,11 +714,7 @@ fn stream_session(
     // fetched lazily per node here — only the prefix nodes' bodies are read ahead of the stream.)
     let mut prefix: Vec<String> = Vec::new();
     for &nid in &chain {
-        let is_prefix = node_meta
-            .get(&nid)
-            .and_then(|m| m.get("is_system_prefix"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let is_prefix = node_meta.get(&nid).map(|m| m.is_system_prefix).unwrap_or(false);
         if is_prefix && forest.roles.get(&nid).is_some_and(|r| r == "system") {
             let content: Option<String> = conn
                 .query_row(
@@ -872,13 +889,17 @@ fn stream_session(
     let mut last_msg_id: Option<String> = None;
     let mut last_sf: Option<i64> = None;
     let mut skipped = 0u64;
-    let mut stmt =
-        conn.prepare("SELECT chat_message, created_at FROM message_nodes WHERE session_id = ?1 AND node_id = ?2")?;
+    let metadata_column = if has_node_metadata { "metadata" } else { "NULL" };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT chat_message, created_at, {metadata_column} FROM message_nodes WHERE session_id = ?1 AND node_id = ?2"
+    ))?;
     for &nid in &chain {
-        let row: Option<(String, i64)> = stmt
-            .query_row(rusqlite::params![session_id, nid], |row| Ok((row.get(0)?, row.get(1)?)))
+        let row: Option<(String, i64, Option<String>)> = stmt
+            .query_row(rusqlite::params![session_id, nid], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2).ok().flatten()))
+            })
             .ok();
-        let Some((raw, node_created)) = row else {
+        let Some((raw, node_created, metadata)) = row else {
             skipped += 1;
             continue;
         };
@@ -886,14 +907,14 @@ fn stream_session(
             skipped += 1;
             continue;
         };
-        let mut m = node_to_message(nid, node_created, &chat, node_meta.get(&nid), &mut tool_names);
+        let metadata = metadata
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .filter(Value::is_object);
+        let mut m = node_to_message(nid, node_created, &chat, metadata.as_ref(), &mut tool_names);
 
         // The first node of a compaction pair: emit a synthetic boundary right before it and
         // point the summary's parent_id at the boundary (compaction.rs pairs them by uuid).
-        let sf = node_meta
-            .get(&nid)
-            .and_then(|n| n.get("summarized_from"))
-            .and_then(Value::as_i64);
+        let sf = node_meta.get(&nid).and_then(|n| n.summarized_from);
         let mut parent = last_msg_id.clone();
         if let Some(sf) = sf {
             if last_sf != Some(sf) {
@@ -1240,6 +1261,40 @@ mod tests {
 
     fn sref(id: &str) -> SessionRef {
         SessionRef::new(id, Harness::Devin, fixture())
+    }
+
+    #[test]
+    fn node_facts_match_value_navigation_without_retaining_payloads() {
+        for text in [
+            r#"{"summarized_from":1,"num_tokens_preceding":9,"is_system_prefix":true,"ignored":"body"}"#,
+            r#"{"summarized_from":1,"summarized_from":null,"num_tokens_preceding":-1,"is_system_prefix":1}"#,
+            r#"{"summarized_from":{},"num_tokens_preceding":[],"is_system_prefix":false}"#,
+            r#"{"ignored":"\ud800"}"#,
+            r#"{"ignored":1e400}"#,
+            "null",
+            "[]",
+            "{} trailing",
+        ] {
+            let old = serde_json::from_str::<Value>(text).ok().filter(Value::is_object);
+            let facts = NodeFacts::parse(text);
+            assert_eq!(facts.is_some(), old.is_some(), "{text}");
+            if let (Some(old), Some(facts)) = (old, facts) {
+                assert_eq!(
+                    facts.summarized_from,
+                    old.get("summarized_from").and_then(Value::as_i64)
+                );
+                assert_eq!(
+                    facts.num_tokens_preceding,
+                    old.get("num_tokens_preceding").and_then(Value::as_u64)
+                );
+                assert_eq!(
+                    facts.is_system_prefix,
+                    old.get("is_system_prefix").and_then(Value::as_bool).unwrap_or(false)
+                );
+            }
+        }
+        let text = format!("{{\"ignored\":\"{}\",\"summarized_from\":7}}", "x".repeat(1024 * 1024));
+        assert_eq!(NodeFacts::parse(&text).unwrap().summarized_from, Some(7));
     }
 
     fn dbag(s: &Session) -> &serde_json::Map<String, Value> {
