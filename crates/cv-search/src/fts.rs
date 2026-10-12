@@ -3584,6 +3584,133 @@ mod tests {
         }
     }
 
+    /// Native Qwen has stable ChatRecord boundaries; legacy replay can replace old IDs. Keep
+    /// this end-to-end check across counts, events and stored search docs, including partial EOF.
+    #[test]
+    fn qwen_native_append_resumes_but_legacy_replay_and_metadata_changes_do_not() {
+        use cv_core::{Harness, SessionRef};
+        let _home = IsolatedHome::new();
+        let (dir, root) = (tmpdir(), tmpdir());
+        let chats = root.join("projects/group/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        let r = SessionRef::new("native", Harness::Qwen, chats.join("native.jsonl"));
+        let rec = |id: &str, body: serde_json::Value| {
+            let mut v = serde_json::json!({"uuid":id,"sessionId":"native","cwd":"/scratch",
+                "timestamp":"2026-10-11T00:00:01Z","version":"0.25.1"});
+            v.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+            v.to_string()
+        };
+        let mut text = String::new();
+        for n in 0..100 {
+            text.push_str(&rec(&format!("u{n}"), serde_json::json!({"type":"user",
+                "provenance":"real_user","message":{"role":"user","parts":[{"text":format!("prefix sapphire message {n}")}]}})));
+            text.push('\n');
+        }
+        text.push_str(&rec(
+            "a1",
+            serde_json::json!({"type":"assistant","model":"first-model",
+            "message":{"role":"model","parts":[{"functionCall":{"id":"call","name":"tool_call",
+                "args":{"name":"agent","arguments":{"prompt":"explore"}}}}]}}),
+        ));
+        text.push('\n');
+        // Valid EOF records emit, but may not be checkpointed until the physical newline lands.
+        text.push_str(&rec(
+            "pending",
+            serde_json::json!({"type":"assistant","model":"next-model",
+            "message":{"role":"model","parts":[{"text":"pending amber reply"}]}}),
+        ));
+        std::fs::write(&r.path, &text).unwrap();
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().resumed, 0);
+        assert!(
+            cv_core::resume::MarkTable::load().get(&r).is_some(),
+            "native head must leave a safe chunk boundary"
+        );
+        let words: Vec<_> = ["sapphire", "amber", "returned", "compressed"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for suffix in [
+            rec(
+                "result",
+                serde_json::json!({"type":"tool_result","message":{"role":"user","parts":[
+                {"functionResponse":{"id":"call","name":"tool_call","response":{"output":"returned emerald"}}}]},
+                "toolCallResult":{"callId":"call","status":"success"}}),
+            ),
+            rec(
+                "compact",
+                serde_json::json!({"type":"system","subtype":"chat_compression","systemPayload":{
+                "info":{"originalTokenCount":99,"newTokenCount":9},"compressedHistory":[{"role":"user","parts":[{"text":"compressed ruby"}]}]}}),
+            ),
+        ] {
+            text.push('\n');
+            text.push_str(&suffix);
+            text.push('\n');
+            std::fs::write(&r.path, &text).unwrap();
+            let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
+            assert_eq!((swept.changed, swept.resumed), (1, 1));
+            assert_eq!(
+                observe(&dir, std::slice::from_ref(&r), &words),
+                whole_sweep(std::slice::from_ref(&r), &words)
+            );
+        }
+
+        // A sidecar edit must not reuse checkpointed lineage, even alongside transcript growth.
+        let sub = root.join("projects/group/subagents/native");
+        std::fs::create_dir_all(&sub).unwrap();
+        let child = SessionRef::new("agent-worker", Harness::Qwen, sub.join("agent-worker.jsonl"));
+        let meta = sub.join("agent-worker.meta.json");
+        std::fs::write(&meta, r#"{"toolUseId":"old","subagentName":"worker"}"#).unwrap();
+        std::fs::write(&child.path, &text).unwrap();
+        sweep(&dir, vec![r.clone(), child.clone()], false, false).unwrap();
+        std::fs::write(&meta, r#"{"toolUseId":"new","subagentName":"worker"}"#).unwrap();
+        std::fs::write(
+            &child.path,
+            format!(
+                "{text}\n{}\n",
+                rec(
+                    "last",
+                    serde_json::json!({"type":"user",
+            "message":{"role":"user","parts":[{"text":"child append"}]}})
+                )
+            ),
+        )
+        .unwrap();
+        let swept = sweep(&dir, vec![r.clone(), child.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (1, 0));
+        assert_eq!(
+            observe(&dir, &[r.clone(), child.clone()], &words),
+            whole_sweep(&[r, child], &words)
+        );
+
+        let legacy_dir = root.join("tmp/hash/chats");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = SessionRef::new("legacy", Harness::Qwen, legacy_dir.join("session-legacy.jsonl"));
+        let mut old = String::from(
+            r#"{"sessionId":"legacy","startTime":"2026-10-11T00:00:00Z","lastUpdated":"2026-10-11T00:00:01Z","kind":"main"}"#,
+        );
+        for n in 0..60 {
+            old.push_str(&format!(
+                "\n{{\"id\":\"u{n}\",\"type\":\"user\",\"content\":\"legacy prompt\"}}"
+            ));
+        }
+        old.push_str("\n{\"id\":\"answer\",\"type\":\"gemini\",\"content\":\"obsolete sapphire\"}\n");
+        std::fs::write(&legacy.path, &old).unwrap();
+        sweep(&dir, vec![legacy.clone()], false, false).unwrap();
+        old.push_str("{\"id\":\"answer\",\"type\":\"gemini\",\"content\":\"replacement amber\"}\n");
+        std::fs::write(&legacy.path, &old).unwrap();
+        let swept = sweep(&dir, vec![legacy.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (1, 0));
+        assert_eq!(
+            observe(&dir, std::slice::from_ref(&legacy), &words),
+            whole_sweep(std::slice::from_ref(&legacy), &words)
+        );
+        assert!(text_search(&dir, "sapphire", 100).unwrap().is_empty());
+        assert!(!text_search(&dir, "amber", 100).unwrap().is_empty());
+        for d in [dir, root] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
     #[test]
     fn fts_only_reread_keeps_event_checkpoints_for_later_append() {
         let home = IsolatedHome::new();
