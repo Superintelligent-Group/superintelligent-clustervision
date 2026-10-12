@@ -97,8 +97,9 @@ Source baseline: `c0f0044`; implementation and remaining work: `DATAPATHS.md`. T
 process-isolated operations over frozen copies or generated fixtures, with a scratch catalog.
 Peak heap is requested live Rust allocation, not RSS, native SQLite allocation, or fragmentation.
 Throughput runs use a clean release binary; allocation and fidelity instrumentation run separately.
-The shared machine carried roughly 150–180 load during this pass, so CPU comparisons below are
-interleaved baseline/candidate medians, not a promise about interactive wall latency.
+The shared machine carried roughly 150–180 load early in this pass and 17–20 during the final
+Gemini/affordance pairs. CPU comparisons below use interleaved baseline/candidate medians, not a
+promise about interactive wall latency.
 
 | Operation/input | Baseline peak Rust heap | Updated peak Rust heap |
 |---|---:|---:|
@@ -124,6 +125,13 @@ Claude lazy count CPU medians (three interleaved pairs): frozen 0.307 → 0.273 
 100 MB plain 0.0885 → 0.0512 s; escaped 0.718 → 0.404 s; 30,000 small records
 0.0856 → 0.0417 s. Typed borrowed records avoid the old Value tree, and mmap line traversal
 removes the giant-line buffer. Rich extras and uncommon fallback shapes remain owned.
+
+Gemini lazy count CPU medians (three final interleaved pairs): 1.05 → 0.72 s, about 31% less
+CPU; source-stage wall medians 1.124 → 0.813 s. The baseline's first 3.567 s outlier is retained
+in the raw results; OS caches were not controlled. Production affordance reading on the same
+source takes median 0.87 → 0.64 s user+system CPU and 0.894 → 0.653 s wall. The escaped
+64 MiB late-summary fixture instead costs about 1.45× CPU: the bounded reducer trades a second
+validation pass for dramatically lower peak allocation. No hashing runs contribute to these times.
 
 Cursor's composer discovery query on 20,000 unrelated bubble rows falls from 80,043 to 52
 SQLite VM steps, with zero full-scan steps. OpenClaw's bounded row/tree replay trades roughly

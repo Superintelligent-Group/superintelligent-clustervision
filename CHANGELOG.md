@@ -16,7 +16,7 @@
 - Giant Codex tool outputs preserve tool names, namespaces, timestamps and inherited-history filtering through the ordinary dispatch path.
 - Gemini accepts escaped wrapper metadata and preserves saved-chat message classification.
 - Same-size transcript edits invalidate search and event caches; checkpoint reuse requires source growth.
-- Catalog watches detect SQLite WAL changes, including WAL creation and removal.
+- Counts, events and search track known sidecar and SQLite WAL changes independently; discovery caches invalidate when metadata interpretation changes.
 - Archive catalog cleanup scans grow geometrically instead of rereading the entire catalog after every stored session.
 - `cv index` parses on every core: a full counts recount of a 95 GB fleet went from 329 s to 61-68 s.
 - `cv search` ranks equal scores by session id, whatever order the index was written in.

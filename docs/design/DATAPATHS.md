@@ -117,11 +117,16 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
    reasoning can revise the last pending message. Checkpoint only finalized output/state.
 2. Identity includes dependencies: SQLite WAL, directory children, side metadata, rotation
    manifests and sidecar output. Existing freshness policies disagree about these dependencies.
-   Catalog DB watches now include WAL appearance, modification and disappearance. FTS/events
-   require primary-path mtime and size, as counts already did; complete dependency stamps remain work.
+   Catalog DB watches include WAL appearance, modification and disappearance. Counts, events and
+   each search index now keep separate canonical dependency metadata baselines, tied to the primary
+   tuple. SQL output and stamps publish atomically; FTS invalidates its old baseline before changes
+   and publishes a revalidated baseline after commit. Operation-local probes share file stats.
+   Known adapter-local sidecars, directory members and WAL files are covered; conditional Claude
+   fork siblings and adopted external tool-output pointers still need a consumer-recorded read set.
 3. Current resume marks sample the first 4 KiB and the 4 KiB preceding the mark. This is not a
    proof that the entire prefix is unchanged. FTS now requires growth before using a mark, so
-   same-size rewrites take a whole pass; a rewrite followed by growth can still escape the samples.
+   same-size rewrites take a whole pass; inode replacement also rejects reuse. A rewrite followed by
+   growth can still escape the samples, and a primary rewrite restoring size/mtime can evade freshness.
    Unconditional detection of arbitrary prefix edits requires reading that prefix or a trusted
    writer/filesystem change signal; do not promise both zero prefix reads and such detection.
 4. Lazy/full equivalence must compare **resolved content** and metadata. The existing stream dump
@@ -174,9 +179,11 @@ of peak live Rust allocations (847 MB process footprint). The corresponding Code
 25.7 MB live Rust allocations and 47.5 MB footprint despite 761 MB RSS: most resident pages are
 file-backed. These measurements distinguish private allocation from mapped input.
 
-The probe measures direct adapter behavior. Its window operation demonstrates retention shape;
+The probe separates direct adapter operations from production affordance reads. Its window
+operation demonstrates retention shape;
 production JSON show additionally counts, serializes selected messages for budgets and handles
-continuation. It is not an end-to-end show benchmark. Hash runs resolve spans and canonicalize
+continuation. The probe window is not an end-to-end show benchmark. Separate actual CLI tests
+compare full JSON output with the lazy-extra window implementation, including EOF metadata. Hash runs resolve spans and canonicalize
 message and metadata maps; they are separate from timing and allocation runs. The heap feature
 counts requested Rust allocations, excluding SQLite/native allocation and allocator fragmentation.
 
@@ -197,7 +204,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [ ] Claude metadata scan and remaining rich/fallback record allocations.
-- [ ] SQLite/dependency freshness, including WAL and sidecar-only changes.
+- [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
+- [ ] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
 - [ ] Remaining document readers: SDK, exports and OpenSession; Continue/LM Studio selected records.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
