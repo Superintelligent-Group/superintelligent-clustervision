@@ -201,10 +201,10 @@ fn ext_facts_drive_external_terms() {
     struct Fx;
     impl ExtFacts for Fx {
         fn tool(&self, n: &str) -> anyhow::Result<Tri> {
-            Ok({ Tri::of(n == "bash") })
+            Ok(Tri::of(n == "bash"))
         }
         fn has(&self, f: &str) -> anyhow::Result<Tri> {
-            Ok({ Tri::of(f == "errors") })
+            Ok(Tri::of(f == "errors"))
         }
     }
     let query = q("tool:Bash has:errors");
@@ -229,16 +229,16 @@ fn forest_fields_classify_and_resolve() {
     struct Fx;
     impl ExtFacts for Fx {
         fn subtool(&self, n: &str) -> anyhow::Result<Tri> {
-            Ok({ Tri::of(n == "bash") })
+            Ok(Tri::of(n == "bash"))
         }
         fn agent_type(&self, n: &str) -> anyhow::Result<Tri> {
-            Ok({ Tri::of(n == "explore") })
+            Ok(Tri::of(n == "explore"))
         }
         fn workflow(&self, n: &str) -> anyhow::Result<Tri> {
-            Ok({ Tri::of(n == "census") })
+            Ok(Tri::of(n == "census"))
         }
         fn has(&self, f: &str) -> anyhow::Result<Tri> {
-            Ok({ Tri::of(f == "compacted") })
+            Ok(Tri::of(f == "compacted"))
         }
         fn count(&self, field: FieldId) -> anyhow::Result<Option<u64>> {
             Ok({
