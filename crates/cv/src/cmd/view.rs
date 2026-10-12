@@ -321,7 +321,7 @@ fn session_json_window(
     }
     impl cv_core::MessageSink for Selection {
         fn take_error(&mut self) -> Option<anyhow::Error> {
-            self.error.take().map(Into::into)
+            self.error.take()
         }
         fn message(&mut self, m: Message) -> cv_core::Flow {
             let index = self.seen;
