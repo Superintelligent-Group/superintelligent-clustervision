@@ -629,6 +629,24 @@ fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str
 /// window or read error returns `Err`: callers must discard or reset their accumulated result on
 /// failure. This primitive does not publish transactional output or stop before validating EOF.
 pub(crate) fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) -> Result<bool, ()> {
+    decode_json_body_control(reader, &mut |text| {
+        f(text);
+        true
+    })
+}
+
+/// Decode a body already accepted by strict Value-compatible validation, stopping when the
+/// callback returns false. Ok after an intentional stop does NOT validate the unread suffix.
+/// Callers must retain/recheck their source identity and discard callback effects on Err.
+/// Reads ahead at most one window; an intentional stop is not a resumable decoder checkpoint.
+pub(crate) fn decode_validated_json_body_until(
+    reader: &mut impl std::io::BufRead,
+    f: &mut impl FnMut(&str) -> bool,
+) -> Result<(), ()> {
+    decode_json_body_control(reader, f).map(|_| ())
+}
+
+fn decode_json_body_control(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str) -> bool) -> Result<bool, ()> {
     const WINDOW: usize = 64 * 1024;
     let mut raw = Vec::with_capacity(WINDOW);
     let mut quoted = Vec::with_capacity(WINDOW + 2);
@@ -669,8 +687,11 @@ pub(crate) fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl 
         quoted.extend_from_slice(&raw[..end]);
         quoted.push(b'"');
         let mut decoder = serde_json::Deserializer::from_slice(&quoted);
-        decoder.deserialize_str(JsonWindow(f)).map_err(|_| ())?;
+        let keep_going = decoder.deserialize_str(JsonWindow(f)).map_err(|_| ())?;
         decoder.end().map_err(|_| ())?;
+        if !keep_going {
+            return Ok(has_escape);
+        }
         raw.drain(..end);
         if eof {
             return Ok(has_escape);
@@ -681,16 +702,15 @@ pub(crate) fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl 
 /// The callback borrows serde's decode scratch; neither pass needs an owned decoded String.
 struct JsonWindow<'a, F>(&'a mut F);
 
-impl<'de, F: FnMut(&str)> Visitor<'de> for JsonWindow<'_, F> {
-    type Value = ();
+impl<'de, F: FnMut(&str) -> bool> Visitor<'de> for JsonWindow<'_, F> {
+    type Value = bool;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("a JSON string window")
     }
 
-    fn visit_str<E: de::Error>(self, s: &str) -> Result<(), E> {
-        (self.0)(s);
-        Ok(())
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<bool, E> {
+        Ok((self.0)(s))
     }
 }
 
@@ -795,6 +815,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn validated_decoder_stops_after_one_bounded_window() {
+        use std::io::Cursor;
+        let body = "\\ud83c\\udf19\\n".repeat(100_000);
+        // Independent full-value acceptance establishes the stoppable primitive's precondition.
+        let expected: String = serde_json::from_str(&format!("\"{body}\"")).unwrap();
+        let mut reader = Cursor::new(body.as_bytes());
+        let mut output = String::new();
+        decode_validated_json_body_until(&mut reader, &mut |text| {
+            output.push_str(text);
+            false
+        })
+        .unwrap();
+        assert!(reader.position() <= 65_536);
+        assert!(reader.position() < body.len() as u64);
+        assert!(!output.is_empty());
+        assert!(expected.starts_with(&output));
+        let mut full_reader = Cursor::new(body.as_bytes());
+        let mut full = String::new();
+        decode_validated_json_body_until(&mut full_reader, &mut |text| {
+            full.push_str(text);
+            true
+        })
+        .unwrap();
+        assert_eq!(full, expected);
+        assert_eq!(full_reader.position(), body.len() as u64);
     }
 
     #[test]

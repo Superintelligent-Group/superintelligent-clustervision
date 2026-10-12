@@ -202,7 +202,7 @@ impl Json {
         })?;
         range.offset += leading;
         range.len = normalized_len;
-        Ok(Self::Source(Arc::new(range)))
+        range.source.validated_range(range.offset, range.len)
     }
     /// Select a child value without materializing its descendants. Source children retain their
     /// validated range and source identity; missing keys/nonobjects remain distinct from errors.
@@ -243,6 +243,12 @@ impl Json {
         self.write_canonical(&mut counter)?;
         Ok(counter.0)
     }
+    /// A compact JSON byte prefix ending on a Unicode scalar boundary, plus whether the complete
+    /// value was truncated. Source validation and the final identity check still apply. No more
+    /// than max_bytes of output are retained; the prefix need not itself be complete JSON.
+    pub fn canonical_prefix(&self, max_bytes: usize) -> Result<(String, bool)> {
+        self.with_view(|view| view.canonical_prefix(max_bytes))
+    }
     /// Emit the exact compact JSON that serde_json serializes from the complete Value.
     ///
     /// An I/O or source-change error may occur after a prefix has been written. Callers must
@@ -281,6 +287,24 @@ impl<'a> JsonView<'a> {
             View::Source(source) => Record::parse(source.raw)
                 .and_then(|record| record.get(key))
                 .map(|raw| Self(View::Source(SourceView { raw, ..source }))),
+        })
+    }
+    pub fn is_string(self) -> Result<bool> {
+        Ok(match self.0 {
+            View::Owned(value) => value.is_string(),
+            View::Source(source) => source.raw.get().starts_with('"'),
+        })
+    }
+    pub fn is_object(self) -> Result<bool> {
+        Ok(match self.0 {
+            View::Owned(value) => value.is_object(),
+            View::Source(source) => source.raw.get().starts_with('{'),
+        })
+    }
+    pub fn is_array(self) -> Result<bool> {
+        Ok(match self.0 {
+            View::Owned(value) => value.is_array(),
+            View::Source(source) => source.raw.get().starts_with('['),
         })
     }
     pub fn is_null(self) -> Result<bool> {
@@ -370,10 +394,11 @@ impl<'a> JsonView<'a> {
                     .offset
                     .checked_add(delta)
                     .context("JSON child offset overflow")?;
-                source
-                    .range
-                    .source
-                    .validated_range(offset, source.raw.get().len() as u64)
+                // The containing scoped operation performs the final identity check; child
+                // descriptors do not need another stat for each field within that operation.
+                Ok(Json::Source(Arc::new(
+                    source.range.source.range(offset, source.raw.get().len() as u64)?,
+                )))
             }
         }
     }
@@ -388,6 +413,19 @@ impl<'a> JsonView<'a> {
         let mut counter = CountWriter(0);
         self.write_canonical(&mut counter)?;
         Ok(counter.0)
+    }
+    /// Same bounded output and truncation contract as Json::canonical_prefix.
+    pub fn canonical_prefix(self, max_bytes: usize) -> Result<(String, bool)> {
+        let mut writer = PrefixWriter {
+            bytes: Vec::new(),
+            limit: max_bytes,
+            stopped: false,
+        };
+        let result = self.write_canonical(&mut writer);
+        if !writer.stopped {
+            result?;
+        }
+        Ok((String::from_utf8(writer.bytes)?, writer.stopped))
     }
     /// Same partial-output-on-error contract as Json::write_canonical.
     pub fn write_canonical(self, writer: &mut impl Write) -> Result<()> {
@@ -420,6 +458,41 @@ impl<'a> Iterator for JsonArray<'a> {
     }
 }
 
+struct PrefixWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    stopped: bool,
+}
+impl Write for PrefixWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let text = std::str::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let remaining = self.limit - self.bytes.len();
+        let mut end = bytes.len().min(remaining);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let needed = self.bytes.len() + end;
+        if needed > self.bytes.capacity() {
+            let capacity = self
+                .bytes
+                .capacity()
+                .max(32)
+                .saturating_mul(2)
+                .min(self.limit)
+                .max(needed);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(&bytes[..end]);
+        if end != bytes.len() {
+            self.stopped = true;
+            return Err(std::io::Error::other("canonical JSON prefix complete"));
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 struct CountWriter(u64);
 impl Write for CountWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -440,10 +513,9 @@ fn decode_string(raw: Raw<'_>, f: &mut impl FnMut(&str) -> Result<()>) -> Result
         return f(body);
     }
     let mut error = None;
-    let decoded = crate::lazy::decode_json_body(&mut Cursor::new(body.as_bytes()), &mut |text| {
-        if error.is_none() {
-            error = f(text).err();
-        }
+    let decoded = crate::lazy::decode_validated_json_body_until(&mut Cursor::new(body.as_bytes()), &mut |text| {
+        error = f(text).err();
+        error.is_none()
     });
     if let Some(error) = error {
         return Err(error);
@@ -660,6 +732,10 @@ mod tests {
                     assert_eq!(array.len(), 3);
                     assert_eq!(array[0].as_bool()?, Some(true));
                     assert!(array[1].is_null()?);
+                    assert!(view.is_object()?);
+                    assert!(view.get("a")?.unwrap().is_array()?);
+                    assert!(array[2].is_string()?);
+                    assert!(!array[1].is_string()?);
                     assert!(!array[1].for_each_str_chunk(|_| panic!("nonstring callback"))?);
                     let mut keys = Vec::new();
                     view.for_each_entry(|key, _| {
@@ -803,6 +879,55 @@ mod tests {
         std::fs::remove_file(&link).unwrap();
         symlink(&other, &link).unwrap();
         assert!(value.resolve().is_err());
+    }
+
+    #[test]
+    fn canonical_prefix_is_bounded_unicode_complete_and_reports_truncation() {
+        let input = r#"{"z":"é🌙尾\n","a":[true,1.25],"z":"é🌙尾\n","last":"tail"}"#;
+        let fixture = Fixture::new(input.as_bytes());
+        let owned: Value = serde_json::from_str(input).unwrap();
+        let expected = serde_json::to_string(&owned).unwrap();
+        for value in [Json::from(owned), fixture.value()] {
+            for cap in 0..=expected.len() + 4 {
+                let (prefix, truncated) = value.canonical_prefix(cap).unwrap();
+                let mut end = cap.min(expected.len());
+                while !expected.is_char_boundary(end) {
+                    end -= 1;
+                }
+                assert_eq!(prefix, expected[..end]);
+                assert_eq!(truncated, cap < expected.len());
+                assert!(prefix.capacity() <= cap);
+            }
+            let (prefix, truncated) = value.canonical_prefix(usize::MAX).unwrap();
+            assert_eq!(prefix, expected);
+            assert!(!truncated);
+        }
+        let value = fixture.value();
+        std::fs::remove_file(&fixture.path).unwrap();
+        assert!(value.canonical_prefix(0).is_err());
+    }
+
+    #[test]
+    fn prefix_stop_cannot_mask_a_source_change() {
+        let fixture = Fixture::new(br#"{"a":1}"#);
+        let value = fixture.value();
+        let error = value
+            .with_view(|view| {
+                let result = view.canonical_prefix(0)?;
+                std::fs::File::open(&fixture.path)?.set_modified(SystemTime::UNIX_EPOCH)?;
+                Ok(result)
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("JSON source changed"));
+        let value = fixture.value();
+        let error = value
+            .with_view::<()>(|_| {
+                std::fs::File::open(&fixture.path)?
+                    .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))?;
+                anyhow::bail!("intentional callback stop")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("JSON source changed"));
     }
 
     struct FailingWriter {
