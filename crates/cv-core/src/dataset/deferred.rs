@@ -5,7 +5,7 @@ use crate::json::{Json, SourceDescriptor, SourceRegistry};
 use crate::spill::Record;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct DeferredMessage {
@@ -101,7 +101,7 @@ fn value_heap(value: &serde_json::Value) -> usize {
     }
 }
 impl Record for DeferredMessage {
-    type ReadState = ();
+    type ReadState = Vec<u8>;
     fn heap_bytes(&self) -> usize {
         self.sources.capacity() * std::mem::size_of::<(usize, SourceDescriptor)>()
             + self.message.content.capacity() * std::mem::size_of::<Block>()
@@ -131,15 +131,45 @@ impl Record for DeferredMessage {
         writer.write_all(b"\n")?;
         Ok(())
     }
-    fn read(reader: &mut impl BufRead, _: &mut ()) -> Result<Self> {
-        // Deserialize one object directly from the bounded reader; never own an encoded line
-        // alongside its decoded inline fields. Do not require EOF after this one spool record.
-        let row = Self::deserialize(&mut serde_json::Deserializer::from_reader(&mut *reader))
-            .context("reading deferred dataset message")?;
-        let mut delimiter = [0];
-        reader.read_exact(&mut delimiter)?;
-        anyhow::ensure!(delimiter == [b'\n'], "invalid deferred dataset delimiter");
-        Ok(row)
+    fn read(reader: &mut impl BufRead, prefix: &mut Vec<u8>) -> Result<Self> {
+        // Most projections fit in the spill reader's buffer. Slice deserialization avoids
+        // serde's byte-at-a-time Read adapter without retaining a second encoded record.
+        // Split rows use a bounded reusable prefix; oversized inline fields keep streaming.
+        const PREFIX_LIMIT: usize = 64 * 1024;
+        prefix.clear();
+        loop {
+            let bytes = reader.fill_buf()?;
+            anyhow::ensure!(!bytes.is_empty(), "missing deferred dataset record");
+            if let Some(end) = memchr::memchr(b'\n', bytes) {
+                if prefix.is_empty() {
+                    let row = serde_json::from_slice(&bytes[..end]).context("reading deferred dataset message")?;
+                    reader.consume(end + 1);
+                    return Ok(row);
+                }
+                if prefix.len() + end <= PREFIX_LIMIT {
+                    prefix.extend_from_slice(&bytes[..end]);
+                    reader.consume(end + 1);
+                    return serde_json::from_slice(prefix).context("reading deferred dataset message");
+                }
+            }
+            if prefix.capacity() < PREFIX_LIMIT {
+                prefix.reserve_exact(PREFIX_LIMIT - prefix.len());
+            }
+            let take = bytes.len().min(PREFIX_LIMIT - prefix.len());
+            prefix.extend_from_slice(&bytes[..take]);
+            reader.consume(take);
+            if prefix.len() == PREFIX_LIMIT {
+                // Only this bounded prefix overlaps the decoded message, even for giant
+                // owned fields. Chain reads exactly the bytes consumed above back into serde.
+                let mut chained = std::io::Cursor::new(prefix.as_slice()).chain(&mut *reader);
+                let row = Self::deserialize(&mut serde_json::Deserializer::from_reader(&mut chained))
+                    .context("reading deferred dataset message")?;
+                let mut delimiter = [0];
+                chained.read_exact(&mut delimiter)?;
+                anyhow::ensure!(&delimiter == b"\n", "invalid deferred dataset delimiter");
+                return Ok(row);
+            }
+        }
     }
 }
 
@@ -193,6 +223,36 @@ mod tests {
             assert_eq!(actual, expected);
         }
         assert_eq!(restored_count, 1000);
+    }
+
+    #[test]
+    fn split_and_oversized_rows_preserve_exact_fields_and_record_boundaries() {
+        for capacity in [31, 65536] {
+            let mut bytes = Vec::new();
+            for size in [3, 65530, 100000, 7] {
+                let mut message = Message::new(Role::User);
+                message.content.push(Block::Text {
+                    text: "a\n\"🌙".repeat(size).into(),
+                });
+                DeferredMessage::new(message, &mut SourceRegistry::default())
+                    .write(&mut bytes)
+                    .unwrap();
+            }
+            let mut reader = std::io::BufReader::with_capacity(capacity, bytes.as_slice());
+            let mut state = Vec::new();
+            for size in [3, 65530, 100000, 7] {
+                let message = DeferredMessage::read(&mut reader, &mut state)
+                    .unwrap()
+                    .restore(&SourceRegistry::default())
+                    .unwrap();
+                let Block::Text { text } = &message.content[0] else {
+                    panic!("text")
+                };
+                assert_eq!(text.inline_str(), Some("a\n\"🌙".repeat(size).as_str()));
+                assert!(state.capacity() <= 65536);
+            }
+            assert!(reader.fill_buf().unwrap().is_empty());
+        }
     }
 
     #[test]
