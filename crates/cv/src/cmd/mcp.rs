@@ -453,7 +453,7 @@ fn observe_poll(
     let mut chars_used = 0usize;
     let mut projection_error = None;
     let more_pending = !baseline
-        && watcher.poll_bounded(max_messages, |ev| {
+        && watcher.try_poll_bounded(max_messages, |ev| {
             if projection_error.is_some() {
                 return 0;
             }
@@ -488,7 +488,7 @@ fn observe_poll(
                 taken += 1;
             }
             taken
-        });
+        })?;
     if let Some(error) = projection_error {
         return Err(error);
     }
@@ -569,6 +569,26 @@ mod projection_tests {
             .unwrap()
             .discover()
             .unwrap()
+    }
+
+    #[test]
+    fn observe_read_failure_returns_error_without_advancing_cursor() {
+        let _world = cv_testkit::World::in_process("mcp-unreadable-boundary");
+        fn unreadable() -> Vec<SessionRef> {
+            vec![SessionRef::new(
+                "unreadable",
+                Harness::Claude,
+                std::env::temp_dir().join(format!("cv-mcp-missing-{}.jsonl", uuid::Uuid::new_v4())),
+            )]
+        }
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, unreadable);
+        let before = watcher.to_cursor().encode();
+        assert!(observe_poll(&mut watcher, false, 50, 16_000, message_text).is_err());
+        assert_eq!(
+            watcher.to_cursor().encode(),
+            before,
+            "a demanded read failure leaves cursor position unchanged"
+        );
     }
 
     #[test]
