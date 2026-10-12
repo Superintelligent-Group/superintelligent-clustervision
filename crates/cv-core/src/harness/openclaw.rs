@@ -113,6 +113,7 @@
 //! when it differs from `Session::model` (the first non-synthetic one seen).
 
 mod emit;
+mod registry;
 pub use emit::emit;
 
 #[cfg(feature = "sqlite")]
@@ -255,6 +256,12 @@ impl Adapter for OpenClaw {
         };
         let rows = lines.filter_map(|l| parse_line(&l)).map(Row::active);
         Ok(stream_rows(rows, r, &facts, opts, sink))
+    }
+
+    /// The cron and sub-agent registries in the state dir that name this session's key
+    /// ([`registry`]).
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        registry::affordances(r)
     }
 }
 

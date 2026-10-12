@@ -36,7 +36,8 @@
       "subagent_returns": 0,
       "affordances": {
         "model_change/change": 2,
-        "schedule/create": 1
+        "schedule/create": 1,
+        "schedule/state": 1
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -112,7 +113,8 @@
       "affordances": {
         "model_change/change": 2,
         "subagent_return/return": 1,
-        "subagent_spawn/spawn": 1
+        "subagent_spawn/spawn": 1,
+        "subagent_spawn/state": 1
       },
       "lineage": {},
       "model": "glm-5.3-flash",
@@ -226,7 +228,8 @@
       "subagent_returns": 0,
       "affordances": {
         "model_change/change": 2,
-        "schedule/fire": 1
+        "schedule/fire": 1,
+        "schedule/state": 1
       },
       "lineage": {},
       "model": "glm-5.3-flash",
