@@ -89,6 +89,7 @@
 //! `…/agents/agent-N`); parsing one yields its own [`Session`] with `lineage.parent` = the session
 //! uuid and `lineage.agent_path` = `agent-N`.
 
+use super::store::{document::Record, jsonl};
 use super::wire::{coerce_text, openai, text_parts};
 use super::Adapter;
 use crate::harness::claude::CARRIER_KEY;
@@ -393,24 +394,23 @@ struct SessionIndex {
 /// entry after a tombstone — a re-created id — revives it).
 fn read_session_index(path: &Path) -> SessionIndex {
     let mut idx = SessionIndex::default();
-    let Ok(text) = fs::read_to_string(path) else {
-        return idx;
-    };
-    super::for_each_json_line_str(&text, |v| {
-        let Some(id) = v.get("sessionId").and_then(Value::as_str) else {
-            return Flow::Continue;
-        };
-        if v.get("deleted").and_then(Value::as_bool) == Some(true) {
-            idx.deleted.insert(id.to_string());
-            idx.cwd.remove(id);
+    let valid = jsonl::scan(path, |raw, _| {
+        let Some(record) = Record::parse(raw) else { return };
+        let Some(id) = record.string("sessionId") else { return };
+        if record.get("deleted").is_some_and(|raw| raw.get() == "true") {
+            idx.deleted.insert(id.clone());
+            idx.cwd.remove(&id);
         } else {
-            idx.deleted.remove(id);
-            if let Some(wd) = v.get("workDir").and_then(Value::as_str) {
-                idx.cwd.insert(id.to_string(), PathBuf::from(wd));
+            idx.deleted.remove(&id);
+            if let Some(wd) = record.string("workDir") {
+                idx.cwd.insert(id, PathBuf::from(wd));
             }
         }
-        Flow::Continue
     });
+    if valid.is_none() {
+        // The previous read_to_string rejected the complete file on UTF-8/read failure.
+        return SessionIndex::default();
+    }
     idx
 }
 
@@ -1204,6 +1204,57 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn projected_inventory_matches_value_tombstone_oracle() {
+        let world = cv_testkit::World::new("kimi-code-inventory");
+        let path = world.base.join("session_index.jsonl");
+        let text = format!(
+            "{{\"sessionId\":\"a\",\"workDir\":\"/a\",\"ignored\":\"{}\"}}\n{}",
+            "雪\\\"".repeat(10_000),
+            [
+                r#"{"sessionId":"b","workDir":"/b"}"#,
+                r#"{"sessionId":"a","deleted":true}"#,
+                r#"{"sessionId":"a","deleted":true,"\u0064eleted":false,"workDir":"/last"}"#,
+                r#"{"sessionId":"bad","workDir":"/bad","ignored":"\ud800"}"#,
+                r#"{"sessionId":"bad","workDir":"/bad","ignored":1e400}"#,
+                r#"{"sessionId":"b","workDir":null}"#,
+                r#"{"sessionId":"b","deleted":"true"}"#,
+                r#"{"sessionId":12,"workDir":"/wrong"}"#,
+                r#"{"sessionId":"z","deleted":true,"sessionId":"last"}"#,
+                "[null]",
+                "invalid",
+            ]
+            .join("\n")
+        );
+        fs::write(&path, &text).unwrap();
+        let mut expected = SessionIndex::default();
+        super::super::for_each_json_line_str(&text, |value| {
+            let Some(id) = value.get("sessionId").and_then(Value::as_str) else {
+                return Flow::Continue;
+            };
+            if value.get("deleted").and_then(Value::as_bool) == Some(true) {
+                expected.deleted.insert(id.to_string());
+                expected.cwd.remove(id);
+            } else {
+                expected.deleted.remove(id);
+                if let Some(cwd) = value.get("workDir").and_then(Value::as_str) {
+                    expected.cwd.insert(id.to_string(), cwd.into());
+                }
+            }
+            Flow::Continue
+        });
+        let actual = read_session_index(&path);
+        assert_eq!(actual.deleted, expected.deleted);
+        assert_eq!(actual.cwd, expected.cwd);
+        assert_eq!(actual.cwd.get("a"), Some(&PathBuf::from("/last")));
+        assert_eq!(actual.deleted, HashSet::from(["last".to_string()]));
+        let mut invalid_utf8 = text.into_bytes();
+        invalid_utf8.extend_from_slice(b"\n\xff");
+        fs::write(&path, invalid_utf8).unwrap();
+        let actual = read_session_index(&path);
+        assert!(actual.deleted.is_empty() && actual.cwd.is_empty());
     }
 
     #[test]
