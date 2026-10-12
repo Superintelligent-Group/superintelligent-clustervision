@@ -141,6 +141,47 @@ fn git_field_matches_branch() {
 }
 
 #[test]
+fn partially_resolved_models_fall_back_per_needle() {
+    struct Fx;
+    impl ExtFacts for Fx {
+        fn model(&self, needle: &str, exact: bool) -> Tri {
+            match needle {
+                "known" => Tri::False,
+                "resolved" => Tri::of(exact),
+                _ => Tri::Unknown,
+            }
+        }
+    }
+    let r = refx("a", Harness::Claude, None, None, 1);
+    let mut session = Session::new("a", Harness::Claude);
+    session.model = Some("known".into());
+    let facts = Facts {
+        r: &r,
+        session: Some(&session),
+        ext: &Fx,
+    };
+    // Falling back for the whole OR-list would incorrectly rediscover the authoritative false
+    // needle in Session.model. Unknown is resolved only for that particular needle.
+    assert_eq!(q("model:known,missing").eval(&facts), Tri::False);
+    assert_eq!(q("model=resolved,missing").eval(&facts), Tri::True);
+    assert_eq!(q("model:resolved,missing").eval(&facts), Tri::False);
+    session.model = Some("missing".into());
+    assert!(q("model:known,missing").matches(&Facts {
+        r: &r,
+        session: Some(&session),
+        ext: &Fx
+    }));
+    assert_eq!(
+        q("model:known,missing").eval(&Facts {
+            r: &r,
+            session: None,
+            ext: &Fx
+        }),
+        Tri::Unknown
+    );
+}
+
+#[test]
 fn external_fields_classified_and_unknown_in_prefilter() {
     let query = q("text:\"SandboxDenied\" tool:Bash touched:src/ir.rs has:errors");
     assert!(query.needs_index());

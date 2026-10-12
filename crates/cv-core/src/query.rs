@@ -556,20 +556,31 @@ fn eval_term(t: &Term, f: &Facts) -> Tri {
         FieldId::Updated => date_match(t.op, &t.val, f.r.updated_at.or(f.r.created_at)),
         // Parse-required.
         FieldId::Model => {
-            let resolved = match &t.val {
-                Val::Strs(v) if !v.is_empty() => or_over(&t.val, |n| f.ext.model(n, t.op == Op::Eq)),
-                _ => Tri::Unknown,
-            };
-            if resolved != Tri::Unknown {
-                return resolved;
+            if !matches!(&t.val, Val::Strs(v) if !v.is_empty()) {
+                return f.session.map_or(Tri::Unknown, |_| Tri::False);
             }
-            match f.session {
-                None => Tri::Unknown,
-                Some(s) => {
-                    let hit = |m: Option<&str>| m.is_some_and(|m| val_hit(&t.val, t.op, &m.to_lowercase()));
-                    Tri::of(hit(s.model.as_deref()) || s.messages.iter().any(|msg| hit(msg.model.as_deref())))
+            or_over(&t.val, |needle| {
+                let resolved = f.ext.model(needle, t.op == Op::Eq);
+                if resolved != Tri::Unknown {
+                    return resolved;
                 }
-            }
+                match f.session {
+                    None => Tri::Unknown,
+                    Some(s) => {
+                        let hit = |m: Option<&str>| {
+                            m.is_some_and(|m| {
+                                let model = m.to_lowercase();
+                                if t.op == Op::Eq {
+                                    model == needle
+                                } else {
+                                    model.contains(needle)
+                                }
+                            })
+                        };
+                        Tri::of(hit(s.model.as_deref()) || s.messages.iter().any(|msg| hit(msg.model.as_deref())))
+                    }
+                }
+            })
         }
         FieldId::Git => match f.session {
             None => Tri::Unknown,
