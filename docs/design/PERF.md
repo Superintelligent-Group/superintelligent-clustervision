@@ -165,3 +165,52 @@ fails the same gate on source scaling, demonstrating that the gate catches the o
 These figures do not establish a new full-fleet recount time, first-run listing time, or total
 process memory ceiling. Full output, rich metadata, selected SQLite blobs, non-mmap document
 fallbacks, event queues and other stores still have separate bounds recorded in `DATAPATHS.md`.
+
+
+## Composed-path follow-up (2026-10-12, in progress)
+
+Baseline for this follow-up is `28daf7c`, the completed first datapaths pass. These results
+cover individual changes; the combined implementation has not yet completed its final gates or
+whole-fleet after run. Requested Rust heap excludes native SQLite allocations and mapped input.
+
+| Operation/input | First-pass baseline | Follow-up |
+|---|---:|---:|
+| Claude metadata discovery, four outputs totaling 64 MiB | 49.54 MB plain / 68.43 MB escaped heap | approximately 96.4 KB, flat |
+| Event extraction and SQL publication, 20,000 events | 7,211,499 B heap | 358,005 B |
+| Event extraction and SQL publication, 200,000 events | 58,878,796 B heap | 358,007 B |
+| Native SDK, OpenSession and account-export count/discovery, 16 → 64 MiB fixtures | approximately 33–60 → 135–241 MB heap | under 78 KB in tested cases |
+| Selected owned text, 136 MB ordinary escaped source | 0.263 s user CPU | 0.133 s |
+| Selected owned text, 136 MB surrogate-heavy source | 0.551 s user CPU | 0.282 s |
+| Decoded-length count, same ordinary / surrogate sources | 0.244 / 0.594 s user CPU | 0.126 / 0.289 s |
+
+The event spool writes and rereads approximately 2.42 / 24.58 MB of temporary data at the two
+sizes. Clean median CPU was 0.110 → 0.119 s and 1.224 → 1.207 s respectively: the demonstrated
+improvement is bounded retention, not a throughput multiplier. Temporary files are exclusive,
+private and removed by their owner. SQL failures retain retryable state.
+
+Selected-text timings are six alternating hash-disabled release pairs. Valid inputs use about
+half the prior CPU; malformed-tail timing ranges overlap. The owned result still determines peak
+memory, saving only about 65 KB for large output. A length-only consumer instead stays below
+314 KiB in both mmap and portable builds. Independent hashes cover valid escapes, surrogate
+pairs, compact Unicode escapes and malformed raw fallback; all match.
+
+Claude discovery hashes match on 924 frozen references covering 6.8 GB. Paired median CPU on the
+189.8 MB session fell from 0.508 to 0.250 s. Native document-reader resolved message and metadata
+hashes match in lazy, full and complete modes on four escaped fixtures. Their portable cold path
+still owns encoded source bytes: approximately 16.8 → 67.3 MB plain and 21.4 → 85.9 MB escaped.
+Warm portable exports seek only the selected conversation. No universal document heap bound is
+claimed. Rich-query reducers match the old collector on 282 sessions across 15 harnesses,
+including exact affordance counts; unmatched relative paths can remain until final cwd is known.
+
+The live whole-CLI baseline used isolated catalogs and write-denied original stores, with 12
+logical workers and substantial shared load (roughly 80–105 during full indexing). It indexed
+6,826 sessions with zero reported errors in 421.54 s wall / 592.80 s CPU. Peak RSS was 3.39 GB;
+peak physical footprint was 823 MB. Those are different metrics. Samples caught both repeated
+catalog open/schema/checkpoint work during publication and a later wait for Tantivy's final
+merge. They do not establish either phase's percentage of total runtime.
+
+The same baseline's first empty-catalog listing took 14.97 s, quiet warm listings 0.03–0.04 s,
+and fresh listings a 1.14 s median. The fleet remained live and changed between operations, so
+these are observations rather than frozen before/after claims. An isolated 16.29 MB prefix plus
+623-byte append did resume and matched a complete rebuild's search results, counts and events.
+The candidate replay remains pending.

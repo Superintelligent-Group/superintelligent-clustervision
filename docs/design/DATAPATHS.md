@@ -1,6 +1,6 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12; updated as changes land on `perf/store-datapaths`.
+Source audit: `c0f0044`, 2026-10-12; updated through the first pass and the ongoing `perf/excellence-pass`.
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
@@ -57,17 +57,17 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
-| Claude JSONL | Parallel cached discovery; mmap lazy lines; typed borrowed hot records; checkpoints | Discovery parses all records; full extras and uncommon fallback records remain owned; fork side reads |
+| Claude JSONL | Parallel cached discovery; mmap lazy lines; typed borrowed hot records; checkpoints | Metadata discovery and fork heads project raw fields; rich/fallback records and portable line buffers remain owned |
 | Codex JSONL | mmap line scan and bounded event-authority prepass; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; buffered/zstd input still retains the largest raw line |
 | Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
 | Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
 | Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery now counts without collecting; record text remains owned |
-| Kimi | Context stream + pending usage message, rotated prefix dedup | Full wire sidecar text and tool outputs; dependency cache misses; mutable trailing usage |
+| Kimi | Context stream + pending usage message, rotated prefix dedup | Wire sidecar uses raw ranges and lazy output spans; structural lookup state and mutable trailing usage remain |
 | Kimi Code | One LLM step buffered; sidecar output references | Full Value discovery scans; step can be large; state/wire dependency mismatch |
 | Grok | History stream + pending reasoning | Whole updates sidecar; uncached discovery; enrichment can revise old messages |
 | Cline/Roo legacy | mmap raw history items, one record at a time | Full discovery/UI sidecar trees; no lazy text |
-| Cline SDK | Whole wrapper document before emission | Primary source-size heap, unlike legacy reader |
+| Cline SDK | Native source mapping, raw records, shared Anthropic block dispatch | Portable cold source buffer; rich structured fields remain owned |
 | Continue | mmap raw history items; tool-answer dedup | Metadata-only discovery now skips bodies; stream records and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
@@ -76,10 +76,10 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Hermes SQLite | Indexed message rows + generation dedup/trailing user texts | Pathological trailing prompts; shared DB invalidation |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
-| Zed SQLite | Decode complete compressed thread blob | Full decode in discovery and stream; blob representation limits direct seeking |
+| Zed SQLite | Borrowed SQLite blob; metadata pass then one-message replay | Native SQLite blob allocation, largest decoded message, two decompression passes |
 | LM Studio | Raw-turn mmap stream | Metadata-only discovery skips body trees; escaped scratch and first-title candidate remain owned |
-| ChatGPT / Claude account exports | Whole archive String + owned raw conversation copies, then target parse | Archive reread for every session; repeated prefix parsing; ChatGPT branch selection |
-| OpenSession | Whole JSON document/Session then replay | Can traverse message array while retaining metadata |
+| ChatGPT / Claude account exports | Bounded metadata cache and source ranges; selected-conversation replay | Cold portable source buffer, branch descriptors, joined text and tool argument Values |
+| OpenSession | Native raw document validation and per-message IR projection | Portable cold source buffer; authoritative rich IR fields remain owned |
 
 Registry: `cv-core/src/harness/mod.rs`; implementations under `cv-core/src/harness/`.
 Directory entry sizes and whole database sizes are **not** per-session transcript byte counts.
@@ -94,10 +94,10 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
 | JSON show / MCP show | Lazy full-extras stream into selected window; EOF metadata retained | Selected output and rich extras; selected-message serialization for byte budgets |
 | Affordance view | Lazy full-extras stream into classified rows; bounded text summaries | Rich extras, side stores and result rows; escaped validation still traverses the whole field |
-| Doctor | Full-fidelity messages streamed, attribution state | Largest decoded record/extras dominate; decoded-length reducer may help |
+| Doctor | Lazy-extra stream; resolved text lengths and JSON writer counts | Attribution state, adapter rich/fallback parsing and structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
-| Other rich predicates | Lazy whole-session collection for unknown facts | Small streaming fact reducers; preserve tri-state semantics |
-| FTS | Chunked text, event vector, counts, checkpoint state | Escaped decoding now bounded; inline payloads, queued bytes and event retention remain |
+| Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
+| FTS | Chunked text, bounded event spool, counts, checkpoint state | Writer connection churn and final merge measured separately; inline payloads and queued bytes remain |
 | Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
 | API pagination | Each page starts source traversal at zero; head reads whole source | Verified anchors or cache; head need not block first page rendering |
 | Watch | Discovery, full parse/count of changed session; old prefix parse on first append | Reuse safe stable cursors; logical edits must invalidate old output |
@@ -217,17 +217,22 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Extend scale fixtures and heap gates to the remaining store formats.
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
-- [ ] Claude metadata scan and remaining rich/fallback record allocations.
+- [x] Claude metadata discovery and fork-head projections, including giant first records.
+- [ ] Claude rich/fallback record allocations and lazy-extra notification classification.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
-- [ ] Remaining document readers: SDK, exports and OpenSession; Continue/LM Studio selected records.
+- [x] Native SDK, exports and OpenSession source-backed readers; bounded export metadata cache.
+- [ ] Portable cold document buffers, composite payloads and Continue/LM Studio selected records.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
-- [ ] Remaining sidecar/step/tree retention: Kimi, Kimi Code, Grok, Devin and Zed.
+- [x] Kimi wire output ranges and Zed per-message blob replay.
+- [ ] Remaining sidecar/step/tree retention: Kimi Code, Grok and Devin; Zed native SQLite blob footprint.
 - [ ] Format-safe append reuse beyond Claude/Codex; watcher and archive amplification.
-- [ ] Reassess index admission/events/queues after reader and consumer measurements.
-- [ ] API pagination, query facts, pack/tools/stats, semantic rebuilds: prioritize by measurements.
-- [ ] Selected escaped materialization: measure a single decode pass with rollback to raw text; an owned result can retract output, unlike streaming callbacks.
+- [x] Bound event retention with spill-to-disk batches and retryable publication.
+- [ ] Index writer connection reuse, final merge costs, admission and queued bytes.
+- [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
+- [ ] API pagination, pack/tools/stats and semantic rebuilds: prioritize by measurements.
+- [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Claude discovery and fork detection inspect metadata without allocating giant message bodies.
+- Cline SDK, OpenSession and account exports read native source ranges; export metadata caching avoids repeated archive scans.
+- Kimi wire outputs use lazy source spans; Zed compressed threads replay one decoded message at a time.
+- Rich queries retain requested facts instead of whole transcripts, preserving tool, model, path and affordance matching.
+- Event indexing spills large batches to temporary files and keeps failed publication retryable.
+- Dependency freshness follows conditional fork siblings and external outputs, including missing files and relative paths.
+- Selected escaped text and decoded-length counts use one decode pass while preserving malformed-input fallback.
 - Doctor counts decoded text in bounded chunks and tool arguments without a serialized copy, preserving attribution and compaction reports.
 - Claude lazy reads borrow typed hot records and map JSONL lines, avoiding allocations proportional to giant text records.
 - Gemini lazy reads retain source ranges for message bodies and replay history; discovery skips unused payloads.
