@@ -65,6 +65,7 @@ jobs:
           cargo build --release -p clustervision-core --example store_probe --no-default-features --features probe-heap
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only active
+          python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only query
 
       # Every `cv <cmd>` and MCP tool name the manual mentions exists in `cv schema --commands` or
       # a live `tools/list`. The roster is generated from the clap tree so the binary cannot skew;

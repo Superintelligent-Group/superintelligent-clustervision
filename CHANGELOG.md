@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Index publication reuses its catalog connection while preserving independent transactions and reporting partial failures for retry.
+- Tool histograms fold streamed events without retaining an event list.
+- Zed discovery sorts metadata and reads blobs incrementally under one SQLite snapshot, avoiding whole-blob sorting and copying.
 - Claude discovery and fork detection inspect metadata without allocating giant message bodies.
 - Cline SDK, OpenSession and account exports read native source ranges; export metadata caching avoids repeated archive scans.
 - Kimi wire outputs use lazy source spans; Zed compressed threads replay one decoded message at a time.
