@@ -15,6 +15,7 @@ mod borrowed;
 pub(crate) mod emit;
 mod fork;
 mod lean;
+mod metadata;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
@@ -1326,59 +1327,17 @@ pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<
 
 /// Cheap metadata-only scan for `discover`.
 fn scan(path: &std::path::Path) -> Result<SessionRef> {
-    let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
     let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-
-    let mut cwd = None;
-    let mut title = None;
-    let mut custom_title = false;
-    let mut created_at: Option<DateTime<Utc>> = None;
-    let mut updated_at: Option<DateTime<Utc>> = None;
-    let mut message_count = 0usize;
-
-    super::for_each_json_line(reader, |v| {
-        let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
-        // Same precedence as `ingest_value`: `/rename` beats the model's title.
-        if ty == "custom-title" {
-            if let Some(t) = v.get("customTitle").and_then(Value::as_str) {
-                title = Some(t.to_string());
-                custom_title = true;
-            }
-        }
-        if ty == "ai-title" && !custom_title {
-            if let Some(t) = v.get("aiTitle").and_then(Value::as_str) {
-                title = Some(t.to_string());
-            }
-        }
-        if cwd.is_none() {
-            if let Some(c) = v.get("cwd").and_then(Value::as_str) {
-                cwd = Some(PathBuf::from(c));
-            }
-        }
-        if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_ts) {
-            // min/max, not first/last — transcripts can carry out-of-order timestamps (clock skew).
-            created_at = Some(created_at.map_or(ts, |c: DateTime<Utc>| c.min(ts)));
-            updated_at = Some(updated_at.map_or(ts, |u: DateTime<Utc>| u.max(ts)));
-        }
-        // Synthetic notices ("Prompt is too long", …) are not turns — see `is_synthetic_assistant`.
-        let synthetic = ty == "assistant" && is_synthetic_assistant(&v, v.get("message").unwrap_or(&Value::Null));
-        if matches!(ty, "user" | "assistant") && !synthetic {
-            message_count += 1;
-        }
-        Flow::Continue
-    });
-
-    Ok(SessionRef {
-        id,
-        harness: Harness::Claude,
-        path: path.to_path_buf(),
-        cwd,
-        title,
-        created_at,
-        updated_at,
-        message_count,
-    })
+    let mut scan = metadata::Scan::new(path);
+    #[cfg(feature = "mmap")]
+    if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+        #[cfg(unix)]
+        let _ = map.advise(memmap2::Advice::Sequential);
+        scan.bytes(&map);
+        return Ok(scan.finish());
+    }
+    scan.reader(BufReader::new(file));
+    Ok(scan.finish())
 }
 
 /// Turn one record into an IR [`Message`]. Handles `user`/`assistant` (the conversation) and the
