@@ -1136,11 +1136,12 @@ impl Counter {
         }
     }
 
-    pub fn note(&mut self, m: &Message) {
+    pub fn note(&mut self, m: &Message) -> anyhow::Result<()> {
         for hit in hits(self.harness, m, &self.resolver, false) {
             let (Hit::Call { kind, .. } | Hit::Message { kind, .. } | Hit::Detail { kind, .. }) = hit;
             *self.counts.entry(kind).or_default() += 1;
         }
+        Ok(())
     }
 
     /// What the messages so far showed (a resumable pass's checkpoint keeps it).
