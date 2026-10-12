@@ -57,7 +57,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
-| Claude JSONL | Parallel metadata discovery; mmap typed borrowed conversational records including rich reads; checkpoints | Structured arguments/details and uncommon fallback records remain owned; portable transport retains one line |
+| Claude JSONL | Parallel metadata discovery; mmap typed borrowed conversational records including rich reads; large lazy tool inputs use Json source ranges; checkpoints | Demanded full arguments/details and uncommon fallback records remain owned; portable transport retains one line |
 | Codex JSONL | mmap line scan and bounded event-authority prepass; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; buffered/zstd input still retains the largest raw line |
 | Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
@@ -99,9 +99,9 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
 | FTS | Chunked text, bounded event spool, counts, checkpoint state; one catalog connection per sweep | Inline payloads and queued bytes remain; each consumer still commits independently |
 | Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
-| API pagination | Each page starts source traversal at zero; head reads whole source | Verified anchors or cache; head need not block first page rendering |
-| Watch | Discovery, full parse/count of changed session; old prefix parse on first append | Reuse safe stable cursors; logical edits must invalidate old output |
-| Archive | Whole parse/serialize/compare even unchanged; watch reparses again | Skip unchanged dependencies; catalog cleanup scans now grow geometrically |
+| API pagination | Bounded source-verified page checkpoints and head metadata cache; no messages cached | Safe continuation formats only; source/dependency changes and oversized state fall back |
+| Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
+| Archive | Skip verified unchanged artifacts before parsing; safe append reuses source suffixes | Initial full selected payload and fallback parse remain owned; logical edits invalidate reuse |
 | Dataset | One session's lazy message vector, writer resolves output | Escaped chunk bound; streaming filters where semantics allow |
 | Pack/tools/token stats | Tool histograms fold bounded per-message event scratch; pack excerpts use a ring | Stats usage aggregation and repeated passes; preserve duplicate precedence and float addition order |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
@@ -282,6 +282,14 @@ message and metadata digests, with 128/512 callbacks. The source-sized native-ce
 largest demanded record remain separate limits. Detailed measurement definitions are in
 `PERF.md`; these results do not claim combined final gates or whole-fleet throughput.
 
+API continuation/head changes (`0769d1a` + `cb844b4`) reduce callback work on the controlled
+20,000-message fixture: 100 successive pages of 100 messages emit 20,099 callbacks instead of
+1,010,099; five head requests emit 20,000 instead of 100,000. This is a callback-work result,
+not a wall-time or whole-source-byte bound. Watch/archive reuse (`e120208`, `8cc975f`, `432a3bd`,
+`b211452`) is integrated with strict identity/error handling and a clean composed CLI check.
+It does not bound initial full/archive selected payloads or unsupported-format fallback memory.
+Lane-summary projection (`5ffbd10`) has eight scoped tests; it skips irrelevant bodies.
+
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
 - [x] Source map: readers, consumers, caches, index, follow/archive, write paths and gates.
@@ -296,7 +304,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [x] Claude metadata discovery and fork-head projections, including giant first records.
 - [x] Claude conversational lazy-extra projections and bounded notification classification; raw serialized metadata order checked.
-- [ ] Structured arguments/details and uncommon Claude fallback record allocations.
+- [x] Fallible Json demands across consumers and native Claude large lazy argument activation; giant composed allocation/parity proof.
+- [ ] Other structured-input producers, demanded details and uncommon Claude fallback record allocations.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
@@ -307,12 +316,15 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
 - [ ] Kimi Code logical-step and selected structured payload retention; preserve necessary Devin forest navigation state.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
-- [ ] Other format-safe continuation; repeated watcher tails and archive rereads.
+- [x] Verified watch tail and archive suffix reuse with strict source/dependency identity and demanded-error propagation.
+- [ ] Other format-safe continuation and full/archive fallback payload retention.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [ ] Index admission and queued payload bytes; assess transaction batching with write-lock contention measurements and final Tantivy merge/query costs.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
-- [ ] API pagination, stats aggregation and semantic rebuilds: prioritize by measurements.
+- [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
+- [x] Lane summaries project relevant messages without resolving unrelated bodies.
+- [ ] Stats aggregation and semantic rebuilds: active targeted lanes; preserve exact output and float/dedup order.
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
@@ -360,10 +372,19 @@ ranges bypass that admission work; cold portable reader optimization remains sep
 
 Native Claude producer activation is integrated. Arguments with at most 4,096 encoded bytes
 remain owned; larger inputs use source ranges in lazy and lazy-extra modes. Full/bulk/complete
-and arbitrary byte helpers retain their owned behavior. Composed giant-input allocator and
-resolved-output checks are underway; their final source-identity repetition is still needed
-before extending the primitive evidence above to end-to-end consumers. Other native producers
-remain separate work.
+and arbitrary byte helpers retain their owned behavior. The composed native activation campaign,
+repeated after source-identity follow-up `35bc1f5`, checks 25/100 MB decoded arguments in plain and escape-expanded sources. Peak above-baseline
+live requested Rust heap is 1,654–1,660 B for discard/count, 3,508–3,511 B for collect,
+4,118–4,151 B for events and 3,561–3,600 B for affordance reads. Doctor peaks at 5,518 B plain
+and 171,521–171,523 B escaped; the final 100 MB repetition confirms discard, doctor and events.
+Old rich discard grows with the owned value: 25/100 MB plain and 58.6/234.2 MB escaped. All
+36 initial and 12 final fidelity comparisons match: resolved messages and metadata, count and
+affordance output, doctor JSON and joined event SQL rows against full-owned output. A frozen
+189.76 MB session with 20,483 messages also matches its old lazy-extra/full hashes, and all five
+sources remain unchanged. These counters exclude mmap pages, C/SQLite allocations, allocator
+overhead, stacks and process RSS/footprint; there is no timing, portable-adapter or FTS queue
+bound claim. Full demanded arguments remain output-sized. Other native producers remain separate
+work.
 
 Its wire contract stays an actual JSON value. Owned/full/deserialized input remains supported;
 selected output and mutation can explicitly materialize. Bounded consumers request typed fields,
