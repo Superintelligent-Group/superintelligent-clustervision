@@ -33,9 +33,14 @@
 pub(crate) mod emit;
 pub use emit::emit;
 
+use super::store::{
+    document::{self, Raw, Record},
+    jsonl,
+};
 use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
+use crate::lazy::{Span, Text, INLINE_MAX};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -220,77 +225,119 @@ impl Adapter for Grok {
 /// puts back. Each line is a checkpoint.
 fn rewind_points(dir: &Path) -> Vec<crate::affordance::Affordance> {
     use crate::affordance::{Affordance, Kind};
-    let Ok(text) = fs::read_to_string(dir.join("rewind_points.jsonl")) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .map(|v| {
-            let ts = v.get("created_at").and_then(Value::as_str).and_then(parse_ts);
-            let files: Vec<&str> = v
-                .get("file_snapshots")
-                .and_then(Value::as_object)
-                .map(|o| o.keys().map(String::as_str).collect())
-                .unwrap_or_default();
-            let mut summary = match v.get("prompt_index").and_then(Value::as_u64) {
-                Some(i) => format!("prompt {i}"),
-                None => "prompt".to_string(),
-            };
-            if !files.is_empty() {
-                summary.push_str(&format!(" · {}", files.join(", ")));
-            }
-            Affordance::store_event(Kind::Checkpoint, "create", ts, "rewind_points.jsonl", &summary)
-        })
-        .collect()
-}
-
-/// The hook runs `updates.jsonl` records as `hook_execution` updates (`{event_name, runs: [{name,
-/// status: {status, elapsed_ms}}]}`), one `hook`/`run` row each. Grok keeps no hook output, so
-/// these say a hook ran and how it ended, not what it told the model. Only lines naming
-/// `hook_execution` are parsed.
-fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
-    use crate::affordance::{Affordance, Kind};
-    let Ok(text) = fs::read_to_string(dir.join("updates.jsonl")) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for line in text.lines().filter(|l| l.contains("\"hook_execution\"")) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
+    if jsonl::scan(&dir.join("rewind_points.jsonl"), |raw, _| {
+        let v = fields(raw);
+        let selected = v.project(&["prompt_index", "created_at"]).unwrap_or_default();
+        let ts = selected.get("created_at").and_then(Value::as_str).and_then(parse_ts);
+        let files = v.get("file_snapshots").map(ordered_keys).unwrap_or_default();
+        let mut summary = match selected.get("prompt_index").and_then(Value::as_u64) {
+            Some(i) => format!("prompt {i}"),
+            None => "prompt".to_string(),
         };
-        let Some(u) = v.pointer("/params/update") else {
-            continue;
-        };
-        if u.get("sessionUpdate").and_then(Value::as_str) != Some("hook_execution") {
-            continue;
+        if !files.is_empty() {
+            summary.push_str(&format!(" · {}", files.join(", ")));
         }
-        let event = u.get("event_name").and_then(Value::as_str).unwrap_or("hook");
-        let timestamp = v
-            .pointer("/params/_meta/agentTimestampMs")
-            .and_then(Value::as_i64)
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .or_else(|| {
-                v.get("timestamp")
-                    .and_then(Value::as_i64)
-                    .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
-            });
-        for run in u.get("runs").and_then(Value::as_array).into_iter().flatten() {
-            let name = run.get("name").and_then(Value::as_str).unwrap_or("");
-            let status = run.pointer("/status/status").and_then(Value::as_str).unwrap_or("");
-            let mut summary = format!("{event}: {name} · {status}");
-            if let Some(ms) = run.pointer("/status/elapsed_ms").and_then(Value::as_u64) {
-                summary.push_str(&format!(" · {ms} ms"));
-            }
-            out.push(Affordance::store_event(
-                Kind::Hook,
-                "run",
-                timestamp,
-                "updates.jsonl",
-                &summary,
-            ));
-        }
+        out.push(Affordance::store_event(
+            Kind::Checkpoint,
+            "create",
+            ts,
+            "rewind_points.jsonl",
+            &summary,
+        ));
+    })
+    .is_none()
+    {
+        out.clear();
     }
     out
+}
+
+/// Preserve the original key insertion order (including duplicate-key replacement) without
+/// decoding snapshot bodies. The surrounding line has already passed strict Value validation.
+fn ordered_keys(raw: Raw<'_>) -> Vec<String> {
+    struct Keys;
+    impl<'de> serde::de::Visitor<'de> for Keys {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("file snapshots")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> std::result::Result<Self::Value, M::Error> {
+            let mut seen = std::collections::HashSet::new();
+            let mut keys = Vec::new();
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<&crate::lazy::RawValue>()?;
+                if seen.insert(key.clone()) {
+                    keys.push(key);
+                }
+            }
+            Ok(keys)
+        }
+    }
+    use serde::Deserializer;
+    let mut de = serde_json::Deserializer::from_str(raw.get());
+    de.deserialize_map(Keys).unwrap_or_default()
+}
+
+/// Hook rows preserve the old literal-marker selection and reduce only metadata. Unknown
+/// update/run payloads are validated at the line boundary but never materialized.
+fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
+    use crate::affordance::{Affordance, Kind};
+    let mut out = Vec::new();
+    if jsonl::scan_selected(
+        &dir.join("updates.jsonl"),
+        |l| l.contains("\"hook_execution\""),
+        |raw, _| {
+            let v = fields(raw);
+            let params = v.get("params").map(fields).unwrap_or_else(empty_fields);
+            let u = params.get("update").map(fields).unwrap_or_else(empty_fields);
+            if u.string("sessionUpdate").as_deref() != Some("hook_execution") {
+                return;
+            }
+            let event = u.string("event_name").unwrap_or_else(|| "hook".to_string());
+            let timestamp = params
+                .get("_meta")
+                .map(fields)
+                .and_then(|m| m.value("agentTimestampMs"))
+                .and_then(|v| v.as_i64())
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .or_else(|| {
+                    v.value("timestamp")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+                });
+            for run in u.get("runs").and_then(document::array).into_iter().flatten() {
+                let run = fields(run);
+                let name = run.string("name").unwrap_or_default();
+                let status = run.get("status").map(fields).unwrap_or_else(empty_fields);
+                let mut summary = format!("{event}: {name} · {}", status.string("status").unwrap_or_default());
+                if let Some(ms) = status.value("elapsed_ms").and_then(|v| v.as_u64()) {
+                    summary.push_str(&format!(" · {ms} ms"));
+                }
+                out.push(Affordance::store_event(
+                    Kind::Hook,
+                    "run",
+                    timestamp,
+                    "updates.jsonl",
+                    &summary,
+                ));
+            }
+        },
+    )
+    .is_none()
+    {
+        out.clear();
+    }
+    out
+}
+
+fn empty_fields<'a>() -> Record<'a> {
+    Record {
+        fields: Default::default(),
+    }
+}
+fn fields(raw: Raw<'_>) -> Record<'_> {
+    Record::parse(raw).unwrap_or_else(empty_fields)
 }
 
 /// Subagent nickname + Grok-specific session facts from `summary.json`: a subagent's `agent_name`
@@ -391,44 +438,42 @@ impl ToolEnrich {
 /// yields an empty map and zero behavior change.
 fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
     let mut map: HashMap<String, ToolEnrich> = HashMap::new();
-    let Ok(text) = fs::read_to_string(dir.join("updates.jsonl")) else {
-        return map;
-    };
-    super::for_each_json_line_str(&text, |v| {
-        let Some(u) = v.pointer("/params/update") else {
-            return Flow::Continue;
+    if jsonl::scan(&dir.join("updates.jsonl"), |raw, _| {
+        let v = fields(raw);
+        let Some(u) = v.get("params").and_then(|r| fields(r).get("update")) else {
+            return;
         };
-        let su = u.get("sessionUpdate").and_then(Value::as_str);
-        if !matches!(su, Some("tool_call") | Some("tool_call_update")) {
-            return Flow::Continue;
+        let u = fields(u);
+        let su = u.string("sessionUpdate");
+        if !matches!(su.as_deref(), Some("tool_call") | Some("tool_call_update")) {
+            return;
         }
-        let Some(id) = u.get("toolCallId").and_then(Value::as_str) else {
-            return Flow::Continue;
-        };
-        let e = map.entry(id.to_string()).or_default();
-        // Prefer the descriptive title from tool_call_update over the bare tool name in tool_call.
-        if let Some(t) = u.get("title").and_then(Value::as_str) {
-            if su == Some("tool_call_update") || e.title.is_none() {
-                e.title = Some(t.to_string());
+        let Some(id) = u.string("toolCallId") else { return };
+        let e = map.entry(id).or_default();
+        if let Some(t) = u.string("title") {
+            if su.as_deref() == Some("tool_call_update") || e.title.is_none() {
+                e.title = Some(t);
             }
         }
-        if let Some(k) = u.get("kind").and_then(Value::as_str) {
-            e.kind = Some(k.to_string());
+        if let Some(k) = u.string("kind") {
+            e.kind = Some(k);
         }
-        if let Some(locs) = u.get("locations").and_then(Value::as_array) {
-            for l in locs {
-                if let Some(p) = l.get("path").and_then(Value::as_str) {
-                    if !e.locations.iter().any(|x| x == p) {
-                        e.locations.push(p.to_string());
-                    }
+        for l in u.get("locations").and_then(document::array).into_iter().flatten() {
+            if let Some(p) = fields(l).string("path") {
+                if !e.locations.contains(&p) {
+                    e.locations.push(p);
                 }
             }
         }
-        if let Some(st) = u.get("status").and_then(Value::as_str) {
-            e.status = Some(st.to_string());
+        if let Some(st) = u.string("status") {
+            e.status = Some(st);
         }
-        Flow::Continue
-    });
+    })
+    .is_none()
+    {
+        map.clear();
+    }
+
     map
 }
 
@@ -646,20 +691,26 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
     // `system` and `tool_result` included — and `num_messages` is the user-turn count. The same
     // pass supplies the title fallback (first non-empty user text).
     let mut message_count = 0usize;
-    if let Ok(chat) = fs::read_to_string(dir.join("chat_history.jsonl")) {
-        super::for_each_json_line_str(&chat, |v| {
-            let ty = v.get("type").and_then(Value::as_str);
-            if matches!(ty, Some("user") | Some("assistant")) {
-                message_count += 1;
+    let initial_title = title.clone();
+    let history = dir.join("chat_history.jsonl");
+    let resolver = crate::lazy::Resolver::new(Some(history.clone()));
+    if jsonl::scan(&history, |raw, offset| {
+        let v = fields(raw);
+        let ty = v.string("type");
+        if matches!(ty.as_deref(), Some("user") | Some("assistant")) {
+            message_count += 1;
+        }
+        if title.is_none() && ty.as_deref() == Some("user") {
+            if let Some(content) = v.get("content") {
+                let texts = title_parts(content, raw, offset);
+                title = document::text_summary(texts.iter(), &resolver, true);
             }
-            if title.is_none() && ty == Some("user") {
-                let t = text_parts(v.get("content"));
-                if !t.trim().is_empty() {
-                    title = Some(crate::ir::truncate(&t, 80));
-                }
-            }
-            Flow::Continue
-        });
+        }
+    })
+    .is_none()
+    {
+        message_count = 0;
+        title = initial_title;
     }
 
     Ok(Some(SessionRef {
@@ -678,10 +729,165 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
     }))
 }
 
+/// wire::text_parts joins every string text field, including empty ones, in source order.
+fn title_parts(content: Raw<'_>, record: Raw<'_>, offset: u64) -> Vec<Text> {
+    let text = |raw: Raw<'_>| {
+        let b = raw.get().as_bytes();
+        if b.first() != Some(&b'"') {
+            return None;
+        }
+        if b.len() - 2 > INLINE_MAX {
+            Some(Text::Span(Span {
+                source: None,
+                offset: offset + (b.as_ptr() as usize - record.get().as_ptr() as usize) as u64 + 1,
+                len: b.len() as u64 - 2,
+                escaped: b.contains(&b'\\'),
+            }))
+        } else {
+            serde_json::from_str::<String>(raw.get()).ok().map(Text::Inline)
+        }
+    };
+    if content.get().starts_with('"') {
+        return text(content).into_iter().collect();
+    }
+    document::array(content)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| fields(p).get("text").and_then(text))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn discovery_title_and_count_match_value_oracle() {
+        let world = cv_testkit::World::new("grok-raw-title");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir).unwrap();
+        let summary = dir.join("summary.json");
+        fs::write(&summary, r#"{"info":{"id":"session"}}"#).unwrap();
+        let bodies = [
+            serde_json::json!("雪\n\"\\".repeat(3000)),
+            serde_json::json!(format!("{}late", " ".repeat(10000))),
+            serde_json::json!("\u{2003}".repeat(10000)),
+            serde_json::json!([{"text":""},{"ignored":"payload"},{"text":"雪\n".repeat(3000)},{"text":"last"}]),
+            serde_json::json!([{"text":""},{"text":""},{"text":"answer"}]),
+            serde_json::json!([{"text":""},{"text":""}]),
+            serde_json::json!([{"text":false}]),
+        ];
+        let mut cases: Vec<String> = bodies
+            .into_iter()
+            .map(|content| serde_json::json!({"type":"user", "content":content}).to_string())
+            .collect();
+        cases.extend([
+            r#"{"type":"user","ty\u0070e":"assistant","content":"ignored user title"}"#.to_string(),
+            r#"{"type":"user","content":[{"text":"old","te\u0078t":"last"}]}"#.to_string(),
+            r#"{"type":"user","content":"must skip","ignored":"\ud800"}"#.to_string(),
+            r#"{"type":"user","content":"must skip","ignored":1e400}"#.to_string(),
+        ]);
+        for first in cases {
+            let text = format!("{first}\n{{\"type\":\"user\",\"content\":\"fallback\"}}\n{{\"type\":\"assistant\",\"content\":\"answer\"}}\n");
+            fs::write(dir.join("chat_history.jsonl"), &text).unwrap();
+            let mut expected_title = None;
+            let mut expected_count = 0;
+            super::super::for_each_json_line_str(&text, |v| {
+                let ty = v.get("type").and_then(Value::as_str);
+                expected_count += usize::from(matches!(ty, Some("user" | "assistant")));
+                if expected_title.is_none() && ty == Some("user") {
+                    let text = text_parts(v.get("content"));
+                    if !text.trim().is_empty() {
+                        expected_title = Some(crate::ir::truncate(&text, 80));
+                    }
+                }
+                Flow::Continue
+            });
+            let actual = scan(&summary).unwrap().unwrap();
+            assert_eq!(actual.message_count, expected_count);
+            assert_eq!(
+                actual.title,
+                expected_title,
+                "title oracle case with {} source bytes",
+                first.len()
+            );
+        }
+        fs::write(
+            dir.join("chat_history.jsonl"),
+            b"{\"type\":\"user\",\"content\":\"prefix\"}\n\xff",
+        )
+        .unwrap();
+        let actual = scan(&summary).unwrap().unwrap();
+        assert_eq!(actual.message_count, 0);
+        assert_eq!(actual.title, None);
+    }
+
+    #[test]
+    fn sidecar_projections_preserve_order_selection_and_strict_acceptance() {
+        use crate::affordance::{Affordance, Kind};
+        let world = cv_testkit::World::new("grok-raw-sidecars");
+        let dir = &world.base;
+        let updates = [
+            r#"{"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call","title":"bare","locations":[{"path":"b"},{"path":"a"},{"path":"b"}],"kind":"read"}}}"#,
+            r#"{"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call","title":"old","ti\u0074le":"rich","status":"completed","locations":[{"path":"a"},{"path":"c"}]}}}"#,
+            r#"{"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call","status":"failed"}},"ignored":"\ud800"}"#,
+            r#"{"params":{"update":{"sessionUpdate":"hook_execution","event_name":"after","runs":[{"name":"check","status":{"status":"ok","elapsed_ms":3}},{"name":"second","status":null}]},"_meta":{"agentTimestampMs":1700000000123}},"timestamp":1}"#,
+            // Original hook reader only selects a literal marker, even when semantic type matches.
+            r#"{"params":{"update":{"sessionUpdate":"hook\u005fexecution","runs":[{"name":"not selected"}]}}}"#,
+            r#"{"params":{"update":{"sessionUpdate":"hook\u005fexecution","runs":[{"name":"selected","status":{"status":"ok"}}]}},"ignored":"hook_execution"}"#,
+            r#"{"params":{"update":{"sessionUpdate":"hook_execution","runs":[{"name":"invalid"}]}},"ignored":1e400}"#,
+        ].join("\n");
+        fs::write(dir.join("updates.jsonl"), &updates).unwrap();
+        let e = read_update_enrichment(dir);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e["call"].title.as_deref(), Some("rich"));
+        assert_eq!(e["call"].kind.as_deref(), Some("read"));
+        assert_eq!(e["call"].status.as_deref(), Some("completed"));
+        assert_eq!(e["call"].locations, ["b", "a", "c"]);
+        let ts = chrono::DateTime::from_timestamp_millis(1700000000123);
+        let expected = [
+            Affordance::store_event(Kind::Hook, "run", ts, "updates.jsonl", "after: check · ok · 3 ms"),
+            Affordance::store_event(Kind::Hook, "run", ts, "updates.jsonl", "after: second · "),
+            Affordance::store_event(Kind::Hook, "run", None, "updates.jsonl", "hook: selected · ok"),
+        ];
+        assert_eq!(
+            serde_json::to_value(hook_runs(dir)).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        let snapshots = format!(
+            r#"{{"prompt_index":2,"file_snapshots":{{"b":{{"body":"{}"}},"a":1,"b":2}},"after_snapshots":{{"ignored":"{}"}}}}"#,
+            "x".repeat(65536),
+            "x".repeat(65536)
+        );
+        fs::write(
+            dir.join("rewind_points.jsonl"),
+            format!("{snapshots}\n{{\"file_snapshots\":null}}\n{{\"file_snapshots\":{{\"bad\":\"\\ud800\"}}}}\n"),
+        )
+        .unwrap();
+        let expected = [
+            Affordance::store_event(
+                Kind::Checkpoint,
+                "create",
+                None,
+                "rewind_points.jsonl",
+                "prompt 2 · b, a",
+            ),
+            Affordance::store_event(Kind::Checkpoint, "create", None, "rewind_points.jsonl", "prompt"),
+        ];
+        assert_eq!(
+            serde_json::to_value(rewind_points(dir)).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        // Bad UTF-8 anywhere retracts earlier rows, for the literal-selected reader too.
+        let mut bad = updates.into_bytes();
+        bad.extend_from_slice(b"\n\xff");
+        fs::write(dir.join("updates.jsonl"), bad).unwrap();
+        assert!(hook_runs(dir).is_empty());
+        assert!(read_update_enrichment(dir).is_empty());
+        fs::write(dir.join("rewind_points.jsonl"), b"{}\n\xff").unwrap();
+        assert!(rewind_points(dir).is_empty());
+    }
 
     fn enrich_from(s: &str) -> HashMap<String, ToolEnrich> {
         let dir = tempdir_with("updates.jsonl", s);
