@@ -64,16 +64,27 @@ mod heap {
         baseline
     }
 
-    pub fn end(baseline: usize) -> serde_json::Value {
+    #[derive(serde::Serialize)]
+    pub struct Snapshot {
+        baseline_live_bytes: usize,
+        peak_live_bytes: usize,
+        peak_above_baseline_bytes: usize,
+        stage_end_live_bytes: usize,
+        allocation_requests: usize,
+        requested_bytes: usize,
+    }
+
+    pub fn end(baseline: usize) -> Snapshot {
         let peak = PEAK.load(Relaxed);
-        serde_json::json!({
-            "baseline_live_bytes": baseline,
-            "peak_live_bytes": peak,
-            "peak_above_baseline_bytes": peak.saturating_sub(baseline),
-            "stage_end_live_bytes": LIVE.load(Relaxed),
-            "allocation_requests": CALLS.load(Relaxed),
-            "requested_bytes": REQUESTED.load(Relaxed),
-        })
+        // Capture on the stack; allocating report JSON must not count itself as stage work.
+        Snapshot {
+            baseline_live_bytes: baseline,
+            peak_live_bytes: peak,
+            peak_above_baseline_bytes: peak.saturating_sub(baseline),
+            stage_end_live_bytes: LIVE.load(Relaxed),
+            allocation_requests: CALLS.load(Relaxed),
+            requested_bytes: REQUESTED.load(Relaxed),
+        }
     }
 }
 
@@ -331,6 +342,12 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         }
         "chunks" => {
             let (offset, len) = a.span.context("chunks requires --span OFFSET:LENGTH")?;
+            if offset
+                .checked_add(len)
+                .is_none_or(|end| end > std::fs::metadata(&r.path).map_or(0, |m| m.len()))
+            {
+                bail!("span is outside the source file");
+            }
             let span = cv_core::Span {
                 source: None,
                 offset,
@@ -354,11 +371,11 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
 
 fn main() -> Result<()> {
     let a = args()?;
-    // Production affordance::read historically calls parse/stream_counted, which can persist
-    // counts. Keep that composed operation faithful, but require an explicitly isolated catalog.
-    if a.operation == "affordance-read" {
+    // Production affordance::read can persist counts, and discovery cache initialization opens
+    // a writable catalog. Keep composed operations faithful with an explicitly isolated catalog.
+    if matches!(a.operation.as_str(), "affordance-read" | "discover") {
         let home = std::fs::canonicalize(
-            std::env::var_os("CLUSTERVISION_HOME").context("affordance-read requires scratch CLUSTERVISION_HOME")?,
+            std::env::var_os("CLUSTERVISION_HOME").context("this operation requires scratch CLUSTERVISION_HOME")?,
         )
         .context("scratch CLUSTERVISION_HOME must exist")?;
         if let Some(real) = dirs::home_dir().map(|p| p.join(".clustervision")) {
@@ -377,16 +394,20 @@ fn main() -> Result<()> {
     let out = run(&a, adapter.as_ref(), &r)?;
     let seconds = start.elapsed().as_secs_f64();
     #[cfg(feature = "probe-heap")]
-    let requested_rust_heap = heap::end(baseline);
+    let requested_rust_heap = Some(heap::end(baseline));
     #[cfg(not(feature = "probe-heap"))]
-    let requested_rust_heap = Value::Null;
+    let requested_rust_heap: Option<()> = None;
     println!(
         "{}",
         json!({
             "operation": a.operation, "harness": a.harness.as_str(), "id": a.id,
             "path": a.path, "root": a.root, "requested_mode": a.mode,
-            "effective_mode": if a.operation == "affordances" { "full" } else { &a.mode },
-            "materialize": a.materialize || a.operation == "affordances",
+            "effective_mode": match a.operation.as_str() {
+                "affordances" | "affordance-read" => "full",
+                "baseline" | "discover" | "chunks" => "not-applicable",
+                _ => &a.mode,
+            },
+            "materialize": a.materialize || matches!(a.operation.as_str(), "affordances" | "hash" | "affordance-read"),
             "physical_input_bytes": physical_bytes, "traversed_bytes": null,
             "wall_seconds": seconds, "messages": out.messages,
             "requested_rust_heap": requested_rust_heap, "detail": out.detail,

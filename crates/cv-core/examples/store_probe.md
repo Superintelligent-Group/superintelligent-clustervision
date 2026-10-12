@@ -3,8 +3,8 @@
 This diagnostic example performs one read-only operation per process on an explicit source.
 It supports Claude, Codex, Gemini and OpenClaw through their explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
-The composed `affordance-read` operation may persist counts in the baseline implementation: it requires
-an existing scratch `CLUSTERVISION_HOME` and refuses the real catalog directory. Claude fork detection
+The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
+scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
 and adapter side-store reads still examine siblings of the supplied source, so use a frozen
 scratch directory. `discover` explicitly scans `--root`; the other operations read `PATH`.
 
@@ -33,7 +33,7 @@ pass the config/runtime root explicitly (`projects/`, `sessions/`, or `tmp/` liv
 | `affordances` | Full collection and materialization, classify and retain affordance rows |
 | `affordance-read` | Production `affordance::read`; requires scratch `CLUSTERVISION_HOME` |
 | `hash` | Resolve each message, sort owned JSON maps recursively, hash streamed JSON and final metadata |
-| `discover` | Explicit-root adapter discovery |
+| `discover` | Explicit-root adapter discovery; requires scratch `CLUSTERVISION_HOME` |
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
 
 `hash` emits independent SHA-256 digests of newline-delimited canonical message JSON and final
