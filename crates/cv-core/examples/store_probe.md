@@ -40,6 +40,7 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `checkpoint` | Count through the resumable pipeline; return last checkpoint in `detail.checkpoint`, every `--chunk-bytes N` bytes |
 | `resume` | Continue fixture checkpoint from `--resume-from FILE`; report suffix callbacks and whole-session counts |
 | `doctor` | Production context attribution report, using the requested parse mode |
+| `token-stats` | Production token statistics for the explicit session and its subagent forest; scratch catalog required |
 | `collect` | Direct stream into a retained message vector; optional materialization |
 | `window` | Stream to EOF, retain only `--last N` messages (default 20), optionally materialize |
 | `affordances` | Full collection and materialization, classify and retain affordance rows |
@@ -49,6 +50,12 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
 | `resolve` | Direct span materialization into a retained owned string; `--span OFFSET:LENGTH [--escaped]` |
 | `resolved-len` | Direct decoded byte counting without owning text; same span flags |
+
+`token-stats` calls `TokenStats::compute` on the explicit session reference. Its parse policy is
+production-defined; `--mode` is ignored. The complete statistics are in `detail`; `messages`
+stays zero because the operation does not expose callback counts. Child detection can examine
+sibling files, so isolate the entire supplied source directory. Aggregation and JSON report
+construction are both included in the stage.
 
 For append diagnostics, save `checkpoint`'s `detail.checkpoint` as JSON, append to the same
 scratch transcript, then run `resume --resume-from FILE`. These operations never save marks or

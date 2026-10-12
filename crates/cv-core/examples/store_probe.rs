@@ -71,7 +71,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
-                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len|json-len|json-write|json-prefix\n\
+                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len|json-len|json-write|json-prefix\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -338,6 +338,9 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             };
             out.detail = serde_json::to_value(histogram)?;
         }
+        "token-stats" => {
+            out.detail = cv_core::stats::TokenStats::compute(std::slice::from_ref(r)).to_json();
+        }
         "doctor" => {
             let mut report = cv_core::doctor::Report::default();
             let mut pass = report.session(Some(r.path.clone()));
@@ -561,7 +564,7 @@ fn main() -> Result<()> {
     if a.warm_discover
         || matches!(
             a.operation.as_str(),
-            "affordance-read" | "discover" | "events" | "events-collected" | "query" | "query-collect"
+            "affordance-read" | "discover" | "events" | "events-collected" | "query" | "query-collect" | "token-stats"
         )
     {
         let home = std::fs::canonicalize(
@@ -602,7 +605,7 @@ fn main() -> Result<()> {
             "path": a.path, "root": a.root, "requested_mode": a.mode,
             "effective_mode": match a.operation.as_str() {
                 "affordances" => "full",
-                "affordance-read" => "production-defined",
+                "affordance-read" | "token-stats" => "production-defined",
                 "query" | "query-collect" | "tools" | "tools-collect" => "lazy",
                 "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
                 _ => &a.mode,
