@@ -1,8 +1,8 @@
 //! Read-only document sources and borrowed structural slices. Strict scalar/depth validation
 //! remains in `store::json`; these indexes describe the bytes rather than retain their payloads.
 
-#[cfg(test)]
-mod range;
+#[cfg(any(not(feature = "mmap"), test))]
+pub(crate) mod range;
 
 use crate::lazy::{Span, Text, INLINE_MAX};
 use anyhow::{Context, Result};

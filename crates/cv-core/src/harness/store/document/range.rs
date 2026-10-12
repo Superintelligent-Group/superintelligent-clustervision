@@ -4,7 +4,8 @@
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{self, BufRead, Read};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 
 const WINDOW: usize = 64 * 1024;
 
@@ -25,62 +26,31 @@ impl Range {
 /// use positioned reads so nested views do not share seek position or hold a RefCell borrow.
 pub(crate) struct RangeSource {
     file: File,
-    path: PathBuf,
-    identity: Identity,
-}
-#[derive(Clone, PartialEq, Eq)]
-struct Identity {
-    len: u64,
-    modified: Option<std::time::SystemTime>,
-    #[cfg(not(unix))]
-    created: Option<std::time::SystemTime>,
-    #[cfg(unix)]
-    inode: (u64, u64, i64, i64),
-}
-impl Identity {
-    fn from_metadata(md: std::fs::Metadata) -> Self {
-        Self {
-            len: md.len(),
-            modified: md.modified().ok(),
-            #[cfg(not(unix))]
-            created: md.created().ok(),
-            #[cfg(unix)]
-            inode: {
-                use std::os::unix::fs::MetadataExt;
-                (md.dev(), md.ino(), md.ctime(), md.ctime_nsec())
-            },
-        }
-    }
+    captured: crate::json::JsonSource,
 }
 impl RangeSource {
+    #[cfg(test)]
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let identity = Identity::from_metadata(file.metadata()?);
-        let source = Self {
-            file,
-            path: path.to_path_buf(),
-            identity,
-        };
+        Self::from_captured(crate::json::JsonSource::capture(path)?)
+    }
+    pub fn from_captured(captured: crate::json::JsonSource) -> Result<Self> {
+        let file = File::open(captured.path()).with_context(|| format!("opening {}", captured.path().display()))?;
+        let source = Self { file, captured };
         source.check_identity()?;
         Ok(source)
     }
     pub fn range(&self) -> Range {
         Range {
             offset: 0,
-            len: self.identity.len,
+            len: self.captured.len(),
         }
     }
     pub fn check_identity(&self) -> Result<()> {
-        anyhow::ensure!(
-            Identity::from_metadata(self.file.metadata()?) == self.identity
-                && Identity::from_metadata(std::fs::metadata(&self.path)?) == self.identity,
-            "source changed while reading {}",
-            self.path.display()
-        );
-        Ok(())
+        self.captured.check_metadata(self.file.metadata()?)?;
+        self.captured.check()
     }
     pub fn cursor(&self, range: Range) -> io::Result<Cursor<'_>> {
-        if range.end()? > self.identity.len {
+        if range.end()? > self.range().end()? {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "range extends beyond source",
@@ -98,6 +68,7 @@ impl RangeSource {
 }
 
 enum Backing<'a> {
+    #[cfg(test)]
     Bytes(&'a [u8]),
     File(&'a File),
 }
@@ -110,6 +81,7 @@ pub(crate) struct Cursor<'a> {
     read_error: Option<io::ErrorKind>,
 }
 impl<'a> Cursor<'a> {
+    #[cfg(test)]
     pub fn bytes(bytes: &'a [u8], base: u64) -> io::Result<Self> {
         let range = Range {
             offset: base,
@@ -143,6 +115,7 @@ impl<'a> Cursor<'a> {
     }
     pub fn borrow_range(&self, range: Range) -> Option<&[u8]> {
         let (bytes, base) = match &self.backing {
+            #[cfg(test)]
             Backing::Bytes(b) => (*b, self.range.offset),
             Backing::File(_) => (self.window.as_slice(), self.window_start),
         };
@@ -153,7 +126,7 @@ impl<'a> Cursor<'a> {
     /// Only structural navigation; the caller validates grammar and scalar acceptance once at
     /// the document/record boundary. Escapes may span windows without decoding their payload.
     pub fn string(&mut self) -> io::Result<Range> {
-        let start = self.position;
+        let start = self.position();
         if self.peek()? != Some(b'"') {
             return Err(invalid("expected JSON string"));
         }
@@ -184,7 +157,7 @@ impl<'a> Cursor<'a> {
     }
     pub fn value(&mut self) -> io::Result<Range> {
         self.whitespace()?;
-        let start = self.position;
+        let start = self.position();
         match self.peek()? {
             Some(b'"') => return self.string(),
             Some(b'{' | b'[') => {
@@ -238,6 +211,7 @@ impl BufRead for Cursor<'_> {
             return Ok(&[]);
         }
         match self.backing {
+            #[cfg(test)]
             Backing::Bytes(bytes) => Ok(&bytes[(self.position - self.range.offset) as usize..]),
             Backing::File(file) => {
                 let consumed = usize::try_from(self.position - self.window_start).unwrap_or(usize::MAX);
@@ -308,52 +282,6 @@ fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         let mut cloned = file.try_clone()?;
         cloned.seek(SeekFrom::Start(offset))?;
         cloned.read(buf)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn byte_and_positioned_cursors_agree_across_escaped_window_boundaries() {
-        let path = std::env::temp_dir().join(format!("cv-range-cursor-{}", uuid::Uuid::new_v4()));
-        let values = [
-            serde_json::json!("a".repeat(WINDOW - 2) + "\\\"é😀"),
-            serde_json::json!({"x":[1,true,null,"end"]}),
-            serde_json::json!(-1.25e30),
-        ];
-        let encoded = values
-            .iter()
-            .map(|v| serde_json::to_string(v).unwrap())
-            .collect::<Vec<_>>()
-            .join(" \n");
-        std::fs::write(&path, &encoded).unwrap();
-        let source = RangeSource::open(&path).unwrap();
-        let mut file = source.cursor(source.range()).unwrap();
-        let mut bytes = Cursor::bytes(encoded.as_bytes(), 0).unwrap();
-        for expected in values {
-            let fr = file.value().unwrap();
-            let br = bytes.value().unwrap();
-            assert_eq!(fr, br);
-            assert_eq!(file.position(), bytes.position());
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(bytes.borrow_range(br).unwrap()).unwrap(),
-                expected
-            );
-            let mut scalar = source.cursor(fr).unwrap();
-            assert_eq!(
-                serde_json::from_reader::<_, serde_json::Value>(&mut scalar).unwrap(),
-                expected
-            );
-        }
-        file.whitespace().unwrap();
-        assert_eq!(file.peek().unwrap(), None);
-        source.check_identity().unwrap();
-        std::fs::write(&path, "truncated").unwrap();
-        assert!(source.check_identity().is_err());
-        let mut truncated = source.cursor(source.range()).unwrap();
-        assert!(truncated.read_to_end(&mut Vec::new()).is_err());
-        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -466,6 +394,48 @@ impl RangeSource {
         }
         decoded.map_err(|_| anyhow::anyhow!("invalid JSON string"))?;
         Ok(())
+    }
+    /// Inspect the first byte of a normalized validated range without allocating an input window.
+    pub fn kind(&self, range: Range) -> Result<Option<u8>> {
+        if range.len == 0 {
+            return Ok(None);
+        }
+        anyhow::ensure!(range.end()? <= self.captured.len(), "JSON range outside source");
+        let mut byte = [0];
+        loop {
+            match read_at(&self.file, &mut byte, range.offset) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "JSON source was truncated").into()),
+                Ok(_) => return Ok(Some(byte[0])),
+            }
+        }
+    }
+    /// Stream a string accepted at the enclosing validation boundary, stopping on callback error.
+    /// The enclosing operation checks source identity even after an intentional prefix stop.
+    pub fn for_each_string_chunk_until(&self, string: Range, visit: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+        if string.len <= crate::lazy::INLINE_MAX as u64 + 2 {
+            let decoded: String = self.materialize(string)?;
+            return visit(&decoded);
+        }
+        anyhow::ensure!(string.len >= 2, "not a JSON string");
+        let body = Range {
+            offset: string.offset + 1,
+            len: string.len - 2,
+        };
+        let mut cursor = self.cursor(body)?;
+        let mut callback_error = None;
+        let decoded = crate::lazy::decode_validated_json_body_until(&mut cursor, &mut |part| {
+            callback_error = visit(part).err();
+            callback_error.is_none()
+        });
+        if let Some(kind) = cursor.read_error {
+            return Err(io::Error::new(kind, "reading JSON string").into());
+        }
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        decoded.map_err(|_| anyhow::anyhow!("validated JSON string failed decoding"))
     }
     pub fn key_matches(&self, string: Range, key: &str) -> Result<bool> {
         // An escaped ASCII byte needs at most six encoded bytes; surrogate pairs encode one
@@ -718,6 +688,63 @@ mod io_tests {
             io::ErrorKind::UnexpectedEof
         );
         assert!(source.check_identity().is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn byte_and_positioned_cursors_agree_across_escaped_window_boundaries() {
+        let path = std::env::temp_dir().join(format!("cv-range-cursor-{}", uuid::Uuid::new_v4()));
+        let values = [
+            serde_json::json!("a".repeat(WINDOW - 2) + "\\\"é😀"),
+            serde_json::json!({"x":[1,true,null,"end"]}),
+            serde_json::json!(-1.25e30),
+        ];
+        let encoded = values
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join(" \n");
+        std::fs::write(&path, &encoded).unwrap();
+        let source = RangeSource::open(&path).unwrap();
+        let mut file = source.cursor(source.range()).unwrap();
+        let mut bytes = Cursor::bytes(encoded.as_bytes(), 0).unwrap();
+        for expected in values {
+            let fr = file.value().unwrap();
+            let br = bytes.value().unwrap();
+            assert_eq!(fr, br);
+            assert_eq!(file.position(), bytes.position());
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(bytes.borrow_range(br).unwrap()).unwrap(),
+                expected
+            );
+            let mut scalar = source.cursor(fr).unwrap();
+            assert_eq!(
+                serde_json::from_reader::<_, serde_json::Value>(&mut scalar).unwrap(),
+                expected
+            );
+        }
+        file.whitespace().unwrap();
+        assert_eq!(file.peek().unwrap(), None);
+        assert_eq!(source.kind(source.range()).unwrap(), Some(b'"'));
+        let first = source.cursor(source.range()).unwrap().value().unwrap();
+        let mut chunks = 0;
+        let error = source
+            .for_each_string_chunk_until(first, &mut |_| {
+                chunks += 1;
+                anyhow::bail!("stop after first bounded chunk")
+            })
+            .unwrap_err();
+        assert_eq!(chunks, 1);
+        assert!(error.to_string().contains("stop after first"));
+        source.check_identity().unwrap();
+        std::fs::write(&path, "truncated").unwrap();
+        assert!(source.check_identity().is_err());
+        let mut truncated = source.cursor(source.range()).unwrap();
+        assert!(truncated.read_to_end(&mut Vec::new()).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }
