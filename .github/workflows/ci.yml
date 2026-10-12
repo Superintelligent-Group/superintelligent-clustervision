@@ -50,6 +50,11 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace
 
+      # The parse budget (docs/design/PERF.md): the counting pass over the committed corpus as a
+      # ratio to a plain read of the same bytes in the same run, so a slow runner moves both sides.
+      - name: Parse budget
+        run: cargo test --release -p clustervision-core --test perf_budget -- --ignored corpus
+
       # Every `cv <cmd>` and MCP tool name the manual mentions exists in `cv schema --commands` or
       # a live `tools/list`. The roster is generated from the clap tree so the binary cannot skew;
       # the manual could, and did (a `formats` tool that is really `formats_census`/`formats_check`;
