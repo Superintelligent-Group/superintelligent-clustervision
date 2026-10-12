@@ -362,9 +362,9 @@ impl<W: Write> Write for PrettyJson<'_, W> {
                         tail -= 1;
                     }
                     self.escape = if tail == i {
-                        self.escape ^ ((bytes.len() - tail) % 2 != 0)
+                        self.escape ^ !(bytes.len() - tail).is_multiple_of(2)
                     } else {
-                        (bytes.len() - tail) % 2 != 0
+                        !(bytes.len() - tail).is_multiple_of(2)
                     };
                     break;
                 };
