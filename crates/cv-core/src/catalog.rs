@@ -677,13 +677,26 @@ mod imp {
             r: &SessionRef,
             source: &crate::source::Snapshot,
         ) -> Option<crate::affordance::Counts> {
+            self.counts_with_probe(r, source, &mut crate::source::Probe::default())
+        }
+
+        pub fn counts_with_probe(
+            &self,
+            r: &SessionRef,
+            source: &crate::source::Snapshot,
+            probe: &mut crate::source::Probe,
+        ) -> Option<crate::affordance::Counts> {
             let key = (
                 r.harness.as_str().to_string(),
                 r.id.clone(),
                 r.path.to_string_lossy().into_owned(),
             );
             let (a, b, text) = self.rows.get(&key)?;
-            if (*a, *b) == source.primary && *a != 0 && self.dependencies.fresh(r, source.primary, &source.dependencies)
+            if (*a, *b) == source.primary
+                && *a != 0
+                && self
+                    .dependencies
+                    .fresh_with_probe(r, source.primary, &source.dependencies, probe)
             {
                 counts_of(text)
             } else {
@@ -866,6 +879,14 @@ impl AffordanceTable {
         &self,
         _r: &SessionRef,
         _source: &crate::source::Snapshot,
+    ) -> Option<crate::affordance::Counts> {
+        None
+    }
+    pub fn counts_with_probe(
+        &self,
+        _r: &SessionRef,
+        _source: &crate::source::Snapshot,
+        _probe: &mut crate::source::Probe,
     ) -> Option<crate::affordance::Counts> {
         None
     }

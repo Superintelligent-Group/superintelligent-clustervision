@@ -73,6 +73,8 @@ pub struct EventSink {
     cwd: Option<PathBuf>,
     msg_idx: usize,
     events: Vec<Event>,
+    dependencies: crate::source::ReadSet,
+    capture_events: bool,
 }
 
 impl EventSink {
@@ -83,7 +85,21 @@ impl EventSink {
             cwd,
             msg_idx: 0,
             events: Vec::new(),
+            dependencies: Default::default(),
+            capture_events: true,
         }
+    }
+
+    /// Keep checkpoint state and dependencies without extracting or retaining event rows.
+    /// Useful when events are fresh but another consumer needs a new shared resume mark.
+    pub fn without_events(mut self) -> Self {
+        self.capture_events = false;
+        self
+    }
+
+    /// Auxiliary adapter reads captured before their metadata or content was consulted.
+    pub fn dependencies(&self) -> &crate::source::ReadSet {
+        &self.dependencies
     }
 
     pub fn events(&self) -> &[Event] {
@@ -103,6 +119,8 @@ impl EventSink {
             cwd: st.cwd,
             msg_idx: st.msg_idx,
             events: Vec::new(),
+            dependencies: st.dependencies,
+            capture_events: true,
         })
     }
 }
@@ -115,9 +133,14 @@ const EVENTS_LAYER: &str = "events";
 struct EventState {
     msg_idx: usize,
     cwd: Option<PathBuf>,
+    #[serde(default)]
+    dependencies: crate::source::ReadSet,
 }
 
 impl MessageSink for EventSink {
+    fn dependency(&mut self, path: &std::path::Path) {
+        self.dependencies.record(path);
+    }
     fn meta(&mut self, s: &Session) {
         if self.cwd.is_none() {
             self.cwd = s.cwd.clone();
@@ -125,7 +148,9 @@ impl MessageSink for EventSink {
     }
 
     fn message(&mut self, m: Message) -> Flow {
-        extract_into(&m, self.msg_idx, self.cwd.as_deref(), &mut self.events);
+        if self.capture_events {
+            extract_into(&m, self.msg_idx, self.cwd.as_deref(), &mut self.events);
+        }
         self.msg_idx += 1;
         Flow::Continue
     }
@@ -140,6 +165,7 @@ impl MessageSink for EventSink {
             &EventState {
                 msg_idx: self.msg_idx,
                 cwd: self.cwd.clone(),
+                dependencies: self.dependencies.clone(),
             },
         );
     }
@@ -661,6 +687,15 @@ mod db {
 
         /// The same decision with dependencies already gathered by the operation's shared probe.
         pub fn needs_ingest_with_source(&self, r: &SessionRef, source: &crate::source::Snapshot) -> bool {
+            self.needs_ingest_with_probe(r, source, &mut crate::source::Probe::default())
+        }
+
+        pub fn needs_ingest_with_probe(
+            &self,
+            r: &SessionRef,
+            source: &crate::source::Snapshot,
+            probe: &mut crate::source::Probe,
+        ) -> bool {
             let Some(rows) = &self.rows else { return false };
             let key = (
                 r.harness.as_str().to_string(),
@@ -668,7 +703,9 @@ mod db {
                 r.path.to_string_lossy().into_owned(),
             );
             !sync_fresh(r, rows.get(&key).copied(), source.primary.0, source.primary.1)
-                || !self.dependencies.fresh(r, source.primary, &source.dependencies)
+                || !self
+                    .dependencies
+                    .fresh_with_probe(r, source.primary, &source.dependencies, probe)
         }
     }
 
@@ -698,7 +735,7 @@ mod db {
     /// `from` and later are replaced by `events` (all of which are), the earlier ones stay as the
     /// pass that read them stored them. The same dedup rule, within the new rows.
     /// `mtime_ns` and `size` must have been captured before the source read, never after it.
-    /// This legacy API leaves auxiliary dependencies stale; [`record_from_with_source`] carries
+    /// This legacy API leaves source freshness stale; [`record_from_with_source`] carries
     /// their before-read snapshot and can publish auxiliary freshness.
     pub fn record_from(r: &SessionRef, from: usize, events: &[Event], mtime_ns: i64, size: i64, prov: &Provenance) {
         let source = crate::source::Snapshot {
@@ -822,6 +859,7 @@ mod db {
         let source = crate::source::Probe::default().snapshot(r);
         let mut sink = EventSink::new(r.cwd.clone());
         adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
+        let source = source.with_reads(sink.dependencies());
         let events = sink.into_events();
         record_from_with_source(r, 0, &events, &source, &Provenance::default());
         Ok(events.len())
@@ -836,6 +874,7 @@ mod db {
         let source = crate::source::Probe::default().snapshot(r);
         let mut sink = EventSink::new(r.cwd.clone());
         adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
+        let source = source.with_reads(sink.dependencies());
         let events = sink.into_events();
         record_from_with_source(r, 0, &events, &source, prov);
         Ok(events.len())
@@ -856,7 +895,7 @@ mod db {
         let mut probe = crate::source::Probe::default();
         for r in crate::discover_all() {
             let source = probe.snapshot(&r);
-            let top_stale = sync.needs_ingest_with_source(&r, &source);
+            let top_stale = sync.needs_ingest_with_probe(&r, &source, &mut probe);
             if force || top_stale {
                 match ingest_ref(&r) {
                     Ok(_) => n += 1,
@@ -1104,6 +1143,14 @@ mod db_stub {
         pub fn needs_ingest_with_source(&self, _r: &SessionRef, _source: &crate::source::Snapshot) -> bool {
             false
         }
+        pub fn needs_ingest_with_probe(
+            &self,
+            _r: &SessionRef,
+            _source: &crate::source::Snapshot,
+            _probe: &mut crate::source::Probe,
+        ) -> bool {
+            false
+        }
     }
     pub fn record(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64) {}
     pub fn record_with(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64, _prov: &Provenance) {}
@@ -1160,6 +1207,21 @@ mod tests {
     use super::*;
     use crate::ir::{Message, Role};
     use serde_json::json;
+
+    #[test]
+    fn checkpoint_only_sink_tracks_positions_without_extracting_rows() {
+        let mut sink = EventSink::new(Some("/work".into())).without_events();
+        let message = || msg(vec![tool_use("Bash", json!({"command":"echo hi"}))]);
+        sink.message(message());
+        sink.message(message());
+        assert!(sink.events().is_empty());
+        let mut cp = Checkpoint::new(42);
+        sink.checkpoint(&mut cp);
+        let mut resumed = EventSink::resume(&cp).unwrap();
+        resumed.message(message());
+        assert_eq!(resumed.events().len(), 1);
+        assert_eq!(resumed.events()[0].msg_idx, 2);
+    }
 
     fn msg(blocks: Vec<Block>) -> Message {
         let mut m = Message::new(Role::Assistant);

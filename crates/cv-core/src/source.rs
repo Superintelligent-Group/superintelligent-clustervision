@@ -5,23 +5,24 @@
 //! make an older search index fresh. Missing baselines cause an incremental reread once.
 //!
 //! These are metadata freshness guards, not content verification. Primary transcripts retain
-//! the size/mtime tuple; timestamp-restored rewrites are outside that guarantee. Inventories
-//! cover known adapter-local files. Claude's conditional fork inference reads siblings and an
-//! adopted transcript may point to tool outputs outside its local tool-results directory; those
-//! require a future consumer-recorded read set and are not covered by the local inventory.
+//! the size/mtime tuple; timestamp-restored rewrites are outside that guarantee. The before-pass
+//! inventory covers known adapter-local files. Consumers additionally capture paths immediately
+//! before dynamic reads, including conditional fork siblings and adopted external output files.
+//! Version 2 records explicitly distinguish a complete read set (even empty) from an unrecorded
+//! one. Older baselines reread once through ordinary incremental refresh; no index rebuild.
 
 use crate::ir::{Harness, SessionRef};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
     state: Option<FileState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
     len: u64,
     modified_ns: u64,
@@ -29,10 +30,13 @@ struct FileState {
 }
 
 /// Exact serialized metadata records for an auxiliary dependency set, not a content digest.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Records {
     version: u32,
     entries: Vec<Entry>,
+    /// None is a before-pass inventory, not a complete consumer read set.
+    #[serde(default)]
+    reads: Option<Vec<Entry>>,
 }
 
 /// A canonical record string. Loaded baselines remain strings instead of allocating each path
@@ -41,8 +45,58 @@ struct Records {
 pub struct Stamp(String);
 
 impl Stamp {
-    fn empty(&self) -> bool {
-        self.0 == r#"{"version":1,"entries":[]}"#
+    fn records(&self) -> Option<Records> {
+        let records: Records = serde_json::from_str(&self.0).ok()?;
+        (records.version == 2).then_some(records)
+    }
+
+    fn matches(&self, current: &Stamp, probe: &mut Probe) -> bool {
+        // Canonical version-2 records with no dynamic reads compare without allocating all
+        // adapter-local paths three times. The generated base record strings must match exactly.
+        if self.0.strip_suffix("\"reads\":[]}").is_some_and(|base| {
+            current.0.strip_suffix("\"reads\":null}") == Some(base)
+                || current.0.strip_suffix("\"reads\":[]}") == Some(base)
+        }) {
+            return true;
+        }
+        let Some(old) = self.records() else { return false };
+        let Some(current) = current.records() else { return false };
+        old.entries == current.entries
+            && old.reads.as_ref().is_some_and(|reads| {
+                reads
+                    .iter()
+                    .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+            })
+    }
+}
+
+/// The metadata captured immediately before a consumer reads dynamically resolved paths.
+/// Captures absence too. Repeated paths retain the first stamp; publication revalidates it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadSet {
+    entries: BTreeMap<PathBuf, Entry>,
+    known: bool,
+}
+
+impl Default for ReadSet {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            known: true,
+        }
+    }
+}
+
+impl ReadSet {
+    pub fn record(&mut self, path: &Path) {
+        if !self.entries.contains_key(path) {
+            match Probe::default().entry(path) {
+                Some(entry) => {
+                    self.entries.insert(path.to_path_buf(), entry);
+                }
+                None => self.known = false,
+            }
+        }
     }
 }
 
@@ -51,6 +105,24 @@ impl Stamp {
 pub struct Snapshot {
     pub primary: (i64, i64),
     pub dependencies: Option<Stamp>,
+}
+
+impl Snapshot {
+    /// Attach the read set captured by this consumer's complete pass, never another consumer's.
+    pub fn with_reads(&self, reads: &ReadSet) -> Self {
+        let dependencies = (|| {
+            if !reads.known {
+                return None;
+            }
+            let mut records = self.dependencies.as_ref()?.records()?;
+            records.reads = Some(reads.entries.values().cloned().collect());
+            Some(Stamp(serde_json::to_string(&records).ok()?))
+        })();
+        Self {
+            primary: self.primary,
+            dependencies,
+        }
+    }
 }
 
 /// File and immediate-directory probes shared within one operation. It never descends recursively.
@@ -307,8 +379,9 @@ impl Probe {
         }
         Some(Stamp(
             serde_json::to_string(&Records {
-                version: 1,
+                version: 2,
                 entries: entries.into_values().collect(),
+                reads: None,
             })
             .ok()?,
         ))
@@ -327,8 +400,23 @@ impl Probe {
 
 /// A captured source still matches at publication time. Errors never establish freshness.
 pub fn unchanged(r: &SessionRef, snapshot: &Snapshot) -> bool {
-    let now = Probe::default().snapshot(r);
-    snapshot.dependencies.is_some() && now.primary == snapshot.primary && now.dependencies == snapshot.dependencies
+    let mut probe = Probe::default();
+    let now = probe.snapshot(r);
+    if now.primary != snapshot.primary {
+        return false;
+    }
+    let Some(before) = snapshot.dependencies.as_ref().and_then(Stamp::records) else {
+        return false;
+    };
+    let Some(now) = now.dependencies.as_ref().and_then(Stamp::records) else {
+        return false;
+    };
+    before.entries == now.entries
+        && before.reads.as_ref().is_none_or(|reads| {
+            reads
+                .iter()
+                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+        })
 }
 
 pub type Update = (SessionRef, Snapshot);
@@ -342,7 +430,8 @@ fn key(r: &SessionRef) -> Key {
     )
 }
 
-/// A consumer's baselines, loaded once. Empty sets need no stored row.
+/// A consumer's baselines, loaded once. Version 1/missing read sets reread once; even empty
+/// complete read sets have a row, so an old consumer cannot silently certify unresolved paths.
 #[derive(Default)]
 pub struct Table {
     rows: HashMap<Key, ((i64, i64), Stamp)>,
@@ -350,12 +439,21 @@ pub struct Table {
 
 impl Table {
     pub fn fresh(&self, r: &SessionRef, primary: (i64, i64), dependencies: &Option<Stamp>) -> bool {
-        dependencies.as_ref().is_some_and(|stamp| {
-            stamp.empty()
-                || self
-                    .rows
-                    .get(&key(r))
-                    .is_some_and(|(old_primary, old)| *old_primary == primary && old == stamp)
+        self.fresh_with_probe(r, primary, dependencies, &mut Probe::default())
+    }
+
+    /// Shared operation probes memoize dynamic files consulted by multiple consumers/sessions.
+    pub fn fresh_with_probe(
+        &self,
+        r: &SessionRef,
+        primary: (i64, i64),
+        dependencies: &Option<Stamp>,
+        probe: &mut Probe,
+    ) -> bool {
+        dependencies.as_ref().is_some_and(|current| {
+            self.rows
+                .get(&key(r))
+                .is_some_and(|(old_primary, old)| *old_primary == primary && old.matches(current, probe))
         })
     }
 
@@ -424,9 +522,6 @@ pub(crate) fn fresh_in(
     dependencies: &Option<Stamp>,
 ) -> bool {
     dependencies.as_ref().is_some_and(|stamp| {
-        if stamp.empty() {
-            return true;
-        }
         let (h, id, path) = key(r);
         conn.query_row(
             "SELECT mtime,size,stamp FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
@@ -434,7 +529,7 @@ pub(crate) fn fresh_in(
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
         )
         .ok()
-        .is_some_and(|(mtime, size, old)| (mtime, size) == primary && old == stamp.0)
+        .is_some_and(|(mtime, size, old)| (mtime, size) == primary && Stamp(old).matches(stamp, &mut Probe::default()))
     })
 }
 
@@ -456,7 +551,7 @@ pub(crate) fn publish_in(
     if let Some(stamp) = snapshot
         .dependencies
         .as_ref()
-        .filter(|stamp| !stamp.empty() && unchanged(r, snapshot))
+        .filter(|stamp| stamp.records().is_some_and(|records| records.reads.is_some()) && unchanged(r, snapshot))
     {
         conn.execute(
             "INSERT INTO source_dependencies(consumer,harness,id,path,mtime,size,stamp)
@@ -522,6 +617,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dynamic_reads_capture_absence_and_reject_changes_during_a_pass() {
+        let w = cv_testkit::World::in_process("dynamic-reads");
+        let path = w.base.join("plain.jsonl");
+        std::fs::write(&path, "primary").unwrap();
+        let r = SessionRef {
+            harness: Harness::Codex,
+            id: "test".into(),
+            path,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        };
+        let base = Probe::default().snapshot(&r);
+        let extra = w.base.join("external.txt");
+        let mut reads = ReadSet::default();
+        reads.record(&extra);
+        let before = base.with_reads(&reads);
+        update("dynamic", &[(r.clone(), before.clone())]);
+        assert!(Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        std::fs::write(&extra, "before").unwrap();
+        reads.record(&extra); // Keep the first capture, even after the dependent read changed.
+        assert!(!unchanged(&r, &base.with_reads(&reads)));
+        assert!(!Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        update("dynamic", &[(r.clone(), before)]);
+        assert!(!Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        let mut reads = ReadSet::default();
+        reads.record(&extra);
+        update("dynamic", &[(r.clone(), base.with_reads(&reads))]);
+        assert!(Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        std::fs::write(&extra, "after!").unwrap();
+        assert!(!Table::load("dynamic").fresh(&r, base.primary, &base.dependencies));
+        assert_eq!(Probe::default().snapshot(&r).primary, base.primary);
+        assert!(!Table::load("other").fresh(&r, base.primary, &base.dependencies));
+    }
+
+    #[test]
+    fn unrecorded_and_version_one_baselines_reread_once() {
+        let w = cv_testkit::World::in_process("read-set-upgrade");
+        let path = w.base.join("plain.jsonl");
+        std::fs::write(&path, "primary").unwrap();
+        let r = SessionRef {
+            harness: Harness::Codex,
+            id: "test".into(),
+            path,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        };
+        let base = Probe::default().snapshot(&r);
+        update("upgrade", &[(r.clone(), base.clone())]);
+        assert!(!Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
+        let complete = base.with_reads(&ReadSet::default());
+        update("upgrade", &[(r.clone(), complete.clone())]);
+        assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
+        let mut table = Table::load("upgrade");
+        for (_, stamp) in table.rows.values_mut() {
+            stamp.0 = stamp.0.replacen("\"version\":2", "\"version\":1", 1);
+        }
+        assert!(!table.fresh(&r, base.primary, &base.dependencies));
+        assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
+    }
+
+    #[test]
     fn dependency_baselines_are_per_consumer_and_revalidated_at_publication() {
         let w = cv_testkit::World::in_process("source-baselines");
         let path = w.base.join("sessions.db");
@@ -537,12 +699,15 @@ mod tests {
             message_count: 0,
         };
         let mut probe = Probe::default();
-        let before = probe.snapshot(&r);
+        let before = probe.snapshot(&r).with_reads(&ReadSet::default());
         let other = SessionRef {
             id: "s2".into(),
             ..r.clone()
         };
-        assert_eq!(probe.snapshot(&other).dependencies, before.dependencies);
+        assert_eq!(
+            probe.snapshot(&other).with_reads(&ReadSet::default()).dependencies,
+            before.dependencies
+        );
         assert_eq!(
             probe.entries.len(),
             2,
@@ -554,7 +719,7 @@ mod tests {
         assert!(!Table::load("events").fresh(&r, before.primary, &before.dependencies));
 
         std::fs::write(w.base.join("sessions.db-wal"), "new WAL").unwrap();
-        let after = Probe::default().snapshot(&r);
+        let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         assert_eq!(after.primary, before.primary);
         assert_ne!(after.dependencies, before.dependencies);
         assert!(!unchanged(&r, &before));
@@ -585,13 +750,19 @@ mod tests {
             updated_at: None,
             message_count: 0,
         };
-        let before = Probe::default().snapshot(&r);
+        let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         std::fs::write(&wire, "line1\nline2\n").unwrap();
-        let after = Probe::default().snapshot(&r);
+        let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         assert_eq!(before.primary, after.primary);
         assert_ne!(before.dependencies, after.dependencies);
         std::fs::write(session.join("state.json"), "after!").unwrap();
-        assert_ne!(after.dependencies, Probe::default().snapshot(&r).dependencies);
+        assert_ne!(
+            after.dependencies,
+            Probe::default()
+                .snapshot(&r)
+                .with_reads(&ReadSet::default())
+                .dependencies
+        );
 
         let storage = w.base.join("storage");
         for dir in ["session/project", "message/sid", "part/mid"] {
@@ -608,15 +779,18 @@ mod tests {
             path,
             ..r
         };
-        let before = Probe::default().snapshot(&r);
+        let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         std::fs::write(&part, "after!").unwrap();
-        let after = Probe::default().snapshot(&r);
+        let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         assert_eq!(before.primary, after.primary);
         assert_ne!(before.dependencies, after.dependencies, "part-only same-size edit");
         std::fs::write(storage.join("part/mid/new.json"), "new").unwrap();
         assert_ne!(
             after.dependencies,
-            Probe::default().snapshot(&r).dependencies,
+            Probe::default()
+                .snapshot(&r)
+                .with_reads(&ReadSet::default())
+                .dependencies,
             "part membership"
         );
     }
@@ -638,7 +812,7 @@ mod tests {
             message_count: 0,
         };
         crate::catalog::open_db().unwrap();
-        let source = Probe::default().snapshot(&r);
+        let source = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         crate::catalog::note_affordances_with_source(&r, &source, || {
             // An edit while producing side-store counts cannot publish a newer primary tuple.
             std::fs::write(&path, "after!").unwrap();
@@ -647,6 +821,7 @@ mod tests {
         assert!(crate::catalog::AffordanceTable::load().stale(&r));
         crate::stream::Counted {
             turns: 1,
+            dependencies: ReadSet::default(),
             counts: crate::affordance::Counts::new(),
         }
         .record(&r);
@@ -671,12 +846,12 @@ mod tests {
             message_count: 0,
         };
         let conn = crate::catalog::open_db().unwrap();
-        let before = Probe::default().snapshot(&r);
+        let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         crate::catalog::note_affordances_with_source(&r, &before, crate::affordance::Counts::new);
         assert!(!crate::catalog::AffordanceTable::load().stale(&r));
         let wal = w.base.join("sessions.db-wal");
         std::fs::write(&wal, "new").unwrap();
-        let after = Probe::default().snapshot(&r);
+        let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         conn.execute_batch(
             "CREATE TRIGGER reject_stamp BEFORE INSERT ON source_dependencies
             WHEN NEW.consumer='counts' BEGIN SELECT RAISE(FAIL,'stamp rejected'); END;",
@@ -686,7 +861,13 @@ mod tests {
             [(crate::affordance::Kind::Plan, 1)].into_iter().collect()
         });
         std::fs::remove_file(&wal).unwrap();
-        assert_eq!(before.dependencies, Probe::default().snapshot(&r).dependencies);
+        assert_eq!(
+            before.dependencies,
+            Probe::default()
+                .snapshot(&r)
+                .with_reads(&ReadSet::default())
+                .dependencies
+        );
         assert!(
             crate::catalog::AffordanceTable::load().counts(&r).unwrap().is_empty(),
             "failed stamp insert rolls back new counts too"
@@ -699,7 +880,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&wal, "new").unwrap();
-        let after = Probe::default().snapshot(&r);
+        let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         let mut called = false;
         crate::catalog::note_affordances_with_source(&r, &after, || {
             called = true;

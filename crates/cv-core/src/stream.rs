@@ -151,6 +151,10 @@ pub trait MessageSink {
     /// Session metadata, possibly emitted before the first message. Default: ignore.
     fn meta(&mut self, _session: &Session) {}
 
+    /// An auxiliary path is about to be consulted (including metadata/absence or directory
+    /// membership). Adapters report before reading; wrappers must forward the notification.
+    fn dependency(&mut self, _path: &std::path::Path) {}
+
     /// The adapter is between records, holding nothing back, `offset` bytes into the file: may it
     /// take a [`Checkpoint`] here? Only a sink that can put everything it holds into one says
     /// yes, so a pass through any other sink never takes one. Default: no.
@@ -250,6 +254,10 @@ impl<'a> TeeSink<'a> {
 }
 
 impl MessageSink for TeeSink<'_> {
+    fn dependency(&mut self, path: &std::path::Path) {
+        self.a.dependency(path);
+        self.b.dependency(path);
+    }
     fn meta(&mut self, s: &Session) {
         self.a.meta(s);
         self.b.meta(s);
@@ -347,7 +355,11 @@ pub fn stream_counted(
 ) -> Result<Session> {
     let source = crate::source::Probe::default().snapshot(r);
     let (session, counter) = stream_with_counter(adapter, r, opts, sink)?;
-    if let Some((turns, counter)) = counter.filter(|_| crate::source::unchanged(r, &source)) {
+    if let Some((turns, counter, dependencies)) = counter {
+        let source = source.with_reads(&dependencies);
+        if !crate::source::unchanged(r, &source) {
+            return Ok(session);
+        }
         note_turns(r, turns);
         crate::catalog::note_affordances_with_source(r, &source, || {
             counter.finish(&session, &adapter.store_affordances(r))
@@ -361,6 +373,8 @@ pub fn stream_counted(
 pub struct Counted {
     pub turns: usize,
     pub counts: crate::affordance::Counts,
+    /// Adapter dependencies consulted before the pass computed these counts.
+    pub dependencies: crate::source::ReadSet,
 }
 
 impl Counted {
@@ -372,9 +386,10 @@ impl Counted {
 
     /// Publish against the dependencies captured before this pass, including any side-store rows.
     pub fn record_with_source(self, r: &SessionRef, source: &crate::source::Snapshot) {
-        if crate::source::unchanged(r, source) {
+        let source = source.with_reads(&self.dependencies);
+        if crate::source::unchanged(r, &source) {
             note_turns(r, self.turns);
-            crate::catalog::note_affordances_with_source(r, source, || self.counts);
+            crate::catalog::note_affordances_with_source(r, &source, || self.counts);
         }
     }
 }
@@ -390,8 +405,9 @@ pub fn stream_counting(
     sink: &mut dyn MessageSink,
 ) -> Result<(Session, Option<Counted>)> {
     let (session, counter) = stream_with_counter(adapter, r, opts, sink)?;
-    let counted = counter.map(|(turns, counter)| Counted {
+    let counted = counter.map(|(turns, counter, dependencies)| Counted {
         turns,
+        dependencies,
         counts: counter.finish(&session, &adapter.store_affordances(r)),
     });
     Ok((session, counted))
@@ -444,6 +460,7 @@ pub fn stream_resumable(
         .filter(|_| !counting.stopped);
     let counted = (!counting.stopped).then(|| Counted {
         turns: counting.turns,
+        dependencies: counting.dependencies,
         counts: counting.affordances.finish(&session, &adapter.store_affordances(r)),
     });
     Ok(Some(Resumed { session, counted, last }))
@@ -461,6 +478,8 @@ struct CounterState {
     messages: usize,
     turns: usize,
     counts: std::collections::BTreeMap<String, u32>,
+    #[serde(default)]
+    dependencies: crate::source::ReadSet,
 }
 
 /// The wrapper every counted pass streams through: turns, messages and affordances as they go
@@ -470,6 +489,7 @@ struct Counting<'a> {
     messages: usize,
     turns: usize,
     affordances: crate::affordance::Counter,
+    dependencies: crate::source::ReadSet,
     stopped: bool,
     /// Take a checkpoint every this many bytes (`None`: never).
     every: Option<u64>,
@@ -484,6 +504,7 @@ impl<'a> Counting<'a> {
             messages: 0,
             turns: 0,
             affordances: crate::affordance::Counter::new(r),
+            dependencies: Default::default(),
             stopped: false,
             every,
             last_offset: 0,
@@ -494,6 +515,7 @@ impl<'a> Counting<'a> {
     fn restore(&mut self, state: CounterState, offset: u64) {
         self.messages = state.messages;
         self.turns = state.turns;
+        self.dependencies = state.dependencies;
         let counts = state
             .counts
             .iter()
@@ -505,6 +527,10 @@ impl<'a> Counting<'a> {
 }
 
 impl MessageSink for Counting<'_> {
+    fn dependency(&mut self, path: &std::path::Path) {
+        self.dependencies.record(path);
+        self.inner.dependency(path);
+    }
     fn meta(&mut self, s: &Session) {
         self.inner.meta(s);
     }
@@ -534,6 +560,7 @@ impl MessageSink for Counting<'_> {
                 messages: self.messages,
                 turns: self.turns,
                 counts,
+                dependencies: self.dependencies.clone(),
             },
         );
         self.inner.checkpoint(cp);
@@ -541,6 +568,8 @@ impl MessageSink for Counting<'_> {
         self.last = Some(cp.clone());
     }
 }
+
+type CompletedCounter = (usize, crate::affordance::Counter, crate::source::ReadSet);
 
 /// `adapter.stream` with every message counted: the turns and the affordance [`Counter`]
 /// (`None` when the sink stopped early, so the counts would be partial).
@@ -551,10 +580,10 @@ fn stream_with_counter(
     r: &SessionRef,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
-) -> Result<(Session, Option<(usize, crate::affordance::Counter)>)> {
+) -> Result<(Session, Option<CompletedCounter>)> {
     let mut counting = Counting::new(r, sink, None);
     let session = adapter.stream(r, opts, &mut counting)?;
-    let counted = (!counting.stopped).then_some((counting.turns, counting.affordances));
+    let counted = (!counting.stopped).then_some((counting.turns, counting.affordances, counting.dependencies));
     Ok((session, counted))
 }
 
@@ -629,6 +658,40 @@ mod tests {
         fn checkpoint(&mut self, cp: &mut Checkpoint) {
             self.cps.push(cp.clone());
         }
+    }
+
+    #[test]
+    fn wrappers_forward_read_sets_and_counter_checkpoints_keep_the_prefix() {
+        let w = cv_testkit::World::in_process("read-set-wrappers");
+        let path = w.base.join("session.jsonl");
+        std::fs::write(&path, "primary").unwrap();
+        let extra = w.base.join("external.txt");
+        std::fs::write(&extra, "before").unwrap();
+        let r = transcript(crate::ir::Harness::Codex, path);
+        let base = crate::source::Probe::default().snapshot(&r);
+        let mut a = crate::events::EventSink::new(None);
+        let mut b = crate::events::EventSink::new(None);
+        let mut tee = TeeSink::new(&mut a, &mut b);
+        let mut affordances = crate::affordance::AffordanceSink::new(r.harness, &mut tee);
+        let mut counting = Counting::new(&r, &mut affordances, Some(1));
+        counting.dependency(&extra);
+        let mut cp = Checkpoint::new(1);
+        counting.checkpoint(&mut cp);
+        let state = cp.get::<CounterState>(COUNTER_LAYER).unwrap();
+        let events_resumed = crate::events::EventSink::resume(&cp).unwrap();
+        let mut keep = Keep::default();
+        let mut resumed = Counting::new(&r, &mut keep, Some(1));
+        resumed.restore(state, cp.offset);
+        assert!(crate::source::unchanged(&r, &base.with_reads(&resumed.dependencies)));
+        drop(counting);
+        std::fs::write(&extra, "after!").unwrap();
+        assert!(!crate::source::unchanged(&r, &base.with_reads(a.dependencies())));
+        assert!(!crate::source::unchanged(&r, &base.with_reads(b.dependencies())));
+        assert!(!crate::source::unchanged(&r, &base.with_reads(&resumed.dependencies)));
+        assert!(!crate::source::unchanged(
+            &r,
+            &base.with_reads(events_resumed.dependencies())
+        ));
     }
 
     /// The claude and codex transcripts of the harness corpus (the two adapters that resume).

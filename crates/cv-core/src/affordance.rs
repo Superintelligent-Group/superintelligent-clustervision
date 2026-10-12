@@ -444,6 +444,9 @@ impl<'a> AffordanceSink<'a> {
 }
 
 impl MessageSink for AffordanceSink<'_> {
+    fn dependency(&mut self, path: &std::path::Path) {
+        self.inner.dependency(path);
+    }
     fn message(&mut self, mut m: Message) -> Flow {
         if matches!(self.harness, Harness::Hermes | Harness::OpenClaw) {
             let h = self.harness;
