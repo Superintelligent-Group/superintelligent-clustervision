@@ -73,7 +73,7 @@ mod imp {
     }
 
     fn open() -> Option<Connection> {
-        let conn = Connection::open(db_path()?).ok()?;
+        let mut conn = Connection::open(db_path()?).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
         conn.execute_batch(
@@ -137,6 +137,50 @@ mod imp {
                 "ALTER TABLE sessions ADD COLUMN created_ns INTEGER;
                  ALTER TABLE sessions ADD COLUMN updated_ns INTEGER;",
             );
+        }
+        let has_version: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('scan_cache') WHERE name='interpretation_version')",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        if !has_version {
+            // Nullable: an older binary's INSERT OR REPLACE omits it and produces a stale row.
+            let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN interpretation_version INTEGER;");
+        }
+        let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
+        let old: Option<String> = conn
+            .query_row(
+                "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        if old.as_deref() != Some(version.as_str()) {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .ok()?;
+            // Recheck under the writer lock: a concurrent new process may already have upgraded.
+            let old: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM catalog_meta WHERE key='discovery_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
+            if old.as_deref() != Some(version.as_str()) {
+                tx.execute("DELETE FROM watched", []).ok()?;
+                tx.execute("DELETE FROM catalog_meta WHERE key='last_full_sync'", [])
+                    .ok()?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('discovery_version',?1)",
+                    [&version],
+                )
+                .ok()?;
+                tx.commit().ok()?;
+                crate::discover_cache::invalidate_interpretation();
+            }
         }
         Some(conn)
     }

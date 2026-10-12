@@ -12,8 +12,8 @@
 //! instead — a second, redundant representation of the same facts that every command paid to parse;
 //! [`load`] leaves a "safe to delete" note if one is still lying around. Reads are tolerant — a
 //! missing or unreadable cache simply means everything is re-scanned (and the cache rebuilt).
-//! Correctness never depends on the cache: an entry is only reused when `(mtime, size)` match
-//! exactly, so any real change misses.
+//! Entries are reused only when the interpretation version and `(mtime, size)` match.
+//! Metadata probes do not verify content rewritten with restored timestamps.
 
 use crate::ir::SessionRef;
 use std::collections::HashMap;
@@ -34,7 +34,26 @@ struct Cache {
     any_dirty: AtomicBool,
 }
 
+/// Bump when discovery changes the interpretation of unchanged source bytes.
+#[cfg(feature = "sqlite")]
+pub(crate) const INTERPRETATION_VERSION: u32 = 1;
 static CACHE: OnceLock<Cache> = OnceLock::new();
+static INVALIDATE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "sqlite")]
+pub(crate) fn invalidate_interpretation() {
+    INVALIDATE.store(true, Ordering::Release);
+}
+
+fn clear_invalidated(cache: &Cache) {
+    if INVALIDATE.load(Ordering::Acquire) {
+        let mut entries = cache.entries.write().unwrap();
+        if INVALIDATE.swap(false, Ordering::AcqRel) {
+            entries.clear();
+            cache.any_dirty.store(false, Ordering::Release);
+        }
+    }
+}
 
 /// One-time nudge about the pre-0.9.12 JSON cache this module replaced.
 fn note_legacy_json() {
@@ -57,8 +76,10 @@ fn load() -> Cache {
     let mut entries: HashMap<PathBuf, Entry> = HashMap::new();
     #[cfg(feature = "sqlite")]
     if let Some(conn) = crate::catalog::open_db() {
-        if let Ok(mut stmt) = conn.prepare("SELECT path, mtime_ns, size, refs FROM scan_cache") {
-            let rows = stmt.query_map([], |row| {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT path, mtime_ns, size, refs FROM scan_cache WHERE interpretation_version=?1")
+        {
+            let rows = stmt.query_map([INTERPRETATION_VERSION], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
@@ -115,6 +136,7 @@ where
         return scan();
     };
     let cache = CACHE.get_or_init(load);
+    clear_invalidated(cache);
     if let Some(e) = cache.entries.read().unwrap().get(path) {
         if e.mtime_ns == mtime_ns && e.size == size {
             return e.refs.clone();
@@ -164,11 +186,12 @@ pub(crate) fn persist(prune: bool) {
         let Some(mut conn) = crate::catalog::open_db() else {
             return;
         };
+        clear_invalidated(cache);
         let Ok(tx) = conn.transaction() else { return };
         let mut g = cache.entries.write().unwrap();
         {
             let Ok(mut stmt) =
-                tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs) VALUES(?1,?2,?3,?4)")
+                tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version) VALUES(?1,?2,?3,?4,?5)")
             else {
                 return;
             };
@@ -181,7 +204,8 @@ pub(crate) fn persist(prune: bool) {
                         path.to_string_lossy(),
                         e.mtime_ns as i64,
                         e.size as i64,
-                        refs
+                        refs,
+                        INTERPRETATION_VERSION
                     ])
                     .is_ok()
                 {
@@ -228,14 +252,15 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
         hit
     };
     if let Some(cache) = CACHE.get() {
+        clear_invalidated(cache);
         if let Some(e) = cache.entries.write().unwrap().get_mut(path) {
             fill(&mut e.refs);
         }
     }
     let key = path.to_string_lossy();
     let Ok(json) = conn.query_row(
-        "SELECT refs FROM scan_cache WHERE path=?1",
-        rusqlite::params![key],
+        "SELECT refs FROM scan_cache WHERE path=?1 AND interpretation_version=?2",
+        rusqlite::params![key, INTERPRETATION_VERSION],
         |row| row.get::<_, String>(0),
     ) else {
         return;
@@ -246,9 +271,78 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
     if fill(&mut refs) {
         if let Ok(json) = serde_json::to_string(&refs) {
             let _ = conn.execute(
-                "UPDATE scan_cache SET refs=?1 WHERE path=?2",
-                rusqlite::params![json, key],
+                "UPDATE scan_cache SET refs=?1 WHERE path=?2 AND interpretation_version=?3",
+                rusqlite::params![json, key, INTERPRETATION_VERSION],
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpretation_upgrade_rejects_persisted_and_process_scan_rows() {
+        let w = cv_testkit::World::in_process("scan-interpretation");
+        let path = w.base.join("unchanged.jsonl");
+        std::fs::write(&path, "unchanged").unwrap();
+        let old = SessionRef {
+            harness: crate::Harness::Gemini,
+            id: "old".into(),
+            path: path.clone(),
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        };
+        assert_eq!(cached_scan(&path, || Some(old.clone())).unwrap().id, "old");
+        persist(false);
+        let conn = crate::catalog::open_db().unwrap();
+        conn.execute_batch(
+            "UPDATE scan_cache SET interpretation_version=NULL;
+            UPDATE catalog_meta SET value='0' WHERE key='discovery_version';
+            INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('last_full_sync','1');
+            INSERT OR REPLACE INTO watched(harness,path,mtime_ns) VALUES('gemini','old-watch',1);",
+        )
+        .unwrap();
+        let conn = crate::catalog::open_db().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM watched", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(crate::catalog::last_full_sync().is_none());
+        assert!(
+            load().entries.read().unwrap().is_empty(),
+            "old persisted interpretation ignored"
+        );
+        let current = SessionRef {
+            id: "current".into(),
+            ..old
+        };
+        assert_eq!(
+            cached_scan(&path, || Some(current)).unwrap().id,
+            "current",
+            "process entry invalidated despite unchanged bytes"
+        );
+        persist(false);
+        assert_eq!(
+            conn.query_row(
+                "SELECT interpretation_version FROM scan_cache WHERE path=?1",
+                [path.to_string_lossy()],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+            INTERPRETATION_VERSION
+        );
+        // Old binaries omit the added nullable field on replacement: their row remains stale.
+        conn.execute(
+            "INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs) VALUES(?1,1,1,'[]')",
+            [path.to_string_lossy()],
+        )
+        .unwrap();
+        assert!(load().entries.read().unwrap().is_empty());
     }
 }
