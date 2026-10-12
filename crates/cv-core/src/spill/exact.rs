@@ -118,6 +118,61 @@ impl Slot {
         file.write(index, &bytes)
     }
 }
+// Index pages have independent offsets; positional I/O avoids a seek syscall for every
+// cache miss/dirty eviction without changing the bounded cache or exact comparison contract.
+#[cfg(unix)]
+fn read_page_at(file: &mut File, bytes: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(bytes, offset)
+}
+#[cfg(unix)]
+fn write_page_at(file: &mut File, bytes: &[u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(bytes, offset)
+}
+#[cfg(windows)]
+fn read_page_at(file: &mut File, mut bytes: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !bytes.is_empty() {
+        match file.seek_read(bytes, offset) {
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => {
+                offset += n as u64;
+                bytes = &mut bytes[n..];
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+#[cfg(windows)]
+fn write_page_at(file: &mut File, mut bytes: &[u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !bytes.is_empty() {
+        match file.seek_write(bytes, offset) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => {
+                offset += n as u64;
+                bytes = &bytes[n..];
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+#[cfg(not(any(unix, windows)))]
+fn read_page_at(file: &mut File, bytes: &mut [u8], offset: u64) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(bytes)
+}
+#[cfg(not(any(unix, windows)))]
+fn write_page_at(file: &mut File, bytes: &[u8], offset: u64) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(bytes)
+}
+
 // A fixed direct-mapped page cache avoids a syscall per small bucket lookup. Its bound is
 // independent of the index/key count; evictions flush dirty pages before exact reads continue.
 const SLOTS_PER_PAGE: u64 = 128;
@@ -156,19 +211,11 @@ impl Index {
         let page = &mut self.pages[(number % CACHE_PAGES as u64) as usize];
         if page.key != Some(number) {
             if let Some(old) = page.key.filter(|_| page.dirty) {
-                self.file.seek(SeekFrom::Start(
-                    old.checked_mul(PAGE_BYTES as u64).context("spill index overflow")?,
-                ))?;
-                self.file
-                    .write_all(&page.bytes)
-                    .context("writing exact set index page")?;
+                let offset = old.checked_mul(PAGE_BYTES as u64).context("spill index overflow")?;
+                write_page_at(&mut self.file, &page.bytes, offset).context("writing exact set index page")?;
             }
-            self.file.seek(SeekFrom::Start(
-                number.checked_mul(PAGE_BYTES as u64).context("spill index overflow")?,
-            ))?;
-            self.file
-                .read_exact(&mut page.bytes)
-                .context("reading exact set index page")?;
+            let offset = number.checked_mul(PAGE_BYTES as u64).context("spill index overflow")?;
+            read_page_at(&mut self.file, &mut page.bytes, offset).context("reading exact set index page")?;
             page.key = Some(number);
             page.dirty = false;
         }
