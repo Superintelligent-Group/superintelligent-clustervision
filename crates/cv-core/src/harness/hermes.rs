@@ -66,7 +66,7 @@ pub use emit::emit;
 
 use super::store::sqlite::{columns, open_ro, table_exists};
 use super::wire::openai;
-use super::{Adapter, ts_from_epoch};
+use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
@@ -855,12 +855,12 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
 struct ReplayDedup {
     /// Single-texts of consecutive trailing user messages (most recent last). Cleared when a
     /// substantive assistant turn passes (which ends the look-back window).
-    recent_user_texts: ReplayTexts,
+    recent_user_texts: crate::spill::ExactStrings,
 }
 
 impl ReplayDedup {
     /// Mirror of the look-back in [`is_duplicate_replayed_user_message`].
-    fn is_duplicate(&self, msg: &Message) -> Result<bool> {
+    fn is_duplicate(&mut self, msg: &Message) -> Result<bool> {
         if msg.role != Role::User {
             return Ok(false);
         }
@@ -890,110 +890,11 @@ impl ReplayDedup {
                     .iter()
                     .any(|b| matches!(b, Block::Text { .. } | Block::ToolUse { .. }));
                 if has_content {
-                    self.recent_user_texts.clear()?;
+                    self.recent_user_texts.clear();
                 }
             }
             _ => {}
         }
-        Ok(())
-    }
-}
-
-// Prompt-only sessions can make the exact replay look-back as large as the session. Keep the
-// common case in memory, then move the exact BINARY string set into an operation-owned database.
-const REPLAY_TEXT_MEMORY: usize = 1024 * 1024;
-#[derive(Default)]
-struct ReplayTexts {
-    memory: Vec<String>,
-    bytes: usize,
-    spill: Option<ReplayTextSpill>,
-}
-struct ReplayTextSpill {
-    conn: Option<Connection>,
-    path: PathBuf,
-}
-impl Drop for ReplayTextSpill {
-    fn drop(&mut self) {
-        self.conn.take();
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-impl ReplayTextSpill {
-    fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("cv-hermes-replay-{}.db", uuid::Uuid::new_v4()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&path)?;
-        let mut spill = Self { conn: None, path };
-        drop(file);
-        let conn = Connection::open_with_flags(
-            &spill.path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        // No recovery is needed for an ephemeral equality set; bound the native page cache too.
-        conn.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-256; CREATE TABLE texts(text TEXT COLLATE BINARY PRIMARY KEY) WITHOUT ROWID;")?;
-        spill.conn = Some(conn);
-        #[cfg(unix)]
-        std::fs::remove_file(&spill.path)?;
-        Ok(spill)
-    }
-}
-impl ReplayTexts {
-    fn contains(&self, text: &str) -> Result<bool> {
-        if let Some(spill) = &self.spill {
-            return Ok(spill.conn.as_ref().unwrap().query_row(
-                "SELECT EXISTS(SELECT 1 FROM texts WHERE text=?1)",
-                [text],
-                |row| row.get(0),
-            )?);
-        }
-        Ok(self.memory.iter().any(|t| t == text))
-    }
-    fn insert(&mut self, text: String) -> Result<()> {
-        // Include the backing Vec's actual/potential slot allocation, not just string payloads.
-        let slots = if self.memory.len() == self.memory.capacity() {
-            self.memory.capacity().max(2).saturating_mul(2)
-        } else {
-            self.memory.capacity()
-        };
-        let estimated = self
-            .bytes
-            .saturating_add(text.capacity())
-            .saturating_add(slots.saturating_mul(std::mem::size_of::<String>()));
-        if self.spill.is_none() && estimated > REPLAY_TEXT_MEMORY {
-            let spill = ReplayTextSpill::new()?;
-            let conn = spill.conn.as_ref().unwrap();
-            let transaction = conn.unchecked_transaction()?;
-            for old in &self.memory {
-                transaction.execute("INSERT OR IGNORE INTO texts VALUES(?1)", [old])?;
-            }
-            transaction.commit()?;
-            self.spill = Some(spill);
-            self.memory = Vec::new();
-            self.bytes = 0;
-        }
-        if let Some(spill) = &self.spill {
-            spill
-                .conn
-                .as_ref()
-                .unwrap()
-                .execute("INSERT OR IGNORE INTO texts VALUES(?1)", [&text])?;
-        } else {
-            self.bytes += text.capacity();
-            self.memory.push(text);
-        }
-        Ok(())
-    }
-    fn clear(&mut self) -> Result<()> {
-        // Drop the entire private set: clears the look-back and releases its disk/page budget.
-        self.spill.take();
-        self.memory = Vec::new();
-        self.bytes = 0;
         Ok(())
     }
 }
@@ -1499,11 +1400,11 @@ mod tests {
     /// A message's `extra["hermes"]` bag (the only place a Hermes message fact may live).
     #[test]
     fn replay_text_memory_budget_includes_tiny_entry_slots() {
-        let mut texts = ReplayTexts::default();
+        let mut texts = crate::spill::ExactStrings::default();
         for i in 0..40000 {
             texts.insert(i.to_string()).unwrap();
         }
-        assert!(texts.spill.is_some(), "small strings still consume entry storage");
+        assert!(texts.is_spilled(), "small strings still consume entry storage");
         assert!(texts.contains("0").unwrap());
         assert!(texts.contains("39999").unwrap());
         let mut dedup = ReplayDedup::default();
@@ -1512,15 +1413,15 @@ mod tests {
         for _ in 0..40000 {
             dedup.observe(&message).unwrap();
         }
-        assert!(dedup.recent_user_texts.memory.is_empty());
-        assert!(dedup.recent_user_texts.spill.is_none());
+        assert!(!dedup.recent_user_texts.contains("").unwrap());
+        assert!(!dedup.recent_user_texts.is_spilled());
     }
 
     #[test]
     fn replay_text_spill_keeps_exact_equality_and_releases_on_clear() {
-        let mut texts = ReplayTexts::default();
+        let mut texts = crate::spill::ExactStrings::default();
         texts.insert("first".into()).unwrap();
-        let large = "x".repeat(REPLAY_TEXT_MEMORY + 1);
+        let large = "x".repeat(1024 * 1024 + 1);
         texts.insert(large.clone()).unwrap();
         assert!(texts.contains("first").unwrap());
         assert!(texts.contains(&large).unwrap());
@@ -1529,12 +1430,8 @@ mod tests {
         texts.insert("nul\0suffix".into()).unwrap();
         assert!(texts.contains("nul\0suffix").unwrap());
         assert!(!texts.contains("nul").unwrap());
-        let path = texts.spill.as_ref().unwrap().path.clone();
-        #[cfg(unix)]
-        assert!(!path.exists());
-        texts.clear().unwrap();
-        assert!(texts.spill.is_none());
-        assert!(!path.exists());
+        texts.clear();
+        assert!(!texts.is_spilled());
         assert!(!texts.contains("first").unwrap());
     }
 
@@ -2388,13 +2285,11 @@ mod tests {
             Some("Long migration"),
             "an untitled rotation tip is titled by its root, as Hermes lists it"
         );
-        assert!(
-            by_id(F)
-                .title
-                .as_deref()
-                .unwrap()
-                .starts_with("Imported from Claude Code")
-        );
+        assert!(by_id(F)
+            .title
+            .as_deref()
+            .unwrap()
+            .starts_with("Imported from Claude Code"));
         assert_eq!(by_id(A).cwd, Some(PathBuf::from("/tmp/proj")));
         assert_eq!(
             by_id(A).message_count,

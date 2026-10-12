@@ -43,6 +43,7 @@ pub mod rows;
 pub mod sanitize;
 pub mod scan;
 pub mod source;
+pub(crate) mod spill;
 pub mod stats;
 pub mod stream;
 pub mod task;

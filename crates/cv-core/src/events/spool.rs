@@ -1,17 +1,13 @@
 //! Bounded event retention between a source pass and atomic catalog publication.
 use super::{Event, EventSink};
+use crate::spill::{Ordered, Record, Rows};
 use crate::stream::{Checkpoint, Flow, MessageSink};
 use crate::{Message, Session};
 use anyhow::{Context, Result};
-use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
+#[cfg(all(test, feature = "sqlite"))]
+use std::fs;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
-
-/// Small sessions avoid temporary IO. Large sessions retain only one message's extracted rows
-/// and a fixed writer buffer, independent of the number of messages or distinct targets.
-const MEMORY_BYTES: usize = 256 * 1024;
-const IO_BYTES: usize = 64 * 1024;
 
 #[derive(serde::Deserialize)]
 struct DiskEvent {
@@ -45,156 +41,47 @@ fn decode(line: &str) -> Result<Event> {
     })
 }
 
-fn cost(event: &Event) -> usize {
-    std::mem::size_of::<Event>()
-        + [&event.tool, &event.target, &event.detail]
+impl Record for Event {
+    type ReadState = String;
+    fn heap_bytes(&self) -> usize {
+        [&self.tool, &self.target, &self.detail]
             .into_iter()
             .flatten()
             .map(String::capacity)
-            .sum::<usize>()
+            .sum()
+    }
+    fn write(&self, writer: &mut impl Write) -> Result<()> {
+        serde_json::to_writer(&mut *writer, self).context("serializing event spool row")?;
+        writer.write_all(b"\n").context("writing event spool row")
+    }
+    fn read(reader: &mut impl BufRead, line: &mut String) -> Result<Self> {
+        line.clear();
+        reader.read_line(line).context("reading event spool row")?;
+        decode(line)
+    }
 }
 
-/// A completed ordered event batch. Its temporary file, when needed, is owned by this value and
-/// removed on consumption, abandoned passes, channel closure and persistence failures.
+/// A completed ordered event batch. Large batches share the bounded private spool with stats;
+/// staged rows remain unpublished until the source pass completes successfully.
 #[derive(Default)]
 pub struct EventSpool {
-    memory: VecDeque<Event>,
-    memory_bytes: usize,
-    spill: Option<Spill>,
-    len: usize,
+    ordered: Ordered<Event>,
 }
-
-struct Spill {
-    path: PathBuf,
-    writer: Option<BufWriter<File>>,
-}
-
-impl Drop for Spill {
-    fn drop(&mut self) {
-        // This path was exclusively created by us. Never remove another operation's files.
-        self.writer.take();
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 impl EventSpool {
     pub fn len(&self) -> usize {
-        self.len
+        self.ordered.len()
     }
-
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
-
-    /// Logical temporary bytes written, including the pending writer buffer. Zero for a batch
-    /// retained in memory. Successful publication reads these bytes once before removing the file.
     pub fn temporary_bytes(&self) -> Result<u64> {
-        match &self.spill {
-            None => Ok(0),
-            Some(spill) => {
-                let writer = spill.writer.as_ref().context("event spool already consumed")?;
-                Ok(writer.get_ref().metadata()?.len() + writer.buffer().len() as u64)
-            }
-        }
+        self.ordered.temporary_bytes()
     }
-
     fn push(&mut self, event: Event) -> Result<()> {
-        if self.spill.is_none() && self.memory_bytes.saturating_add(cost(&event)) > MEMORY_BYTES {
-            let path = std::env::temp_dir().join(format!("cv-event-spool-{}.jsonl", uuid::Uuid::new_v4()));
-            let mut options = fs::OpenOptions::new();
-            options.write(true).read(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let file = options.open(&path).context("creating event spool")?;
-            self.spill = Some(Spill {
-                path,
-                writer: Some(BufWriter::with_capacity(IO_BYTES, file)),
-            });
-            let spill = self.spill.as_mut().unwrap();
-            for event in self.memory.drain(..) {
-                write_event(spill.writer.as_mut().unwrap(), &event)?;
-            }
-            self.memory = VecDeque::new();
-            self.memory_bytes = 0;
-        }
-        match &mut self.spill {
-            Some(spill) => write_event(spill.writer.as_mut().unwrap(), &event)?,
-            None => {
-                self.memory_bytes += cost(&event);
-                self.memory.push_back(event);
-            }
-        }
-        self.len += 1;
-        Ok(())
+        self.ordered.push(event)
     }
-
-    pub(super) fn rows(mut self) -> Result<Rows> {
-        let reader = if let Some(spill) = &mut self.spill {
-            let mut writer = spill.writer.take().unwrap();
-            writer.flush().context("flushing event spool")?;
-            writer.get_mut().rewind().context("rewinding event spool")?;
-            let file = writer
-                .into_inner()
-                .map_err(|e| e.into_error())
-                .context("opening event spool reader")?;
-            Some(BufReader::with_capacity(IO_BYTES, file))
-        } else {
-            None
-        };
-        Ok(Rows {
-            spool: self,
-            reader,
-            line: String::new(),
-            failed: false,
-            read_count: 0,
-        })
-    }
-}
-
-fn write_event(writer: &mut BufWriter<File>, event: &Event) -> Result<()> {
-    serde_json::to_writer(&mut *writer, event).context("serializing event spool row")?;
-    writer.write_all(b"\n").context("writing event spool row")
-}
-
-pub(super) struct Rows {
-    spool: EventSpool,
-    reader: Option<BufReader<File>>,
-    line: String,
-    failed: bool,
-    read_count: usize,
-}
-
-impl Drop for Rows {
-    fn drop(&mut self) {
-        // Close the reader before the spool's ownership guard removes its file (also on Windows).
-        self.reader.take();
-    }
-}
-
-impl Iterator for Rows {
-    type Item = Result<Event>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.failed {
-            return None;
-        }
-        let Some(reader) = &mut self.reader else {
-            return self.spool.memory.pop_front().map(Ok);
-        };
-        self.line.clear();
-        let result = match reader.read_line(&mut self.line) {
-            Ok(0) if self.read_count == self.spool.len => return None,
-            Ok(0) => Err(anyhow::anyhow!("truncated event spool")),
-            Ok(_) if self.read_count >= self.spool.len => Err(anyhow::anyhow!("extra event spool row")),
-            Ok(_) => decode(&self.line),
-            Err(e) => Err(e).context("reading event spool row"),
-        };
-        self.failed = result.is_err();
-        self.read_count += usize::from(result.is_ok());
-        Some(result)
+    pub(super) fn rows(self) -> Result<Rows<Event>> {
+        self.ordered.rows()
     }
 }
 
@@ -341,19 +228,8 @@ mod tests {
         for count in [20_000, 200_000] {
             let spool = large_spool(0, count);
             assert_eq!(spool.len(), count);
-            assert_eq!(spool.memory.capacity(), 0);
-            assert_eq!(spool.memory_bytes, 0);
-            let spill = spool.spill.as_ref().unwrap();
-            let path = spill.path.clone();
-            assert_eq!(spill.writer.as_ref().unwrap().capacity(), IO_BYTES);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-            }
-            let bytes = spool.temporary_bytes().unwrap();
+            assert!(spool.temporary_bytes().unwrap() > 0);
             let mut rows = spool.rows().unwrap();
-            assert_eq!(fs::metadata(&path).unwrap().len(), bytes);
             for i in 0..count {
                 assert_eq!(
                     rows.next().unwrap().unwrap(),
@@ -362,37 +238,21 @@ mod tests {
             }
             assert!(rows.next().is_none());
             drop(rows);
-            assert!(!path.exists());
         }
     }
 
     #[test]
-    fn abandoned_and_corrupt_batches_remove_their_files() {
-        let spool = large_spool(0, 3000);
-        let path = spool.spill.as_ref().unwrap().path.clone();
-        drop(spool);
-        assert!(!path.exists());
-        let spool = large_spool(0, 3000);
-        let path = spool.spill.as_ref().unwrap().path.clone();
-        let mut rows = spool.rows().unwrap();
-        fs::write(&path, b"{broken\n").unwrap();
-        assert!(rows.next().unwrap().is_err());
-        assert!(rows.next().is_none());
-        drop(rows);
-        assert!(!path.exists());
-        let spool = large_spool(0, 3000);
-        let path = spool.spill.as_ref().unwrap().path.clone();
-        let mut rows = spool.rows().unwrap();
-        let first = serde_json::to_string(&event(0, Some("/repo/distinct/0.rs".into()))).unwrap();
-        fs::write(&path, format!("{first}\n")).unwrap();
-        assert!(rows.next().unwrap().is_ok());
-        assert!(
-            rows.next().unwrap().is_err(),
-            "valid truncated prefix cannot be published fresh"
-        );
-        drop(rows);
-        assert!(!path.exists());
+    fn event_codec_rejects_corrupt_unknown_and_truncated_records() {
+        use std::io::Cursor;
+        assert!(Event::read(&mut Cursor::new(b"{broken\n"), &mut String::new()).is_err());
         assert!(decode(r#"{"msg_idx":0,"ts":null,"kind":"unknown","call":true}"#).is_err());
+        let first = serde_json::to_vec(&event(0, Some("/repo/a.rs".into()))).unwrap();
+        let mut reader = Cursor::new(first);
+        assert!(Event::read(&mut reader, &mut String::new()).is_ok());
+        assert!(
+            Event::read(&mut reader, &mut String::new()).is_err(),
+            "truncated prefix cannot produce another row"
+        );
     }
 
     #[test]
@@ -521,17 +381,8 @@ mod tests {
         }
         // Force a disk decoding failure after a valid row; all earlier INSERTs still roll back.
         let mut spool = large_spool(2, 3000);
-        let spill = spool.spill.as_mut().unwrap();
-        spill.writer.as_mut().unwrap().flush().unwrap();
-        let path = spill.path.clone();
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(b"{broken\n")
-            .unwrap();
+        spool.ordered.append_corrupt(b"{broken\n").unwrap();
         assert!(record_spooled_with_source(&r, 2, spool, &changed, &Provenance::default()).is_err());
-        assert!(!path.exists());
         assert_eq!(format!("{:?}", events_for("claude", "events", None)), before);
         assert!(needs_ingest(&r, changed.primary.0));
         // Force an SQL INSERT failure, again after the suffix DELETE.
@@ -541,9 +392,7 @@ mod tests {
         )
         .unwrap();
         let spool = large_spool(2, 3000);
-        let path = spool.spill.as_ref().unwrap().path.clone();
         assert!(record_spooled_with_source(&r, 2, spool, &changed, &Provenance::default()).is_err());
-        assert!(!path.exists());
         assert_eq!(format!("{:?}", events_for("claude", "events", None)), before);
         assert!(needs_ingest(&r, changed.primary.0));
     }
