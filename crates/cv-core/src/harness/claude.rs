@@ -228,6 +228,12 @@ impl Adapter for Claude {
             sink,
         ))
     }
+
+    /// The task list (`TaskCreate`/`TaskUpdate`) Claude Code keeps beside the transcripts:
+    /// `<config>/tasks/<session id>/<n>.json`.
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        task_list(&r.path, &r.id).into_iter().collect()
+    }
 }
 
 /// Fully parse a Claude `.jsonl` transcript from its text contents into a [`Session`] (full
@@ -253,6 +259,8 @@ pub fn stream_str(
     sink: &mut dyn MessageSink,
 ) -> Session {
     let mut session = new_session(id, source_path);
+    let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
+    let sink = &mut spawns;
     // Pure-string path (parse_str, tests): no file offsets, so all content stays inline.
     super::for_each_json_line_str(text, |v| ingest_value(&mut session, &v, opts, sink, None));
     session
@@ -302,6 +310,8 @@ pub fn stream_reader<R: BufRead>(
     sink: &mut dyn MessageSink,
 ) -> Session {
     let mut session = new_session(id, source_path);
+    let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
+    let sink = &mut spawns;
     // Read raw bytes (not `lines()`) so we know each record's byte offset in the file — that's what
     // lets large content fields become lazy [`Span`]s pointing back into the source instead of owned
     // strings. `read_until` keeps peak at O(largest line) just like `lines()` did.
@@ -655,6 +665,47 @@ fn user_origin(v: &Value) -> Origin {
         None | Some("human") => Origin::Human,
         Some(_) => Origin::Harness,
     }
+}
+
+/// What a non-slash-command `user` record IS. A typed prompt (and a scheduler fire, which acts as
+/// one) is a `Prompt`; everything else the harness wrote is not: a `<task-notification>` for an
+/// agent or a workflow is that sub-agent's return, one for a command (or a monitor) is injected
+/// context, and so are the interrupt marker (`[Request interrupted by user…]`) and every other
+/// `isMeta` row (the local-command caveat, a skill's body, an image reference).
+fn user_kind(v: &Value, msg: &Value) -> (MessageKind, Origin) {
+    let origin = user_origin(v);
+    let head = match msg.get("content") {
+        Some(Value::String(s)) => s.trim_start(),
+        Some(Value::Array(a)) => a
+            .first()
+            .and_then(|b| b.get("text"))
+            .and_then(Value::as_str)
+            .map(str::trim_start)
+            .unwrap_or(""),
+        _ => "",
+    };
+    if head.starts_with("[Request interrupted by user") {
+        return (MessageKind::InjectedContext, Origin::Harness);
+    }
+    if origin != Origin::Harness {
+        return (MessageKind::Prompt, origin);
+    }
+    if head.starts_with("<task-notification>") {
+        let summary = tag_inner(head, "summary").unwrap_or("").trim_start();
+        if summary.starts_with("Agent ") || summary.to_ascii_lowercase().contains("workflow") {
+            return (MessageKind::SubagentReturn, Origin::Subagent);
+        }
+    }
+    (MessageKind::InjectedContext, Origin::Harness)
+}
+
+/// A `tool_result` record that is a sub-agent's final answer: the `Agent`/`Task` call ran in the
+/// foreground, so its `toolUseResult` names the agent and is not an `async_launched` receipt.
+fn is_sync_agent_return(v: &Value) -> bool {
+    let Some(t) = v.get("toolUseResult").filter(|t| t.is_object()) else {
+        return false;
+    };
+    t.get("agentId").is_some() && t.get("status").and_then(Value::as_str) != Some("async_launched")
 }
 
 /// A `user` record whose whole content is a slash-command record: the invocation
@@ -1265,6 +1316,7 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
         (MessageKind::CompactionSummary, Origin::Harness)
     } else {
         match role {
+            Role::Tool if is_sync_agent_return(v) => (MessageKind::SubagentReturn, Origin::Subagent),
             Role::Tool => (MessageKind::ToolResult, Origin::Harness),
             Role::Assistant => (MessageKind::Reply, Origin::Model),
             // Claude Code ≥ 2.1 records a slash command's invocation (`<command-name>…`) and its
@@ -1273,7 +1325,7 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
             // the command, not what the person typed (that is the plain `/compact` row just
             // before them), so they classify as the system rows do: a notice from the harness.
             Role::User if is_slash_command_record(msg) => (MessageKind::Notice, Origin::Harness),
-            Role::User => (MessageKind::Prompt, user_origin(v)),
+            Role::User => user_kind(v, msg),
             Role::System => (MessageKind::Notice, Origin::Harness),
         }
     };
@@ -1804,6 +1856,21 @@ impl Claude {
     fn for_root(root: std::path::PathBuf) -> Self {
         Claude { entries: vec![root] }
     }
+}
+
+/// `<config>/tasks/<session id>/*.json` (`{id, subject, description, status, blocks, blockedBy}`)
+/// as the session's plan, found from the transcript's own path (`<config>/projects/<p>/<id>.jsonl`).
+fn task_list(transcript: &Path, id: &str) -> Option<crate::affordance::Affordance> {
+    let config = transcript
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == "projects"))?
+        .parent()?;
+    let dir = config.join("tasks").join(id);
+    let items: Vec<_> = crate::affordance::json_files(&dir)
+        .iter()
+        .filter_map(|(_, v)| crate::affordance::item_of(v))
+        .collect();
+    crate::affordance::plan_state(crate::affordance::Kind::Plan, "tasks/", items)
 }
 
 #[cfg(test)]
@@ -2477,6 +2544,46 @@ mod tests {
         let s = parse_str("wakeup", &text, None);
         let origins: Vec<Origin> = s.messages.iter().map(|m| m.origin).collect();
         assert_eq!(origins, vec![Origin::Scheduler, Origin::Harness]);
+    }
+
+    /// The `user` rows Claude Code writes itself are not prompts: an agent's or workflow's
+    /// task-notification is the sub-agent's return, a command's is injected context, and so are
+    /// the interrupt marker and `isMeta` rows. A wakeup still acts as the prompt. The spawning
+    /// `Agent` call is a `SubagentSpawn`; a foreground agent's result is its return.
+    #[test]
+    fn harness_user_rows_are_typed_and_agent_calls_are_spawns() {
+        let note = |id: &str, summary: &str| {
+            format!(
+                r#"{{"type":"user","uuid":"{id}","origin":{{"kind":"task-notification"}},"message":{{"role":"user","content":"<task-notification>\n<task-id>t</task-id>\n<status>completed</status>\n<summary>{summary}</summary>\n</task-notification>"}}}}"#
+            )
+        };
+        let text = [
+            r#"{"type":"assistant","uuid":"a","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"prompt":"x"}}]}}"#.to_string(),
+            r#"{"type":"user","uuid":"r","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]},"toolUseResult":{"agentId":"a1","status":"completed"}}"#.to_string(),
+            note("n1", "Agent 'x' finished"),
+            note("n2", "Dynamic workflow 'w' completed"),
+            note("n3", "Background command 'sleep' completed (exit code 0)"),
+            r#"{"type":"user","uuid":"i","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#.to_string(),
+            r#"{"type":"user","uuid":"m","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat</local-command-caveat>"}}"#.to_string(),
+            r#"{"type":"user","uuid":"p","message":{"role":"user","content":"a real prompt"}}"#.to_string(),
+        ]
+        .join("\n");
+        let s = parse_str("kinds", &text, None);
+        let got: Vec<(MessageKind, Origin)> = s.messages.iter().map(|m| (m.kind, m.origin)).collect();
+        assert_eq!(
+            got,
+            [
+                (MessageKind::SubagentSpawn, Origin::Model),
+                (MessageKind::SubagentReturn, Origin::Subagent),
+                (MessageKind::SubagentReturn, Origin::Subagent),
+                (MessageKind::SubagentReturn, Origin::Subagent),
+                (MessageKind::InjectedContext, Origin::Harness),
+                (MessageKind::InjectedContext, Origin::Harness),
+                (MessageKind::InjectedContext, Origin::Harness),
+                (MessageKind::Prompt, Origin::Human),
+            ]
+        );
+        assert!(s.messages[0].is_turn() && s.messages[0].is_model_visible());
     }
 
     #[test]

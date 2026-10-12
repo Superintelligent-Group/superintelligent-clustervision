@@ -335,7 +335,12 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             let calls: Vec<Value> = msg
                 .content
                 .iter()
-                .filter_map(|b| match b {
+                .map(|b| {
+                    crate::affordance::rewrap_deferred(Harness::Hermes, b)
+                        .map_or(std::borrow::Cow::Borrowed(b), std::borrow::Cow::Owned)
+                })
+                .filter_map(|b| match b.as_ref() {
+                    // A deferred tool's call goes back through Hermes's `tool_call` wrapper.
                     Block::ToolUse { id, name, input, .. } => Some(json!({
                         "id": id,
                         "type": "function",

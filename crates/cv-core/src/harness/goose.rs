@@ -229,12 +229,41 @@ impl Adapter for Goose {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Goose, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         // A legacy session's `path` is the `.jsonl`; a DB session's `path` is `sessions.db`.
         if r.path.extension().is_some_and(|e| e == "jsonl") {
             return stream_legacy(&r.id, &r.path, sink);
         }
         let conn = open_ro(&r.path)?;
         stream_db(&conn, r, sink)
+    }
+
+    /// The todo extension's state: `sessions.extension_data["todo.v0"].content` (a markdown list).
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        if r.path.extension().is_some_and(|e| e == "jsonl") {
+            return Vec::new();
+        }
+        let Ok(conn) = open_ro(&r.path) else {
+            return Vec::new();
+        };
+        let data: Option<String> = conn
+            .query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
+                row.get(0)
+            })
+            .ok()
+            .flatten();
+        let Some(todo) = data
+            .and_then(|d| serde_json::from_str::<Value>(&d).ok())
+            .and_then(|v| v.get("todo.v0").cloned())
+        else {
+            return Vec::new();
+        };
+        let items = crate::affordance::items_of(&todo);
+        crate::affordance::plan_state(crate::affordance::Kind::Plan, "extension_data[todo.v0]", items)
+            .into_iter()
+            .collect()
     }
 }
 

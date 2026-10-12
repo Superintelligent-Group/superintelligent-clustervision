@@ -254,6 +254,17 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
             .map(|(i, _)| i)
             .collect()
     };
+    // Every affordance the view finds (transcript rows, then the adapter's side store), counted by
+    // `kind/action`: what `cv show --kind affordances` would list.
+    let mut affordances: BTreeMap<String, usize> = BTreeMap::new();
+    for a in cv_core::affordance::of_session(&s)
+        .into_iter()
+        .chain(adapter.store_affordances(r))
+    {
+        *affordances
+            .entry(format!("{}/{}", a.kind.as_str(), a.action))
+            .or_default() += 1;
+    }
     json!({
         "id": s.id,
         "path": r.path.strip_prefix(version_dir).unwrap_or(&r.path),
@@ -265,6 +276,7 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
         "compaction_boundaries": indices(MessageKind::CompactionBoundary),
         "subagent_spawns": indices(MessageKind::SubagentSpawn).len(),
         "subagent_returns": indices(MessageKind::SubagentReturn).len(),
+        "affordances": affordances,
         "lineage": s.lineage,
         "model": s.model,
         "skipped_lines": s.cv_extra().and_then(|c| c.get("skipped_lines")).cloned().unwrap_or(json!(0)),
@@ -450,4 +462,151 @@ fn claude_corpus_workflow_runs_read_as_recorded() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// What each corpus store persists, by the evidence in `tools/harness-corpus/<h>/AFFORDANCES.md`,
+/// as `kind` or `kind/action` (`plan/state` is a side-store row). A row applies to every version
+/// whose `harness/version` label starts with its prefix. The affordance view must surface each
+/// one, so a harness that records a plan, a schedule or a spawn cannot quietly drop out of
+/// `cv show --kind`.
+const PERSISTED: &[(&str, &[&str])] = &[
+    (
+        "claude/",
+        &[
+            "plan",
+            "plan/state",
+            "schedule",
+            "schedule/fire",
+            "background_job/start",
+            "background_job/complete",
+            "subagent_spawn",
+            "subagent_return",
+            "skill",
+            "hook",
+        ],
+    ),
+    ("cline/", &["subagent_spawn", "subagent_return", "question"]),
+    ("codex/", &["subagent_spawn", "subagent_return"]),
+    ("continue/", &["plan", "subagent_spawn"]),
+    ("devin/", &["plan", "subagent_spawn", "subagent_return"]),
+    (
+        "gemini/",
+        &[
+            "plan",
+            "plan/state",
+            "background_job",
+            "subagent_spawn",
+            "subagent_return",
+            "skill",
+            "hook",
+        ],
+    ),
+    (
+        "goose/",
+        &[
+            "plan",
+            "plan/state",
+            "schedule/fire",
+            "skill",
+            "subagent_spawn",
+            "subagent_return",
+        ],
+    ),
+    (
+        "grok/",
+        &["plan", "schedule", "background_job", "subagent_spawn", "fork"],
+    ),
+    (
+        "hermes/",
+        &[
+            "goal/state",
+            "schedule/state",
+            "background_job",
+            "subagent_spawn",
+            "skill",
+            "fork",
+        ],
+    ),
+    // 8.31 dispatched its delegation in the background and the corpus run ended before delivery.
+    ("hermes/0.21.6", &["subagent_return"]),
+    ("hermes/2026.8.31", &["plan", "schedule/create"]),
+    (
+        "kimi/",
+        &["plan", "background_job", "subagent_spawn", "subagent_return", "branch"],
+    ),
+    (
+        "kimi-code/",
+        &[
+            "plan",
+            "goal",
+            "schedule",
+            "background_job/complete",
+            "skill",
+            "hook",
+            "branch",
+        ],
+    ),
+    ("kimi-code/2.1.1", &["subagent_spawn", "subagent_return", "fork"]),
+    (
+        "openclaw/",
+        &["schedule", "background_job", "subagent_spawn", "model_change"],
+    ),
+    ("openclaw/2026.10.1", &["subagent_return", "branch"]),
+    ("opencode/", &["skill", "subagent_spawn", "subagent_return"]),
+    ("opencode/1.18.20", &["plan", "plan/state"]),
+    ("opencode/2.0.25", &["model_change", "fork", "background_job/complete"]),
+    (
+        "qwen/",
+        &[
+            "plan",
+            "goal",
+            "schedule",
+            "subagent_spawn",
+            "subagent_return",
+            "skill",
+            "hook",
+            "fork",
+        ],
+    ),
+    ("roo/", &["plan", "question", "subagent_spawn"]),
+];
+
+#[test]
+fn every_persisted_affordance_surfaces_in_the_view() {
+    let _w = World::in_process("corpus-affordances");
+    let mut missing = Vec::new();
+    for h in HARNESSES {
+        for v in subdirs(&corpus_root().join(h.name)) {
+            let label = format!("{}/{}", h.name, v.file_name().unwrap().to_string_lossy());
+            let adapter = (h.adapter)(&v);
+            let mut refs = adapter.discover().expect("discover");
+            if let Some(children) = h.children {
+                let kids: Vec<SessionRef> = refs.iter().flat_map(children).collect();
+                refs.extend(kids);
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for r in &refs {
+                let rows = cv_core::affordance::read(adapter.as_ref(), r).expect("affordances");
+                for a in rows {
+                    seen.insert(a.kind.as_str().to_string());
+                    seen.insert(format!("{}/{}", a.kind.as_str(), a.action));
+                }
+            }
+            for (prefix, wants) in PERSISTED {
+                if !label.starts_with(prefix) {
+                    continue;
+                }
+                for w in *wants {
+                    if !seen.contains(*w) {
+                        missing.push(format!("{label}: {w} (saw {seen:?})"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "affordances the store persists but the view misses:\n{}",
+        missing.join("\n")
+    );
 }

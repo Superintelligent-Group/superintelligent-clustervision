@@ -196,6 +196,9 @@ impl Adapter for Kimi {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         // r.path is the session dir (modern), the hash dir (legacy), or a sub-agent's dir
         // (`<session>/subagents/<agent_id>`, from [`subagent_refs`]). Locate the transcript and
         // the rotated segments before it.

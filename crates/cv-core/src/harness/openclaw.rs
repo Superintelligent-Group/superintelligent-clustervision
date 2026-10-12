@@ -222,6 +222,9 @@ impl Adapter for OpenClaw {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenClaw, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         if is_sqlite_store_path(&r.path) {
             return stream_sqlite(r, opts, sink);
         }
@@ -2543,7 +2546,11 @@ mod tests {
         let kinds: Vec<MessageKind> = parent.messages.iter().map(|m| m.kind).collect();
         assert_eq!(
             kinds,
-            [MessageKind::Reply, MessageKind::ToolResult, MessageKind::SubagentReturn]
+            [
+                MessageKind::SubagentSpawn,
+                MessageKind::ToolResult,
+                MessageKind::SubagentReturn
+            ]
         );
         assert!(format!("{:?}", parent.messages[1].content).contains(&long));
         assert_eq!(parent.messages[2].origin, Origin::Subagent);

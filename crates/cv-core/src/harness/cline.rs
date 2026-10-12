@@ -102,6 +102,9 @@ impl Adapter for Cline {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Cline, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         if super::cline_sdk::is_sdk_path(&r.path) {
             return super::cline_sdk::stream(&r.path, &r.id, sink);
         }

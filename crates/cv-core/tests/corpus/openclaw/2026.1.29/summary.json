@@ -18,6 +18,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {
         "parent": "6e8a2344-c695-44ce-87e1-7bbcf642b032"
       },
@@ -43,6 +46,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -80,6 +86,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -92,7 +101,7 @@
         "system/model_change",
         "system/model_change",
         "user/prompt",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
         "assistant/reply",
         "tool/tool_result",
@@ -115,8 +124,12 @@
       ],
       "usage_messages": 5,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
+      "subagent_spawns": 1,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -149,6 +162,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2,
+        "schedule/create": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -172,6 +189,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2,
+        "schedule/fire": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -202,6 +223,7 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "glm-5.3-flash-tiny",
       "skipped_lines": 0
@@ -229,6 +251,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -283,6 +308,11 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "background_job/read": 1,
+        "background_job/start": 1,
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -313,6 +343,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0

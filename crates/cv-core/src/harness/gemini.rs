@@ -116,6 +116,12 @@ impl Adapter for Gemini {
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         stream_for(Harness::Gemini, r, opts, sink)
     }
+
+    /// The per-session side files under `tmp/<project>/<session id>/`: the task tracker
+    /// (`tracker/<id>.json`, `tracker_*` tools) and the plan-mode plans (`plans/*.md`).
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        side_affordances(&r.path, &r.id)
+    }
 }
 
 /// Keep one [`SessionRef`] per session id across files and roots (a sandboxed and an unsandboxed run
@@ -1490,6 +1496,49 @@ fn session_ref(s: &Session, path: &Path, harness: Harness) -> SessionRef {
             .filter(|m| matches!(m.role, Role::User | Role::Assistant))
             .count(),
     }
+}
+
+/// `tracker/*.json` as the session's plan and each `plans/*.md` as one plan row (its first
+/// heading), from the session's directory beside `chats/`.
+fn side_affordances(recording: &Path, id: &str) -> Vec<crate::affordance::Affordance> {
+    use crate::affordance::{item_of, json_files, plan_state, Affordance, Kind};
+    let Some(project) = recording
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == "chats"))
+        .and_then(Path::parent)
+    else {
+        return Vec::new();
+    };
+    let dir = project.join(id);
+    let mut out = Vec::new();
+    let items: Vec<_> = json_files(&dir.join("tracker"))
+        .iter()
+        .filter_map(|(_, v)| item_of(v))
+        .collect();
+    out.extend(plan_state(Kind::Plan, "tracker/", items));
+    let mut plans: Vec<PathBuf> = fs::read_dir(dir.join("plans"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    plans.sort();
+    for p in plans {
+        let text = fs::read_to_string(&p).unwrap_or_default();
+        let head = text
+            .lines()
+            .map(|l| l.trim_start_matches('#').trim())
+            .find(|l| !l.is_empty())
+            .unwrap_or("");
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("plan.md");
+        out.push(Affordance::store(
+            Kind::Plan,
+            format!("plans/{name}"),
+            truncate(head, 120),
+            Vec::new(),
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

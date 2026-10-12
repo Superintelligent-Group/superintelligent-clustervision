@@ -28,6 +28,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "branch/branch": 1,
+        "hook/output": 2
+      },
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,
@@ -214,6 +218,21 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "background_job/complete": 1,
+        "background_job/read": 1,
+        "background_job/start": 1,
+        "goal/create": 1,
+        "goal/update": 1,
+        "hook/output": 19,
+        "plan/enter": 1,
+        "plan/exit": 1,
+        "plan/write": 2,
+        "schedule/create": 1,
+        "schedule/delete": 1,
+        "schedule/list": 1,
+        "skill/load": 2
+      },
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,
@@ -240,6 +259,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-0"
@@ -269,6 +289,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-1"
@@ -298,6 +319,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "bd89ed75-cad6-44de-a84b-3799983eb639",
             "agent_path": "agent-2"
@@ -322,6 +344,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "__kimi_env_model__",
       "skipped_lines": 0,

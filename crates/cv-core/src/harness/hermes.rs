@@ -253,10 +253,24 @@ impl Adapter for Hermes {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Hermes, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
         // what lets one Hermes adapter span many profile DBs without id collisions.
         let conn = open_ro(&r.path)?;
         stream_conn(&conn, r, opts, sink)
+    }
+
+    /// What `/goal`, `/loop` and `/heartbeat` keep in `state_meta` under `<kind>:<session id>`.
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        let Ok(conn) = open_ro(&r.path) else {
+            return Vec::new();
+        };
+        if !table_exists(&conn, "state_meta") {
+            return Vec::new();
+        }
+        state_meta_affordances(&conn, &r.id)
     }
 }
 
@@ -1306,6 +1320,52 @@ fn parse_conn_with(conn: &Connection, r: &SessionRef, opts: &ParseOptions) -> Re
     let mut s = stream_conn(conn, r, opts, &mut sink)?;
     s.messages = sink.messages;
     Ok(s)
+}
+
+/// `state_meta` rows `goal:<sid>` (`{goal, status, turns_used, max_turns, …}`), `loop:<sid>`
+/// (`{prompt, status, mode, interval_seconds, ticks_fired, …}`) and `heartbeat:<sid>` (`{prompt,
+/// interval_seconds, status, fire_count}`) as the session's goal and schedules.
+fn state_meta_affordances(conn: &Connection, id: &str) -> Vec<crate::affordance::Affordance> {
+    use crate::affordance::{Affordance, Item, Kind};
+    let mut out = Vec::new();
+    for key in ["goal", "loop", "heartbeat"] {
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM state_meta WHERE key = ?1",
+                [format!("{key}:{id}")],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(v) = value.and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+            continue;
+        };
+        let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
+        let n = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_f64)
+                .map(|x| x.to_string())
+                .unwrap_or_default()
+        };
+        let status = s("status");
+        out.push(match key {
+            "goal" => Affordance::store(
+                Kind::Goal,
+                "state_meta[goal]",
+                format!("{status} · {} of {} turns", n("turns_used"), n("max_turns")),
+                vec![Item {
+                    content: s("goal").to_string(),
+                    status: Some(status.to_string()).filter(|x| !x.is_empty()),
+                }],
+            ),
+            _ => Affordance::store(
+                Kind::Schedule,
+                format!("state_meta[{key}]"),
+                format!("{status} · every {}s · {}", n("interval_seconds"), s("prompt")),
+                Vec::new(),
+            ),
+        });
+    }
+    out
 }
 
 #[cfg(test)]

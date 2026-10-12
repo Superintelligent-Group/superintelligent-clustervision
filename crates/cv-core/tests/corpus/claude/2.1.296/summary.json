@@ -31,6 +31,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -75,6 +78,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -96,12 +102,12 @@
         "system/injected_context",
         "system/injected_context",
         "assistant/reply",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
         "system/injected_context",
         "assistant/reply",
         "assistant/reply",
-        "user/prompt",
+        "user/subagent_return",
         "system/injected_context",
         "assistant/reply",
         "assistant/reply"
@@ -117,8 +123,13 @@
       ],
       "usage_messages": 6,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 1,
+      "subagent_returns": 1,
+      "affordances": {
+        "hook/output": 3,
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -146,6 +157,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "491559c8-a17d-4944-b591-a5b247edfd74",
             "spawned_by_tool_use": "call_6d828690c97b40249a63b93b"
@@ -199,6 +211,13 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 2,
+        "plan/create": 2,
+        "plan/read": 1,
+        "plan/state": 1,
+        "plan/update": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -256,6 +275,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -294,6 +316,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -317,7 +342,7 @@
         "assistant/reply",
         "assistant/reply",
         "tool/tool_result",
-        "user/prompt"
+        "user/injected_context"
       ],
       "blocks": {
         "text": 11,
@@ -332,6 +357,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -357,7 +385,7 @@
         "tool/tool_result",
         "system/injected_context",
         "assistant/reply",
-        "user/prompt",
+        "user/injected_context",
         "system/injected_context",
         "assistant/reply"
       ],
@@ -374,6 +402,11 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "background_job/complete": 1,
+        "background_job/start": 1,
+        "hook/output": 3
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -389,7 +422,7 @@
         "system/injected_context",
         "system/injected_context",
         "system/injected_context",
-        "user/prompt",
+        "user/injected_context",
         "system/injected_context",
         "system/injected_context",
         "system/injected_context",
@@ -420,6 +453,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 3
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -520,6 +556,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 7
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -542,31 +581,31 @@
         "system/injected_context",
         "assistant/reply",
         "assistant/reply",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
-        "assistant/reply",
-        "tool/tool_result",
-        "system/injected_context",
-        "assistant/reply",
-        "assistant/reply",
-        "user/prompt",
-        "system/injected_context",
-        "assistant/reply",
-        "assistant/reply",
-        "user/prompt",
-        "system/injected_context",
-        "assistant/reply",
-        "assistant/reply",
-        "user/prompt",
-        "system/injected_context",
-        "system/injected_context",
-        "assistant/reply",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
         "system/injected_context",
         "assistant/reply",
         "assistant/reply",
+        "user/subagent_return",
+        "system/injected_context",
+        "assistant/reply",
+        "assistant/reply",
+        "user/subagent_return",
+        "system/injected_context",
+        "assistant/reply",
+        "assistant/reply",
         "user/prompt",
+        "system/injected_context",
+        "system/injected_context",
+        "assistant/reply",
+        "assistant/reply",
+        "tool/tool_result",
+        "system/injected_context",
+        "assistant/reply",
+        "assistant/reply",
+        "user/subagent_return",
         "system/injected_context",
         "assistant/reply"
       ],
@@ -583,8 +622,13 @@
       ],
       "usage_messages": 15,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 2,
+      "subagent_returns": 3,
+      "affordances": {
+        "hook/output": 6,
+        "subagent_return/return": 3,
+        "subagent_spawn/spawn": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -620,6 +664,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "94f6ae0a-e4a9-4668-99dd-e43bd58d1484",
             "spawned_by_tool_use": "call_1ceaff5e8c954cc183237f3c"
@@ -640,7 +685,7 @@
             "system/injected_context",
             "assistant/reply",
             "assistant/reply",
-            "user/prompt",
+            "user/injected_context",
             "assistant/reply",
             "assistant/reply"
           ],
@@ -653,6 +698,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "94f6ae0a-e4a9-4668-99dd-e43bd58d1484",
             "spawned_by_tool_use": "call_256f96271f954fe68aedec78"
@@ -671,7 +717,7 @@
         "user/compaction_summary",
         "assistant/reply",
         "assistant/reply",
-        "user/prompt",
+        "user/injected_context",
         "user/notice",
         "user/notice",
         "system/injected_context",
@@ -703,6 +749,9 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 3
+      },
       "lineage": {},
       "model": "glm-5.3",
       "skipped_lines": 0,
@@ -724,12 +773,12 @@
         "system/injected_context",
         "system/injected_context",
         "assistant/reply",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
         "system/injected_context",
         "assistant/reply",
         "assistant/reply",
-        "user/prompt",
+        "user/subagent_return",
         "system/injected_context",
         "assistant/reply",
         "assistant/reply"
@@ -745,8 +794,13 @@
       ],
       "usage_messages": 6,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 1,
+      "subagent_returns": 1,
+      "affordances": {
+        "hook/output": 3,
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -774,6 +828,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "b6031422-389e-4ede-97c6-588200bd450f",
             "spawned_by_tool_use": "call_5803e8aed8e14f27917529a9"
@@ -810,6 +865,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -844,7 +902,7 @@
         "assistant/reply",
         "system/compaction_boundary",
         "user/compaction_summary",
-        "user/prompt",
+        "user/injected_context",
         "user/notice",
         "user/notice",
         "system/injected_context",
@@ -871,6 +929,9 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 6
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -930,6 +991,13 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 3,
+        "schedule/create": 3,
+        "schedule/delete": 1,
+        "schedule/fire": 1,
+        "schedule/list": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -942,7 +1010,7 @@
       "sequence": [
         "system/injected_context",
         "user/prompt",
-        "user/prompt",
+        "user/injected_context",
         "system/injected_context",
         "system/injected_context",
         "system/injected_context",
@@ -958,7 +1026,7 @@
         "assistant/reply",
         "assistant/reply",
         "tool/tool_result",
-        "user/prompt",
+        "user/injected_context",
         "system/injected_context",
         "assistant/reply"
       ],
@@ -975,6 +1043,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 3,
+        "skill/load": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -995,12 +1067,12 @@
         "system/injected_context",
         "system/injected_context",
         "assistant/reply",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
         "system/injected_context",
         "assistant/reply",
         "assistant/reply",
-        "user/prompt",
+        "user/subagent_return",
         "system/injected_context",
         "assistant/reply",
         "assistant/reply"
@@ -1016,8 +1088,13 @@
       ],
       "usage_messages": 6,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 1,
+      "subagent_returns": 1,
+      "affordances": {
+        "hook/output": 3,
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0,
@@ -1045,6 +1122,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "fc2a257c-05d1-422a-813e-c446155d90b4"
           },
@@ -1074,6 +1152,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "fc2a257c-05d1-422a-813e-c446155d90b4"
           },

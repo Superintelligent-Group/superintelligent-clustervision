@@ -16,6 +16,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -51,6 +52,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -61,8 +63,8 @@
       "messages": 4,
       "sequence": [
         "user/prompt",
-        "assistant/reply",
-        "tool/tool_result",
+        "assistant/subagent_spawn",
+        "tool/subagent_return",
         "assistant/reply"
       ],
       "blocks": {
@@ -76,8 +78,12 @@
       ],
       "usage_messages": 2,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 1,
+      "subagent_returns": 1,
+      "affordances": {
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -99,6 +105,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {
         "parent": "1791750921112_4i2p2",
         "agent_path": "agent_4906d67a-65d4-4233-bb2f-c8ebc64f2d45"
@@ -112,7 +119,7 @@
       "messages": 12,
       "sequence": [
         "user/prompt",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "tool/tool_result",
         "assistant/reply",
         "tool/tool_result",
@@ -138,8 +145,11 @@
       ],
       "usage_messages": 6,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
+      "subagent_spawns": 1,
       "subagent_returns": 0,
+      "affordances": {
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -160,6 +170,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {
         "parent": "1791750938370_7ouqo",
         "agent_path": "helper"
@@ -193,6 +204,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -220,6 +232,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -247,6 +260,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -277,6 +291,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "question/ask": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0

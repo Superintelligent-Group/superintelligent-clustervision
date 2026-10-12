@@ -20,6 +20,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {
         "parent": "2c417d0e-1c66-489a-8805-96088d0418be"
       },
@@ -48,6 +49,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -77,6 +79,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -87,7 +90,7 @@
       "messages": 3,
       "sequence": [
         "user/prompt",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "user/prompt"
       ],
       "blocks": {
@@ -101,8 +104,11 @@
       ],
       "usage_messages": 0,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
+      "subagent_spawns": 1,
       "subagent_returns": 0,
+      "affordances": {
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -134,6 +140,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "question/ask": 1
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -159,6 +168,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -207,6 +217,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -237,6 +248,7 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -265,6 +277,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -296,6 +309,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "plan/write": 2
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0

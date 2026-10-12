@@ -203,6 +203,9 @@ impl Adapter for Devin {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Devin, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         let conn = open_ro(&r.path)?;
         stream_conn(&conn, r, sink)
     }

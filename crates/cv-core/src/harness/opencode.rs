@@ -249,6 +249,9 @@ impl Adapter for OpenCode {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenCode, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         // A db-backed ref points at the `.db` file itself (like the other SQLite adapters).
         #[cfg(feature = "sqlite")]
         if db::is_db_ref(r) {
@@ -326,6 +329,15 @@ impl Adapter for OpenCode {
         }
 
         Ok(s)
+    }
+
+    /// The todo list `todowrite` keeps in `opencode.db`'s `todo` table (1.x; 2.x has none).
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        #[cfg(feature = "sqlite")]
+        if db::is_db_ref(r) {
+            return db::todos(r).into_iter().collect();
+        }
+        Vec::new()
     }
 }
 
@@ -418,6 +430,29 @@ mod db {
         "summary_diffs",
         "fork_boundary",
     ];
+
+    /// The session's `todo` rows in position order, as its plan. `None` when the table is absent
+    /// (2.x) or holds nothing for the session.
+    pub(super) fn todos(r: &SessionRef) -> Option<crate::affordance::Affordance> {
+        let conn = open_ro(&r.path).ok()?;
+        if !has_table(&conn, "todo") {
+            return None;
+        }
+        let mut st = conn
+            .prepare("SELECT content, status FROM todo WHERE session_id = ?1 ORDER BY position")
+            .ok()?;
+        let items: Vec<crate::affordance::Item> = st
+            .query_map([&r.id], |row| {
+                Ok(crate::affordance::Item {
+                    content: row.get(0)?,
+                    status: row.get(1)?,
+                })
+            })
+            .ok()?
+            .filter_map(|x| x.ok())
+            .collect();
+        crate::affordance::plan_state(crate::affordance::Kind::Plan, "todo", items)
+    }
 
     pub(super) fn is_db_ref(r: &SessionRef) -> bool {
         r.path.extension().and_then(|e| e.to_str()) == Some("db")

@@ -27,6 +27,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "swe-2-medium",
       "skipped_lines": 0
@@ -103,6 +104,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "plan/write": 1
+      },
       "lineage": {},
       "model": "swe-2-medium",
       "skipped_lines": 0
@@ -119,8 +123,8 @@
         "system/injected_context",
         "user/prompt",
         "system/injected_context",
-        "assistant/reply",
-        "tool/tool_result",
+        "assistant/subagent_spawn",
+        "tool/subagent_return",
         "assistant/reply"
       ],
       "blocks": {
@@ -134,8 +138,12 @@
       ],
       "usage_messages": 2,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 1,
+      "subagent_returns": 1,
+      "affordances": {
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "swe-2-medium",
       "skipped_lines": 0
@@ -169,6 +177,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {
         "parent": "smart-isthmus",
         "spawned_by_tool_use": "run_subagent:0#fe660263753a4b098c617918acefe3ea",
@@ -209,6 +218,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "swe-2-medium",
       "skipped_lines": 0

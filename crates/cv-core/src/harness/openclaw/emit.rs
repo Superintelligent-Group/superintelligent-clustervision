@@ -236,7 +236,18 @@ fn openclaw_short_id() -> String {
 }
 
 /// IR blocks → an OpenClaw content array (`text`/`thinking`/`toolCall`/`image`).
+/// A deferred tool's call goes back through OpenClaw's `tool_call` wrapper.
 fn openclaw_content_blocks(content: &[Block]) -> Value {
+    if content
+        .iter()
+        .any(|b| crate::affordance::rewrap_deferred(crate::ir::Harness::OpenClaw, b).is_some())
+    {
+        let wrapped: Vec<Block> = content
+            .iter()
+            .map(|b| crate::affordance::rewrap_deferred(crate::ir::Harness::OpenClaw, b).unwrap_or_else(|| b.clone()))
+            .collect();
+        return Value::Array(anthropic::assistant_blocks(&wrapped, &anthropic::OPENCLAW));
+    }
     Value::Array(anthropic::assistant_blocks(content, &anthropic::OPENCLAW))
 }
 

@@ -81,8 +81,8 @@
         "assistant/reply",
         "user/prompt",
         "user/injected_context",
-        "assistant/reply",
-        "tool/tool_result",
+        "assistant/subagent_spawn",
+        "tool/subagent_return",
         "assistant/reply",
         "user/prompt",
         "user/injected_context",
@@ -129,8 +129,19 @@
       "compaction_boundaries": [
         84
       ],
-      "subagent_spawns": 0,
-      "subagent_returns": 0,
+      "subagent_spawns": 1,
+      "subagent_returns": 1,
+      "affordances": {
+        "background_job/complete": 1,
+        "background_job/read": 1,
+        "branch/branch": 1,
+        "plan/enter": 1,
+        "plan/exit": 1,
+        "plan/write": 1,
+        "question/ask": 1,
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": null,
       "skipped_lines": 0,
@@ -155,6 +166,7 @@
           "compaction_boundaries": [],
           "subagent_spawns": 0,
           "subagent_returns": 0,
+          "affordances": {},
           "lineage": {
             "parent": "01533176-23de-4b73-8a2a-79a105793240",
             "agent_path": "a901fe706"

@@ -94,6 +94,9 @@ impl Adapter for Grok {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         // r.path is the session directory. `summary.json` (small) carries all session-level
         // metadata; the transcript is `chat_history.jsonl`, one record per line — streamed.
         let dir = &r.path;
@@ -191,6 +194,20 @@ impl Adapter for Grok {
         }
         super::note_skipped_lines(&mut s, skipped);
         Ok(s)
+    }
+
+    /// The todo list `todo_write` keeps in the session directory: `plan.json` `{todos: {id: …}}`.
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        let Some(v) = fs::read_to_string(r.path.join("plan.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        else {
+            return Vec::new();
+        };
+        let items = crate::affordance::items_of(&v);
+        crate::affordance::plan_state(crate::affordance::Kind::Plan, "plan.json", items)
+            .into_iter()
+            .collect()
     }
 }
 

@@ -28,6 +28,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -108,6 +109,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -133,6 +135,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -168,6 +171,7 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -239,6 +243,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -292,6 +297,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
+      "affordances": {
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0
@@ -335,6 +344,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {
         "parent": "01a12c67-d6ee-74e3-a296-8c936b563a50",
         "agent_path": "/root/say_ok"
@@ -376,6 +386,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gpt-6-luna",
       "skipped_lines": 0

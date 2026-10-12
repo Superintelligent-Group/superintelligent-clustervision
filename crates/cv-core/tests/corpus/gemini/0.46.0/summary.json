@@ -27,6 +27,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -49,6 +50,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -77,6 +79,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -105,6 +108,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "skill/load": 1
+      },
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -133,6 +139,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -175,6 +182,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {
         "parent": "964ee802-2410-4c28-8f0e-bf29909626c5"
       },
@@ -201,6 +209,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -229,6 +238,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "plan/write": 1
+      },
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -252,6 +264,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "hook/output": 1
+      },
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -280,6 +295,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "background_job/start": 1
+      },
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -317,6 +335,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "plan/exit": 1,
+        "plan/state": 1
+      },
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -345,6 +367,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 1,
       "subagent_returns": 1,
+      "affordances": {
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -368,6 +394,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -410,6 +437,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -444,6 +472,11 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "plan/create": 2,
+        "plan/read": 1,
+        "plan/state": 1
+      },
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0
@@ -466,6 +499,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -488,6 +522,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": null,
       "skipped_lines": 0
@@ -512,6 +547,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-2.5-flash-lite",
       "skipped_lines": 0
@@ -538,6 +574,7 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {},
       "lineage": {},
       "model": "gemini-3.5-flash",
       "skipped_lines": 0

@@ -129,6 +129,9 @@ impl Adapter for Continue {
     /// into one small `Value` ([`history_item_to_message`]), emitted to `sink`, and dropped before
     /// the next — so peak memory is O(largest item) + the mmap (reclaimable) + the slice vec.
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Continue, sink);
+        let sink: &mut dyn MessageSink = &mut spawns;
         let mut s = Session {
             cwd: r.cwd.clone(),
             title: r.title.clone(),

@@ -28,12 +28,16 @@
         "tool_search",
         "exec",
         "tool_describe",
-        "tool_call"
+        "tool_call/openclaw:core:automations"
       ],
       "usage_messages": 4,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2,
+        "schedule/create": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -61,12 +65,15 @@
       },
       "tools": [
         "tool_search",
-        "tool_call"
+        "tool_call/mcp:corpus:corpus__add"
       ],
       "usage_messages": 3,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -79,7 +86,7 @@
         "system/model_change",
         "system/model_change",
         "user/prompt",
-        "assistant/reply",
+        "assistant/subagent_spawn",
         "system/notice",
         "tool/tool_result",
         "assistant/reply",
@@ -95,13 +102,18 @@
         "tool_use": 2
       },
       "tools": [
-        "tool_call",
+        "tool_call/sessions_spawn",
         "sessions_yield"
       ],
       "usage_messages": 3,
       "compaction_boundaries": [],
-      "subagent_spawns": 0,
+      "subagent_spawns": 1,
       "subagent_returns": 1,
+      "affordances": {
+        "model_change/change": 2,
+        "subagent_return/return": 1,
+        "subagent_spawn/spawn": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -125,6 +137,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {
         "parent": "36d24063-c7fd-4a6b-894a-bd054c1befef"
       },
@@ -182,6 +197,11 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "background_job/read": 1,
+        "background_job/start": 1,
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -204,6 +224,10 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2,
+        "schedule/fire": 1
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -235,14 +259,17 @@
         "tool_use": 3
       },
       "tools": [
-        "tool_call",
-        "tool_call",
+        "tool_call/memory_search",
+        "tool_call/web_fetch",
         "exec"
       ],
       "usage_messages": 5,
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -288,6 +315,10 @@
       ],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "branch/branch": 1,
+        "model_change/change": 4
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -317,6 +348,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
@@ -347,6 +381,9 @@
       "compaction_boundaries": [],
       "subagent_spawns": 0,
       "subagent_returns": 0,
+      "affordances": {
+        "model_change/change": 2
+      },
       "lineage": {},
       "model": "glm-5.3-flash",
       "skipped_lines": 0
