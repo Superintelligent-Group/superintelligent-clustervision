@@ -28,9 +28,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 /// - [`bulk()`](ParseOptions::bulk) — you read **all** the text once, forward-only, and never
 ///   touch `extra` (live search over small/whole-doc harnesses, dataset-style flattening of
 ///   sessions you'll fully consume). Inline content, no sidecars.
-/// - [`lazy()`](ParseOptions::lazy) — you read **at most a bounded amount** of any one field, or
-///   skip content entirely: windowed/`--range` reads, metadata/event extraction, snippet scans,
-///   head-only embedding, chunk-wise indexing. Large fields arrive as [`Span`](crate::lazy::Span)s
+/// - [`lazy()`](ParseOptions::lazy) — you skip, partially read, or consume fields in bounded
+///   chunks: windowed/`--range` reads, metadata/event extraction, snippet scans, head-only
+///   embedding, chunk-wise indexing. Supported large fields arrive as [`Span`](crate::lazy::Span)s
 ///   you resolve (possibly capped via [`Resolver::resolve_prefix`](crate::lazy::Resolver::
 ///   resolve_prefix) or chunked via `for_each_chunk`) — a 700 MB record costs 16 bytes until you
 ///   choose otherwise. Adapters without a span path just hand you inline content, so `lazy()` is
@@ -45,10 +45,9 @@ pub struct ParseOptions {
     /// read it; only full-fidelity paths (json export, cross-harness convert/port, round-trips) do.
     pub extra: bool,
     /// Emit large content as lazy [`Span`](crate::lazy::Span)s into the source instead of owned
-    /// strings. Off by default: it only pays off for **partial-access** consumers (e.g. reading a
-    /// window of messages, web pagination) that never touch the giant fields — a consumer that
-    /// reads *all* content materializes it anyway and just adds mmap overhead. Adapters that can't
-    /// span ignore it and produce inline content regardless.
+    /// strings. Partial readers and chunk-wise reducers can avoid retaining complete decoded
+    /// fields. Resolving every span into an owned string loses that benefit. Adapters without
+    /// span support ignore this flag; adapters may still allocate during record interpretation.
     pub spans: bool,
     /// Stamp each message's source **byte offset** into
     /// `Message.extra[`[`offsets::OFFSET_KEY`](crate::offsets::OFFSET_KEY)`]` (the offset of the
@@ -104,9 +103,8 @@ impl ParseOptions {
         }
     }
 
-    /// [`lazy()`](ParseOptions::lazy) **plus** the harness-specific `extra` sidecars — giant content
-    /// stays lazy on disk (memory-safe on a multi-GB transcript) while the small record metadata
-    /// (`subtype`, `compactMetadata`, `isCompactSummary`, attribution, …) is still materialized.
+    /// [`lazy()`](ParseOptions::lazy) **plus** the harness-specific `extra` sidecars and metadata
+    /// (`subtype`, `compactMetadata`, `isCompactSummary`, attribution, …).
     /// Sidecars and other rich metadata can themselves be large: only supported content fields
     /// become spans. For metadata scans and bounded decoded-text reducers (e.g. doctor).
     pub fn lazy_extra() -> Self {

@@ -191,7 +191,7 @@ impl SessionPass<'_> {
         for b in &m.content {
             // What this block costs, by the one shared rule; the arms below only decide which
             // bucket the number lands in.
-            let t = est_tokens_resolved(b, BYTES_PER_TOKEN, &self.resolver);
+            let tokens = || est_tokens_resolved(b, BYTES_PER_TOKEN, &self.resolver);
             match b {
                 Block::Text { .. } => {
                     match (m.role, m.kind) {
@@ -207,17 +207,18 @@ impl SessionPass<'_> {
                         // output, turn context): real per-turn context, itemized by kind — it
                         // used to hide inside "fixed overhead".
                         (_, MessageKind::InjectedContext) => {
+                            let t = tokens();
                             rep.attachments += t;
                             *rep.by_attachment.entry(injected_kind(m)).or_default() += t;
                         }
-                        (Role::Assistant, _) => rep.assistant_text += t,
-                        (Role::System, _) => rep.system_text += t,
-                        _ => rep.user_text += t,
+                        (Role::Assistant, _) => rep.assistant_text += tokens(),
+                        (Role::System, _) => rep.system_text += tokens(),
+                        _ => rep.user_text += tokens(),
                     }
                 }
-                Block::Thinking { .. } => rep.thinking += t,
+                Block::Thinking { .. } => rep.thinking += tokens(),
                 Block::ToolUse { id, name, .. } => {
-                    rep.tool_call_args += t;
+                    rep.tool_call_args += tokens();
                     self.names.insert(id.clone(), name.clone());
                     let e = rep.by_tool.entry(name.clone()).or_default();
                     e.calls += 1;
@@ -226,6 +227,7 @@ impl SessionPass<'_> {
                 Block::ToolResult {
                     tool_name, tool_use_id, ..
                 } => {
+                    let t = tokens();
                     rep.tool_results += t;
                     match tool_name {
                         Some(name) => {
@@ -236,7 +238,7 @@ impl SessionPass<'_> {
                         None => *self.unnamed.entry(tool_use_id.clone()).or_default() += t,
                     }
                 }
-                Block::Image { .. } => rep.images += t,
+                Block::Image { .. } => rep.images += tokens(),
                 Block::File { .. } => {}
             }
         }
