@@ -11,6 +11,8 @@ from pathlib import Path
 from perf_fixtures import FORMATS, generate
 from perf_fixture_zed import generate_zed
 from perf_fixture_sqlite import FORMATS as SQLITE_FORMATS, generate_sqlite
+from perf_fixture_usage import generate_usage
+from perf_fixture_search import generate_sweep
 
 
 def main():
@@ -21,14 +23,30 @@ def main():
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
     parser.add_argument("--entropy", action="store_true", help="Zed only: deterministic low-compressibility payloads")
-    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "legacy", "parts"], default="history")
+    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "legacy", "parts", "usage", "sweep-arguments"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
     if args.entropy and args.harness != "zed":
         parser.error("--entropy applies only to Zed compressed fixtures")
+    if args.shape == "usage" and (args.escaped or args.records < 1):
+        parser.error("usage fixtures use tiny literal fields; --records controls call count")
+    if args.shape == "sweep-arguments" and (args.harness != "claude" or args.records != 1):
+        parser.error("sweep-arguments is one Claude tool argument; use --payload-bytes for scale")
     args.out.mkdir(parents=True, exist_ok=False)
     root = args.out.resolve()
+    if args.shape == "sweep-arguments":
+        manifest = generate_sweep(root, args.payload_bytes, args.escaped)
+        (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        print(json.dumps(manifest))
+        return
+    if args.shape == "usage":
+        if args.harness not in ("claude", "codex"):
+            parser.error("usage fixtures support Claude and Codex")
+        manifest = generate_usage(args.harness, root, args.records)
+        (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        print(json.dumps(manifest))
+        return
     if args.harness in (*FORMATS, *SQLITE_FORMATS, "zed"):
         if args.harness == "zed":
             if args.shape != "history":
