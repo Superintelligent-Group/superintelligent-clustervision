@@ -533,6 +533,72 @@ mod tests {
     }
 
     #[test]
+    fn directory_wire_continuation_keeps_exact_output_and_invalidates_on_controls() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("cv-watch-directory-{}", uuid::Uuid::new_v4()));
+        let wire = dir.join("agents/main/wire.jsonl");
+        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        let controls = dir.join("state.json");
+        std::fs::write(&controls, "{\"cwd\":\"/before\"}").unwrap();
+        let line = format!(
+            "{}\n",
+            serde_json::json!({"type":"context.append_message",
+            "message":{"role":"user","content":"x".repeat(128)}})
+        );
+        std::fs::write(&wire, line.repeat(4096)).unwrap();
+        let r = SessionRef::new("directory", Harness::KimiCode, &dir);
+        let adapter = harness::for_harness(r.harness).unwrap();
+        assert_eq!(adapter.resume_source(&r), wire);
+        let first = read_session(adapter.as_ref(), &r, None, 0).unwrap();
+        assert_eq!(first.total, 4096);
+        let state = first.accepted(first.total);
+        assert!(state.fresh_with(adapter.as_ref(), &r));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wire)
+            .unwrap()
+            .write_all(line.repeat(4).as_bytes())
+            .unwrap();
+        let suffix = read_session(adapter.as_ref(), &r, Some(&state), 4096).unwrap();
+        assert!(suffix.resumed);
+        assert!(suffix.parsed_messages < 2048);
+        let expected = adapter.parse(&r).unwrap();
+        let mut reconstructed = suffix.session.clone();
+        reconstructed.messages = first.messages[..suffix.prefix].to_vec();
+        reconstructed.messages.extend(suffix.messages.clone());
+        assert_eq!(
+            serde_json::to_value(reconstructed).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let state = suffix.accepted(suffix.total);
+        let pending = read(adapter.as_ref(), &r, Some(&state), 1, 1).unwrap();
+        assert_eq!(pending.total, 4100);
+        assert_eq!(pending.parsed_messages, 2);
+        assert_eq!(
+            serde_json::to_value(&pending.messages).unwrap(),
+            serde_json::to_value(&expected.messages[1..2]).unwrap()
+        );
+        std::fs::write(&controls, "{\"cwd\":\"/changed\"}").unwrap();
+        assert!(!state.fresh_with(adapter.as_ref(), &r));
+        let changed = read_session(adapter.as_ref(), &r, Some(&state), 4100).unwrap();
+        assert!(!changed.resumed);
+        assert_eq!(changed.session.cwd, Some(PathBuf::from("/changed")));
+        assert_eq!(changed.parsed_messages, 4100);
+        let changed_state = changed.accepted(changed.total);
+        std::fs::write(&wire, &line).unwrap();
+        let truncated = read_session(adapter.as_ref(), &r, Some(&changed_state), 4100).unwrap();
+        assert!(!truncated.resumed);
+        assert_eq!(truncated.total, 1);
+        eprintln!(
+            "directory watch: whole=4096, append={}, pending={}, checkpoint_bytes={}",
+            suffix.parsed_messages,
+            pending.parsed_messages,
+            serde_json::to_vec(&state.anchor).unwrap().len()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn append_resume_and_pending_replay_match_the_full_parse_with_less_work() {
         let dir = std::env::temp_dir().join(format!("cv-watch-replay-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

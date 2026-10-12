@@ -1200,6 +1200,7 @@ struct ChunkSink<'w> {
     harness: String,
     cwd: Option<String>,
     path: String,
+    primary_path: PathBuf,
     created_at: Option<i64>,
     updated_at: Option<i64>,
     mtime: i64,
@@ -1270,6 +1271,7 @@ impl<'w> ChunkSink<'w> {
             harness: r.harness.as_str().to_string(),
             cwd: r.cwd.as_ref().map(|p| p.display().to_string()),
             path: r.path.display().to_string(),
+            primary_path: cv_core::source::primary_path(r),
             created_at: r.created_at.map(|t| t.timestamp()),
             updated_at: r.updated_at.map(|t| t.timestamp()),
             mtime,
@@ -1471,11 +1473,7 @@ impl<'w> ChunkSink<'w> {
     /// the chunk callback, which mutates `self`).
     fn append_text(&mut self, r: &cv_core::Resolver, text: &cv_core::Text) {
         if let Some(sp) = text.as_span() {
-            if let Some(path) = sp
-                .source
-                .as_ref()
-                .filter(|path| path.as_path() != Path::new(&self.path))
-            {
+            if let Some(path) = sp.source.as_ref().filter(|path| path.as_path() != self.primary_path) {
                 self.dependencies.record(path);
             }
             r.for_each_chunk(sp, CHUNK_BYTES, |s| self.push_chunk(s));
@@ -1495,7 +1493,7 @@ impl<'w> ChunkSink<'w> {
             }
             Block::ToolUse { name, input, .. } => {
                 if let cv_core::json::Json::Source(range) = input {
-                    if range.path() != Path::new(&self.path) {
+                    if range.path() != self.primary_path {
                         self.dependencies.record(range.path());
                     }
                 }
@@ -2890,6 +2888,64 @@ mod tests {
         for d in [dir, sdir, external] {
             std::fs::remove_dir_all(d).unwrap();
         }
+    }
+
+    #[test]
+    fn directory_wire_sweep_resumes_and_keeps_events_counts_and_search_exact() {
+        use std::io::Write as _;
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let wire = sdir.join("agents/main/wire.jsonl");
+        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        let controls = sdir.join("state.json");
+        std::fs::write(&controls, "{\"cwd\":\"/before\"}").unwrap();
+        let line = format!(
+            "{}\n",
+            serde_json::json!({"type":"context.append_message",
+            "message":{"role":"user","content":"zanzibar"}})
+        );
+        std::fs::write(&wire, line.repeat(8192)).unwrap();
+        let r = cv_core::SessionRef::new("directory", cv_core::Harness::KimiCode, &sdir);
+        let refresh = |rebuild| sweep(&dir, vec![r.clone()], rebuild, false).unwrap();
+        assert_eq!(refresh(false).changed, 1);
+        assert_eq!(refresh(false).changed, 0);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wire)
+            .unwrap()
+            .write_all(format!("{}{}\n{}\n{}\n", line.repeat(4),
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"s"}}),
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"t","stepUuid":"s","toolCallId":"t","name":"Read","args":{"path":"/before/a.rs"}}}),
+                serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.end","uuid":"s"}})).as_bytes())
+            .unwrap();
+        let appended = refresh(false);
+        assert_eq!((appended.changed, appended.resumed), (1, 1));
+        let source = cv_core::source::Probe::default().snapshot(&r);
+        assert!(!cv_core::events::needs_ingest(
+            &r,
+            cv_core::events::file_mtime_ns(&r.path)
+        ));
+        let counts = cv_core::catalog::AffordanceTable::load()
+            .counts_with_source(&r, &source)
+            .unwrap();
+        let before = observe(&dir, std::slice::from_ref(&r), &["zanzibar".into()]);
+        let rows = cv_core::events::events_for("kimi-code", &r.id, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "file_read");
+        let events = format!("{rows:?}");
+        assert_eq!(refresh(true).resumed, 0);
+        assert_eq!(counts, cv_core::catalog::AffordanceTable::load().counts(&r).unwrap());
+        assert_eq!(before, observe(&dir, std::slice::from_ref(&r), &["zanzibar".into()]));
+        assert_eq!(
+            events,
+            format!("{:?}", cv_core::events::events_for("kimi-code", &r.id, None))
+        );
+        std::fs::write(&controls, "{\"cwd\":\"/changed\"}").unwrap();
+        let changed = refresh(false);
+        assert_eq!((changed.changed, changed.resumed), (1, 0));
+        assert_eq!(refresh(false).changed, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(sdir).unwrap();
     }
 
     #[test]

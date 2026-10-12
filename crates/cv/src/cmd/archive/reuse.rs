@@ -325,6 +325,52 @@ mod tests {
     }
 
     #[test]
+    fn directory_wire_archive_reuses_suffix_and_keeps_pretty_output_exact() {
+        use std::io::Write as _;
+        let root = std::env::temp_dir().join(format!("cv-archive-directory-{}", uuid::Uuid::new_v4()));
+        let input = root.join("input");
+        let wire = input.join("agents/main/wire.jsonl");
+        fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        let controls = input.join("state.json");
+        fs::write(&controls, "{\"cwd\":\"/before\"}").unwrap();
+        let line = format!(
+            "{}\n",
+            serde_json::json!({"type":"context.append_message",
+            "message":{"role":"user","content":"x".repeat(128)}})
+        );
+        fs::write(&wire, line.repeat(4096)).unwrap();
+        let a = Archive::resolve(Some(root.join("archive"))).unwrap();
+        let r = SessionRef::new("directory", Harness::KimiCode, &input);
+        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
+        assert_eq!(a.store_ref(adapter.as_ref(), &r).unwrap().total, 4096);
+        exact(&a, adapter.as_ref(), &r);
+        let unchanged = a.store_ref(adapter.as_ref(), &r).unwrap();
+        assert_eq!(unchanged.outcome, StoreOutcome::Skipped);
+        assert_eq!(unchanged.parsed_messages, 0);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&wire)
+            .unwrap()
+            .write_all(line.repeat(4).as_bytes())
+            .unwrap();
+        let appended = a.store_ref(adapter.as_ref(), &r).unwrap();
+        assert!(appended.resumed);
+        assert!(appended.parsed_messages < 2048);
+        assert_eq!(appended.total, 4100);
+        exact(&a, adapter.as_ref(), &r);
+        fs::write(&controls, "{\"cwd\":\"/changed\"}").unwrap();
+        let changed = a.store_ref(adapter.as_ref(), &r).unwrap();
+        assert!(!changed.resumed);
+        assert_eq!(changed.parsed_messages, 4100);
+        exact(&a, adapter.as_ref(), &r);
+        fs::remove_file(a.session_path(r.harness, &r.id)).unwrap();
+        let repaired = a.store_ref(adapter.as_ref(), &r).unwrap();
+        assert!(!repaired.resumed);
+        exact(&a, adapter.as_ref(), &r);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn streamed_artifact_write_is_idempotent_and_owned_temps_clean_up() {
         let (root, a, r, _) = setup(Harness::Claude);
         let adapter = cv_core::harness::for_harness(r.harness).unwrap();
