@@ -211,8 +211,8 @@ fn usage_hits(r: &SessionRef) -> Result<Option<UsageBatch>> {
     };
     let mut hits = Ordered::default();
     let mut spill_error = None;
-    // `lazy_extra` carries Claude's response ID; content remains source-backed.
-    let session = adapter.try_stream(r, &ParseOptions::lazy_extra(), &mut |m: Message| {
+    // Usage identity is selected without materializing unrelated rich sidecars.
+    let session = adapter.try_stream(r, &ParseOptions::usage(), &mut |m: Message| {
         if let Some(usage) = m
             .usage
             .as_ref()

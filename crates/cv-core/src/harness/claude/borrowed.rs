@@ -142,6 +142,59 @@ impl<'de> Deserialize<'de> for MessageExtra {
     }
 }
 
+/// This selected demand is independent of the rich roster. Manual visitors retain last-wins
+/// identity semantics without adding a derived hot field that would alter ordinary eligibility.
+#[derive(Default)]
+struct UsageIdentity(Option<String>);
+impl<'de> Deserialize<'de> for UsageIdentity {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = UsageIdentity;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a record object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut identity = None;
+                while let Some(Str(key)) = map.next_key::<Str<'de>>()? {
+                    if key == "message" {
+                        identity = map.next_value::<MessageIdentity>()?.0;
+                    } else {
+                        map.next_value::<&RawValue>()?;
+                    }
+                }
+                Ok(UsageIdentity(identity))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+struct MessageIdentity(Option<String>);
+impl<'de> Deserialize<'de> for MessageIdentity {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = MessageIdentity;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a message object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut identity = None;
+                while let Some(Str(key)) = map.next_key::<Str<'de>>()? {
+                    let raw = map.next_value::<&RawValue>()?;
+                    if key == "id" {
+                        identity = serde_json::from_str::<Str<'_>>(raw.get())
+                            .ok()
+                            .map(|s| s.0.into_owned());
+                    }
+                }
+                Ok(MessageIdentity(identity))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
 fn hot_kind<'de, D: Deserializer<'de>>(d: D) -> Result<Str<'de>, D::Error> {
     let kind = Str::deserialize(d)?;
     if matches!(kind.0.as_ref(), "user" | "assistant") {
@@ -343,6 +396,10 @@ pub(super) fn ingest(
             if let Some(raw) = record.tool_use_result.0.filter(|v| v.get() != "null") {
                 attach_tool_use_result_owned(&mut blocks, serde_json::from_str(raw.get()).ok()?);
             }
+        }
+    } else if opts.usage_identity {
+        if let Some(id) = serde_json::from_slice::<UsageIdentity>(slice).ok()?.0 {
+            bag.insert("message.id".into(), Value::String(id));
         }
     }
     let mut extra = Map::new();
@@ -830,6 +887,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_identity_matches_rich_precedence_without_other_extras() {
+        let identities = [
+            r#""id":"response""#,
+            r#""id":"""#,
+            r#""id":"escaped\u002did""#,
+            r#""id":"first","id":"last""#,
+            r#""id":"first","id":null"#,
+            r#""id":12"#,
+            r#""id":{"nested":"unused"}"#,
+        ];
+        for fields in identities {
+            // Duplicate content forces the established owned fallback; ID duplicate handling
+            // must agree there and on the borrowed path without changing ordinary eligibility.
+            for content in [r#""content":"small""#, r#""content":"first","content":"small""#] {
+                let text = format!(
+                    r#"{{"type":"assistant","attribution":{{"large":"ignored"}},"message":{{{fields},"role":"assistant","model":"perf",{content},"usage":{{"input_tokens":3,"output_tokens":7}}}}}}"#
+                );
+                assert_modes(&text);
+                let mut rich = CollectSink::default();
+                stream_str("session", &text, None, &ParseOptions::lazy_extra(), &mut rich);
+                let mut usage = CollectSink::default();
+                stream_str("session", &text, None, &ParseOptions::usage(), &mut usage);
+                let expected = rich.messages[0]
+                    .extra
+                    .get("claude")
+                    .and_then(|v| v.get("message.id"))
+                    .and_then(Value::as_str);
+                let actual = usage.messages[0].extra.get("claude").and_then(|v| v.get("message.id"));
+                assert_eq!(actual.and_then(Value::as_str), expected);
+                assert!(usage.messages[0]
+                    .extra
+                    .get("claude")
+                    .and_then(|v| v.as_object())
+                    .is_none_or(|v| v.len() == 1));
+                let opts = ParseOptions {
+                    usage_identity: true,
+                    ..ParseOptions::lazy_extra()
+                };
+                let mut both = CollectSink::default();
+                stream_str("session", &text, None, &opts, &mut both);
+                assert_eq!(
+                    serde_json::to_vec(&both.messages).unwrap(),
+                    serde_json::to_vec(&rich.messages).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn usage_preserves_rich_invalid_ignored_field_eligibility() {
+        for ignored in [
+            r#"{"unknown":1e400}"#.to_owned(),
+            r#"{"unknown":"\ud800"}"#.to_owned(),
+            format!("{}0{}", "[".repeat(130), "]".repeat(130)),
+        ] {
+            // attachment is ignored by the older lean codec. Usage used to select rich Value
+            // parsing, so it must continue rejecting records it cannot represent there.
+            let text = format!(
+                r#"{{"type":"assistant","attachment":{ignored},"message":{{"id":"response","role":"assistant","content":"small","usage":{{"input_tokens":3}}}}}}"#
+            );
+            let path = cv_testkit::temp_dir("claude-usage-eligibility").join("session.jsonl");
+            std::fs::write(&path, &text).unwrap();
+            for opts in [ParseOptions::usage(), ParseOptions::lazy_extra()] {
+                let mut sink = CollectSink::default();
+                stream_reader(
+                    "session",
+                    BufReader::new(std::fs::File::open(&path).unwrap()),
+                    Some(path.clone()),
+                    &opts,
+                    &mut sink,
+                );
+                assert!(sink.messages.is_empty(), "{opts:?}");
+            }
+        }
+    }
+
+    #[test]
     fn bounded_notification_classification_matches_complete_summary_oracle() {
         let mut bodies = vec![
             "<task-notification><summary>Agent a completed</summary>".to_string(),
@@ -946,6 +1080,7 @@ mod tests {
             ParseOptions::bulk(),
             ParseOptions::lazy(),
             ParseOptions::lazy_extra(),
+            ParseOptions::usage(),
             ParseOptions::full(),
             ParseOptions::complete(),
         ] {

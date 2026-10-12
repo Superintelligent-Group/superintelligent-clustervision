@@ -631,6 +631,12 @@ fn ingest_bytes(
         Ok(v) => v,
         Err(_) => return Flow::Continue,
     };
+    // Usage previously requested rich extras, whose Value codec rejects invalid numbers,
+    // surrogates and excessive nesting even inside discarded sidecars. Keep that acceptance
+    // contract for usage while leaving ordinary lean fallback behavior unchanged.
+    if opts.usage_identity && !super::store::json::value_compatible(slice) {
+        return Flow::Continue;
+    }
     // Only defer large content to spans when the consumer asked for it (partial-access). Bulk/full
     // consumers read everything, so inline content is cheaper (no mmap on resolve).
     let flow = ingest_value(session, &v, opts, sink, ctx.as_ref());
@@ -1637,6 +1643,10 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
     }
     if opts.extra {
         collect_extra(v, msg, &mut bag);
+    } else if opts.usage_identity {
+        if let Some(id) = msg.get("id").and_then(Value::as_str) {
+            bag.insert("message.id".into(), Value::String(id.to_owned()));
+        }
     }
     // Format-complete: capture EVERY remaining top-level + message-level field (beyond the
     // first-classed ones) so `parse → emit` reproduces the record with no dropped keys.
@@ -2595,6 +2605,7 @@ mod tests {
             complete: true,
             spans: true,
             offsets: true,
+            ..Default::default()
         };
         let mut sink = CollectSink::default();
         stream_reader(

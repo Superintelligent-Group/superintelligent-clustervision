@@ -44,6 +44,10 @@ pub struct ParseOptions {
     /// turn and can dwarf the visible transcript. Bulk text consumers (index/search/dataset) never
     /// read it; only full-fidelity paths (json export, cross-harness convert/port, round-trips) do.
     pub extra: bool,
+    /// Request provider response identity needed to deduplicate usage, without unrelated rich
+    /// extras. Claude retains its string `message.id`; other harnesses may ignore this demand.
+    /// Full `extra` remains authoritative when both are requested.
+    pub usage_identity: bool,
     /// Emit large content as lazy [`Span`](crate::lazy::Span)s into the source instead of owned
     /// strings. Partial readers and chunk-wise reducers can avoid retaining complete decoded
     /// fields. Resolving every span into an owned string loses that benefit. Adapters without
@@ -112,6 +116,14 @@ impl ParseOptions {
             spans: true,
             extra: true,
             ..Default::default()
+        }
+    }
+
+    /// Usage aggregation: lazy content and response identity, without large rich sidecars.
+    pub fn usage() -> Self {
+        ParseOptions {
+            usage_identity: true,
+            ..Self::lazy()
         }
     }
 
