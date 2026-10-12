@@ -399,8 +399,10 @@ impl RangeSource {
     /// Scalar/depth validation after the syntax boundary. Short strings/numbers reuse the same
     /// authoritative checks as mapped slices; long strings reuse the bounded serde decoder.
     pub fn accepts_value(&self, range: Range) -> Result<bool> {
+        self.accepts_value_at_depth(range, 0)
+    }
+    pub fn accepts_value_at_depth(&self, range: Range, mut depth: usize) -> Result<bool> {
         let mut cursor = self.cursor(range)?;
-        let mut depth = 0usize;
         loop {
             cursor.whitespace()?;
             match cursor.peek()? {
@@ -427,7 +429,7 @@ impl RangeSource {
                 }
                 Some(b'{' | b'[') => {
                     depth += 1;
-                    if depth == 128 {
+                    if depth >= 128 {
                         return Ok(false);
                     }
                     cursor.consume(1);
@@ -562,6 +564,12 @@ impl RangeSource {
     }
     /// Retain only the requested roster. Arbitrary ignored keys cannot consume decoded heap.
     pub fn select_fields(&self, range: Range, keys: &[&str]) -> Result<Option<Vec<Option<Range>>>> {
+        self.select_fields_with(range, keys, false)
+    }
+    pub fn select_unique_fields(&self, range: Range, keys: &[&str]) -> Result<Option<Vec<Option<Range>>>> {
+        self.select_fields_with(range, keys, true)
+    }
+    fn select_fields_with(&self, range: Range, keys: &[&str], unique: bool) -> Result<Option<Vec<Option<Range>>>> {
         let Some(entries) = self.object(range)? else {
             return Ok(None);
         };
@@ -569,12 +577,16 @@ impl RangeSource {
         let mut fields = vec![None; keys.len()];
         for entry in entries {
             let (key, value) = entry?;
+            if unique {
+                anyhow::ensure!(self.accepts_value(key)?, "invalid JSON object key");
+            }
             if key.len > max_key.saturating_mul(6).saturating_add(2) {
                 continue;
             }
             let key: String = self.materialize(key)?;
             for (i, requested) in keys.iter().enumerate() {
                 if key == *requested {
+                    anyhow::ensure!(!unique || fields[i].is_none(), "duplicate field {key}");
                     fields[i] = Some(value);
                 }
             }
@@ -853,6 +865,11 @@ mod tests {
             .select_fields(source.range(), &["id", "id", "missing", "body"])
             .unwrap()
             .unwrap();
+        assert!(source.select_unique_fields(source.range(), &["id", "body"]).is_err());
+        assert!(source
+            .select_unique_fields(source.range(), &["body"])
+            .unwrap()
+            .is_some());
         assert_eq!(fields[0], fields[1]);
         assert!(fields[2].is_none());
         assert_eq!(source.materialize::<u64>(fields[0].unwrap()).unwrap(), 2);

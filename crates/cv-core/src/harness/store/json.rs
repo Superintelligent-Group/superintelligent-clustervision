@@ -10,11 +10,14 @@ pub(crate) fn value_compatible(b: &[u8]) -> bool {
 
 /// As `value_compatible`, reporting validated string boundaries for source-slice indexes.
 pub(crate) fn value_compatible_with(b: &[u8], mut string: impl FnMut(usize, usize)) -> bool {
+    value_compatible_at_depth_with(b, 0, &mut string)
+}
+
+pub(crate) fn value_compatible_at_depth_with(b: &[u8], mut depth: usize, mut string: impl FnMut(usize, usize)) -> bool {
     if std::str::from_utf8(b).is_err() {
         return false;
     }
     let mut i = 0;
-    let mut depth = 0usize;
     while i < b.len() {
         match b[i] {
             b'"' => {
@@ -31,7 +34,7 @@ pub(crate) fn value_compatible_with(b: &[u8], mut string: impl FnMut(usize, usiz
             }
             b'{' | b'[' => {
                 depth += 1;
-                if depth == 128 {
+                if depth >= 128 {
                     return false;
                 }
             }

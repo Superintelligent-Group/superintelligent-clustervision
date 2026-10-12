@@ -65,7 +65,33 @@ pub(crate) struct Fields<'a> {
 }
 impl<'a> Fields<'a> {
     pub fn parse(view: crate::json::JsonView<'a>, keys: &[&'static str]) -> Result<Option<Self>> {
-        let Some(fields) = view.select_fields(keys)? else {
+        Self::parse_with(view, keys, false)
+    }
+    pub fn parse_unique(view: crate::json::JsonView<'a>, keys: &[&'static str]) -> Result<Option<Self>> {
+        Self::parse_with(view, keys, true)
+    }
+    /// serde's derived struct representation: unique named fields or a positional sequence.
+    /// Missing trailing fields are left absent for the caller's defaults; excess fields error.
+    pub fn parse_struct(view: crate::json::JsonView<'a>, keys: &[&'static str]) -> Result<Option<Self>> {
+        if let Some(fields) = Self::parse_unique(view, keys)? {
+            return Ok(Some(fields));
+        }
+        let Some(values) = view.array()? else { return Ok(None) };
+        let mut fields = Vec::with_capacity(keys.len());
+        for (index, value) in values.enumerate() {
+            let value = value?;
+            anyhow::ensure!(index < keys.len(), "too many struct fields");
+            fields.push((keys[index], value));
+        }
+        Ok(Some(Self { fields }))
+    }
+    fn parse_with(view: crate::json::JsonView<'a>, keys: &[&'static str], unique: bool) -> Result<Option<Self>> {
+        let fields = if unique {
+            view.select_unique_fields(keys)?
+        } else {
+            view.select_fields(keys)?
+        };
+        let Some(fields) = fields else {
             return Ok(None);
         };
         Ok(Some(Self {
@@ -148,8 +174,12 @@ impl<'a> Raw<'a> {
 }
 
 pub(crate) fn accepts_value(raw: Raw<'_>) -> bool {
+    accepts_value_at_depth(raw, 0)
+}
+
+pub(crate) fn accepts_value_at_depth(raw: Raw<'_>, depth: usize) -> bool {
     let b = raw.get().as_bytes();
-    super::json::value_compatible_with(b, |start, end| {
+    super::json::value_compatible_at_depth_with(b, depth, |start, end| {
         if end - start > INLINE_MAX {
             raw.1.remember(b.as_ptr() as usize + start, b.as_ptr() as usize + end);
         }
@@ -160,9 +190,18 @@ pub(crate) fn accepts_value(raw: Raw<'_>) -> bool {
 /// Keys obey Value's final-duplicate rule; complete acceptance remains the caller's boundary.
 #[cfg(feature = "mmap")]
 pub(crate) fn select_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Option<Vec<Option<Raw<'a>>>> {
+    select_fields_with(raw, keys, false).ok().flatten()
+}
+#[cfg(feature = "mmap")]
+pub(crate) fn select_unique_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Result<Option<Vec<Option<Raw<'a>>>>> {
+    select_fields_with(raw, keys, true)
+}
+#[cfg(feature = "mmap")]
+fn select_fields_with<'a>(raw: Raw<'a>, keys: &[&str], unique: bool) -> Result<Option<Vec<Option<Raw<'a>>>>> {
+    use anyhow::Context;
     let b = raw.get().as_bytes();
     if b.first() != Some(&b'{') {
-        return None;
+        return Ok(None);
     }
     let key_limit = keys
         .iter()
@@ -176,10 +215,16 @@ pub(crate) fn select_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Option<Vec<Optio
     loop {
         whitespace(b, &mut cursor);
         if b.get(cursor) == Some(&b'}') {
-            return Some(fields);
+            return Ok(Some(fields));
         }
         let start = cursor;
-        cursor = string_end(b, start, raw.1)?;
+        cursor = string_end(b, start, raw.1).context("invalid JSON key")?;
+        if unique {
+            anyhow::ensure!(
+                super::json::value_compatible(&b[start..cursor]),
+                "invalid JSON object key"
+            );
+        }
         let key = if cursor - start <= key_limit {
             serde_json::from_str::<String>(&raw.get()[start..cursor]).ok()
         } else {
@@ -187,15 +232,16 @@ pub(crate) fn select_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Option<Vec<Optio
         };
         whitespace(b, &mut cursor);
         if b.get(cursor) != Some(&b':') {
-            return None;
+            return Ok(None);
         }
         cursor += 1;
         whitespace(b, &mut cursor);
         let start = cursor;
-        cursor = value_end(b, start, raw.1)?;
+        cursor = value_end(b, start, raw.1).context("invalid JSON field")?;
         if let Some(key) = key {
             for (i, requested) in keys.iter().enumerate() {
                 if key == *requested {
+                    anyhow::ensure!(!unique || fields[i].is_none(), "duplicate field {key}");
                     fields[i] = Some(Raw(&raw.get()[start..cursor], raw.1));
                 }
             }
@@ -203,8 +249,8 @@ pub(crate) fn select_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Option<Vec<Optio
         whitespace(b, &mut cursor);
         match b.get(cursor) {
             Some(b',') => cursor += 1,
-            Some(b'}') => return Some(fields),
-            _ => return None,
+            Some(b'}') => return Ok(Some(fields)),
+            _ => return Ok(None),
         }
     }
 }

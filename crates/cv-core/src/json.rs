@@ -438,15 +438,24 @@ impl<'a> JsonView<'a> {
         Ok(self.array()?.map(AcceptedArray))
     }
     pub(crate) fn accepts_value(self) -> Result<bool> {
+        self.accepts_value_at_depth(0)
+    }
+    pub(crate) fn accepts_value_at_depth(self, depth: usize) -> Result<bool> {
         match self.0 {
             View::Owned(_) => Ok(true),
             #[cfg(feature = "mmap")]
-            View::Source(source) => Ok(document::accepts_value(source.raw)),
+            View::Source(source) => Ok(document::accepts_value_at_depth(source.raw, depth)),
             #[cfg(not(feature = "mmap"))]
-            View::Portable(source) => source.source.accepts_value(source.value),
+            View::Portable(source) => source.source.accepts_value_at_depth(source.value, depth),
         }
     }
     pub(crate) fn select_fields(self, keys: &[&str]) -> Result<Option<Vec<Option<Self>>>> {
+        self.select_fields_with(keys, false)
+    }
+    pub(crate) fn select_unique_fields(self, keys: &[&str]) -> Result<Option<Vec<Option<Self>>>> {
+        self.select_fields_with(keys, true)
+    }
+    fn select_fields_with(self, keys: &[&str], unique: bool) -> Result<Option<Vec<Option<Self>>>> {
         Ok(match self.0 {
             View::Owned(Value::Object(object)) => Some(
                 keys.iter()
@@ -455,14 +464,24 @@ impl<'a> JsonView<'a> {
             ),
             View::Owned(_) => None,
             #[cfg(feature = "mmap")]
-            View::Source(source) => document::select_fields(source.raw, keys).map(|fields| {
+            View::Source(source) => (if unique {
+                document::select_unique_fields(source.raw, keys)?
+            } else {
+                document::select_fields(source.raw, keys)
+            })
+            .map(|fields| {
                 fields
                     .into_iter()
                     .map(|raw| raw.map(|raw| Self(View::Source(SourceView { raw, ..source }))))
                     .collect()
             }),
             #[cfg(not(feature = "mmap"))]
-            View::Portable(source) => source.source.select_fields(source.value, keys)?.map(|fields| {
+            View::Portable(source) => (if unique {
+                source.source.select_unique_fields(source.value, keys)?
+            } else {
+                source.source.select_fields(source.value, keys)?
+            })
+            .map(|fields| {
                 fields
                     .into_iter()
                     .map(|value| value.map(|value| Self(View::Portable(PortableView { value, ..source }))))
@@ -1010,11 +1029,50 @@ mod tests {
     }
 
     #[test]
+    fn typed_document_projection_preserves_derive_duplicate_and_sequence_rules() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct Doc {
+            #[serde(default)]
+            body: Option<Value>,
+        }
+        let mut cases = vec![
+            r#"{"body":null,"body":0}"#.to_owned(),
+            r#"{"body":0,"\u0062ody":0}"#.to_owned(),
+            r#"{"ignored":1,"ignored":2,"body":0}"#.to_owned(),
+            r#"{"ignored\uD800":0}"#.to_owned(),
+            r#"{"body":1e400}"#.to_owned(),
+            r#"{"ignored":1e400,"body":0}"#.to_owned(),
+            "[]".to_owned(),
+            "[null]".to_owned(),
+            "[0,1]".to_owned(),
+        ];
+        cases.push(format!(r#"{{"{}\uD800":0}}"#, "x".repeat(100_000)));
+        for depth in 125..=129 {
+            cases.push(format!(r#"{{"body":{}0{}}}"#, "[".repeat(depth), "]".repeat(depth)));
+        }
+        for bytes in cases {
+            let fixture = Fixture::new(bytes.as_bytes());
+            let source = JsonSource::capture(&fixture.path).unwrap();
+            let actual = source.read_syntax(|view| {
+                let fields = document::Fields::parse_struct(view, &["body"])?.context("not a struct")?;
+                if let Some(body) = fields.get("body") {
+                    anyhow::ensure!(body.accepts_value_at_depth(1)?, "invalid body");
+                }
+                Ok(())
+            });
+            assert_eq!(actual.is_ok(), serde_json::from_str::<Doc>(&bytes).is_ok(), "{bytes}");
+        }
+    }
+
+    #[test]
     fn document_projection_preserves_escaped_keys_final_values_and_complete_arguments() {
         let body = "雪\"\\".repeat(4000);
         let bytes = format!(
             " \n{{\"ignored{}\":null,\"id\":\"old\",\"\\u0069d\":\"last\",\"body\":{},\"input\":{{\"payload\":{},\"n\":2}}}} \n",
-            "x".repeat(20000), serde_json::to_string(&body).unwrap(), serde_json::to_string(&body).unwrap()
+            "x".repeat(20000),
+            serde_json::to_string(&body).unwrap(),
+            serde_json::to_string(&body).unwrap()
         );
         let fixture = Fixture::new(bytes.as_bytes());
         let source = JsonSource::capture(&fixture.path).unwrap();
