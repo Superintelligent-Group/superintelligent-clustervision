@@ -38,3 +38,7 @@ urlencoding = "2"
 
 [dev-dependencies]
 cv-testkit = { path = "../cv-testkit" }
+
+[features]
+# Isolated ignored-test diagnostics; ordinary binaries retain the system allocator.
+probe-heap = []

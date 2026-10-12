@@ -8,6 +8,10 @@
 //! a hidden stub that errors with a pointer and exits 2 — never an alias that works — and the
 //! stub itself goes at the next release (the 0.11 tombstones left at 0.15).
 
+#[cfg(all(test, feature = "probe-heap"))]
+#[global_allocator]
+static ALLOCATOR: cv_testkit::heap::Allocator = cv_testkit::heap::Allocator;
+
 mod blame;
 mod cmd;
 mod llm;

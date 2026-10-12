@@ -324,6 +324,39 @@ mod tests {
         assert_eq!(fs::read(a.session_path(r.harness, &r.id)).unwrap(), expected);
     }
 
+    /// One explicitly supplied read-only source and owned scratch archive per process. Run this
+    /// ignored test alone with probe-heap; fixture generation is outside the measured operation.
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore]
+    fn archive_retention_heap_probe() {
+        let input = PathBuf::from(std::env::var_os("CV_ARCHIVE_PROBE_SOURCE").expect("explicit source"));
+        let home = PathBuf::from(std::env::var_os("CV_ARCHIVE_PROBE_HOME").expect("owned scratch archive"));
+        let mode = std::env::var("CV_ARCHIVE_PROBE_MODE").unwrap_or_else(|_| "archive".into());
+        let r = SessionRef::new("perf", Harness::Claude, &input);
+        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
+        let a = Archive::resolve(Some(home)).unwrap();
+        let baseline = cv_testkit::heap::begin();
+        let started = std::time::Instant::now();
+        let (total, parsed, resumed, suffix_bytes) = match mode.as_str() {
+            "archive" => {
+                let pass = a.store_ref(adapter.as_ref(), &r).unwrap();
+                (pass.total, pass.parsed_messages, pass.resumed, pass.suffix_bytes)
+            }
+            "watch" => {
+                let pass = cv_core::watch::read_tail(adapter.as_ref(), &r, None, 0, 0).unwrap();
+                (pass.total, pass.parsed_messages, pass.resumed, pass.suffix_bytes)
+            }
+            _ => panic!("unknown probe mode"),
+        };
+        let heap = cv_testkit::heap::end(baseline);
+        let report = serde_json::json!({"operation":mode,"total":total,"callbacks":parsed,
+            "resumed":resumed,"logical_source_suffix_bytes":suffix_bytes,
+            "artifact_bytes":fs::metadata(a.session_path(r.harness,&r.id)).ok().map(|m|m.len()),
+            "elapsed_seconds":started.elapsed().as_secs_f64(),"heap":heap});
+        eprintln!("archive_probe={report}");
+    }
+
     #[test]
     fn directory_wire_archive_reuses_suffix_and_keeps_pretty_output_exact() {
         use std::io::Write as _;
