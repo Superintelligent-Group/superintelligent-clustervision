@@ -40,6 +40,7 @@
 mod detect;
 mod emit;
 mod lean;
+mod metadata;
 pub use emit::emit;
 
 use super::wire::{openai, text_parts};
@@ -1991,6 +1992,7 @@ fn top_ts(v: &Value) -> Option<DateTime<Utc>> {
 /// Accumulates the cheap metadata `discover` needs, one record at a time. Factored out of [`scan`]
 /// so it can be fed either the whole file (small sessions) or just a head+tail sample (huge ones).
 #[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct CodexScan {
     id: String,
     cwd: Option<PathBuf>,
@@ -2014,6 +2016,12 @@ impl CodexScan {
         // [`is_injected_text`]).
         if self.title.is_none() && !trimmed.is_empty() && !is_injected_text(trimmed) {
             self.title = Some(crate::ir::truncate(trimmed, 80));
+        }
+    }
+
+    fn feed_line(&mut self, line: &str) {
+        if let Some(metadata) = metadata::project(line, self) {
+            self.feed(&metadata);
         }
     }
 
@@ -2161,7 +2169,8 @@ fn read_tail(path: &Path, n: usize) -> Result<String> {
 /// Files up to this size are scanned in full by [`scan`]; larger ones are sampled head+tail.
 const FULL_SCAN_CAP: u64 = 8 << 20; // 8 MiB
 
-/// Cheap metadata scan for `discover`. Files up to [`FULL_SCAN_CAP`] are parsed in full; larger ones
+/// Cheap metadata scan for `discover`. JSONL records validate discarded bodies without building
+/// their trees. Files up to [`FULL_SCAN_CAP`] are scanned in full; larger ones
 /// (Codex rollout logs can be hundreds of MB) are sampled head+tail so discovery never reads — and
 /// JSON-parses — gigabytes just to list sessions. Exact content is parsed lazily on actual open.
 fn scan(path: &Path) -> Result<SessionRef> {
@@ -2179,31 +2188,28 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
     if is_zst_path(path) {
         // Compressed (cold, > 7 days) rollout: no seeking, so stream the whole decode — these are
         // exactly the files whose bytes we never mmap.
-        super::for_each_json_line(open_rollout(path)?, |v| {
-            s.feed(&v);
-            Flow::Continue
-        });
+        for line in open_rollout(path)?.lines() {
+            let Ok(line) = line else { continue };
+            s.feed_line(&line);
+        }
     } else if is_jsonl {
         if size <= full_scan_cap {
             let text = fs::read_to_string(path)?;
-            super::for_each_json_line_str(&text, |v| {
-                s.feed(&v);
-                Flow::Continue
-            });
+            for line in text.lines() {
+                s.feed_line(line);
+            }
         } else {
             // Head: id / cwd / title / created_at all live near the top.
             let head = read_head(path, SAMPLE)?;
-            super::for_each_json_line_str(&head, |v| {
-                s.feed(&v);
-                Flow::Continue
-            });
+            for line in head.lines() {
+                s.feed_line(line);
+            }
             // Tail: the last record carries the real updated_at. Skip the (likely partial) first line.
             let tail = read_tail(path, SAMPLE)?;
             let tail = tail.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
-            super::for_each_json_line_str(tail, |v| {
-                s.feed(&v);
-                Flow::Continue
-            });
+            for line in tail.lines() {
+                s.feed_line(line);
+            }
             // The middle was never read, so the turn count is unknown, and `message_count` is a
             // contract (`SessionRef::message_count`: user + assistant turns, never a proxy). The
             // head+tail extrapolation that used to stand here was measured 35× low on one real
