@@ -131,30 +131,38 @@ impl<'a> Cursor<'a> {
             return Err(invalid("expected JSON string"));
         }
         self.consume(1);
+        // Only quotes can end a string. Carry slash parity across refill boundaries so
+        // dense escaped bodies remain vectorized rather than visiting every backslash.
+        let mut trailing_odd = false;
         loop {
             let bytes = self.fill_buf()?;
             if bytes.is_empty() {
                 return Err(invalid("unterminated JSON string"));
             }
-            let Some(n) = memchr::memchr2(b'"', b'\\', bytes) else {
+            let Some(n) = memchr::memchr(b'"', bytes) else {
+                let trailing = bytes.iter().rev().take_while(|&&b| b == b'\\').count();
+                trailing_odd = if trailing == bytes.len() {
+                    trailing_odd ^ (trailing % 2 != 0)
+                } else {
+                    trailing % 2 != 0
+                };
                 let n = bytes.len();
                 self.consume(n);
                 continue;
             };
-            let marker = bytes[n];
+            let slashes = bytes[..n].iter().rev().take_while(|&&b| b == b'\\').count();
+            let escaped = (slashes % 2 != 0) ^ (slashes == n && trailing_odd);
             self.consume(n + 1);
-            if marker == b'"' {
+            if !escaped {
                 return Ok(Range {
                     offset: start,
                     len: self.position - start,
                 });
             }
-            if self.peek()?.is_none() {
-                return Err(invalid("unterminated JSON escape"));
-            }
-            self.consume(1);
+            trailing_odd = false;
         }
     }
+
     pub fn value(&mut self) -> io::Result<Range> {
         self.whitespace()?;
         let start = self.position();
@@ -778,6 +786,34 @@ mod io_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quote_search_preserves_slash_parity_across_windows() {
+        let path = std::env::temp_dir().join(format!("cv-range-parity-{}", uuid::Uuid::new_v4()));
+        for body in [
+            r"\u0061".repeat(WINDOW),
+            r"\\".repeat(WINDOW + 1),
+            "a".repeat(WINDOW - 2) + r#"\"after"#,
+            "a".repeat(WINDOW - 3) + r#"\\"#,
+            "a".repeat(WINDOW - 1) + &r"\\".repeat(WINDOW) + r#"\"after"#,
+        ] {
+            let encoded = format!("\"{body}\" null");
+            let string_len = encoded.len() - 5;
+            std::fs::write(&path, &encoded).unwrap();
+            let source = RangeSource::open(&path).unwrap();
+            let range = source.cursor(source.range()).unwrap().string().unwrap();
+            assert_eq!(
+                range,
+                Range {
+                    offset: 0,
+                    len: string_len as u64
+                }
+            );
+            assert!(serde_json::from_str::<String>(&encoded[..string_len]).is_ok());
+            let mut bytes = Cursor::bytes(encoded.as_bytes(), 0).unwrap();
+            assert_eq!(bytes.string().unwrap(), range);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn byte_and_positioned_cursors_agree_across_escaped_window_boundaries() {
         let path = std::env::temp_dir().join(format!("cv-range-cursor-{}", uuid::Uuid::new_v4()));
