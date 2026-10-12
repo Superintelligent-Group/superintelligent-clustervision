@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- LM Studio discovery projects source metadata and bounded titles without loading whole documents, including portable builds.
 - Cursor numeric message modes map to readable names, retaining original values and unknown future enum values in harness metadata.
 
 - Codex discovery counts logical turns consistently with parsing and streaming, excluding duplicated event echoes, injected instructions and inherited history.

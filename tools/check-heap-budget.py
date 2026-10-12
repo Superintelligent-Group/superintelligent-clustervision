@@ -249,6 +249,39 @@ def events(binary, root, env):
     assert peaks["events-collected"][1] > peaks["events-collected"][0] + 16 * MIB, "retained control must grow with history"
 
 
+def selected_documents(native, portable, root, env):
+    """Selected giant fields remain spans, including positioned document readers."""
+    generator = Path(__file__).with_name("perf-fixture.py")
+    for harness in ("continue", "lmstudio"):
+        for escaped in (False, True):
+            peaks = {(mmap, operation): [] for mmap in (True, False)
+                     for operation in ("discard", "discover")}
+            for size in SIZES:
+                name = f"selected-{harness}-{size}-{escaped}"
+                command = [sys.executable, str(generator), harness, str(root / name),
+                           "--payload-bytes", str(size), "--records", "4"]
+                if escaped:
+                    command.append("--escaped")
+                manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                common = [harness, manifest["id"], manifest["path"], "--root", manifest["root"]]
+                for (mmap, operation), values in peaks.items():
+                    catalog = root / f"catalog-{name}-{mmap}-{operation}"
+                    catalog.mkdir()
+                    row, peak = probe(native if mmap else portable, [operation, *common],
+                                      dict(env, CLUSTERVISION_HOME=str(catalog)), mmap)
+                    if operation == "discard":
+                        assert row["messages"] == manifest["expected_messages"], "selected messages were skipped"
+                    else:
+                        assert row["detail"]["discovered_sessions"] == 1, "selected document was not discovered"
+                    values.append(peak)
+                    print(json.dumps({"case": name, "operation": operation, "mmap": mmap,
+                                      "decoded_payload_bytes": size,
+                                      "physical_input_bytes": manifest["physical_input_bytes"],
+                                      "peak_live_rust_bytes": peak}), flush=True)
+            for key, values in peaks.items():
+                bound(values, 2 * MIB, MIB // 4, f"selected {harness} escaped={escaped} {key}")
+
+
 def token_stats(binary, root, env, mmap, baseline=None):
     """Bound usage history and exact dedup, preserving independent provider token arithmetic."""
     generator = Path(__file__).with_name("perf-fixture.py")
@@ -316,7 +349,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "doctor", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "doctor", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
     parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/stats, separately check baseline behavior parity")
     parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
                         help="repeat to focus --only active on selected native formats")
@@ -346,6 +379,8 @@ def main():
         elif args.only == "portable-docs":
             active_formats(args.no_mmap_probe.resolve(), root, env, args.probe.resolve(),
                            args.format or portable_formats, mmap=False)
+        elif args.only == "selected-docs":
+            selected_documents(args.probe.resolve(), args.no_mmap_probe.resolve(), root, env)
         elif args.only == "active":
             active_formats(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None, args.format)
         elif args.only != "chunks":

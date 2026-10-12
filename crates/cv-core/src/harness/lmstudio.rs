@@ -34,7 +34,7 @@
 //!   skipped, a `content` that is a string OR an array of `{type,text}` parts both work, and a
 //!   missing `~/.lmstudio` dir yields an empty discover (never a panic).
 
-use super::store::{document::Fields, DiscardValue};
+use super::store::document::Fields;
 use super::Adapter;
 use super::EmitResult;
 use crate::ir::*;
@@ -42,8 +42,8 @@ use crate::json::{JsonSource, JsonView};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::de::{MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+#[cfg(test)]
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -537,39 +537,6 @@ fn projected_harmony(view: JsonView<'_>) -> Result<bool> {
     Ok(found)
 }
 
-/// Owns either an mmap of `path` or its bytes read into a `Vec`, exposing `.as_ref()` as `&[u8]`.
-enum Bytes {
-    #[cfg(feature = "mmap")]
-    Mapped(memmap2::Mmap),
-    Owned(Vec<u8>),
-}
-
-impl AsRef<[u8]> for Bytes {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            #[cfg(feature = "mmap")]
-            Bytes::Mapped(m) => m,
-            Bytes::Owned(v) => v,
-        }
-    }
-}
-
-/// Memory-map `path` (default `mmap` feature) so a large conversation's bytes are paged in on demand
-/// and reclaimable; fall back to reading the whole file into a `Vec` when the feature is off or the
-/// map fails (e.g. a zero-length file).
-fn read_bytes(path: &Path) -> std::io::Result<Bytes> {
-    #[cfg(feature = "mmap")]
-    {
-        let file = fs::File::open(path)?;
-        // SAFETY: cv reads its own session store; a concurrent truncation by another process could
-        // in theory cause a SIGBUS, the standard caveat for all mmap'd file reads.
-        if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
-            return Ok(Bytes::Mapped(map));
-        }
-    }
-    fs::read(path).map(Bytes::Owned)
-}
-
 // ------------------------------------------------------------------------------------------------
 // Emit (port-a-sesh target): the faithful inverse of `parse`.
 // ------------------------------------------------------------------------------------------------
@@ -825,15 +792,8 @@ fn is_conversation_file(path: &Path) -> bool {
 
 /// Build a cheap [`SessionRef`] without parsing every step.
 fn scan(path: &Path) -> Result<Option<SessionRef>> {
-    let bytes = read_bytes(path)?;
-    let bytes = bytes.as_ref();
-    let doc: Scan = if bytes.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{') {
-        serde_json::from_slice(bytes)?
-    } else {
-        // The old Value scanner accepted non-object JSON as empty metadata.
-        serde_json::from_slice::<DiscardValue>(bytes)?;
-        Scan::default()
-    };
+    let source = JsonSource::capture(path)?;
+    let doc = source.read_document(scan_view)?;
 
     let id = path
         .file_name()
@@ -868,112 +828,128 @@ struct Scan {
     messages: ScanMessages,
 }
 
-impl<'de> Deserialize<'de> for Scan {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Fields;
-        impl<'de> Visitor<'de> for Fields {
-            type Value = Scan;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("an LM Studio conversation object")
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Scan, A::Error> {
-                let mut scan = Scan::default();
-                while let Some(key) = map.next_key::<String>()? {
-                    if key == "messages" {
-                        scan.messages = map.next_value()?;
-                    } else {
-                        match key.as_str() {
-                            "name" => scan.name = named_title(&map.next_value::<Value>()?),
-                            "createdAt" => scan.created_at = super::ts_from_value(&map.next_value::<Value>()?),
-                            _ => {
-                                map.next_value::<DiscardValue>()?;
-                            }
-                        }
-                    }
-                }
-                Ok(scan)
-            }
-        }
-        d.deserialize_map(Fields)
-    }
-}
-
 #[derive(Default)]
 struct ScanMessages {
     count: usize,
     title: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for ScanMessages {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Messages;
-        impl<'de> Visitor<'de> for Messages {
-            type Value = ScanMessages;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("any JSON value")
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ScanMessages, A::Error> {
-                let mut messages = ScanMessages::default();
-                let mut search_title = true;
-                loop {
-                    if !search_title {
-                        if seq.next_element::<DiscardValue>()?.is_none() {
-                            break;
+fn scan_view(view: JsonView<'_>) -> Result<Scan> {
+    let Some(fields) = Fields::parse(view, &["name", "createdAt", "messages"])? else {
+        // The original whole-Value scan accepts non-object JSON as empty metadata.
+        return Ok(Scan::default());
+    };
+    let mut scan = Scan::default();
+    if let Some(name) = fields.get("name") {
+        let mut head = TitleHead::default();
+        name.for_each_str_chunk(|text| {
+            head.push(text, true);
+            Ok(())
+        })?;
+        let name = head.finish(true);
+        scan.name = name.filter(|name| name != "Untitled" && !name.starts_with("Untitled -"));
+    }
+    if let Some(created) = fields.get("createdAt") {
+        if created.is_string()? || created.as_number()?.is_some() {
+            scan.created_at = super::ts_from_value(created.resolve()?.as_ref());
+        }
+    }
+    let Some(messages) = fields.get("messages").map(JsonView::array).transpose()?.flatten() else {
+        return Ok(scan);
+    };
+    let mut search_title = scan.name.is_none();
+    for message in messages {
+        scan.messages.count += 1;
+        let message = message?;
+        if !search_title {
+            continue;
+        }
+        let selected = if let Some(turn) = Fields::parse(message, &["currentlySelected", "versions"])? {
+            turn.get("versions")
+                .map(|versions| projected_selected_version(&turn, versions))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let Some((_, version)) = selected else {
+            // chat_title's `?` stops at the first versionless turn.
+            search_title = false;
+            continue;
+        };
+        let Some(version) = Fields::parse(version, &["role", "content"])? else {
+            continue;
+        };
+        if !string_is(version.get("role"), "user")? {
+            continue;
+        }
+        let mut head = TitleHead::default();
+        if let Some(content) = version.get("content") {
+            if content.is_string()? {
+                content.for_each_str_chunk(|text| {
+                    head.push(text, false);
+                    Ok(())
+                })?;
+            } else if let Some(parts) = content.array()? {
+                let mut first = true;
+                for part in parts {
+                    let Some(text) = part?.get("text")? else { continue };
+                    if text.is_string()? {
+                        if !first {
+                            head.push("\n", false);
                         }
-                        messages.count += 1;
-                        continue;
-                    }
-                    let Some(v) = seq.next_element::<Value>()? else {
-                        break;
-                    };
-                    messages.count += 1;
-                    if search_title {
-                        // chat_title's `?` stops title lookup at the first versionless turn.
-                        if let Some(version) = selected_version(&v) {
-                            if version.get("role").and_then(Value::as_str) == Some("user") {
-                                let text = super::wire::text_parts(version.get("content"));
-                                if !text.trim().is_empty() {
-                                    messages.title = Some(crate::ir::truncate(&text, 80));
-                                    search_title = false;
-                                }
-                            }
-                        } else {
-                            search_title = false;
-                        }
+                        first = false;
+                        text.for_each_str_chunk(|text| {
+                            head.push(text, false);
+                            Ok(())
+                        })?;
                     }
                 }
-                Ok(messages)
-            }
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<ScanMessages, A::Error> {
-                DiscardValue::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(ScanMessages::default())
-            }
-            fn visit_bool<E>(self, _: bool) -> Result<ScanMessages, E> {
-                Ok(ScanMessages::default())
-            }
-            fn visit_i64<E>(self, _: i64) -> Result<ScanMessages, E> {
-                Ok(ScanMessages::default())
-            }
-            fn visit_u64<E>(self, _: u64) -> Result<ScanMessages, E> {
-                Ok(ScanMessages::default())
-            }
-            fn visit_f64<E>(self, _: f64) -> Result<ScanMessages, E> {
-                Ok(ScanMessages::default())
-            }
-            fn visit_str<E>(self, _: &str) -> Result<ScanMessages, E> {
-                Ok(ScanMessages::default())
-            }
-            fn visit_unit<E>(self) -> Result<ScanMessages, E> {
-                Ok(ScanMessages::default())
             }
         }
-        d.deserialize_any(Messages)
+        scan.messages.title = head.finish(false);
+        search_title = scan.messages.title.is_none();
     }
+    Ok(scan)
 }
 
-fn named_title(name: &Value) -> Option<String> {
-    let t = name.as_str()?.trim();
-    (!t.is_empty() && t != "Untitled" && !t.starts_with("Untitled -")).then(|| crate::ir::truncate(t, 80))
+/// Preserve trim/empty detection and truncate's character semantics without retaining a title
+/// candidate or its trailing whitespace. Keep one extra character to distinguish truncation.
+#[derive(Default)]
+struct TitleHead {
+    head: String,
+    chars: usize,
+    nonwhite: usize,
+}
+impl TitleHead {
+    fn push(&mut self, text: &str, trim: bool) {
+        if self.chars == 81 && (self.nonwhite == 81 || (!trim && self.nonwhite > 0)) {
+            return;
+        }
+        for c in text.chars() {
+            if trim && self.chars == 0 && c.is_whitespace() {
+                continue;
+            }
+            if self.chars < 81 {
+                self.head.push(c);
+            }
+            self.chars = (self.chars + 1).min(81);
+            if !c.is_whitespace() {
+                self.nonwhite = self.chars;
+            }
+        }
+    }
+    fn finish(self, trim: bool) -> Option<String> {
+        if self.nonwhite == 0 {
+            return None;
+        }
+        let head = if trim {
+            self.head.chars().take(self.nonwhite).collect()
+        } else {
+            self.head
+        };
+        Some(crate::ir::truncate(&head, 80))
+    }
 }
 
 /// Title: the explicit `name` (when meaningful), else the first user text. LM Studio writes
@@ -1024,6 +1000,7 @@ fn system_prompt(v: &Value) -> Option<String> {
 }
 
 /// Pick the `currentlySelected` version of a message turn, falling back to the last / first.
+#[cfg(test)]
 fn selected_version(msg: &Value) -> Option<&Value> {
     let versions = msg.get("versions").and_then(Value::as_array)?;
     if versions.is_empty() {
@@ -1824,6 +1801,36 @@ mod tests {
     }
 
     #[test]
+    fn title_projection_preserves_trim_join_and_truncation() {
+        let texts = [
+            String::new(),
+            " \n\t\u{2003}".repeat(100),
+            format!("{}Untitled{}", " ".repeat(100), " ".repeat(100)),
+            "Untitled - branch".into(),
+            format!("{}{}\nend{}", " ".repeat(99), "é☺".repeat(100), " ".repeat(99)),
+            format!("short{}", " ".repeat(1000)),
+            "a".repeat(80),
+            "a".repeat(81),
+        ];
+        for text in texts {
+            let chars: Vec<_> = text.chars().collect();
+            for width in 1..19 {
+                for trim in [false, true] {
+                    let mut head = TitleHead::default();
+                    for chunk in chars.chunks(width) {
+                        head.push(&chunk.iter().collect::<String>(), trim);
+                    }
+                    let expected = if trim { text.trim() } else { &text };
+                    assert_eq!(
+                        head.finish(trim),
+                        (!text.trim().is_empty()).then(|| crate::ir::truncate(expected, 80))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn discovery_scan_matches_whole_value_metadata() {
         let _world = cv_testkit::World::in_process("lmstudio-scan");
         let dir = std::env::temp_dir().join(format!("cv-lmstudio-scan-{}", uuid::Uuid::new_v4()));
@@ -1835,6 +1842,7 @@ mod tests {
             r#"{"name":"Untitled - Branched","messages":[{"versions":[]},{"versions":[{"role":"user","content":"must not become title"}]}]}"#.to_owned(),
             r#"{"name":42,"messages":[{"currentlySelected":0,"currentlySelected":99,"versions":[{"role":"user","content":"old"},{"role":"user","content":[{"type":"text","text":"selected\ntext"}]}]}]}"#.to_owned(),
             r#"{"messages":[{"versions":[{"role":"assistant","content":"ignored"}]},{"versions":[{"role":"user","content":"   "}]},{"versions":[{"role":"user","content":"first user"}]}]}"#.to_owned(),
+            r#"{"messages":[{"versions":[{"role":"user","content":[{"text":""},{"text":""},{"text":"é☺\\nfinal"},false,{"text":3}]}]}]}"#.to_owned(),
             r#"{"messages":[1,2],"messages":false,"name":"  Untitled  "}"#.to_owned(),
             r#"{"messages":null,"messages":[1,2,3],"name":"explicit"}"#.to_owned(),
             "[1,2,3]".to_owned(), "null".to_owned(), "42".to_owned(),

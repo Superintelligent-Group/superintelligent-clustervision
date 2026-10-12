@@ -269,6 +269,13 @@ duplicates; payload bytes are not the scale knob. `check-heap-budget.py ... --on
 checks exact provider totals and model/harness buckets, and verifies ordinary temporary cleanup.
 This bound assumes tiny usage records and a fixed model roster, not arbitrary output cardinality.
 
+`check-heap-budget.py ... --only selected-docs` gates Continue and LM Studio discovery and lazy
+discard in native and portable builds. Four records contain 16/64 MiB of plain or escaped payload;
+the bound is 2 MiB with 256 KiB growth. Expected callback and discovered-session counts prevent
+empty reads from passing. These named-document fixtures isolate selected-body retention, not
+arbitrary rich metadata, Harmony decoding or full output. The portable LM Studio whole-file read
+previously failed at 16.8/67.1 MB; the source-view scanner stays below 329 KB in these cases.
+
 The separate search CI oracle uses `--shape sweep-arguments --payload-bytes 100000000` and four
 logical copies plus 32 tiny sessions. It executes production planning, parse, tee, queue, tokenizing,
 commit and compaction with actual 4 MiB chunk settings, independent full-body hashes and freshness
