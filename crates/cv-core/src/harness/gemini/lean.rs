@@ -1,6 +1,11 @@
 //! Borrowed recording payloads. Metadata and tool arguments keep their normal JSON shapes;
 //! large text fields stay in the source until a consumer asks for them.
 
+#[cfg(not(feature = "mmap"))]
+mod view;
+#[cfg(not(feature = "mmap"))]
+pub(super) use view::emit as emit_view;
+
 use super::*;
 use crate::lazy::{Resolver, Span, Text, INLINE_MAX};
 use anyhow::Context as _;

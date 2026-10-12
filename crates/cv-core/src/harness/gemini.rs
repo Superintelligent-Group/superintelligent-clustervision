@@ -442,6 +442,10 @@ fn stream_legacy_json_recording(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
+    #[cfg(not(feature = "mmap"))]
+    if opts.spans && !opts.complete {
+        return stream_legacy_views(path, harness, sink);
+    }
     use serde::Deserialize;
     use serde_json::value::RawValue;
 
@@ -554,6 +558,93 @@ fn stream_legacy_json_recording(
     session.model = st.session_model;
     session.title = summary.or(st.title);
     Ok(Some(session))
+}
+
+/// Preserve the legacy Wrapper's typed/unique known fields and independent message acceptance,
+/// while portable views keep large payloads in the positioned source rather than encoded buffers.
+#[cfg(not(feature = "mmap"))]
+fn stream_legacy_views(path: &Path, harness: Harness, sink: &mut dyn MessageSink) -> Result<Option<Session>> {
+    const KEYS: &[&str] = &[
+        "sessionId",
+        "startTime",
+        "lastUpdated",
+        "summary",
+        "directories",
+        "messages",
+        "kind",
+    ];
+    let captured = crate::json::JsonSource::capture(path)?;
+    if captured.len() == 0 {
+        return Ok(None);
+    }
+    let result = captured.read_syntax(|view| {
+        // serde's struct decoder rejects duplicate known fields, even when their values agree.
+        let Some(fields) = super::store::document::Fields::parse_struct(view, KEYS)? else {
+            return Ok(None);
+        };
+        let mut meta = serde_json::Map::new();
+        for key in KEYS {
+            let value = fields.get(key);
+            if matches!(*key, "directories" | "messages") {
+                continue;
+            }
+            let Some(value) = value else { continue };
+            if value.is_null()? {
+                continue;
+            }
+            if !value.is_string()? || !value.accepts_value()? {
+                return Ok(None);
+            }
+            meta.insert((*key).into(), value.resolve()?.into_owned());
+        }
+        if !meta.contains_key("sessionId") {
+            return Ok(None);
+        }
+        if let Some(dirs) = fields.get("directories") {
+            if !dirs.is_null()? {
+                let Some(dirs) = dirs.array()? else { return Ok(None) };
+                let mut directories = Vec::new();
+                for dir in dirs {
+                    let dir = dir?;
+                    if !dir.is_string()? || !dir.accepts_value()? {
+                        return Ok(None);
+                    }
+                    directories.push(dir.resolve()?.into_owned());
+                }
+                meta.insert("directories".into(), Value::Array(directories));
+            }
+        }
+        let Some(messages) = fields
+            .get("messages")
+            .map(crate::json::JsonView::accepted_array)
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let mut session = record_metadata(&meta, harness, Some(path.to_path_buf()));
+        let summary = session.title.take();
+        let mut st = EmitState::default();
+        let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
+        let mut sink = input::SourceSink::new(Some(&captured), sink);
+        for message in messages {
+            let Some(message) = message? else { continue };
+            if lean::emit_view(message, harness, &mut st, &resolver, &mut sink)? == Flow::Stop {
+                break;
+            }
+        }
+        sink.finish()?;
+        // read_syntax checks the same opened descriptor and named identity after this callback.
+        session.model = st.session_model;
+        session.title = summary.or(st.title);
+        Ok(Some(session))
+    });
+    match result {
+        Err(error) if error.is::<crate::json::InvalidJson>() || error.is::<super::store::document::InvalidStruct>() => {
+            Ok(None)
+        }
+        result => result,
+    }
 }
 
 /// Memory-map `path` (feature `mmap`) or read it into a `Vec<u8>` (fallback). Returns an opaque
@@ -814,9 +905,10 @@ fn stream_jsonl_ranges(path: &Path, harness: Harness, sink: &mut dyn MessageSink
             break;
         }
     }
-    if sink.finish()? {
-        source.check_identity()?;
-    }
+    sink.finish()?;
+    // Navigation ranges are replayed from this descriptor even when every argument is small.
+    // One completion check protects that snapshot without per-record metadata calls.
+    source.check_identity()?;
     session.model = st.session_model;
     session.title = summary.or(st.title);
     Ok(Some(session))
@@ -1916,6 +2008,58 @@ mod tests {
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
     }
 
+    #[cfg(not(feature = "mmap"))]
+    #[test]
+    fn portable_legacy_views_preserve_wrapper_acceptance_and_independent_children() {
+        let world = cv_testkit::World::in_process("gemini-legacy-acceptance");
+        let path = world.base.join("source.json");
+        let large = serde_json::to_string(&"x\nβ".repeat(6000)).unwrap();
+        let message = format!("{{\"type\":\"gemini\",\"id\":\"a\",\"toolCalls\":[{{\"name\":\"custom\",\"args\":{{\"payload\":{large}}}}}]}}");
+        let child_poison = r#"{"type":"user","id":"bad","content":"poison","ignored":"\ud800"}"#;
+        let mut cases = vec![
+            format!("{{\"sessionId\":\"source\",\"messages\":[{child_poison},{message}],\"ignored\":1e400}}"),
+            format!("{{\"sessionId\":\"source\",\"messages\":[{message}],\"ignored\":\"\\ud800\"}}"),
+            format!("{{\"sessionId\":\"source\",\"messages\":[{message}],\"ignored\":1,\"ignored\":2}}"),
+            format!("[\"source\",null,null,\"summary\",[],[{message}],\"main\"]"),
+            format!("[\"source\",null,null,\"summary\",[],[{message}]]"),
+            format!("[\"source\",null,null,\"summary\",[],[{message}],\"main\",0]"),
+            format!("{{\"sessionId\":\"source\",\"session\\u0049d\":\"source\",\"messages\":[{message}]}}"),
+            format!("{{\"sessionId\":\"source\",\"messages\":[{message}],\"messages\":[]}}"),
+            format!("{{\"sessionId\":\"source\",\"messages\":[{message}],\"directories\":[\"ok\",false]}}"),
+            format!("{{\"sessionId\":\"source\",\"messages\":[{message}],\"directories\":[\"\\ud800\"]}}"),
+            format!("{{\"sessionId\":\"source\",\"messages\":[{message}],\"\\ud800\":0}}"),
+            format!("{{\"sessionId\":\"source\",\"messages\":[{message}],\"summary\":\"\\ud800\"}}"),
+            "".into(),
+            "not JSON".into(),
+            "null".into(),
+            r#"{"sessionId":"source","messages":null}"#.into(),
+        ];
+        for field in ["sessionId", "startTime", "lastUpdated", "summary", "kind"] {
+            cases.push(format!(
+                "{{\"sessionId\":\"source\",\"messages\":[{message}],\"{field}\":false}}"
+            ));
+        }
+        for (i, text) in cases.into_iter().enumerate() {
+            fs::write(&path, &text).unwrap();
+            let mut full = CollectSink::default();
+            let expected = stream_legacy_json_recording(&path, Harness::Gemini, &ParseOptions::full(), &mut full)
+                .unwrap()
+                .map(|mut s| {
+                    s.messages = full.messages;
+                    s
+                });
+            let mut lazy = CollectSink::default();
+            let actual = stream_legacy_json_recording(&path, Harness::Gemini, &ParseOptions::lazy(), &mut lazy)
+                .unwrap()
+                .map(|mut s| {
+                    s.messages = lazy.messages;
+                    s.materialize().unwrap();
+                    s
+                });
+            assert_eq!(actual.as_ref().map(as_json), expected.as_ref().map(as_json), "case {i}");
+        }
+    }
+
     fn json_inputs(session: &Session) -> Vec<&crate::Json> {
         session
             .messages
@@ -2043,7 +2187,6 @@ mod tests {
         let world = cv_testkit::World::in_process("gemini-json-errors");
         let chats = world.base.join("chats");
         fs::create_dir_all(&chats).unwrap();
-        let path = chats.join("session-source.jsonl");
         struct Delete {
             path: PathBuf,
             at: usize,
@@ -2060,21 +2203,33 @@ mod tests {
         }
         let large = serde_json::json!({"payload":"x".repeat(6000)});
         let assistant = serde_json::json!({"type":"gemini","id":"a","toolCalls":[{"id":"c","name":"custom","args":large,"status":"success","result":"done"}]});
-        let text = format!("{{\"sessionId\":\"source\",\"projectHash\":\"x\"}}\n{assistant}\n{{\"type\":\"user\",\"id\":\"u\",\"content\":\"later\"}}\n");
-        for at in [1, 3] {
-            fs::write(&path, &text).unwrap();
-            let mut sink = Delete {
-                path: path.clone(),
-                at,
-                calls: 0,
+        for modern in [false, true] {
+            let path = chats.join(if modern {
+                "session-source.jsonl"
+            } else {
+                "session-source.json"
+            });
+            let user = serde_json::json!({"type":"user","id":"u","content":"later"});
+            let text = if modern {
+                format!("{{\"sessionId\":\"source\",\"projectHash\":\"x\"}}\n{assistant}\n{user}\n")
+            } else {
+                serde_json::json!({"sessionId":"source","messages":[assistant,user]}).to_string()
             };
-            let result = Gemini { roots: vec![] }.stream(
-                &SessionRef::new("source", Harness::Gemini, path.clone()),
-                &ParseOptions::lazy(),
-                &mut sink,
-            );
-            assert!(result.is_err());
-            assert_eq!(sink.calls, at);
+            for at in [1, 3] {
+                fs::write(&path, &text).unwrap();
+                let mut sink = Delete {
+                    path: path.clone(),
+                    at,
+                    calls: 0,
+                };
+                let result = Gemini { roots: vec![] }.stream(
+                    &SessionRef::new("source", Harness::Gemini, path.clone()),
+                    &ParseOptions::lazy(),
+                    &mut sink,
+                );
+                assert!(result.is_err());
+                assert_eq!(sink.calls, at);
+            }
         }
     }
 
