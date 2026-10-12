@@ -433,6 +433,10 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
         actual.messages = sink.messages;
         actual.materialize();
         assert_eq!(
+            serde_json::to_string(&actual).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+        assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(&expected).unwrap()
         );

@@ -53,7 +53,7 @@
 //! sent to the model ([`MessageKind::Error`]).
 
 use super::store::document::text_summary;
-use super::store::document::{accepts_value, array, Raw, Record, Source};
+use super::store::document::{accepts_value, array_iter, ArrayIter, Raw, Record, Source};
 use super::wire::{anthropic, coerce_text};
 use super::{parse_ts, ts_from_epoch};
 use crate::ir::*;
@@ -162,7 +162,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         return None;
     }
     let record = Record::parse(raw)?;
-    let msgs = array(record.get("messages")?)?;
+    let msgs = array_iter(record.get("messages")?)?;
     let doc = Value::Object(
         ["updated_at"]
             .into_iter()
@@ -173,7 +173,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
     let lead = id == sid;
     let row = if lead { manifest(path.parent()?, sid) } else { None };
     let mut r = SessionRef::new(&id, Harness::Cline, path.to_path_buf());
-    r.message_count = msgs.len();
+    r.message_count = msgs.clone().count();
     r.cwd = row
         .as_ref()
         .and_then(|m| m.get("cwd"))
@@ -184,7 +184,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         .and_then(|m| m.pointer("/metadata/title"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| first_raw_user_text(&msgs, &source, path))
+        .or_else(|| first_raw_user_text(msgs.clone(), &source, path))
         .map(|t| truncate(&t, 80));
     r.created_at = row
         .as_ref()
@@ -192,8 +192,9 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         .and_then(Value::as_str)
         .and_then(parse_ts)
         .or_else(|| {
-            msgs.first()
-                .and_then(|m| Record::parse(*m))
+            msgs.clone()
+                .next()
+                .and_then(Record::parse)
                 .and_then(|m| m.value("ts"))
                 .and_then(|v| v.as_i64())
                 .and_then(ts_from_epoch)
@@ -207,18 +208,17 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
     Some(r)
 }
 
-fn first_raw_user_text(msgs: &[Raw<'_>], source: &Source, path: &Path) -> Option<String> {
+fn first_raw_user_text(msgs: ArrayIter<'_>, source: &Source, path: &Path) -> Option<String> {
     let message = msgs
-        .iter()
-        .filter_map(|raw| Record::parse(*raw))
+        .filter_map(Record::parse)
         .find(|m| m.string("role").as_deref() == Some("user"))?;
     let content = message.get("content")?;
     let texts = if let Some(text) = source.text(content, true) {
         vec![text]
     } else {
-        array(content)
-            .unwrap_or_default()
+        array_iter(content)
             .into_iter()
+            .flatten()
             .filter_map(Record::parse)
             .filter_map(|part| part.get("text").and_then(|raw| source.text(raw, true)))
             .collect()
@@ -265,8 +265,9 @@ pub(crate) fn stream_with_options(
     let msgs = record
         .as_ref()
         .and_then(|r| r.get("messages"))
-        .and_then(array)
-        .unwrap_or_default();
+        .and_then(array_iter)
+        .into_iter()
+        .flatten();
     let mut s = Session::new(id.to_string(), Harness::Cline);
     s.source_path = Some(path.to_path_buf());
     let sid = id.split('/').next().unwrap_or(id);
@@ -397,7 +398,7 @@ fn raw_message(raw: Raw<'_>, source: &Source, spans: bool, lead: bool, prompted:
     if let Some(content) = record.get("content") {
         if let Some(text) = source.text(content, true) {
             blocks.push(Block::Text { text });
-        } else if let Some(items) = array(content) {
+        } else if let Some(items) = array_iter(content) {
             for raw in items {
                 let part = Record::parse(raw);
                 if part.as_ref().and_then(|r| r.string("type")).as_deref() == Some("tool_result") {
@@ -789,7 +790,7 @@ mod tests {
             let mut actual = stream_with_options(&path, "sdk", &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
             actual.materialize();
-            let actual = serde_json::to_value(actual).unwrap();
+            let actual = serde_json::to_string(&actual).unwrap();
             if let Some(expected) = &expected {
                 assert_eq!(&actual, expected);
             } else {

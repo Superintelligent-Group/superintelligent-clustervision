@@ -4,7 +4,7 @@
 use crate::lazy::{Span, Text, INLINE_MAX};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::Path;
 
 /// Source bytes are mapped in native builds. The fallback owns one byte buffer, without a
@@ -132,10 +132,34 @@ impl Source {
 #[derive(Clone, Copy)]
 pub(crate) struct Raw<'a>(&'a str, &'a Index);
 
-/// Memoize only long string endpoints. Nested payload wrappers then visit each large body once;
-/// entries contain two offsets, never text, and live only as long as this source traversal.
+/// Memoize at most 1024 recent long string endpoints. Nested record wrappers reuse body bounds
+/// without retaining offsets for the entire history. Eviction affects only scan cost, not data.
+const ENDPOINTS: usize = 1024;
 #[derive(Default)]
-pub(crate) struct Index(std::cell::RefCell<BTreeMap<usize, usize>>);
+pub(crate) struct Index(std::cell::RefCell<Endpoints>);
+#[derive(Default)]
+struct Endpoints {
+    ends: BTreeMap<usize, usize>,
+    order: VecDeque<usize>,
+}
+impl Index {
+    fn get(&self, key: usize) -> Option<usize> {
+        self.0.borrow().ends.get(&key).copied()
+    }
+    fn remember(&self, start: usize, end: usize) {
+        let mut cache = self.0.borrow_mut();
+        if cache.ends.contains_key(&start) {
+            return;
+        }
+        if cache.ends.len() == ENDPOINTS {
+            if let Some(old) = cache.order.pop_front() {
+                cache.ends.remove(&old);
+            }
+        }
+        cache.ends.insert(start, end);
+        cache.order.push_back(start);
+    }
+}
 impl<'a> Raw<'a> {
     /// `raw` must be a serde-validated RawValue or a slice returned by this module.
     pub fn new(raw: &'a str, index: &'a Index) -> Self {
@@ -150,50 +174,77 @@ pub(crate) fn accepts_value(raw: Raw<'_>) -> bool {
     let b = raw.get().as_bytes();
     super::json::value_compatible_with(b, |start, end| {
         if end - start > INLINE_MAX {
-            raw.1
-                 .0
-                .borrow_mut()
-                .insert(b.as_ptr() as usize + start, b.as_ptr() as usize + end);
+            raw.1.remember(b.as_ptr() as usize + start, b.as_ptr() as usize + end);
         }
     })
 }
 
+/// Syntax-validated object entries in wire order, including duplicate names.
+struct ObjectIter<'a> {
+    raw: Raw<'a>,
+    cursor: usize,
+    done: bool,
+}
+impl<'a> Iterator for ObjectIter<'a> {
+    type Item = (String, Raw<'a>);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let b = self.raw.get().as_bytes();
+        whitespace(b, &mut self.cursor);
+        if b.get(self.cursor) == Some(&b'}') {
+            self.done = true;
+            return None;
+        }
+        let start = self.cursor;
+        self.cursor = string_end(b, start, self.raw.1)?;
+        let key = serde_json::from_str(&self.raw.get()[start..self.cursor]).ok()?;
+        whitespace(b, &mut self.cursor);
+        if b.get(self.cursor) != Some(&b':') {
+            return None;
+        }
+        self.cursor += 1;
+        whitespace(b, &mut self.cursor);
+        let start = self.cursor;
+        self.cursor = value_end(b, start, self.raw.1)?;
+        let value = Raw(&self.raw.get()[start..self.cursor], self.raw.1);
+        whitespace(b, &mut self.cursor);
+        match b.get(self.cursor) {
+            Some(b',') => self.cursor += 1,
+            Some(b'}') => self.done = true,
+            _ => return None,
+        }
+        Some((key, value))
+    }
+}
 pub(crate) struct Record<'a> {
+    raw: Raw<'a>,
     pub fields: BTreeMap<String, Raw<'a>>,
 }
 impl<'a> Record<'a> {
     pub fn parse(raw: Raw<'a>) -> Option<Self> {
-        let b = raw.get().as_bytes();
-        if b.first() != Some(&b'{') {
+        if !raw.get().starts_with('{') {
             return None;
         }
-        let mut fields = BTreeMap::new();
-        let mut i = 1;
-        loop {
-            whitespace(b, &mut i);
-            if b.get(i) == Some(&b'}') {
-                break;
-            }
-            let start = i;
-            i = string_end(b, i, raw.1)?;
-            let key = serde_json::from_str(&raw.get()[start..i]).ok()?;
-            whitespace(b, &mut i);
-            if b.get(i) != Some(&b':') {
-                return None;
-            }
-            i += 1;
-            whitespace(b, &mut i);
-            let start = i;
-            i = value_end(b, i, raw.1)?;
-            fields.insert(key, Raw(&raw.get()[start..i], raw.1));
-            whitespace(b, &mut i);
-            match b.get(i) {
-                Some(b',') => i += 1,
-                Some(b'}') => break,
-                _ => return None,
-            }
+        let mut entries = ObjectIter {
+            raw,
+            cursor: 1,
+            done: false,
+        };
+        let fields = entries.by_ref().collect();
+        entries.done.then_some(Self { raw, fields })
+    }
+    /// serde_json's preserve_order keeps a key's first position and its final value. Only
+    /// callers that require navigation order retain the set; ordinary records retain no roster.
+    pub fn values_in_order(&self) -> impl Iterator<Item = Raw<'a>> + '_ {
+        let mut seen = HashSet::new();
+        ObjectIter {
+            raw: self.raw,
+            cursor: 1,
+            done: false,
         }
-        Some(Self { fields })
+        .filter_map(move |(key, _)| seen.insert(key.clone()).then(|| self.get(&key)).flatten())
     }
     pub fn get(&self, key: &str) -> Option<Raw<'a>> {
         self.fields.get(key).copied()
@@ -213,29 +264,51 @@ impl<'a> Record<'a> {
     }
 }
 
+/// Chronological traversal keeps one descriptor regardless of record count. Input must already
+/// be syntax validated, as with every structural slice operation in this module.
+#[derive(Clone, Copy)]
+pub(crate) struct ArrayIter<'a> {
+    raw: Raw<'a>,
+    cursor: usize,
+    done: bool,
+}
+pub(crate) fn array_iter(raw: Raw<'_>) -> Option<ArrayIter<'_>> {
+    raw.get().starts_with('[').then_some(ArrayIter {
+        raw,
+        cursor: 1,
+        done: false,
+    })
+}
+impl<'a> Iterator for ArrayIter<'a> {
+    type Item = Raw<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let bytes = self.raw.get().as_bytes();
+        whitespace(bytes, &mut self.cursor);
+        if bytes.get(self.cursor) == Some(&b']') {
+            self.done = true;
+            return None;
+        }
+        let start = self.cursor;
+        let end = value_end(bytes, start, self.raw.1)?;
+        self.cursor = end;
+        whitespace(bytes, &mut self.cursor);
+        match bytes.get(self.cursor) {
+            Some(b',') => self.cursor += 1,
+            Some(b']') => self.done = true,
+            _ => {
+                self.done = true;
+                return None;
+            }
+        }
+        Some(Raw(&self.raw.get()[start..end], self.raw.1))
+    }
+}
+/// Retained descriptors are reserved for replay/navigation that genuinely needs random access.
 pub(crate) fn array(raw: Raw<'_>) -> Option<Vec<Raw<'_>>> {
-    let b = raw.get().as_bytes();
-    if b.first() != Some(&b'[') {
-        return None;
-    }
-    let mut items = Vec::new();
-    let mut i = 1;
-    loop {
-        whitespace(b, &mut i);
-        if b.get(i) == Some(&b']') {
-            break;
-        }
-        let start = i;
-        i = value_end(b, i, raw.1)?;
-        items.push(Raw(&raw.get()[start..i], raw.1));
-        whitespace(b, &mut i);
-        match b.get(i) {
-            Some(b',') => i += 1,
-            Some(b']') => break,
-            _ => return None,
-        }
-    }
-    Some(items)
+    Some(array_iter(raw)?.collect())
 }
 
 fn whitespace(b: &[u8], i: &mut usize) {
@@ -245,12 +318,12 @@ fn whitespace(b: &[u8], i: &mut usize) {
 }
 fn string_end(b: &[u8], i: usize, index: &Index) -> Option<usize> {
     let key = b.as_ptr() as usize + i;
-    if let Some(end) = index.0.borrow().get(&key) {
-        return Some(*end - b.as_ptr() as usize);
+    if let Some(end) = index.get(key) {
+        return Some(end - b.as_ptr() as usize);
     }
     let end = super::json::string_end(b, i)?;
     if end - i > INLINE_MAX {
-        index.0.borrow_mut().insert(key, b.as_ptr() as usize + end);
+        index.remember(key, b.as_ptr() as usize + end);
     }
     Some(end)
 }
@@ -357,6 +430,27 @@ mod tests {
         for input in ["null", "true", "123", "[]", "\"string\""] {
             let index = Index::default();
             assert!(Record::parse(Raw::new(input, &index)).is_none());
+        }
+    }
+    #[test]
+    fn array_iteration_and_endpoint_eviction_preserve_records() {
+        let body = "a\\\"x".repeat(2048);
+        let values = (0..ENDPOINTS * 3)
+            .map(|n| serde_json::json!({"n":n,"body":body}))
+            .collect::<Vec<_>>();
+        let text = serde_json::to_string(&values).unwrap();
+        let validated: &crate::lazy::RawValue = serde_json::from_str(&text).unwrap();
+        let index = Index::default();
+        let raw = Raw::new(validated.get(), &index);
+        assert!(accepts_value(raw));
+        assert!(index.0.borrow().ends.len() <= ENDPOINTS);
+        let iterator = array_iter(raw).unwrap();
+        assert_eq!(iterator.clone().count(), values.len());
+        for (raw, expected) in iterator.zip(values.iter()) {
+            let record = Record::parse(raw).unwrap();
+            assert_eq!(record.value("n").unwrap(), expected["n"]);
+            assert_eq!(record.value("body").unwrap(), expected["body"]);
+            assert!(index.0.borrow().ends.len() <= ENDPOINTS);
         }
     }
 }

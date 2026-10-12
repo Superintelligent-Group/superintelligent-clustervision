@@ -26,7 +26,7 @@
 //! than a parse failure — the document is still a session, it just came from somewhere cv cannot
 //! name.
 
-use super::store::document::{accepts_value, array, Raw, Record, Source};
+use super::store::document::{accepts_value, array_iter, Raw, Record, Source};
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
@@ -175,9 +175,9 @@ fn doc_ref(path: &Path) -> Option<SessionRef> {
     let string = |k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
     let message_count = record
         .get("messages")
-        .and_then(array)
-        .unwrap_or_default()
+        .and_then(array_iter)
         .into_iter()
+        .flatten()
         .filter(|raw| {
             Record::parse(*raw)
                 .and_then(|r| r.string("role"))
@@ -249,13 +249,13 @@ fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink)
     let mut session = from_object(meta)?;
     let messages = record
         .get("messages")
-        .and_then(array)
+        .and_then(array_iter)
         .context("not an OpenSession 0.3 document: messages must be an array")?;
     session.source_path = Some(path.to_path_buf());
     // Validate through the authoritative IR deserializer with actual Text spans. This never
     // substitutes body text with a sentinel, and catches malformed later turns before emission.
-    for raw in &messages {
-        ir_message(*raw, &source, true)?;
+    for raw in messages.clone() {
+        ir_message(raw, &source, true)?;
     }
     sink.meta(&session);
     for raw in messages {
@@ -294,7 +294,7 @@ fn ir_message(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Message> {
         ],
     )?;
     if let Some(content) = record.get("content") {
-        let value = if let Some(blocks) = array(content) {
+        let value = if let Some(blocks) = array_iter(content) {
             Value::Array(
                 blocks
                     .into_iter()

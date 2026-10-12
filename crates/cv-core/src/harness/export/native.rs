@@ -1,6 +1,6 @@
 //! Archive metadata and source ranges, never cached transcript bodies or source mappings.
 use super::*;
-use crate::harness::store::document::{accepts_value, array, text_summary, Raw, Record, Source};
+use crate::harness::store::document::{accepts_value, array_iter, text_summary, ArrayIter, Raw, Record, Source};
 use crate::lazy::{Resolver, Text};
 use crate::stream::Flow;
 use std::collections::{HashMap, VecDeque};
@@ -87,10 +87,10 @@ fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
         let source = Source::open(path)?;
         let raw = source.raw();
         // The old Vec<RawValue> parser treats a non-array or invalid JSON document as empty.
-        let values = raw.ok().and_then(array).unwrap_or_default();
+        let values = raw.ok().and_then(array_iter).into_iter().flatten();
         let shapes = values
-            .first()
-            .copied()
+            .clone()
+            .next()
             .filter(|r| accepts_value(*r))
             .and_then(Record::parse)
             .map(|r| [r.get("mapping").is_some(), r.get("chat_messages").is_some()])
@@ -196,9 +196,9 @@ fn raw_ref(kind: Kind, path: &Path, r: &Record<'_>, id: &str) -> Option<SessionR
             .count()
     } else {
         r.get("chat_messages")
-            .and_then(array)
-            .unwrap_or_default()
+            .and_then(array_iter)
             .into_iter()
+            .flatten()
             .filter_map(Record::parse)
             .filter(|r| matches!(r.string("sender").as_deref(), Some("human" | "assistant")))
             .count()
@@ -216,7 +216,7 @@ fn active_chain<'a>(conv: &Record<'a>) -> Vec<Raw<'a>> {
         return vec![];
     };
     let Some(mut current) = conv.string("current_node") else {
-        return mapping.fields.values().copied().collect();
+        return mapping.values_in_order().collect();
     };
     let mut chain = Vec::new();
     for _ in 0..100_000 {
@@ -229,6 +229,21 @@ fn active_chain<'a>(conv: &Record<'a>) -> Vec<Raw<'a>> {
     }
     chain.reverse();
     chain
+}
+
+#[derive(Clone)]
+enum Nodes<'a> {
+    Branch(std::vec::IntoIter<Raw<'a>>),
+    Chronological(Option<ArrayIter<'a>>),
+}
+impl<'a> Iterator for Nodes<'a> {
+    type Item = Raw<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Branch(nodes) => nodes.next(),
+            Self::Chronological(nodes) => nodes.as_mut()?.next(),
+        }
+    }
 }
 
 pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -268,17 +283,17 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut
     session.source_path = Some(r.path.clone());
     session.model = conv.string("default_model_slug").filter(|s| !s.is_empty());
     let nodes = if kind == Kind::ChatGpt {
-        active_chain(&conv)
+        Nodes::Branch(active_chain(&conv).into_iter())
     } else {
-        conv.get("chat_messages").and_then(array).unwrap_or_default()
+        Nodes::Chronological(conv.get("chat_messages").and_then(array_iter))
     };
     let resolver = Resolver::new(Some(r.path.clone()));
     // The old replay emits a final fallback title even when the consumer stops immediately.
     // Inspect only up to the first emitted user message; use source spans to bound its body.
     if session.title.is_none() {
         let mut calls = HashMap::new();
-        for raw in &nodes {
-            let record = Record::parse(*raw);
+        for raw in nodes.clone() {
+            let record = Record::parse(raw);
             let role = match kind {
                 Kind::Claude => record.and_then(|r| r.string("sender")),
                 Kind::ChatGpt => record
@@ -291,7 +306,7 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut
             if role.as_deref().map(role_from_str) != Some(Role::User) {
                 continue;
             }
-            if let Some(m) = build_message(kind, *raw, &source, true, &resolver, &mut calls) {
+            if let Some(m) = build_message(kind, raw, &source, true, &resolver, &mut calls) {
                 if m.role == Role::User {
                     session.title = text_summary(
                         m.content.iter().filter_map(|b| match b {
@@ -335,7 +350,7 @@ fn claude_message(raw: Raw<'_>, source: &Source, spans: bool) -> Option<Message>
     let r = Record::parse(raw)?;
     let role = role_from_str(&r.string("sender")?);
     let mut content = Vec::new();
-    for raw in r.get("content").and_then(array).unwrap_or_default() {
+    for raw in r.get("content").and_then(array_iter).into_iter().flatten() {
         let Some(mut block) = anthropic::block_from_raw(raw, source, &anthropic::CLAUDE_AI, spans) else {
             continue;
         };
@@ -415,7 +430,11 @@ fn chatgpt_message(
         } else if text_summary(std::iter::once(&text), resolver, true).is_some() {
             content.push(Block::Text { text });
         }
-        if let Some(parts) = content_record.as_ref().and_then(|r| r.get("parts")).and_then(array) {
+        if let Some(parts) = content_record
+            .as_ref()
+            .and_then(|r| r.get("parts"))
+            .and_then(array_iter)
+        {
             for pointer in parts
                 .into_iter()
                 .filter_map(Record::parse)
@@ -443,8 +462,8 @@ fn chatgpt_message(
 }
 fn chatgpt_text(r: Option<&Record<'_>>, source: &Source, spans: bool, resolver: &Resolver) -> Text {
     let Some(r) = r else { return Text::default() };
-    if let Some(parts) = r.get("parts").and_then(array) {
-        let mut texts = parts.into_iter().filter_map(|raw| source.text(raw, spans));
+    if let Some(parts) = r.get("parts").and_then(array_iter) {
+        let mut texts = parts.filter_map(|raw| source.text(raw, spans));
         let Some(first) = texts.next() else {
             return Text::default();
         };

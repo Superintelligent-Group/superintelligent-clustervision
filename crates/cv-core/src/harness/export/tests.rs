@@ -280,6 +280,10 @@ fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
             actual.messages = sink.messages;
             actual.materialize();
             assert_eq!(
+                serde_json::to_string(&actual).unwrap(),
+                serde_json::to_string(&expected).unwrap()
+            );
+            assert_eq!(
                 serde_json::to_value(&actual).unwrap(),
                 serde_json::to_value(&expected).unwrap()
             );
@@ -350,4 +354,35 @@ fn cached_export_discovery_preserves_the_callers_path_spelling() {
     assert_eq!(first[0].path, relative);
     assert_eq!(second[0].path, absolute);
     std::fs::remove_dir_all(relative_dir).unwrap();
+}
+
+#[test]
+fn native_chatgpt_fallback_keeps_insertion_order_and_final_duplicate_value() {
+    use crate::stream::{CollectSink, ParseOptions};
+    let dir = std::env::temp_dir().join(format!("cv-export-order-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("conversations.json");
+    let archive = r#"[{"id":"ordered","mapping":{
+        "z":{"id":"discarded","message":{"author":{"role":"user"},"content":{"parts":["old"]}}},
+        "a":{"id":"second","message":{"author":{"role":"assistant"},"recipient":"python","content":{"z":1,"a":2,"text":"run"}}},
+        "\u007a":{"id":"first","message":{"author":{"role":"user"},"content":{"parts":["replacement"]}}}
+    }}]"#;
+    std::fs::write(&path, archive).unwrap();
+    let r = SessionRef::new("ordered", Harness::ChatGptExport, path.clone());
+    let expected = parse_ref(Kind::ChatGpt, &r).unwrap();
+    assert_eq!(
+        expected.messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
+        [Some("first"), Some("second")]
+    );
+    for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+        let mut sink = CollectSink::default();
+        let mut actual = native::stream(Kind::ChatGpt, &r, &opts, &mut sink).unwrap();
+        actual.messages = sink.messages;
+        actual.materialize();
+        assert_eq!(
+            serde_json::to_string(&actual).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
