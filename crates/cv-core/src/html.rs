@@ -409,16 +409,12 @@ fn input_preview(input: &crate::Json) -> anyhow::Result<String> {
         "prompt",
         "description",
     ];
-    // 81 Unicode scalars suffice for truncate's 80-character label, at most 324 UTF-8 bytes.
+    // One extra scalar determines truncation; the shared projection stops decoding the tail.
     if let Some(preview) = input.with_view(|view| {
         for key in KEYS {
             if let Some(field) = view.get(key)? {
-                let mut head = crate::projection::Head::new(81 * 4);
-                if field.for_each_str_chunk(|text| {
-                    head.push(text);
-                    Ok(())
-                })? {
-                    return Ok(Some(crate::ir::truncate(head.as_str(), 80)));
+                if let Some(head) = crate::projection::string_prefix(field, 81)? {
+                    return Ok(Some(crate::ir::truncate(&head, 80)));
                 }
             }
         }
