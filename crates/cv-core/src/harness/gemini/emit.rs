@@ -17,6 +17,8 @@ use uuid::Uuid;
 /// (`harness/gemini.rs`) requires the file to live under a `chats/` dir to be picked up by
 /// `discover`, but `parse_all_str` / `parse` will read it directly from any path.
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     let cwd = effective_cwd(session, opts);
     let cwd_str = cwd
@@ -131,7 +133,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         let mut call = Map::new();
                         call.insert("id".into(), json!(id));
                         call.insert("name".into(), json!(name));
-                        call.insert("args".into(), input.clone());
+                        call.insert("args".into(), input.resolve()?.into_owned());
                         if let Some((content, is_error)) = tool_results.get(id) {
                             call.insert("status".into(), json!(if *is_error { "error" } else { "success" }));
                             call.insert(

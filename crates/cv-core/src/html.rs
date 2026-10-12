@@ -251,7 +251,7 @@ pub fn share_begin(meta: &ShareMeta) -> String {
 }
 
 /// One message card. `idx` becomes the anchor id (`#m0`, `#m1`, …) used by keyboard nav.
-pub fn share_message(m: &Message, idx: usize, out: &mut String) {
+pub fn share_message(m: &Message, idx: usize, out: &mut String) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     let role = role_class(m.role);
     let _ = writeln!(out, "<section class=\"msg msg-{role}\" id=\"m{idx}\">");
@@ -263,16 +263,17 @@ pub fn share_message(m: &Message, idx: usize, out: &mut String) {
     }
     out.push_str("</div>\n<div class=\"msg-body\">\n");
     for b in &m.content {
-        share_block(b, out);
+        share_block(b, out)?;
     }
     out.push_str("</div>\n");
     if let Some(u) = &m.usage {
         render_usage(u, out);
     }
     out.push_str("</section>\n");
+    Ok(())
 }
 
-fn share_block(b: &Block, out: &mut String) {
+fn share_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     match b {
         Block::Text { text } => {
@@ -301,12 +302,14 @@ fn share_block(b: &Block, out: &mut String) {
             out.push_str("\n</details>\n");
         }
         Block::ToolUse { name, input, .. } => {
+            let preview = input_preview(input)?;
+            let input = input.resolve()?;
             out.push_str("<details class=\"fold tool tool-use\"><summary><span class=\"t-ico\">🔧</span> <code>");
             out.push_str(&escape(name));
             out.push_str("</code>");
-            let _ = write!(out, "<span class=\"hint\">{}</span>", escape(&input_preview(input)));
+            let _ = write!(out, "<span class=\"hint\">{}</span>", escape(&preview));
             out.push_str("</summary>\n<pre><code>");
-            let pretty = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+            let pretty = serde_json::to_string_pretty(&*input)?;
             out.push_str(&escape(&pretty));
             out.push_str("</code></pre>\n</details>\n");
         }
@@ -357,6 +360,7 @@ fn share_block(b: &Block, out: &mut String) {
             out.push_str("</div>\n");
         }
     }
+    Ok(())
 }
 
 /// Footer + inline script + closing tags. `redactions` is the number of spans the scrubber
@@ -393,7 +397,7 @@ fn short(id: &str) -> String {
 
 /// A one-line preview of a tool input for the collapsed summary: the most human-meaningful
 /// string field if present, otherwise the compact JSON.
-fn input_preview(input: &serde_json::Value) -> String {
+fn input_preview(input: &crate::Json) -> anyhow::Result<String> {
     const KEYS: &[&str] = &[
         "command",
         "file_path",
@@ -404,14 +408,26 @@ fn input_preview(input: &serde_json::Value) -> String {
         "prompt",
         "description",
     ];
-    if let Some(obj) = input.as_object() {
-        for k in KEYS {
-            if let Some(v) = obj.get(*k).and_then(|v| v.as_str()) {
-                return crate::ir::truncate(v, 80);
+    // 81 Unicode scalars suffice for truncate's 80-character label, at most 324 UTF-8 bytes.
+    if let Some(preview) = input.with_view(|view| {
+        for key in KEYS {
+            if let Some(field) = view.get(key)? {
+                let mut head = crate::projection::Head::new(81 * 4);
+                if field.for_each_str_chunk(|text| {
+                    head.push(text);
+                    Ok(())
+                })? {
+                    return Ok(Some(crate::ir::truncate(head.as_str(), 80)));
+                }
             }
         }
+        Ok(None)
+    })? {
+        return Ok(preview);
     }
-    crate::ir::truncate(&input.to_string(), 80)
+    let mut head = crate::projection::Head::new(81 * 4);
+    head.push_json(input)?;
+    Ok(crate::ir::truncate(head.as_str(), 80))
 }
 
 /// The 🔮 share theme: dark by default (deep violet-black with a soft crystal glow), light via
@@ -689,7 +705,7 @@ mod tests {
         assistant.content.push(Block::ToolUse {
             id: "t1".into(),
             name: "Bash".into(),
-            input: serde_json::json!({ "command": "echo <x> & done" }),
+            input: (serde_json::json!({ "command": "echo <x> & done" })).into(),
             namespace: None,
         });
         assistant.usage = Some(Usage {
@@ -772,7 +788,7 @@ mod tests {
         let meta = sample_share_meta(redacted);
         let mut doc = share_begin(&meta);
         for (i, m) in session.messages.iter().enumerate() {
-            share_message(m, i, &mut doc);
+            share_message(m, i, &mut doc).unwrap();
         }
         doc.push_str(&share_end(&meta, 3, "0.9.11"));
         doc
@@ -841,8 +857,8 @@ mod tests {
         assert_eq!(short("abcdef1234567890"), "abcdef12");
         // preview picks the meaningful key
         let v = serde_json::json!({"file_path": "/a/b.rs", "old_string": "xxxx"});
-        assert_eq!(input_preview(&v), "/a/b.rs");
+        assert_eq!(input_preview(&v.into()).unwrap(), "/a/b.rs");
         let v2 = serde_json::json!({"weird": 1});
-        assert!(input_preview(&v2).contains("weird"));
+        assert!(input_preview(&v2.into()).unwrap().contains("weird"));
     }
 }

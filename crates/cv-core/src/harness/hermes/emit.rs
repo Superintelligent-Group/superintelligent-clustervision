@@ -18,6 +18,8 @@ use uuid::Uuid;
 /// the `\x00json:` sentinel prefix.
 #[cfg(feature = "sqlite")]
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     use rusqlite::{params, Connection};
 
     const MULTIMODAL_SENTINEL: &str = "\u{0}json:";
@@ -332,26 +334,21 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
 
         // Assistant tool calls → OpenAI-shaped tool_calls JSON.
         let tool_calls: Option<String> = {
-            let calls: Vec<Value> = msg
-                .content
-                .iter()
-                .map(|b| {
-                    crate::affordance::rewrap_deferred(Harness::Hermes, b)
-                        .map_or(std::borrow::Cow::Borrowed(b), std::borrow::Cow::Owned)
-                })
-                .filter_map(|b| match b.as_ref() {
-                    // A deferred tool's call goes back through Hermes's `tool_call` wrapper.
-                    Block::ToolUse { id, name, input, .. } => Some(json!({
+            let mut calls = Vec::new();
+            for block in &msg.content {
+                let rewrapped = crate::affordance::rewrap_deferred(Harness::Hermes, block)?;
+                let block = rewrapped.as_ref().unwrap_or(block);
+                if let Block::ToolUse { id, name, input, .. } = block {
+                    calls.push(json!({
                         "id": id,
                         "type": "function",
                         "function": {
                             "name": name,
-                            "arguments": serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
+                            "arguments": serde_json::to_string(input.resolve()?.as_ref())?,
                         },
-                    })),
-                    _ => None,
-                })
-                .collect();
+                    }));
+                }
+            }
             (!calls.is_empty()).then(|| Value::Array(calls).to_string())
         };
 

@@ -333,15 +333,17 @@ fn est(s: &str) -> u64 {
     est_tokens_bytes(s.len(), BYTES_PER_TOKEN)
 }
 
-fn block_est(b: &Block) -> u64 {
+fn block_est(b: &Block) -> anyhow::Result<u64> {
     est_tokens(b, BYTES_PER_TOKEN)
 }
 
-fn message_est(m: &Message) -> u64 {
+fn message_est(m: &Message) -> anyhow::Result<u64> {
     if !m.is_model_visible() {
-        return 0;
+        return Ok(0);
     }
-    m.content.iter().map(block_est).sum()
+    m.content
+        .iter()
+        .try_fold(0u64, |sum, block| Ok(sum + block_est(block)?))
 }
 
 /// A short label for one tool call, for the ledger and the facts lists.
@@ -421,8 +423,10 @@ fn note_paths(p: &str) -> bool {
 }
 
 /// Distill `session` (any harness; materialized) into a context pack, a tail cut point and the
-/// elided-output list. Pure: no filesystem access.
-pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
+/// elided-output list. Source-backed values are explicitly read before analysis; failures propagate.
+pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Distilled> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let msgs = &session.messages;
     let retrieve_ref = opts.retrieve_ref.clone().unwrap_or_else(|| session.id.clone());
 
@@ -450,9 +454,10 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
     for m in &msgs[..tail_start] {
         for b in &m.content {
             if let Block::ToolUse { id, name, input, .. } = b {
+                let input = input.resolve()?;
                 let path = match name.as_str() {
                     "Read" => input.get("file_path").and_then(Value::as_str).map(String::from),
-                    _ => command_of(input).and_then(|c| {
+                    _ => command_of(&input).and_then(|c| {
                         let c = c.trim();
                         let simple = c.starts_with("cat ") || c.starts_with("sed -n");
                         let p = c.split_whitespace().last()?.trim_matches(['\'', '"']);
@@ -569,9 +574,10 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
                             });
                         }
                         Block::ToolUse { name, input, .. } => {
-                            scan_input_facts(name, input, &mut facts);
+                            let input = input.resolve()?;
+                            scan_input_facts(name, &input, &mut facts);
                             if !in_tail {
-                                if let Some(e) = own_words_from_tool(i, m, name, input, opts) {
+                                if let Some(e) = own_words_from_tool(i, m, name, &input, opts) {
                                     timeline.push(e);
                                 }
                             }
@@ -594,7 +600,8 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
                     };
                     let (name, input) = uses
                         .get(tool_use_id.as_str())
-                        .map(|c| (c.name.to_string(), c.input.clone()))
+                        .map(|c| Ok::<_, anyhow::Error>((c.name.to_string(), c.input.resolve()?.into_owned())))
+                        .transpose()?
                         .unwrap_or_else(|| (tool_name.clone().unwrap_or_default(), Value::Null));
                     let label = tool_label(&name, &input);
                     let out: &str = content;
@@ -722,14 +729,16 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
         h.push('\n');
     }
 
-    let tail_md = render_tail(msgs, tail_start, opts, &retrieve_ref);
+    let tail_md = render_tail(msgs, tail_start, opts, &retrieve_ref, &session.resolver())?;
 
-    let source_est_tokens: u64 = msgs.iter().map(message_est).sum();
-    let pack_est_tokens = est(&h);
-    let tail_est_tokens: u64 = resumable_tail(msgs, tail_start, opts, &retrieve_ref)
+    let source_est_tokens: u64 = msgs
         .iter()
-        .map(|m| m.content.iter().map(block_est).sum::<u64>())
-        .sum();
+        .try_fold(0u64, |sum, message| Ok::<_, anyhow::Error>(sum + message_est(message)?))?;
+    let pack_est_tokens = est(&h);
+    let tail_est_tokens: u64 = resumable_tail(msgs, tail_start, opts, &retrieve_ref, &session.resolver())?
+        .iter()
+        .flat_map(|m| &m.content)
+        .try_fold(0u64, |sum, block| Ok::<_, anyhow::Error>(sum + block_est(block)?))?;
     let recorded_context_tokens = msgs
         .iter()
         .rev()
@@ -752,7 +761,7 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
         errors: facts.errors.len(),
         elided_outputs: elided.len(),
     };
-    Distilled {
+    Ok(Distilled {
         head_md: h,
         tail_md,
         tail_start,
@@ -760,7 +769,7 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> Distilled {
         stats,
         label,
         retrieve_ref,
-    }
+    })
 }
 
 /// A peer message arrives wrapped in a `<system-reminder>`; keep what is inside.
@@ -1057,12 +1066,19 @@ fn tail_cut(msgs: &[Message], keep_last: usize) -> usize {
 /// results clipped with a `cv cat` pointer, queued messages turned into user turns, harness-only
 /// records dropped. A trailing call with no result stays here (the pack shows the lane stopped
 /// mid-call); the Claude emitter drops it from a resumable session (`harness::claude::emit::make_resumable`).
-fn resumable_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, retrieve_ref: &str) -> Vec<Message> {
+fn resumable_tail(
+    msgs: &[Message],
+    tail_start: usize,
+    opts: &DistillOptions,
+    retrieve_ref: &str,
+    resolver: &crate::Resolver,
+) -> anyhow::Result<Vec<Message>> {
     let mut out: Vec<Message> = Vec::new();
     for m in &msgs[tail_start..] {
         match (m.role, m.kind) {
             (Role::Assistant, _) => {
                 let mut m2 = m.clone();
+                m2.materialize(resolver)?;
                 m2.usage = None;
                 if !opts.keep_tail_thinking {
                     m2.content.retain(|b| !matches!(b, Block::Thinking { .. }));
@@ -1073,6 +1089,7 @@ fn resumable_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, re
             }
             (Role::Tool, _) | (Role::User, MessageKind::ToolResult) => {
                 let mut m2 = m.clone();
+                m2.materialize(resolver)?;
                 for b in &mut m2.content {
                     if let Block::ToolResult {
                         tool_use_id, content, ..
@@ -1090,27 +1107,40 @@ fn resumable_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, re
                 }
                 out.push(m2);
             }
-            (Role::User, MessageKind::Prompt) => out.push(m.clone()),
+            (Role::User, MessageKind::Prompt) => {
+                let mut owned = m.clone();
+                owned.materialize(resolver)?;
+                out.push(owned);
+            }
             (_, MessageKind::InjectedContext) if matches!(attachment_type(m), Some("queued_command")) => {
                 let mut u = Message::of_kind(Role::User, MessageKind::Prompt, Origin::Subagent);
                 u.id = m.id.clone();
                 u.parent_id = m.parent_id.clone();
                 u.timestamp = m.timestamp;
                 u.content.push(Block::Text {
-                    text: strip_reminder(&m.text().unwrap_or_default()).into(),
+                    text: {
+                        let mut owned = m.clone();
+                        owned.materialize(resolver)?;
+                        strip_reminder(&owned.text().unwrap_or_default()).into()
+                    },
                 });
                 out.push(u);
             }
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
-fn render_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, retrieve_ref: &str) -> String {
-    let tail = resumable_tail(msgs, tail_start, opts, retrieve_ref);
+fn render_tail(
+    msgs: &[Message],
+    tail_start: usize,
+    opts: &DistillOptions,
+    retrieve_ref: &str,
+) -> anyhow::Result<String> {
+    let tail = resumable_tail(msgs, tail_start, opts, retrieve_ref, resolver)?;
     if tail.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
     let mut s = String::new();
     let _ = writeln!(
@@ -1130,14 +1160,15 @@ fn render_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, retri
                     let _ = writeln!(s, "**{who}** ({}):\n\n{}\n", when(m), text.trim());
                 }
                 Block::ToolUse { id, name, input, .. } => {
-                    let body = match command_of(input) {
+                    let input = input.resolve()?;
+                    let body = match command_of(&input) {
                         Some(c) => c.to_string(),
-                        None => serde_json::to_string_pretty(input).unwrap_or_default(),
+                        None => serde_json::to_string_pretty(&*input)?,
                     };
                     let _ = writeln!(
                         s,
                         "▶ **{name}** `{id}` — {}\n```\n{}\n```\n",
-                        tool_label(name, input),
+                        tool_label(name, &input),
                         body.trim()
                     );
                 }
@@ -1149,7 +1180,7 @@ fn render_tail(msgs: &[Message], tail_start: usize, opts: &DistillOptions, retri
             }
         }
     }
-    s
+    Ok(s)
 }
 
 fn session_label(s: &Session) -> String {
@@ -1186,7 +1217,7 @@ pub fn resume_preamble(d: &Distilled, keep_last: usize) -> String {
 /// owns the resumability rules: the first tail turn's parent names a record the tail does not
 /// carry and is re-linked to the opening prompt, a hook attachment's child is re-linked over the
 /// gap, an unanswered trailing call is dropped (`harness::claude::emit::make_resumable`). This is a selector.
-pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions) -> Session {
+pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions) -> anyhow::Result<Session> {
     let mut first = Message::of_kind(Role::User, MessageKind::Prompt, Origin::Human);
     first.timestamp = session
         .messages
@@ -1196,10 +1227,16 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
     first.content.push(Block::Text {
         text: format!("{}{}", resume_preamble(d, opts.keep_last), d.head_md).into(),
     });
-    let mut tail = resumable_tail(&session.messages, d.tail_start, opts, &d.retrieve_ref);
+    let mut tail = resumable_tail(
+        &session.messages,
+        d.tail_start,
+        opts,
+        &d.retrieve_ref,
+        &session.resolver(),
+    )?;
     let mut messages = vec![first];
     messages.append(&mut tail);
-    Session {
+    let mut output = Session {
         id: session.id.clone(),
         harness: session.harness,
         cwd: session.cwd.clone(),
@@ -1216,18 +1253,21 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
         messages,
         source_path: None,
         extra: serde_json::Map::new(),
-    }
+    };
+    // Only the selected tail is demanded; earlier source-backed inputs need not be read here.
+    output.materialize()?;
+    Ok(output)
 }
 
 /// Another lane's findings, for injection into this one's pack (`--with`): its own words (text,
 /// messages sent, notes) and its facts — not its brief, ledger or tail.
-pub fn findings(session: &Session, opts: &DistillOptions) -> String {
+pub fn findings(session: &Session, opts: &DistillOptions) -> anyhow::Result<String> {
     let o = DistillOptions {
         keep_last: 0,
         ledger: false,
         ..opts.clone()
     };
-    let d = distill(session, &o);
+    let d = distill(session, &o)?;
     // Keep only the agent's own entries from the timeline and the facts section.
     let mut out = String::new();
     let _ = writeln!(out, "## Findings from another lane — {} (`{}`)\n", d.label, session.id);
@@ -1257,7 +1297,7 @@ pub fn findings(session: &Session, opts: &DistillOptions) -> String {
     if !keep {
         let _ = writeln!(out, "_(no findings)_");
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1278,7 +1318,7 @@ pub(crate) mod tests {
         Block::ToolUse {
             id: id.into(),
             name: "Bash".into(),
-            input: json!({"command": cmd, "description": desc}),
+            input: (json!({"command": cmd, "description": desc})).into(),
             namespace: None,
         }
     }
@@ -1370,7 +1410,8 @@ pub(crate) mod tests {
                 keep_last: 2,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let p = d.pack();
         assert!(p.contains("You are lane X. Build the thing on box1."));
         assert!(p.contains("Chose rebase over merge"));
@@ -1393,7 +1434,8 @@ pub(crate) mod tests {
                 keep_last: 2,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(s.messages[d.tail_start].role, Role::Assistant);
         let r = resumable_session(
             &s,
@@ -1402,7 +1444,8 @@ pub(crate) mod tests {
                 keep_last: 2,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(r.messages[0].role, Role::User);
         assert_eq!(r.messages[1].role, Role::Assistant);
         assert!(r.messages.iter().all(|m| m.usage.is_none()));

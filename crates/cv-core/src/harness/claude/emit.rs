@@ -48,6 +48,8 @@ pub(crate) fn claude_encode_cwd(cwd: &Path) -> String {
 }
 
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     // The id every record is stamped with, and the id the caller resumes by. For a main-thread
     // session they are one uuid; for a sub-agent transcript the records carry the ROOT's id and the
     // handle is the agent id (see [`EmitOptions::sidechain_of`]).
@@ -251,13 +253,13 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 let content = if msg.content.iter().all(|b| matches!(b, Block::Text { .. })) {
                     json!(msg.text().unwrap_or_default())
                 } else {
-                    Value::Array(claude_user_blocks(&msg.content))
+                    Value::Array(claude_user_blocks(&msg.content)?)
                 };
                 line.insert("message".into(), json!({ "role": "user", "content": content }));
             }
             Role::Assistant => {
                 line.insert("type".into(), json!("assistant"));
-                let blocks = claude_assistant_blocks(&msg.content);
+                let blocks = claude_assistant_blocks(&msg.content)?;
                 let mut message = Map::new();
                 message.insert("role".into(), json!("assistant"));
                 if let Some(model) = msg.model.as_ref().or(session.model.as_ref()) {
@@ -279,7 +281,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             }
             Role::Tool => {
                 // Tool results ride on a `user` line whose content is tool_result blocks.
-                let blocks = claude_tool_result_blocks(&msg.content);
+                let blocks = claude_tool_result_blocks(&msg.content)?;
                 line.insert("type".into(), json!("user"));
                 line.insert(
                     "message".into(),
@@ -552,21 +554,21 @@ fn claude_usage(usage: Option<&crate::ir::Usage>) -> Option<Value> {
 
 /// An assistant line's content: the Anthropic blocks, never empty (an empty turn is one empty
 /// text block, as Claude Code writes it).
-fn claude_assistant_blocks(content: &[Block]) -> Vec<Value> {
-    let mut out = anthropic::assistant_blocks(content, &anthropic::ANTHROPIC);
+fn claude_assistant_blocks(content: &[Block]) -> Result<Vec<Value>> {
+    let mut out = anthropic::assistant_blocks(content, &anthropic::ANTHROPIC)?;
     if out.is_empty() {
         out.push(json!({ "type": "text", "text": "" }));
     }
-    out
+    Ok(out)
 }
 
 /// A user line's content: text/image natively, a [`Block::File`] as the `document` attachment
 /// the parser reads back into a File, a stray tool result kept as a `tool_result` block.
-fn claude_user_blocks(content: &[Block]) -> Vec<Value> {
+fn claude_user_blocks(content: &[Block]) -> Result<Vec<Value>> {
     anthropic::user_blocks(content, &anthropic::ANTHROPIC)
 }
 
-fn claude_tool_result_blocks(content: &[Block]) -> Vec<Value> {
+fn claude_tool_result_blocks(content: &[Block]) -> Result<Vec<Value>> {
     anthropic::tool_result_blocks(content)
 }
 

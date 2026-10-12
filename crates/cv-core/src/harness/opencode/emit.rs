@@ -42,6 +42,8 @@ fn opencode_db_path(out_dir: &Path) -> PathBuf {
 /// dir gets a fresh db. Tool results are folded onto the originating assistant's `tool` part
 /// (`state.output`/`state.error`), since OpenCode has no standalone tool turn.
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     #[cfg(not(feature = "sqlite"))]
     {
         let _ = (session, out_dir, opts);
@@ -228,7 +230,7 @@ fn emit_opencode_db(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Re
                     write_part(Value::Object(p))?;
                 }
                 Block::ToolUse { id, name, input, .. } => {
-                    let state = opencode_tool_state(Some(input), tool_results.get(id).copied());
+                    let state = opencode_tool_state(Some(input), tool_results.get(id).copied())?;
                     write_part(json!({
                         "type": "tool",
                         "callID": id,
@@ -268,7 +270,7 @@ fn emit_opencode_db(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Re
                         "type": "tool",
                         "callID": tool_use_id,
                         "tool": tool_name.clone().unwrap_or_default(),
-                        "state": Value::Object(opencode_tool_state(None, Some(b))),
+                        "state": Value::Object(opencode_tool_state(None, Some(b))?),
                     }))?;
                 }
                 Block::ToolResult { .. } => {}
@@ -290,10 +292,10 @@ fn emit_opencode_db(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Re
 /// `input` is `None` for an **orphan** result (see [`emit_opencode_db`]): the call itself is not in
 /// this session, so there are no arguments to record, only what came back.
 #[cfg(feature = "sqlite")]
-fn opencode_tool_state(input: Option<&Value>, result: Option<&Block>) -> Map<String, Value> {
+fn opencode_tool_state(input: Option<&crate::Json>, result: Option<&Block>) -> Result<Map<String, Value>> {
     let mut state = Map::new();
     if let Some(input) = input {
-        state.insert("input".into(), input.clone());
+        state.insert("input".into(), input.resolve()?.into_owned());
     }
     let Some(Block::ToolResult {
         content,
@@ -303,7 +305,7 @@ fn opencode_tool_state(input: Option<&Value>, result: Option<&Block>) -> Map<Str
     }) = result
     else {
         state.insert("status".into(), json!("completed"));
-        return state;
+        return Ok(state);
     };
     if *is_error {
         state.insert("status".into(), json!("error"));
@@ -346,5 +348,5 @@ fn opencode_tool_state(input: Option<&Value>, result: Option<&Block>) -> Map<Str
             state.insert("metadata".into(), Value::Object(meta));
         }
     }
-    state
+    Ok(state)
 }

@@ -71,7 +71,11 @@ const SPAN_CHUNK: usize = 1 << 20; // 1 MiB
 /// Stream one message's blocks as training text to `emit`, resolving span content **in chunks** (so a
 /// giant field is never materialized whole). Byte-identical to the old `parts.join("\n\n")`: the same
 /// parts, separated by `\n\n`, with empty/redacted text turns producing no part.
-fn render_blocks_into(blocks: &[Block], resolver: &crate::lazy::Resolver, emit: &mut dyn FnMut(&str)) {
+fn render_blocks_into(
+    blocks: &[Block],
+    resolver: &crate::lazy::Resolver,
+    emit: &mut dyn FnMut(&str),
+) -> anyhow::Result<()> {
     render_blocks_impl(blocks, resolver, None, emit)
 }
 
@@ -85,14 +89,13 @@ type RedactCtx<'a> = (&'a crate::redact::RedactOptions, &'a mut crate::redact::R
 /// whole). With `redact`, each text field is scrubbed **per block** — resolve (a span must be
 /// scanned whole to redact it), scrub, emit, drop — so the peak is one field, and nothing is cloned
 /// when a field is clean ([`scrub_cow`](crate::redact::scrub_cow) borrows). This replaced a
-/// clone-the-whole-`Message`-then-redact path; only tool inputs still clone (small JSON, mutated by
-/// structural scrubbing).
+/// clone-the-whole-`Message`-then-redact path; tool inputs materialize only for structural scrubbing.
 fn render_blocks_impl(
     blocks: &[Block],
     resolver: &crate::lazy::Resolver,
     mut redact: Option<RedactCtx<'_>>,
     emit: &mut dyn FnMut(&str),
-) {
+) -> anyhow::Result<()> {
     let mut started = false;
     let sep = |started: &mut bool, emit: &mut dyn FnMut(&str)| {
         if *started {
@@ -154,16 +157,26 @@ fn render_blocks_impl(
                 emit("```tool_call\n");
                 emit(name);
                 emit(" ");
-                let json = if let Some((opts, stats)) = redact.as_mut() {
-                    // Structural scrub (string values only, keys/shape intact) needs a mutable
-                    // value; tool inputs are small, so this clone is cheap.
-                    let mut input = input.clone();
-                    crate::redact::scrub_value(&mut input, opts, stats);
-                    serde_json::to_string(&input).unwrap_or_default()
+                struct TextWriter<'a>(&'a mut dyn FnMut(&str));
+                impl std::io::Write for TextWriter<'_> {
+                    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                        let text = std::str::from_utf8(bytes).map_err(std::io::Error::other)?;
+                        (self.0)(text);
+                        Ok(bytes.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        Ok(())
+                    }
+                }
+                let mut writer = TextWriter(emit);
+                if let Some((opts, stats)) = redact.as_mut() {
+                    // Structural scrubbing explicitly owns only the demanded tool value.
+                    let mut owned = input.resolve()?.into_owned();
+                    crate::redact::scrub_value(&mut owned, opts, stats);
+                    serde_json::to_writer(&mut writer, &owned)?;
                 } else {
-                    serde_json::to_string(input).unwrap_or_default()
-                };
-                emit(&json);
+                    input.write_canonical(&mut writer)?;
+                }
                 emit("\n```");
             }
             Block::ToolResult { content, is_error, .. } => {
@@ -200,6 +213,7 @@ fn render_blocks_impl(
             }
         }
     }
+    Ok(())
 }
 
 /// Whether a message renders to no training text (so [`write_record`] drops it) — the
@@ -277,9 +291,10 @@ pub fn write_record<W: std::io::Write>(
                 // Scrub per block — resolve, scrub, emit, drop — so the peak is one field and a
                 // clean message is never cloned (the old path cloned + materialized each message).
                 let mut stats = crate::redact::RedactStats::default();
-                render_blocks_impl(&m.content, &resolver, Some((opts, &mut stats)), &mut emit);
+                render_blocks_impl(&m.content, &resolver, Some((opts, &mut stats)), &mut emit)
+                    .map_err(std::io::Error::other)?;
             } else {
-                render_blocks_into(&m.content, &resolver, &mut emit);
+                render_blocks_into(&m.content, &resolver, &mut emit).map_err(std::io::Error::other)?;
             }
         }
         err?;
@@ -373,7 +388,7 @@ mod tests {
                     Block::ToolUse {
                         id: "1".into(),
                         name: "Bash".into(),
-                        input: json!({"cmd": "grep x"}),
+                        input: (json!({"cmd": "grep x"})).into(),
                         namespace: None,
                     },
                 ],
@@ -431,7 +446,7 @@ mod tests {
                     Block::ToolUse {
                         id: "1".into(),
                         name: "Bash".into(),
-                        input: json!({"command": "export TOKEN=plain", "auth": "Bearer abcdef1234567890XYZ"}),
+                        input: (json!({"command": "export TOKEN=plain", "auth": "Bearer abcdef1234567890XYZ"})).into(),
                         namespace: None,
                     },
                 ],
@@ -457,7 +472,7 @@ mod tests {
         ]);
         let opts = crate::redact::RedactOptions::default();
 
-        let (scrubbed_session, _) = crate::redact::redact_with(&s, &opts);
+        let (scrubbed_session, _) = crate::redact::redact_with(&s, &opts).unwrap();
         let mut expect = Vec::new();
         write_record(&scrubbed_session, &mut expect, Format::Chatml, None).unwrap();
 

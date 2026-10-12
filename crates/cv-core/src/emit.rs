@@ -166,7 +166,7 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     let mut owned: Option<Session> = None;
     if has_unresolved_spans(session) {
         let mut s = session.clone();
-        s.materialize();
+        s.materialize()?;
         owned = Some(s);
     }
     if opts.thinking != ThinkingMode::Native {
@@ -299,9 +299,22 @@ fn has_unresolved_spans(session: &Session) -> bool {
         m.content.iter().any(|b| match b {
             Block::Text { text } | Block::Thinking { text, .. } => text.is_span(),
             Block::ToolResult { content, .. } => content.is_span(),
+            Block::ToolUse { input, .. } => matches!(input, crate::Json::Source(_)),
             _ => false,
         })
     })
+}
+
+/// Resolve complete values before a full-output consumer touches them. Ordinary owned sessions
+/// borrow without a clone; a failed source read returns before native output is created.
+pub(crate) fn materialized_session(session: &Session) -> Result<std::borrow::Cow<'_, Session>> {
+    if has_unresolved_spans(session) {
+        let mut owned = session.clone();
+        owned.materialize()?;
+        Ok(std::borrow::Cow::Owned(owned))
+    } else {
+        Ok(std::borrow::Cow::Borrowed(session))
+    }
 }
 
 /// Emit `session` into `target`, then re-parse the written output with `target`'s own adapter and
@@ -344,6 +357,8 @@ pub fn emit_report(
     out_dir: &Path,
     opts: &EmitOptions,
 ) -> Result<(EmitResult, FidelityReport)> {
+    let session = materialized_session(session)?;
+    let session = session.as_ref();
     let result = emit(session, target, out_dir, opts)?;
     // The emitter owns resumability for Claude; assert the three rules on what it wrote.
     if target == Harness::Claude {
@@ -478,7 +493,7 @@ mod tests {
         asst.content.push(Block::ToolUse {
             id: "call_1".into(),
             name: "run_shell".into(),
-            input: serde_json::json!({ "cmd": "ls" }),
+            input: (serde_json::json!({ "cmd": "ls" })).into(),
             namespace: None,
         });
 
@@ -828,8 +843,8 @@ mod tests {
             keep_last: 1,
             ..Default::default()
         };
-        let d = distill(&src, &opts);
-        let distilled = resumable_session(&src, &d, &opts);
+        let d = distill(&src, &opts).unwrap();
+        let distilled = resumable_session(&src, &d, &opts).unwrap();
         let fork = splice(
             &[Span {
                 source: &src,
@@ -856,15 +871,15 @@ mod tests {
             Harness::Claude,
         );
         let lane = crate::distill::tests::lane();
-        let dl = distill(&lane, &opts);
-        let lane_distilled = resumable_session(&lane, &dl, &opts);
+        let dl = distill(&lane, &opts).unwrap();
+        let lane_distilled = resumable_session(&lane, &dl, &opts).unwrap();
 
         let verbs: [(&str, &Session); 5] = [
             ("distill", &distilled),
             ("fork", &fork),
             ("splice", &two),
             ("port", &src),
-            ("distill(lane)", &lane_distilled),
+            ("distill(lane).unwrap()", &lane_distilled),
         ];
         for (verb, session) in verbs {
             for sidechain in [None, Some(("rootsess".to_string(), "afedcba9876543210".to_string()))] {
@@ -1171,7 +1186,7 @@ mod tests {
         // And the assistant tool call's arguments round-trip.
         let tool_use_input = parsed.messages.iter().find_map(|m| {
             m.content.iter().find_map(|b| match b {
-                Block::ToolUse { input, .. } => Some(input.clone()),
+                Block::ToolUse { input, .. } => Some(input.resolve().unwrap().into_owned()),
                 _ => None,
             })
         });

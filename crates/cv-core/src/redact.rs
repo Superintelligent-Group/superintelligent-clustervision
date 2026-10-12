@@ -131,8 +131,8 @@ impl RedactStats {
 }
 
 /// Return a copy of `session` with secrets/PII scrubbed from all message + tool content.
-pub fn redact(session: &Session) -> Session {
-    redact_with(session, &RedactOptions::default()).0
+pub fn redact(session: &Session) -> anyhow::Result<Session> {
+    Ok(redact_with(session, &RedactOptions::default())?.0)
 }
 
 /// Like [`redact`], but with [`RedactOptions`]; also returns [`RedactStats`].
@@ -148,7 +148,7 @@ pub fn redact(session: &Session) -> Session {
 /// Not scrubbed: `cwd` and `source_path` (filesystem paths — a placeholder would corrupt them, and
 /// path privacy is a separate concern from secret redaction), `model`, ids, timestamps, and
 /// `git.branch`/`git.commit` (user-visible refs, not credential carriers).
-pub fn redact_with(session: &Session, opts: &RedactOptions) -> (Session, RedactStats) {
+pub fn redact_with(session: &Session, opts: &RedactOptions) -> anyhow::Result<(Session, RedactStats)> {
     let mut out = session.clone();
     let mut stats = RedactStats::default();
 
@@ -164,10 +164,10 @@ pub fn redact_with(session: &Session, opts: &RedactOptions) -> (Session, RedactS
         scrub_value(v, opts, &mut stats);
     }
     for msg in &mut out.messages {
-        redact_message(msg, opts, &mut stats);
+        redact_message(msg, opts, &mut stats)?;
     }
 
-    (out, stats)
+    Ok((out, stats))
 }
 
 /// Redact secrets from a single string. The core building block.
@@ -178,7 +178,7 @@ pub fn redact_text(s: &str) -> String {
 
 /// Redact secrets from a single message in place. Public so streaming consumers (dataset export) can
 /// scrub one message at a time without materializing the whole session.
-pub fn redact_message(msg: &mut Message, opts: &RedactOptions, stats: &mut RedactStats) {
+pub fn redact_message(msg: &mut Message, opts: &RedactOptions, stats: &mut RedactStats) -> anyhow::Result<()> {
     for block in &mut msg.content {
         match block {
             Block::Text { text } | Block::Thinking { text, .. } => {
@@ -189,7 +189,7 @@ pub fn redact_message(msg: &mut Message, opts: &RedactOptions, stats: &mut Redac
                 }
             }
             Block::ToolUse { input, .. } => {
-                scrub_value(input, opts, stats);
+                scrub_value(input.make_owned()?, opts, stats);
             }
             Block::ToolResult { content, details, .. } => {
                 if let Cow::Owned(scrubbed) = scrub_cow(content, opts, stats) {
@@ -207,6 +207,7 @@ pub fn redact_message(msg: &mut Message, opts: &RedactOptions, stats: &mut Redac
     for (_k, v) in msg.extra.iter_mut() {
         scrub_value(v, opts, stats);
     }
+    Ok(())
 }
 
 /// Recursively scrub string values inside a JSON value, leaving keys and structure intact. Public
@@ -798,7 +799,8 @@ mod tests {
                 keep_emails: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let t = out.messages[0].text().unwrap();
         assert!(t.contains("a@b.com"), "got: {t}");
     }
@@ -935,16 +937,17 @@ mod tests {
         m.content.push(Block::ToolUse {
             id: "1".into(),
             name: "bash".into(),
-            input,
+            input: input.into(),
             namespace: None,
         });
         sess.messages.push(m);
 
-        let out = redact(&sess);
+        let out = redact(&sess).unwrap();
         let block = &out.messages[0].content[0];
         let Block::ToolUse { input, .. } = block else {
             panic!("expected tool use");
         };
+        let input = input.resolve().unwrap();
         // structure + keys intact
         assert!(input.get("command").is_some());
         assert_eq!(input["command"], "curl");
@@ -973,7 +976,7 @@ mod tests {
         });
         sess.messages.push(m);
 
-        let out = redact(&sess);
+        let out = redact(&sess).unwrap();
         let Block::ToolResult { content, details, .. } = &out.messages[0].content[0] else {
             panic!();
         };
@@ -996,7 +999,7 @@ mod tests {
         });
         sess.messages.push(m);
 
-        let out = redact(&sess);
+        let out = redact(&sess).unwrap();
         assert!(!out.title.as_ref().unwrap().contains("sk-abcDEF"));
         let Block::Thinking { text, .. } = &out.messages[0].content[0] else {
             panic!();
@@ -1014,7 +1017,7 @@ mod tests {
             text: "sk-abcDEF1234567890ghijkl and a@b.com".into(),
         });
         sess.messages.push(m);
-        let (_out, stats) = redact_with(&sess, &RedactOptions::default());
+        let (_out, stats) = redact_with(&sess, &RedactOptions::default()).unwrap();
         assert_eq!(stats.api_keys, 1);
         assert_eq!(stats.emails, 1);
         assert_eq!(stats.total(), 2);
@@ -1241,7 +1244,7 @@ mod tests {
         );
         sess.messages.push(m);
 
-        let (out, stats) = redact_with(&sess, &RedactOptions::default());
+        let (out, stats) = redact_with(&sess, &RedactOptions::default()).unwrap();
         let remote = out.git.as_ref().unwrap().remote.as_deref().unwrap();
         assert_eq!(remote, "https://x-access-token:[REDACTED:secret]@github.com/o/r.git");
         assert_eq!(out.git.as_ref().unwrap().branch.as_deref(), Some("main"));
@@ -1252,7 +1255,7 @@ mod tests {
         assert!(stats.total() >= 3, "stats: {stats:?}");
 
         // Idempotent across the whole session too.
-        let (again, again_stats) = redact_with(&out, &RedactOptions::default());
+        let (again, again_stats) = redact_with(&out, &RedactOptions::default()).unwrap();
         assert_eq!(again.git.as_ref().unwrap().remote, out.git.as_ref().unwrap().remote);
         assert_eq!(again.extra, out.extra);
         assert_eq!(again.messages[0].extra, out.messages[0].extra);

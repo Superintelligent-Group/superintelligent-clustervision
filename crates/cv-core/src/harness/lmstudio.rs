@@ -278,6 +278,8 @@ fn read_bytes(path: &Path) -> std::io::Result<Bytes> {
 /// LM Studio is a chat app with no working directory, so `opts.new_cwd` / `session.cwd` are not
 /// written into the file; we surface the chosen cwd only in the resume hint.
 pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let created = session.created_at.or(session.updated_at).unwrap_or_else(Utc::now);
     let created_ms = created.timestamp_millis();
 
@@ -290,7 +292,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 
     let mut messages: Vec<Value> = Vec::new();
     for msg in &session.messages {
-        if let Some(version) = emit_version(session, msg, created) {
+        if let Some(version) = emit_version(session, msg, created)? {
             messages.push(json!({
                 "versions": [version],
                 "currentlySelected": 0,
@@ -328,12 +330,12 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 
 /// Build the single `version` object for one IR message turn (the parser only reads the
 /// `currentlySelected` version, so we emit exactly one). Returns `None` for empty turns.
-fn emit_version(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Option<Value> {
-    match msg.role {
+fn emit_version(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Result<Option<Value>> {
+    Ok(match msg.role {
         Role::Assistant => {
-            let steps = emit_assistant_steps(session, msg, fallback);
+            let steps = emit_assistant_steps(session, msg, fallback)?;
             if steps.is_empty() {
-                return None;
+                return Ok(None);
             }
             Some(json!({
                 "type": "multiStep",
@@ -343,9 +345,9 @@ fn emit_version(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Op
         }
         // User, System, and Tool turns all become a single-step turn with content parts.
         role => {
-            let content = emit_content_parts(&msg.content);
+            let content = emit_content_parts(&msg.content)?;
             if content.is_empty() {
-                return None;
+                return Ok(None);
             }
             let role_str = match role {
                 Role::System => "system",
@@ -357,12 +359,12 @@ fn emit_version(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Op
                 "content": content,
             }))
         }
-    }
+    })
 }
 
 /// Map an assistant message's blocks into LM Studio `steps[]` (`contentBlock`s). Model + usage ride
 /// on the first step's `genInfo`; the `stepIdentifier` prefix carries the step timestamp.
-fn emit_assistant_steps(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Vec<Value> {
+fn emit_assistant_steps(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Result<Vec<Value>> {
     let ts = msg.timestamp.unwrap_or(fallback);
     let step_id = format!("{}-0.{}", ts.timestamp_millis(), "0000000000000000");
     let model = msg.model.as_ref().or(session.model.as_ref());
@@ -418,7 +420,7 @@ fn emit_assistant_steps(session: &Session, msg: &Message, fallback: DateTime<Utc
             Block::ToolUse { name, input, .. } => {
                 // No native tool structure: render a readable, self-describing text block. The
                 // parser reads it back as text (round-trips as content, not as a ToolUse).
-                let args = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                let args = serde_json::to_string(input.resolve()?.as_ref())?;
                 push_block(text_parts(&format!("[tool call: {name} {args}]")), false, &mut steps);
             }
             Block::ToolResult { content, .. } => {
@@ -431,11 +433,11 @@ fn emit_assistant_steps(session: &Session, msg: &Message, fallback: DateTime<Utc
             }
         }
     }
-    steps
+    Ok(steps)
 }
 
 /// Map a (user/system/tool) message's blocks into a `content[]` parts array (`text` / `file`).
-fn emit_content_parts(blocks: &[Block]) -> Vec<Value> {
+fn emit_content_parts(blocks: &[Block]) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for b in blocks {
         match b {
@@ -446,7 +448,7 @@ fn emit_content_parts(blocks: &[Block]) -> Vec<Value> {
                 out.push(json!({ "type": "text", "text": format!("[tool result: {content}]") }))
             }
             Block::ToolUse { name, input, .. } => {
-                let args = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                let args = serde_json::to_string(input.resolve()?.as_ref())?;
                 out.push(json!({ "type": "text", "text": format!("[tool call: {name} {args}]") }))
             }
             Block::File { .. } | Block::Image { .. } => {

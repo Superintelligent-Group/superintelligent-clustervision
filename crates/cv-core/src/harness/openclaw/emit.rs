@@ -18,6 +18,8 @@ use uuid::Uuid;
 /// a `sessions.json` index entry. Mirrors `harness/openclaw.rs`'s reader: a `{type:session,…}`
 /// header line followed by `{type:message,id,parentId,timestamp,message:{role,content,…}}` lines.
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     let agent_id = "main";
     let cwd = effective_cwd(session, opts);
@@ -113,18 +115,18 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         let inner = match msg.role {
             Role::User => json!({
                 "role": "user",
-                "content": openclaw_content_blocks(&msg.content),
+                "content": openclaw_content_blocks(&msg.content)?,
                 "timestamp": ts_ms,
             }),
             Role::System => json!({
                 "role": "system",
-                "content": openclaw_content_blocks(&msg.content),
+                "content": openclaw_content_blocks(&msg.content)?,
                 "timestamp": ts_ms,
             }),
             Role::Assistant => {
                 let mut m = Map::new();
                 m.insert("role".into(), json!("assistant"));
-                m.insert("content".into(), openclaw_content_blocks(&msg.content));
+                m.insert("content".into(), openclaw_content_blocks(&msg.content)?);
                 m.insert("timestamp".into(), json!(ts_ms));
                 if let Some(model) = msg.model.as_ref().or(session.model.as_ref()) {
                     m.insert("model".into(), json!(model));
@@ -237,18 +239,19 @@ fn openclaw_short_id() -> String {
 
 /// IR blocks → an OpenClaw content array (`text`/`thinking`/`toolCall`/`image`).
 /// A deferred tool's call goes back through OpenClaw's `tool_call` wrapper.
-fn openclaw_content_blocks(content: &[Block]) -> Value {
-    if content
-        .iter()
-        .any(|b| crate::affordance::rewrap_deferred(crate::ir::Harness::OpenClaw, b).is_some())
-    {
-        let wrapped: Vec<Block> = content
-            .iter()
-            .map(|b| crate::affordance::rewrap_deferred(crate::ir::Harness::OpenClaw, b).unwrap_or_else(|| b.clone()))
-            .collect();
-        return Value::Array(anthropic::assistant_blocks(&wrapped, &anthropic::OPENCLAW));
+fn openclaw_content_blocks(content: &[Block]) -> Result<Value> {
+    let mut wrapped = Vec::new();
+    let mut changed = false;
+    for block in content {
+        if let Some(rewrapped) = crate::affordance::rewrap_deferred(crate::ir::Harness::OpenClaw, block)? {
+            changed = true;
+            wrapped.push(rewrapped);
+        } else {
+            wrapped.push(block.clone());
+        }
     }
-    Value::Array(anthropic::assistant_blocks(content, &anthropic::OPENCLAW))
+    let blocks = if changed { wrapped.as_slice() } else { content };
+    Ok(Value::Array(anthropic::assistant_blocks(blocks, &anthropic::OPENCLAW)?))
 }
 
 /// Pull the (id, content, is_error, name) out of a Tool turn's blocks.

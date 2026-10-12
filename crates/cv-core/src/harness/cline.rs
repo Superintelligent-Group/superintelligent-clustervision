@@ -640,6 +640,8 @@ pub fn emit_with_harness(
     opts: &crate::emit::EmitOptions,
     harness: Harness,
 ) -> Result<crate::harness::EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let extension = match harness {
         Harness::Roo => "Roo Code",
         _ => "Cline",
@@ -671,7 +673,7 @@ pub fn emit_with_harness(
                 } else {
                     None
                 };
-                let mut blocks = anthropic::user_blocks(&msg.content, &anthropic::ANTHROPIC);
+                let mut blocks = anthropic::user_blocks(&msg.content, &anthropic::ANTHROPIC)?;
                 if let Some(cwd) = inject {
                     // Prepend a <task> title block (when we have one) so titles round-trip, then
                     // append the environment_details so cwd extraction finds it.
@@ -690,7 +692,7 @@ pub fn emit_with_harness(
             Role::Assistant => {
                 history.push(json!({
                     "role": "assistant",
-                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)),
+                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)?),
                 }));
             }
             Role::Tool => {
@@ -698,13 +700,13 @@ pub fn emit_with_harness(
                 // reclassifies it back to Role::Tool.
                 history.push(json!({
                     "role": "user",
-                    "content": Value::Array(anthropic::tool_result_blocks(&msg.content)),
+                    "content": Value::Array(anthropic::tool_result_blocks(&msg.content)?),
                 }));
             }
             Role::System => {
                 history.push(json!({
                     "role": "system",
-                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)),
+                    "content": Value::Array(anthropic::assistant_blocks(&msg.content, &anthropic::ANTHROPIC)?),
                 }));
             }
         }

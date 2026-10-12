@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::now_v7().to_string());
     // Which tool calls exist at all, so a result whose call was pruned away can be paired below.
     let called = called_tool_ids(session);
@@ -210,7 +212,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                             lines.push(codex_response_item(&ts, Value::Object(p)));
                         }
                         Block::ToolUse { id, name, input, .. } => {
-                            let args = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                            let args = serde_json::to_string(input.resolve()?.as_ref())?;
                             lines.push(codex_response_item(
                                 &ts,
                                 json!({

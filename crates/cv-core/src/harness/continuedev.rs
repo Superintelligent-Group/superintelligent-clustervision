@@ -299,6 +299,8 @@ fn read_bytes(path: &Path) -> Option<Bytes> {
 /// The parser backfills `cwd`/`title` from the transcript itself, so writing the index is for
 /// `discover()` fidelity, not correctness; we still write it.
 pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) -> Result<super::EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     use anyhow::Context;
 
     let new_id = opts.new_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -423,8 +425,7 @@ fn history_item(msg: &Message, session_model: Option<&str>) -> Value {
                             "function": {
                                 "name": name,
                                 // `arguments` is a JSON-encoded *string*.
-                                "arguments": serde_json::to_string(input)
-                                    .unwrap_or_else(|_| "{}".to_string()),
+                                "arguments": serde_json::to_string(input.resolve()?.as_ref())?,
                             },
                         }));
                     }

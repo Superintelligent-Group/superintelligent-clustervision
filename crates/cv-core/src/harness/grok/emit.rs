@@ -18,6 +18,8 @@ use uuid::Uuid;
 const GROK_ENCODE: &AsciiSet = &CONTROLS.add(b'/').add(b' ').add(b'.').add(b'%').add(b':').add(b'\\');
 
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::now_v7().to_string());
     let cwd = effective_cwd(session, opts);
     let cwd_str = cwd
@@ -132,15 +134,16 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                     .content
                     .iter()
                     .filter_map(|b| match b {
-                        Block::ToolUse { id, name, input, .. } => Some(json!({
-                            "id": id,
-                            "name": name,
-                            "arguments": serde_json::to_string(input)
-                                .unwrap_or_else(|_| "{}".to_string()),
-                        })),
+                        Block::ToolUse { id, name, input, .. } => Some((|| {
+                            Ok::<_, anyhow::Error>(json!({
+                                "id": id,
+                                "name": name,
+                                "arguments": serde_json::to_string(input.resolve()?.as_ref())?,
+                            }))
+                        })()),
                         _ => None,
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>>>()?;
                 if !calls.is_empty() {
                     line.insert("tool_calls".into(), Value::Array(calls));
                 }

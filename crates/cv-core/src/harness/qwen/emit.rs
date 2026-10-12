@@ -186,6 +186,8 @@ impl Writer<'_> {
 
 /// Emit Qwen Code 0.25 session JSONL under `out_dir` (see the module doc for what it may be).
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
+    let session = crate::emit::materialized_session(session)?;
+    let session = session.as_ref();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     let cwd = effective_cwd(session, opts);
     let cwd_str = cwd

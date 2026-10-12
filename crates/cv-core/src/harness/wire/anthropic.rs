@@ -300,29 +300,41 @@ fn document_from(item: &Value, q: &Quirks) -> Block {
 /// or a plain one when it has none), tool invocations, images; a [`Block::File`] becomes a
 /// `[file: …]` text marker (documents are a user-turn shape); tool results are skipped (they go
 /// on the Tool turn via [`tool_result_blocks`]).
-pub fn assistant_blocks(content: &[Block], q: &Quirks) -> Vec<Value> {
-    content.iter().filter_map(|b| block_to(b, q, false)).collect()
+pub fn assistant_blocks(content: &[Block], q: &Quirks) -> anyhow::Result<Vec<Value>> {
+    blocks_to(content, q, false)
 }
 
 /// A user turn's blocks as content: text and images natively, a [`Block::File`] as the
 /// `document` attachment the reader turns back into a File (stores with flat media get the text
 /// marker), a stray tool result (mixed user content) as a `tool_result` block; thinking and tool
 /// invocations do not occur on user turns but map to their native shapes rather than vanishing.
-pub fn user_blocks(content: &[Block], q: &Quirks) -> Vec<Value> {
-    content.iter().filter_map(|b| block_to(b, q, true)).collect()
+pub fn user_blocks(content: &[Block], q: &Quirks) -> anyhow::Result<Vec<Value>> {
+    blocks_to(content, q, true)
 }
 
 /// A Tool turn's results as `tool_result` blocks the reader pairs by id.
-pub fn tool_result_blocks(content: &[Block]) -> Vec<Value> {
-    content
-        .iter()
-        .filter(|b| matches!(b, Block::ToolResult { .. }))
-        .filter_map(|b| block_to(b, &ANTHROPIC, true))
-        .collect()
+pub fn tool_result_blocks(content: &[Block]) -> anyhow::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for block in content.iter().filter(|b| matches!(b, Block::ToolResult { .. })) {
+        if let Some(value) = block_to(block, &ANTHROPIC, true)? {
+            out.push(value);
+        }
+    }
+    Ok(out)
 }
 
-fn block_to(b: &Block, q: &Quirks, user: bool) -> Option<Value> {
-    Some(match b {
+fn blocks_to(content: &[Block], q: &Quirks, user: bool) -> anyhow::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for block in content {
+        if let Some(value) = block_to(block, q, user)? {
+            out.push(value);
+        }
+    }
+    Ok(out)
+}
+
+fn block_to(b: &Block, q: &Quirks, user: bool) -> anyhow::Result<Option<Value>> {
+    Ok(Some(match b {
         Block::Text { text } => json!({ "type": "text", "text": text }),
         Block::Thinking {
             text,
@@ -352,7 +364,7 @@ fn block_to(b: &Block, q: &Quirks, user: bool) -> Option<Value> {
             "type": q.tool_use.0,
             "id": id,
             "name": name,
-            q.tool_use.1: input,
+            q.tool_use.1: input.resolve()?.as_ref(),
         }),
         Block::ToolResult {
             tool_use_id,
@@ -365,7 +377,7 @@ fn block_to(b: &Block, q: &Quirks, user: bool) -> Option<Value> {
             "content": content,
             "is_error": is_error,
         }),
-        Block::ToolResult { .. } => return None,
+        Block::ToolResult { .. } => return Ok(None),
         Block::Image { media_type, data_ref } => image_block(media_type, data_ref, q),
         Block::File { mime, path, source } if user && q.flat_media.is_none() => {
             // Inverse of `document_from`: title ← path, source ← url/file_id.
@@ -396,7 +408,7 @@ fn block_to(b: &Block, q: &Quirks, user: bool) -> Option<Value> {
             let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
             json!({ "type": "text", "text": format!("[file: {label}]") })
         }
-    })
+    }))
 }
 
 /// An `image` block rebuilt from the IR's reference so the pointer survives a round trip (the
