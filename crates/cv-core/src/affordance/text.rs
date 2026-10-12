@@ -515,4 +515,32 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn unicode_whitespace_across_prefix_cap_keeps_the_late_ascii_head() {
+        let dir = std::env::temp_dir().join(format!("cv-affordance-unicode-head-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let full = format!(
+            "{}<task-notification>wanted</task-notification>",
+            "\u{2003}".repeat(10000)
+        );
+        let path = dir.join("body");
+        std::fs::write(&path, &full).unwrap();
+        let resolver = Resolver::new(Some(path));
+        for escaped in [false, true] {
+            let span = Text::Span(crate::lazy::Span {
+                source: None,
+                offset: 0,
+                len: full.len() as u64,
+                escaped,
+            });
+            assert!(span.resolve_prefix(&resolver, 256).trim().is_empty());
+            assert_eq!(
+                starts_with(&span, &resolver, "<task-notification>"),
+                full.trim_start().starts_with("<task-notification>")
+            );
+        }
+        drop(resolver);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

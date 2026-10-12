@@ -277,8 +277,9 @@ impl Resolver {
     /// Resolve at most the first `max_raw` **raw** bytes of `sp` — for consumers that only need the
     /// head of a giant field (listing labels, snippet scans, embedding heads) and must never
     /// materialize the whole thing. For an escaped span the cut is backed up to the last *complete*
-    /// JSON escape sequence so truncation can't corrupt the unescape; an unescaped cut may land
-    /// mid-UTF-8-char, which `from_utf8_lossy` renders as a trailing replacement char.
+    /// JSON escape sequence so truncation can't corrupt the unescape. A cut within a valid UTF-8
+    /// scalar backs up to its start, using at most three lookahead bytes to distinguish a cap from
+    /// malformed source text. Malformed bytes retain the full resolver's lossy behavior.
     pub fn resolve_prefix<'a>(&'a self, sp: &Span, max_raw: u64) -> Cow<'a, str> {
         if sp.len <= max_raw {
             return self.resolve(sp);
@@ -287,14 +288,26 @@ impl Resolver {
             len: max_raw,
             ..sp.clone()
         };
-        match self.raw_bytes(&capped) {
+        let with_lookahead = Span {
+            len: max_raw.saturating_add(3).min(sp.len),
+            ..sp.clone()
+        };
+        // A readable cap remains useful even when the source ends before the requested lookahead.
+        match self.raw_bytes(&with_lookahead).or_else(|| self.raw_bytes(&capped)) {
             None => Cow::Borrowed(""),
             Some(bytes) if sp.escaped => {
-                let keep = complete_escape_prefix(&bytes);
+                let end = complete_utf8_prefix(&bytes, usize::try_from(max_raw).unwrap_or(usize::MAX));
+                let keep = complete_escape_prefix(&bytes[..end]);
                 Cow::Owned(unescape_json_body(&bytes[..keep]))
             }
-            Some(Cow::Borrowed(b)) => String::from_utf8_lossy(b),
-            Some(Cow::Owned(b)) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
+            Some(Cow::Borrowed(b)) => {
+                let keep = complete_utf8_prefix(b, usize::try_from(max_raw).unwrap_or(usize::MAX));
+                String::from_utf8_lossy(&b[..keep])
+            }
+            Some(Cow::Owned(b)) => {
+                let keep = complete_utf8_prefix(&b, usize::try_from(max_raw).unwrap_or(usize::MAX));
+                Cow::Owned(String::from_utf8_lossy(&b[..keep]).into_owned())
+            }
         }
     }
 
@@ -373,6 +386,28 @@ impl Resolver {
         let mut buf = vec![0u8; sp.len as usize];
         f.read_exact(&mut buf).ok()?;
         Some(Cow::Owned(buf))
+    }
+}
+
+/// Back up a raw cap only when lookahead confirms a complete valid scalar across it. Inspecting
+/// just an incomplete capped prefix would also erase malformed or truncated source bytes.
+fn complete_utf8_prefix(raw: &[u8], limit: usize) -> usize {
+    let end = limit.min(raw.len());
+    let Some(mut start) = end.checked_sub(1) else { return 0 };
+    while start > 0 && raw[start] & 0xc0 == 0x80 && end - start < 4 {
+        start -= 1;
+    }
+    let width = match raw[start] {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return end,
+    };
+    let scalar_end = start + width;
+    if scalar_end > end && scalar_end <= raw.len() && std::str::from_utf8(&raw[start..scalar_end]).is_ok() {
+        start
+    } else {
+        end
     }
 }
 
@@ -1205,5 +1240,90 @@ mod tests {
         assert_eq!(resolver.resolve_prefix(&span(full_len, true), 14), "line one\nline");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_prefix_preserves_unicode_boundaries_and_malformed_source() {
+        let dir = std::env::temp_dir().join(format!("cv-lazy-prefix-unicode-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let valid = format!("{}wanted é 😀", "\u{2003}".repeat(10000));
+        let malformed: &[&[u8]] = &[
+            b"\xff\xe2\x80Awanted",
+            b"\xff\xe2\x80\x83wanted",
+            b"\xe2\x80",
+            b"\xf0\x90\x80",
+            b"\xe0\x80\x80wanted",
+            b"\xed\xa0\x80wanted",
+            b"\xf4\x90\x80\x80wanted",
+            b"\x80\x80\x80\x80\x80wanted",
+        ];
+        let bodies: Vec<&[u8]> = std::iter::once(valid.as_bytes())
+            .chain(malformed.iter().copied())
+            .collect();
+        for (i, body) in bodies.iter().enumerate() {
+            let path = dir.join(i.to_string());
+            // Offset and suffix make lookahead's original-span boundary observable.
+            std::fs::write(&path, [b"prefix".as_slice(), body, b"\x83outside"].concat()).unwrap();
+            let resolver = Resolver::new(Some(path));
+            for escaped in [false, true] {
+                let span = Span {
+                    source: None,
+                    offset: 6,
+                    len: body.len() as u64,
+                    escaped,
+                };
+                let caps: Vec<usize> = if i == 0 {
+                    (0..8)
+                        .chain([
+                            1024,
+                            body.len() - 4,
+                            body.len() - 3,
+                            body.len() - 2,
+                            body.len() - 1,
+                            body.len(),
+                        ])
+                        .collect()
+                } else {
+                    (0..=body.len()).collect()
+                };
+                for cap in caps {
+                    // Independent scalar iteration identifies valid scalars straddling the cap;
+                    // invalid UTF-8 subsequences keep the existing lossy capped representation.
+                    let mut keep = cap;
+                    let mut offset = 0;
+                    for chunk in body.utf8_chunks() {
+                        for (start, ch) in chunk.valid().char_indices() {
+                            let start = offset + start;
+                            if start < cap && cap < start + ch.len_utf8() {
+                                keep = start;
+                            }
+                        }
+                        offset += chunk.valid().len() + chunk.invalid().len();
+                    }
+                    assert_eq!(
+                        resolver.resolve_prefix(&span, cap as u64),
+                        String::from_utf8_lossy(&body[..keep]),
+                        "body {i}, cap {cap}, escaped {escaped}"
+                    );
+                }
+                if i == 0 {
+                    assert!(resolver.resolve_prefix(&span, 1024).trim().is_empty());
+                    assert_eq!(resolver.resolve(&span), valid);
+                }
+            }
+        }
+        // Requested lookahead past the file must not erase an otherwise readable prefix.
+        let path = dir.join("short-source");
+        std::fs::write(&path, b"\xe2\x80").unwrap();
+        let resolver = Resolver::new(Some(path));
+        let span = Span {
+            source: None,
+            offset: 0,
+            len: 8,
+            escaped: false,
+        };
+        assert_eq!(resolver.resolve_prefix(&span, 1), "\u{fffd}");
+        drop(resolver);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
