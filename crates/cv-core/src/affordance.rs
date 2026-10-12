@@ -1521,6 +1521,155 @@ mod tests {
     }
 
     #[test]
+    fn deferred_source_child_remains_lazy_and_failure_stops_delivery() {
+        let path = std::env::temp_dir().join(format!("cv-deferred-source-{}", uuid::Uuid::new_v4()));
+        let wrapped = json!({"name":"delegate_task", "arguments":{"prompt":"λ".repeat(400_000),"id":7}});
+        let raw = serde_json::to_vec(&wrapped).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let source = Json::source(&path, 0, raw.len() as u64).unwrap();
+        let mut block = Block::ToolUse {
+            id: "c".into(),
+            name: DEFERRED.into(),
+            namespace: None,
+            input: source.clone(),
+        };
+        unwrap_deferred(Harness::Hermes, &mut block).unwrap();
+        let Block::ToolUse {
+            input, name, namespace, ..
+        } = &block
+        else {
+            unreachable!()
+        };
+        assert!(matches!(input, Json::Source(_)));
+        assert_eq!(name, "delegate_task");
+        assert_eq!(namespace.as_deref(), Some(DEFERRED));
+        let replay = rewrap_deferred(Harness::Hermes, &block).unwrap().unwrap();
+        let Block::ToolUse { input, .. } = replay else {
+            unreachable!()
+        };
+        assert_eq!(input.resolve().unwrap().as_ref(), &wrapped);
+        std::fs::remove_file(path).unwrap();
+        let mut delivered = 0;
+        let mut inner = |_: Message| {
+            delivered += 1;
+            Flow::Continue
+        };
+        let mut sink = AffordanceSink::new(Harness::Hermes, &mut inner);
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::ToolUse {
+            id: "c".into(),
+            name: DEFERRED.into(),
+            namespace: None,
+            input: source,
+        });
+        assert_eq!(sink.message(message), Flow::Stop);
+        assert!(sink.take_error().is_some());
+        assert_eq!(sink.message(Message::new(Role::Assistant)), Flow::Stop);
+        drop(sink);
+        assert_eq!(delivered, 0);
+    }
+
+    #[test]
+    fn bounded_composed_summaries_match_original_owned_codec() {
+        let path = std::env::temp_dir().join(format!("cv-summary-oracle-{}", uuid::Uuid::new_v4()));
+        for value in [
+            json!({"status":"λ\n".repeat(80),"taskId":"x".repeat(119)}),
+            json!({"status":"done","taskId":false,"task_id":17}),
+            json!({"description":"λ\n".repeat(100),"subject":"second"}),
+            json!({"description":"","subject":"λ".repeat(121)}),
+            json!({"questions":[{"question":""}],"tasks":["  λ  "],"status":"x".repeat(200)}),
+            json!({"questions":[{"question":"first"}],"tasks":[{"content":" ","subject":"masked"}],"status":"done"}),
+            json!({"tasks":[format!("{}λ{}", " ".repeat(80_000), "\n".repeat(80_000))]}),
+            json!({"tasks":[{"content":"λ".repeat(121),"status":"ignored"}],"status":"tail"}),
+            json!({"id":u64::MAX,"taskId":"later","status":null}),
+            json!({"command":[],"prompt":null,"questions":[],"status":"pending"}),
+        ] {
+            let raw = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &raw).unwrap();
+            let source = Json::source(&path, 0, raw.len() as u64).unwrap();
+            for kind in [Kind::Plan, Kind::Schedule, Kind::Approval] {
+                let expected = owned_summary_oracle(kind, &value, &[]);
+                assert_eq!(call_summary(kind, JsonView::from(&value), &[]).unwrap(), expected);
+                assert_eq!(
+                    source.with_view(|view| call_summary(kind, view, &[])).unwrap(),
+                    expected
+                );
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn owned_summary_oracle(kind: Kind, input: &Value, items: &[Item]) -> String {
+        if !items.is_empty() {
+            return items_summary(items);
+        }
+        // An item-wise update: which item, and what it became.
+        if let Some(status) = input
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|_| kind == Kind::Plan)
+        {
+            let which = ["taskId", "task_id", "id", "subject"].iter().find_map(|k| {
+                input.get(*k).and_then(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .or_else(|| v.as_u64().map(|n| n.to_string()))
+                })
+            });
+            if let Some(which) = which {
+                return crate::ir::truncate(&format!("{which} → {status}"), 120);
+            }
+        }
+        const KEYS: [&str; 16] = [
+            "description",
+            "subject",
+            "prompt",
+            "command",
+            "cron",
+            "schedule",
+            "skill",
+            "name",
+            "question",
+            "goal",
+            "objective",
+            "instructions",
+            "message",
+            "reason",
+            "id",
+            "taskId",
+        ];
+        let mut parts = Vec::new();
+        for k in KEYS {
+            if let Some(s) = input.get(k).and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            }) {
+                parts.push(s);
+                if parts.len() == 2 || kind != Kind::Schedule {
+                    break;
+                }
+            }
+        }
+        if parts.is_empty() {
+            if let Some(q) = input.get("questions").and_then(Value::as_array).and_then(|a| a.first()) {
+                if let Some(s) = q.get("question").and_then(Value::as_str) {
+                    parts.push(s.to_string());
+                }
+            }
+            if let Some(t) = input.get("tasks").and_then(Value::as_array).and_then(|a| a.first()) {
+                if let Some(s) = item_of(t) {
+                    parts.push(s.content);
+                }
+            }
+            if let Some(s) = input.get("status").and_then(Value::as_str) {
+                parts.push(s.to_string());
+            }
+        }
+        crate::ir::truncate(&parts.join(" · "), 120)
+    }
+
+    #[test]
     fn every_todo_shape_normalizes_to_items() {
         let todo = json!({"todos": [{"content": "a", "status": "completed"}, {"content": "b", "status": "pending"}]});
         assert_eq!(items_of(&todo).len(), 2);
