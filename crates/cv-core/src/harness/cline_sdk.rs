@@ -840,9 +840,18 @@ mod tests {
             let mut sink = CollectSink::default();
             let mut actual = stream_with_options(&path, "sdk", &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
-            assert_eq!(actual.messages.iter().flat_map(|m| &m.content).any(|block| {
-                matches!(block, Block::ToolUse { input: crate::json::Json::Source(_), .. })
-            }), opts.spans);
+            assert_eq!(
+                actual.messages.iter().flat_map(|m| &m.content).any(|block| {
+                    matches!(
+                        block,
+                        Block::ToolUse {
+                            input: crate::json::Json::Source(_),
+                            ..
+                        }
+                    )
+                }),
+                opts.spans
+            );
             actual.materialize().unwrap();
             let actual = serde_json::to_string(&actual).unwrap();
             if let Some(expected) = &expected {
