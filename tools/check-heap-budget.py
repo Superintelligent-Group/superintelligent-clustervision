@@ -48,12 +48,12 @@ def stores(binary, root, env):
     generator = Path(__file__).with_name("perf-fixture.py")
     # Store promises here are for mmap builds. The no-mmap guarantee below applies to the
     # positioned-read chunk resolver, not adapters that must own giant source records.
-    for harness, shape in (("gemini", "giant"), ("claude", "fixed"), ("claude", "giant"), ("codex", "fixed")):
+    for harness, shape in (("gemini", "giant"), ("claude", "fixed"), ("claude", "giant"), ("codex", "fixed"), ("codex", "giant")):
         for escaped in (False, True):
             peaks = []
             for size in SIZES:
                 # Fixed records refute whole-history retention; giant records refute temporary
-                # field/line ownership in mmap-backed lazy Gemini and Claude parsing.
+                # field/line ownership (including detector passes) in mmap-backed lazy parsing.
                 records = 4 if shape == "giant" else size // (256 << 10)
                 out = root / f"{harness}-{shape}-{size}-{escaped}"
                 command = [sys.executable, str(generator), harness, str(out), "--payload-bytes", str(size), "--records", str(records)]
