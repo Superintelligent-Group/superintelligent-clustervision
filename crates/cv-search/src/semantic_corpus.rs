@@ -232,6 +232,13 @@ mod tests {
         let mut actual = sink();
         actual.message(message);
         assert!(actual.take_error().unwrap().to_string().contains("JSON source changed"));
+        let saved = actual.body.as_str().to_owned();
+        assert!(matches!(
+            actual.message(super::tests::message(Role::User, vec![text("later")])),
+            Flow::Stop
+        ));
+        assert_eq!(actual.body.as_str(), saved);
+        assert!(actual.take_error().is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
