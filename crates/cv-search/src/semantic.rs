@@ -44,6 +44,27 @@ const MODEL_REPO: &str = "minishlab/potion-base-8M";
 /// Store header magic: `CVEMBED` + format version 2 (version 1 was the implicit all-JSON store).
 const MAGIC: &[u8; 8] = b"CVEMBED\x02";
 
+/// Exact discovery hints visible to the reader, kept separately from its derived metadata.
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct ReferenceHints {
+    cwd: Option<PathBuf>,
+    title: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    message_count: usize,
+}
+impl From<&cv_core::SessionRef> for ReferenceHints {
+    fn from(r: &cv_core::SessionRef) -> Self {
+        Self {
+            cwd: r.cwd.clone(),
+            title: r.title.clone(),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            message_count: r.message_count,
+        }
+    }
+}
+
 /// Per-session metadata, persisted as the store's JSON block (everything but the vector).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RecordMeta {
@@ -64,6 +85,8 @@ struct RecordMeta {
     source_path: Option<PathBuf>,
     #[serde(default)]
     source: Option<Snapshot>,
+    #[serde(default)]
+    hints: Option<ReferenceHints>,
 }
 
 /// The JSON block inside the binary store (deserialize side; serialization uses a borrowed twin
@@ -139,6 +162,7 @@ impl From<LegacyStore> for Store {
                 updated_at: r.updated_at,
                 source_path: None,
                 source: None,
+                hints: None,
             });
         }
         Store {
@@ -390,6 +414,18 @@ fn model_reads(root: &Path) -> Result<ReadSet> {
     }
     let mut reads = ReadSet::default();
     visit(root, 0, &mut reads)?;
+    // Directory symlinks are not recursively followed; stamp the model's concrete supported
+    // layout files too, so a symlinked 0_StaticEmbedding cannot hide artifact replacement.
+    for base in [root.to_path_buf(), root.join("0_StaticEmbedding")] {
+        for name in [
+            "config.json",
+            "config_sentence_transformers.json",
+            "tokenizer.json",
+            "model.safetensors",
+        ] {
+            reads.record(&base.join(name));
+        }
+    }
     if let Some(parent) = root.parent() {
         reads.record(&parent.join("config_sentence_transformers.json"));
     }
@@ -438,9 +474,7 @@ fn refresh(
             && lookup.get(&(r.harness.as_str(), r.id.as_str())).is_some_and(|&i| {
                 let m = &old.meta[i];
                 let fresh = m.source_path.as_ref() == Some(&r.path)
-                    && m.created_at == r.created_at.map(|t| t.timestamp())
-                    && m.updated_at == r.updated_at.map(|t| t.timestamp())
-                    && m.cwd == r.cwd.as_ref().map(|p| p.display().to_string())
+                    && m.hints.as_ref() == Some(&ReferenceHints::from(r))
                     && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before));
                 keep[i] |= fresh;
                 fresh
@@ -484,6 +518,7 @@ fn refresh(
             updated_at: doc.updated_at,
             source_path: Some(r.path.clone()),
             source: Some(snapshot.with_reads(&reads)),
+            hints: Some(ReferenceHints::from(r)),
         });
         bodies.push(doc.body);
         if bodies.len() >= EMBED_BATCH {
@@ -564,6 +599,10 @@ pub fn semantic_search(path: &Path, query: &str, k: usize) -> Result<Vec<Hit>> {
     if store.meta.is_empty() {
         return Ok(Vec::new());
     }
+    anyhow::ensure!(
+        store.projection == PROJECTION_VERSION,
+        "semantic projection version changed — run cv index --semantic to rebuild vectors"
+    );
     let spec = resolve_model(false)?.context("embedding model is not cached — run cv index --semantic")?;
     let current = &spec.key;
     if store.model != *current
@@ -794,6 +833,124 @@ mod tests {
             1,
             "artifact replacement invalidates vectors even with the same alias/revision path"
         );
+        #[cfg(unix)]
+        {
+            let target = dir.join("linked-static");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::write(target.join("model.safetensors"), "linked weights").unwrap();
+            std::os::unix::fs::symlink(&target, first.join("0_StaticEmbedding")).unwrap();
+            let linked_reads = model_reads(&first).unwrap();
+            std::fs::write(target.join("model.safetensors"), "changed linked weights").unwrap();
+            assert!(!linked_reads.fresh(&mut Probe::default()));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_refresh_composes_real_claude_projection_with_fake_embedder() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-compose-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let input = dir.join("session.jsonl");
+        let path = dir.join("vectors.bin");
+        let user = serde_json::json!({"type":"user", "uuid":"u", "sessionId":"a", "message":{
+            "role":"user", "content":[{"type":"text", "text":"Inspect the file"}]}});
+        let assistant = serde_json::json!({"type":"assistant", "uuid":"v", "parentUuid":"u", "sessionId":"a", "message":{
+            "role":"assistant", "content":[{"type":"tool_use", "id":"call", "name":"Edit", "input":{"arg":"x".repeat(200000)}}]}});
+        std::fs::write(&input, format!("{user}\n{assistant}\n")).unwrap();
+        let refs = [fixture_ref(&input, "a")];
+        let count = std::cell::Cell::new(0);
+        refresh(
+            &path,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            crate::read_corpus_doc,
+            |bodies| {
+                count.set(count.get() + bodies.len());
+                assert_eq!(bodies[0].len(), 64 * 1024);
+                assert!(bodies[0].starts_with("Inspect the file\nEdit {\"arg\":\""));
+                fake_encode(bodies)
+            },
+            save_store,
+        )
+        .unwrap();
+        assert_eq!(count.get(), 1);
+        let saved = load_store(&path).unwrap();
+        assert_eq!(saved.meta[0].title.as_deref(), Some("Inspect the file"));
+        refresh(
+            &path,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |_| panic!("fresh native source should not parse"),
+            |_| panic!("fresh native source should not load model"),
+            save_store,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_freshness_compares_exact_reference_hints_not_derived_metadata() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-hints-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let input = dir.join("session.jsonl");
+        let path = dir.join("vectors.bin");
+        std::fs::write(&input, "body").unwrap();
+        let mut r = fixture_ref(&input, "a");
+        r.cwd = Some("/discovery/cwd".into());
+        r.title = Some("discovery title".into());
+        r.created_at = chrono::DateTime::from_timestamp(42, 1);
+        let count = std::cell::Cell::new(0);
+        let run = |r: &cv_core::SessionRef| {
+            refresh(
+                &path,
+                std::slice::from_ref(r),
+                "fake",
+                1,
+                ReadSet::default(),
+                |r| {
+                    count.set(count.get() + 1);
+                    let (mut d, reads) = fake_doc(r, None)?;
+                    d.cwd = Some("/derived/cwd".into());
+                    d.title = Some("derived title".into());
+                    Ok((d, reads))
+                },
+                fake_encode,
+                save_store,
+            )
+            .unwrap();
+        };
+        run(&r);
+        assert_eq!(count.get(), 1);
+        run(&r);
+        assert_eq!(count.get(), 1);
+        r.title = Some("new hint".into());
+        run(&r);
+        assert_eq!(count.get(), 2);
+        r.message_count += 1;
+        run(&r);
+        assert_eq!(count.get(), 3);
+        r.cwd = Some("/other/hint".into());
+        run(&r);
+        assert_eq!(count.get(), 4);
+        r.created_at = chrono::DateTime::from_timestamp(42, 2);
+        run(&r);
+        assert_eq!(count.get(), 5);
+        r.updated_at = chrono::DateTime::from_timestamp(43, 0);
+        run(&r);
+        assert_eq!(count.get(), 6);
+        run(&r);
+        assert_eq!(count.get(), 6);
+        let mut old = load_store(&path).unwrap();
+        old.projection = 0;
+        save_store(&path, &old).unwrap();
+        assert!(semantic_search(&path, "query", 1)
+            .unwrap_err()
+            .to_string()
+            .contains("projection version changed"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1010,6 +1167,7 @@ mod tests {
             updated_at: dates.map(|(_, u)| u),
             source_path: None,
             source: None,
+            hints: None,
         }
     }
 
