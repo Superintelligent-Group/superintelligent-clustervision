@@ -19,6 +19,11 @@ struct Key {
     path: std::path::PathBuf,
     version: String,
     extra: bool,
+    cwd: Option<std::path::PathBuf>,
+    title: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    message_count: usize,
 }
 
 impl Key {
@@ -29,7 +34,19 @@ impl Key {
             path: r.path.clone(),
             version,
             extra,
+            cwd: r.cwd.clone(),
+            title: r.title.clone(),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            message_count: r.message_count,
         }
+    }
+
+    fn admitted(r: &SessionRef, version: String, extra: bool) -> Option<Self> {
+        // Readers can use every catalog hint as fallback metadata. Check the borrowed ref before
+        // copying it so oversized demanded hints never become temporary cache keys.
+        bounded_size(r)?;
+        Some(Self::of(r, version, extra))
     }
 }
 
@@ -170,7 +187,7 @@ pub(super) fn window(
         let mut sink = window_sink(r, start, end, false, ReadSet::default());
         return Ok((adapter.try_stream(r, &opts, &mut sink)?, sink));
     }
-    let key = version.map(|version| Key::of(r, version, extra));
+    let key = version.and_then(|version| Key::admitted(r, version, extra));
     let (before, reads) = captured(r);
     let mut sink = window_sink(r, start, end, key.is_some(), reads);
     let mut resumed = false;
@@ -235,14 +252,14 @@ pub(super) fn window(
 }
 
 pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
-    let key = Key::of(r, format!("{}/api-head1", env!("CARGO_PKG_VERSION")), false);
-    if let Some(entry) = cache.get(&key) {
+    let key = Key::admitted(r, format!("{}/api-head1", env!("CARGO_PKG_VERSION")), false);
+    if let Some(entry) = key.as_ref().and_then(|key| cache.get(key)) {
         if fresh(r, &entry.source) {
             if let Payload::Head(value) = entry.payload {
                 return Ok(value);
             }
         } else {
-            cache.remove(&key);
+            cache.remove(key.as_ref().expect("cached head has a key"));
         }
     }
     let (before, reads) = captured(r);
@@ -267,7 +284,7 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
     map.insert("total".into(), json!(counter.total));
     map.insert("extra".into(), Value::Object(shell.extra));
     let source = before.with_reads(&counter.reads);
-    if fresh(r, &source) && bounded_size(&value).is_some() {
+    if let Some(key) = key.filter(|_| fresh(r, &source) && bounded_size(&value).is_some()) {
         cache.insert(Entry {
             key,
             source,
@@ -495,6 +512,64 @@ mod tests {
         let before = adapter.messages.load(Ordering::Relaxed);
         window(&cache, &adapter, &r, 20, Some(21), true).unwrap();
         assert_eq!(adapter.messages.load(Ordering::Relaxed) - before, 21);
+    }
+
+    #[test]
+    fn catalog_fallback_hints_are_part_of_read_identity() {
+        struct Hints(AtomicUsize);
+        impl Adapter for Hints {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(&self, r: &SessionRef, _: &ParseOptions, _: &mut dyn MessageSink) -> Result<Session> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                let mut shell = Session::new(&r.id, r.harness);
+                shell.title = r.title.clone();
+                shell.cwd = r.cwd.clone();
+                shell.created_at = r.created_at;
+                shell.updated_at = r.updated_at;
+                shell.extra.insert("catalog_count".into(), json!(r.message_count));
+                shell.extra.insert("created_hint".into(), json!(r.created_at));
+                shell.extra.insert("updated_hint".into(), json!(r.updated_at));
+                Ok(shell)
+            }
+        }
+        let world = cv_testkit::World::in_process("api_catalog_hint_identity");
+        let mut r = fixture(&world, 1);
+        let adapter = Hints(AtomicUsize::new(0));
+        let cache = Cache::default();
+        for i in 0..6 {
+            match i {
+                1 => r.title = Some("new catalog title".into()),
+                2 => r.cwd = Some(world.home.join("new-cwd")),
+                3 => r.created_at = Some("2026-01-01T00:00:00Z".parse().unwrap()),
+                4 => r.updated_at = Some("2026-02-01T00:00:00Z".parse().unwrap()),
+                5 => r.message_count = 42,
+                _ => {}
+            }
+            let value = head(&cache, &adapter, &r).unwrap();
+            assert_eq!(value["title"], json!(r.title));
+            assert_eq!(value["cwd"], json!(r.cwd));
+            assert_eq!(value["extra"]["created_hint"], json!(r.created_at));
+            assert_eq!(value["extra"]["updated_hint"], json!(r.updated_at));
+            assert_eq!(value["extra"]["catalog_count"], r.message_count);
+            assert_eq!(head(&cache, &adapter, &r).unwrap(), value);
+            assert_eq!(adapter.0.load(Ordering::Relaxed), i + 1);
+        }
+        r.title = Some("x".repeat(MAX_ENTRY_BYTES + 1024));
+        assert!(Key::admitted(&r, "head".into(), false).is_none());
+        let prior = cache.entries.lock().unwrap().len();
+        for _ in 0..2 {
+            assert_eq!(head(&cache, &adapter, &r).unwrap()["title"], json!(r.title));
+        }
+        assert_eq!(adapter.0.load(Ordering::Relaxed), 8);
+        assert_eq!(cache.entries.lock().unwrap().len(), prior);
     }
 
     #[test]
