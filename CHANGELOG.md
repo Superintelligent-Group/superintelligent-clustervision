@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.16.1 — 2026-10-12 — approvals, checkpoints, and the side files
+
+Two new affordance kinds, `approval` (asks, denials, the approval mode in force) and `checkpoint`
+(restorable points, tallies, restores), and the side files 0.16.0 named as unread: Qwen schedules,
+Cline schedule fires and team runs, OpenClaw cron and sub-agent registries, Kimi todos, Grok hook
+runs; Claude `--fork-session` and Goose forks now name their source. Catalog counts carry a view
+version, so `has:` recounts after an upgrade instead of answering from 0.16.0's counts: run
+`cv index` once.
+
+
 - New affordance kinds `approval` (asks, denials, the session's approval mode) and `checkpoint` (restorable points, restores) in `show --kind` and `has:`.
 - Roo `ui_messages.json` checkpoints and permission asks, and Grok `rewind_points.jsonl`, are now read.
 - Session JSON gains `permission_modes` and `checkpoints` in the harness bag (Claude, Codex, Kimi, Kimi Code, Qwen, Gemini saved chats).
