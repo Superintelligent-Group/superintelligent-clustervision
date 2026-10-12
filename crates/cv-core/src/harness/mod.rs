@@ -225,6 +225,24 @@ pub trait Adapter: Send + Sync {
     /// whole hands its parsed session to [`crate::stream::replay`].
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session>;
 
+    /// Checked stream boundary for all implementations, including third-party adapters which
+    /// implement only [`Self::stream`]. Consumer failures are errors, never successful stops.
+    fn try_stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        crate::stream::checked(sink, |sink| self.stream(r, opts, sink))
+    }
+
+    /// [`Self::resume`] with the same consumer error guard as [`Self::try_stream`]. A failed
+    /// consumer must not publish a mark even if the adapter offered checkpoints before failing.
+    fn try_resume(
+        &self,
+        r: &SessionRef,
+        opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        from: &crate::stream::Checkpoint,
+    ) -> Result<Option<Session>> {
+        crate::stream::checked(sink, |sink| self.resume(r, opts, sink, from))
+    }
+
     /// The affordances that live only in a side store beside the transcript (a todo file, a
     /// table, a state row): the session's current plan, goals, schedules. Rows have no message
     /// index (`docs/design/AFFORDANCES.md`). Default: the store keeps none. Unreadable side files

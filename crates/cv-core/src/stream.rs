@@ -148,6 +148,22 @@ pub enum Flow {
 pub trait MessageSink {
     fn message(&mut self, m: Message) -> Flow;
 
+    /// Return a latched consumer error, if any. A source-backed field can fail while being
+    /// inspected: that failure must not be represented as an intentional [`Flow::Stop`].
+    /// Wrappers forward this channel; completed passes check it before publishing any output.
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        None
+    }
+
+    /// Deliver a message and surface failures distinctly from an intentional early stop.
+    fn try_message(&mut self, m: Message) -> Result<Flow> {
+        let flow = self.message(m);
+        match self.take_error() {
+            Some(error) => Err(error),
+            None => Ok(flow),
+        }
+    }
+
     /// Session metadata, possibly emitted before the first message. Default: ignore.
     fn meta(&mut self, _session: &Session) {}
 
@@ -166,6 +182,94 @@ pub trait MessageSink {
     /// this one wraps. Called only after [`wants_checkpoint`](MessageSink::wants_checkpoint) said
     /// yes. Default: nothing to add.
     fn checkpoint(&mut self, _cp: &mut Checkpoint) {}
+}
+
+/// Run an adapter boundary with a consumer error guard. Legacy adapter loops can keep using
+/// `message() -> Flow`; failures stop delivery immediately and surface after the adapter returns,
+/// including errors raised by metadata, dependencies, checkpoints or an EOF-only sink check.
+/// An intentional stop remains successful. Any staged output from a failed pass must be discarded.
+pub fn checked<T>(sink: &mut dyn MessageSink, read: impl FnOnce(&mut dyn MessageSink) -> Result<T>) -> Result<T> {
+    let mut guard = ErrorGuard {
+        inner: sink,
+        error: None,
+        failed: false,
+    };
+    if let Some(error) = guard.take_error() {
+        return Err(error);
+    }
+    let result = read(&mut guard);
+    let error = guard.take_error();
+    // An inner checked boundary may already have returned the original diagnostic while its
+    // failed outer sink now reports only a persistent failure marker. Preserve that Result.
+    match result {
+        Err(error) => Err(error),
+        Ok(value) => match error {
+            Some(error) => Err(error),
+            None => Ok(value),
+        },
+    }
+}
+
+struct ErrorGuard<'a> {
+    inner: &'a mut dyn MessageSink,
+    error: Option<anyhow::Error>,
+    failed: bool,
+}
+impl ErrorGuard<'_> {
+    fn capture(&mut self) {
+        if let Some(error) = self.inner.take_error() {
+            self.failed = true;
+            self.error.get_or_insert(error);
+        }
+    }
+}
+impl MessageSink for ErrorGuard<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.capture();
+        self.error.take().or_else(|| {
+            self.failed
+                .then(|| anyhow::anyhow!("stream consumer has already failed"))
+        })
+    }
+    fn message(&mut self, m: Message) -> Flow {
+        if self.failed {
+            return Flow::Stop;
+        }
+        match self.inner.try_message(m) {
+            Ok(flow) => flow,
+            Err(error) => {
+                self.failed = true;
+                self.error = Some(error);
+                Flow::Stop
+            }
+        }
+    }
+    fn meta(&mut self, s: &Session) {
+        if !self.failed {
+            self.inner.meta(s);
+            self.capture();
+        }
+    }
+    fn dependency(&mut self, path: &std::path::Path) {
+        if !self.failed {
+            self.inner.dependency(path);
+            self.capture();
+        }
+    }
+    fn wants_checkpoint(&mut self, offset: u64) -> bool {
+        if self.failed {
+            return false;
+        }
+        let wants = self.inner.wants_checkpoint(offset);
+        self.capture();
+        wants && !self.failed
+    }
+    fn checkpoint(&mut self, cp: &mut Checkpoint) {
+        if !self.failed {
+            self.inner.checkpoint(cp);
+            self.capture();
+        }
+    }
 }
 
 /// A point a pass over an append-only transcript can resume from: `offset` is the byte after the
@@ -240,6 +344,8 @@ pub struct TeeSink<'a> {
     b: &'a mut dyn MessageSink,
     a_stopped: bool,
     b_stopped: bool,
+    error: Option<anyhow::Error>,
+    failed: bool,
 }
 
 impl<'a> TeeSink<'a> {
@@ -249,41 +355,93 @@ impl<'a> TeeSink<'a> {
             b,
             a_stopped: false,
             b_stopped: false,
+            error: None,
+            failed: false,
         }
     }
 }
 
+impl TeeSink<'_> {
+    fn capture(&mut self) {
+        let error = self.a.take_error().or_else(|| self.b.take_error());
+        if let Some(error) = error {
+            self.failed = true;
+            self.error.get_or_insert(error);
+        }
+    }
+    fn deliver(sink: &mut dyn MessageSink, m: Message, stopped: &mut bool) -> Result<()> {
+        *stopped = sink.try_message(m)? == Flow::Stop;
+        Ok(())
+    }
+}
 impl MessageSink for TeeSink<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.capture();
+        self.error.take().or_else(|| {
+            self.failed
+                .then(|| anyhow::anyhow!("stream consumer has already failed"))
+        })
+    }
     fn dependency(&mut self, path: &std::path::Path) {
+        if self.failed {
+            return;
+        }
         self.a.dependency(path);
-        self.b.dependency(path);
+        self.capture();
+        if !self.failed {
+            self.b.dependency(path);
+            self.capture();
+        }
     }
     fn meta(&mut self, s: &Session) {
+        if self.failed {
+            return;
+        }
         self.a.meta(s);
-        self.b.meta(s);
+        self.capture();
+        if !self.failed {
+            self.b.meta(s);
+            self.capture();
+        }
     }
-
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
-        self.a.wants_checkpoint(offset) && self.b.wants_checkpoint(offset)
+        if self.failed {
+            return false;
+        }
+        let wants = self.a.wants_checkpoint(offset) && self.b.wants_checkpoint(offset);
+        self.capture();
+        wants && !self.failed
     }
-
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
+        if self.failed {
+            return;
+        }
         self.a.checkpoint(cp);
-        self.b.checkpoint(cp);
+        self.capture();
+        if !self.failed {
+            self.b.checkpoint(cp);
+            self.capture();
+        }
     }
-
     fn message(&mut self, m: Message) -> Flow {
-        match (self.a_stopped, self.b_stopped) {
+        if self.failed {
+            return Flow::Stop;
+        }
+        let result = match (self.a_stopped, self.b_stopped) {
             (false, false) => {
                 let copy = m.clone();
-                self.a_stopped = self.a.message(m) == Flow::Stop;
-                self.b_stopped = self.b.message(copy) == Flow::Stop;
+                Self::deliver(self.a, m, &mut self.a_stopped)
+                    .and_then(|()| Self::deliver(self.b, copy, &mut self.b_stopped))
             }
-            (false, true) => self.a_stopped = self.a.message(m) == Flow::Stop,
-            (true, false) => self.b_stopped = self.b.message(m) == Flow::Stop,
-            (true, true) => {}
+            (false, true) => Self::deliver(self.a, m, &mut self.a_stopped),
+            (true, false) => Self::deliver(self.b, m, &mut self.b_stopped),
+            (true, true) => Ok(()),
+        };
+        if let Err(error) = result {
+            self.failed = true;
+            self.error = Some(error);
         }
-        if self.a_stopped && self.b_stopped {
+        if self.failed || (self.a_stopped && self.b_stopped) {
             Flow::Stop
         } else {
             Flow::Continue
@@ -310,8 +468,11 @@ impl MessageSink for CollectSink {
 pub fn replay(mut session: Session, sink: &mut dyn MessageSink) -> Result<Session> {
     let messages = std::mem::take(&mut session.messages);
     sink.meta(&session);
+    if let Some(error) = sink.take_error() {
+        return Err(error);
+    }
     for m in messages {
-        if sink.message(m) == Flow::Stop {
+        if sink.try_message(m)? == Flow::Stop {
             break;
         }
     }
@@ -340,7 +501,7 @@ pub fn collect_with(adapter: &dyn Adapter, r: &SessionRef, opts: &ParseOptions) 
     Ok(session)
 }
 
-/// `adapter.stream(r, opts, sink)`, plus what a pass that read the whole session learned: when the
+/// `adapter.try_stream(r, opts, sink)`, plus what a pass that read the whole session learned: when the
 /// sink never said [`Flow::Stop`], the parse's own turn count ([`Message::is_turn`]) is written back
 /// to the catalog for a row that holds `0` ("not counted" — a Codex rollout over the discovery scan
 /// cap, an adapter that cannot count cheaply), so `cv ls` shows the real number from the first full
@@ -458,12 +619,12 @@ pub fn stream_resumable(
                 return Ok(None);
             };
             counting.restore(state, cp.offset);
-            match adapter.resume(r, opts, &mut counting, cp)? {
+            match adapter.try_resume(r, opts, &mut counting, cp)? {
                 Some(s) => s,
                 None => return Ok(None),
             }
         }
-        None => adapter.stream(r, opts, &mut counting)?,
+        None => adapter.try_stream(r, opts, &mut counting)?,
     };
     // A resumed pass that read too little to take one still passed through `from`.
     let last = counting
@@ -540,6 +701,9 @@ impl<'a> Counting<'a> {
 }
 
 impl MessageSink for Counting<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.inner.take_error()
+    }
     fn dependency(&mut self, path: &std::path::Path) {
         self.dependencies.record(path);
         self.inner.dependency(path);
@@ -595,7 +759,7 @@ fn stream_with_counter(
     sink: &mut dyn MessageSink,
 ) -> Result<(Session, Option<CompletedCounter>)> {
     let mut counting = Counting::new(r, sink, None);
-    let session = adapter.stream(r, opts, &mut counting)?;
+    let session = adapter.try_stream(r, opts, &mut counting)?;
     let counted = (!counting.stopped).then_some((counting.turns, counting.affordances, counting.dependencies));
     Ok((session, counted))
 }
@@ -718,6 +882,219 @@ mod tests {
             &r,
             &base.with_reads(events_resumed.dependencies())
         ));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum FailAt {
+        Message,
+        Meta,
+        Dependency,
+        Checkpoint,
+        End,
+    }
+    struct FailingSink {
+        at: FailAt,
+        seen: usize,
+        metas: usize,
+        dependencies: usize,
+        checkpoints: usize,
+        error: Option<anyhow::Error>,
+        ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl FailingSink {
+        fn new(at: FailAt, ended: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+            Self {
+                at,
+                seen: 0,
+                metas: 0,
+                dependencies: 0,
+                checkpoints: 0,
+                error: None,
+                ended,
+            }
+        }
+        fn fail(&mut self) {
+            self.error = Some(anyhow::anyhow!("source projection unavailable"));
+        }
+    }
+    impl MessageSink for FailingSink {
+        fn message(&mut self, _: Message) -> Flow {
+            self.seen += 1;
+            if matches!(self.at, FailAt::Message) && self.seen == 2 {
+                self.fail();
+            }
+            Flow::Continue // A pending error must win even over Continue.
+        }
+        fn meta(&mut self, _: &Session) {
+            self.metas += 1;
+            if matches!(self.at, FailAt::Meta) {
+                self.fail();
+            }
+        }
+        fn dependency(&mut self, _: &std::path::Path) {
+            self.dependencies += 1;
+            if matches!(self.at, FailAt::Dependency) {
+                self.fail();
+            }
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, _: &mut Checkpoint) {
+            self.checkpoints += 1;
+            if matches!(self.at, FailAt::Checkpoint) {
+                self.fail();
+            }
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            if matches!(self.at, FailAt::End) && self.ended.load(std::sync::atomic::Ordering::Relaxed) {
+                self.fail();
+            }
+            self.error.take()
+        }
+    }
+    struct IgnoresStop {
+        ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        side_reads: std::sync::atomic::AtomicUsize,
+    }
+    impl Adapter for IgnoresStop {
+        fn harness(&self) -> crate::Harness {
+            crate::Harness::Codex
+        }
+        fn roots(&self) -> Vec<std::path::PathBuf> {
+            Vec::new()
+        }
+        fn discover(&self) -> Result<Vec<SessionRef>> {
+            Ok(Vec::new())
+        }
+        fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+            let session = Session::new(&r.id, r.harness);
+            sink.meta(&session);
+            for n in 1..=3 {
+                sink.message(text_msg("turn")); // Deliberately ignore Stop, as some metadata scans do.
+                sink.dependency(&r.path);
+                if sink.wants_checkpoint(n) {
+                    sink.checkpoint(&mut Checkpoint::new(n));
+                }
+            }
+            sink.meta(&session); // Late callbacks must not resume after a failure.
+            self.ended.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(session)
+        }
+        fn store_affordances(&self, _: &SessionRef) -> Vec<crate::affordance::Affordance> {
+            self.side_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn failed_streams_never_finish_counts_or_publish_cache_or_marks() {
+        let w = cv_testkit::World::in_process("fallible-stream-publication");
+        let path = w.base.join("session.jsonl");
+        std::fs::write(&path, "scratch primary").unwrap();
+        let r = transcript(crate::Harness::Codex, path);
+        for at in [
+            FailAt::Message,
+            FailAt::Meta,
+            FailAt::Dependency,
+            FailAt::Checkpoint,
+            FailAt::End,
+        ] {
+            for resumable in [false, true] {
+                if matches!(at, FailAt::Checkpoint) && !resumable {
+                    continue;
+                }
+                let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let adapter = IgnoresStop {
+                    ended: ended.clone(),
+                    side_reads: Default::default(),
+                };
+                let mut failing = FailingSink::new(at, ended);
+                let result = if resumable {
+                    stream_resumable(&adapter, &r, &ParseOptions::lazy(), &mut failing, 1, None).map(|_| ())
+                } else {
+                    stream_counted(&adapter, &r, &ParseOptions::lazy(), &mut failing).map(|_| ())
+                };
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("source projection unavailable"),
+                    "{at:?}"
+                );
+                assert_eq!(
+                    adapter.side_reads.load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "{at:?}: no finish after failure"
+                );
+                assert!(crate::catalog::AffordanceTable::load().counts(&r).is_none());
+                assert!(crate::resume::MarkTable::load().get(&r).is_none());
+                if matches!(at, FailAt::Message) {
+                    assert_eq!((failing.seen, failing.metas, failing.dependencies), (2, 1, 1));
+                    assert_eq!(failing.checkpoints, usize::from(resumable));
+                }
+                if matches!(at, FailAt::Meta) {
+                    assert_eq!((failing.seen, failing.metas), (0, 1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tee_errors_abort_both_but_intentional_stop_keeps_the_other_live() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut failure = FailingSink::new(FailAt::Message, flag);
+        let mut other = Keep::default();
+        let mut tee = TeeSink::new(&mut failure, &mut other);
+        let mut affordances = crate::affordance::AffordanceSink::new(crate::Harness::Codex, &mut tee);
+        let error = checked(&mut affordances, |sink| {
+            assert_eq!(sink.message(text_msg("first")), Flow::Continue);
+            assert_eq!(sink.message(text_msg("second")), Flow::Stop);
+            // Even if a legacy caller drains and ignores the diagnostic, the failed latch holds.
+            assert!(sink.take_error().is_some());
+            assert_eq!(sink.message(text_msg("late")), Flow::Stop);
+            sink.meta(&Session::new("test", crate::Harness::Codex));
+            sink.checkpoint(&mut Checkpoint::new(3));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("already failed"));
+        assert_eq!(failure.seen, 2);
+        assert_eq!(other.msgs.len(), 1, "failed first branch stops its peer immediately");
+        assert!(other.cps.is_empty());
+
+        let mut one = |_m: Message| Flow::Stop;
+        let mut two = Keep::default();
+        let mut tee = TeeSink::new(&mut one, &mut two);
+        checked(&mut tee, |sink| {
+            assert_eq!(sink.try_message(text_msg("one"))?, Flow::Continue);
+            assert_eq!(sink.try_message(text_msg("two"))?, Flow::Continue);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(two.msgs.len(), 2);
+    }
+
+    #[test]
+    fn built_in_stream_boundary_and_nested_guard_return_the_original_error() {
+        let w = cv_testkit::World::in_process("built-in-fallible-stream");
+        let dir = w.base.join("projects/group/chats");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("q.jsonl");
+        let record = r#"{"uuid":"u","type":"user","message":{"role":"user","parts":[{"text":"hello"}]}}"#;
+        std::fs::write(&path, format!("{record}\n{record}\n{record}\n")).unwrap();
+        let r = transcript(crate::Harness::Qwen, path);
+        let adapter = crate::harness::for_harness(r.harness).unwrap();
+        for checked_entry in [false, true] {
+            let mut failing = FailingSink::new(FailAt::Message, Default::default());
+            let result = if checked_entry {
+                adapter.try_stream(&r, &ParseOptions::lazy(), &mut failing)
+            } else {
+                adapter.stream(&r, &ParseOptions::lazy(), &mut failing)
+            };
+            assert_eq!(result.unwrap_err().to_string(), "source projection unavailable");
+            assert_eq!(failing.seen, 2);
+        }
     }
 
     /// The claude and codex transcripts of the harness corpus (the two adapters that resume).

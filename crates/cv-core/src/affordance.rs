@@ -444,6 +444,9 @@ impl<'a> AffordanceSink<'a> {
 }
 
 impl MessageSink for AffordanceSink<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.inner.take_error()
+    }
     fn dependency(&mut self, path: &std::path::Path) {
         self.inner.dependency(path);
     }

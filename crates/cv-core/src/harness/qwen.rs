@@ -106,12 +106,14 @@ impl Adapter for Qwen {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        if is_session_jsonl(&r.path) {
-            return stream_session_jsonl(&r.path, sink);
-        }
-        // The gemini-cli shape: the streaming machinery (mmap + RawValue for legacy whole-file
-        // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
-        crate::harness::gemini::stream_for(Harness::Qwen, r, opts, sink)
+        crate::stream::checked(sink, |sink| {
+            if is_session_jsonl(&r.path) {
+                return stream_session_jsonl(&r.path, sink);
+            }
+            // The gemini-cli shape: the streaming machinery (mmap + RawValue for legacy whole-file
+            // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
+            crate::harness::gemini::stream_for(Harness::Qwen, r, opts, sink)
+        })
     }
 
     /// Project ChatRecords are chronological: each complete physical record finalizes all its
@@ -127,19 +129,21 @@ impl Adapter for Qwen {
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
-        if !is_session_jsonl(&r.path) {
-            return Ok(None);
-        }
-        let Some(state) = from.get::<ReplayCheckpoint>(ADAPTER_LAYER) else {
-            return Ok(None);
-        };
-        let mut file = std::fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
-        if from.offset > file.metadata()?.len() {
-            return Ok(None);
-        }
-        file.seek(SeekFrom::Start(from.offset))
-            .with_context(|| format!("seeking {}", r.path.display()))?;
-        stream_reader_at(state.session, state.replay, BufReader::new(file), from.offset, sink).map(Some)
+        crate::stream::checked(sink, |sink| {
+            if !is_session_jsonl(&r.path) {
+                return Ok(None);
+            }
+            let Some(state) = from.get::<ReplayCheckpoint>(ADAPTER_LAYER) else {
+                return Ok(None);
+            };
+            let mut file = std::fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            if from.offset > file.metadata()?.len() {
+                return Ok(None);
+            }
+            file.seek(SeekFrom::Start(from.offset))
+                .with_context(|| format!("seeking {}", r.path.display()))?;
+            stream_reader_at(state.session, state.replay, BufReader::new(file), from.offset, sink).map(Some)
+        })
     }
 
     /// The cron jobs `cron_create` persists per project in `tmp/<sha256(cwd)>/scheduled_tasks.json`
