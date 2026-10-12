@@ -1239,6 +1239,19 @@ impl SubagentInfo {
 /// workflow tier (which on a heavy session is the *majority* of the agents) and drops the
 /// meta/journal sidecars that carry each agent's purpose and outcome. Newest first.
 pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
+    subagent_tree_inner(parent_path, true)
+}
+
+/// Token aggregation needs the full forest and its metadata order, without task descriptions or
+/// journaled return bodies. Unchanged child metadata reuses the versioned discovery scan cache.
+pub(crate) fn subagent_session_refs(parent_path: &std::path::Path) -> Vec<SessionRef> {
+    subagent_tree_inner(parent_path, false)
+        .into_iter()
+        .map(|s| s.session)
+        .collect()
+}
+
+fn subagent_tree_inner(parent_path: &std::path::Path, rich: bool) -> Vec<SubagentInfo> {
     let Some(base) = sidecar::subagents_dir(parent_path) else {
         return vec![];
     };
@@ -1246,7 +1259,7 @@ pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
     let mut out: Vec<SubagentInfo> = Vec::new();
 
     // Tier 1: directly-spawned sub-agents at `subagents/agent-*.jsonl`.
-    out.extend(agents_in_dir(&base, None));
+    out.extend(agents_in_dir(&base, None, rich));
 
     // Tier 2: workflow sub-agents at `subagents/workflows/<wf>/agent-*.jsonl`, grouped by run id,
     // each annotated with the result the workflow `journal.jsonl` recorded for its agentId.
@@ -1254,8 +1267,12 @@ pub fn subagent_tree(parent_path: &std::path::Path) -> Vec<SubagentInfo> {
         let wf_dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
         let groups = crate::par_flat_map(wf_dirs, |wf_dir| {
             let run_id = wf_dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let journal = sidecar::journal_results(&wf_dir);
-            agents_in_dir(&wf_dir, Some((&run_id, &journal)))
+            let journal = if rich {
+                sidecar::journal_results(&wf_dir)
+            } else {
+                JournalResults::new()
+            };
+            agents_in_dir(&wf_dir, Some((&run_id, &journal)), rich)
         });
         out.extend(groups);
     }
@@ -1270,7 +1287,7 @@ type JournalResults = std::collections::BTreeMap<String, Value>;
 /// Scan one directory for `agent-*.jsonl` transcripts, pairing each with its `*.meta.json` sidecar
 /// and (for workflow dirs) the journaled result for its agentId. `wf` is `Some((run_id, journal))`
 /// for a workflow dir, `None` for the top-level `subagents/` dir.
-fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>) -> Vec<SubagentInfo> {
+fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>, rich: bool) -> Vec<SubagentInfo> {
     let mut paths: Vec<PathBuf> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -1286,8 +1303,18 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>) -> 
         }
     }
     crate::par_filter_map(paths, |p| {
-        let session = scan(&p).ok()?;
-        let meta = read_meta(&p.with_extension("meta.json"));
+        let session = if rich {
+            scan(&p).ok()?
+        } else {
+            // Retain the old open-failure exclusion even on a metadata cache hit.
+            fs::File::open(&p).ok()?;
+            crate::discover_cache::cached_scan(&p, || scan(&p).ok())?
+        };
+        let meta = if rich {
+            read_meta(&p.with_extension("meta.json"))
+        } else {
+            (None, None, None)
+        };
         let agent_id = session.id.strip_prefix("agent-").unwrap_or(&session.id).to_string();
         let (status, summary) = wf
             .and_then(|(_, j)| j.get(&agent_id))
@@ -1298,7 +1325,7 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>) -> 
             agent_type: meta.0,
             description: meta.1,
             tool_use_id: meta.2,
-            workflow: wf.map(|(id, _)| id.to_string()),
+            workflow: rich.then(|| wf.map(|(id, _)| id.to_string())).flatten(),
             result_status: status,
             result_summary: summary,
         })
@@ -2977,6 +3004,7 @@ mod tests {
     #[test]
     fn subagent_tree_discovers_both_tiers_with_meta_and_journal() {
         use std::io::Write;
+        let _world = cv_testkit::World::in_process("claude-subagent-ref-projection");
         // Lay out a parent session with one directly-spawned sub-agent and one workflow holding
         // two agents (one journaled done, one a string return), mirroring the real on-disk shape.
         let root = std::env::temp_dir().join(format!("cv-subtree-{}", uuid::Uuid::new_v4()));
@@ -3030,6 +3058,15 @@ mod tests {
 
         let tree = subagent_tree(&parent);
         assert_eq!(tree.len(), 3, "two tiers: 1 direct + 2 workflow");
+
+        let refs: Vec<_> = tree.iter().map(|s| &s.session).collect();
+        for _ in 0..2 {
+            assert_eq!(
+                serde_json::to_vec(&subagent_session_refs(&parent)).unwrap(),
+                serde_json::to_vec(&refs).unwrap(),
+                "cold and cached refs preserve both tiers and ordering"
+            );
+        }
 
         let direct = tree.iter().find(|s| s.agent_id() == "a111").expect("direct agent");
         assert_eq!(direct.agent_type.as_deref(), Some("general-purpose"));

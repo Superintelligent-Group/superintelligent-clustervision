@@ -328,6 +328,13 @@ fn read_string(reader: &mut impl BufRead) -> Result<Option<String>> {
     }
 }
 
+fn subagent_usage_refs(r: &SessionRef) -> Vec<SessionRef> {
+    match r.harness {
+        Harness::Claude => crate::harness::claude::subagent_session_refs(&r.path),
+        _ => crate::subagent_tree_of(r).into_iter().map(|s| s.session).collect(),
+    }
+}
+
 fn parse_workers() -> usize {
     #[cfg(feature = "parallel")]
     {
@@ -359,9 +366,7 @@ impl TokenStats {
             sessions: refs.len(),
             ..TokenStats::default()
         };
-        let subs: Vec<SessionRef> = crate::par_flat_map(refs.to_vec(), |r| {
-            crate::subagent_tree_of(&r).into_iter().map(|s| s.session).collect()
-        });
+        let subs: Vec<SessionRef> = crate::par_flat_map(refs.to_vec(), |r| subagent_usage_refs(&r));
         stats.subagents = subs.len();
         let mut fold = TokenFold::default();
         // Bound completed spool retention to one 256KiB allowance per configured worker.
