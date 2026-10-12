@@ -447,6 +447,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clustervision-core",
+ "cv-testkit",
  "dirs 5.0.1",
  "model2vec-rs",
  "rusqlite",

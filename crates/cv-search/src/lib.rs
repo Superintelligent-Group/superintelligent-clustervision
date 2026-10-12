@@ -23,6 +23,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 pub mod fts;
+mod ingest;
 #[cfg(feature = "semantic")]
 pub mod semantic;
 #[cfg(feature = "semantic")]
@@ -193,3 +194,7 @@ pub(crate) struct Doc {
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
 }
+
+#[cfg(all(test, feature = "probe-heap"))]
+#[global_allocator]
+static PROBE_ALLOCATOR: cv_testkit::heap::Allocator = cv_testkit::heap::Allocator;

@@ -30,8 +30,11 @@ model2vec-rs = { version = "0.2", default-features = false, features = ["onig", 
 [features]
 default = ["semantic"]
 semantic = ["dep:model2vec-rs"]
+# Isolated ignored sweep oracle: requested Rust heap and production document chunk size.
+probe-heap = []
 
 [dev-dependencies]
+cv-testkit = { path = "../cv-testkit" }
 rusqlite.workspace = true
 # Tests name their scratch dirs with a fresh UUID.
 uuid.workspace = true

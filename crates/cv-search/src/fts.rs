@@ -32,6 +32,7 @@
 //! Snippets are generated **live** from the top hits (re-reading the session, capped) rather than
 //! from a stored copy of every body — which is what keeps the on-disk index small.
 
+use crate::ingest::{Admission, AdmittedDocument, Writer};
 use crate::Hit;
 use anyhow::{Context, Result};
 use cv_core::scan::{ceil_char, floor_char};
@@ -40,7 +41,7 @@ use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Field, Schema, Value, INDEXED, STORED, STRING, TEXT};
-use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+use tantivy::{Index, TantivyDocument, Term};
 
 struct Fields {
     id: Field,
@@ -196,8 +197,8 @@ const DEAD_RATIO: f32 = 0.5;
 /// every segment but the largest shares one tier: every commit started a background merge of
 /// ~1.2 GB that ran ~11 s at ~1 GB resident — and `cv index` exited first, abandoning it, so the
 /// next run started it again. Merging is [`compact`]'s job, sized by bytes, run to completion.
-fn open_writer(index: &Index, heap: usize) -> Result<IndexWriter> {
-    let writer: IndexWriter = index.writer(heap).context("creating tantivy index writer")?;
+fn open_writer(index: &Index, heap: usize) -> Result<Writer> {
+    let writer = Writer::new(index, heap)?;
     writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
     Ok(writer)
 }
@@ -206,7 +207,7 @@ fn open_writer(index: &Index, heap: usize) -> Result<IndexWriter> {
 /// segments becomes one segment, and a segment past [`DEAD_RATIO`] is rewritten alone, until no
 /// rule fires. An unchanged index merges nothing; each byte is rewritten about once per tier it
 /// climbs, so the cost is amortized over the runs that wrote it. Returns the merges run.
-fn compact(dir: &Path, index: &Index, writer: &mut IndexWriter) -> Result<usize> {
+fn compact(dir: &Path, index: &Index, writer: &mut Writer) -> Result<usize> {
     let bytes = |m: &tantivy::index::SegmentMeta| -> u64 {
         m.list_files()
             .iter()
@@ -263,7 +264,11 @@ fn compact(dir: &Path, index: &Index, writer: &mut IndexWriter) -> Result<usize>
 /// so the index never holds a whole large session's body at once — search dedups hits back to one
 /// row per id. 4 MB keeps per-doc memory bounded while staying well above almost every individual
 /// message. 2 KB under test, so the small fixtures span several docs.
-const CHUNK_BYTES: usize = if cfg!(test) { 2048 } else { 4 * 1024 * 1024 };
+const CHUNK_BYTES: usize = if cfg!(all(test, not(feature = "probe-heap"))) {
+    2048
+} else {
+    4 * 1024 * 1024
+};
 
 /// Discover + parse every session and bring the index at `dir` up to date.
 ///
@@ -326,6 +331,10 @@ pub(crate) struct Swept {
     pub removed: usize,
     /// Sessions read only from their mark on.
     pub resumed: usize,
+    #[cfg(test)]
+    admission: (usize, usize, usize, usize),
+    #[cfg(all(test, feature = "probe-heap"))]
+    bodies: HashMap<String, BodySummary>,
 }
 
 /// One session a sweep must read, and what for.
@@ -356,7 +365,7 @@ enum Out {
         id: String,
         delete: Delete,
     },
-    Doc(TantivyDocument),
+    Doc(AdmittedDocument),
     /// A session's read finished: its events (from the message index given on), counts and new
     /// mark are the writer's to record.
     Done {
@@ -401,9 +410,12 @@ fn source_consumer(dir: &Path) -> Result<String> {
 /// once for FTS docs, events and affordance counts. Everything that writes stays on this thread,
 /// fed by a bounded channel: the tantivy writer (so a session's delete precedes its docs, in
 /// opstamp order) and every catalog write (sqlite has one writer anyway). Peak memory is bounded
-/// twice: the channel holds at most `2 × workers` docs of [`CHUNK_BYTES`], and the sessions in
-/// flight together never exceed [`IN_FLIGHT_BYTES`] of transcript (a session bigger than that runs
-/// alone). Interim commits land only when no session is half-sent, so a crash never leaves a
+/// at both queues: raw document byte reservations survive the producer channel and Tantivy's
+/// internal 10,000-document pipeline until indexing consumes each document. The shared
+/// [`crate::ingest::DOCUMENT_BYTES`] guard is independent of Tantivy's 50 MB arena budget.
+/// Each worker also owns its body buffer and at most one document waiting for admission; parser
+/// working sets and merge allocations remain separate. Source pressure additionally stays under
+/// [`IN_FLIGHT_BYTES`] of estimated transcript (a larger session runs alone). Interim commits land only when no session is half-sent, so a crash never leaves a
 /// truncated session stamped fresh; past [`COMMIT_EVERY`] × 8 uncommitted docs the workers drain
 /// to make one.
 ///
@@ -538,10 +550,16 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         resumed: ran.resumed,
         errors: ran.errors,
         first_error: ran.first_error,
+        #[cfg(test)]
+        admission: writer.admission.stats(),
+        #[cfg(all(test, feature = "probe-heap"))]
+        bodies: ran.bodies,
     })
 }
 
-/// Transcript bytes the sessions in flight may add up to (see [`sweep`]).
+/// Conservative primary-source pressure guard. This is not an allocated-heap estimate: mapped
+/// Source JSON may own only descriptors, and a SQLite primary contains other sessions too.
+/// Retain it until every adapter's parser working set has an independently enforced bound.
 const IN_FLIGHT_BYTES: u64 = 2 << 30;
 
 /// The job queue the workers share: whole groups of jobs (one group per session id, in discovery
@@ -551,6 +569,59 @@ struct Queue {
     groups: Vec<Vec<Job>>,
     in_flight: u64,
     draining: bool,
+    stopped: bool,
+}
+
+/// Return the largest waiting group that fits. The workload is finite, so a large waiting
+/// group cannot starve: after fitting work completes it is admitted alone when the guard empties.
+impl Queue {
+    fn next_fitting(&self) -> Option<usize> {
+        if self.stopped || self.draining {
+            return None;
+        }
+        if self.in_flight == 0 {
+            return self.groups.len().checked_sub(1);
+        }
+        self.groups
+            .iter()
+            .rposition(|group| job_cost(group) <= IN_FLIGHT_BYTES.saturating_sub(self.in_flight))
+    }
+}
+
+/// Return the parser reservation on every exit, including a disconnected writer.
+struct GroupReservation<'a> {
+    queue: &'a std::sync::Mutex<Queue>,
+    wake: &'a std::sync::Condvar,
+    bytes: u64,
+}
+impl Drop for GroupReservation<'_> {
+    fn drop(&mut self) {
+        self.queue.lock().unwrap().in_flight -= self.bytes;
+        self.wake.notify_all();
+    }
+}
+
+/// An early writer/commit failure must wake workers parked on either admission condition.
+/// This guard drops before thread::scope waits for workers, avoiding disconnected-channel hangs.
+struct Shutdown<'a> {
+    queue: &'a std::sync::Mutex<Queue>,
+    wake: &'a std::sync::Condvar,
+    admission: &'a Admission,
+    complete: bool,
+}
+impl Shutdown<'_> {
+    fn stop(&self) {
+        self.queue.lock().unwrap().stopped = true;
+        self.admission.close();
+        self.wake.notify_all();
+    }
+}
+impl Drop for Shutdown<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.stop();
+        }
+    }
 }
 
 fn job_cost(group: &[Job]) -> u64 {
@@ -560,6 +631,31 @@ fn job_cost(group: &[Job]) -> u64 {
         .max()
         .unwrap_or(0)
         .min(IN_FLIGHT_BYTES)
+}
+
+#[cfg(all(test, feature = "probe-heap"))]
+#[derive(serde::Serialize)]
+struct BodySummary {
+    bytes: usize,
+    docs: usize,
+    hash: u64,
+}
+#[cfg(all(test, feature = "probe-heap"))]
+impl Default for BodySummary {
+    fn default() -> Self {
+        Self {
+            bytes: 0,
+            docs: 0,
+            hash: 0xcbf29ce484222325,
+        }
+    }
+}
+#[cfg(all(test, feature = "probe-heap"))]
+fn body_hash(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// What [`run_jobs`] did.
@@ -574,10 +670,12 @@ struct Ran {
     /// Mark updates still waiting for the commit that holds their docs.
     marks: Vec<cv_core::resume::MarkUpdate>,
     dependencies: Vec<cv_core::source::Update>,
+    #[cfg(all(test, feature = "probe-heap"))]
+    bodies: HashMap<String, BodySummary>,
 }
 
 /// Run every job on a pool of workers, writing on this thread.
-fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str) -> Result<Ran> {
+fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> Result<Ran> {
     use std::sync::{mpsc, Condvar, Mutex};
     if jobs.is_empty() {
         return Ok(Ran::default());
@@ -608,42 +706,52 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
         groups,
         in_flight: 0,
         draining: false,
+        stopped: false,
     });
     let wake = Condvar::new();
     let (tx, rx) = mpsc::sync_channel::<Out>(2 * workers);
+    let admission = std::sync::Arc::clone(&writer.admission);
 
     std::thread::scope(|scope| -> Result<Ran> {
         for _ in 0..workers {
             let tx = tx.clone();
-            let (queue, wake) = (&queue, &wake);
+            let (queue, wake, admission) = (&queue, &wake, &admission);
             scope.spawn(move || loop {
                 let group = {
                     let mut q = queue.lock().unwrap();
                     loop {
-                        if q.groups.is_empty() {
+                        if q.stopped || q.groups.is_empty() {
                             break None;
                         }
-                        let cost = job_cost(q.groups.last().unwrap());
-                        if !q.draining && (q.in_flight == 0 || q.in_flight + cost <= IN_FLIGHT_BYTES) {
-                            q.in_flight += cost;
-                            break q.groups.pop();
+                        if let Some(at) = q.next_fitting() {
+                            let group = q.groups.remove(at);
+                            q.in_flight += job_cost(&group);
+                            break Some(group);
                         }
                         q = wake.wait(q).unwrap();
                     }
                 };
                 let Some(group) = group else { return };
-                let cost = job_cost(&group);
+                let _reservation = GroupReservation {
+                    queue,
+                    wake,
+                    bytes: job_cost(&group),
+                };
                 for job in group {
-                    if !run_job(job, f, &tx) {
+                    if !run_job(job, f, &tx, admission) {
                         return; // the writer is gone
                     }
                 }
-                queue.lock().unwrap().in_flight -= cost;
-                wake.notify_all();
             });
         }
         drop(tx);
 
+        let mut shutdown = Shutdown {
+            queue: &queue,
+            wake: &wake,
+            admission: &admission,
+            complete: false,
+        };
         let mut catalog = cv_core::catalog::Writer::open();
         let mut open: HashSet<String> = HashSet::new();
         let mut since_commit = 0usize;
@@ -660,15 +768,30 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
                         Delete::From(n) => {
                             if let Err(e) = writer.delete_query(Box::new(resumed_docs(f, &id, n))) {
                                 failure.get_or_insert(e.into());
+                                shutdown.stop();
                             }
                         }
                     }
                     open.insert(id);
                 }
                 Out::Doc(doc) => {
+                    #[cfg(all(test, feature = "probe-heap"))]
+                    if std::env::var_os("CV_SWEEP_HASH_BODY").is_some() {
+                        let inner = doc.inner();
+                        if let (Some(id), Some(body)) = (
+                            inner.get_first(f.id).and_then(|value| value.as_str()),
+                            inner.get_first(f.body).and_then(|value| value.as_str()),
+                        ) {
+                            let summary = ran.bodies.entry(id.to_owned()).or_default();
+                            summary.bytes += body.len();
+                            summary.docs += 1;
+                            summary.hash = body_hash(summary.hash, body.as_bytes());
+                        }
+                    }
                     if failure.is_none() {
-                        if let Err(e) = writer.add_document(doc) {
-                            failure = Some(e.into());
+                        if let Err(e) = writer.add_admitted(doc) {
+                            failure = Some(e);
+                            shutdown.stop();
                         }
                     }
                     since_commit += 1;
@@ -775,7 +898,10 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
         }
         match failure {
             Some(e) => Err(e),
-            None => Ok(ran),
+            None => {
+                shutdown.complete = true;
+                Ok(ran)
+            }
         }
     })
 }
@@ -802,7 +928,7 @@ fn resumed_docs(f: &Fields, id: &str, n: usize) -> tantivy::query::BooleanQuery 
 }
 
 /// Read one job and send what it found; `false` when the writer hung up.
-fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>) -> bool {
+fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admission: &std::sync::Arc<Admission>) -> bool {
     let Some(adapter) = cv_core::harness::for_harness(job.r.harness) else {
         return true;
     };
@@ -810,11 +936,11 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>) -> bool 
     let from = version.as_deref().and_then(|v| resumable_from(&job, v));
     // A resume the adapter declines touched nothing: read the session whole instead.
     let resumed = match &from {
-        Some(cp) => job_pass(&job, f, tx, adapter.as_ref(), Some(cp)).transpose(),
+        Some(cp) => job_pass(&job, f, tx, admission, adapter.as_ref(), Some(cp)).transpose(),
         None => None,
     };
     let result = resumed.unwrap_or_else(|| {
-        job_pass(&job, f, tx, adapter.as_ref(), None).and_then(|p| p.context("a whole pass never declines"))
+        job_pass(&job, f, tx, admission, adapter.as_ref(), None).and_then(|p| p.context("a whole pass never declines"))
     });
     let out = match result {
         Ok(p) => {
@@ -886,6 +1012,7 @@ fn job_pass(
     job: &Job,
     f: &Fields,
     tx: &std::sync::mpsc::SyncSender<Out>,
+    admission: &std::sync::Arc<Admission>,
     adapter: &dyn cv_core::Adapter,
     from: Option<&cv_core::stream::Checkpoint>,
 ) -> Result<Option<JobPass>> {
@@ -915,7 +1042,7 @@ fn job_pass(
                 .map_err(|_| anyhow::anyhow!("index writer closed"))?;
                 begun = true;
             }
-            tx.send(Out::Doc(doc))
+            tx.send(Out::Doc(admission.document(doc)?))
                 .map_err(|_| anyhow::anyhow!("index writer closed"))
         };
         index_session(
@@ -1001,7 +1128,7 @@ fn index_session(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn index_session_clean(
-    writer: &mut IndexWriter,
+    writer: &mut Writer,
     f: &Fields,
     adapter: &dyn cv_core::Adapter,
     r: &cv_core::SessionRef,
@@ -1012,7 +1139,7 @@ fn index_session_clean(
 ) -> Result<(usize, cv_core::source::ReadSet)> {
     let source = cv_core::source::Probe::default().snapshot(r);
     let result = {
-        let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()).map_err(Into::into) };
+        let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()) };
         index_session(&mut add, f, adapter, r, mtime, size, events, prov, None)
             .and_then(|done| done.context("a whole pass never declines"))
     };
@@ -1038,7 +1165,7 @@ fn index_session_clean(
 /// walk the forest and extends `seen` with every live agent) may decide an agent is gone. Returns
 /// the number of sessions reaped.
 fn reap_missing(
-    writer: &mut IndexWriter,
+    writer: &mut Writer,
     f: &Fields,
     existing: &HashMap<String, (i64, i64)>,
     seen: &HashSet<String>,
@@ -2032,6 +2159,240 @@ fn head(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ingest_job(r: cv_core::SessionRef) -> Job {
+        let source = cv_core::source::Probe::default().snapshot(&r);
+        let (mtime, size) = source.primary;
+        Job {
+            r,
+            mtime,
+            size,
+            fts: true,
+            events: true,
+            existing: false,
+            grew: false,
+            source,
+            dependencies_fresh: true,
+            prov: Default::default(),
+            mark: None,
+        }
+    }
+
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "explicit synthetic CV_SWEEP_INPUT_PROBE and CV_SWEEP_INPUT_BYTES, one isolated process"]
+    fn production_sweep_heap_probe() {
+        assert_eq!(CHUNK_BYTES, 4 * 1024 * 1024);
+        let home = IsolatedHome::new();
+        let fixture = std::fs::canonicalize(std::env::var_os("CV_SWEEP_INPUT_PROBE").unwrap()).unwrap();
+        let input_bytes: usize = std::env::var("CV_SWEEP_INPUT_BYTES").unwrap().parse().unwrap();
+        let copies: usize = std::env::var("CV_SWEEP_COPIES")
+            .unwrap_or_else(|_| "4".into())
+            .parse()
+            .unwrap();
+        let small: usize = std::env::var("CV_SWEEP_SMALL")
+            .unwrap_or_else(|_| "32".into())
+            .parse()
+            .unwrap();
+        assert!((1..=16).contains(&copies));
+        assert!(small <= 1000);
+        let mut refs = Vec::new();
+        for n in 0..copies {
+            refs.push(cv_core::SessionRef::new(
+                format!("large{n}"),
+                cv_core::Harness::Claude,
+                &fixture,
+            ));
+        }
+        for n in 0..small {
+            let id = format!("small{n}");
+            let path = home.home.join(format!("{id}.jsonl"));
+            let line = serde_json::json!({"type":"user", "sessionId":id, "uuid":"u",
+                "message":{"role":"user", "content":format!("zqsmall{n} small session")}});
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            refs.push(cv_core::SessionRef::new(id, cv_core::Harness::Claude, path));
+        }
+        let dir = tmpdir();
+        let baseline = cv_testkit::heap::begin();
+        let started = std::time::Instant::now();
+        let result = sweep(&dir, refs.clone(), false, false).unwrap();
+        let wall = started.elapsed().as_secs_f64();
+        let heap = cv_testkit::heap::end(baseline);
+        assert_eq!((result.changed, result.errors), (refs.len(), 0));
+        assert_eq!(result.admission.0, 0);
+        let bounded = std::env::var_os("CV_SWEEP_COMPARE_UNBOUNDED").is_none();
+        if bounded {
+            assert!(result.admission.1 <= crate::ingest::DOCUMENT_BYTES.max(result.admission.2));
+        }
+        // This is a scoped composed-path ceiling, not a universal RSS promise. Four concurrent
+        // synthetic giant Source inputs include raw queues, working buffers, tokenizers and arenas.
+        if copies == 4 && bounded {
+            assert!(heap.peak_above_baseline_bytes < 384 * 1024 * 1024);
+        }
+        let hits = text_search(&dir, "Inspect", copies + 10).unwrap();
+        assert_eq!(hits.len(), copies);
+        for (n, r) in refs.iter().enumerate() {
+            assert!(!cv_core::events::needs_ingest(
+                r,
+                cv_core::events::file_mtime_ns(&r.path)
+            ));
+            assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
+            if n < copies {
+                let events = cv_core::events::events_for("claude", &r.id, None);
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].target.as_deref(), Some("/perf/a.rs"));
+            } else {
+                let hits = text_search(&dir, &format!("zqsmall{}", n - copies), 10).unwrap();
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].id, r.id);
+            }
+        }
+        if std::env::var_os("CV_SWEEP_HASH_BODY").is_some() {
+            let prefix = b"Inspect the file\nEdit {\"file_path\":\"/perf/a.rs\",\"content\":\"";
+            let suffix = b"\",\"metadata\":{\"n\":3,\"flag\":true}}\n";
+            let mut expected = body_hash(0xcbf29ce484222325, prefix);
+            let x = [b'x'; 4096];
+            for _ in 0..input_bytes / x.len() {
+                expected = body_hash(expected, &x);
+            }
+            expected = body_hash(expected, &x[..input_bytes % x.len()]);
+            expected = body_hash(expected, suffix);
+            for n in 0..copies {
+                let body = &result.bodies[&format!("large{n}")];
+                assert_eq!(body.bytes, prefix.len() + input_bytes + suffix.len());
+                assert_eq!(body.hash, expected);
+            }
+        }
+        let repeat_started = std::time::Instant::now();
+        let unchanged = sweep(&dir, refs, false, false).unwrap();
+        assert_eq!((unchanged.changed, unchanged.errors, unchanged.admission.1), (0, 0, 0));
+        eprintln!(
+            "{}",
+            serde_json::json!({"input_bytes":input_bytes,"physical_bytes":std::fs::metadata(&fixture).unwrap().len(),
+            "large_sessions":copies,"small_sessions":small,"chunk_bytes":CHUNK_BYTES,
+            "document_limit_bytes":if bounded { Some(crate::ingest::DOCUMENT_BYTES) } else { None },"queue_peak_charged_bytes":result.admission.1,
+            "largest_document_charged_bytes":result.admission.2,"queue_waits":result.admission.3,
+            "body_hashing":std::env::var_os("CV_SWEEP_HASH_BODY").is_some(),"bodies":result.bodies,
+            "heap":heap,"wall_seconds":wall,"unchanged_wall_seconds":repeat_started.elapsed().as_secs_f64(),
+            "tantivy_tokenization":true,"commits_and_compaction":true})
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_admission_selects_fitting_work_without_losing_largest_first_order() {
+        let mut small = ingest_job(cv_core::SessionRef::new("small", cv_core::Harness::Claude, "/missing"));
+        small.size = (IN_FLIGHT_BYTES / 8) as i64;
+        let mut medium = ingest_job(cv_core::SessionRef::new("medium", cv_core::Harness::Claude, "/missing"));
+        medium.size = (IN_FLIGHT_BYTES / 2) as i64;
+        let mut large = ingest_job(cv_core::SessionRef::new("large", cv_core::Harness::Claude, "/missing"));
+        large.size = (3 * IN_FLIGHT_BYTES / 4) as i64;
+        let mut queue = Queue {
+            groups: vec![vec![small], vec![medium], vec![large]],
+            in_flight: 0,
+            draining: false,
+            stopped: false,
+        };
+        assert_eq!(queue.next_fitting(), Some(2));
+        let large = queue.groups.pop().unwrap();
+        queue.in_flight = job_cost(&large);
+        assert_eq!(
+            queue.next_fitting(),
+            Some(0),
+            "do not leave a worker idle behind the medium group"
+        );
+        let small = queue.groups.remove(0);
+        queue.in_flight += job_cost(&small);
+        assert_eq!(queue.next_fitting(), None);
+        queue.in_flight = 0;
+        assert_eq!(queue.next_fitting(), Some(0), "the waiting medium group now runs");
+        queue.draining = true;
+        assert_eq!(queue.next_fitting(), None);
+        queue.draining = false;
+        queue.stopped = true;
+        assert_eq!(queue.next_fitting(), None);
+    }
+
+    #[test]
+    fn mixed_sweep_keeps_large_and_small_sessions_exact_under_document_admission() {
+        let home = IsolatedHome::new();
+        let mut refs = Vec::new();
+        for n in 0..18 {
+            let id = format!("mixed{n}");
+            let marker = format!("zqmixed{n}");
+            let path = home.home.join(format!("{id}.jsonl"));
+            let size = if n % 6 == 0 { 50 * CHUNK_BYTES } else { 40 };
+            let line = serde_json::json!({"type":"assistant", "uuid":"a", "sessionId":id,
+                "message":{"role":"assistant", "content":[
+                    {"type":"text", "text":format!("{marker} {}", "x".repeat(size))},
+                    {"type":"tool_use", "id":"call", "name":"Edit", "input":{"file_path":format!("/scratch/{id}.rs"), "new_string":"y".repeat(size)}}]}});
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            refs.push(cv_core::SessionRef::new(&id, cv_core::Harness::Claude, &path));
+        }
+        let dir = tmpdir();
+        let result = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((result.changed, result.errors), (refs.len(), 0));
+        let (live, peak, largest, _) = result.admission;
+        assert_eq!(live, 0, "commit consumed every accepted document");
+        assert!(peak <= crate::ingest::DOCUMENT_BYTES.max(largest));
+        assert!(peak > 0);
+        for (n, r) in refs.iter().enumerate() {
+            let hits = text_search(&dir, &format!("zqmixed{n}"), 30).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].id, r.id);
+            assert!(!cv_core::events::needs_ingest(
+                r,
+                cv_core::events::file_mtime_ns(&r.path)
+            ));
+            assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
+        }
+        assert_eq!(sweep(&dir, refs, false, false).unwrap().changed, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn writer_failure_cancels_sweep_admission_without_publishing_the_partial_session() {
+        let home = IsolatedHome::new();
+        let path = home.home.join("large.jsonl");
+        let line = serde_json::json!({"type":"assistant", "uuid":"a", "sessionId":"large",
+            "message":{"role":"assistant", "content":[{"type":"text", "text":"zqpartial ".repeat(300 * CHUNK_BYTES)}]}});
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let r = cv_core::SessionRef::new("large", cv_core::Harness::Claude, &path);
+        let dir = tmpdir();
+        let (index, fields) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        writer.document_limit(1); // every document runs alone; later producers park on its byte lease
+        writer.fail_after(2);
+        let admission = std::sync::Arc::clone(&writer.admission);
+        let consumer = source_consumer(&dir).unwrap();
+        // The active source fills the conservative source guard, parking both other groups.
+        // A fatal writer failure must wake those workers before thread::scope tries to join them.
+        let mut jobs = vec![
+            ingest_job(cv_core::SessionRef::new("later1", cv_core::Harness::Claude, &path)),
+            ingest_job(cv_core::SessionRef::new("later2", cv_core::Harness::Claude, &path)),
+            ingest_job(r.clone()),
+        ];
+        for job in &mut jobs {
+            job.size = IN_FLIGHT_BYTES as i64;
+        }
+        let error = run_jobs(&mut writer, &fields, jobs, &consumer).err().unwrap();
+        assert!(format!("{error:#}").contains("injected index consumer failure"));
+        drop(writer);
+        assert_eq!(
+            admission.stats().0,
+            0,
+            "all accepted/discarded documents return their bytes"
+        );
+        assert_eq!(index.reader().unwrap().searcher().num_docs(), 0);
+        assert!(cv_core::events::SyncTable::load().needs_ingest(
+            &r,
+            cv_core::events::file_mtime_ns(&r.path),
+            std::fs::metadata(&r.path).unwrap().len() as i64
+        ));
+        assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
+        assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn tool_input_json_streaming_preserves_unicode_and_canonical_body() {
@@ -3183,7 +3544,7 @@ mod tests {
             error: None,
         };
         let (index, f) = open_or_create(&dir).unwrap();
-        let mut writer: IndexWriter = index.writer(50_000_000).unwrap();
+        let mut writer = open_writer(&index, 50_000_000).unwrap();
         let error = index_session_clean(
             &mut writer,
             &f,
@@ -3248,7 +3609,7 @@ mod tests {
         }
 
         let (index, f) = open_or_create(&dir).unwrap();
-        let mut writer: IndexWriter = index.writer(50_000_000).unwrap();
+        let mut writer = open_writer(&index, 50_000_000).unwrap();
         let r = sref("victim", "doomed", "/nonexistent/victim.jsonl".into());
         let res = index_session_clean(
             &mut writer,
