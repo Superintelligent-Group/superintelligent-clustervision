@@ -144,12 +144,14 @@ fn git_field_matches_branch() {
 fn partially_resolved_models_fall_back_per_needle() {
     struct Fx;
     impl ExtFacts for Fx {
-        fn model(&self, needle: &str, exact: bool) -> Tri {
-            match needle {
-                "known" => Tri::False,
-                "resolved" => Tri::of(exact),
-                _ => Tri::Unknown,
-            }
+        fn model(&self, needle: &str, exact: bool) -> anyhow::Result<Tri> {
+            Ok({
+                match needle {
+                    "known" => Tri::False,
+                    "resolved" => Tri::of(exact),
+                    _ => Tri::Unknown,
+                }
+            })
         }
     }
     let r = refx("a", Harness::Claude, None, None, 1);
@@ -162,21 +164,25 @@ fn partially_resolved_models_fall_back_per_needle() {
     };
     // Falling back for the whole OR-list would incorrectly rediscover the authoritative false
     // needle in Session.model. Unknown is resolved only for that particular needle.
-    assert_eq!(q("model:known,missing").eval(&facts), Tri::False);
-    assert_eq!(q("model=resolved,missing").eval(&facts), Tri::True);
-    assert_eq!(q("model:resolved,missing").eval(&facts), Tri::False);
+    assert_eq!(q("model:known,missing").eval(&facts).unwrap(), Tri::False);
+    assert_eq!(q("model=resolved,missing").eval(&facts).unwrap(), Tri::True);
+    assert_eq!(q("model:resolved,missing").eval(&facts).unwrap(), Tri::False);
     session.model = Some("missing".into());
-    assert!(q("model:known,missing").matches(&Facts {
-        r: &r,
-        session: Some(&session),
-        ext: &Fx
-    }));
-    assert_eq!(
-        q("model:known,missing").eval(&Facts {
+    assert!(q("model:known,missing")
+        .matches(&Facts {
             r: &r,
-            session: None,
+            session: Some(&session),
             ext: &Fx
-        }),
+        })
+        .unwrap());
+    assert_eq!(
+        q("model:known,missing")
+            .eval(&Facts {
+                r: &r,
+                session: None,
+                ext: &Fx
+            })
+            .unwrap(),
         Tri::Unknown
     );
 }
@@ -194,11 +200,11 @@ fn external_fields_classified_and_unknown_in_prefilter() {
 fn ext_facts_drive_external_terms() {
     struct Fx;
     impl ExtFacts for Fx {
-        fn tool(&self, n: &str) -> Tri {
-            Tri::of(n == "bash")
+        fn tool(&self, n: &str) -> anyhow::Result<Tri> {
+            Ok({ Tri::of(n == "bash") })
         }
-        fn has(&self, f: &str) -> Tri {
-            Tri::of(f == "errors")
+        fn has(&self, f: &str) -> anyhow::Result<Tri> {
+            Ok({ Tri::of(f == "errors") })
         }
     }
     let query = q("tool:Bash has:errors");
@@ -208,9 +214,9 @@ fn ext_facts_drive_external_terms() {
         session: None,
         ext: &Fx,
     };
-    assert!(query.matches(&facts));
+    assert!(query.matches(&facts).unwrap());
     let query2 = q("tool:Grep");
-    assert!(!query2.matches(&facts)); // Fx.tool("grep") = False
+    assert!(!query2.matches(&facts).unwrap()); // Fx.tool("grep") = False
 }
 
 #[test]
@@ -222,24 +228,26 @@ fn forest_fields_classify_and_resolve() {
 
     struct Fx;
     impl ExtFacts for Fx {
-        fn subtool(&self, n: &str) -> Tri {
-            Tri::of(n == "bash")
+        fn subtool(&self, n: &str) -> anyhow::Result<Tri> {
+            Ok({ Tri::of(n == "bash") })
         }
-        fn agent_type(&self, n: &str) -> Tri {
-            Tri::of(n == "explore")
+        fn agent_type(&self, n: &str) -> anyhow::Result<Tri> {
+            Ok({ Tri::of(n == "explore") })
         }
-        fn workflow(&self, n: &str) -> Tri {
-            Tri::of(n == "census")
+        fn workflow(&self, n: &str) -> anyhow::Result<Tri> {
+            Ok({ Tri::of(n == "census") })
         }
-        fn has(&self, f: &str) -> Tri {
-            Tri::of(f == "compacted")
+        fn has(&self, f: &str) -> anyhow::Result<Tri> {
+            Ok({ Tri::of(f == "compacted") })
         }
-        fn count(&self, field: FieldId) -> Option<u64> {
-            Some(match field {
-                FieldId::Agents => 4,
-                FieldId::Workflows => 1,
-                FieldId::Compactions => 2,
-                _ => return None,
+        fn count(&self, field: FieldId) -> anyhow::Result<Option<u64>> {
+            Ok({
+                Some(match field {
+                    FieldId::Agents => 4,
+                    FieldId::Workflows => 1,
+                    FieldId::Compactions => 2,
+                    _ => return Ok(None),
+                })
             })
         }
     }
@@ -249,11 +257,11 @@ fn forest_fields_classify_and_resolve() {
         session: None,
         ext: &Fx,
     };
-    assert!(query.matches(&facts));
+    assert!(query.matches(&facts).unwrap());
 
     // a count that fails the comparison flips it false
     let q2 = q("agents>=10");
-    assert!(!q2.matches(&facts)); // Fx says 4
+    assert!(!q2.matches(&facts).unwrap()); // Fx says 4
 }
 
 #[test]
@@ -432,7 +440,7 @@ fn has_an_affordance_reads_the_view() {
     reply.content.push(Block::ToolUse {
         id: "c1".into(),
         name: "update_plan".into(),
-        input: serde_json::json!({"plan": [{"step": "x", "status": "pending"}]}),
+        input: serde_json::json!({"plan": [{"step": "x", "status": "pending"}]}).into(),
         namespace: None,
     });
     let s = Session {
@@ -440,8 +448,8 @@ fn has_an_affordance_reads_the_view() {
         ..Session::new("a", Harness::Codex)
     };
     let none = facts::TextSets::empty();
-    assert!(facts::matches_full(&q("has:plan"), &r, &s, &none));
-    assert!(!facts::matches_full(&q("has:schedule"), &r, &s, &none));
+    assert!(facts::matches_full(&q("has:plan"), &r, &s, &none).unwrap());
+    assert!(!facts::matches_full(&q("has:schedule"), &r, &s, &none).unwrap());
     assert!(SessionQuery::parse("has:nonsense").is_err());
 }
 
@@ -455,4 +463,30 @@ fn has_an_affordance_is_counted_not_events() {
     assert!(errs.needs_events() && !errs.needs_counted());
     let mixed = q("has:plan has:errors");
     assert!(mixed.needs_events() && mixed.needs_counted());
+}
+
+#[test]
+fn consulted_fact_errors_propagate_through_negation_and_boolean_terms() {
+    struct Broken;
+    impl ExtFacts for Broken {
+        fn tool(&self, _: &str) -> anyhow::Result<Tri> {
+            anyhow::bail!("source changed")
+        }
+    }
+    let r = refx("a", Harness::Claude, None, None, 1);
+    let facts = Facts {
+        r: &r,
+        session: None,
+        ext: &Broken,
+    };
+    for source in ["tool:edit", "NOT tool:edit", "tool:edit OR id:a", "id:a AND tool:edit"] {
+        assert_eq!(
+            q(source).matches(&facts).unwrap_err().to_string(),
+            "source changed",
+            "{source}"
+        );
+    }
+    // Keep existing order-sensitive short circuiting: these leaves are never consulted.
+    assert!(q("id:a OR tool:edit").matches(&facts).unwrap());
+    assert!(!q("id:absent AND tool:edit").matches(&facts).unwrap());
 }

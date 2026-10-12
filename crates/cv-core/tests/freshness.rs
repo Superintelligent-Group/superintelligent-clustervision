@@ -331,7 +331,7 @@ fn a_full_read_counts_affordances_for_has() {
     assert!(query.needs_counted() && !query.needs_events());
     let run = || {
         let mut v = cv_core::sessions();
-        cv_core::query::filter_refs(&mut v, &query, &cv_core::query::TextSets::empty());
+        cv_core::query::filter_refs(&mut v, &query, &cv_core::query::TextSets::empty()).unwrap();
         ids(&v)
     };
     assert_eq!(run(), ["planner"]);

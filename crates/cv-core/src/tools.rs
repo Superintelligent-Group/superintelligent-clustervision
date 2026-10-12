@@ -82,8 +82,14 @@ impl ToolHistogram {
         }
     }
 
-    fn note_message(&mut self, m: &Message, idx: usize, cwd: Option<&std::path::Path>, scratch: &mut Vec<Event>) {
-        events::extract_into(m, idx, cwd, scratch);
+    fn note_message(
+        &mut self,
+        m: &Message,
+        idx: usize,
+        cwd: Option<&std::path::Path>,
+        scratch: &mut Vec<Event>,
+    ) -> anyhow::Result<()> {
+        events::extract_into(m, idx, cwd, scratch)?;
         for event in scratch.iter() {
             self.note(event);
         }
@@ -93,17 +99,21 @@ impl ToolHistogram {
         if scratch.capacity() > 64 {
             *scratch = Vec::new();
         }
+        Ok(())
     }
 
     /// Build from already-parsed messages, dropping each message's extracted event rows after
     /// tallying them. The caller's messages are borrowed; no transcript or event list is cloned.
-    pub fn from_messages<'a>(msgs: impl IntoIterator<Item = &'a Message>, cwd: Option<&std::path::Path>) -> Self {
+    pub fn from_messages<'a>(
+        msgs: impl IntoIterator<Item = &'a Message>,
+        cwd: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
         let mut h = Self::default();
         let mut scratch = Vec::new();
         for (i, m) in msgs.into_iter().enumerate() {
-            h.note_message(m, i, cwd, &mut scratch);
+            h.note_message(m, i, cwd, &mut scratch)?;
         }
-        h
+        Ok(h)
     }
 
     /// Stream one transcript into its histogram, retaining only distinct tool counts. Unreadable
@@ -114,8 +124,9 @@ impl ToolHistogram {
             msg_idx: 0,
             histogram: Self::default(),
             scratch: Vec::new(),
+            fail: None,
         };
-        adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
         Ok(sink.histogram)
     }
 
@@ -157,9 +168,14 @@ struct HistogramSink {
     msg_idx: usize,
     histogram: ToolHistogram,
     scratch: Vec<Event>,
+    fail: Option<anyhow::Error>,
 }
 
 impl MessageSink for HistogramSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.fail.take()
+    }
+
     fn meta(&mut self, session: &crate::Session) {
         // Match EventSink: a discovery cwd wins; otherwise the first available pushed cwd wins.
         if self.cwd.is_none() {
@@ -168,8 +184,13 @@ impl MessageSink for HistogramSink {
     }
 
     fn message(&mut self, message: Message) -> Flow {
-        self.histogram
-            .note_message(&message, self.msg_idx, self.cwd.as_deref(), &mut self.scratch);
+        if let Err(error) = self
+            .histogram
+            .note_message(&message, self.msg_idx, self.cwd.as_deref(), &mut self.scratch)
+        {
+            self.fail = Some(error);
+            return Flow::Stop;
+        }
         self.msg_idx += 1;
         Flow::Continue
     }
@@ -207,6 +228,7 @@ struct CallSink {
     cwd: Option<std::path::PathBuf>,
     msg_idx: usize,
     rows: Vec<(String, Event)>,
+    fail: Option<anyhow::Error>,
 }
 
 impl CallSink {
@@ -215,11 +237,16 @@ impl CallSink {
             cwd,
             msg_idx: 0,
             rows: Vec::new(),
+            fail: None,
         }
     }
 }
 
 impl MessageSink for CallSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.fail.take()
+    }
+
     fn meta(&mut self, s: &crate::ir::Session) {
         if self.cwd.is_none() {
             self.cwd = s.cwd.clone();
@@ -232,7 +259,13 @@ impl MessageSink for CallSink {
                 let mut one = Message::new(m.role);
                 one.timestamp = m.timestamp;
                 one.content = vec![b.clone()];
-                let rows = events::extract(&one, self.msg_idx, self.cwd.as_deref());
+                let rows = match events::extract(&one, self.msg_idx, self.cwd.as_deref()) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        self.fail = Some(error);
+                        return Flow::Stop;
+                    }
+                };
                 self.rows.extend(rows.into_iter().map(|e| (id.clone(), e)));
             }
         }
@@ -339,8 +372,7 @@ pub const ORCHESTRATOR: &str = "<orchestrator>";
 ///
 /// This is the cross-agent surface: with it you can ask "which tools did agent X use"
 /// ([`ForestTools::agent`]), "which agents used tool T" ([`ForestTools::agents_using`]), and the
-/// aggregate across the whole forest ([`ForestTools::aggregate`]). Best-effort per agent: an
-/// unreadable transcript contributes an empty histogram rather than aborting.
+/// aggregate across the whole forest ([`ForestTools::aggregate`]). A failed read in any agent returns an error; no partial forest is published.
 pub fn forest_tools(r: &SessionRef) -> anyhow::Result<ForestTools> {
     let adapter =
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
@@ -360,7 +392,7 @@ pub fn forest_tools(r: &SessionRef) -> anyhow::Result<ForestTools> {
 
     // Every sub-agent in the forest (direct + workflow), each its own histogram.
     for s in crate::subagent_tree_of(r) {
-        let hist = ToolHistogram::from_stream(adapter.as_ref(), &s.session).unwrap_or_default();
+        let hist = ToolHistogram::from_stream(adapter.as_ref(), &s.session)?;
         agents.push(AgentTools {
             agent: s.agent_id().to_string(),
             agent_type: s.agent_type.clone().unwrap_or_else(|| "agent".to_string()),
@@ -381,14 +413,13 @@ pub fn forest_timeline(r: &SessionRef) -> anyhow::Result<Vec<ToolEvent>> {
     let mut out: Vec<ToolEvent> = Vec::new();
 
     let mut sink = CallSink::new(r.cwd.clone());
-    adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+    adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
     timeline_calls(ORCHESTRATOR, sink.rows, &mut out);
 
     for s in crate::subagent_tree_of(r) {
         let mut sink = CallSink::new(s.session.cwd.clone());
-        if adapter.stream(&s.session, &ParseOptions::lazy(), &mut sink).is_ok() {
-            timeline_calls(s.agent_id(), sink.rows, &mut out);
-        }
+        adapter.try_stream(&s.session, &ParseOptions::lazy(), &mut sink)?;
+        timeline_calls(s.agent_id(), sink.rows, &mut out);
     }
 
     out.sort_by(|a, b| match (a.ts, b.ts) {
@@ -424,7 +455,7 @@ mod tests {
         Block::ToolUse {
             id: "t".into(),
             name: name.into(),
-            input,
+            input: input.into(),
             namespace: None,
         }
     }
@@ -436,6 +467,7 @@ mod tests {
             msg_idx: 0,
             histogram: ToolHistogram::default(),
             scratch: Vec::new(),
+            fail: None,
         };
         let mut shell = crate::Session::new("histogram", crate::Harness::Claude);
         shell.cwd = Some("/first".into());
@@ -465,6 +497,7 @@ mod tests {
             msg_idx: 0,
             histogram: ToolHistogram::default(),
             scratch: Vec::new(),
+            fail: None,
         };
         discovered.meta(&shell);
         assert_eq!(discovered.cwd.as_deref(), Some(std::path::Path::new("/discovery")));
@@ -513,7 +546,7 @@ mod tests {
                 tool_use("Bash", json!({"command": "git status"})),
             ]),
         ];
-        let h = ToolHistogram::from_messages(msgs.iter(), Some(std::path::Path::new("/repo")));
+        let h = ToolHistogram::from_messages(msgs.iter(), Some(std::path::Path::new("/repo"))).unwrap();
         assert_eq!(h.total_calls, 5);
         assert_eq!(h.distinct(), 3);
         assert!(h.used("Bash"));
@@ -544,7 +577,7 @@ mod tests {
             tool_use("shell", json!({"command": "ls"})),
         ])];
         let blocks = msgs[0].content.len();
-        let h = ToolHistogram::from_messages(msgs.iter(), Some(std::path::Path::new("/repo")));
+        let h = ToolHistogram::from_messages(msgs.iter(), Some(std::path::Path::new("/repo"))).unwrap();
         assert_eq!(h.total_calls, blocks);
         let shell = &h.tools["shell"];
         assert_eq!((shell.calls, shell.commands, shell.edits), (2, 2, 3));
@@ -570,7 +603,7 @@ mod tests {
         for m in &msgs {
             sink.message(m.clone());
         }
-        let h = ToolHistogram::from_messages(msgs.iter(), Some(cwd));
+        let h = ToolHistogram::from_messages(msgs.iter(), Some(cwd)).unwrap();
         let mut tl = Vec::new();
         timeline_calls(ORCHESTRATOR, sink.rows, &mut tl);
         assert_eq!(tl.len(), h.total_calls);
@@ -613,7 +646,7 @@ mod tests {
                 details: None,
             },
         ];
-        let h = ToolHistogram::from_messages(std::slice::from_ref(&m).iter(), None);
+        let h = ToolHistogram::from_messages(std::slice::from_ref(&m).iter(), None).unwrap();
         assert_eq!(h.total_errors, 2);
         assert_eq!(h.tools["Bash"].errors, 1);
         assert_eq!(h.total_calls, 0);
@@ -633,7 +666,8 @@ mod tests {
                 ]))
                 .iter(),
                 None,
-            ),
+            )
+            .unwrap(),
         };
         let a2 = AgentTools {
             agent: "agentA".into(),
@@ -646,7 +680,8 @@ mod tests {
                 ]))
                 .iter(),
                 Some(std::path::Path::new("/r")),
-            ),
+            )
+            .unwrap(),
         };
         let ft = ForestTools { agents: vec![a1, a2] };
 
@@ -670,5 +705,34 @@ mod tests {
         let wf = ft.for_workflow("wf_1");
         assert_eq!(wf.agents.len(), 1);
         assert_eq!(wf.agents[0].agent, "agentA");
+    }
+    #[test]
+    fn histogram_and_timeline_stop_on_unreadable_tool_arguments() {
+        let world = cv_testkit::World::in_process("tool_json_failures");
+        let path = world.home.join("input.json");
+        let body = r#"{"file_path":"a.rs"}"#;
+        std::fs::write(&path, body).unwrap();
+        let input = crate::json::Json::source(&path, 0, body.len() as u64).unwrap();
+        let message = asst(vec![Block::ToolUse {
+            id: "call".into(),
+            name: "Edit".into(),
+            namespace: None,
+            input,
+        }]);
+        std::fs::remove_file(path).unwrap();
+        assert!(ToolHistogram::from_messages([&message], None).is_err());
+        let mut histogram = HistogramSink {
+            cwd: None,
+            msg_idx: 0,
+            histogram: ToolHistogram::default(),
+            scratch: Vec::new(),
+            fail: None,
+        };
+        assert_eq!(histogram.message(message.clone()), Flow::Stop);
+        assert!(histogram.take_error().is_some());
+        let mut timeline = CallSink::new(None);
+        assert_eq!(timeline.message(message), Flow::Stop);
+        assert!(timeline.take_error().is_some());
+        assert!(timeline.rows.is_empty());
     }
 }

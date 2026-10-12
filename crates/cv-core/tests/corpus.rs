@@ -258,6 +258,7 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
     // `kind/action`: what `cv show --kind affordances` would list.
     let mut affordances: BTreeMap<String, usize> = BTreeMap::new();
     for a in cv_core::affordance::of_session(&s)
+        .unwrap()
         .into_iter()
         .chain(adapter.store_affordances(r))
     {
@@ -742,18 +743,18 @@ fn query_facts_match_collected_corpus() {
         kinds: HashSet<cv_core::affordance::Kind>,
     }
     impl ExtFacts for ScopedFacts<'_> {
-        fn tool(&self, n: &str) -> Tri {
+        fn tool(&self, n: &str) -> anyhow::Result<Tri> {
             self.full.tool(n)
         }
-        fn touched(&self, n: &str) -> Tri {
+        fn touched(&self, n: &str) -> anyhow::Result<Tri> {
             self.full.touched(n)
         }
-        fn text(&self, n: &str) -> Tri {
+        fn text(&self, n: &str) -> anyhow::Result<Tri> {
             self.full.text(n)
         }
-        fn has(&self, n: &str) -> Tri {
+        fn has(&self, n: &str) -> anyhow::Result<Tri> {
             match cv_core::affordance::Kind::parse(n) {
-                Some(kind) => Tri::of(self.kinds.contains(&kind)),
+                Some(kind) => Ok(Tri::of(self.kinds.contains(&kind))),
                 None => self.full.has(n),
             }
         }
@@ -812,6 +813,7 @@ fn query_facts_match_collected_corpus() {
             for r in adapter.discover().unwrap() {
                 let full = cv_core::stream::collect_with(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy()).unwrap();
                 let rows = cv_core::affordance::of_session(&full)
+                    .unwrap()
                     .into_iter()
                     .chain(adapter.store_affordances(&r));
                 let mut counts = cv_core::affordance::Counts::new();
@@ -856,7 +858,11 @@ fn query_facts_match_collected_corpus() {
                     .messages
                     .iter()
                     .enumerate()
-                    .flat_map(|(i, m)| cv_core::events::extract(m, i, full.cwd.as_deref()))
+                    .map(|(i, m)| cv_core::events::extract(m, i, full.cwd.as_deref()))
+                    .collect::<anyhow::Result<Vec<_>>>()
+                    .unwrap()
+                    .into_iter()
+                    .flatten()
                     .collect();
                 if let Some(tool) = events.iter().find_map(|e| e.tool.as_ref()) {
                     queries.push(format!(
@@ -873,11 +879,13 @@ fn query_facts_match_collected_corpus() {
                 }
                 for source in queries {
                     let query = SessionQuery::parse(&source).unwrap();
-                    let expected = query.matches(&Facts {
-                        r: &r,
-                        session: Some(&full),
-                        ext: &scoped,
-                    });
+                    let expected = query
+                        .matches(&Facts {
+                            r: &r,
+                            session: Some(&full),
+                            ext: &scoped,
+                        })
+                        .unwrap();
                     let actual = cv_core::query::matches_streamed(&query, adapter.as_ref(), &r, &texts).unwrap();
                     assert_eq!(
                         actual,
@@ -905,7 +913,8 @@ fn query_facts_match_collected_corpus() {
                     r.id
                 );
                 let expected = serde_json::to_value(legacy_histogram(&events)).unwrap();
-                let actual = cv_core::tools::ToolHistogram::from_messages(full.messages.iter(), full.cwd.as_deref());
+                let actual =
+                    cv_core::tools::ToolHistogram::from_messages(full.messages.iter(), full.cwd.as_deref()).unwrap();
                 assert_eq!(
                     serde_json::to_value(actual).unwrap(),
                     expected,

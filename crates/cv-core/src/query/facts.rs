@@ -79,22 +79,22 @@ impl<'a> SessionFacts<'a> {
         }
     }
 
-    fn events(&self) -> &[Event] {
-        self.events.get_or_init(|| {
-            let cwd = self.session.cwd.as_deref();
-            self.session
-                .messages
-                .iter()
-                .enumerate()
-                .flat_map(|(i, m)| events::extract(m, i, cwd))
-                .collect()
-        })
+    fn events(&self) -> anyhow::Result<&[Event]> {
+        if self.events.get().is_none() {
+            let mut rows = Vec::new();
+            for (i, message) in self.session.messages.iter().enumerate() {
+                events::extract_into(message, i, self.session.cwd.as_deref(), &mut rows)?;
+            }
+            let _ = self.events.set(rows);
+        }
+        Ok(self.events.get().expect("events initialized"))
     }
 
-    /// Per-agent tool histograms across the orchestrator + forest (parses every sub-agent — pricey).
-    fn forest(&self) -> &crate::tools::ForestTools {
-        self.forest
-            .get_or_init(|| crate::tools::forest_tools(self.r).unwrap_or(crate::tools::ForestTools { agents: vec![] }))
+    fn forest(&self) -> anyhow::Result<&crate::tools::ForestTools> {
+        if self.forest.get().is_none() {
+            let _ = self.forest.set(crate::tools::forest_tools(self.r)?);
+        }
+        Ok(self.forest.get().expect("forest initialized"))
     }
 
     /// The sub-agent forest as lightweight infos (type + ref + journaled outcome).
@@ -107,67 +107,63 @@ impl<'a> SessionFacts<'a> {
     }
 
     /// The affordance kinds this session shows, transcript and side store.
-    fn affordance_kinds(&self) -> &HashSet<crate::affordance::Kind> {
-        self.affordances.get_or_init(|| {
-            let mut rows = crate::affordance::of_session(self.session);
+    fn affordance_kinds(&self) -> anyhow::Result<&HashSet<crate::affordance::Kind>> {
+        if self.affordances.get().is_none() {
+            let mut rows = crate::affordance::of_session(self.session)?;
             if let Some(a) = crate::harness::for_harness(self.r.harness) {
                 rows.extend(a.store_affordances(self.r));
             }
-            rows.into_iter().map(|a| a.kind).collect()
-        })
+            let _ = self.affordances.set(rows.into_iter().map(|a| a.kind).collect());
+        }
+        Ok(self.affordances.get().expect("affordances initialized"))
     }
 
-    fn compaction_count(&self) -> usize {
-        // Keep the detector's extra-enabled read: some legacy lean readers tolerate malformed
-        // ignored sidecars that this pass rejects. Counting lazy IR kinds changes those results.
-        *self
-            .compactions
-            .get_or_init(|| crate::compaction::detect(self.r, false).map(|c| c.len()).unwrap_or(0))
+    fn compaction_count(&self) -> anyhow::Result<usize> {
+        // Preserve the detector's extra-enabled record acceptance policy.
+        if self.compactions.get().is_none() {
+            let _ = self.compactions.set(crate::compaction::detect(self.r, false)?.len());
+        }
+        Ok(*self.compactions.get().expect("compactions initialized"))
     }
 }
 
 impl ExtFacts for SessionFacts<'_> {
-    fn model(&self, needle: &str, exact: bool) -> Tri {
-        self.reduced
+    fn model(&self, needle: &str, exact: bool) -> anyhow::Result<Tri> {
+        Ok(self
+            .reduced
             .and_then(|f| f.models.get(needle))
-            .map_or(Tri::Unknown, |m| Tri::of(if exact { m.exact } else { m.contains }))
+            .map_or(Tri::Unknown, |m| Tri::of(if exact { m.exact } else { m.contains })))
     }
-
-    fn text(&self, needle: &str) -> Tri {
-        // The id key is the session id; `needle` is already lowercased by the parser, matching the
-        // map keys we inserted under.
-        Tri::of(self.text_sets.contains(needle, &self.session.id))
+    fn text(&self, needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::of(self.text_sets.contains(needle, &self.session.id)))
     }
-
-    fn tool(&self, name: &str) -> Tri {
+    fn tool(&self, name: &str) -> anyhow::Result<Tri> {
         if let Some(facts) = self.reduced {
-            return Tri::of(facts.tools.contains(name));
+            return Ok(Tri::of(facts.tools.contains(name)));
         }
-        Tri::of(
-            self.events()
-                .iter()
-                .any(|e| e.tool.as_deref().is_some_and(|t| t.to_lowercase().contains(name))),
-        )
+        Ok(Tri::of(self.events()?.iter().any(|e| {
+            e.tool.as_deref().is_some_and(|t| t.to_lowercase().contains(name))
+        })))
     }
-
-    fn touched(&self, path: &str) -> Tri {
+    fn touched(&self, path: &str) -> anyhow::Result<Tri> {
         if let Some(facts) = self.reduced {
-            return Tri::of(facts.targets.contains(path));
+            return Ok(Tri::of(facts.targets.contains(path)));
         }
-        Tri::of(self.events().iter().any(|e| {
+        Ok(Tri::of(self.events()?.iter().any(|e| {
             matches!(e.kind, "file_edit" | "file_read")
                 && e.target.as_deref().is_some_and(|t| t.to_lowercase().contains(path))
-        }))
+        })))
     }
-
-    fn has(&self, flag: &str) -> Tri {
-        Tri::of(match flag {
-            "errors" => self
-                .reduced
-                .map_or_else(|| self.events().iter().any(|e| e.kind == "error"), |f| f.errors),
-            "tools" => self
-                .reduced
-                .map_or_else(|| self.events().iter().any(|e| e.tool.is_some()), |f| f.has_tools),
+    fn has(&self, flag: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::of(match flag {
+            "errors" => match self.reduced {
+                Some(f) => f.errors,
+                None => self.events()?.iter().any(|e| e.kind == "error"),
+            },
+            "tools" => match self.reduced {
+                Some(f) => f.has_tools,
+                None => self.events()?.iter().any(|e| e.tool.is_some()),
+            },
             "images" => self.reduced.map_or_else(
                 || {
                     self.session
@@ -185,55 +181,52 @@ impl ExtFacts for SessionFacts<'_> {
                         .as_deref()
                         .is_some_and(|p| !crate::harness::claude::subagent_refs(p).is_empty())
             }
-            "compacted" => self.compaction_count() > 0,
+            "compacted" => self.compaction_count()? > 0,
             "workflows" => !self.workflows().is_empty(),
-            other => crate::affordance::Kind::parse(other).is_some_and(|k| {
-                self.reduced.map_or_else(
-                    || self.affordance_kinds().contains(&k),
-                    |f| {
-                        f.counts
-                            .as_ref()
-                            .is_some_and(|counts| counts.get(&k).is_some_and(|n| *n > 0))
-                    },
-                )
-            }),
-        })
-    }
-
-    fn subtool(&self, name: &str) -> Tri {
-        // A tool used by any *sub-agent* (skip the orchestrator sentinel).
-        Tri::of(self.forest().agents.iter().any(|a| {
-            a.agent != crate::tools::ORCHESTRATOR && a.histogram.tools.keys().any(|t| t.to_lowercase().contains(name))
+            other => match crate::affordance::Kind::parse(other) {
+                Some(k) => match self.reduced {
+                    Some(f) => f.counts.as_ref().is_some_and(|c| c.get(&k).is_some_and(|n| *n > 0)),
+                    None => self.affordance_kinds()?.contains(&k),
+                },
+                None => false,
+            },
         }))
     }
-
-    fn agent_type(&self, needle: &str) -> Tri {
-        Tri::of(self.tree().iter().any(|info| {
+    fn subtool(&self, name: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::of(self.forest()?.agents.iter().any(|a| {
+            a.agent != crate::tools::ORCHESTRATOR && a.histogram.tools.keys().any(|t| t.to_lowercase().contains(name))
+        })))
+    }
+    fn agent_type(&self, needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::of(self.tree().iter().any(|info| {
             info.agent_type
                 .as_deref()
                 .is_some_and(|t| t.to_lowercase().contains(needle))
-        }))
+        })))
     }
-
-    fn workflow(&self, needle: &str) -> Tri {
-        Tri::of(self.workflows().iter().any(|w| {
+    fn workflow(&self, needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::of(self.workflows().iter().any(|w| {
             w.run_id.to_lowercase().contains(needle)
                 || w.name.as_deref().is_some_and(|n| n.to_lowercase().contains(needle))
-        }))
+        })))
     }
-
-    fn count(&self, field: FieldId) -> Option<u64> {
-        Some(match field {
-            FieldId::Agents => self.tree().len() as u64,
-            FieldId::Workflows => self.workflows().len() as u64,
-            FieldId::Compactions => self.compaction_count() as u64,
-            _ => return None,
+    fn count(&self, field: FieldId) -> anyhow::Result<Option<u64>> {
+        Ok(match field {
+            FieldId::Agents => Some(self.tree().len() as u64),
+            FieldId::Workflows => Some(self.workflows().len() as u64),
+            FieldId::Compactions => Some(self.compaction_count()? as u64),
+            _ => None,
         })
     }
 }
 
 /// Full evaluation of `query` against a parsed session + its ref, using a [`SessionFacts`] resolver.
-pub fn matches_full(query: &SessionQuery, r: &SessionRef, session: &Session, text_sets: &TextSets) -> bool {
+pub fn matches_full(
+    query: &SessionQuery,
+    r: &SessionRef,
+    session: &Session,
+    text_sets: &TextSets,
+) -> anyhow::Result<bool> {
     let facts = SessionFacts::new(r, session, text_sets);
     query.matches(&Facts {
         r,
@@ -281,6 +274,7 @@ struct FactSink {
     targets: Vec<String>,
     pending_targets: HashSet<String>,
     events: bool,
+    fail: Option<anyhow::Error>,
 }
 
 impl FactSink {
@@ -303,6 +297,7 @@ impl FactSink {
             tools,
             targets,
             pending_targets: HashSet::new(),
+            fail: None,
         }
     }
 
@@ -346,13 +341,24 @@ impl FactSink {
 }
 
 impl crate::MessageSink for FactSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.fail.take()
+    }
+
     fn message(&mut self, m: Message) -> crate::Flow {
         if let Some(model) = m.model.as_deref() {
             self.facts.note_model(model);
         }
         self.facts.images |= m.content.iter().any(|b| matches!(b, Block::Image { .. }));
         if self.events {
-            for e in events::extract(&m, 0, None) {
+            let rows = match events::extract(&m, 0, None) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    self.fail = Some(error);
+                    return crate::Flow::Stop;
+                }
+            };
+            for e in rows {
                 self.facts.errors |= e.kind == "error";
                 self.facts.has_tools |= e.tool.is_some();
                 if !self.tools.is_empty() {
@@ -422,11 +428,11 @@ fn matches_streamed_with_probe(
         reduced: Some(&reduced),
         ..SessionFacts::new(r, &session, text_sets)
     };
-    Ok(query.matches(&Facts {
+    query.matches(&Facts {
         r,
         session: Some(&session),
         ext: &facts,
-    }))
+    })
 }
 
 /// Facts available before parsing: indexed text membership and fresh catalog affordance counts.
@@ -438,15 +444,15 @@ struct RefFacts<'a> {
 }
 
 impl ExtFacts for RefFacts<'_> {
-    fn text(&self, needle: &str) -> Tri {
-        Tri::of(self.text_sets.contains(needle, self.id))
+    fn text(&self, needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::of(self.text_sets.contains(needle, self.id)))
     }
 
-    fn has(&self, flag: &str) -> Tri {
-        match (crate::affordance::Kind::parse(flag), &self.counts) {
+    fn has(&self, flag: &str) -> anyhow::Result<Tri> {
+        Ok(match (crate::affordance::Kind::parse(flag), &self.counts) {
             (Some(k), Some(counts)) => Tri::of(counts.get(&k).is_some_and(|n| *n > 0)),
             _ => Tri::Unknown,
-        }
+        })
     }
 }
 
@@ -455,15 +461,21 @@ impl ExtFacts for RefFacts<'_> {
 /// indexed text membership and catalog's affordance counts, keeping a definite match and dropping
 /// a definite miss without a parse, and parse only what is still undecided. `cv ls`/`stats` and
 /// `cv serve`'s `/api/stats?q=` all go through here, so `-q` means the same thing on every door.
-pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) {
-    refs.retain(|r| query.prefilter(r));
+pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) -> anyhow::Result<()> {
     let heavy = query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest();
-    if !heavy && !query.needs_counted() {
-        return;
-    }
     let table = query.needs_counted().then(crate::catalog::AffordanceTable::load);
     let mut probe = crate::source::Probe::default();
-    refs.retain(|r| {
+    // Decide before mutating: a read error leaves the caller's list intact.
+    let mut keep = Vec::with_capacity(refs.len());
+    for r in refs.iter() {
+        if !query.prefilter(r) {
+            keep.push(false);
+            continue;
+        }
+        if !heavy && !query.needs_counted() {
+            keep.push(true);
+            continue;
+        }
         let cheap_facts = RefFacts {
             id: &r.id,
             text_sets,
@@ -471,20 +483,23 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
                 .as_ref()
                 .and_then(|t| t.counts_with_probe(r, &probe.snapshot(r), &mut probe)),
         };
-        let cheap = query.eval(&Facts {
+        let decision = match query.eval(&Facts {
             r,
             session: None,
             ext: &cheap_facts,
-        });
-        match cheap {
+        })? {
             Tri::True => true,
             Tri::False => false,
-            // Undecided: reduce it (which also records its counts for the next query).
-            Tri::Unknown => crate::harness::for_harness(r.harness).is_some_and(|a| {
-                matches_streamed_with_probe(query, a.as_ref(), r, text_sets, &mut probe).unwrap_or(false)
-            }),
-        }
-    });
+            Tri::Unknown => match crate::harness::for_harness(r.harness) {
+                Some(a) => matches_streamed_with_probe(query, a.as_ref(), r, text_sets, &mut probe)?,
+                None => anyhow::bail!("no adapter for {}", r.harness),
+            },
+        };
+        keep.push(decision);
+    }
+    let mut decisions = keep.into_iter();
+    refs.retain(|_| decisions.next().expect("one decision per ref"));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -533,7 +548,7 @@ mod tests {
             let query = SessionQuery::parse(source).unwrap();
             let texts = text_sets(&query, &r);
             let mut refs = vec![r.clone()];
-            filter_refs(&mut refs, &query, &texts);
+            filter_refs(&mut refs, &query, &texts).unwrap();
             assert_eq!(refs.len(), usize::from(matches), "{source}");
         }
     }
@@ -560,11 +575,13 @@ mod tests {
                 counts: None,
             };
             assert_eq!(
-                query.eval(&Facts {
-                    r: &r,
-                    session: None,
-                    ext: &ext
-                }),
+                query
+                    .eval(&Facts {
+                        r: &r,
+                        session: None,
+                        ext: &ext
+                    })
+                    .unwrap(),
                 expected,
                 "{source}"
             );
@@ -615,7 +632,7 @@ mod tests {
             "compactions=1",
         ] {
             assert!(
-                matches_full(&SessionQuery::parse(required).unwrap(), &r, &full, &TextSets::default()),
+                matches_full(&SessionQuery::parse(required).unwrap(), &r, &full, &TextSets::default()).unwrap(),
                 "{required}"
             );
         }
@@ -666,14 +683,14 @@ mod tests {
                     HashSet::new()
                 }
             });
-            let expected = matches_full(&query, &r, &full, &texts);
+            let expected = matches_full(&query, &r, &full, &texts).unwrap();
             assert_eq!(
                 matches_streamed(&query, adapter.as_ref(), &r, &texts).unwrap(),
                 expected,
                 "{source}"
             );
             let mut refs = vec![r.clone()];
-            filter_refs(&mut refs, &query, &texts);
+            filter_refs(&mut refs, &query, &texts).unwrap();
             assert_eq!(!refs.is_empty(), expected, "filter: {source}");
         }
     }
@@ -688,7 +705,7 @@ mod tests {
             id: "call".into(),
             name: "Edit".into(),
             namespace: None,
-            input: serde_json::json!({"file_path":"./a.rs","rich":"discarded rich argument".repeat(8192)}),
+            input: serde_json::json!({"file_path":"./a.rs","rich":"discarded rich argument".repeat(8192)}).into(),
         });
         m.content.push(Block::Image {
             media_type: None,
@@ -754,7 +771,44 @@ mod tests {
         let query = SessionQuery::parse("compactions=0").unwrap();
         let texts = TextSets::default();
         assert_eq!(full.messages.len(), 1);
-        assert!(matches_full(&query, &r, &full, &texts));
+        assert!(matches_full(&query, &r, &full, &texts).unwrap());
         assert!(matches_streamed(&query, adapter.as_ref(), &r, &texts).unwrap());
+    }
+    #[test]
+    fn unreadable_json_facts_and_filter_errors_are_not_negative_matches() {
+        let world = cv_testkit::World::in_process("query_json_failures");
+        let path = world.home.join("input.json");
+        let body = r#"{"file_path":"a.rs","command":"git commit","plan":["step"]}"#;
+        std::fs::write(&path, body).unwrap();
+        let input = crate::json::Json::source(&path, 0, body.len() as u64).unwrap();
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "Edit".into(),
+            namespace: None,
+            input,
+        });
+        std::fs::remove_file(&path).unwrap();
+        let r = SessionRef::new("facts", crate::Harness::Claude, world.transcript("missing"));
+        let mut full = Session::new("facts", crate::Harness::Claude);
+        full.messages.push(message.clone());
+        for source in ["tool:edit", "NOT tool:edit", "touched:a.rs", "has:plan"] {
+            assert!(
+                matches_full(&SessionQuery::parse(source).unwrap(), &r, &full, &TextSets::empty()).is_err(),
+                "{source}"
+            );
+        }
+        let mut sink = FactSink::new(&SessionQuery::parse("tool:edit").unwrap());
+        assert_eq!(crate::MessageSink::message(&mut sink, message), crate::Flow::Stop);
+        assert!(crate::MessageSink::take_error(&mut sink).is_some());
+        let mut refs = vec![r.clone()];
+        assert!(filter_refs(
+            &mut refs,
+            &SessionQuery::parse("tool:edit").unwrap(),
+            &TextSets::empty()
+        )
+        .is_err());
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, r.id);
     }
 }

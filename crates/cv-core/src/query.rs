@@ -303,37 +303,37 @@ impl Tri {
 pub trait ExtFacts {
     /// A model predicate resolved without retaining messages. `Unknown` falls back to the
     /// provided Session's model and turn models, preserving existing resolver implementations.
-    fn model(&self, _needle: &str, _exact: bool) -> Tri {
-        Tri::Unknown
+    fn model(&self, _needle: &str, _exact: bool) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
-    fn text(&self, _needle: &str) -> Tri {
-        Tri::Unknown
+    fn text(&self, _needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
-    fn tool(&self, _name: &str) -> Tri {
-        Tri::Unknown
+    fn tool(&self, _name: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
-    fn touched(&self, _path: &str) -> Tri {
-        Tri::Unknown
+    fn touched(&self, _path: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
-    fn has(&self, _flag: &str) -> Tri {
-        Tri::Unknown
+    fn has(&self, _flag: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
     /// A tool used by a sub-agent (not the orchestrator) — `subtool:`.
-    fn subtool(&self, _name: &str) -> Tri {
-        Tri::Unknown
+    fn subtool(&self, _name: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
     /// Spawned a sub-agent whose type matches — `agent:`.
-    fn agent_type(&self, _needle: &str) -> Tri {
-        Tri::Unknown
+    fn agent_type(&self, _needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
     /// Ran a `Workflow` matching this name/run-id — `workflow:`.
-    fn workflow(&self, _needle: &str) -> Tri {
-        Tri::Unknown
+    fn workflow(&self, _needle: &str) -> anyhow::Result<Tri> {
+        Ok(Tri::Unknown)
     }
     /// A forest-derived count for a numeric forest field (`agents`/`workflows`/`compactions`).
     /// `None` ⇒ couldn't compute (treated as `Unknown`).
-    fn count(&self, _field: FieldId) -> Option<u64> {
-        None
+    fn count(&self, _field: FieldId) -> anyhow::Result<Option<u64>> {
+        Ok(None)
     }
 }
 
@@ -422,7 +422,7 @@ impl SessionQuery {
 
     /// The three-valued evaluation against whatever facts are given (`Unknown` where they cannot
     /// decide) — what a sweep uses to keep a definite `True` without parsing.
-    pub fn eval(&self, facts: &Facts) -> Tri {
+    pub fn eval(&self, facts: &Facts) -> anyhow::Result<Tri> {
         eval(&self.expr, facts)
     }
 
@@ -443,13 +443,13 @@ impl SessionQuery {
     /// Cheap catalog-only prefilter: evaluate against the ref alone (parse/index/events leaves are
     /// `Unknown`). Returns `false` only when the query is *definitely* false — safe to prune.
     pub fn prefilter(&self, r: &SessionRef) -> bool {
-        eval(&self.expr, &Facts::from_ref(r)) != Tri::False
+        eval(&self.expr, &Facts::from_ref(r)).expect("catalog facts are infallible") != Tri::False
     }
 
     /// Full evaluation with whatever facts are available. `Unknown` is treated as no-match (the
     /// final decision must be definite).
-    pub fn matches(&self, facts: &Facts) -> bool {
-        eval(&self.expr, facts) == Tri::True
+    pub fn matches(&self, facts: &Facts) -> anyhow::Result<bool> {
+        Ok(eval(&self.expr, facts)? == Tri::True)
     }
 
     /// Convenience: full match against a parsed [`Session`] (external predicates `Unknown`). Use
@@ -460,7 +460,7 @@ impl SessionQuery {
             session: Some(s),
             ext: &NoExt,
         };
-        eval(&self.expr, &facts) == Tri::True
+        eval(&self.expr, &facts).expect("session metadata facts are infallible") == Tri::True
     }
 }
 
@@ -512,16 +512,16 @@ fn collect_costs(e: &Expr, out: &mut Vec<Cost>) {
 // Evaluation.
 // ---------------------------------------------------------------------------
 
-fn eval(e: &Expr, f: &Facts) -> Tri {
-    match e {
+fn eval(e: &Expr, f: &Facts) -> anyhow::Result<Tri> {
+    Ok(match e {
         Expr::All => Tri::True,
-        Expr::Term(t) => eval_term(t, f),
-        Expr::Not(b) => eval(b, f).not(),
+        Expr::Term(t) => eval_term(t, f)?,
+        Expr::Not(b) => eval(b, f)?.not(),
         Expr::And(v) => {
             let mut acc = Tri::True;
             for e in v {
-                match eval(e, f) {
-                    Tri::False => return Tri::False,
+                match eval(e, f)? {
+                    Tri::False => return Ok(Tri::False),
                     Tri::Unknown => acc = Tri::Unknown,
                     Tri::True => {}
                 }
@@ -531,19 +531,19 @@ fn eval(e: &Expr, f: &Facts) -> Tri {
         Expr::Or(v) => {
             let mut acc = Tri::False;
             for e in v {
-                match eval(e, f) {
-                    Tri::True => return Tri::True,
+                match eval(e, f)? {
+                    Tri::True => return Ok(Tri::True),
                     Tri::Unknown => acc = Tri::Unknown,
                     Tri::False => {}
                 }
             }
             acc
         }
-    }
+    })
 }
 
-fn eval_term(t: &Term, f: &Facts) -> Tri {
-    match t.field {
+fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
+    Ok(match t.field {
         FieldId::Harness => match &t.val {
             Val::Strs(names) => Tri::of(names.iter().any(|n| Harness::parse(n) == Some(f.r.harness))),
             _ => Tri::False,
@@ -557,14 +557,14 @@ fn eval_term(t: &Term, f: &Facts) -> Tri {
         // Parse-required.
         FieldId::Model => {
             if !matches!(&t.val, Val::Strs(v) if !v.is_empty()) {
-                return f.session.map_or(Tri::Unknown, |_| Tri::False);
+                return Ok(f.session.map_or(Tri::Unknown, |_| Tri::False));
             }
             or_over(&t.val, |needle| {
-                let resolved = f.ext.model(needle, t.op == Op::Eq);
+                let resolved = f.ext.model(needle, t.op == Op::Eq)?;
                 if resolved != Tri::Unknown {
-                    return resolved;
+                    return Ok(resolved);
                 }
-                match f.session {
+                Ok(match f.session {
                     None => Tri::Unknown,
                     Some(s) => {
                         let hit = |m: Option<&str>| {
@@ -579,8 +579,8 @@ fn eval_term(t: &Term, f: &Facts) -> Tri {
                         };
                         Tri::of(hit(s.model.as_deref()) || s.messages.iter().any(|msg| hit(msg.model.as_deref())))
                     }
-                }
-            })
+                })
+            })?
         }
         FieldId::Git => match f.session {
             None => Tri::Unknown,
@@ -597,32 +597,32 @@ fn eval_term(t: &Term, f: &Facts) -> Tri {
             }
         },
         // External (index/events).
-        FieldId::Text => or_over(&t.val, |n| f.ext.text(n)),
-        FieldId::Tool => or_over(&t.val, |n| f.ext.tool(n)),
-        FieldId::Touched => or_over(&t.val, |n| f.ext.touched(n)),
-        FieldId::Has => or_over(&t.val, |n| f.ext.has(n)),
+        FieldId::Text => or_over(&t.val, |n| f.ext.text(n))?,
+        FieldId::Tool => or_over(&t.val, |n| f.ext.tool(n))?,
+        FieldId::Touched => or_over(&t.val, |n| f.ext.touched(n))?,
+        FieldId::Has => or_over(&t.val, |n| f.ext.has(n))?,
         // Forest (sub-agents / workflows / compaction).
-        FieldId::Subtool => or_over(&t.val, |n| f.ext.subtool(n)),
-        FieldId::Agent => or_over(&t.val, |n| f.ext.agent_type(n)),
-        FieldId::Workflow => or_over(&t.val, |n| f.ext.workflow(n)),
-        FieldId::Agents | FieldId::Workflows | FieldId::Compactions => match f.ext.count(t.field) {
+        FieldId::Subtool => or_over(&t.val, |n| f.ext.subtool(n))?,
+        FieldId::Agent => or_over(&t.val, |n| f.ext.agent_type(n))?,
+        FieldId::Workflow => or_over(&t.val, |n| f.ext.workflow(n))?,
+        FieldId::Agents | FieldId::Workflows | FieldId::Compactions => match f.ext.count(t.field)? {
             Some(n) => num_match(t.op, &t.val, n),
             None => Tri::Unknown,
         },
-    }
+    })
 }
 
 /// OR a predicate over each string in the value (so `tool:a,b` is "a OR b"), with Kleene semantics.
-fn or_over(val: &Val, mut g: impl FnMut(&str) -> Tri) -> Tri {
+fn or_over(val: &Val, mut g: impl FnMut(&str) -> anyhow::Result<Tri>) -> anyhow::Result<Tri> {
     let mut acc = Tri::False;
     for n in as_strs(val) {
-        match g(&n) {
-            Tri::True => return Tri::True,
+        match g(&n)? {
+            Tri::True => return Ok(Tri::True),
             Tri::Unknown => acc = Tri::Unknown,
             Tri::False => {}
         }
     }
-    acc
+    Ok(acc)
 }
 
 fn as_strs(val: &Val) -> Vec<String> {

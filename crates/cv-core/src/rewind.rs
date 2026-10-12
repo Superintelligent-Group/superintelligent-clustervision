@@ -165,6 +165,7 @@ pub struct CommitEvidenceSink {
     /// every later mention).
     stop_on_created: bool,
     pub found: Vec<CommitEvidence>,
+    fail: Option<anyhow::Error>,
 }
 
 impl CommitEvidenceSink {
@@ -177,16 +178,17 @@ impl CommitEvidenceSink {
             resolver: source.map(|p| Resolver::new(Some(p))),
             stop_on_created: false,
             found: Vec::new(),
+            fail: None,
         }
     }
 
     /// Observe one message at stream index `idx`; returns whether a `Created` match landed.
-    fn observe(&mut self, m: &Message, idx: usize) -> bool {
+    fn observe(&mut self, m: &Message, idx: usize) -> Result<bool> {
         let mut created = false;
         for b in &m.content {
             match b {
                 Block::ToolUse { id, input, .. } => {
-                    if let Some(cmd) = crate::events::command_of(input) {
+                    if let Some(cmd) = crate::events::command_of_json(input)? {
                         if let Some(kind) = git_evidence_kind(&cmd) {
                             self.git_calls.insert(id.clone(), (kind, cmd));
                         }
@@ -220,7 +222,7 @@ impl CommitEvidenceSink {
                 _ => {}
             }
         }
-        created
+        Ok(created)
     }
 
     /// The best evidence for `sha`: its first `Created` match, else its first `Pushed` one.
@@ -231,11 +233,20 @@ impl CommitEvidenceSink {
 }
 
 impl MessageSink for CommitEvidenceSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.fail.take()
+    }
+
     fn message(&mut self, m: Message) -> Flow {
         let idx = self.msg_idx;
         self.msg_idx += 1;
-        if self.observe(&m, idx) && self.stop_on_created {
-            return Flow::Stop;
+        match self.observe(&m, idx) {
+            Ok(true) if self.stop_on_created => return Flow::Stop,
+            Err(error) => {
+                self.fail = Some(error);
+                return Flow::Stop;
+            }
+            _ => {}
         }
         Flow::Continue
     }
@@ -263,18 +274,20 @@ pub fn commit_evidence(r: &SessionRef, shas: &[String]) -> Result<Vec<CommitEvid
     }
     let adapter = crate::harness::for_harness(r.harness).with_context(|| format!("no adapter for {}", r.harness))?;
     let mut sink = CommitEvidenceSink::new(want, Some(r.path.clone()));
-    adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+    adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
     Ok(sink.found)
 }
 
 /// [`commit_evidence`] over many sessions at once (in parallel where the build allows), keeping
-/// only the sessions with evidence. Per-session failures (an unreadable transcript) are skipped:
-/// exact evidence is a bonus tier, never a reason to fail the caller.
-pub fn commit_evidence_many(refs: Vec<SessionRef>, shas: &[String]) -> Vec<(SessionRef, Vec<CommitEvidence>)> {
-    crate::par_filter_map(refs, |r| {
-        let found = commit_evidence(&r, shas).ok()?;
-        (!found.is_empty()).then_some((r, found))
-    })
+/// only sessions with evidence. A failed source read returns an error instead of an absent match.
+pub fn commit_evidence_many(refs: Vec<SessionRef>, shas: &[String]) -> Result<Vec<(SessionRef, Vec<CommitEvidence>)>> {
+    let rows = crate::par_filter_map(refs, |r| Some(commit_evidence(&r, shas).map(|found| (r, found))));
+    Ok(rows
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, found)| !found.is_empty())
+        .collect())
 }
 
 /// Which of `needles` (ASCII, case-insensitive) occur anywhere in the file, by one chunked read —
@@ -402,6 +415,10 @@ struct ScanSink {
 }
 
 impl MessageSink for ScanSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.evidence.as_mut().and_then(MessageSink::take_error)
+    }
+
     fn message(&mut self, m: Message) -> Flow {
         let idx = self.offsets.len();
         match m.extra.get(OFFSET_KEY).and_then(Value::as_u64) {
@@ -418,8 +435,13 @@ impl MessageSink for ScanSink {
             self.uuid_off.insert(id.clone(), self.offsets[idx]);
         }
         if let Some(ev) = &mut self.evidence {
-            if ev.observe(&m, idx) {
-                return Flow::Stop;
+            match ev.observe(&m, idx) {
+                Ok(true) => return Flow::Stop,
+                Err(error) => {
+                    ev.fail = Some(error);
+                    return Flow::Stop;
+                }
+                _ => {}
             }
         }
         if self.stop_after == Some(idx) {
@@ -494,6 +516,9 @@ pub fn rewind_session(r: &SessionRef, opts: &RewindOptions) -> Result<RewindResu
         &ParseOptions::lazy_offsets(),
         &mut scan,
     );
+    if let Some(error) = scan.take_error() {
+        return Err(error);
+    }
     if scan.unstamped {
         bail!("cannot map {}'s messages to source records (no byte offsets)", r.id);
     }
@@ -887,3 +912,39 @@ fn closes_open_call(v: &Value) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod json_read_tests {
+    use super::*;
+
+    #[test]
+    fn commit_evidence_does_not_ignore_unreadable_command_arguments() {
+        let world = cv_testkit::World::in_process("rewind_json_failure");
+        let path = world.home.join("input.json");
+        let body = r#"{"command":"git commit -m test"}"#;
+        std::fs::write(&path, body).unwrap();
+        let input = crate::json::Json::source(&path, 0, body.len() as u64).unwrap();
+        let mut message = Message::new(crate::Role::Assistant);
+        message.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "Bash".into(),
+            namespace: None,
+            input,
+        });
+        std::fs::remove_file(path).unwrap();
+        let mut evidence = CommitEvidenceSink::new(vec!["abcdef123".into()], None);
+        assert_eq!(evidence.message(message.clone()), Flow::Stop);
+        assert!(evidence.take_error().is_some());
+        assert!(evidence.found.is_empty());
+        let mut scan = ScanSink {
+            offsets: Vec::new(),
+            unstamped: false,
+            boundaries: Vec::new(),
+            uuid_off: HashMap::new(),
+            stop_after: None,
+            evidence: Some(CommitEvidenceSink::new(vec!["abcdef123".into()], None)),
+        };
+        assert_eq!(scan.message(message), Flow::Stop);
+        assert!(scan.take_error().is_some());
+    }
+}
