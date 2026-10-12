@@ -11,6 +11,8 @@
 //! tool a [`MessageKind::SubagentSpawn`] and a synchronous spawn's result a
 //! [`MessageKind::SubagentReturn`].
 
+mod text;
+
 use crate::ir::{Block, Harness, Message, MessageKind, Origin, Role, Session};
 use crate::stream::{Flow, MessageSink};
 use chrono::{DateTime, Utc};
@@ -701,15 +703,16 @@ fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(
     use Harness as H;
     let bag = m.harness_extra(h);
     let bag_str = |k: &str| bag.and_then(|b| b.get(k)).and_then(Value::as_str);
-    let head = || match m.content.first() {
-        Some(Block::Text { text }) => text.resolve_prefix(resolver, 256).trim_start().to_string(),
-        _ => String::new(),
+    let head = match m.content.first() {
+        Some(Block::Text { text }) => Some(text),
+        _ => None,
     };
+    let starts_with = |prefix| head.is_some_and(|head| text::starts_with(head, resolver, prefix));
     match h {
-        H::Claude if m.kind == MessageKind::InjectedContext && head().starts_with("<task-notification>") => {
+        H::Claude if m.kind == MessageKind::InjectedContext && starts_with("<task-notification>") => {
             Some((Kind::BackgroundJob, "complete", "task-notification"))
         }
-        H::Kimi if head().starts_with("<notification") => Some((Kind::BackgroundJob, "complete", "notification")),
+        H::Kimi if starts_with("<notification") => Some((Kind::BackgroundJob, "complete", "notification")),
         H::KimiCode => match bag_str("origin_kind")? {
             "task" | "background_task" => Some((Kind::BackgroundJob, "complete", "task")),
             "skill_activation" => Some((Kind::Skill, "load", "skill_activation")),
@@ -722,7 +725,10 @@ fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(
             _ => None,
         },
         // An MCP call Codex refused because the approval policy could not ask (`never`).
-        H::Codex if bag_str("item_type") == Some("McpToolCall") && head().contains("requires approval") => {
+        H::Codex
+            if bag_str("item_type") == Some("McpToolCall")
+                && head.is_some_and(|head| text::contains(head, resolver, "requires approval")) =>
+        {
             Some((Kind::Approval, "deny", "McpToolCall"))
         }
         H::OpenCode
@@ -738,32 +744,18 @@ fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(
     }
 }
 
-/// How much of a message's text a summary reads: a notification's `<summary>` sits near the top.
-const HEAD_BYTES: u64 = 4 * 1024;
-
-/// A message's first text (or tool output), at most [`HEAD_BYTES`] of it, resolving a lazy span.
-fn first_text<'a>(m: &'a Message, resolver: &'a crate::lazy::Resolver) -> Option<std::borrow::Cow<'a, str>> {
-    m.content.iter().find_map(|b| match b {
-        Block::Text { text } => Some(text.resolve_prefix(resolver, HEAD_BYTES)),
-        Block::ToolResult { content, .. } => Some(content.resolve_prefix(resolver, HEAD_BYTES)),
-        _ => None,
-    })
-}
-
-/// A message's one-line summary: the `<summary>` of a notification when it has one, else its
-/// first text with a `<system-reminder>` wrapper peeled.
+/// A message's one-line summary from its complete first text or tool output. The reducer searches
+/// for the first complete summary/reminder wrapper and keeps only enough text for the final row.
 fn text_head(m: &Message, resolver: &crate::lazy::Resolver) -> String {
-    let Some(text) = first_text(m, resolver) else {
-        return String::new();
-    };
-    let inner = |tag: &str| {
-        let open = format!("<{tag}>");
-        let start = text.find(&open)? + open.len();
-        let end = text[start..].find(&format!("</{tag}>"))? + start;
-        Some(&text[start..end])
-    };
-    let t = inner("summary").or_else(|| inner("system-reminder")).unwrap_or(&text);
-    crate::ir::truncate(t.trim(), 120)
+    m.content
+        .iter()
+        .find_map(|b| match b {
+            Block::Text { text } => Some(text),
+            Block::ToolResult { content, .. } => Some(content),
+            _ => None,
+        })
+        .map(|body| text::facts(body, resolver).summary())
+        .unwrap_or_default()
 }
 
 /// What one message contributes: a tool call the table names, or the message itself (a kind, a
@@ -793,24 +785,6 @@ enum Hit<'a> {
     },
 }
 
-/// Whether a tool result is the harness refusing the call for want of permission: Claude's denial
-/// (headless `dontAsk`: "Permission to use Bash has been denied …") and rejection (the person said
-/// no), OpenCode's rule refusal and rejection. Read off the start of an error result.
-fn denied(h: Harness, text: &str) -> bool {
-    let t = text.trim_start();
-    match h {
-        Harness::Claude => {
-            (t.starts_with("Permission to use ") && t.contains(" denied"))
-                || t.starts_with("The user doesn't want to proceed with this tool use")
-        }
-        Harness::OpenCode => {
-            t.starts_with("The user has specified a rule which prevents you from using this specific tool call")
-                || t.starts_with("The user rejected permission to use this specific tool call")
-        }
-        _ => false,
-    }
-}
-
 /// The first eight characters of a snapshot hash, for a summary.
 fn short(hash: &str) -> &str {
     hash.get(..8).unwrap_or(hash)
@@ -826,7 +800,13 @@ fn joined(v: Option<&Value>) -> String {
 /// The restorable points a message carries beside its content: OpenCode's `patch` parts (1.x) and
 /// `snapshot{start, end, files}` (2.x) when the step changed files, Devin's `restorable` files on
 /// an edit's result.
-fn detail_hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, out: &mut Vec<Hit<'a>>) {
+fn detail_hits<'a>(
+    h: Harness,
+    m: &'a Message,
+    resolver: &crate::lazy::Resolver,
+    summaries: bool,
+    out: &mut Vec<Hit<'a>>,
+) {
     for b in &m.content {
         let Block::ToolResult {
             tool_use_id,
@@ -839,13 +819,17 @@ fn detail_hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver,
         else {
             continue;
         };
-        if *is_error && denied(h, &content.resolve_prefix(resolver, 256)) {
+        if *is_error && text::denied(content, resolver, h) {
             out.push(Hit::Detail {
                 kind: Kind::Approval,
                 action: "deny",
                 tool: tool_name.as_deref(),
                 tool_use_id: Some(tool_use_id),
-                summary: crate::ir::truncate(content.resolve_prefix(resolver, 512).trim(), 120),
+                summary: if summaries {
+                    text::plain_summary(content, resolver)
+                } else {
+                    String::new()
+                },
             });
         }
         if let Some(files) = details
@@ -890,7 +874,7 @@ fn detail_hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver,
     }
 }
 
-fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver) -> Vec<Hit<'a>> {
+fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summaries: bool) -> Vec<Hit<'a>> {
     let mut out = Vec::new();
     let mut spawn_calls = 0;
     for b in &m.content {
@@ -936,7 +920,7 @@ fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver) -> Vec
     if let Some((kind, action, tool)) = message {
         out.push(Hit::Message { kind, action, tool });
     }
-    detail_hits(h, m, resolver, &mut out);
+    detail_hits(h, m, resolver, summaries, &mut out);
     out
 }
 
@@ -1059,7 +1043,7 @@ pub fn of_session(s: &Session) -> Vec<Affordance> {
 /// Render one message's hits identically for whole-session and streamed views.
 fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy::Resolver) -> Vec<Affordance> {
     let mut out = Vec::new();
-    for hit in hits(harness, m, resolver) {
+    for hit in hits(harness, m, resolver, true) {
         out.push(match hit {
             Hit::Call {
                 kind,
@@ -1147,7 +1131,7 @@ impl Counter {
     }
 
     pub fn note(&mut self, m: &Message) {
-        for hit in hits(self.harness, m, &self.resolver) {
+        for hit in hits(self.harness, m, &self.resolver, false) {
             let (Hit::Call { kind, .. } | Hit::Message { kind, .. } | Hit::Detail { kind, .. }) = hit;
             *self.counts.entry(kind).or_default() += 1;
         }
@@ -1178,14 +1162,13 @@ pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) ->
     let resolver = crate::lazy::Resolver::new(Some(r.path.clone()));
     let mut messages = Vec::new();
     let mut index = 0;
-    // Full fidelity preserves the old parse's details and text summaries. Keep only the rows,
-    // dropping each message before the next; a whole Session need never exist for this view.
+    // Retain full metadata and tool details while reducing complete content spans into bounded
+    // summaries. Only the resulting rows survive each streamed message.
     let s = crate::stream::stream_counted(
         adapter,
         r,
-        &crate::stream::ParseOptions::full(),
-        &mut |mut m: Message| {
-            m.materialize(&resolver);
+        &crate::stream::ParseOptions::lazy_extra(),
+        &mut |m: Message| {
             messages.extend(message_rows(r.harness, &m, index, &resolver));
             index += 1;
             Flow::Continue
@@ -1222,7 +1205,9 @@ mod tests {
     #[test]
     fn streamed_read_matches_full_session_and_side_store() {
         let _world = cv_testkit::World::in_process("affordance-stream");
-        struct Fixture;
+        struct Fixture {
+            text_path: std::path::PathBuf,
+        }
         impl crate::harness::Adapter for Fixture {
             fn harness(&self) -> Harness {
                 Harness::Claude
@@ -1239,7 +1224,7 @@ mod tests {
                 opts: &crate::ParseOptions,
                 sink: &mut dyn MessageSink,
             ) -> anyhow::Result<Session> {
-                assert!(opts.extra && !opts.spans, "the view must preserve full fidelity");
+                assert!(opts.extra, "the view must preserve full metadata");
                 let mut s = Session::new(r.id.clone(), r.harness);
                 sink.meta(&s);
                 // Many large irrelevant outputs must be dropped; only affordance rows survive.
@@ -1258,9 +1243,17 @@ mod tests {
                 sink.message(call);
                 let mut hook = Message::new(Role::System);
                 hook.origin = Origin::Hook;
-                hook.content.push(Block::Text {
-                    text: format!("<summary>{}late closing tag</summary>", " ".repeat(8192)).into(),
-                });
+                let text = if opts.spans {
+                    crate::Text::Span(crate::Span {
+                        source: Some(self.text_path.clone()),
+                        offset: 0,
+                        len: std::fs::metadata(&self.text_path)?.len(),
+                        escaped: false,
+                    })
+                } else {
+                    std::fs::read_to_string(&self.text_path)?.into()
+                };
+                hook.content.push(Block::Text { text });
                 sink.message(hook);
                 sink.message(result("denied", "Permission to use Bash has been denied", true, None));
                 sink.message(result(
@@ -1283,7 +1276,16 @@ mod tests {
             Harness::Claude,
             "/nonexistent/affordance-stream.jsonl",
         );
-        let adapter: &dyn crate::harness::Adapter = &Fixture;
+        let text_path = std::env::temp_dir().join(format!("cv-affordance-stream-{}", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &text_path,
+            format!("<summary>{}late closing tag</summary>", " ".repeat(8192)),
+        )
+        .unwrap();
+        let fixture = Fixture {
+            text_path: text_path.clone(),
+        };
+        let adapter: &dyn crate::harness::Adapter = &fixture;
         let full = adapter.parse(&r).unwrap();
         let mut expected = of_session(&full);
         expected.extend(adapter.store_affordances(&r));
@@ -1296,6 +1298,7 @@ mod tests {
         assert_eq!(actual.last().unwrap().source, Source::Store);
         assert!(actual.iter().any(|a| a.summary == "late closing tag"));
         assert!(actual.iter().any(|a| a.kind == Kind::Checkpoint));
+        std::fs::remove_file(text_path).unwrap();
     }
 
     #[test]
