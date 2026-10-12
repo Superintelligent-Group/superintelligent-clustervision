@@ -173,7 +173,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
     let lead = id == sid;
     let row = if lead { manifest(path.parent()?, sid) } else { None };
     let mut r = SessionRef::new(&id, Harness::Cline, path.to_path_buf());
-    r.message_count = msgs.clone().count();
+    r.message_count = msgs.count();
     r.cwd = row
         .as_ref()
         .and_then(|m| m.get("cwd"))
@@ -184,7 +184,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         .and_then(|m| m.pointer("/metadata/title"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| first_raw_user_text(msgs.clone(), &source, path))
+        .or_else(|| first_raw_user_text(msgs, &source, path))
         .map(|t| truncate(&t, 80));
     r.created_at = row
         .as_ref()
@@ -192,7 +192,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         .and_then(Value::as_str)
         .and_then(parse_ts)
         .or_else(|| {
-            msgs.clone()
+            msgs.take(1)
                 .next()
                 .and_then(Record::parse)
                 .and_then(|m| m.value("ts"))

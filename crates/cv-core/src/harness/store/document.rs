@@ -457,7 +457,7 @@ mod tests {
         assert!(accepts_value(raw));
         assert!(index.0.borrow().ends.len() <= ENDPOINTS);
         let iterator = array_iter(raw).unwrap();
-        assert_eq!(iterator.clone().count(), values.len());
+        assert_eq!(iterator.count(), values.len());
         for (raw, expected) in iterator.zip(values.iter()) {
             let record = Record::parse(raw).unwrap();
             assert_eq!(record.value("n").unwrap(), expected["n"]);

@@ -70,4 +70,5 @@ parallel = ["dep:rayon"]
 probe-heap = []
 
 [dev-dependencies]
+syn = { version = "2", features = ["full"] }
 cv-testkit = { path = "../cv-testkit" }

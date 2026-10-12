@@ -56,6 +56,65 @@ const VERSION_KEY_V02: &str = "openSession";
 /// document that buries it past 64 KiB is out of scope (name it `*.opensession.json` instead).
 const SNIFF_BYTES: usize = 64 * 1024;
 
+// Projection vocabularies are pinned against the authoritative deserializer in tests. Nested
+// rich Values preserve their source order; ignored typed fields never need materialization.
+const SESSION_FIELDS: &[&str] = &[
+    VERSION_KEY,
+    VERSION_KEY_V02,
+    "id",
+    "harness",
+    "cwd",
+    "title",
+    "created_at",
+    "updated_at",
+    "model",
+    "system_prompt",
+    "source_path",
+    "extra",
+];
+const MESSAGE_FIELDS: &[&str] = &[
+    "id",
+    "parent_id",
+    "role",
+    "kind",
+    "origin",
+    "timestamp",
+    "model",
+    "extra",
+];
+const GIT_FIELDS: &[&str] = &["branch", "commit", "remote"];
+const LINEAGE_FIELDS: &[&str] = &[
+    "forked_from",
+    "parent",
+    "spawned_by_tool_use",
+    "continued_in",
+    "continues",
+    "agent_path",
+];
+const USAGE_FIELDS: &[&str] = &[
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "reasoning_tokens",
+    "cost_usd",
+];
+
+fn block_projection(ty: Option<&str>) -> (&'static [&'static str], Option<&'static str>) {
+    match ty {
+        Some("text") => (&["type"], Some("text")),
+        Some("thinking") => (&["type", "signature", "encrypted", "redacted"], Some("text")),
+        Some("tool_use") => (&["type", "id", "name", "input", "namespace"], None),
+        Some("tool_result") => (
+            &["type", "tool_use_id", "is_error", "tool_name", "status", "details"],
+            Some("content"),
+        ),
+        Some("image") => (&["type", "media_type", "data_ref"], None),
+        Some("file") => (&["type", "mime", "path", "source"], None),
+        _ => (&["type"], None),
+    }
+}
+
 // ── Writing: the document boundary ────────────────────────────────────────────
 
 /// A session as an OpenSession document: the IR's own serialization, with `open_session` first.
@@ -217,34 +276,9 @@ fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink)
     anyhow::ensure!(accepts_value(raw), "not JSON: invalid scalar or nesting depth");
     let record = Record::parse(raw).context("an OpenSession document is a JSON object")?;
     // Match the IR's ignored-field behavior without decoding unrecognized document payloads.
-    let mut meta = record.project(&[
-        VERSION_KEY,
-        VERSION_KEY_V02,
-        "id",
-        "harness",
-        "cwd",
-        "title",
-        "created_at",
-        "updated_at",
-        "model",
-        "system_prompt",
-        "source_path",
-        "extra",
-    ])?;
-    project_object(&record, &mut meta, "git", &["branch", "commit", "remote"])?;
-    project_object(
-        &record,
-        &mut meta,
-        "lineage",
-        &[
-            "forked_from",
-            "parent",
-            "spawned_by_tool_use",
-            "continued_in",
-            "continues",
-            "agent_path",
-        ],
-    )?;
+    let mut meta = record.project(SESSION_FIELDS)?;
+    project_object(&record, &mut meta, "git", GIT_FIELDS)?;
+    project_object(&record, &mut meta, "lineage", LINEAGE_FIELDS)?;
     meta.insert("messages".into(), Value::Array(Vec::new()));
     let mut session = from_object(meta)?;
     let messages = record
@@ -254,7 +288,7 @@ fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink)
     session.source_path = Some(path.to_path_buf());
     // Validate through the authoritative IR deserializer with actual Text spans. This never
     // substitutes body text with a sentinel, and catches malformed later turns before emission.
-    for raw in messages.clone() {
+    for raw in messages {
         ir_message(raw, &source, true)?;
     }
     sink.meta(&session);
@@ -270,29 +304,8 @@ fn ir_message(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Message> {
     let Some(record) = Record::parse(raw) else {
         return serde_json::from_value(serde_json::from_str(raw.get())?).context("not an OpenSession message");
     };
-    let mut fields = record.project(&[
-        "id",
-        "parent_id",
-        "role",
-        "kind",
-        "origin",
-        "timestamp",
-        "model",
-        "extra",
-    ])?;
-    project_object(
-        &record,
-        &mut fields,
-        "usage",
-        &[
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_creation_tokens",
-            "reasoning_tokens",
-            "cost_usd",
-        ],
-    )?;
+    let mut fields = record.project(MESSAGE_FIELDS)?;
+    project_object(&record, &mut fields, "usage", USAGE_FIELDS)?;
     if let Some(content) = record.get("content") {
         let value = if let Some(blocks) = array_iter(content) {
             Value::Array(
@@ -333,18 +346,7 @@ fn ir_block(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Value> {
         return Ok(serde_json::from_str(raw.get())?);
     };
     let ty = record.string("type");
-    let (keys, text_key): (&[&str], Option<&str>) = match ty.as_deref() {
-        Some("text") => (&["type"], Some("text")),
-        Some("thinking") => (&["type", "signature", "encrypted", "redacted"], Some("text")),
-        Some("tool_use") => (&["type", "id", "name", "input", "namespace"], None),
-        Some("tool_result") => (
-            &["type", "tool_use_id", "is_error", "tool_name", "status", "details"],
-            Some("content"),
-        ),
-        Some("image") => (&["type", "media_type", "data_ref"], None),
-        Some("file") => (&["type", "mime", "path", "source"], None),
-        _ => (&["type"], None), // The authoritative enum deserializer rejects this shape.
-    };
+    let (keys, text_key) = block_projection(ty.as_deref());
     let mut fields = record.project(keys)?;
     if let Some(key) = text_key {
         if let Some(raw) = record.get(key) {

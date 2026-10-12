@@ -460,3 +460,273 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
         .contains("reads 0.3 only"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+mod projection_schema {
+    use super::*;
+    use serde::de::{self, DeserializeOwned, Visitor};
+    use std::collections::BTreeSet;
+
+    // Capture the actual field roster passed by Deserialize, including Message's custom Wire.
+    // Optional and skipped-serialization fields remain in this roster even when fixtures omit them.
+    struct Roster<'a>(&'a std::cell::Cell<Option<&'static [&'static str]>>);
+    impl<'de> serde::Deserializer<'de> for Roster<'_> {
+        type Error = de::value::Error;
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(de::Error::custom("expected a struct field roster"))
+        }
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.0.set(Some(fields));
+            Err(de::Error::custom("captured roster"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier ignored_any
+        }
+    }
+    fn roster<T: DeserializeOwned>() -> BTreeSet<String> {
+        let fields = std::cell::Cell::new(None);
+        assert!(T::deserialize(Roster(&fields)).is_err());
+        set(fields
+            .get()
+            .expect("authoritative Deserialize must expose a struct roster")
+            .iter()
+            .copied())
+    }
+    fn set<'a>(fields: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+        fields.into_iter().map(str::to_owned).collect()
+    }
+    #[test]
+    fn projections_cover_authoritative_serde_field_rosters() {
+        assert_eq!(
+            roster::<Session>(),
+            set(SESSION_FIELDS
+                .iter()
+                .copied()
+                .filter(|f| ![VERSION_KEY, VERSION_KEY_V02].contains(f))
+                .chain(["messages", "git", "lineage"]))
+        );
+        assert_eq!(
+            roster::<Message>(),
+            set(MESSAGE_FIELDS.iter().copied().chain(["content", "usage"]))
+        );
+        assert_eq!(roster::<GitInfo>(), set(GIT_FIELDS.iter().copied()));
+        assert_eq!(roster::<Lineage>(), set(LINEAGE_FIELDS.iter().copied()));
+        assert_eq!(roster::<Usage>(), set(USAGE_FIELDS.iter().copied()));
+    }
+
+    // Internally tagged enum deserialization hides its fields behind serde's ContentDeserializer.
+    // Inspect only this enum's in-crate declaration; all projection keys still come from the
+    // production function above. No runtime reflection or second production schema is involved.
+    #[derive(Default)]
+    struct Attributes {
+        rename: Option<String>,
+        rename_all: Option<String>,
+        rename_all_fields: Option<String>,
+        aliases: Vec<String>,
+        skip: bool,
+        tag: Option<String>,
+    }
+    fn string(expr: &syn::Expr) -> String {
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s), ..
+        }) = expr
+        else {
+            panic!("serde schema name must be a string")
+        };
+        s.value()
+    }
+    fn attributes(attrs: &[syn::Attribute]) -> Attributes {
+        use syn::punctuated::Punctuated;
+        let mut out = Attributes::default();
+        for attr in attrs.iter().filter(|a| a.path().is_ident("serde")) {
+            for meta in attr
+                .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+                .unwrap()
+            {
+                match meta {
+                    syn::Meta::Path(p) if p.is_ident("skip") || p.is_ident("skip_deserializing") => out.skip = true,
+                    syn::Meta::NameValue(n) => {
+                        let slot = if n.path.is_ident("rename") {
+                            &mut out.rename
+                        } else if n.path.is_ident("rename_all") {
+                            &mut out.rename_all
+                        } else if n.path.is_ident("rename_all_fields") {
+                            &mut out.rename_all_fields
+                        } else if n.path.is_ident("tag") {
+                            &mut out.tag
+                        } else if n.path.is_ident("alias") {
+                            out.aliases.push(string(&n.value));
+                            continue;
+                        } else {
+                            continue;
+                        };
+                        *slot = Some(string(&n.value));
+                    }
+                    syn::Meta::List(l)
+                        if l.path.is_ident("rename")
+                            || l.path.is_ident("rename_all")
+                            || l.path.is_ident("rename_all_fields") =>
+                    {
+                        for m in l
+                            .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+                            .unwrap()
+                        {
+                            if let syn::Meta::NameValue(n) = m {
+                                if n.path.is_ident("deserialize") {
+                                    let slot = if l.path.is_ident("rename") {
+                                        &mut out.rename
+                                    } else if l.path.is_ident("rename_all") {
+                                        &mut out.rename_all
+                                    } else {
+                                        &mut out.rename_all_fields
+                                    };
+                                    *slot = Some(string(&n.value));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+    fn rename(name: &str, rule: Option<&str>, variant: bool) -> String {
+        // These are serde's field/variant rename rules. Reject an unfamiliar rule so a schema
+        // change cannot silently bypass this gate.
+        let snake = || {
+            if !variant {
+                return name.to_string();
+            }
+            let mut s = String::new();
+            for (i, c) in name.chars().enumerate() {
+                if c.is_uppercase() && i > 0 {
+                    s.push('_');
+                }
+                s.extend(c.to_lowercase());
+            }
+            s
+        };
+        let pascal = || {
+            name.split('_')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<String>()
+        };
+        match rule {
+            None => name.to_string(),
+            Some("lowercase") => {
+                if variant {
+                    name.to_lowercase()
+                } else {
+                    name.to_string()
+                }
+            }
+            Some("UPPERCASE") => name.to_uppercase(),
+            Some("snake_case") => snake(),
+            Some("SCREAMING_SNAKE_CASE") => snake().to_uppercase(),
+            Some("kebab-case") => snake().replace('_', "-"),
+            Some("SCREAMING-KEBAB-CASE") => snake().to_uppercase().replace('_', "-"),
+            Some("PascalCase") => {
+                if variant {
+                    name.to_string()
+                } else {
+                    pascal()
+                }
+            }
+            Some("camelCase") => {
+                let p = if variant { name.to_string() } else { pascal() };
+                p[..1].to_lowercase() + &p[1..]
+            }
+            other => panic!("unrecognized serde rename rule {other:?}"),
+        }
+    }
+    fn variants(item: &syn::ItemEnum) -> std::collections::BTreeMap<String, BTreeSet<String>> {
+        let parent = attributes(&item.attrs);
+        assert_eq!(parent.tag.as_deref(), Some("type"));
+        let mut out = std::collections::BTreeMap::new();
+        for variant in &item.variants {
+            let attrs = attributes(&variant.attrs);
+            if attrs.skip {
+                continue;
+            }
+            let name = attrs
+                .rename
+                .clone()
+                .unwrap_or_else(|| rename(&variant.ident.to_string(), parent.rename_all.as_deref(), true));
+            let mut fields = set(["type"]);
+            for field in &variant.fields {
+                let fa = attributes(&field.attrs);
+                if fa.skip {
+                    continue;
+                }
+                fields.insert(fa.rename.unwrap_or_else(|| {
+                    rename(
+                        &field.ident.as_ref().expect("IR blocks use named fields").to_string(),
+                        attrs.rename_all.as_deref().or(parent.rename_all_fields.as_deref()),
+                        false,
+                    )
+                }));
+                fields.extend(fa.aliases);
+            }
+            for name in std::iter::once(name).chain(attrs.aliases) {
+                out.insert(name, fields.clone());
+            }
+        }
+        out
+    }
+    #[test]
+    fn block_projections_cover_declared_serde_variants_and_fields() {
+        let file = syn::parse_file(include_str!("../../ir.rs")).unwrap();
+        let block = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                syn::Item::Enum(e) if e.ident == "Block" => Some(e),
+                _ => None,
+            })
+            .unwrap();
+        let projected = ["text", "thinking", "tool_use", "tool_result", "image", "file"]
+            .into_iter()
+            .map(|ty| {
+                let (fields, body) = block_projection(Some(ty));
+                (ty.to_string(), set(fields.iter().copied().chain(body)))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            variants(block),
+            projected,
+            "update native projections when the authoritative Block schema changes"
+        );
+    }
+    #[test]
+    fn schema_gate_sees_optional_fields_renames_aliases_and_skips() {
+        let future: syn::ItemEnum = syn::parse_quote! {
+            #[serde(tag = "type", rename_all = "snake_case")]
+            enum Block {
+                Text { text: String, #[serde(default, skip_serializing_if = "Option::is_none")] future: Option<String> },
+                #[serde(rename(deserialize = "renamed"), alias = "old")]
+                Thinking { #[serde(rename = "wire", alias = "alias")] field: String, #[serde(skip_deserializing)] ignored: bool },
+            }
+        };
+        let declared = variants(&future);
+        let (fields, body) = block_projection(Some("text"));
+        assert_ne!(
+            declared["text"],
+            set(fields.iter().copied().chain(body)),
+            "an added optional field must fail coverage"
+        );
+        assert_eq!(declared["renamed"], set(["type", "wire", "alias"]));
+        assert_eq!(declared["old"], declared["renamed"]);
+    }
+}
