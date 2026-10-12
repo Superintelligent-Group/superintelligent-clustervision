@@ -16,6 +16,8 @@
 //! A dev-dependency only: the dependency fence scans `[dependencies]`, and `cargo publish` strips
 //! a path-only dev-dependency.
 
+pub mod heap;
+
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs;
