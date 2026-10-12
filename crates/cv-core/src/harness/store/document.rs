@@ -4,59 +4,39 @@
 #[cfg(any(not(feature = "mmap"), test))]
 pub(crate) mod range;
 
-use crate::lazy::{Span, Text, INLINE_MAX};
-use anyhow::{Context, Result};
+use crate::lazy::INLINE_MAX;
+#[cfg(feature = "mmap")]
+use anyhow::Context;
+use anyhow::Result;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::path::Path;
 
-/// Source bytes are mapped in native builds. The fallback owns one byte buffer, without a
-/// simultaneous decoded document tree. Export cache hits can read just a selected range.
+/// Read-only mapped source bytes used by native scoped views and JSONL readers.
+#[cfg(feature = "mmap")]
 pub(crate) struct Source {
     bytes: Bytes,
     index: Index,
-    base: u64,
 }
-
+#[cfg(feature = "mmap")]
 enum Bytes {
-    #[cfg(feature = "mmap")]
     Mapped(memmap2::Mmap),
     Owned(Vec<u8>),
 }
+#[cfg(feature = "mmap")]
 impl std::ops::Deref for Bytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
-            #[cfg(feature = "mmap")]
             Self::Mapped(m) => m,
             Self::Owned(v) => v,
         }
     }
 }
-
+#[cfg(feature = "mmap")]
 impl Source {
-    pub fn open(path: &Path) -> Result<Self> {
-        #[cfg(feature = "mmap")]
-        {
-            let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-            Self::map_file(&file).with_context(|| format!("mapping {}", path.display()))
-        }
-        #[cfg(not(feature = "mmap"))]
-        {
-            Ok(Self {
-                bytes: Bytes::Owned(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?),
-                index: Index::default(),
-                base: 0,
-            })
-        }
-    }
-
-    /// Borrow bytes from an already-open read-only descriptor. JSONL callers retain that
-    /// descriptor for selected-field replay and can fall back to buffered lines if mapping fails.
-    #[cfg(feature = "mmap")]
+    /// Map an existing read-only descriptor. JSONL readers retain it for selected-field replay.
     pub fn map_file(file: &std::fs::File) -> Result<Self> {
-        // Transcripts are immutable inputs; callers never mutate their backing file. External
-        // truncation has the same documented caveat as the other mapped adapters.
+        // External truncation has the same documented caveat as the other mapped adapters.
         let bytes = if file.metadata()?.len() == 0 {
             Bytes::Owned(Vec::new())
         } else {
@@ -65,73 +45,19 @@ impl Source {
         Ok(Self {
             bytes,
             index: Index::default(),
-            base: 0,
         })
     }
-
-    #[cfg(feature = "mmap")]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-
-    #[cfg(not(feature = "mmap"))]
-    pub fn range(path: &Path, offset: u64, len: u64) -> Result<Self> {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = Vec::new();
-        file.take(len).read_to_end(&mut bytes)?;
-        anyhow::ensure!(
-            bytes.len() as u64 == len,
-            "document range changed in {}",
-            path.display()
-        );
-        Ok(Self {
-            bytes: Bytes::Owned(bytes),
-            index: Index::default(),
-            base: offset,
-        })
-    }
-
-    pub fn raw(&self) -> Result<Raw<'_>> {
-        let raw: &crate::lazy::RawValue = serde_json::from_slice(&self.bytes).context("not JSON")?;
-        Ok(Raw::new(raw.get(), &self.index))
-    }
-
     pub fn slice(&self, offset: u64, len: u64) -> Option<Raw<'_>> {
-        let start = usize::try_from(offset.checked_sub(self.base)?).ok()?;
+        let start = usize::try_from(offset).ok()?;
         let end = start.checked_add(usize::try_from(len).ok()?)?;
         let text = std::str::from_utf8(self.bytes.get(start..end)?).ok()?;
         Some(Raw::new(text, &self.index))
     }
-
-    pub fn location(&self, raw: Raw<'_>) -> Option<(u64, u64)> {
-        let b = raw.get().as_bytes();
-        let off = (b.as_ptr() as usize).checked_sub(self.bytes.as_ptr() as usize)?;
-        (off.checked_add(b.len())? <= self.bytes.len()).then_some((self.base + off as u64, b.len() as u64))
-    }
-
-    pub fn text(&self, raw: Raw<'_>, spans: bool) -> Option<Text> {
-        let b = raw.get().as_bytes();
-        if b.first() != Some(&b'"') || b.last() != Some(&b'"') || b.len() < 2 {
-            return None;
-        }
-        if spans && b.len() - 2 > INLINE_MAX {
-            let (offset, len) = self.location(raw)?;
-            Some(Text::Span(Span {
-                source: None,
-                offset: offset + 1,
-                len: len - 2,
-                escaped: memchr::memchr(b'\\', &b[1..b.len() - 1]).is_some(),
-            }))
-        } else {
-            serde_json::from_str::<String>(raw.get()).ok().map(Text::Inline)
-        }
-    }
 }
 
-/// Slices inside a RawValue already validated by serde at the file/line boundary. Walking a
-/// shallow object must not repeatedly validate its potentially enormous string descendants.
 /// Schema-selected fields across mapped and positioned sources. Structural descendants remain
 /// scoped views; only requested metadata/output is materialized. No ignored-key roster is kept.
 pub(crate) struct Fields<'a> {
