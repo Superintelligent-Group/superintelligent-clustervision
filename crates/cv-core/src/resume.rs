@@ -26,7 +26,7 @@ use std::path::Path;
 const HASH_SPAN: u64 = 4096;
 
 /// A stored mark minus its state: version, position and sampled-byte guard for append reuse.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MarkHead {
     pub offset: u64,
     pub hash: u64,

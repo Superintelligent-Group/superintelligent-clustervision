@@ -51,7 +51,7 @@ struct Records {
 
 /// A canonical record string. Loaded baselines remain strings instead of allocating each path
 /// three times for counts, events and search; equality compares the actual records.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp(String);
 
 impl Stamp {
@@ -121,16 +121,46 @@ impl ReadSet {
             }
         }
     }
+
+    /// Combine consumer reads, retaining the first metadata observed for each path.
+    pub fn merge(&mut self, other: &Self) {
+        self.known &= other.known;
+        for (path, entry) in &other.entries {
+            self.entries.entry(path.clone()).or_insert_with(|| entry.clone());
+        }
+    }
 }
 
 /// A source pass's captured primary signature and auxiliary dependencies.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub primary: (i64, i64),
     pub dependencies: Option<Stamp>,
 }
 
 impl Snapshot {
+    /// Recorded consumer reads, for a resumed consumer to retain reads made by its old prefix.
+    pub fn reads(&self) -> Option<ReadSet> {
+        let entries = self.dependencies.as_ref()?.records()?.reads?;
+        Some(ReadSet {
+            entries: entries.into_iter().map(|entry| (entry.path.clone(), entry)).collect(),
+            known: true,
+        })
+    }
+
+    /// Auxiliary inventories and all recorded reads still match, independently of primary growth.
+    pub fn dependencies_fresh(&self, current: &Self, probe: &mut Probe) -> bool {
+        self.dependencies
+            .as_ref()
+            .zip(current.dependencies.as_ref())
+            .is_some_and(|(old, now)| old.matches(now, probe))
+    }
+
+    /// Strict consumer freshness using operation-local metadata probes.
+    pub fn fresh(&self, current: &Self, probe: &mut Probe) -> bool {
+        self.primary == current.primary && self.dependencies_fresh(current, probe)
+    }
+
     /// Attach the read set captured by this consumer's complete pass, never another consumer's.
     pub fn with_reads(&self, reads: &ReadSet) -> Self {
         let dependencies = (|| {
@@ -636,6 +666,30 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[test]
+    fn serialized_consumer_reads_survive_growth_and_reject_dependency_changes() {
+        let w = cv_testkit::World::in_process("source-read-state");
+        let path = w.base.join("plain.jsonl");
+        std::fs::write(&path, "primary").unwrap();
+        let r = crate::SessionRef::new("test", crate::Harness::Codex, &path);
+        let extra = w.base.join("external.txt");
+        let mut reads = super::ReadSet::default();
+        reads.record(&extra);
+        let captured = super::Probe::default().snapshot(&r).with_reads(&reads);
+        let restored: super::Snapshot = serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
+        assert!(restored.fresh(&super::Probe::default().snapshot(&r), &mut super::Probe::default()));
+        std::fs::write(&path, "primary grows").unwrap();
+        let now = super::Probe::default().snapshot(&r);
+        assert!(!restored.fresh(&now, &mut super::Probe::default()));
+        assert!(restored.dependencies_fresh(&now, &mut super::Probe::default()));
+        let mut suffix = super::ReadSet::default();
+        suffix.merge(&restored.reads().unwrap());
+        assert!(now.with_reads(&suffix).fresh(&now, &mut super::Probe::default()));
+        std::fs::write(&extra, "created").unwrap();
+        assert!(!restored.dependencies_fresh(&super::Probe::default().snapshot(&r), &mut super::Probe::default()));
+        suffix.merge(&super::ReadSet::unrecorded());
+        assert!(now.with_reads(&suffix).dependencies.is_none());
+    }
     use super::*;
 
     #[test]
