@@ -337,3 +337,17 @@ fn native_archive_matches_raw_value_acceptance_and_duplicate_precedence() {
     assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cached_export_discovery_preserves_the_callers_path_spelling() {
+    let relative_dir = PathBuf::from(format!("cv-export-path-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&relative_dir).unwrap();
+    let relative = relative_dir.join("conversations.json");
+    let absolute = std::env::current_dir().unwrap().join(&relative);
+    std::fs::write(&relative, r#"[{"uuid":"same","chat_messages":[]}]"#).unwrap();
+    let first = discover_kind_in(Kind::Claude, vec![relative.clone()]);
+    let second = discover_kind_in(Kind::Claude, vec![absolute.clone()]);
+    assert_eq!(first[0].path, relative);
+    assert_eq!(second[0].path, absolute);
+    std::fs::remove_dir_all(relative_dir).unwrap();
+}

@@ -63,11 +63,18 @@ fn slot(kind: Kind) -> usize {
 /// retained through the current consumer so a cold selected read need not open the archive twice.
 fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
     let cache = CACHE.get_or_init(Mutex::default);
+    // Relative roots can name different archives after a cwd change. Cache by absolute spelling,
+    // while discovery stamps the caller's original path spelling onto returned refs.
+    let key = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     for _ in 0..2 {
         let identity = Identity::read(path)?;
         {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(position) = guard.entries.iter().position(|e| e.path == path) {
+            if let Some(position) = guard.entries.iter().position(|e| e.path == key) {
                 let hit = guard.entries.remove(position).unwrap();
                 if hit.archive.identity == identity {
                     let archive = hit.archive.clone();
@@ -104,14 +111,17 @@ fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
                 continue;
             };
             let (offset, len) = source.location(raw).context("export source range")?;
-            let refs = [Kind::ChatGpt, Kind::Claude]
-                .map(|kind| shapes[slot(kind)].then(|| raw_ref(kind, path, &record, &id)).flatten());
+            let refs = [Kind::ChatGpt, Kind::Claude].map(|kind| {
+                shapes[slot(kind)]
+                    .then(|| raw_ref(kind, Path::new(""), &record, &id))
+                    .flatten()
+            });
             entries.push(Entry { id, offset, len, refs });
         }
         if Identity::read(path)? != identity {
             continue;
         }
-        let mut charge = path.as_os_str().len() + entries.capacity() * std::mem::size_of::<Entry>();
+        let mut charge = key.as_os_str().len() + entries.capacity() * std::mem::size_of::<Entry>();
         for entry in &entries {
             charge = charge.saturating_add(entry.id.capacity());
             for r in entry.refs.iter().flatten() {
@@ -127,7 +137,7 @@ fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
         if charge <= CACHE_BYTES {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
             // Concurrent readers may build the same archive; replace rather than double-charge.
-            if let Some(position) = guard.entries.iter().position(|e| e.path == path) {
+            if let Some(position) = guard.entries.iter().position(|e| e.path == key) {
                 let old = guard.entries.remove(position).unwrap();
                 guard.bytes -= old.archive.charge;
             }
@@ -140,7 +150,7 @@ fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
             }
             guard.bytes += charge;
             guard.entries.push_back(Cached {
-                path: path.to_path_buf(),
+                path: key.clone(),
                 archive: archive.clone(),
             });
         }
@@ -156,7 +166,9 @@ pub(super) fn discover(kind: Kind, paths: Vec<PathBuf>) -> Vec<SessionRef> {
         let Ok((archive, _)) = load(&path) else { continue };
         for r in archive.entries.iter().filter_map(|e| e.refs[slot(kind)].as_ref()) {
             if seen.insert(r.id.clone()) {
-                out.push(r.clone());
+                let mut r = r.clone();
+                r.path = path.clone();
+                out.push(r);
             }
         }
     }
