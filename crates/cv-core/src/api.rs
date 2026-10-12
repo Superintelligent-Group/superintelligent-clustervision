@@ -663,6 +663,54 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "read-work baseline for pagination design; writes only an isolated scratch fixture"]
+    fn pagination_prefix_replay_read_work() {
+        use crate::Adapter as _;
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("api_page_read_work");
+        let path = world.transcript("pages");
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let records = 20_000usize;
+        let page = 200usize;
+        for i in 0..records {
+            writeln!(
+                file,
+                r#"{{"type":"user","uuid":"m{i}","message":{{"role":"user","content":"hello"}}}}"#
+            )
+            .unwrap();
+        }
+        file.flush().unwrap();
+        drop(file);
+        let r = SessionRef::new("pages", crate::Harness::Claude, path);
+        let adapter = crate::harness::claude::Claude::with_config_dir(&world.home.join(".claude"));
+        let mut callbacks = 0usize;
+        for start in (0..records).step_by(page) {
+            let mut sink = window(start, Some(start + page));
+            adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink).unwrap();
+            assert_eq!(sink.msgs.len(), page);
+            assert_eq!(sink.more, start + page < records);
+            callbacks += sink.idx;
+        }
+        let expected = page * (records / page) * (records / page + 1) / 2 + records / page - 1;
+        assert_eq!(callbacks, expected);
+        let mut head_callbacks = 0usize;
+        adapter
+            .try_stream(&r, &ParseOptions::lazy(), &mut |_m| {
+                head_callbacks += 1;
+                Flow::Continue
+            })
+            .unwrap();
+        assert_eq!(head_callbacks, records);
+        eprintln!(
+            "pages={} selected={} page_callbacks={} additional_head_callbacks={}",
+            records / page,
+            records,
+            callbacks,
+            head_callbacks
+        );
+    }
+
+    #[test]
     fn query_decodes_plus_percent_and_flags() {
         let q = Query::parse("who=ember&since=2h&x=a+b%21&all=1&off=0&bare");
         assert_eq!(q.get("who").as_deref(), Some("ember"));
