@@ -373,6 +373,15 @@ enum Delete {
     From(usize),
 }
 
+fn source_consumer(dir: &Path) -> Result<String> {
+    Ok(format!(
+        "fts:{}",
+        std::fs::canonicalize(dir)
+            .context("identifying search index dependencies")?
+            .display()
+    ))
+}
+
 /// Bring the index at `dir` up to date with `refs` (the top-level sessions on disk), on every core.
 ///
 /// The main thread plans (the freshness checks), then `available_parallelism` workers each take
@@ -413,12 +422,7 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
     let event_sync = cv_core::events::SyncTable::load();
     let affordances = cv_core::catalog::AffordanceTable::load();
     let marks = cv_core::resume::MarkTable::load();
-    let consumer = format!(
-        "fts:{}",
-        std::fs::canonicalize(dir)
-            .context("identifying search index dependencies")?
-            .display()
-    );
+    let consumer = source_consumer(dir)?;
     let dependencies = cv_core::source::Table::load(&consumer);
     let mut probe = cv_core::source::Probe::default();
 
@@ -1477,12 +1481,20 @@ pub fn has_subagent_docs(dir: &Path) -> bool {
 pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool) -> Result<usize> {
     let (index, f) = open_or_create(dir)?;
     let mut writer = open_writer(&index, 50_000_000)?;
+    let consumer = source_consumer(dir)?;
+    anyhow::ensure!(
+        cv_core::source::invalidate(&consumer, refs),
+        "invalidating old search dependency baselines"
+    );
     writer.delete_all_documents().context("clearing index")?;
+    let mut probe = cv_core::source::Probe::default();
+    let mut dependencies = Vec::new();
     for r in refs {
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
             continue;
         };
-        let (mtime, size) = cv_core::offsets::file_sig(&r.path);
+        let source = probe.snapshot(r);
+        let (mtime, size) = source.primary;
         let mut es = catalog.then(|| cv_core::events::EventSink::new(r.cwd.clone()));
         index_session_clean(
             &mut writer,
@@ -1496,10 +1508,12 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         )
         .with_context(|| format!("indexing {}", r.id))?;
         if let Some(es) = es {
-            cv_core::events::record(r, es.events(), mtime, size);
+            cv_core::events::record_from_with_source(r, 0, es.events(), &source, &Default::default());
         }
+        dependencies.push((r.clone(), source));
     }
     writer.commit().context("committing index")?;
+    cv_core::source::update(&consumer, &dependencies);
     Ok(refs.len())
 }
 
@@ -2760,7 +2774,7 @@ mod tests {
     }
 
     /// Regression (B2): an FTS-fresh sub-agent whose *catalog* is stale (e.g. first run after an
-    /// event-schema upgrade, or a catalog wipe) takes the catalog-only pass — which must never
+    /// event-schema upgrade) takes the catalog-only pass — which must never
     /// delete its tantivy docs. The pre-fix path issued the delete-by-id BEFORE the fresh check,
     /// so the agent's docs were dropped and never re-added: a window of silently missing results.
     #[test]
@@ -2777,11 +2791,23 @@ mod tests {
         assert_eq!(folded, 1);
         assert_eq!(text_search(&dir, "zqkeepme", 10).unwrap().len(), 1);
 
-        // Wipe the catalog (db + WAL sidecars): the agent is now FTS-fresh but events-stale — the
-        // exact combination that routes through the catalog-only pass.
-        std::fs::remove_file(h.home.join("catalog.db")).unwrap();
-        std::fs::remove_file(h.home.join("catalog.db-wal")).ok();
-        std::fs::remove_file(h.home.join("catalog.db-shm")).ok();
+        // Invalidate only the event catalog. Keep the independent FTS dependency baselines:
+        // losing those would correctly require a whole-source FTS reread too.
+        let conn = rusqlite::Connection::open(h.home.join("catalog.db")).unwrap();
+        conn.execute_batch(
+            "DELETE FROM events; DELETE FROM event_sync;
+            DELETE FROM source_dependencies WHERE consumer='events';",
+        )
+        .unwrap();
+        assert!(cv_core::events::needs_ingest(
+            &parent,
+            cv_core::offsets::file_sig(&parent.path).0
+        ));
+        let child = cv_core::subagent_tree_of(&parent).remove(0).session;
+        assert!(cv_core::events::needs_ingest(
+            &child,
+            cv_core::offsets::file_sig(&child.path).0
+        ));
 
         // The production `--subagents` sweep: parent and agent are both FTS-fresh, events-stale.
         assert_eq!(
@@ -2791,6 +2817,14 @@ mod tests {
         );
         let changed = sweep(&dir, vec![parent.clone()], false, true).unwrap().changed;
         assert_eq!(changed, 0, "catalog-only pass must not rewrite tantivy docs");
+        assert!(!cv_core::events::needs_ingest(
+            &parent,
+            cv_core::offsets::file_sig(&parent.path).0
+        ));
+        assert!(!cv_core::events::needs_ingest(
+            &child,
+            cv_core::offsets::file_sig(&child.path).0
+        ));
 
         assert_eq!(
             text_search(&dir, "zqkeepme", 10).unwrap().len(),
@@ -2800,6 +2834,39 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    /// A catalog wipe removes FTS's independent dependency baselines too. Existing documents
+    /// remain searchable, but neither parent nor child can skip their next source pass.
+    #[test]
+    fn missing_search_dependency_baselines_force_one_incremental_reread() {
+        let h = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let pp = write_claude(&sdir, "lost-baseline-parent", "orchestrator planning the work");
+        write_subagent(&pp, "lost-kid", "zqbaselinechild lives only in the sub-agent");
+        let parent = sref("lost-baseline-parent", "parent session", pp);
+        assert_eq!(
+            index_refs_with_subagents(&dir, std::slice::from_ref(&parent), false).unwrap(),
+            1
+        );
+        assert_eq!(sweep(&dir, vec![parent.clone()], false, true).unwrap().changed, 0);
+        std::fs::remove_file(h.home.join("catalog.db")).unwrap();
+        std::fs::remove_file(h.home.join("catalog.db-wal")).ok();
+        std::fs::remove_file(h.home.join("catalog.db-shm")).ok();
+        assert_eq!(text_search(&dir, "zqbaselinechild", 10).unwrap().len(), 1);
+        assert_eq!(
+            sweep(&dir, vec![parent.clone()], false, true).unwrap().changed,
+            2,
+            "both parent and child need new dependency baselines"
+        );
+        assert_eq!(text_search(&dir, "zqbaselinechild", 10).unwrap().len(), 1);
+        assert_eq!(
+            sweep(&dir, vec![parent], false, true).unwrap().changed,
+            0,
+            "one incremental reread establishes the new baselines"
+        );
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sdir).ok();
     }
 
     /// Regression (B3): a plain (no `--subagents`) refresh after `cv index --subagents` must NOT
