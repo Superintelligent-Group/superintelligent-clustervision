@@ -402,3 +402,49 @@ fn discovers_documents_in_registered_sources() {
     assert_eq!(s.messages.len(), 3);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
+    use crate::stream::{CollectSink, ParseOptions};
+    let dir = tmpdir("native");
+    let path = dir.join("native.opensession.json");
+    let mut original = every_field_session();
+    original.messages[0].content.insert(
+        0,
+        Block::Text {
+            text: "a\n\"é😀".repeat(8192).into(),
+        },
+    );
+    let bytes = serde_json::to_vec(&document(&original)).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let mut expected = from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    expected.source_path = Some(path.clone());
+    for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+        let mut sink = CollectSink::default();
+        let mut actual = stream_document(&path, &opts, &mut sink).unwrap();
+        actual.messages = sink.messages;
+        actual.materialize();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+    }
+    let mut bad = serde_json::to_value(document(&original)).unwrap();
+    bad["messages"].as_array_mut().unwrap().push(json!({"role":"invalid"}));
+    std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+    let mut sink = CollectSink::default();
+    assert!(stream_document(&path, &ParseOptions::lazy(), &mut sink).is_err());
+    assert!(sink.messages.is_empty());
+    for scalar in ["1e400", "\"\\ud800\""] {
+        let text = format!("{{\"id\":\"x\",\"messages\":[],\"unknown\":{scalar}}}");
+        std::fs::write(&path, &text).unwrap();
+        assert!(from_str(&text).is_err());
+        assert!(stream_document(&path, &ParseOptions::lazy(), &mut sink).is_err());
+    }
+    std::fs::write(&path, r#"{"open_session":"0.2","messages":null}"#).unwrap();
+    assert!(stream_document(&path, &ParseOptions::lazy(), &mut sink)
+        .unwrap_err()
+        .to_string()
+        .contains("reads 0.3 only"));
+    std::fs::remove_dir_all(dir).unwrap();
+}

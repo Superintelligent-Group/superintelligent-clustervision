@@ -26,9 +26,10 @@
 //! than a parse failure — the document is still a session, it just came from somewhere cv cannot
 //! name.
 
+use super::store::document::{accepts_value, array, Raw, Record, Source};
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
-use crate::stream::{MessageSink, ParseOptions};
+use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -93,8 +94,8 @@ impl Adapter for OpenSession {
         Ok(discover_documents(document_files()))
     }
 
-    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::replay(read_document(&r.path)?, sink)
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        stream_document(&r.path, opts, sink)
     }
 }
 
@@ -121,7 +122,7 @@ impl Adapter for RootedOpenSession {
         )))
     }
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        OpenSession.stream(r, opts, sink)
+        stream_document(&r.path, opts, sink)
     }
 }
 
@@ -161,19 +162,28 @@ fn is_document_file(p: &Path) -> bool {
 /// (user + assistant, the cross-harness contract) straight off the raw records. A document with
 /// no `id` is not a session cv can name, so it is not discovered.
 fn doc_ref(path: &Path) -> Option<SessionRef> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    let o = v.as_object()?;
+    let source = Source::open(path).ok()?;
+    let raw = source.raw().ok()?;
+    if !accepts_value(raw) {
+        return None;
+    }
+    let record = Record::parse(raw)?;
+    let o: serde_json::Map<String, Value> = ["id", "cwd", "title", "created_at", "updated_at"]
+        .into_iter()
+        .filter_map(|key| record.value(key).map(|v| (key.into(), v)))
+        .collect();
     let string = |k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-    let message_count = o
+    let message_count = record
         .get("messages")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter(|m| matches!(m.get("role").and_then(Value::as_str), Some("user" | "assistant")))
-                .count()
+        .and_then(array)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|raw| {
+            Record::parse(*raw)
+                .and_then(|r| r.string("role"))
+                .is_some_and(|role| matches!(role.as_str(), "user" | "assistant"))
         })
-        .unwrap_or(0);
+        .count();
     Some(SessionRef {
         id: string("id")?.to_string(),
         // The REF is tagged `opensession` because that is the adapter that reads this file; the
@@ -193,13 +203,87 @@ fn doc_ref(path: &Path) -> Option<SessionRef> {
 
 /// Read one OpenSession document into the IR. The inverse of [`document`].
 pub fn read_document(path: &Path) -> Result<Session> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading OpenSession document {}", path.display()))?;
-    let mut s = from_str(&text).with_context(|| format!("parsing OpenSession document {}", path.display()))?;
-    // `source_path` is where cv read this session from — this document, not whatever store the
-    // document's own `source_path` named on the machine that wrote it.
-    s.source_path = Some(path.to_path_buf());
-    Ok(s)
+    let mut sink = crate::stream::CollectSink::default();
+    let mut session = stream_document(path, &ParseOptions::full(), &mut sink)?;
+    session.messages = sink.messages;
+    Ok(session)
+}
+
+/// Traverse the document's IR messages without retaining a complete Session. Shape validation
+/// finishes before the first callback, preserving the former all-or-error document boundary.
+fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    let source = Source::open(path)?;
+    let raw = source.raw()?;
+    anyhow::ensure!(accepts_value(raw), "not JSON: invalid scalar or nesting depth");
+    let record = Record::parse(raw).context("an OpenSession document is a JSON object")?;
+    let mut meta = record.without(&["messages"])?;
+    meta.insert("messages".into(), Value::Array(Vec::new()));
+    let mut session = from_object(meta)?;
+    let messages = record
+        .get("messages")
+        .and_then(array)
+        .context("not an OpenSession 0.3 document: messages must be an array")?;
+    session.source_path = Some(path.to_path_buf());
+    // Validate through the authoritative IR deserializer with actual Text spans. This never
+    // substitutes body text with a sentinel, and catches malformed later turns before emission.
+    for raw in &messages {
+        ir_message(*raw, &source, true)?;
+    }
+    sink.meta(&session);
+    for raw in messages {
+        if sink.message(ir_message(raw, &source, opts.spans)?) == Flow::Stop {
+            break;
+        }
+    }
+    Ok(session)
+}
+
+fn ir_message(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Message> {
+    if !spans {
+        return serde_json::from_value(serde_json::from_str(raw.get())?).context("not an OpenSession message");
+    }
+    let Some(record) = Record::parse(raw) else {
+        return serde_json::from_value(serde_json::from_str(raw.get())?).context("not an OpenSession message");
+    };
+    let mut fields = record.without(&["content"])?;
+    if let Some(content) = record.get("content") {
+        let value = if let Some(blocks) = array(content) {
+            Value::Array(
+                blocks
+                    .into_iter()
+                    .map(|raw| ir_block(raw, source))
+                    .collect::<Result<_>>()?,
+            )
+        } else {
+            serde_json::from_str(content.get())?
+        };
+        fields.insert("content".into(), value);
+    }
+    serde_json::from_value(Value::Object(fields)).context("not an OpenSession message")
+}
+
+fn ir_block(raw: Raw<'_>, source: &Source) -> Result<Value> {
+    let Some(record) = Record::parse(raw) else {
+        return Ok(serde_json::from_str(raw.get())?);
+    };
+    let text_key = match record.string("type").as_deref() {
+        Some("text" | "thinking") => Some("text"),
+        Some("tool_result") => Some("content"),
+        _ => None,
+    };
+    let mut fields = record.without(&text_key.into_iter().collect::<Vec<_>>())?;
+    if let Some(key) = text_key {
+        if let Some(raw) = record.get(key) {
+            fields.insert(
+                key.into(),
+                match source.text(raw, true) {
+                    Some(text) => serde_json::to_value(text)?,
+                    None => serde_json::from_str(raw.get())?,
+                },
+            );
+        }
+    }
+    Ok(Value::Object(fields))
 }
 
 /// Read an OpenSession document from text: check and strip the version marker, then the IR's own
@@ -208,9 +292,13 @@ pub fn read_document(path: &Path) -> Result<Session> {
 /// renames are documented.
 pub fn from_str(text: &str) -> Result<Session> {
     let v: Value = serde_json::from_str(text).context("not JSON")?;
-    let Value::Object(mut o) = v else {
+    let Value::Object(o) = v else {
         bail!("an OpenSession document is a JSON object");
     };
+    from_object(o)
+}
+
+fn from_object(mut o: serde_json::Map<String, Value>) -> Result<Session> {
     match o.remove(VERSION_KEY) {
         None if !o.contains_key(VERSION_KEY_V02) => {}
         Some(Value::String(v)) if v == VERSION => {}
