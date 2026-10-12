@@ -48,6 +48,17 @@ pub struct JsonRange {
     len: u64,
 }
 
+/// Distinguish invalid content (archives historically appear empty) from unavailable or changed
+/// sources, whose failures must abort consumers and cannot publish freshness.
+#[derive(Debug)]
+pub(crate) struct InvalidJson;
+impl std::fmt::Display for InvalidJson {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid JSON document")
+    }
+}
+impl std::error::Error for InvalidJson {}
+
 /// Capture before an adapter validates its source. Only already accepted complete values may use
 /// validated_range afterward; this avoids validating each giant input again at producer handoff.
 #[derive(Clone, Debug)]
@@ -132,6 +143,22 @@ impl JsonSource {
             len,
         })
     }
+    pub(crate) fn read_document<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        self.range(0, self.0.identity.len)?
+            .with_validation(Validation::Value, f)
+    }
+    /// Archive grammar and UTF-8 are whole-source; each child resets Value's depth budget.
+    /// Invalid children remain None so a consumer can preserve first-record shape semantics.
+    pub(crate) fn read_archive<T>(&self, f: impl for<'a> FnOnce(Option<AcceptedArray<'a>>) -> Result<T>) -> Result<T> {
+        self.range(0, self.0.identity.len)?
+            .with_validation(Validation::Archive, |view| f(view.array()?.map(AcceptedArray)))
+    }
+    pub(crate) fn metadata_bytes(&self) -> usize {
+        std::mem::size_of::<CapturedSource>() + 2 * std::mem::size_of::<usize>() + self.0.path.capacity()
+    }
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.0.path == other.0.path && self.0.identity == other.0.identity
+    }
     /// Caller must have syntax AND Value-compatible scalar/depth validation for this complete
     /// range since capture. Quotes/containers are included; surrounding whitespace is excluded.
     /// Never use this for a decoded JSON string that represents a different IR argument value.
@@ -162,10 +189,10 @@ impl JsonRange {
         self.source.check()?;
         // Even validated ranges keep the safe UTF-8 check on newly mapped/read external bytes.
         // No unchecked string cast is justified by metadata identity.
-        let raw = source
+        let result = source
             .slice(self.offset, self.len)
-            .context("JSON range is unreadable or not UTF-8")?;
-        let result = f(raw);
+            .ok_or_else(|| InvalidJson.into())
+            .and_then(f);
         // Check even after callback failure: an intentional staged-output cap must not hide
         // a source mutation. Source failure takes precedence over the callback error.
         self.source.check_metadata(file.metadata()?)?;
@@ -173,31 +200,80 @@ impl JsonRange {
         result
     }
     fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        self.with_validation(Validation::Cached, f)
+    }
+    fn with_validation<T>(
+        &self,
+        validation: Validation,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
         #[cfg(feature = "mmap")]
         {
             self.with_raw(|raw| {
-                f(JsonView(View::Source(SourceView {
-                    raw,
-                    range: self,
-                    base: raw.get().as_ptr() as usize,
-                })))
+                let base = raw.get().as_ptr() as usize;
+                let index = document::Index::default();
+                let raw = if matches!(validation, Validation::Cached) {
+                    raw
+                } else {
+                    let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).map_err(|_| InvalidJson)?;
+                    let checked = Raw::new(syntax.get(), &index);
+                    if matches!(validation, Validation::Value) {
+                        anyhow::ensure!(document::accepts_value(checked), "invalid JSON scalar or nesting depth");
+                    }
+                    checked
+                };
+                f(JsonView(View::Source(SourceView { raw, range: self, base })))
             })
         }
         #[cfg(not(feature = "mmap"))]
         {
             let source = RangeSource::from_captured(self.source.clone())?;
-            let result = f(JsonView(View::Portable(PortableView {
-                source: &source,
-                owner: self,
-                value: Range {
-                    offset: self.offset,
-                    len: self.len,
-                },
-            })));
-            // Check descriptor and path even after a callback error or intentional prefix stop.
+            let requested = Range {
+                offset: self.offset,
+                len: self.len,
+            };
+            let result = (|| {
+                let value = match validation {
+                    Validation::Cached => requested,
+                    Validation::Value | Validation::Archive => {
+                        let valid = if matches!(validation, Validation::Value) {
+                            source.validate(requested)?
+                        } else {
+                            source.syntax(requested)?
+                        };
+                        if !valid {
+                            return Err(InvalidJson.into());
+                        }
+                        source.cursor(requested)?.value()?
+                    }
+                };
+                f(JsonView(View::Portable(PortableView {
+                    source: &source,
+                    owner: self,
+                    value,
+                })))
+            })();
             source.check_identity()?;
             result
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Validation {
+    Cached,
+    Value,
+    Archive,
+}
+
+pub(crate) struct AcceptedArray<'a>(JsonArray<'a>);
+impl<'a> Iterator for AcceptedArray<'a> {
+    type Item = Result<Option<JsonView<'a>>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|value| {
+            let value = value?;
+            Ok(value.accepts_value()?.then_some(value))
+        })
     }
 }
 
@@ -346,6 +422,93 @@ impl<'a> From<&'a Value> for JsonView<'a> {
     }
 }
 impl<'a> JsonView<'a> {
+    pub(crate) fn accepts_value(self) -> Result<bool> {
+        match self.0 {
+            View::Owned(_) => Ok(true),
+            #[cfg(feature = "mmap")]
+            View::Source(source) => Ok(document::accepts_value(source.raw)),
+            #[cfg(not(feature = "mmap"))]
+            View::Portable(source) => source.source.accepts_value(source.value),
+        }
+    }
+    pub(crate) fn select_fields(self, keys: &[&str]) -> Result<Option<Vec<Option<Self>>>> {
+        Ok(match self.0 {
+            View::Owned(Value::Object(object)) => Some(
+                keys.iter()
+                    .map(|key| object.get(*key).map(|value| Self(View::Owned(value))))
+                    .collect(),
+            ),
+            View::Owned(_) => None,
+            #[cfg(feature = "mmap")]
+            View::Source(source) => document::select_fields(source.raw, keys).map(|fields| {
+                fields
+                    .into_iter()
+                    .map(|raw| raw.map(|raw| Self(View::Source(SourceView { raw, ..source }))))
+                    .collect()
+            }),
+            #[cfg(not(feature = "mmap"))]
+            View::Portable(source) => source.source.select_fields(source.value, keys)?.map(|fields| {
+                fields
+                    .into_iter()
+                    .map(|value| value.map(|value| Self(View::Portable(PortableView { value, ..source }))))
+                    .collect()
+            }),
+        })
+    }
+    pub(crate) fn source_range(self) -> Result<Option<(u64, u64)>> {
+        Ok(match self.0 {
+            View::Owned(_) => None,
+            #[cfg(feature = "mmap")]
+            View::Source(source) => {
+                let delta = (source.raw.get().as_ptr() as usize)
+                    .checked_sub(source.base)
+                    .context("JSON child outside source")? as u64;
+                Some((
+                    source.range.offset.checked_add(delta).context("JSON offset overflow")?,
+                    source.raw.get().len() as u64,
+                ))
+            }
+            #[cfg(not(feature = "mmap"))]
+            View::Portable(source) => Some((source.value.offset, source.value.len)),
+        })
+    }
+    /// Native transcript text uses the session's primary source, just like existing Text spans.
+    pub(crate) fn text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
+        match self.0 {
+            View::Owned(value) => Ok(value.as_str().map(|s| crate::lazy::Text::Inline(s.to_owned()))),
+            #[cfg(feature = "mmap")]
+            View::Source(source) => {
+                let raw = source.raw.get().as_bytes();
+                if raw.first() != Some(&b'"') {
+                    return Ok(None);
+                }
+                if spans && raw.len() - 2 > crate::lazy::INLINE_MAX {
+                    let (offset, len) = self.source_range()?.context("JSON text source")?;
+                    Ok(Some(crate::lazy::Text::Span(crate::lazy::Span {
+                        source: None,
+                        offset: offset + 1,
+                        len: len - 2,
+                        escaped: memchr::memchr(b'\\', &raw[1..raw.len() - 1]).is_some(),
+                    })))
+                } else {
+                    Ok(Some(crate::lazy::Text::Inline(serde_json::from_slice(raw)?)))
+                }
+            }
+            #[cfg(not(feature = "mmap"))]
+            View::Portable(source) => source.source.text(source.value, spans),
+        }
+    }
+    pub(crate) fn argument(self, spans: bool) -> Result<Json> {
+        if spans
+            && self
+                .source_range()?
+                .is_some_and(|(_, len)| len > crate::lazy::INLINE_MAX as u64)
+        {
+            self.to_json()
+        } else {
+            Ok(Json::Owned(self.resolve()?.into_owned()))
+        }
+    }
     /// A nonobject or missing field is None; backing-source failures occur before this view exists.
     pub fn get(self, key: &str) -> Result<Option<Self>> {
         Ok(match self.0 {
@@ -829,6 +992,71 @@ mod tests {
         value.write_canonical(&mut output).unwrap();
         assert_eq!(value.canonical_len().unwrap(), output.len() as u64);
         output
+    }
+
+    #[test]
+    fn document_projection_preserves_escaped_keys_final_values_and_complete_arguments() {
+        let body = "雪\"\\".repeat(4000);
+        let bytes = format!(
+            " \n{{\"ignored{}\":null,\"id\":\"old\",\"\\u0069d\":\"last\",\"body\":{},\"input\":{{\"payload\":{},\"n\":2}}}} \n",
+            "x".repeat(20000), serde_json::to_string(&body).unwrap(), serde_json::to_string(&body).unwrap()
+        );
+        let fixture = Fixture::new(bytes.as_bytes());
+        let source = JsonSource::capture(&fixture.path).unwrap();
+        source
+            .read_document(|view| {
+                let fields = document::Fields::parse(view, &["id", "id", "body", "input"])?.unwrap();
+                assert_eq!(fields.string("id")?.as_deref(), Some("last"));
+                let text = fields.get("body").unwrap().text(true)?.unwrap();
+                let crate::lazy::Text::Span(span) = text else {
+                    panic!("large text must remain a span")
+                };
+                assert!(span.escaped);
+                assert_eq!(
+                    crate::lazy::Resolver::new(Some(fixture.path.clone())).resolve(&span),
+                    body
+                );
+                let argument = fields.get("input").unwrap().argument(true)?;
+                assert!(matches!(argument, Json::Source(_)));
+                assert_eq!(
+                    argument.resolve()?.get("payload").and_then(Value::as_str),
+                    Some(body.as_str())
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn archive_whole_grammar_and_independent_value_budgets_match_raw_children() {
+        let nested = format!("{}0{}", "[".repeat(126), "]".repeat(126));
+        let fixture = Fixture::new(
+            format!("[{{\"bad\":1e400}},{{\"bad\":\"\\ud800\"}},{{\"ok\":{nested}}},{{\"ok\":1}}]").as_bytes(),
+        );
+        let source = JsonSource::capture(&fixture.path).unwrap();
+        assert!(source.read_document(|_| Ok(())).is_err());
+        let accepted = source
+            .read_archive(|array| {
+                array
+                    .unwrap()
+                    .map(|value| value.map(|v| v.is_some()))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(accepted, [false, false, true, true]);
+        for bytes in [b"[{\"ok\":1},]".as_slice(), b"[{\"ok\":1},\"\xff\"]"] {
+            let fixture = Fixture::new(bytes);
+            let source = JsonSource::capture(&fixture.path).unwrap();
+            let mut published = false;
+            let error = source
+                .read_archive(|_| {
+                    published = true;
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(error.is::<InvalidJson>());
+            assert!(!published);
+        }
     }
 
     #[test]

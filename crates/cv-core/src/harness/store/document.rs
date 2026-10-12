@@ -132,6 +132,54 @@ impl Source {
 
 /// Slices inside a RawValue already validated by serde at the file/line boundary. Walking a
 /// shallow object must not repeatedly validate its potentially enormous string descendants.
+/// Schema-selected fields across mapped and positioned sources. Structural descendants remain
+/// scoped views; only requested metadata/output is materialized. No ignored-key roster is kept.
+pub(crate) struct Fields<'a> {
+    fields: Vec<(&'static str, crate::json::JsonView<'a>)>,
+}
+impl<'a> Fields<'a> {
+    pub fn parse(view: crate::json::JsonView<'a>, keys: &[&'static str]) -> Result<Option<Self>> {
+        let Some(fields) = view.select_fields(keys)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            fields: keys
+                .iter()
+                .copied()
+                .zip(fields)
+                .filter_map(|(key, value)| value.map(|value| (key, value)))
+                .collect(),
+        }))
+    }
+    pub fn get(&self, key: &str) -> Option<crate::json::JsonView<'a>> {
+        self.fields
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| *value)
+    }
+    pub fn value(&self, key: &str) -> Result<Option<Value>> {
+        self.get(key).map(|view| Ok(view.resolve()?.into_owned())).transpose()
+    }
+    pub fn string(&self, key: &str) -> Result<Option<String>> {
+        let Some(view) = self.get(key) else { return Ok(None) };
+        if !view.is_string()? {
+            return Ok(None);
+        }
+        match view.resolve()?.into_owned() {
+            Value::String(s) => Ok(Some(s)),
+            _ => unreachable!(),
+        }
+    }
+    pub fn project(&self, keys: &[&str]) -> Result<serde_json::Map<String, Value>> {
+        keys.iter()
+            .filter_map(|key| self.get(key).map(|view| (*key, view)))
+            .map(|(key, view)| Ok((key.to_owned(), view.resolve()?.into_owned())))
+            .collect()
+    }
+}
+
+/// Slices inside a RawValue already validated by serde at the file/line boundary. Walking a
+/// shallow object must not repeatedly validate its potentially enormous string descendants.
 #[derive(Clone, Copy)]
 pub(crate) struct Raw<'a>(&'a str, &'a Index);
 
@@ -180,6 +228,59 @@ pub(crate) fn accepts_value(raw: Raw<'_>) -> bool {
             raw.1.remember(b.as_ptr() as usize + start, b.as_ptr() as usize + end);
         }
     })
+}
+
+/// Select a bounded schema roster without allocating ignored keys or descendant payloads.
+/// Keys obey Value's final-duplicate rule; complete acceptance remains the caller's boundary.
+#[cfg(feature = "mmap")]
+pub(crate) fn select_fields<'a>(raw: Raw<'a>, keys: &[&str]) -> Option<Vec<Option<Raw<'a>>>> {
+    let b = raw.get().as_bytes();
+    if b.first() != Some(&b'{') {
+        return None;
+    }
+    let key_limit = keys
+        .iter()
+        .map(|key| key.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_mul(6)
+        .saturating_add(2);
+    let mut fields = vec![None; keys.len()];
+    let mut cursor = 1;
+    loop {
+        whitespace(b, &mut cursor);
+        if b.get(cursor) == Some(&b'}') {
+            return Some(fields);
+        }
+        let start = cursor;
+        cursor = string_end(b, start, raw.1)?;
+        let key = if cursor - start <= key_limit {
+            serde_json::from_str::<String>(&raw.get()[start..cursor]).ok()
+        } else {
+            None
+        };
+        whitespace(b, &mut cursor);
+        if b.get(cursor) != Some(&b':') {
+            return None;
+        }
+        cursor += 1;
+        whitespace(b, &mut cursor);
+        let start = cursor;
+        cursor = value_end(b, start, raw.1)?;
+        if let Some(key) = key {
+            for (i, requested) in keys.iter().enumerate() {
+                if key == *requested {
+                    fields[i] = Some(Raw(&raw.get()[start..cursor], raw.1));
+                }
+            }
+        }
+        whitespace(b, &mut cursor);
+        match b.get(cursor) {
+            Some(b',') => cursor += 1,
+            Some(b'}') => return Some(fields),
+            _ => return None,
+        }
+    }
 }
 
 /// Syntax-validated object entries in wire order, including duplicate names.

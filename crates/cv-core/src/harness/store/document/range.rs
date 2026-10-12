@@ -560,6 +560,57 @@ impl RangeSource {
         cursor.consume(1);
         Ok(Some(ObjectRanges { cursor, done: false }))
     }
+    /// Retain only the requested roster. Arbitrary ignored keys cannot consume decoded heap.
+    pub fn select_fields(&self, range: Range, keys: &[&str]) -> Result<Option<Vec<Option<Range>>>> {
+        let Some(entries) = self.object(range)? else {
+            return Ok(None);
+        };
+        let max_key = keys.iter().map(|key| key.len()).max().unwrap_or(0) as u64;
+        let mut fields = vec![None; keys.len()];
+        for entry in entries {
+            let (key, value) = entry?;
+            if key.len > max_key.saturating_mul(6).saturating_add(2) {
+                continue;
+            }
+            let key: String = self.materialize(key)?;
+            for (i, requested) in keys.iter().enumerate() {
+                if key == *requested {
+                    fields[i] = Some(value);
+                }
+            }
+        }
+        Ok(Some(fields))
+    }
+    pub fn text(&self, string: Range, spans: bool) -> Result<Option<crate::lazy::Text>> {
+        if self.kind(string)? != Some(b'"') {
+            return Ok(None);
+        }
+        if !spans || string.len - 2 <= crate::lazy::INLINE_MAX as u64 {
+            return Ok(Some(crate::lazy::Text::Inline(self.materialize(string)?)));
+        }
+        let body = Range {
+            offset: string.offset + 1,
+            len: string.len - 2,
+        };
+        let mut cursor = self.cursor(body)?;
+        let escaped = loop {
+            let bytes = cursor.fill_buf()?;
+            if bytes.is_empty() {
+                break false;
+            }
+            if memchr::memchr(b'\\', bytes).is_some() {
+                break true;
+            }
+            let n = bytes.len();
+            cursor.consume(n);
+        };
+        Ok(Some(crate::lazy::Text::Span(crate::lazy::Span {
+            source: None,
+            offset: body.offset,
+            len: body.len,
+            escaped,
+        })))
+    }
     /// Scan with constant state and final-key-wins semantics, including discarded duplicate keys.
     pub fn get(&self, range: Range, key: &str) -> Result<Option<Range>> {
         let Some(fields) = self.object(range)? else {
@@ -786,6 +837,32 @@ mod io_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_roster_and_lazy_text_keep_original_ranges() {
+        let body = "雪\\".repeat(4000);
+        let encoded = format!(
+            "{{\"id\":1,\"\\u0069d\":2,\"ignored{}\":null,\"body\":{}}}",
+            "x".repeat(20000),
+            serde_json::to_string(&body).unwrap()
+        );
+        let path = std::env::temp_dir().join(format!("cv-range-fields-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &encoded).unwrap();
+        let source = RangeSource::open(&path).unwrap();
+        assert!(source.validate(source.range()).unwrap());
+        let fields = source
+            .select_fields(source.range(), &["id", "id", "missing", "body"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(fields[0], fields[1]);
+        assert!(fields[2].is_none());
+        assert_eq!(source.materialize::<u64>(fields[0].unwrap()).unwrap(), 2);
+        let crate::lazy::Text::Span(span) = source.text(fields[3].unwrap(), true).unwrap().unwrap() else {
+            panic!("large string must remain a span")
+        };
+        assert!(span.escaped);
+        assert_eq!(crate::lazy::Resolver::new(Some(path.clone())).resolve(&span), body);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn quote_search_preserves_slash_parity_across_windows() {
         let path = std::env::temp_dir().join(format!("cv-range-parity-{}", uuid::Uuid::new_v4()));
