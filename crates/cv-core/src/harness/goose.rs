@@ -92,6 +92,8 @@
 //! stores NO import provenance (`goose session import` forces `session_type = user`,
 //! `import_formats/mod.rs:46`), so [`Origin::Import`] is never derivable from the store today.
 //! `parent_session_id` → `Session::lineage.parent`; `metadata_json.usage.cost` → `Usage::cost_usd`.
+//! A fork stores no link: the messages it copied (same `message_id`) name its source, which is
+//! `Session::lineage.forked_from` ([`fork_source`]).
 //! Goose uses MCP-style tools: a `toolRequest` is the assistant's call (rmcp `CallToolRequestParams`
 //! = `{name, arguments}`); a `toolResponse` is the result (rmcp `CallToolResult` =
 //! `{content:[Content…], isError}`). On error the inner wrapper is `{"status":"error","error":"…"}`.
@@ -346,6 +348,47 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     Ok(out)
 }
 
+/// The session `id` was forked from. `goose session --resume --fork` copies every message, with
+/// its `message_id` and `created_timestamp`, into a new session and stores no link; so a session
+/// whose first message predates the session itself is a copy, and its source is the
+/// earliest-created other session holding that first message (a fork of a fork resolves to the
+/// original). `goose session import` also yields an older first message, but no other session
+/// holds its ids. Two indexed lookups, and only for a copied session.
+fn fork_source(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -> Option<String> {
+    let created_at = created_at?;
+    if !columns(conn, "messages").contains("message_id") {
+        return None;
+    }
+    let (first, at): (String, i64) = conn
+        .query_row(
+            "SELECT message_id, created_timestamp FROM messages WHERE session_id = ?1 \
+             AND message_id IS NOT NULL ORDER BY created_timestamp, id LIMIT 1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    if at >= created_at.timestamp() {
+        return None;
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, s.created_at FROM messages m JOIN sessions s ON s.id = m.session_id \
+             WHERE m.message_id = ?1 AND m.session_id != ?2",
+        )
+        .ok()?;
+    let holders: Vec<(String, Option<String>)> = stmt
+        .query_map([first.as_str(), id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?
+        .flatten()
+        .collect();
+    holders
+        .into_iter()
+        .filter_map(|(sid, c)| Some((c.as_deref().and_then(parse_ts_text)?, sid)))
+        .filter(|(c, _)| *c < created_at)
+        .min()
+        .map(|(_, sid)| sid)
+}
+
 fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
     let cols = columns(conn, "sessions");
     let has = |c: &str| cols.contains(c);
@@ -408,8 +451,10 @@ fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> R
         bag.insert("session_type".into(), Value::String(t));
         extra.insert(Harness::Goose.as_str().into(), Value::Object(bag));
     }
+    let created_at = created.as_deref().and_then(parse_ts_text).or(r.created_at);
     let lineage = Lineage {
         parent: parent_id.filter(|p| !p.is_empty()),
+        forked_from: fork_source(conn, &r.id, created_at),
         ..Default::default()
     };
 
@@ -421,7 +466,7 @@ fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> R
             .map(PathBuf::from)
             .or_else(|| r.cwd.clone()),
         title: title.filter(|t| !t.trim().is_empty()).or_else(|| r.title.clone()),
-        created_at: created.as_deref().and_then(parse_ts_text).or(r.created_at),
+        created_at,
         updated_at: updated.as_deref().and_then(parse_ts_text).or(r.updated_at),
         model,
         git: None,

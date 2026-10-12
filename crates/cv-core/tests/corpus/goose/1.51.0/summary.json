@@ -275,11 +275,14 @@
       "subagent_spawns": 0,
       "subagent_returns": 0,
       "affordances": {
+        "fork/fork": 1,
         "plan/state": 1,
         "plan/write": 5,
         "skill/load": 1
       },
-      "lineage": {},
+      "lineage": {
+        "forked_from": "20261011_1"
+      },
       "model": "openai/glm-4.7-flash",
       "skipped_lines": 0
     },

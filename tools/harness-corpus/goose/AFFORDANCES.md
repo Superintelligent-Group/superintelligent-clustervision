@@ -38,7 +38,7 @@ versions): `sessions`, `messages` (`content_json`, `metadata_json`), `usage_ledg
 | scheduled jobs | the run is a session with `session_type = scheduled` and `schedule_id`; the job itself is in `schedule.json` (not copied) | yes (`schedule`, `goose schedule run-now`) | |
 | chat recall | `chatrecall__chatrecall` tool call over past sessions | yes (`recall`) | `chatrecall__chatrecall` |
 | approvals | `GOOSE_MODE=approve` headless: Goose refuses before inference, so only the prompt rows persist. Interactive approvals would write `toolConfirmationRequest` / `actionRequired` blocks | the refusal only (`approve`) | |
-| fork | `goose session --resume --fork` copies every message into a NEW session with the same name; no link to the source is stored | yes (`fork`) | |
+| fork | `goose session --resume --fork` copies every message into a NEW session with the same name; no link to the source is stored, but the copies keep their `message_id` | yes (`fork`) | `lineage.forked_from`: the earliest-created other session holding the fork's first `message_id` |
 | import | `goose session import <claude/codex/pi .jsonl>`: `session_type = user`, no provenance stored | yes (`import`) | |
 | rename | `sessions.name`, `user_set_name = 1` | yes in 1.54.0 (`rename`); 1.51.0 has no `goose session rename` | |
 | usage and cost | `metadata_json.usage{inputTokens, outputTokens, totalTokens, cacheReadTokens, cost, costSource, elapsedMs, timeToFirstTokenMs}`; `sessions.accumulated_*`; `usage_ledger` per call | yes (every turn) | |
