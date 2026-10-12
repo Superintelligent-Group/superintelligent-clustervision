@@ -97,7 +97,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Doctor | Lazy-extra stream; resolved text lengths and JSON writer counts | Attribution state, adapter rich/fallback parsing and structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
-| FTS | Chunked text, bounded event spool, counts, checkpoint state | Writer connection churn and final merge measured separately; inline payloads and queued bytes remain |
+| FTS | Chunked text, bounded event spool, counts, checkpoint state; one catalog connection per sweep | Inline payloads and queued bytes remain; each consumer still commits independently |
 | Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
 | API pagination | Each page starts source traversal at zero; head reads whole source | Verified anchors or cache; head need not block first page rendering |
 | Watch | Discovery, full parse/count of changed session; old prefix parse on first append | Reuse safe stable cursors; logical edits must invalidate old output |
@@ -205,6 +205,34 @@ mapped stream. Detection now projects only discriminants from strictly validated
 reuses the mapping. Tool-only histories therefore stay bounded even when no natural-language
 record allows an early exit. Buffered/zstd traversal still retains a largest-line buffer.
 
+Event publication now spills ordered rows above a 256 KiB charged-memory budget to an owned
+private temporary file, then reads that file once inside the existing SQL transaction. Corrupt,
+missing or extra rows roll back both output and its dependency baseline. Failed publication clears
+the resume mark and is reported by indexing; successful independent FTS/count work remains. An
+FTS-only pass retains event checkpoint state without extracting rows, preserving later append reuse.
+
+| Isolated publication measurement | Previous path | Candidate |
+|---|---:|---:|
+| 20,000 event rows: peak live Rust allocation | 7,211,499 B | 358,005 B |
+| 200,000 event rows: peak live Rust allocation | 58,878,796 B | 358,007 B |
+| 200,000 event rows: clean median wall time | 1.224 s | 1.207 s |
+| 1,000 sessions, 16 rows + counts each: clean median wall time | 2.865 s | 0.368 s |
+| Same 1,000-session writer stage: user + system CPU | 2.33 s | 0.31 s |
+
+The event probe uses valid Claude JSONL with small tool inputs and distinct targets, including SQL
+publication. Spooling writes and reads 2,417,780 B for 20,000 rows and 24,577,780 B for 200,000 rows,
+once in each direction. The largest decoded record/target is still a separate bound. Native SQLite
+allocation and mapped input are excluded from Rust heap instrumentation.
+
+The `cv-core` example `catalog_writer_probe legacy|writer SESSIONS SOURCE` isolates publication
+from parsing and Tantivy. With fresh scratch catalogs, three clean runs per mode produced identical
+16,000 event rows, 1,000 count rows, 2,000 baselines and a 2,052,096 B catalog. Reusing one connection
+amortizes schema initialization, prepared statements and close/checkpoint work; it preserves separate
+per-consumer transactions and never holds a write lock across source reads. Native peak footprint
+rose from 3.75 MB to 5.36 MB in this probe because the connection/page cache lives longer. These
+stage timings do not claim the same multiplier for full indexing: a later fleet sample was waiting
+on Tantivy merges after parsing had finished.
+
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
 - [x] Source map: readers, consumers, caches, index, follow/archive, write paths and gates.
@@ -228,8 +256,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [ ] Remaining sidecar/step/tree retention: Kimi Code, Grok and Devin; Zed native SQLite blob footprint.
 - [ ] Format-safe append reuse beyond Claude/Codex; watcher and archive amplification.
-- [x] Bound event retention with spill-to-disk batches and retryable publication.
-- [ ] Index writer connection reuse, final merge costs, admission and queued bytes.
+- [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
+- [ ] Index admission and queued payload bytes; assess transaction batching with write-lock contention measurements and final Tantivy merge/query costs.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [ ] API pagination, pack/tools/stats and semantic rebuilds: prioritize by measurements.
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
