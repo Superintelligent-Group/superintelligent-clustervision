@@ -1,0 +1,723 @@
+//! Positioned, bounded input windows for source-backed JSON. Offsets count consumed bytes, never
+//! underlying reads or serde lookahead. The same structural scanner works on bytes and files.
+
+use anyhow::{Context, Result};
+use std::fs::File;
+use std::io::{self, BufRead, Read};
+use std::path::{Path, PathBuf};
+
+const WINDOW: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Range {
+    pub offset: u64,
+    pub len: u64,
+}
+impl Range {
+    fn end(self) -> io::Result<u64> {
+        self.offset
+            .checked_add(self.len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source range overflows"))
+    }
+}
+
+/// One readonly descriptor shared by all projected fields in an operation. Independent cursors
+/// use positioned reads so nested views do not share seek position or hold a RefCell borrow.
+pub(crate) struct RangeSource {
+    file: File,
+    path: PathBuf,
+    identity: Identity,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct Identity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(not(unix))]
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64, i64, i64),
+}
+impl Identity {
+    fn from_metadata(md: std::fs::Metadata) -> Self {
+        Self {
+            len: md.len(),
+            modified: md.modified().ok(),
+            #[cfg(not(unix))]
+            created: md.created().ok(),
+            #[cfg(unix)]
+            inode: {
+                use std::os::unix::fs::MetadataExt;
+                (md.dev(), md.ino(), md.ctime(), md.ctime_nsec())
+            },
+        }
+    }
+}
+impl RangeSource {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let identity = Identity::from_metadata(file.metadata()?);
+        let source = Self {
+            file,
+            path: path.to_path_buf(),
+            identity,
+        };
+        source.check_identity()?;
+        Ok(source)
+    }
+    pub fn range(&self) -> Range {
+        Range {
+            offset: 0,
+            len: self.identity.len,
+        }
+    }
+    pub fn check_identity(&self) -> Result<()> {
+        anyhow::ensure!(
+            Identity::from_metadata(self.file.metadata()?) == self.identity
+                && Identity::from_metadata(std::fs::metadata(&self.path)?) == self.identity,
+            "source changed while reading {}",
+            self.path.display()
+        );
+        Ok(())
+    }
+    pub fn cursor(&self, range: Range) -> io::Result<Cursor<'_>> {
+        if range.end()? > self.identity.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "range extends beyond source",
+            ));
+        }
+        Ok(Cursor {
+            backing: Backing::File(&self.file),
+            range,
+            position: range.offset,
+            window: Vec::new(),
+            window_start: range.offset,
+            read_error: None,
+        })
+    }
+}
+
+enum Backing<'a> {
+    Bytes(&'a [u8]),
+    File(&'a File),
+}
+pub(crate) struct Cursor<'a> {
+    backing: Backing<'a>,
+    range: Range,
+    position: u64,
+    window: Vec<u8>,
+    window_start: u64,
+    read_error: Option<io::ErrorKind>,
+}
+impl<'a> Cursor<'a> {
+    pub fn bytes(bytes: &'a [u8], base: u64) -> io::Result<Self> {
+        let range = Range {
+            offset: base,
+            len: bytes.len() as u64,
+        };
+        range.end()?;
+        Ok(Self {
+            backing: Backing::Bytes(bytes),
+            range,
+            position: base,
+            window: Vec::new(),
+            window_start: base,
+            read_error: None,
+        })
+    }
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+    pub fn peek(&mut self) -> io::Result<Option<u8>> {
+        Ok(self.fill_buf()?.first().copied())
+    }
+    pub fn whitespace(&mut self) -> io::Result<()> {
+        loop {
+            let bytes = self.fill_buf()?;
+            let n = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
+            if n == 0 {
+                return Ok(());
+            }
+            self.consume(n);
+        }
+    }
+    pub fn borrow_range(&self, range: Range) -> Option<&[u8]> {
+        let (bytes, base) = match &self.backing {
+            Backing::Bytes(b) => (*b, self.range.offset),
+            Backing::File(_) => (self.window.as_slice(), self.window_start),
+        };
+        let start = usize::try_from(range.offset.checked_sub(base)?).ok()?;
+        let end = start.checked_add(usize::try_from(range.len).ok()?)?;
+        bytes.get(start..end)
+    }
+    /// Only structural navigation; the caller validates grammar and scalar acceptance once at
+    /// the document/record boundary. Escapes may span windows without decoding their payload.
+    pub fn string(&mut self) -> io::Result<Range> {
+        let start = self.position;
+        if self.peek()? != Some(b'"') {
+            return Err(invalid("expected JSON string"));
+        }
+        self.consume(1);
+        loop {
+            let bytes = self.fill_buf()?;
+            if bytes.is_empty() {
+                return Err(invalid("unterminated JSON string"));
+            }
+            let Some(n) = memchr::memchr2(b'"', b'\\', bytes) else {
+                let n = bytes.len();
+                self.consume(n);
+                continue;
+            };
+            let marker = bytes[n];
+            self.consume(n + 1);
+            if marker == b'"' {
+                return Ok(Range {
+                    offset: start,
+                    len: self.position - start,
+                });
+            }
+            if self.peek()?.is_none() {
+                return Err(invalid("unterminated JSON escape"));
+            }
+            self.consume(1);
+        }
+    }
+    pub fn value(&mut self) -> io::Result<Range> {
+        self.whitespace()?;
+        let start = self.position;
+        match self.peek()? {
+            Some(b'"') => return self.string(),
+            Some(b'{' | b'[') => {
+                self.consume(1);
+                let mut depth = 1usize;
+                while depth != 0 {
+                    match self.peek()? {
+                        Some(b'"') => {
+                            self.string()?;
+                        }
+                        Some(b'{' | b'[') => {
+                            depth = depth.checked_add(1).ok_or_else(|| invalid("nesting overflow"))?;
+                            self.consume(1);
+                        }
+                        Some(b'}' | b']') => {
+                            depth -= 1;
+                            self.consume(1);
+                        }
+                        Some(_) => {
+                            self.consume(1);
+                        }
+                        None => return Err(invalid("unterminated JSON container")),
+                    }
+                }
+            }
+            Some(_) => loop {
+                let bytes = self.fill_buf()?;
+                let n = bytes
+                    .iter()
+                    .take_while(|b| !b.is_ascii_whitespace() && !b",]}".contains(b))
+                    .count();
+                if n == 0 {
+                    break;
+                }
+                self.consume(n);
+            },
+            None => return Err(invalid("expected JSON value")),
+        }
+        if self.position == start {
+            return Err(invalid("expected JSON value"));
+        }
+        Ok(Range {
+            offset: start,
+            len: self.position - start,
+        })
+    }
+}
+impl BufRead for Cursor<'_> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.position == self.range.end()? {
+            return Ok(&[]);
+        }
+        match self.backing {
+            Backing::Bytes(bytes) => Ok(&bytes[(self.position - self.range.offset) as usize..]),
+            Backing::File(file) => {
+                let consumed = usize::try_from(self.position - self.window_start).unwrap_or(usize::MAX);
+                if consumed < self.window.len() {
+                    return Ok(&self.window[consumed..]);
+                }
+                self.window_start = self.position;
+                let n = (self.range.end()? - self.position).min(WINDOW as u64) as usize;
+                self.window.resize(n, 0);
+                let n = loop {
+                    match read_at(file, &mut self.window, self.position) {
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            self.read_error = Some(e.kind());
+                            return Err(e);
+                        }
+                        Ok(n) => break n,
+                    }
+                };
+                if n == 0 {
+                    self.read_error = Some(io::ErrorKind::UnexpectedEof);
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "source was truncated"));
+                }
+                self.window.truncate(n);
+                Ok(&self.window)
+            }
+        }
+    }
+    fn consume(&mut self, n: usize) {
+        assert!(
+            n as u64 <= self.range.end().unwrap() - self.position,
+            "cursor consumed beyond range"
+        );
+        self.position += n as u64;
+    }
+}
+impl Read for Cursor<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let bytes = self.fill_buf()?;
+        let n = bytes.len().min(out.len());
+        out[..n].copy_from_slice(&bytes[..n]);
+        self.consume(n);
+        Ok(n)
+    }
+}
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        file.seek_read(buf, offset)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        use std::io::{Seek, SeekFrom};
+        // Files are unavailable on wasm32-unknown-unknown. Keep its build portable without
+        // introducing OS-specific APIs; native supported platforms use independent positions.
+        let mut cloned = file.try_clone()?;
+        cloned.seek(SeekFrom::Start(offset))?;
+        cloned.read(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn byte_and_positioned_cursors_agree_across_escaped_window_boundaries() {
+        let path = std::env::temp_dir().join(format!("cv-range-cursor-{}", uuid::Uuid::new_v4()));
+        let values = [
+            serde_json::json!("a".repeat(WINDOW - 2) + "\\\"é😀"),
+            serde_json::json!({"x":[1,true,null,"end"]}),
+            serde_json::json!(-1.25e30),
+        ];
+        let encoded = values
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect::<Vec<_>>()
+            .join(" \n");
+        std::fs::write(&path, &encoded).unwrap();
+        let source = RangeSource::open(&path).unwrap();
+        let mut file = source.cursor(source.range()).unwrap();
+        let mut bytes = Cursor::bytes(encoded.as_bytes(), 0).unwrap();
+        for expected in values {
+            let fr = file.value().unwrap();
+            let br = bytes.value().unwrap();
+            assert_eq!(fr, br);
+            assert_eq!(file.position(), bytes.position());
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(bytes.borrow_range(br).unwrap()).unwrap(),
+                expected
+            );
+            let mut scalar = source.cursor(fr).unwrap();
+            assert_eq!(
+                serde_json::from_reader::<_, serde_json::Value>(&mut scalar).unwrap(),
+                expected
+            );
+        }
+        file.whitespace().unwrap();
+        assert_eq!(file.peek().unwrap(), None);
+        source.check_identity().unwrap();
+        std::fs::write(&path, "truncated").unwrap();
+        assert!(source.check_identity().is_err());
+        let mut truncated = source.cursor(source.range()).unwrap();
+        assert!(truncated.read_to_end(&mut Vec::new()).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+impl RangeSource {
+    /// Validate grammar and whole-range UTF-8 once. Export archives use this boundary before
+    /// validating individual conversations with Value's independently reset recursion budget.
+    pub fn syntax(&self, range: Range) -> Result<bool> {
+        use serde::Deserialize;
+        self.check_identity()?;
+        let mut decoder = serde_json::Deserializer::from_reader(self.cursor(range)?);
+        let result = serde::de::IgnoredAny::deserialize(&mut decoder).and_then(|_| decoder.end());
+        if let Err(error) = result {
+            self.check_identity()?;
+            if error.is_io() {
+                return Err(error.into());
+            }
+            return Ok(false);
+        }
+        let valid = utf8(&mut self.cursor(range)?)?;
+        self.check_identity()?;
+        Ok(valid)
+    }
+
+    /// Scalar/depth validation after the syntax boundary. Short strings/numbers reuse the same
+    /// authoritative checks as mapped slices; long strings reuse the bounded serde decoder.
+    pub fn accepts_value(&self, range: Range) -> Result<bool> {
+        let mut cursor = self.cursor(range)?;
+        let mut depth = 0usize;
+        loop {
+            cursor.whitespace()?;
+            match cursor.peek()? {
+                None => break,
+                Some(b'"') => {
+                    let string = cursor.string()?;
+                    let valid = if let Some(bytes) = cursor.borrow_range(string) {
+                        super::super::json::value_compatible(bytes)
+                    } else {
+                        let body = Range {
+                            offset: string.offset + 1,
+                            len: string.len - 2,
+                        };
+                        let mut body = self.cursor(body)?;
+                        let valid = crate::lazy::decode_json_body(&mut body, &mut |_| {}).is_ok();
+                        if let Some(kind) = body.read_error {
+                            return Err(io::Error::new(kind, "reading JSON string").into());
+                        }
+                        valid
+                    };
+                    if !valid {
+                        return Ok(false);
+                    }
+                }
+                Some(b'{' | b'[') => {
+                    depth += 1;
+                    if depth == 128 {
+                        return Ok(false);
+                    }
+                    cursor.consume(1);
+                }
+                Some(b'}' | b']') => {
+                    depth = depth.checked_sub(1).context("unvalidated JSON nesting")?;
+                    cursor.consume(1);
+                }
+                Some(b'-' | b'0'..=b'9') => {
+                    let number = cursor.value()?;
+                    let valid = if let Some(bytes) = cursor.borrow_range(number) {
+                        super::super::json::value_compatible(bytes)
+                    } else {
+                        match serde_json::from_reader::<_, serde_json::Number>(self.cursor(number)?) {
+                            Ok(_) => true,
+                            Err(e) if e.is_io() => return Err(e.into()),
+                            Err(_) => false,
+                        }
+                    };
+                    if !valid {
+                        return Ok(false);
+                    }
+                }
+                Some(_) => cursor.consume(1),
+            }
+        }
+        Ok(true)
+    }
+    pub fn validate(&self, range: Range) -> Result<bool> {
+        let result = self
+            .syntax(range)
+            .and_then(|syntax| if syntax { self.accepts_value(range) } else { Ok(false) });
+        self.check_identity()?;
+        result
+    }
+    /// Explicit materialization is for demanded typed metadata/output, not structural traversal.
+    pub fn materialize<T: serde::de::DeserializeOwned>(&self, range: Range) -> Result<T> {
+        Ok(serde_json::from_reader(self.cursor(range)?)?)
+    }
+    pub fn for_each_string_chunk(&self, string: Range, mut visit: impl FnMut(&str)) -> Result<()> {
+        if string.len <= crate::lazy::INLINE_MAX as u64 + 2 {
+            let decoded: String = self.materialize(string)?;
+            visit(&decoded);
+            return Ok(());
+        }
+        anyhow::ensure!(string.len >= 2, "not a JSON string");
+        let body = Range {
+            offset: string.offset + 1,
+            len: string.len - 2,
+        };
+        let mut cursor = self.cursor(body)?;
+        let decoded = crate::lazy::decode_json_body(&mut cursor, &mut visit);
+        if let Some(kind) = cursor.read_error {
+            return Err(io::Error::new(kind, "reading JSON string").into());
+        }
+        decoded.map_err(|_| anyhow::anyhow!("invalid JSON string"))?;
+        Ok(())
+    }
+    pub fn key_matches(&self, string: Range, key: &str) -> Result<bool> {
+        // An escaped ASCII byte needs at most six encoded bytes; surrogate pairs encode one
+        // four-byte UTF-8 scalar in twelve bytes. A longer key cannot equal the requested name.
+        if string.len > (key.len() as u64).saturating_mul(6).saturating_add(2) {
+            return Ok(false);
+        }
+        let mut matched = true;
+        let mut position: usize = 0;
+        self.for_each_string_chunk(string, |part| {
+            matched &= key.as_bytes().get(position..position.saturating_add(part.len())) == Some(part.as_bytes());
+            position = position.saturating_add(part.len());
+        })?;
+        Ok(matched && position == key.len())
+    }
+    pub fn array(&self, range: Range) -> Result<Option<ArrayRanges<'_>>> {
+        let mut cursor = self.cursor(range)?;
+        cursor.whitespace()?;
+        if cursor.peek()? != Some(b'[') {
+            return Ok(None);
+        }
+        cursor.consume(1);
+        Ok(Some(ArrayRanges { cursor, done: false }))
+    }
+    pub fn object(&self, range: Range) -> Result<Option<ObjectRanges<'_>>> {
+        let mut cursor = self.cursor(range)?;
+        cursor.whitespace()?;
+        if cursor.peek()? != Some(b'{') {
+            return Ok(None);
+        }
+        cursor.consume(1);
+        Ok(Some(ObjectRanges { cursor, done: false }))
+    }
+    /// Scan with constant state and final-key-wins semantics, including discarded duplicate keys.
+    pub fn get(&self, range: Range, key: &str) -> Result<Option<Range>> {
+        let Some(fields) = self.object(range)? else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for field in fields {
+            let (name, value) = field?;
+            if self.key_matches(name, key)? {
+                found = Some(value);
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// Whole-range UTF-8 validates ignored/discarded fields too. At most one incomplete scalar is
+/// carried over a window boundary; outside-string non-ASCII is already rejected by grammar.
+fn utf8(cursor: &mut Cursor<'_>) -> io::Result<bool> {
+    let mut pending = [0; 4];
+    let mut len = 0;
+    loop {
+        let bytes = cursor.fill_buf()?;
+        if bytes.is_empty() {
+            return Ok(len == 0);
+        }
+        let mut start = 0;
+        while len > 0 && start < bytes.len() {
+            pending[len] = bytes[start];
+            len += 1;
+            start += 1;
+            match std::str::from_utf8(&pending[..len]) {
+                Ok(_) => len = 0,
+                Err(e) if e.error_len().is_none() && len < 4 => {}
+                Err(_) => return Ok(false),
+            }
+        }
+        if start < bytes.len() {
+            if let Err(e) = std::str::from_utf8(&bytes[start..]) {
+                if e.error_len().is_some() {
+                    return Ok(false);
+                }
+                let tail = &bytes[start + e.valid_up_to()..];
+                pending[..tail.len()].copy_from_slice(tail);
+                len = tail.len();
+            }
+        }
+        let n = bytes.len();
+        cursor.consume(n);
+    }
+}
+
+pub(crate) struct ArrayRanges<'a> {
+    cursor: Cursor<'a>,
+    done: bool,
+}
+impl Iterator for ArrayRanges<'_> {
+    type Item = io::Result<Range>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let result = (|| {
+            self.cursor.whitespace()?;
+            if self.cursor.peek()? == Some(b']') {
+                self.done = true;
+                return Ok(None);
+            }
+            let value = self.cursor.value()?;
+            self.cursor.whitespace()?;
+            match self.cursor.peek()? {
+                Some(b',') => self.cursor.consume(1),
+                Some(b']') => self.done = true,
+                _ => return Err(invalid("unvalidated JSON array delimiter")),
+            }
+            Ok(Some(value))
+        })();
+        match result {
+            Ok(value) => value.map(Ok),
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+pub(crate) struct ObjectRanges<'a> {
+    cursor: Cursor<'a>,
+    done: bool,
+}
+impl Iterator for ObjectRanges<'_> {
+    type Item = io::Result<(Range, Range)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let result = (|| {
+            self.cursor.whitespace()?;
+            if self.cursor.peek()? == Some(b'}') {
+                self.done = true;
+                return Ok(None);
+            }
+            let key = self.cursor.string()?;
+            self.cursor.whitespace()?;
+            if self.cursor.peek()? != Some(b':') {
+                return Err(invalid("unvalidated JSON field delimiter"));
+            }
+            self.cursor.consume(1);
+            let value = self.cursor.value()?;
+            self.cursor.whitespace()?;
+            match self.cursor.peek()? {
+                Some(b',') => self.cursor.consume(1),
+                Some(b'}') => self.done = true,
+                _ => return Err(invalid("unvalidated JSON object delimiter")),
+            }
+            Ok(Some((key, value)))
+        })();
+        match result {
+            Ok(value) => value.map(Ok),
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod acceptance_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_validation_matches_value_and_navigation_keeps_final_escaped_keys() {
+        let path = std::env::temp_dir().join(format!("cv-range-validation-{}", uuid::Uuid::new_v4()));
+        let mut cases = [
+            "null",
+            "true",
+            "0",
+            "-0",
+            "1e400",
+            "1e-400",
+            "18446744073709551616",
+            "\"\\ud800\"",
+            "\"\\udc00\"",
+            "\"\\ud83c\\udf19\"",
+            "\"\\\\ud800\"",
+            "{\"x\":1e400,\"x\":0}",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        for depth in 125..=130 {
+            cases.push(format!("{}0{}", "[".repeat(depth), "]".repeat(depth)));
+        }
+        cases.extend([
+            format!("\"{}\\ud800\"", "\\u0061".repeat(WINDOW)),
+            format!("\"{}é😀\"", "a".repeat(WINDOW - 2)),
+            format!("1.{}9", "0".repeat(WINDOW * 2)),
+            format!("1e-{}", "9".repeat(WINDOW * 2)),
+        ]);
+        for case in cases {
+            std::fs::write(&path, &case).unwrap();
+            let source = RangeSource::open(&path).unwrap();
+            assert_eq!(
+                source.validate(source.range()).unwrap(),
+                serde_json::from_str::<serde_json::Value>(&case).is_ok(),
+                "{} bytes",
+                case.len()
+            );
+        }
+        let document = r#" {"z":1,"a":[null,{"x":"tail"}],"\u007a":2} "#;
+        std::fs::write(&path, document).unwrap();
+        let source = RangeSource::open(&path).unwrap();
+        assert!(source.validate(source.range()).unwrap());
+        let z = source.get(source.range(), "z").unwrap().unwrap();
+        assert_eq!(
+            source.materialize::<serde_json::Value>(z).unwrap(),
+            serde_json::json!(2)
+        );
+        assert!(source.get(source.range(), "missing").unwrap().is_none());
+        let a = source.get(source.range(), "a").unwrap().unwrap();
+        let values = source
+            .array(a)
+            .unwrap()
+            .unwrap()
+            .map(|range| source.materialize::<serde_json::Value>(range.unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, [serde_json::Value::Null, serde_json::json!({"x":"tail"})]);
+        std::fs::write(&path, b"{\"ignored\":\"\xff\"}").unwrap();
+        let invalid = RangeSource::open(&path).unwrap();
+        assert!(!invalid.syntax(invalid.range()).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+    #[test]
+    fn a_late_refill_failure_is_a_read_error_not_an_invalid_scalar_or_success() {
+        let path = std::env::temp_dir().join(format!("cv-range-refill-{}", uuid::Uuid::new_v4()));
+        let encoded = serde_json::to_string(&"x".repeat(WINDOW * 3)).unwrap();
+        std::fs::write(&path, &encoded).unwrap();
+        let source = RangeSource::open(&path).unwrap();
+        assert!(source.validate(source.range()).unwrap());
+        let mut callbacks = 0;
+        let result = source.for_each_string_chunk(source.range(), |_| {
+            callbacks += 1;
+            if callbacks == 1 {
+                std::fs::write(&path, "x").unwrap();
+            }
+        });
+        assert!(callbacks > 0);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert!(source.check_identity().is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
