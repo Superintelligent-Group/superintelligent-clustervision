@@ -272,8 +272,8 @@ fn show_range(r: &SessionRef, window: &WindowArgs, pre_compaction: Option<usize>
 }
 
 /// Collect a full-fidelity JSON window while reading through EOF for final session metadata.
-/// Discarded messages die in the sink; `Last` keeps only its bounded tail. Full options are
-/// intentional: some adapters' lazy path omits extra fields the JSON contract must preserve.
+/// Discarded messages die in the sink; `Last` keeps only its bounded tail. Lazy content retains
+/// full extras, then selected messages are materialized before budgeting and serialization.
 fn session_json_window(
     adapter: &dyn Adapter,
     r: &SessionRef,
@@ -354,7 +354,7 @@ fn session_json_window(
         next: None,
         error: None,
     };
-    let mut session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::full(), &mut sink)?;
+    let mut session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?;
     if sink.tail.is_some() {
         let start = sink.seen - sink.messages.len();
         for (i, m) in std::mem::take(&mut sink.messages).into_iter().enumerate() {
@@ -1383,6 +1383,7 @@ mod tests {
             None,
             Some(Window::First(0)),
             Some(Window::First(1)),
+            Some(Window::Last(1)),
             Some(Window::Last(0)),
             Some(Window::Last(3)),
             Some(Window::Last(100)),
@@ -1390,6 +1391,10 @@ mod tests {
             Some(Window::Range(100, Some(101))),
             Some(Window::Range(3, None)),
             Some(Window::Around { center: 1, context: 2 }),
+            Some(Window::Around {
+                center: 100,
+                context: 2,
+            }),
         ] {
             for budget in [None, Some(0), Some(1024), Some(1 << 20)] {
                 let (expected, expected_next) = full_json_window(adapter, r, window, budget);
@@ -1417,8 +1422,12 @@ mod tests {
         for record in [
             serde_json::json!({"type":"attachment", "attachment":{"type":"prompt_snapshot",
                 "systemPrompt":["late system prompt"]}}),
-            serde_json::json!({"type":"user", "uuid":"result", "toolUseResult":{"persistedOutput":{"path":"/tmp/output"}},
-                "message":{"role":"user", "content":[{"type":"tool_result","tool_use_id":"call","content":"done"}]}}),
+            serde_json::json!({"type":"user", "uuid":"result", "toolUseResult":{"persistedOutput":{"path":"/tmp/output"},
+                "details":{"command":"printf \"🌙\"", "exitCode":1}},
+                "message":{"role":"user", "content":[{"type":"tool_result","tool_use_id":"call",
+                    "is_error":true,"content":"escaped\n\t\"\\🌙".repeat(1200)}]}}),
+            serde_json::json!({"type":"user", "isCompactSummary":true,
+                "message":{"role":"user","content":"complete summary\n\"🌙\"".repeat(1200)}}),
             serde_json::json!({"type":"ai-title", "aiTitle":"late title"}),
         ] {
             writeln!(f, "{record}").unwrap();
@@ -1453,7 +1462,7 @@ mod tests {
                 opts: &cv_core::ParseOptions,
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<Session> {
-                assert!(opts.extra && !opts.spans);
+                assert!(opts.extra);
                 let mut s = Session::new(r.id.clone(), r.harness);
                 s.title = Some("early title".into());
                 sink.meta(&s);
@@ -1486,6 +1495,56 @@ mod tests {
                 serde_json::to_value(expected).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn gemini_json_windows_preserve_lazy_content_and_replayed_metadata() {
+        let _world = cv_testkit::World::in_process("gemini_json_windows_preserve_lazy_content_and_replayed_metadata");
+        let home = temp_home("gemini-json-window");
+        std::fs::create_dir_all(home.join("chats")).unwrap();
+        let adapter = cv_core::harness::gemini::Gemini::with_home(&home);
+        let giant = "escaped\n\t\"\\🌙".repeat(1200);
+        let messages = serde_json::json!([
+            {"type":"user","id":"u","content":"small first prompt"},
+            {"type":"gemini","id":"a","model":"gemini-test","content":[
+                {"text":giant,"thought":true},{"text":giant}],
+             "tokens":{"input":100,"cached":60,"output":20},
+             "toolCalls":[{"id":"c","name":"shell","args":{"command":"ls"},"status":"success",
+                 "result":[{"functionResponse":{"response":{"output":giant}}}]}]},
+            {"type":"user","id":"t","content":[
+                {"functionResponse":{"id":"c","name":"shell","response":{"output":giant}}}]},
+            {"type":"warning","id":"w","content":giant},
+            {"type":"user","id":"last","content":"small final prompt"}
+        ]);
+        let metadata = serde_json::json!({"sessionId":"json-window","projectHash":"x","kind":"subagent",
+            "startTime":"2026-01-01T00:00:00Z","lastUpdated":"2026-01-01T00:00:10Z",
+            "summary":"full summary\n\"🌙\"".repeat(1200),"directories":["/tmp/q\"uote"]});
+        for ext in ["json", "jsonl"] {
+            let path = home.join("chats").join(format!("session-window.{ext}"));
+            if ext == "json" {
+                let mut document = metadata.clone();
+                document["messages"] = messages.clone();
+                std::fs::write(&path, document.to_string()).unwrap();
+            } else {
+                let mut early = metadata.clone();
+                early.as_object_mut().unwrap().remove("summary");
+                let mut records = vec![early.to_string()];
+                records.extend(messages.as_array().unwrap().iter().map(ToString::to_string));
+                // EOF replay must supply the final shell even for an early, empty or budget-cut window.
+                records.push(
+                    serde_json::json!({"$set":{"summary":metadata["summary"],
+                    "lastUpdated":"2026-01-01T00:00:20Z"}})
+                    .to_string(),
+                );
+                std::fs::write(&path, records.join("\n")).unwrap();
+            }
+            let r = SessionRef::new("json-window", Harness::Gemini, path);
+            assert_json_windows(&adapter, &r);
+            let (first, _) = session_json_window(&adapter, &r, Some(Window::First(1)), None).unwrap();
+            assert_eq!(first.title.as_deref(), metadata["summary"].as_str());
+            assert_eq!(first.messages.len(), 1);
+        }
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     /// `--kind` picks one view family: what the person said, the compaction seams, or the
@@ -1837,16 +1896,26 @@ mod tests {
         let home = temp_home("codex");
 
         let path = home.join("rollout-r.jsonl");
-        let big = "giant output\n".repeat(500);
+        let big = "giant output\n\t\"\\🌙".repeat(1200);
         let mut f = std::fs::File::create(&path).unwrap();
         for l in [
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"rollout-r","cwd":"/work"}}"#.to_string(),
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"rollout-r","cwd":"/work","forked_from_id":"parent","subagent_history_start_ordinal":2,"agent_role":"reviewer"}}"#.to_string(),
+            serde_json::json!({"ordinal":1,"type":"response_item","payload":{"type":"custom_tool_call_output",
+                "call_id":"inherited","output":big}}).to_string(),
             r#"{"timestamp":"2026-01-01T00:00:01Z","type":"turn_context","payload":{"cwd":"/work","model":"gpt-test"}}"#.to_string(),
             r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"hello there"}}"#.to_string(),
             r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"working"}}"#.to_string(),
             r#"{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"}}"#.to_string(),
             serde_json::json!({"timestamp":"2026-01-01T00:00:05Z","type":"response_item",
-                "payload":{"type":"function_call_output","call_id":"c1","output":big}}).to_string(),
+                "payload":{"type":"function_call_output","call_id":"c1","name":"shell","namespace":"functions",
+                    "internal_chat_message_metadata_passthrough":{"create_time":1767225604.5,"turn_id":"turn1"},
+                    "output":format!("[error] {big}")}}).to_string(),
+            serde_json::json!({"timestamp":"2026-01-01T00:00:05Z","type":"response_item",
+                "payload":{"type":"custom_tool_call_output","call_id":"c2","name":"patch","namespace":"functions",
+                    "output":big}}).to_string(),
+            serde_json::json!({"timestamp":"2026-01-01T00:00:05Z","type":"compacted",
+                "payload":{"message":big,"window_number":3,"window_id":"w","compaction_response_id":"cr",
+                    "replacement_history":[{"role":"user","content":"preserved count"}]}}).to_string(),
             r#"{"timestamp":"2026-01-01T00:00:06Z","type":"event_msg","payload":{"type":"agent_message","message":"all done"}}"#.to_string(),
         ] {
             writeln!(f, "{l}").unwrap();
