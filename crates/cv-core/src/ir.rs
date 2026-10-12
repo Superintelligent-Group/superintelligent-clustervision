@@ -335,16 +335,16 @@ impl Session {
     ///
     /// The per-message projection lives in [`Message::append_searchable`]; this just prepends the
     /// title and folds every message into one `String`.
-    pub fn searchable_text(&self) -> String {
+    pub fn searchable_text(&self) -> anyhow::Result<String> {
         let mut out = String::new();
         if let Some(t) = &self.title {
             out.push_str(t);
             out.push('\n');
         }
         for m in &self.messages {
-            m.append_searchable(&mut out);
+            m.append_searchable(&mut out)?;
         }
-        out
+        Ok(out)
     }
 
     /// A [`Resolver`](crate::lazy::Resolver) for this session's lazy content spans, rooted at its
@@ -357,11 +357,12 @@ impl Session {
     /// content inline. Whole-session consumers (cross-harness emit building output in memory, JSON
     /// serialization) call this; streaming consumers resolve per-block instead. After it, every
     /// content `Text` is `Inline`, so `Deref`/`Display`/`searchable_text` are safe.
-    pub fn materialize(&mut self) {
+    pub fn materialize(&mut self) -> anyhow::Result<()> {
         let resolver = self.resolver();
         for m in &mut self.messages {
-            m.materialize(&resolver);
+            m.materialize(&resolver)?;
         }
+        Ok(())
     }
 }
 
@@ -643,11 +644,15 @@ impl Message {
     /// Resolve this message's lazy content spans in place against `resolver`, so its content is owned
     /// inline. Streaming consumers call this per message (peak = one message) instead of holding a
     /// whole materialized session.
-    pub fn materialize(&mut self, resolver: &crate::lazy::Resolver) {
+    pub fn materialize(&mut self, resolver: &crate::lazy::Resolver) -> anyhow::Result<()> {
         for b in &mut self.content {
             let slot = match b {
                 Block::Text { text } | Block::Thinking { text, .. } => text,
                 Block::ToolResult { content, .. } => content,
+                Block::ToolUse { input, .. } => {
+                    input.make_owned()?;
+                    continue;
+                }
                 _ => continue,
             };
             if slot.is_span() {
@@ -655,14 +660,25 @@ impl Message {
                 *slot = crate::lazy::Text::Inline(owned);
             }
         }
+        Ok(())
     }
 
     /// Append this message's searchable text to `out` — the single canonical projection behind
     /// both [`Session::searchable_text`] (whole session) and
     /// [`Message::append_searchable`] (streaming, per message).
     /// Writes into the caller's buffer so neither path allocates intermediates.
-    pub fn append_searchable(&self, out: &mut String) {
-        use std::fmt::Write as _;
+    pub fn append_searchable(&self, out: &mut String) -> anyhow::Result<()> {
+        struct Utf8Writer<'a>(&'a mut String);
+        impl std::io::Write for Utf8Writer<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let text = std::str::from_utf8(bytes).map_err(std::io::Error::other)?;
+                self.0.push_str(text);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
         for b in &self.content {
             match b {
                 Block::Text { text } | Block::Thinking { text, .. } => {
@@ -672,9 +688,9 @@ impl Message {
                 Block::ToolUse { name, input, .. } => {
                     out.push_str(name);
                     out.push(' ');
-                    // `Display` for `serde_json::Value` produces exactly `to_string()`, without
-                    // the intermediate allocation.
-                    let _ = write!(out, "{input}");
+                    // Reuse the demanded output allocation while the canonical walker emits
+                    // source fields. No intermediate serialized copy of a giant input.
+                    input.write_canonical(&mut Utf8Writer(out))?;
                     out.push('\n');
                 }
                 Block::ToolResult { content, .. } => {
@@ -690,6 +706,7 @@ impl Message {
                 Block::Image { .. } => {}
             }
         }
+        Ok(())
     }
 
     /// Concatenated plain text of this message's text blocks (ignores thinking/tools).
@@ -730,7 +747,10 @@ pub enum Block {
     ToolUse {
         id: String,
         name: String,
-        input: serde_json::Value,
+        /// Complete arguments, owned or backed by a validated source range. Serialization keeps
+        /// the existing JSON value shape. Projections and materialization can fail if the source
+        /// changes; consumers must propagate that failure rather than substitute missing fields.
+        input: crate::json::Json,
         /// The tool's namespace when the harness has one (Codex `collaboration`, MCP server names).
         /// `name` stays the bare tool name so tool statistics keep grouping.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -979,23 +999,31 @@ pub fn est_tokens_bytes(len: usize, bytes_per_token: f64) -> u64 {
 /// `text` reads zero); a tool call as its `input` JSON; a tool result as its content; an image as
 /// [`IMAGE_TOKENS`]; a file reference as nothing. The one definition `doctor`, `distill` and `stats`
 /// share — change what a block costs here, nowhere else.
-pub fn est_tokens(block: &Block, bytes_per_token: f64) -> u64 {
+pub fn est_tokens(block: &Block, bytes_per_token: f64) -> anyhow::Result<u64> {
     est_tokens_with(block, bytes_per_token, crate::lazy::Text::len)
 }
 
 /// The same estimate as [`est_tokens`] after materializing the block, without retaining its
 /// decoded text. Spans are read in bounded chunks; malformed fields retain the resolver's raw
 /// fallback. This is useful for byte-counting consumers such as the compaction doctor.
-pub fn est_tokens_resolved(block: &Block, bytes_per_token: f64, resolver: &crate::lazy::Resolver) -> u64 {
+pub fn est_tokens_resolved(
+    block: &Block,
+    bytes_per_token: f64,
+    resolver: &crate::lazy::Resolver,
+) -> anyhow::Result<u64> {
     est_tokens_with(block, bytes_per_token, |text| match text {
         crate::lazy::Text::Inline(s) => s.len(),
         crate::lazy::Text::Span(span) => resolver.resolved_len(span),
     })
 }
 
-fn est_tokens_with(block: &Block, bytes_per_token: f64, text_len: impl Fn(&crate::lazy::Text) -> usize) -> u64 {
+fn est_tokens_with(
+    block: &Block,
+    bytes_per_token: f64,
+    text_len: impl Fn(&crate::lazy::Text) -> usize,
+) -> anyhow::Result<u64> {
     let b = |len: usize| est_tokens_bytes(len, bytes_per_token);
-    match block {
+    Ok(match block {
         Block::Text { text } => b(text_len(text)),
         Block::Thinking {
             text,
@@ -1007,30 +1035,11 @@ fn est_tokens_with(block: &Block, bytes_per_token: f64, text_len: impl Fn(&crate
                 + b(signature.as_deref().map_or(0, str::len))
                 + b(encrypted.as_deref().map_or(0, str::len))
         }
-        Block::ToolUse { input, .. } => b(json_bytes(input)),
+        Block::ToolUse { input, .. } => (input.canonical_len()? as f64 / bytes_per_token).ceil() as u64,
         Block::ToolResult { content, .. } => b(text_len(content)),
         Block::Image { .. } => IMAGE_TOKENS,
         Block::File { .. } => 0,
-    }
-}
-
-/// Count exactly the compact JSON representation without allocating another copy of the input.
-fn json_bytes(value: &serde_json::Value) -> usize {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Counter(0);
-    // A Value contains only JSON values, and this writer cannot fail.
-    serde_json::to_writer(&mut count, value).expect("counting JSON bytes cannot fail");
-    count.0
+    })
 }
 
 /// Whether a tool is an MCP server's: Claude Code names those `mcp__<server>__<tool>`. Decided by
@@ -1046,7 +1055,7 @@ pub struct ToolCall<'a> {
     /// Index into the messages of the assistant turn that made the call.
     pub msg: usize,
     pub name: &'a str,
-    pub input: &'a serde_json::Value,
+    pub input: &'a crate::json::Json,
 }
 
 /// Every tool call in `messages` by its `tool_use_id`. Tool results carry only the id (and
@@ -1142,11 +1151,11 @@ mod tests {
                 for block in blocks {
                     let mut message = Message::new(Role::Assistant);
                     message.content.push(block.clone());
-                    message.materialize(&resolver);
+                    message.materialize(&resolver).unwrap();
                     for ratio in [2.4, 3.5, 4.0] {
                         assert_eq!(
-                            est_tokens_resolved(&block, ratio, &resolver),
-                            est_tokens(&message.content[0], ratio),
+                            est_tokens_resolved(&block, ratio, &resolver).unwrap(),
+                            est_tokens(&message.content[0], ratio).unwrap(),
                             "escaped={escaped}, ratio={ratio}"
                         );
                     }
@@ -1163,7 +1172,7 @@ mod tests {
                     escaped: true,
                 }),
             };
-            assert_eq!(est_tokens_resolved(&block, 3.5, &resolver), 0);
+            assert_eq!(est_tokens_resolved(&block, 3.5, &resolver).unwrap(), 0);
         }
         drop(resolver);
         std::fs::remove_dir_all(dir).unwrap();
@@ -1176,8 +1185,52 @@ mod tests {
             serde_json::json!([1, -100, 1.5, true, false, null]),
             serde_json::json!({"escape\n": "\u{0000}\t\n\\\"π🙂".repeat(20_000), "nested": [{"x": 9}]}),
         ] {
-            assert_eq!(json_bytes(&input), input.to_string().len());
+            assert_eq!(
+                crate::json::Json::from(input.clone()).canonical_len().unwrap(),
+                input.to_string().len() as u64
+            );
         }
+    }
+
+    #[test]
+    fn source_tool_input_preserves_wire_tokens_and_propagates_read_failure() {
+        let dir = cv_testkit::temp_dir("ir-source-tool-input");
+        let path = dir.join("arguments.json");
+        let raw = br#"{"z":"hello\n\ud83c\udf19","a":[true,1e2],"z":"final\u03c0"}"#;
+        std::fs::write(&path, raw).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(raw).unwrap();
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::ToolUse {
+            id: "t".into(),
+            name: "Edit".into(),
+            input: crate::json::Json::source(&path, 0, raw.len() as u64).unwrap(),
+            namespace: None,
+        });
+        assert_eq!(
+            est_tokens(&message.content[0], 3.5).unwrap(),
+            est_tokens_bytes(serde_json::to_vec(&value).unwrap().len(), 3.5)
+        );
+        let mut text = "earlier\n".to_string();
+        message.append_searchable(&mut text).unwrap();
+        assert_eq!(text, format!("earlier\nEdit {value}\n"));
+        let wire = serde_json::to_vec(&message).unwrap();
+        let restored: Message = serde_json::from_slice(&wire).unwrap();
+        assert!(matches!(
+            restored.content[0],
+            Block::ToolUse {
+                input: crate::json::Json::Owned(_),
+                ..
+            }
+        ));
+        let mut owned = message.clone();
+        owned.materialize(&crate::lazy::Resolver::new(None)).unwrap();
+        assert_eq!(serde_json::to_vec(&owned).unwrap(), wire);
+        std::fs::remove_file(&path).unwrap();
+        assert!(est_tokens(&message.content[0], 3.5).is_err());
+        assert!(message.append_searchable(&mut String::new()).is_err());
+        assert!(message.materialize(&crate::lazy::Resolver::new(None)).is_err());
+        assert!(serde_json::to_vec(&message).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
