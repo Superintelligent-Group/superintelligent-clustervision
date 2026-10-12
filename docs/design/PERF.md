@@ -225,7 +225,7 @@ Further composed checks, still before the final combined gate run:
 | Tool histogram, 20k → 200k calls | 4.4 → 36.2 MB requested heap | Claude 2.6 KB / Codex 6.2 KB, flat |
 | Rich query, 16 → 64 MiB fixed-size argument histories | collected 16.9–17.4 → 67.5–68.1 MB | approximately 0.27–1.13 MB, flat per case |
 | Zed discovery, 16 → 64 MiB low-compressibility plain payload | 172 → 680 MB process footprint | 14.1 → 14.3 MB |
-| Zed read, same payload | 113 → 444 MB process footprint | 14.2 → 16.4 MB |
+| Zed decoded-spill read, same payload | 113 → 444 MB process footprint | 14.5 → 14.5 MB |
 | Semantic head projection, 64 MiB owned inline / tool input | added heap 192 / 128 MiB | approximately 64 KiB |
 
 Doctor reports and rich-query booleans match their reference collectors. Tool histogram detail
@@ -233,11 +233,39 @@ objects match exactly on both Claude and Codex. The histogram allocation measure
 same debug instrumented binary for both paths; no throughput claim follows. Query fixtures use
 256 KiB arguments, so they establish bounded history retention, not lazy giant arguments.
 
-The final Zed test uses its canonical rowid schema and compressed blobs growing from 12.6 to
-50.4 MB (escaped 13.1 to 52.5 MB). Rust heap remains about 6.68 MB, including decoder scratch;
-escaped process footprints remain roughly 13–16.5 MB. Resolved messages and session metadata match
-on all four fixtures. The WITHOUT ROWID/failed-blob-open fallback still retains one native cell.
-No clean throughput improvement is claimed for the two-pass decoder.
+The Zed fixtures use the canonical rowid schema, fixed 256 KiB records and deterministic
+low-compressibility bodies totaling 16/64 MiB. Compressed blobs grow from 12.6 to 50.4 MB plain
+and 13.1 to 52.5 MB escaped. The incremental reader at `100509c` bounded private memory, but
+decompressed and parsed the document twice. Clean CPU measurements exposed a 2.2–2.6× streaming
+regression against `28daf7c`; discovery kept one pass and cost approximately 1.16–1.24×.
+
+The subsequent decoded-spill implementation (`d0093be`, integrated as `5ae0eda`) decompresses
+once into an operation-owned source, validates it before callbacks, then replays messages from
+that source. Three rotated subprocess triples compare the original reader, the two-pass reader
+and this candidate with allocation instrumentation and fidelity hashing disabled:
+
+| 64 MiB discarded history | `28daf7c` CPU / wall | `100509c` two-pass CPU / wall | Decoded-spill CPU / wall |
+|---|---:|---:|---:|
+| Plain | 0.408 / 0.418 s | 1.047 / 1.062 s | 0.382 / 0.397 s |
+| Escaped | 0.552 / 0.559 s | 1.191 / 1.195 s | 0.639 / 0.652 s |
+
+CPU is child user plus system time; wall is external subprocess time. Shared one-minute load was
+34–38, with uncontrolled, likely warm OS cache. This closes the large two-pass CPU regression;
+escaped CPU remains about 16% above the original one-parse reader. Discovery is unchanged by the
+spill and was not retimed.
+
+Requested Rust peak above the stage baseline is flat at 6,673,262 B plain and 6,674,737 B escaped
+across 16/64 MiB. Native peak footprint is 14.5 → 14.5 MB plain and 14.1 → 15.2 MB escaped.
+RSS instead grows 38.1 → 88.5 MB and 38.8 → 93.4 MB as the read-only decoded mapping touches more
+file pages. Each operation writes 16.8 → 67.2 MB plain or 17.8 → 71.4 MB escaped temporary bytes
+once; validation and complete replay each scan that decoded source. Physical reads depend on OS
+cache, so logical scanned bytes are not disk-read counts. Owned temporary directories are empty
+after every measured operation; Unix spills are unlinked while their descriptor is live.
+
+Separate preserved-order hashes match exact resolved message and metadata serialization on all
+four fixtures, with 128/512 callbacks. This is stronger than canonical-map equality for these
+inputs, but not a full-fleet after run. The WITHOUT ROWID/failed-blob-open fallback still retains
+one native cell, and a demanded giant message remains output-sized.
 
 Semantic projection measurements start after owned input construction. FTS's isolated production
 read/extract/body-emission stage on one 100 MB input falls from 504 MB to 204 MB footprint after

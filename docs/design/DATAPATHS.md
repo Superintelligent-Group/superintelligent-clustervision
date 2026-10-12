@@ -76,7 +76,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Hermes SQLite | Indexed message rows + generation dedup/trailing user texts | Pathological trailing prompts; shared DB invalidation |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
-| Zed SQLite | Metadata-only ordered rows, incremental read-only blobs under one snapshot; per-message replay | Decoder/one message/known metadata; WITHOUT ROWID fallback retains one native cell |
+| Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
 | LM Studio | Raw-turn mmap stream | Metadata-only discovery skips body trees; escaped scratch and first-title candidate remain owned |
 | ChatGPT / Claude account exports | Bounded metadata cache and source ranges; selected-conversation replay | Cold portable source buffer, branch descriptors, joined text and tool argument Values |
 | OpenSession | Native raw document validation and per-message IR projection | Portable cold source buffer; authoritative rich IR fields remain owned |
@@ -249,12 +249,38 @@ footprint fell from 503,857,920 B to 203,571,752 B; RSS fell from 614,481,920 B 
 These debug-stage process measurements include mapped/native memory. Owned JSON input and the
 tee clone remain proportional to input size; this is not a universal index heap bound.
 
-The opt-in `check-heap-budget.py --only events` gate covers ordered extraction through SQL
+The `check-heap-budget.py --only events` gate covers ordered extraction through SQL
 publication at 20,000/200,000 fixed-size records, compares every persisted row with the retained
 collector, and verifies source stamps, spool I/O and normal cleanup. Live Rust peaks are
 352,006/352,009 B versus 7,073,127/57,619,016 B for the collector. Its fixed 1 MiB ceiling and
-256 KiB growth allowance exclude giant individual inputs and native SQLite memory; it is not
-enabled in the default CI pass.
+256 KiB growth allowance exclude giant individual inputs and native SQLite memory. Since
+`100509c`, `.github/workflows/ci.yml` invokes it separately alongside the other heap
+campaigns; it is still a separately selected driver campaign rather than part of the default
+stores/chunks invocation.
+
+Zed's incremental two-pass reader at `100509c` established bounded native memory but cost
+2.2–2.6× the original reader's clean streaming CPU on 64 MiB low-compressibility histories.
+Profiles attributed most execution to repeated zstd decoding and JSON parsing, with SQLite
+around 2% of sampled execution. The decoded-spill follow-up (`d0093be`, integrated as `5ae0eda`)
+preserves full validation before callbacks, authoritative duplicate-last message selection and
+the same SQLite snapshot, while decompressing only once. Discovery retains its existing one-pass
+reader.
+
+Three rotated clean subprocess triples measured original / two-pass / spill CPU medians of
+0.408 / 1.047 / 0.382 s plain and 0.552 / 1.191 / 0.639 s escaped. Wall medians were
+0.418 / 1.062 / 0.397 s and 0.559 / 1.195 / 0.652 s. These are synthetic 64 MiB discard operations
+under shared load 34–38, with uncontrolled OS cache, separate from allocator and hash runs.
+Escaped CPU remains about 16% above the original; the large intermediate regression is removed.
+
+At 16/64 MiB, requested Rust peak stays flat at about 6.67 MB; native footprint is 14.5 → 14.5 MB
+plain and 14.1 → 15.2 MB escaped. RSS grows 38.1 → 88.5 MB / 38.8 → 93.4 MB because decoded
+file pages are mapped. Each operation writes the full decoded source once: 16.8 → 67.2 MB plain
+or 17.8 → 71.4 MB escaped, then scans it for validation and replay. Physical I/O depends on OS
+cache. Owned temporary directories are empty after measured exits; Unix files are unlinked
+while owned descriptors remain live. All four fixtures match exact preserved-order resolved
+message and metadata digests, with 128/512 callbacks. The source-sized native-cell fallback and
+largest demanded record remain separate limits. Detailed measurement definitions are in
+`PERF.md`; these results do not claim combined final gates or whole-fleet throughput.
 
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
