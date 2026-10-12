@@ -35,12 +35,13 @@ directory containing `*.conversation.json` itself. OpenClaw expects its state di
 | `affordances` | Full collection and materialization, classify and retain affordance rows |
 | `affordance-read` | Production `affordance::read`; requires scratch `CLUSTERVISION_HOME` |
 | `hash` | Resolve each message, sort owned JSON maps recursively, hash streamed JSON and final metadata |
-| `discover` | Explicit-root discovery, hash returned refs sorted by ID/path; requires scratch `CLUSTERVISION_HOME` |
+| `discover` | Explicit-root discovery; requires scratch `CLUSTERVISION_HOME` |
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
 
-Discovery hashes all returned `SessionRef` metadata, sorted by ID/path (paths included).
-Both affordance operations hash their ordered rows, including summaries/items and store rows.
-These digests make consumer output parity reviewable alongside memory measurements.
+`--hash-output` explicitly enables consumer fidelity digests. Discovery hashes all returned
+`SessionRef` metadata, sorted by ID/path (paths included); both affordance operations hash their
+ordered rows, including summaries/items and store rows. Leave it off for throughput and allocation
+measurements; compare output digests in separate fidelity runs.
 
 `hash` emits independent SHA-256 digests of newline-delimited canonical message JSON and final
 session metadata. It resolves spans and sorts input/details/extra maps in place, avoiding a second
@@ -75,6 +76,9 @@ bytes, encoded physical bytes and shape. The generator refuses an existing desti
 unique IDs and parent links rather than repeating identical records. Use many records with the
 same total payload to distinguish per-record overhead from giant fields, then repeat for Claude
 and Codex. It creates synthetic scratch inputs, not new committed harness corpus versions.
+The generator also supports Continue (unindexed history) and LM Studio (two versions per reply,
+selected version first) for discovery scaling. Use fixed record size while increasing total bytes;
+escaped discarded strings may still require scratch proportional to the largest field.
 
 For standalone escaped decoder allocation testing, `chunks` bypasses the parser entirely. A
 file containing `x\\n` repeated N times is a valid raw JSON string body: use offset 0, length 3N,

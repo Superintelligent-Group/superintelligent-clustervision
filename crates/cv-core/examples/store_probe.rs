@@ -104,6 +104,7 @@ struct Args {
     escaped: bool,
     chunk_bytes: usize,
     last: usize,
+    hash_output: bool,
 }
 
 fn args() -> Result<Args> {
@@ -112,11 +113,13 @@ fn args() -> Result<Args> {
     let (mut root, mut mode, mut materialize) = (None, "lazy".to_string(), false);
     let (mut span, mut escaped, mut chunk_bytes) = (None, false, 64 << 10);
     let mut last = 20;
+    let mut hash_output = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
             "--mode" => mode = argv.next().context("--mode needs lazy|bulk|full|complete")?,
             "--materialize" => materialize = true,
+            "--hash-output" => hash_output = true,
             "--span" => {
                 let range = argv.next().context("--span needs OFFSET:LENGTH")?;
                 let (off, len) = range.split_once(':').context("--span needs OFFSET:LENGTH")?;
@@ -127,7 +130,7 @@ fn args() -> Result<Args> {
             "--last" => last = argv.next().context("--last needs an integer")?.parse()?,
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|bulk|full|complete] \
-                 [--materialize] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
+                 [--materialize] [--hash-output] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
                  OP: baseline|discard|count|collect|window|affordances|affordance-read|hash|discover|chunks\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio; use scratch CLUSTERVISION_HOME"
             ),
@@ -159,6 +162,7 @@ fn args() -> Result<Args> {
         escaped,
         chunk_bytes,
         last,
+        hash_output,
     })
 }
 
@@ -245,7 +249,10 @@ struct Outcome {
     rows: Vec<cv_core::affordance::Affordance>,
 }
 
-fn affordance_detail(rows: &[cv_core::affordance::Affordance]) -> Result<Value> {
+fn affordance_detail(rows: &[cv_core::affordance::Affordance], hash_output: bool) -> Result<Value> {
+    if !hash_output {
+        return Ok(json!({ "affordances": rows.len() }));
+    }
     let mut digest = DigestWriter::default();
     for row in rows {
         serde_json::to_writer(&mut digest, row)?;
@@ -264,14 +271,17 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         "baseline" => {}
         "discover" => {
             let mut refs = adapter.discover()?;
-            refs.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
-            let mut digest = DigestWriter::default();
-            for r in &refs {
-                serde_json::to_writer(&mut digest, r)?;
-                digest.write_all(b"\n")?;
-            }
-            out.detail = json!({ "discovered_sessions": refs.len(), "discovery_sha256": digest.digest.finish_hex(),
+            out.detail = json!({ "discovered_sessions": refs.len() });
+            if a.hash_output {
+                refs.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
+                let mut digest = DigestWriter::default();
+                for r in &refs {
+                    serde_json::to_writer(&mut digest, r)?;
+                    digest.write_all(b"\n")?;
+                }
+                out.detail = json!({ "discovered_sessions": refs.len(), "discovery_sha256": digest.digest.finish_hex(),
                                  "serialized_ref_bytes": digest.bytes });
+            }
         }
         "discard" | "count" => {
             let mut counter = cv_core::affordance::Counter::new(r);
@@ -303,7 +313,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             if a.operation == "affordances" {
                 out.rows = cv_core::affordance::of_session(&s);
                 out.rows.extend(adapter.store_affordances(r));
-                out.detail = affordance_detail(&out.rows)?;
+                out.detail = affordance_detail(&out.rows, a.hash_output)?;
             }
             out.session = Some(s);
         }
@@ -329,7 +339,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         }
         "affordance-read" => {
             out.rows = cv_core::affordance::read(adapter, r)?;
-            out.detail = affordance_detail(&out.rows)?;
+            out.detail = affordance_detail(&out.rows, a.hash_output)?;
             out.detail["message_callbacks"] = json!("not observed");
         }
         "hash" => {
@@ -432,6 +442,7 @@ fn main() -> Result<()> {
             "materialize": a.materialize || matches!(a.operation.as_str(), "affordances" | "hash" | "affordance-read"),
             "physical_input_bytes": physical_bytes, "traversed_bytes": null,
             "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
+            "hash_output": a.hash_output,
             "wall_seconds": seconds, "messages": out.messages,
             "requested_rust_heap": requested_rust_heap, "detail": out.detail,
         })
