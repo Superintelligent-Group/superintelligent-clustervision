@@ -233,7 +233,7 @@ fn session_head(harness: &str, id: &str) -> (u16, Value) {
         total += 1;
         Flow::Continue
     };
-    let shell = match adapter.stream(&r, &ParseOptions::lazy(), &mut counter) {
+    let shell = match adapter.try_stream(&r, &ParseOptions::lazy(), &mut counter) {
         Ok(shell) => shell,
         Err(e) => return err(500, &format!("stream failed: {e:#}")),
     };
@@ -271,7 +271,7 @@ struct WindowSink {
     /// Session metadata the stream delivered (codex meta / the parse-bridge), when any did —
     /// claude's native stream emits none.
     meta: Option<Value>,
-    fail: Option<String>,
+    fail: Option<anyhow::Error>,
 }
 
 /// The `session` object a windowed read returns. Whatever a session knows about itself has to
@@ -289,6 +289,10 @@ fn session_meta_json(s: &Session) -> Value {
 }
 
 impl MessageSink for WindowSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.fail.take()
+    }
+
     fn meta(&mut self, s: &Session) {
         if self.meta.is_none() {
             self.meta = Some(session_meta_json(s));
@@ -306,14 +310,17 @@ impl MessageSink for WindowSink {
             return Flow::Stop; // at the window's end: note the existence, read no further
         }
         let mut m = m;
-        m.materialize(&self.resolver); // resolve lazy spans for just this message
+        if let Err(error) = m.materialize(&self.resolver) {
+            self.fail = Some(error);
+            return Flow::Stop;
+        }
         match serde_json::to_value(&m) {
             Ok(v) => {
                 self.msgs.push(v);
                 Flow::Continue
             }
             Err(e) => {
-                self.fail = Some(e.to_string());
+                self.fail = Some(e.into());
                 Flow::Stop
             }
         }
@@ -376,16 +383,13 @@ fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
         meta: None,
         fail: None,
     };
-    match adapter.stream(&r, &opts, &mut sink) {
+    match adapter.try_stream(&r, &opts, &mut sink) {
         // Some adapters never call `meta()` — Claude is one — so the sink would stay empty and
         // the response say `session: null` for the single most-read harness. `stream` RETURNS
         // the session shell it assembled; use it when nothing was pushed.
         Ok(shell) if sink.meta.is_none() => sink.meta = Some(session_meta_json(&shell)),
         Ok(_) => {}
         Err(e) => return err(500, &format!("stream failed: {e:#}")),
-    }
-    if let Some(f) = sink.fail {
-        return err(500, &f);
     }
 
     // The count is exact when the stream ran to EOF.
@@ -613,6 +617,50 @@ fn err(status: u16, msg: &str) -> (u16, Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(start: usize, end: Option<usize>) -> WindowSink {
+        WindowSink {
+            resolver: crate::Resolver::new(None),
+            idx: 0,
+            start,
+            end,
+            msgs: Vec::new(),
+            more: false,
+            meta: None,
+            fail: None,
+        }
+    }
+
+    #[test]
+    fn selected_json_window_reports_read_errors_and_skipped_values_stay_lazy() {
+        let world = cv_testkit::World::in_process("api_json_failure");
+        let path = world.home.join("input.json");
+        let body = r#"{"command":"git status"}"#;
+        std::fs::write(&path, body).unwrap();
+        let input = crate::json::Json::source(&path, 0, body.len() as u64).unwrap();
+        let mut message = Message::new(crate::Role::Assistant);
+        message.content.push(crate::Block::ToolUse {
+            id: "call".into(),
+            name: "Bash".into(),
+            namespace: None,
+            input,
+        });
+        std::fs::remove_file(path).unwrap();
+        let mut selected = window(0, Some(1));
+        assert!(crate::stream::checked(&mut selected, |sink| {
+            sink.message(message.clone());
+            Ok(())
+        })
+        .is_err());
+        assert!(selected.msgs.is_empty());
+        let mut before = window(1, Some(2));
+        assert_eq!(before.message(message.clone()), Flow::Continue);
+        assert!(before.take_error().is_none());
+        let mut after = window(0, Some(0));
+        assert_eq!(after.message(message), Flow::Stop);
+        assert!(after.more);
+        assert!(after.take_error().is_none());
+    }
 
     #[test]
     fn query_decodes_plus_percent_and_flags() {
