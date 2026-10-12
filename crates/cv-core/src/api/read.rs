@@ -769,6 +769,36 @@ mod tests {
         eprintln!("pages=100 selected=20000 cached_page_callbacks={page_callbacks} repeated_heads=5 head_callbacks={head_callbacks}");
     }
     #[test]
+    fn plain_codex_pages_reuse_matching_reader_checkpoints() {
+        let world = cv_testkit::World::in_process("api_plain_codex_pages");
+        let path = world.base.join("rollout-pages.jsonl");
+        let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n";
+        std::fs::write(&path, line.repeat(20_000)).unwrap();
+        let r = SessionRef::new("pages", Harness::Codex, path);
+        let inner = crate::harness::codex::Codex::with_home(&world.home.join(".codex"));
+        let adapter = Observed::new(&inner);
+        let cache = Cache::default();
+        for start in (0..20_000).step_by(200) {
+            let (shell, sink) = window(&cache, &adapter, &r, start, Some(start + 200), false).unwrap();
+            assert_eq!(sink.msgs.len(), 200);
+            assert_eq!(sink.idx, (start + 201).min(20_000));
+            if start % 2000 == 0 || start == 19800 {
+                assert_eq!(
+                    result(&shell, &sink),
+                    oracle(&inner, &r, start, Some(start + 200), false)
+                );
+            }
+        }
+        let pages = adapter.messages.load(Ordering::Relaxed);
+        assert_eq!(pages, 20_099);
+        let first = head(&cache, &adapter, &r).unwrap();
+        assert_eq!(head(&cache, &adapter, &r).unwrap(), first);
+        let heads = adapter.messages.load(Ordering::Relaxed) - pages;
+        assert_eq!(heads, 20_000);
+        eprintln!("codex production pages=100 selected=20000 callbacks={pages} repeated_heads=2 callbacks={heads}");
+    }
+
+    #[test]
     fn directory_pages_reuse_actual_wire_and_invalidate_on_wire_or_state_changes() {
         use std::io::Write as _;
         let world = cv_testkit::World::in_process("api_kimi_code_pages");
