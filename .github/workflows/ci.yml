@@ -55,6 +55,16 @@ jobs:
       - name: Parse budget
         run: cargo test --release -p clustervision-core --test perf_budget -- --ignored corpus
 
+      # Actual generated inputs, one operation per process. Requested live Rust heap is distinct
+      # from file-backed RSS; no timing threshold and no native SQLite allocation guarantee.
+      - name: Live Rust heap budget
+        run: |
+          python3 -I tools/test-heap-budget.py
+          cargo build --release -p clustervision-core --example store_probe --features probe-heap
+          cp target/release/examples/store_probe /tmp/cv-store-probe-mmap
+          cargo build --release -p clustervision-core --example store_probe --no-default-features --features probe-heap
+          python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe
+
       # Every `cv <cmd>` and MCP tool name the manual mentions exists in `cv schema --commands` or
       # a live `tools/list`. The roster is generated from the clap tree so the binary cannot skew;
       # the manual could, and did (a `formats` tool that is really `formats_census`/`formats_check`;

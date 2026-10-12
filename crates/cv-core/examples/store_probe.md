@@ -1,7 +1,7 @@
 # Store probe
 
 This diagnostic example performs one read-only operation per process on an explicit source.
-It supports Claude, Codex, Gemini and OpenClaw through their explicit-root constructors. It does not
+It supports Claude, Codex, Gemini, OpenClaw and Continue through their explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
 The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
 scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
@@ -75,3 +75,12 @@ file containing `x\\n` repeated N times is a valid raw JSON string body: use off
 `--escaped` and a small chunk. Build with `--no-default-features --features probe-heap` to measure
 the positioned-read fallback separately from mmap. Check decoded bytes and maximum emitted chunk
 alongside allocation growth; output hashing is a different experiment.
+
+CI's live Rust heap gate is `tools/check-heap-budget.py MMAP_HEAP_PROBE --no-mmap-probe RANGED_HEAP_PROBE`.
+It validates the binaries' reported build features and rejects missing allocation counters. The
+16/64 MiB scratch cases check lazy Gemini giant fields, Claude stores with fixed-size records,
+and valid/malformed escaped spans with both mmap and positioned reads. It checks expected message
+or decoded byte counts, absolute heap ceilings and growth, without a wall-time threshold. Full
+collection, deliberately owned tool arguments and native SQLite heap are outside these promises.
+`--only stores` / `--only chunks` supports a scoped local check. CI's exact build commands are in
+`.github/workflows/ci.yml`; the driver always uses a temporary catalog and deletes only its own inputs.

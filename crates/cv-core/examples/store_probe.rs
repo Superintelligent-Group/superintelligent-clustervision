@@ -129,7 +129,7 @@ fn args() -> Result<Args> {
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|bulk|full|complete] \
                  [--materialize] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
                  OP: baseline|discard|count|collect|window|affordances|affordance-read|hash|discover|chunks\n\
-                 HARNESS: claude|codex|gemini|openclaw; use scratch CLUSTERVISION_HOME"
+                 HARNESS: claude|codex|gemini|openclaw|continue; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ => positional.push(arg),
@@ -177,8 +177,9 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
         Harness::Codex => Box::new(cv_core::harness::codex::Codex::with_home(&a.root)),
         Harness::Gemini => Box::new(cv_core::harness::gemini::Gemini::with_home(&a.root)),
         Harness::OpenClaw => Box::new(cv_core::harness::openclaw::OpenClaw::with_state_dir(&a.root)),
+        Harness::Continue => Box::new(cv_core::harness::continuedev::Continue::with_root(&a.root)),
         _ => {
-            bail!("probe supports claude, codex, gemini and openclaw; use explicit-root constructors when extending it")
+            bail!("probe supports claude, codex, gemini, openclaw and continue; use explicit-root constructors when extending it")
         }
     })
 }
@@ -409,6 +410,7 @@ fn main() -> Result<()> {
             },
             "materialize": a.materialize || matches!(a.operation.as_str(), "affordances" | "hash" | "affordance-read"),
             "physical_input_bytes": physical_bytes, "traversed_bytes": null,
+            "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
             "wall_seconds": seconds, "messages": out.messages,
             "requested_rust_heap": requested_rust_heap, "detail": out.detail,
         })
