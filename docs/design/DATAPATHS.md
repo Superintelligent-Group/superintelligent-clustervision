@@ -57,15 +57,15 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
-| Claude JSONL | Parallel cached discovery; mmap lazy lines; typed borrowed hot records; checkpoints | Metadata discovery and fork heads project raw fields; rich/fallback records and portable line buffers remain owned |
+| Claude JSONL | Parallel metadata discovery; mmap typed borrowed conversational records including rich reads; checkpoints | Structured arguments/details and uncommon fallback records remain owned; portable transport retains one line |
 | Codex JSONL | mmap line scan and bounded event-authority prepass; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; buffered/zstd input still retains the largest raw line |
 | Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
 | Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
 | Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery now counts without collecting; record text remains owned |
 | Kimi | Context stream + pending usage message, rotated prefix dedup | Wire sidecar uses raw ranges and lazy output spans; structural lookup state and mutable trailing usage remain |
-| Kimi Code | One LLM step buffered; sidecar output references | Full Value discovery scans; step can be large; state/wire dependency mismatch |
-| Grok | History stream + pending reasoning | Whole updates sidecar; uncached discovery; enrichment can revise old messages |
+| Kimi Code | One LLM step buffered; source-projected inventory; sidecar output references | Step and structured carriers can be large; mutable state/wire semantics |
+| Grok | History stream + pending reasoning; metadata-projected discovery and sidecars | One history record and retained tool metadata; enrichment can revise old messages |
 | Cline/Roo legacy | mmap raw history items, one record at a time | Full discovery/UI sidecar trees; no lazy text |
 | Cline SDK | Native source mapping, raw records, shared Anthropic block dispatch | Portable cold source buffer; rich structured fields remain owned |
 | Continue | mmap raw history items; tool-answer dedup | Metadata-only discovery now skips bodies; stream records and mutable snapshots remain |
@@ -76,7 +76,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Hermes SQLite | Indexed message rows + generation dedup/trailing user texts | Pathological trailing prompts; shared DB invalidation |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
-| Zed SQLite | Borrowed SQLite blob; metadata pass then one-message replay | Native SQLite blob allocation, largest decoded message, two decompression passes |
+| Zed SQLite | Metadata-only ordered rows, incremental read-only blobs under one snapshot; per-message replay | Decoder/one message/known metadata; WITHOUT ROWID fallback retains one native cell |
 | LM Studio | Raw-turn mmap stream | Metadata-only discovery skips body trees; escaped scratch and first-title candidate remain owned |
 | ChatGPT / Claude account exports | Bounded metadata cache and source ranges; selected-conversation replay | Cold portable source buffer, branch descriptors, joined text and tool argument Values |
 | OpenSession | Native raw document validation and per-message IR projection | Portable cold source buffer; authoritative rich IR fields remain owned |
@@ -92,7 +92,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter | Preserve cheap path; measure discovery separately |
 | Full discovery | Scans + cache persistence + catalog replacement/watch construction | Metadata reducers instead of collect-to-count; dependency-aware caching |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
-| JSON show / MCP show | Lazy full-extras stream into selected window; EOF metadata retained | Selected output and rich extras; selected-message serialization for byte budgets |
+| JSON show / MCP show | Lazy full-extras stream into selected window; EOF metadata retained | Selected output and demanded structured extras; selected-message serialization for byte budgets |
 | Affordance view | Lazy full-extras stream into classified rows; bounded text summaries | Rich extras, side stores and result rows; escaped validation still traverses the whole field |
 | Doctor | Lazy-extra stream; resolved text lengths and JSON writer counts | Attribution state, adapter rich/fallback parsing and structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
@@ -103,7 +103,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Watch | Discovery, full parse/count of changed session; old prefix parse on first append | Reuse safe stable cursors; logical edits must invalidate old output |
 | Archive | Whole parse/serialize/compare even unchanged; watch reparses again | Skip unchanged dependencies; catalog cleanup scans now grow geometrically |
 | Dataset | One session's lazy message vector, writer resolves output | Escaped chunk bound; streaming filters where semantics allow |
-| Pack/tools/token stats | Repeated passes or retained intermediate event/usage vectors | Fuse consumers and fold smaller state, preserve dedup and ordering |
+| Pack/tools/token stats | Tool histograms fold bounded per-message event scratch; pack excerpts use a ring | Stats usage aggregation and repeated passes; preserve duplicate precedence and float addition order |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
 
@@ -262,7 +262,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [x] Claude metadata discovery and fork-head projections, including giant first records.
-- [ ] Claude rich/fallback record allocations and lazy-extra notification classification.
+- [x] Claude conversational lazy-extra projections and bounded notification classification; raw serialized metadata order checked.
+- [ ] Structured arguments/details and uncommon Claude fallback record allocations.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
@@ -270,12 +271,14 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Portable cold document buffers, composite payloads and Continue/LM Studio selected records.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
 - [x] Kimi wire output ranges and Zed per-message blob replay.
-- [ ] Remaining sidecar/step/tree retention: Kimi Code, Grok and Devin; Zed native SQLite blob footprint.
+- [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
+- [ ] Kimi Code logical-step and selected structured payload retention; preserve necessary Devin forest navigation state.
 - [ ] Format-safe append reuse beyond Claude/Codex; watcher and archive amplification.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [ ] Index admission and queued payload bytes; assess transaction batching with write-lock contention measurements and final Tantivy merge/query costs.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
-- [ ] API pagination, pack/tools/stats and semantic rebuilds: prioritize by measurements.
+- [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
+- [ ] API pagination, stats aggregation and semantic rebuilds: prioritize by measurements.
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
@@ -290,3 +293,28 @@ universal heap bounds for the unfinished paths.
 The full gate roster is `.github/workflows/ci.yml`, including release parse budget, manual build,
 search without default features, dist plan, wasm-pack, the separate desktop workspace and web
 selftest. `PERF-HANDOFF.md`'s inline gate list omits several of these.
+
+
+## Next shared representation: structured tool arguments
+
+The remaining giant-leaf case is proved at the IR boundary: a 25/100 MB ToolUse input costs
+25/100 MB even with a discard sink. Rich Claude parsing now removes the second transient copy,
+and FTS/semantic consumers no longer create uncapped serialized copies, but Value and Tee clones
+still scale with the argument. A source-backed `Json` value is the accepted next direction;
+implementation starts as an independent owned/source abstraction before changing Block.input.
+
+Its wire contract stays an actual JSON value. Owned/full/deserialized input remains supported;
+selected output and mutation can explicitly materialize. Bounded consumers request typed fields,
+canonical length or canonical text chunks. Canonical means serde_json Value serialization with
+preserve_order: first key insertion position, last duplicate value, original array order and
+normalized scalar formatting. Neither sorted keys nor raw minification is equivalent. Missing or
+changed source is an error, distinct from a missing key; it must prevent freshness publication.
+The current Flow-only sink protocol needs an explicit error propagation design before enabling
+lazy producers. No null placeholders, partial Values or second parallel message protocol.
+
+The shared source walker should reuse document navigation and bounded string decoding. Immediate
+object key/range state may grow with structural complexity; arrays should stream. Source-buffer
+limits in portable adapters and full selected output remain separate. Producers only opt in after
+doctor, events, query, search, rendering and mutable consumers have explicit demands and pass
+raw serialized output, classifier, token-count and search-body oracles. This is a deliberate Rust
+API evolution, not an IR JSON schema change.

@@ -214,3 +214,34 @@ and fresh listings a 1.14 s median. The fleet remained live and changed between 
 these are observations rather than frozen before/after claims. An isolated 16.29 MB prefix plus
 623-byte append did resume and matched a complete rebuild's search results, counts and events.
 The candidate replay remains pending.
+
+
+Further composed checks, still before the final combined gate run:
+
+| Operation | Baseline | Updated |
+|---|---:|---:|
+| Doctor, 16/64 MiB plain giant fields, Claude/Codex/Gemini | full reference scales to 33–67 MB | approximately 4.6–5.7 KB requested heap, flat |
+| Doctor, same escaped fields | full reference scales with decoded fields | approximately 199–201 KB requested heap, flat |
+| Tool histogram, 20k → 200k calls | 4.4 → 36.2 MB requested heap | Claude 2.6 KB / Codex 6.2 KB, flat |
+| Rich query, 16 → 64 MiB fixed-size argument histories | collected 16.9–17.4 → 67.5–68.1 MB | approximately 0.27–1.13 MB, flat per case |
+| Zed discovery, 16 → 64 MiB low-compressibility plain payload | 172 → 680 MB process footprint | 14.1 → 14.3 MB |
+| Zed read, same payload | 113 → 444 MB process footprint | 14.2 → 16.4 MB |
+| Semantic head projection, 64 MiB owned inline / tool input | added heap 192 / 128 MiB | approximately 64 KiB |
+
+Doctor reports and rich-query booleans match their reference collectors. Tool histogram detail
+objects match exactly on both Claude and Codex. The histogram allocation measurements use the
+same debug instrumented binary for both paths; no throughput claim follows. Query fixtures use
+256 KiB arguments, so they establish bounded history retention, not lazy giant arguments.
+
+The final Zed test uses its canonical rowid schema and compressed blobs growing from 12.6 to
+50.4 MB (escaped 13.1 to 52.5 MB). Rust heap remains about 6.68 MB, including decoder scratch;
+escaped process footprints remain roughly 13–16.5 MB. Resolved messages and session metadata match
+on all four fixtures. The WITHOUT ROWID/failed-blob-open fallback still retains one native cell.
+No clean throughput improvement is claimed for the two-pass decoder.
+
+Semantic projection measurements start after owned input construction. FTS's isolated production
+read/extract/body-emission stage on one 100 MB input falls from 504 MB to 204 MB footprint after
+streamed formatting and capped body documents; it excludes tokenization, queueing and final merge.
+The remaining input Value and Tee clone still dominate. Concatenated canonical body bytes and
+extracted edit events match. This is a bounded serialization improvement, not a bound on the
+whole structured-input path.
