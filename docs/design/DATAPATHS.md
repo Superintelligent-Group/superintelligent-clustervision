@@ -101,7 +101,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
 | API pagination | Bounded source-verified page checkpoints and head metadata cache; no messages cached | Safe continuation formats only; source/dependency changes and oversized state fall back |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
-| Archive | Skip verified unchanged artifacts before parsing; safe append reuses source suffixes | Initial full selected payload and fallback parse remain owned; logical edits invalidate reuse |
+| Archive | Skip verified unchanged artifacts before parsing; safe append reuses source suffixes | Prior archive JSON prefix is still materialized and canonical output rewritten; full fallback remains owned |
 | Dataset | One session's lazy message vector, writer resolves output | Escaped chunk bound; streaming filters where semantics allow |
 | Pack/tools/token stats | Tool histograms fold bounded per-message event scratch; pack excerpts use a ring | Stats usage aggregation and repeated passes; preserve duplicate precedence and float addition order |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
@@ -283,11 +283,43 @@ largest demanded record remain separate limits. Detailed measurement definitions
 `PERF.md`; these results do not claim combined final gates or whole-fleet throughput.
 
 API continuation/head changes (`0769d1a` + `cb844b4`) reduce callback work on the controlled
-20,000-message fixture: 100 successive pages of 100 messages emit 20,099 callbacks instead of
+20,000-message fixture: 100 successive pages of 200 messages emit 20,099 callbacks instead of
 1,010,099; five head requests emit 20,000 instead of 100,000. This is a callback-work result,
-not a wall-time or whole-source-byte bound. Watch/archive reuse (`e120208`, `8cc975f`, `432a3bd`,
-`b211452`) is integrated with strict identity/error handling and a clean composed CLI check.
-It does not bound initial full/archive selected payloads or unsupported-format fallback memory.
+not a wall-time or whole-source-byte bound.
+
+Watch/archive reuse (`e120208`, `8cc975f`, `432a3bd`, `b211452`) shares the existing adapter
+checkpoints, before-read snapshots and dynamic read sets. Strict size+mtime equality additionally
+requires the captured primary identity/ctime; growth uses the existing inode and sampled-byte
+immutable-prefix contract. Replacement, truncation, dependency changes, interpretation-version
+changes and missing guards decline reuse. A timestamp-restored edit followed by growth remains
+outside the sampled append contract. Whole fallback preserves full messages and EOF metadata.
+
+Optional checkpoint state is capped at 64 KiB, EOF metadata at 16 KiB; oversized state degrades
+to replay. Version-1 cursor positions remain unchanged, with at most eight 64 KiB optional reader
+states per issued cursor. A verified unchanged pending poll can intentionally stop after its
+selected messages while using prior complete metadata/counts. Demanded polling errors propagate
+through `try_poll_bounded`; the legacy bool poll remains best effort and leaves failures retryable.
+
+Archive source state lives separately under `archive-source/`, capped at 1 MiB. Reuse also checks
+the archived artifact's size/mtime/inode/ctime on Unix, or a streamed content hash elsewhere, so
+user modification/deletion forces repair. Append replaces the suffix after `checkpoint.messages`,
+including Codex's held EOF assistant whose usage may arrive later. `cv watch` observes references
+directly and lets the archive perform its sole consumer read. Private owned temporary files and
+bounded file comparison replace whole serialized JSON/comparison buffers; failed catalog
+publication does not advance the source stamp and retry repairs missing catalog output.
+
+The focused 8,192-message Claude fixture plus four messages interprets 699 messages / 243,650
+logical primary suffix bytes instead of 8,196 / 2,865,380 on append. Four cold unchanged archive
+polls interpret zero messages, reading a 1,720-byte state file plus metadata probes on Unix. A
+one-message pending poll interprets two callbacks rather than the whole 8,192-message source,
+with exact EOF metadata/count. Archive append still reads 3,766,301 prior JSON bytes and writes
+3,767,141 canonical JSON bytes; these are logical file-byte costs, not physical disk or whole-fleet
+throughput measurements. Full serialized output matches the original parser for Claude/Codex
+fixtures, native/legacy Qwen and Gemini/OpenClaw/LM Studio/Cline/Roo cases. Narrow tests cover
+cursor partial consumption, held EOF usage, artifact repair, source invalidation and publication
+failure/retry. Claude's full-extra fallback remains eager for giant inputs; enabling source-backed
+arguments on that path requires a full-compatible spans mode, not a lazy-extra substitution.
+
 Lane-summary projection (`5ffbd10`) has eight scoped tests; it skips irrelevant bodies.
 
 Tracker (keep unfinished work visible; measurements determine later ordering):
@@ -317,7 +349,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Kimi Code logical-step and selected structured payload retention; preserve necessary Devin forest navigation state.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watch tail and archive suffix reuse with strict source/dependency identity and demanded-error propagation.
-- [ ] Other format-safe continuation and full/archive fallback payload retention.
+- [ ] Other format-safe continuation; full-compatible span extras and archive prefix/output retention costs.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [ ] Index admission and queued payload bytes; assess transaction batching with write-lock contention measurements and final Tantivy merge/query costs.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.

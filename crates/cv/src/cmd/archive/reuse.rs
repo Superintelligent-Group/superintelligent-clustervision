@@ -352,6 +352,7 @@ mod tests {
         let adapter = cv_core::harness::for_harness(r.harness).unwrap();
         let first = a.store_ref(adapter.as_ref(), &r).unwrap();
         assert_eq!((first.outcome, first.parsed_messages), (StoreOutcome::Archived, 8192));
+        let prefix_bytes = fs::metadata(a.session_path(r.harness, &r.id)).unwrap().len();
         for _ in 0..4 {
             let cold = Archive::resolve(Some(a.home.clone())).unwrap();
             let idle = cold.store_ref(adapter.as_ref(), &r).unwrap();
@@ -371,6 +372,7 @@ mod tests {
         assert!(appended.suffix_bytes < 300 * 1024);
         exact(&a, adapter.as_ref(), &r);
         eprintln!("archive repeated polls: 0 parses; append: {} messages/{} primary suffix bytes instead of {} messages/{} bytes", appended.parsed_messages, appended.suffix_bytes, appended.total, body.len());
+        eprintln!("archive append remaining file work: {prefix_bytes} prefix JSON bytes read, {} canonical JSON bytes written, {} source-state bytes per cold unchanged poll", fs::metadata(a.session_path(r.harness, &r.id)).unwrap().len(), fs::metadata(a.source_path(&r)).unwrap().len());
 
         // A modified/deleted artifact cannot be blessed by an unchanged source stamp.
         let dest = a.session_path(r.harness, &r.id);
