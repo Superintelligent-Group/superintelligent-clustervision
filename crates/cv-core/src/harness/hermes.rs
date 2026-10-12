@@ -66,7 +66,7 @@ pub use emit::emit;
 
 use super::store::sqlite::{columns, open_ro, table_exists};
 use super::wire::openai;
-use super::{ts_from_epoch, Adapter};
+use super::{Adapter, ts_from_epoch};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
@@ -834,10 +834,12 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
                 continue;
             }
             // Dedup the replayed first user message at compression boundaries (`complete` keeps it).
-            if !opts.complete && dedup.is_duplicate(&m) {
-                continue;
+            if !opts.complete {
+                if dedup.is_duplicate(&m)? {
+                    continue;
+                }
+                dedup.observe(&m)?;
             }
-            dedup.observe(&m);
             if sink.message(m) == Flow::Stop {
                 break 'lineage;
             }
@@ -853,30 +855,30 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
 struct ReplayDedup {
     /// Single-texts of consecutive trailing user messages (most recent last). Cleared when a
     /// substantive assistant turn passes (which ends the look-back window).
-    recent_user_texts: Vec<String>,
+    recent_user_texts: ReplayTexts,
 }
 
 impl ReplayDedup {
     /// Mirror of the look-back in [`is_duplicate_replayed_user_message`].
-    fn is_duplicate(&self, msg: &Message) -> bool {
+    fn is_duplicate(&self, msg: &Message) -> Result<bool> {
         if msg.role != Role::User {
-            return false;
+            return Ok(false);
         }
         let Some(text) = single_text(msg) else {
-            return false;
+            return Ok(false);
         };
         if text.is_empty() {
-            return false;
+            return Ok(false);
         }
-        self.recent_user_texts.iter().any(|t| t == &text)
+        self.recent_user_texts.contains(&text)
     }
 
     /// Fold an *emitted* message into the look-back state.
-    fn observe(&mut self, m: &Message) {
+    fn observe(&mut self, m: &Message) -> Result<()> {
         match m.role {
             Role::User => {
                 if let Some(text) = single_text(m) {
-                    self.recent_user_texts.push(text);
+                    self.recent_user_texts.insert(text)?;
                 }
             }
             Role::Assistant => {
@@ -886,11 +888,101 @@ impl ReplayDedup {
                     .iter()
                     .any(|b| matches!(b, Block::Text { .. } | Block::ToolUse { .. }));
                 if has_content {
-                    self.recent_user_texts.clear();
+                    self.recent_user_texts.clear()?;
                 }
             }
             _ => {}
         }
+        Ok(())
+    }
+}
+
+// Prompt-only sessions can make the exact replay look-back as large as the session. Keep the
+// common case in memory, then move the exact BINARY string set into an operation-owned database.
+const REPLAY_TEXT_MEMORY: usize = 1024 * 1024;
+#[derive(Default)]
+struct ReplayTexts {
+    memory: Vec<String>,
+    bytes: usize,
+    spill: Option<ReplayTextSpill>,
+}
+struct ReplayTextSpill {
+    conn: Option<Connection>,
+    path: PathBuf,
+}
+impl Drop for ReplayTextSpill {
+    fn drop(&mut self) {
+        self.conn.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+impl ReplayTextSpill {
+    fn new() -> Result<Self> {
+        let path = std::env::temp_dir().join(format!("cv-hermes-replay-{}.db", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        let mut spill = Self { conn: None, path };
+        drop(file);
+        let conn = Connection::open_with_flags(
+            &spill.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // No recovery is needed for an ephemeral equality set; bound the native page cache too.
+        conn.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-256; CREATE TABLE texts(text TEXT COLLATE BINARY PRIMARY KEY) WITHOUT ROWID;")?;
+        spill.conn = Some(conn);
+        #[cfg(unix)]
+        std::fs::remove_file(&spill.path)?;
+        Ok(spill)
+    }
+}
+impl ReplayTexts {
+    fn contains(&self, text: &str) -> Result<bool> {
+        if let Some(spill) = &self.spill {
+            return Ok(spill.conn.as_ref().unwrap().query_row(
+                "SELECT EXISTS(SELECT 1 FROM texts WHERE text=?1)",
+                [text],
+                |row| row.get(0),
+            )?);
+        }
+        Ok(self.memory.iter().any(|t| t == text))
+    }
+    fn insert(&mut self, text: String) -> Result<()> {
+        if self.spill.is_none() && self.bytes.saturating_add(text.capacity()) > REPLAY_TEXT_MEMORY {
+            let spill = ReplayTextSpill::new()?;
+            let conn = spill.conn.as_ref().unwrap();
+            let transaction = conn.unchecked_transaction()?;
+            for old in &self.memory {
+                transaction.execute("INSERT OR IGNORE INTO texts VALUES(?1)", [old])?;
+            }
+            transaction.commit()?;
+            self.spill = Some(spill);
+            self.memory = Vec::new();
+            self.bytes = 0;
+        }
+        if let Some(spill) = &self.spill {
+            spill
+                .conn
+                .as_ref()
+                .unwrap()
+                .execute("INSERT OR IGNORE INTO texts VALUES(?1)", [&text])?;
+        } else {
+            self.bytes += text.capacity();
+            self.memory.push(text);
+        }
+        Ok(())
+    }
+    fn clear(&mut self) -> Result<()> {
+        // Drop the entire private set: clears the look-back and releases its disk/page budget.
+        self.spill.take();
+        self.memory = Vec::new();
+        self.bytes = 0;
+        Ok(())
     }
 }
 
@@ -1227,7 +1319,7 @@ fn decode_content(raw: &str) -> Vec<Block> {
                 return items
                     .iter()
                     .filter_map(|p| openai::part_to_block(p, &openai::HERMES))
-                    .collect()
+                    .collect();
             }
             // Dict-shaped content (provider wrappers, e.g. {"parts":[…]}). Best-effort: pull any
             // string fields out; otherwise stash nothing and fall through to the empty case.
@@ -1393,6 +1485,28 @@ mod tests {
     }
 
     /// A message's `extra["hermes"]` bag (the only place a Hermes message fact may live).
+    #[test]
+    fn replay_text_spill_keeps_exact_equality_and_releases_on_clear() {
+        let mut texts = ReplayTexts::default();
+        texts.insert("first".into()).unwrap();
+        let large = "x".repeat(REPLAY_TEXT_MEMORY + 1);
+        texts.insert(large.clone()).unwrap();
+        assert!(texts.contains("first").unwrap());
+        assert!(texts.contains(&large).unwrap());
+        assert!(!texts.contains("FIRST").unwrap());
+        assert!(!texts.contains(&(large.clone() + "x")).unwrap());
+        texts.insert("nul\0suffix".into()).unwrap();
+        assert!(texts.contains("nul\0suffix").unwrap());
+        assert!(!texts.contains("nul").unwrap());
+        let path = texts.spill.as_ref().unwrap().path.clone();
+        #[cfg(unix)]
+        assert!(!path.exists());
+        texts.clear().unwrap();
+        assert!(texts.spill.is_none());
+        assert!(!path.exists());
+        assert!(!texts.contains("first").unwrap());
+    }
+
     fn bag(m: &Message) -> &serde_json::Map<String, Value> {
         m.harness_extra(Harness::Hermes).expect("extra[\"hermes\"]")
     }
@@ -2243,11 +2357,13 @@ mod tests {
             Some("Long migration"),
             "an untitled rotation tip is titled by its root, as Hermes lists it"
         );
-        assert!(by_id(F)
-            .title
-            .as_deref()
-            .unwrap()
-            .starts_with("Imported from Claude Code"));
+        assert!(
+            by_id(F)
+                .title
+                .as_deref()
+                .unwrap()
+                .starts_with("Imported from Claude Code")
+        );
         assert_eq!(by_id(A).cwd, Some(PathBuf::from("/tmp/proj")));
         assert_eq!(
             by_id(A).message_count,
