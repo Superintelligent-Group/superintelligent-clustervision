@@ -1,6 +1,9 @@
 # Handoff: make every store fast and small (2026-10-12)
 
 Status: a brief for the next agent, written by the agent that ran the perf-2 lane's integration.
+**Audit update:** `DATAPATHS.md` records the subsequent source audit and active work. In particular,
+the affordance view collects whole sessions; Gemini legacy streaming and parallel discovery already
+exist; FTS already has byte-based admission. Treat the diagnoses below as historical hypotheses.
 Read `docs/design/PERF.md` (measured numbers, budgets) and `AGENTS.md` (repo rules) first. Delete
 this file when its work list is done or superseded.
 
