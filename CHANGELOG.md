@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The first `cv index` after upgrading rebuilds the full-text index once: each session is now one metadata doc plus body chunks.
+- `cv index` rebuilds the full-text index once after upgrading; afterwards a grown Claude or Codex transcript is read only from where the last pass stopped.
 
 ## 0.16.1 — 2026-10-12 — approvals, checkpoints, and the side files
 

@@ -19,7 +19,9 @@
 //!   that one session live (no full stored body — keeps the index lean)
 //! - `preview`    STORED (only)    — meta doc: ~240-char whitespace-collapsed head of the body
 //!   (~240 bytes/session), the snippet fallback when the source file has moved/changed
-//! - `created_at`/`updated_at` i64 INDEXED | STORED — returned on hits + future sort/filter
+//! - `created_at`/`updated_at` i64 INDEXED | STORED — returned on hits + future sort/filter;
+//!   `updated_at` only on the meta doc (it moves with every append, and a resumed pass keeps the
+//!   body docs it does not replace)
 //! - `mtime`      i64 STORED       — meta doc: file mtime, still used for non-append transcript stores
 //! - `size`       i64 STORED       — meta doc: file size, the primary incremental-index key for
 //!   append-only session logs, which can skip on unchanged size even when mtime was spuriously
@@ -256,11 +258,12 @@ fn compact(dir: &Path, index: &Index, writer: &mut IndexWriter) -> Result<usize>
     Ok(merges)
 }
 
-/// Max searchable bytes per tantivy document. A session's body is flushed into **multiple** docs of
-/// at most this size (all sharing the session id), so the index never holds a whole large session's
-/// body at once — search dedups hits back to one row per id. 4 MB keeps per-doc memory bounded while
-/// staying well above almost every individual message.
-const CHUNK_BYTES: usize = 4 * 1024 * 1024;
+/// Searchable bytes per tantivy document. A session's body is flushed into **multiple** docs (all
+/// sharing the session id) at the first message end past this size, or mid-message at twice it,
+/// so the index never holds a whole large session's body at once — search dedups hits back to one
+/// row per id. 4 MB keeps per-doc memory bounded while staying well above almost every individual
+/// message. 2 KB under test, so the small fixtures span several docs.
+const CHUNK_BYTES: usize = if cfg!(test) { 2048 } else { 4 * 1024 * 1024 };
 
 /// Discover + parse every session and bring the index at `dir` up to date.
 ///
@@ -292,8 +295,9 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     let swept = sweep(dir, refs, rebuild, subagents)?;
     if !rebuild {
         eprintln!(
-            "  ↳ index: {} changed/new, {} removed, {} unchanged",
+            "  ↳ index: {} changed/new ({} read from where the last pass stopped), {} removed, {} unchanged",
             swept.changed,
+            swept.resumed,
             swept.removed,
             swept.total.saturating_sub(swept.changed)
         );
@@ -309,6 +313,8 @@ pub(crate) struct Swept {
     pub changed: usize,
     /// Sessions reaped because their files are gone.
     pub removed: usize,
+    /// Sessions read only from their mark on.
+    pub resumed: usize,
 }
 
 /// One session a sweep must read, and what for.
@@ -323,27 +329,43 @@ struct Job {
     /// The index holds docs for its id, to delete before the new ones land.
     existing: bool,
     prov: cv_core::events::Provenance,
+    /// Where the last pass over this file left off, if it left a mark.
+    mark: Option<cv_core::resume::MarkHead>,
 }
 
 /// What a sweep worker hands the writer thread, in order per session.
 enum Out {
-    /// A session's FTS rewrite starts (`delete`: its old docs go first).
+    /// A session's FTS rewrite starts, its old docs (those `delete` names) going first.
     Begin {
         id: String,
-        delete: bool,
+        delete: Delete,
     },
     Doc(TantivyDocument),
-    /// A session's read finished: its events and counts are the writer's to record.
+    /// A session's read finished: its events (from the message index given on), counts and new
+    /// mark are the writer's to record.
     Done {
         job: Job,
-        events: Option<Vec<cv_core::events::Event>>,
+        events: Option<(usize, Vec<cv_core::events::Event>)>,
         counted: Option<cv_core::stream::Counted>,
+        mark: Option<(cv_core::resume::MarkHead, cv_core::stream::Checkpoint)>,
+        /// The pass resumed at the job's mark.
+        resumed: bool,
     },
     /// A session's read failed: any docs it sent are deleted and it stays stale.
     Failed {
         job: Job,
         err: anyhow::Error,
     },
+}
+
+/// Which of a session's docs a rewrite replaces.
+#[derive(Clone, Copy)]
+enum Delete {
+    /// None: the index holds none.
+    Nothing,
+    All,
+    /// A pass resumed at this message: its meta doc and the body docs from here on.
+    From(usize),
 }
 
 /// Bring the index at `dir` up to date with `refs` (the top-level sessions on disk), on every core.
@@ -358,6 +380,14 @@ enum Out {
 /// alone). Interim commits land only when no session is half-sent, so a crash never leaves a
 /// truncated session stamped fresh; past [`COMMIT_EVERY`] × 8 uncommitted docs the workers drain
 /// to make one.
+///
+/// **Resumption:** a claude or plain-`.jsonl` codex transcript that has grown since the last pass
+/// is read only from that pass's last [`cv_core::stream::Checkpoint`] (its mark, one per file in
+/// the catalog, taken every [`CHECKPOINT_EVERY`] bytes) when the mark still describes the file
+/// ([`cv_core::resume::MarkHead::holds`]) and covers everything this pass feeds: the docs from the
+/// mark's message on are replaced, the events from there on, and the counts continue from the
+/// mark's. Otherwise the session is read whole. New marks are stored only after the commit that
+/// holds their docs, so a crash between the two can never leave a mark ahead of the index.
 pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<Swept> {
     let (index, f) = open_or_create(dir)?;
     let mut writer = open_writer(&index, 50_000_000)?;
@@ -376,6 +406,7 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
     // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
     let event_sync = cv_core::events::SyncTable::load();
     let affordances = cv_core::catalog::AffordanceTable::load();
+    let marks = cv_core::resume::MarkTable::load();
 
     let total = refs.len();
     let mut seen: HashSet<String> = HashSet::new();
@@ -397,6 +428,7 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
             events,
             existing: existing.contains_key(&r.id),
             prov: Default::default(),
+            mark: marks.get(r).cloned(),
         });
     }
     // The sub-agent forest (opt-in): every claude session's `subagent_tree_of`, tagged with
@@ -425,13 +457,14 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
                     events,
                     existing: existing.contains_key(&sr.id),
                     prov,
+                    mark: marks.get(sr).cloned(),
                 });
             }
         }
     }
     jobs.retain(|j| cv_core::harness::for_harness(j.r.harness).is_some());
 
-    let changed = run_jobs(&mut writer, &f, jobs)?;
+    let ran = run_jobs(&mut writer, &f, jobs)?;
 
     // Reap sessions that disappeared from disk since the last index (incremental only). A plain
     // refresh never reaps the folded sub-agent forest — see [`reap_missing`].
@@ -441,11 +474,13 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         reap_missing(&mut writer, &f, &existing, &seen, &folded, subagents)
     };
     writer.commit().context("committing index")?;
+    cv_core::resume::update(&ran.marks);
     compact(dir, &index, &mut writer)?;
     Ok(Swept {
         total,
-        changed,
+        changed: ran.changed,
         removed,
+        resumed: ran.resumed,
     })
 }
 
@@ -470,12 +505,22 @@ fn job_cost(group: &[Job]) -> u64 {
         .min(IN_FLIGHT_BYTES)
 }
 
-/// Run every job on a pool of workers, writing on this thread. Returns the sessions whose FTS docs
-/// were rewritten.
-fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usize> {
+/// What [`run_jobs`] did.
+#[derive(Default)]
+struct Ran {
+    /// Sessions whose FTS docs were rewritten.
+    changed: usize,
+    /// Sessions read from their mark on.
+    resumed: usize,
+    /// Mark updates still waiting for the commit that holds their docs.
+    marks: Vec<cv_core::resume::MarkUpdate>,
+}
+
+/// Run every job on a pool of workers, writing on this thread.
+fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<Ran> {
     use std::sync::{mpsc, Condvar, Mutex};
     if jobs.is_empty() {
-        return Ok(0);
+        return Ok(Ran::default());
     }
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut groups: Vec<Vec<Job>> = Vec::new();
@@ -502,7 +547,7 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
     let wake = Condvar::new();
     let (tx, rx) = mpsc::sync_channel::<Out>(2 * workers);
 
-    std::thread::scope(|scope| -> Result<usize> {
+    std::thread::scope(|scope| -> Result<Ran> {
         for _ in 0..workers {
             let tx = tx.clone();
             let (queue, wake) = (&queue, &wake);
@@ -536,13 +581,21 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
 
         let mut open: HashSet<String> = HashSet::new();
         let mut since_commit = 0usize;
-        let mut changed = 0usize;
+        let mut ran = Ran::default();
         let mut failure: Option<anyhow::Error> = None;
         for out in rx {
             match out {
                 Out::Begin { id, delete } => {
-                    if delete {
-                        writer.delete_term(Term::from_field_text(f.id, &id));
+                    match delete {
+                        Delete::Nothing => {}
+                        Delete::All => {
+                            writer.delete_term(Term::from_field_text(f.id, &id));
+                        }
+                        Delete::From(n) => {
+                            if let Err(e) = writer.delete_query(Box::new(resumed_docs(f, &id, n))) {
+                                failure.get_or_insert(e.into());
+                            }
+                        }
                     }
                     open.insert(id);
                 }
@@ -554,17 +607,27 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
                     }
                     since_commit += 1;
                 }
-                Out::Done { job, events, counted } => {
+                Out::Done {
+                    job,
+                    events,
+                    counted,
+                    mark,
+                    resumed,
+                } => {
                     // Only stamp events after a complete pass: a parse error leaves the sync rows
                     // untouched so the session is retried next run.
-                    if let Some(events) = events {
-                        cv_core::events::record_with(&job.r, &events, job.mtime, job.size, &job.prov);
+                    if let Some((from, events)) = events {
+                        cv_core::events::record_from(&job.r, from, &events, job.mtime, job.size, &job.prov);
                     }
                     if let Some(c) = counted {
                         c.record(&job.r);
                     }
+                    if mark.is_some() || job.mark.is_some() {
+                        ran.marks.push((job.r.clone(), mark));
+                    }
+                    ran.resumed += usize::from(resumed);
                     if job.fts {
-                        changed += 1;
+                        ran.changed += 1;
                         open.remove(&job.r.id);
                     }
                 }
@@ -575,12 +638,16 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
                         writer.delete_term(Term::from_field_text(f.id, &job.r.id));
                         open.remove(&job.r.id);
                     }
+                    if job.mark.is_some() {
+                        ran.marks.push((job.r.clone(), None));
+                    }
                     eprintln!("cv-search: parse failed for {} ({}): {err:#}", job.r.id, job.r.harness);
                 }
             }
             if since_commit >= COMMIT_EVERY && failure.is_none() {
                 if open.is_empty() {
                     writer.commit().context("interim commit")?;
+                    cv_core::resume::update(&std::mem::take(&mut ran.marks));
                     since_commit = 0;
                     let mut q = queue.lock().unwrap();
                     q.draining = false;
@@ -593,9 +660,30 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
         }
         match failure {
             Some(e) => Err(e),
-            None => Ok(changed),
+            None => Ok(ran),
         }
     })
+}
+
+/// The docs a pass resumed at message `n` of session `id` replaces: its meta doc and its body
+/// docs from message `n` on.
+fn resumed_docs(f: &Fields, id: &str, n: usize) -> tantivy::query::BooleanQuery {
+    use std::ops::Bound;
+    use tantivy::query::{BooleanQuery, Occur, Query, RangeQuery, TermQuery};
+    use tantivy::schema::IndexRecordOption;
+    let id_q: Box<dyn Query> = Box::new(TermQuery::new(
+        Term::from_field_text(f.id, id),
+        IndexRecordOption::Basic,
+    ));
+    let later: Box<dyn Query> = Box::new(RangeQuery::new(
+        Bound::Included(Term::from_field_i64(f.first_msg, n as i64)),
+        Bound::Unbounded,
+    ));
+    let which: Box<dyn Query> = Box::new(BooleanQuery::new(vec![
+        (Occur::Should, Box::new(kind_query(f, KIND_META)) as Box<dyn Query>),
+        (Occur::Should, later),
+    ]));
+    BooleanQuery::new(vec![(Occur::Must, id_q), (Occur::Must, which)])
 }
 
 /// Read one job and send what it found; `false` when the writer hung up.
@@ -603,59 +691,146 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>) -> bool 
     let Some(adapter) = cv_core::harness::for_harness(job.r.harness) else {
         return true;
     };
-    let mut events = job.events.then(|| cv_core::events::EventSink::new(job.r.cwd.clone()));
-    let result = if job.fts {
-        let begin = Out::Begin {
-            id: job.r.id.clone(),
-            delete: job.existing,
-        };
-        if tx.send(begin).is_err() {
-            return false;
+    let version = cv_core::resume::version(adapter.as_ref(), RESUME_TAG);
+    let from = version.as_deref().and_then(|v| resumable_from(&job, v));
+    // A resume the adapter declines touched nothing: read the session whole instead.
+    let resumed = match &from {
+        Some(cp) => job_pass(&job, f, tx, adapter.as_ref(), Some(cp)).transpose(),
+        None => None,
+    };
+    let result = resumed.unwrap_or_else(|| {
+        job_pass(&job, f, tx, adapter.as_ref(), None).and_then(|p| p.context("a whole pass never declines"))
+    });
+    let out = match result {
+        Ok(p) => {
+            let mark = version.as_deref().and_then(|v| {
+                let cp = p.last?;
+                Some((cv_core::resume::MarkHead::of(&job.r.path, &cp, v)?, cp))
+            });
+            Out::Done {
+                job,
+                events: p.events,
+                counted: p.counted,
+                mark,
+                resumed: p.resumed,
+            }
         }
+        Err(err) => Out::Failed { job, err },
+    };
+    tx.send(out).is_ok()
+}
+
+/// The least transcript between two checkpoints of a resumable pass (each serializes the session
+/// so far). An indexing pass takes one only after a chunk flush besides ([`ChunkSink`]), so a
+/// resumed pass re-reads about one chunk of body text, plus a line, before what was appended.
+const CHECKPOINT_EVERY: u64 = CHUNK_BYTES as u64;
+
+/// The most transcript an indexing pass reads without taking a checkpoint (see
+/// [`ChunkSink::wants_checkpoint`]).
+const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
+
+/// The version of what a mark's `fts` layer and the docs behind it mean, part of every mark's
+/// version: bump it when [`FtsState`], the doc layout or [`CHECKPOINT_EVERY`] changes.
+const RESUME_TAG: &str = "fts1";
+
+/// The checkpoint `job` can resume from: its mark still describes the file, and its state covers
+/// every consumer this pass feeds (the index docs it continues must be there too).
+fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoint> {
+    let head = job.mark.as_ref()?;
+    if !head.holds(&job.r.path, job.size.max(0) as u64, version) {
+        return None;
+    }
+    let cp = cv_core::resume::state(&job.r, head)?;
+    cp.messages()?;
+    if job.fts && !(job.existing && cp.state.contains_key(FTS_LAYER)) {
+        return None;
+    }
+    if job.events && cv_core::events::EventSink::resume(&cp).is_none() {
+        return None;
+    }
+    Some(cp)
+}
+
+/// What one pass over a job's session found.
+struct JobPass {
+    resumed: bool,
+    counted: Option<cv_core::stream::Counted>,
+    events: Option<(usize, Vec<cv_core::events::Event>)>,
+    last: Option<cv_core::stream::Checkpoint>,
+}
+
+/// One pass over `job`'s session — from `from` when given — feeding what the job needs: FTS docs
+/// to the writer, events, counts. `Ok(None)`: the adapter declined to resume, nothing was sent.
+fn job_pass(
+    job: &Job,
+    f: &Fields,
+    tx: &std::sync::mpsc::SyncSender<Out>,
+    adapter: &dyn cv_core::Adapter,
+    from: Option<&cv_core::stream::Checkpoint>,
+) -> Result<Option<JobPass>> {
+    let first = from.and_then(|cp| cp.messages()).unwrap_or(0);
+    let mut events = match (job.events, from) {
+        (false, _) => None,
+        (true, None) => Some(cv_core::events::EventSink::new(job.r.cwd.clone())),
+        (true, Some(cp)) => Some(cv_core::events::EventSink::resume(cp).context("checkpoint without events")?),
+    };
+    let done = if job.fts {
+        let delete = match (from, job.existing) {
+            (Some(_), _) => Delete::From(first),
+            (None, true) => Delete::All,
+            (None, false) => Delete::Nothing,
+        };
+        // The rewrite begins with the first doc (every pass that runs ends in the meta doc), so a
+        // declined resume sends nothing at all.
+        let mut begun = false;
         let mut send = |doc: TantivyDocument| -> Result<()> {
+            if !begun {
+                tx.send(Out::Begin {
+                    id: job.r.id.clone(),
+                    delete,
+                })
+                .map_err(|_| anyhow::anyhow!("index writer closed"))?;
+                begun = true;
+            }
             tx.send(Out::Doc(doc))
                 .map_err(|_| anyhow::anyhow!("index writer closed"))
         };
         index_session(
             &mut send,
             f,
-            adapter.as_ref(),
+            adapter,
             &job.r,
             job.mtime,
             job.size,
             events.as_mut(),
             job.prov.clone(),
-        )
-        .map(|(_, counted)| counted)
+            from,
+        )?
+        .map(|(_, done)| done)
     } else {
         let opts = cv_core::ParseOptions::lazy();
-        match events.as_mut() {
-            Some(es) => cv_core::stream::stream_counting(&*adapter, &job.r, &opts, es),
-            None => {
-                let mut drop_all = |_m: cv_core::Message| cv_core::Flow::Continue;
-                cv_core::stream::stream_counting(&*adapter, &job.r, &opts, &mut drop_all)
-            }
-        }
-        .map(|(_, counted)| counted)
+        let sink: &mut dyn cv_core::MessageSink = match events.as_mut() {
+            Some(es) => es,
+            None => &mut cv_core::stream::Discard,
+        };
+        cv_core::stream::stream_resumable(adapter, &job.r, &opts, sink, CHECKPOINT_EVERY, from)?
     };
-    let out = match result {
-        Ok(counted) => Out::Done {
-            job,
-            events: events.map(cv_core::events::EventSink::into_events),
-            counted,
-        },
-        Err(err) => Out::Failed { job, err },
-    };
-    tx.send(out).is_ok()
+    Ok(done.map(|done| JobPass {
+        resumed: from.is_some(),
+        counted: done.counted,
+        events: events.map(|es| (first, es.into_events())),
+        last: done.last,
+    }))
 }
 
 /// Where a session's chunk docs go: the sweep's writer thread, or (tests) straight into a writer.
 type DocOut<'a> = dyn FnMut(TantivyDocument) -> Result<()> + 'a;
 
 /// Stream one session into bounded tantivy docs through [`ChunkSink`] — teeing the same pass into
-/// `events` when given, so the transcript is read once for both consumers. `lazy()` keeps large
-/// content as spans: the chunk sink chunk-resolves them and the event sink never reads them at
-/// all. Returns the docs written and what the pass counted (for the caller to record).
+/// `events` when given, so the transcript is read once for both consumers — from `from` when
+/// given (`events` restored from it too). `lazy()` keeps large content as spans: the chunk sink
+/// chunk-resolves them and the event sink never reads them at all. Returns the docs written and
+/// what the pass found; `Ok(None)` when the adapter declined to resume (no doc was written).
 #[allow(clippy::too_many_arguments)]
 fn index_session(
     out: &mut DocOut<'_>,
@@ -666,18 +841,23 @@ fn index_session(
     size: i64,
     events: Option<&mut cv_core::events::EventSink>,
     prov: cv_core::events::Provenance,
-) -> Result<(usize, Option<cv_core::stream::Counted>)> {
+    from: Option<&cv_core::stream::Checkpoint>,
+) -> Result<Option<(usize, cv_core::stream::Resumed)>> {
     let opts = cv_core::ParseOptions::lazy();
-    let mut sink = ChunkSink::new(out, f, r, mtime, size, prov);
-    let counted = match events {
+    let mut sink = match from {
+        Some(cp) => ChunkSink::resume(out, f, r, mtime, size, prov, cp).context("checkpoint without fts state")?,
+        None => ChunkSink::new(out, f, r, mtime, size, prov),
+    };
+    let done = match events {
         Some(es) => {
             let mut tee = cv_core::TeeSink::new(&mut sink, es);
-            cv_core::stream::stream_counting(adapter, r, &opts, &mut tee)?.1
+            cv_core::stream::stream_resumable(adapter, r, &opts, &mut tee, CHECKPOINT_EVERY, from)?
         }
-        None => cv_core::stream::stream_counting(adapter, r, &opts, &mut sink)?.1,
+        None => cv_core::stream::stream_resumable(adapter, r, &opts, &mut sink, CHECKPOINT_EVERY, from)?,
     };
+    let Some(done) = done else { return Ok(None) };
     sink.finish()?;
-    Ok((sink.docs, counted))
+    Ok(Some((sink.docs, done)))
 }
 
 /// [`index_session`] straight into `writer`, guaranteeing the writer holds **no** docs for the
@@ -704,11 +884,12 @@ fn index_session_clean(
 ) -> Result<usize> {
     let result = {
         let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()).map_err(Into::into) };
-        index_session(&mut add, f, adapter, r, mtime, size, events, prov)
+        index_session(&mut add, f, adapter, r, mtime, size, events, prov, None)
+            .and_then(|done| done.context("a whole pass never declines"))
     };
     match result {
-        Ok((docs, counted)) => {
-            if let Some(c) = counted {
+        Ok((docs, done)) => {
+            if let Some(c) = done.counted {
                 c.record(r);
             }
             Ok(docs)
@@ -778,10 +959,29 @@ struct ChunkSink<'w> {
     msgs: usize,
     /// The index of the message that put the first byte into `buf`.
     buf_first: usize,
+    /// A chunk was flushed since the last checkpoint: take the next one offered.
+    boundary_due: bool,
+    /// Where the last checkpoint was taken (the file offset).
+    last_checkpoint: u64,
     /// Whitespace-collapsed head of the body, capped at [`PREVIEW_CHARS`]; stored on the meta doc.
     preview: String,
     docs: usize,
     err: Option<anyhow::Error>,
+}
+
+/// The [`cv_core::stream::Checkpoint`] layer a [`ChunkSink`] keeps its state under.
+const FTS_LAYER: &str = "fts";
+
+/// What a [`ChunkSink`] holds at a checkpoint (its buffer is empty there: the docs so far are in
+/// the index).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FtsState {
+    msgs: usize,
+    cwd: Option<String>,
+    meta_title: Option<String>,
+    meta_received: bool,
+    first_user: Option<String>,
+    preview: String,
 }
 
 /// Length cap (chars) of the stored head-of-body preview — the snippet fallback when a hit's
@@ -820,10 +1020,36 @@ impl<'w> ChunkSink<'w> {
             buf: String::new(),
             msgs: 0,
             buf_first: 0,
+            boundary_due: false,
+            last_checkpoint: 0,
             preview: String::new(),
             docs: 0,
             err: None,
         }
+    }
+
+    /// The sink a checkpoint kept, for a pass resumed there (the signature, dates and title from
+    /// discovery are this pass's, as a whole pass would have them). `None` when the checkpoint was
+    /// taken without one.
+    fn resume(
+        out: &'w mut DocOut<'w>,
+        f: &'w Fields,
+        r: &cv_core::SessionRef,
+        mtime: i64,
+        size: i64,
+        prov: cv_core::events::Provenance,
+        cp: &cv_core::stream::Checkpoint,
+    ) -> Option<Self> {
+        let st: FtsState = cp.get(FTS_LAYER)?;
+        let mut sink = ChunkSink::new(out, f, r, mtime, size, prov);
+        sink.msgs = st.msgs;
+        sink.cwd = st.cwd;
+        sink.meta_title = st.meta_title;
+        sink.meta_received = st.meta_received;
+        sink.first_user = st.first_user;
+        sink.preview = st.preview;
+        sink.last_checkpoint = cp.offset;
+        Some(sink)
     }
 
     /// Session label for display: the parsed title when the adapter delivered metadata (authoritative,
@@ -851,7 +1077,8 @@ impl<'w> ChunkSink<'w> {
         if let Some(t) = self.created_at {
             doc.add_i64(self.f.created_at, t);
         }
-        if let Some(t) = self.updated_at {
+        // `updated_at` moves with every append; only the meta doc, rewritten by every pass, has it.
+        if let (Some(t), KIND_META) = (self.updated_at, kind) {
             doc.add_i64(self.f.updated_at, t);
         }
         // Provenance rides every doc of a folded-in sub-agent; top-level docs add nothing here.
@@ -908,16 +1135,24 @@ impl<'w> ChunkSink<'w> {
 }
 
 impl<'w> ChunkSink<'w> {
-    /// Append `s` to the buffer, flushing a doc whenever it reaches a chunk.
+    /// Append `s` to the buffer; a giant message (twice a chunk in the buffer) flushes mid-way.
     fn push_chunk(&mut self, s: &str) {
         self.extend_preview(s);
         if self.buf.is_empty() {
             self.buf_first = self.msgs;
         }
         self.buf.push_str(s);
-        if self.buf.len() >= CHUNK_BYTES {
-            self.flush();
+        if self.buf.len() >= 2 * CHUNK_BYTES {
+            self.flush_chunk();
         }
+    }
+
+    /// A chunk's worth is in: flush it, and take the next checkpoint offered (which flushes what
+    /// came after it in the same record), so checkpoints add no doc boundaries of their own beyond
+    /// that remainder.
+    fn flush_chunk(&mut self) {
+        self.flush();
+        self.boundary_due = true;
     }
 
     /// Grow the stored preview from the head of the body: words joined by single spaces (newlines
@@ -1010,6 +1245,34 @@ impl cv_core::MessageSink for ChunkSink<'_> {
             self.cwd = s.cwd.as_ref().map(|p| p.display().to_string());
         }
     }
+
+    /// Once a chunk was flushed since the last one, so checkpoints sit at (or just after) the
+    /// doc boundaries the chunking makes anyway (the more boundaries, the fewer conjunctive
+    /// queries match within one doc); or after [`CHECKPOINT_AT_MOST`] of transcript without one,
+    /// which only a stretch with little text reaches (giant tool outputs, telemetry), so a resumed
+    /// pass never re-reads much.
+    fn wants_checkpoint(&mut self, offset: u64) -> bool {
+        self.err.is_none() && (self.boundary_due || offset >= self.last_checkpoint.saturating_add(CHECKPOINT_AT_MOST))
+    }
+
+    /// A checkpoint is a body-doc boundary: every doc lies wholly before it or after it, so a
+    /// pass resumed there replaces exactly the docs from its message on.
+    fn checkpoint(&mut self, cp: &mut cv_core::stream::Checkpoint) {
+        self.flush();
+        self.boundary_due = false;
+        self.last_checkpoint = cp.offset;
+        cp.put(
+            FTS_LAYER,
+            &FtsState {
+                msgs: self.msgs,
+                cwd: self.cwd.clone(),
+                meta_title: self.meta_title.clone(),
+                meta_received: self.meta_received,
+                first_user: self.first_user.clone(),
+                preview: self.preview.clone(),
+            },
+        );
+    }
     fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
         use cv_core::Block;
         if self.err.is_some() {
@@ -1039,6 +1302,9 @@ impl cv_core::MessageSink for ChunkSink<'_> {
         }
         self.resolver = r;
         self.msgs += 1;
+        if self.buf.len() >= CHUNK_BYTES {
+            self.flush_chunk();
+        }
         cv_core::Flow::Continue
     }
 }
@@ -2104,7 +2370,7 @@ mod tests {
                 sink: &mut dyn cv_core::MessageSink,
             ) -> Result<cv_core::Session> {
                 let mut m = cv_core::Message::new(cv_core::Role::User);
-                let body = "zqpartial ".repeat(CHUNK_BYTES / 8); // > CHUNK_BYTES → mid-stream flush
+                let body = "zqpartial ".repeat(CHUNK_BYTES / 8); // > CHUNK_BYTES → flushed as the message ends
                 m.content.push(cv_core::Block::Text { text: body.into() });
                 let _ = sink.message(m);
                 anyhow::bail!("malformed line mid-transcript")
@@ -2376,6 +2642,222 @@ mod tests {
         assert_eq!(hits[0].title.as_deref(), Some("zqlabel hello"));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    /// The claude transcripts and plain codex rollouts of the cv-core corpus: the adapters whose
+    /// passes resume.
+    fn resumable_corpus() -> Vec<(cv_core::Harness, std::path::PathBuf)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cv-core/tests/corpus");
+        fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+            entries.sort();
+            for p in entries {
+                if p.is_dir() {
+                    files(&p, out);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (dir, h) in [("claude", cv_core::Harness::Claude), ("codex", cv_core::Harness::Codex)] {
+            let mut paths = Vec::new();
+            files(&root.join(dir), &mut paths);
+            for p in paths {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                let top = match h {
+                    cv_core::Harness::Claude => p
+                        .parent()
+                        .and_then(|d| d.parent())
+                        .is_some_and(|d| d.ends_with("projects")),
+                    _ => name.starts_with("rollout-"),
+                };
+                if top && name.ends_with(".jsonl") {
+                    out.push((h, p));
+                }
+            }
+        }
+        out
+    }
+
+    /// A copy of each of `n` corpus transcripts (the larger ones, alternating claude and codex)
+    /// under `dir`, with the refs a discovery would hand the sweep.
+    fn resumable_fleet(dir: &Path, n: usize) -> Vec<(cv_core::SessionRef, Vec<u8>)> {
+        let mut all = resumable_corpus();
+        all.sort_by_key(|(_, p)| std::cmp::Reverse(std::fs::metadata(p).unwrap().len()));
+        let (claude, codex): (Vec<_>, Vec<_>) = all.into_iter().partition(|(h, _)| *h == cv_core::Harness::Claude);
+        claude
+            .into_iter()
+            .zip(codex)
+            .flat_map(|(a, b)| [a, b])
+            .take(n)
+            .map(|(h, src)| {
+                let p = dir.join(src.file_name().unwrap());
+                let bytes = std::fs::read(&src).unwrap();
+                let r = cv_core::SessionRef {
+                    id: p.file_stem().unwrap().to_string_lossy().into_owned(),
+                    harness: h,
+                    path: p,
+                    cwd: Some("/home/u/proj".into()),
+                    title: None,
+                    created_at: chrono::DateTime::from_timestamp(1, 0),
+                    updated_at: chrono::DateTime::from_timestamp(2, 0),
+                    message_count: 1,
+                };
+                (r, bytes)
+            })
+            .collect()
+    }
+
+    /// Words of the sessions' text, every few: terms a resumed and a whole index must agree on.
+    fn some_words(refs: &[cv_core::SessionRef]) -> Vec<String> {
+        let mut words = std::collections::BTreeSet::new();
+        for r in refs {
+            let s = cv_core::harness::for_harness(r.harness).unwrap().parse(r).unwrap();
+            let text: String = s.messages.iter().filter_map(|m| m.text()).collect::<Vec<_>>().join(" ");
+            for w in text
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() >= 5)
+                .step_by(23)
+            {
+                words.insert(w.to_lowercase());
+            }
+        }
+        words.into_iter().collect()
+    }
+
+    /// Everything a sweep leaves for `refs`, comparably: every live doc's stored fields (sorted),
+    /// the hits for each word, and each session's events and affordance counts.
+    fn observe(dir: &Path, refs: &[cv_core::SessionRef], words: &[String]) -> Vec<String> {
+        let (index, _) = open_existing(dir).unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let mut docs = Vec::new();
+        for seg in searcher.segment_readers() {
+            let store = seg.get_store_reader(0).unwrap();
+            for d in seg.doc_ids_alive() {
+                let doc: TantivyDocument = store.get(d).unwrap();
+                docs.push(tantivy::schema::document::Document::to_json(&doc, &index.schema()));
+            }
+        }
+        docs.sort();
+        let mut out = docs;
+        for w in words {
+            let mut hits: Vec<String> = text_search(dir, w, 100)
+                .unwrap()
+                .into_iter()
+                .map(|h| format!("{} {:?} {:?} {:?}", h.id, h.title, h.updated_at, h.snippet))
+                .collect();
+            hits.sort();
+            out.push(format!("{w}: {hits:?}"));
+        }
+        let counts = cv_core::catalog::AffordanceTable::load();
+        for r in refs {
+            out.push(format!(
+                "{:?}",
+                cv_core::events::events_for(r.harness.as_str(), &r.id, None)
+            ));
+            out.push(format!("{:?}", counts.counts(r)));
+        }
+        out
+    }
+
+    /// A whole sweep of the files as they are now, into a fresh index and catalog.
+    fn whole_sweep(refs: &[cv_core::SessionRef], words: &[String]) -> Vec<String> {
+        let (dir, home) = (tmpdir(), tmpdir());
+        let prior = std::env::var_os("CLUSTERVISION_HOME");
+        std::env::set_var("CLUSTERVISION_HOME", &home);
+        let swept = sweep(&dir, refs.to_vec(), false, false).unwrap();
+        assert_eq!(swept.resumed, 0);
+        let seen = observe(&dir, refs, words);
+        std::env::set_var("CLUSTERVISION_HOME", prior.unwrap());
+        for d in [dir, home] {
+            std::fs::remove_dir_all(d).ok();
+        }
+        seen
+    }
+
+    /// Write the first `num/den` of each transcript, cut inside a line as a live writer leaves it.
+    fn write_heads(fleet: &[(cv_core::SessionRef, Vec<u8>)], num: usize, den: usize) {
+        for (r, bytes) in fleet {
+            std::fs::write(&r.path, &bytes[..bytes.len() * num / den]).unwrap();
+        }
+    }
+
+    /// The append case end to end: a sweep over the heads of claude and codex transcripts, the
+    /// rest appended, a second sweep that resumes each from its mark — and the index, events and
+    /// counts it leaves are exactly a whole sweep's of the grown files. A third append resumes
+    /// from the second sweep's marks the same way.
+    #[test]
+    fn a_resumed_sweep_leaves_what_a_whole_sweep_does() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let fleet = resumable_fleet(&sdir, 6);
+        let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
+        write_heads(&fleet, 1, 3);
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().resumed, 0);
+        let marks = cv_core::resume::MarkTable::load();
+        assert!(refs.iter().all(|r| marks.get(r).is_some()), "every head left a mark");
+        for (num, den) in [(2, 3), (1, 1)] {
+            write_heads(&fleet, num, den);
+            let swept = sweep(&dir, refs.clone(), false, false).unwrap();
+            assert_eq!(
+                (swept.changed, swept.resumed),
+                (refs.len(), refs.len()),
+                "at {num}/{den}"
+            );
+            let words = some_words(&refs);
+            assert!(words.len() > 50, "{} words", words.len());
+            let resumed = observe(&dir, &refs, &words);
+            assert_eq!(resumed, whole_sweep(&refs, &words), "at {num}/{den}");
+        }
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    /// A mark that no longer describes its file is never resumed from: a byte changed before
+    /// it, the file cut short of it, or a mark another parser version wrote. Each such session is
+    /// read whole and leaves what a whole sweep does.
+    #[test]
+    fn a_stale_mark_falls_back_to_a_whole_pass() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let fleet = resumable_fleet(&sdir, 3);
+        let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
+        write_heads(&fleet, 1, 2);
+        sweep(&dir, refs.clone(), false, false).unwrap();
+        let marks = cv_core::resume::MarkTable::load();
+        let head = |i: usize| marks.get(&refs[i]).unwrap().clone();
+
+        // 0: a byte before its mark changes (a letter inside the line before it), then it grows.
+        let (r0, b0) = &fleet[0];
+        let mut bytes = b0.clone();
+        let at = (0..head(0).offset as usize - 1)
+            .rev()
+            .find(|&i| bytes[i].is_ascii_lowercase())
+            .unwrap();
+        bytes[at] = if bytes[at] == b'q' { b'z' } else { b'q' };
+        std::fs::write(&r0.path, &bytes).unwrap();
+        // 1: cut short of its mark.
+        let (r1, b1) = &fleet[1];
+        std::fs::write(&r1.path, &b1[..head(1).offset as usize - 1]).unwrap();
+        // 2: grown, but its mark was written by another version.
+        let (r2, b2) = &fleet[2];
+        std::fs::write(&r2.path, b2).unwrap();
+        let cp = cv_core::resume::state(r2, &head(2)).unwrap();
+        let other = cv_core::resume::MarkHead {
+            version: format!("{}-older", head(2).version),
+            ..head(2)
+        };
+        cv_core::resume::update(&[(r2.clone(), Some((other, cp)))]);
+
+        let swept = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (3, 0));
+        let words = some_words(&refs);
+        assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
     }
 
     /// One commit per run leaves one small segment per run: the writer itself never merges them

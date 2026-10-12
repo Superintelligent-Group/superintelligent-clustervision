@@ -394,8 +394,8 @@ pub struct Resumed {
     /// What the whole session counted (the resumed part added to the checkpoint's), `None` when
     /// the sink stopped early.
     pub counted: Option<Counted>,
-    /// The last checkpoint the pass took (`None` when it took none, or stopped early): the mark
-    /// the next pass over the grown file resumes from.
+    /// The last checkpoint the pass took, or else the one it resumed from (`None` when it has
+    /// neither, or stopped early): the mark the next pass over the grown file resumes from.
     pub last: Option<Checkpoint>,
 }
 
@@ -427,7 +427,12 @@ pub fn stream_resumable(
         }
         None => adapter.stream(r, opts, &mut counting)?,
     };
-    let last = counting.last.take().filter(|_| !counting.stopped);
+    // A resumed pass that read too little to take one still passed through `from`.
+    let last = counting
+        .last
+        .take()
+        .or_else(|| from.cloned())
+        .filter(|_| !counting.stopped);
     let counted = (!counting.stopped).then(|| Counted {
         turns: counting.turns,
         counts: counting.affordances.finish(&session, &adapter.store_affordances(r)),
@@ -721,6 +726,22 @@ mod tests {
             assert_eq!(rest.msgs, full.msgs[n..], "{}", src.path.display());
             assert_eq!(s, session, "{}", src.path.display());
             assert_eq!((c.turns, c.counts), (counted.turns, counted.counts));
+
+            // Resumed at the last checkpoint, the pass takes no new one: it hands that one back,
+            // so the next pass still has a mark to resume from.
+            let final_cp = full.cps.last().unwrap();
+            let adapter = crate::harness::for_harness(r.harness).unwrap();
+            let done = stream_resumable(
+                &*adapter,
+                &r,
+                &ParseOptions::lazy(),
+                &mut Keep::default(),
+                1,
+                Some(final_cp),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(done.last.as_ref(), Some(final_cp));
         }
         std::fs::remove_dir_all(&dir).ok();
     }
