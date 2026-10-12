@@ -1253,7 +1253,7 @@ impl<'w> ChunkSink<'w> {
     /// current label and preview, one per session — propagating any deferred error.
     fn finish(&mut self) -> Result<()> {
         self.flush();
-        if !self.failed && !self.failed && self.err.is_none() {
+        if !self.failed && self.err.is_none() {
             let mut doc = self.doc(KIND_META);
             if !self.preview.is_empty() {
                 doc.add_text(self.f.preview, &self.preview);
