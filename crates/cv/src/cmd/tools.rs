@@ -191,13 +191,17 @@ fn tools_timeline(r: &cv_core::SessionRef, agent: Option<&str>, json: bool) -> R
         } else {
             short_id(&e.agent)
         };
+        let mut target = e.target.as_deref().map(|t| truncate(t, 70)).unwrap_or_default();
+        if !e.more_targets.is_empty() {
+            target.push_str(&format!(" (+{} more)", e.more_targets.len()));
+        }
         println!(
             "{}  {:8}  {:9}  {:14}  {}",
             time,
             who,
             e.kind,
             e.tool.as_deref().unwrap_or("-"),
-            e.target.as_deref().map(|t| truncate(t, 70)).unwrap_or_default(),
+            target,
         );
     }
     Ok(())

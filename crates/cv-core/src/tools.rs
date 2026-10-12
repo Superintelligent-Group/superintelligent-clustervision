@@ -122,7 +122,9 @@ impl ToolHistogram {
 }
 
 /// One tool call on a timeline: which agent, which tool, when, what kind/target. The ordered form
-/// used by `cv tools --timeline`.
+/// used by `cv tools --timeline`: one per `tool_use` block, so the timeline has as many entries as
+/// [`ToolHistogram::total_calls`] counts. A call that touched several targets (a multi-file patch)
+/// keeps its first row's `kind`/`target` and the rest in `more_targets`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolEvent {
     /// Identifier of the agent that made the call (`<orchestrator>` for the parent session itself,
@@ -137,6 +139,35 @@ pub struct ToolEvent {
     pub tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// The targets of the call's further rows (the second and later files of a patch).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub more_targets: Vec<String>,
+}
+
+/// One agent's classified rows as timeline entries, one per call: a row that continues a call
+/// ([`Event::call`] false) folds into the entry before it. Error rows are results, not calls.
+fn timeline_calls(agent: &str, evs: Vec<Event>, out: &mut Vec<ToolEvent>) {
+    let first = out.len();
+    for e in evs {
+        if e.kind == "error" {
+            continue;
+        }
+        if !e.call {
+            if let Some(prev) = out[first..].last_mut().filter(|p| p.msg_idx == e.msg_idx) {
+                prev.more_targets.extend(e.target);
+                continue;
+            }
+        }
+        out.push(ToolEvent {
+            agent: agent.to_string(),
+            msg_idx: e.msg_idx,
+            ts: e.ts,
+            kind: e.kind,
+            tool: e.tool,
+            target: e.target,
+            more_targets: Vec::new(),
+        });
+    }
 }
 
 /// Per-agent tool histograms across a whole sub-agent forest (plus the orchestrator), each tagged
@@ -257,30 +288,14 @@ pub fn forest_timeline(r: &SessionRef) -> anyhow::Result<Vec<ToolEvent>> {
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
     let mut out: Vec<ToolEvent> = Vec::new();
 
-    let mut collect = |agent: String, evs: Vec<Event>| {
-        for e in evs {
-            if e.kind == "error" {
-                continue; // the timeline is *calls*, not result-errors
-            }
-            out.push(ToolEvent {
-                agent: agent.clone(),
-                msg_idx: e.msg_idx,
-                ts: e.ts,
-                kind: e.kind,
-                tool: e.tool,
-                target: e.target,
-            });
-        }
-    };
-
     let mut sink = EventSink::new(r.cwd.clone());
     adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
-    collect(ORCHESTRATOR.to_string(), sink.into_events());
+    timeline_calls(ORCHESTRATOR, sink.into_events(), &mut out);
 
     for s in crate::subagent_tree_of(r) {
         let mut sink = EventSink::new(s.session.cwd.clone());
         if adapter.stream(&s.session, &ParseOptions::lazy(), &mut sink).is_ok() {
-            collect(s.agent_id().to_string(), sink.into_events());
+            timeline_calls(s.agent_id(), sink.into_events(), &mut out);
         }
     }
 
@@ -369,6 +384,40 @@ mod tests {
         assert_eq!((shell.calls, shell.commands, shell.edits), (2, 2, 3));
         let ap = &h.tools["apply_patch"];
         assert_eq!((ap.calls, ap.edits), (1, 3));
+    }
+
+    /// The timeline has one entry per call, the count `cv tools` reports: a three-file patch is one
+    /// line carrying its other files, not three.
+    #[test]
+    fn timeline_has_one_entry_per_call() {
+        let patch = "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** Add File: b.rs\n+z\n\
+                     *** Delete File: c.rs\n*** End Patch";
+        let msgs = [
+            asst(vec![
+                tool_use("shell", json!({"command": ["apply_patch", patch]})),
+                tool_use("apply_patch", json!({"input": patch})),
+            ]),
+            asst(vec![tool_use("shell", json!({"command": "ls"}))]),
+        ];
+        let cwd = Some(std::path::Path::new("/repo"));
+        let evs: Vec<Event> = msgs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, m)| events::extract(m, i, cwd))
+            .collect();
+        let h = ToolHistogram::from_messages(msgs.iter(), cwd);
+        let mut tl = Vec::new();
+        timeline_calls(ORCHESTRATOR, evs, &mut tl);
+        assert_eq!(tl.len(), h.total_calls);
+        let line = |e: &ToolEvent| (e.tool.clone().unwrap(), e.kind, e.more_targets.len());
+        assert_eq!(
+            tl.iter().map(line).collect::<Vec<_>>(),
+            [
+                ("shell".into(), "command", 3),
+                ("apply_patch".into(), "file_edit", 2),
+                ("shell".into(), "command", 0)
+            ]
+        );
     }
 
     #[test]
