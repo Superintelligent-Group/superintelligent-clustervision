@@ -102,13 +102,15 @@ impl Adapter for Cline {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Cline, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        if super::cline_sdk::is_sdk_path(&r.path) {
-            return super::cline_sdk::stream_with_options(&r.path, &r.id, opts, sink);
-        }
-        stream_task_dir(&r.path, &r.id, Harness::Cline, opts, sink)
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Cline, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            if super::cline_sdk::is_sdk_path(&r.path) {
+                return super::cline_sdk::stream_with_options(&r.path, &r.id, opts, sink);
+            }
+            stream_task_dir(&r.path, &r.id, Harness::Cline, opts, sink)
+        })
     }
 
     /// The SDK store's side databases: schedule fires and team runs ([`super::cline_sdk`]).

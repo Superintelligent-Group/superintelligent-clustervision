@@ -231,15 +231,17 @@ impl Adapter for Goose {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Goose, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        // A legacy session's `path` is the `.jsonl`; a DB session's `path` is `sessions.db`.
-        if r.path.extension().is_some_and(|e| e == "jsonl") {
-            return stream_legacy(&r.id, &r.path, sink);
-        }
-        let conn = open_ro(&r.path)?;
-        stream_db(&conn, r, sink)
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Goose, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            // A legacy session's `path` is the `.jsonl`; a DB session's `path` is `sessions.db`.
+            if r.path.extension().is_some_and(|e| e == "jsonl") {
+                return stream_legacy(&r.id, &r.path, sink);
+            }
+            let conn = open_ro(&r.path)?;
+            stream_db(&conn, r, sink)
+        })
     }
 
     /// The todo extension's state: `sessions.extension_data["todo.v0"].content` (a markdown list).

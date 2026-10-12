@@ -114,7 +114,7 @@ impl Adapter for Gemini {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        stream_for(Harness::Gemini, r, opts, sink)
+        crate::stream::checked(sink, |sink| stream_for(Harness::Gemini, r, opts, sink))
     }
 
     /// The per-session side files under `tmp/<project>/<session id>/`: the task tracker

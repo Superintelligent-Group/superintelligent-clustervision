@@ -66,10 +66,12 @@ impl Adapter for Roo {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Roo, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        stream_task_dir(&r.path, &r.id, Harness::Roo, opts, sink)
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Roo, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            stream_task_dir(&r.path, &r.id, Harness::Roo, opts, sink)
+        })
     }
 
     /// The checkpoints and permission asks `ui_messages.json` logs (the conversation file has

@@ -60,7 +60,7 @@ impl Adapter for ChatGptExport {
         Ok(discover_kind(Kind::ChatGpt))
     }
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        native::stream(Kind::ChatGpt, r, opts, sink)
+        crate::stream::checked(sink, |sink| native::stream(Kind::ChatGpt, r, opts, sink))
     }
 }
 
@@ -75,7 +75,7 @@ impl Adapter for ClaudeExport {
         Ok(discover_kind(Kind::Claude))
     }
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        native::stream(Kind::Claude, r, opts, sink)
+        crate::stream::checked(sink, |sink| native::stream(Kind::Claude, r, opts, sink))
     }
 }
 
@@ -115,7 +115,7 @@ impl Adapter for RootedExport {
         ))
     }
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        native::stream(self.kind, r, opts, sink)
+        crate::stream::checked(sink, |sink| native::stream(self.kind, r, opts, sink))
     }
 }
 

@@ -223,39 +223,41 @@ impl Adapter for OpenClaw {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenClaw, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        if is_sqlite_store_path(&r.path) {
-            return stream_sqlite(r, opts, sink);
-        }
-        // A transcript with `leaf` controls is a tree: the visible branch must be selected over the
-        // whole file (see [`select_rows`]), so load it. Everything else streams one record at a time,
-        // peak memory O(largest line) — OpenClaw's own rule for flat readers.
-        let facts = jsonl_key_facts(&r.path, &r.id);
-        if file_has_leaf_controls(&r.path)? {
-            let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-            let entries: Vec<Value> = text.lines().filter_map(parse_line).collect();
-            return Ok(stream_rows(
-                rows_from_values(entries, opts.complete).into_iter(),
-                r,
-                &facts,
-                opts,
-                sink,
-            ));
-        }
-        // `filter_map`, not `map_while`: a single undecodable line (stray non-UTF8 bytes) must be
-        // skipped like any other corrupt record — `map_while` would silently TRUNCATE the whole
-        // rest of the transcript at it. The lint's run-forever concern doesn't apply: on a regular
-        // file an invalid-UTF8 `Err` still consumes that line's bytes, so the iterator advances to
-        // EOF (same tolerance as `for_each_json_line`).
-        #[allow(clippy::lines_filter_map_ok)]
-        let lines = {
-            let file = fs::File::open(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-            BufReader::new(file).lines().filter_map(Result::ok)
-        };
-        let rows = lines.filter_map(|l| parse_line(&l)).map(Row::active);
-        Ok(stream_rows(rows, r, &facts, opts, sink))
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenClaw, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            if is_sqlite_store_path(&r.path) {
+                return stream_sqlite(r, opts, sink);
+            }
+            // A transcript with `leaf` controls is a tree: the visible branch must be selected over the
+            // whole file (see [`select_rows`]), so load it. Everything else streams one record at a time,
+            // peak memory O(largest line) — OpenClaw's own rule for flat readers.
+            let facts = jsonl_key_facts(&r.path, &r.id);
+            if file_has_leaf_controls(&r.path)? {
+                let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
+                let entries: Vec<Value> = text.lines().filter_map(parse_line).collect();
+                return Ok(stream_rows(
+                    rows_from_values(entries, opts.complete).into_iter(),
+                    r,
+                    &facts,
+                    opts,
+                    sink,
+                ));
+            }
+            // `filter_map`, not `map_while`: a single undecodable line (stray non-UTF8 bytes) must be
+            // skipped like any other corrupt record — `map_while` would silently TRUNCATE the whole
+            // rest of the transcript at it. The lint's run-forever concern doesn't apply: on a regular
+            // file an invalid-UTF8 `Err` still consumes that line's bytes, so the iterator advances to
+            // EOF (same tolerance as `for_each_json_line`).
+            #[allow(clippy::lines_filter_map_ok)]
+            let lines = {
+                let file = fs::File::open(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
+                BufReader::new(file).lines().filter_map(Result::ok)
+            };
+            let rows = lines.filter_map(|l| parse_line(&l)).map(Row::active);
+            Ok(stream_rows(rows, r, &facts, opts, sink))
+        })
     }
 
     /// The cron and sub-agent registries in the state dir that name this session's key

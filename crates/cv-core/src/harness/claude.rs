@@ -219,20 +219,22 @@ impl Adapter for Claude {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
-        // Lazy spans borrow record slices from the file: even a giant output needs no private
-        // largest-line buffer. Buffered readers remain the fallback and the bulk/full path.
-        #[cfg(feature = "mmap")]
-        if opts.spans {
-            if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
-                #[cfg(unix)]
-                let _ = map.advise(memmap2::Advice::Sequential);
-                let s = stream_bytes_at(new_session(&r.id, Some(r.path.clone())), &map, 0, opts, sink);
-                return Ok(with_fork_source(s, &r.path, sink));
+        crate::stream::checked(sink, |sink| {
+            let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            // Lazy spans borrow record slices from the file: even a giant output needs no private
+            // largest-line buffer. Buffered readers remain the fallback and the bulk/full path.
+            #[cfg(feature = "mmap")]
+            if opts.spans {
+                if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+                    #[cfg(unix)]
+                    let _ = map.advise(memmap2::Advice::Sequential);
+                    let s = stream_bytes_at(new_session(&r.id, Some(r.path.clone())), &map, 0, opts, sink);
+                    return Ok(with_fork_source(s, &r.path, sink));
+                }
             }
-        }
-        let s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
-        Ok(with_fork_source(s, &r.path, sink))
+            let s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
+            Ok(with_fork_source(s, &r.path, sink))
+        })
     }
 
     fn resume_format(&self) -> Option<u32> {
@@ -248,28 +250,30 @@ impl Adapter for Claude {
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
-        use std::io::{Seek as _, SeekFrom};
-        let Some(session) = from.get::<Session>(ADAPTER_LAYER) else {
-            return Ok(None);
-        };
-        let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
-        #[cfg(feature = "mmap")]
-        if opts.spans {
-            if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
-                #[cfg(unix)]
-                let _ = map.advise(memmap2::Advice::Sequential);
-                let bytes = usize::try_from(from.offset)
-                    .ok()
-                    .and_then(|offset| map.get(offset..))
-                    .unwrap_or(&[]);
-                let s = stream_bytes_at(session, bytes, from.offset, opts, sink);
-                return Ok(Some(with_fork_source(s, &r.path, sink)));
+        crate::stream::checked(sink, |sink| {
+            use std::io::{Seek as _, SeekFrom};
+            let Some(session) = from.get::<Session>(ADAPTER_LAYER) else {
+                return Ok(None);
+            };
+            let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            #[cfg(feature = "mmap")]
+            if opts.spans {
+                if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+                    #[cfg(unix)]
+                    let _ = map.advise(memmap2::Advice::Sequential);
+                    let bytes = usize::try_from(from.offset)
+                        .ok()
+                        .and_then(|offset| map.get(offset..))
+                        .unwrap_or(&[]);
+                    let s = stream_bytes_at(session, bytes, from.offset, opts, sink);
+                    return Ok(Some(with_fork_source(s, &r.path, sink)));
+                }
             }
-        }
-        file.seek(SeekFrom::Start(from.offset))
-            .with_context(|| format!("seeking {}", r.path.display()))?;
-        let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink);
-        Ok(Some(with_fork_source(s, &r.path, sink)))
+            file.seek(SeekFrom::Start(from.offset))
+                .with_context(|| format!("seeking {}", r.path.display()))?;
+            let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink);
+            Ok(Some(with_fork_source(s, &r.path, sink)))
+        })
     }
 
     /// The task list (`TaskCreate`/`TaskUpdate`) Claude Code keeps beside the transcripts:

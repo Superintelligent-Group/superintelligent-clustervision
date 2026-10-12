@@ -185,53 +185,55 @@ impl Adapter for Codex {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        let is_jsonl = is_jsonl_path(&r.path);
-        if !is_jsonl {
-            // 2025 legacy layout is a single JSON document — inherently whole-file. Parse it whole
-            // and replay (these sessions are rare and small).
-            let text = read_rollout_to_string(&r.path)?;
-            return crate::stream::replay(parse_str(&r.id, &text, false, Some(r.path.clone())), sink);
-        }
-        // Modern `.jsonl` rollout: stream it. `has_events` is a whole-file property (do NL text
-        // come from `event_msg`s or `response_item`s?), so we make a cheap first pass to detect it,
-        // then a second streaming pass that emits one record's messages at a time. The native
-        // lazy path borrows both passes from one mapping, avoiding a giant private line buffer.
-        // Span path (partial-access / chunked index): mmap the file and emit a lazy `Span` for a giant
-        // `function_call_output` string output instead of reading/materializing the 100s-of-MB line.
-        // Never for a compressed rollout — a span can't point into zstd frames.
-        #[cfg(feature = "mmap")]
-        if opts.spans && !is_zst_path(&r.path) {
-            if let Ok(file) = fs::File::open(&r.path) {
-                if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
-                    // One forward pass: tell the kernel, so it reads ahead in big runs instead of
-                    // faulting the file in a page at a time. Measured on a 12-thread recount of
-                    // 88 GB of rollouts: 41-44 s with this hint, 58-59 s without; our own read-ahead on
-                    // top (`madvise(WILLNEED)` or `F_RDADVISE`, 32 MB ahead of the parser) made it
-                    // 150-180 s, and `WILLNEED` on the whole file pages all of it in for a reader
-                    // that stops at the first hit.
-                    #[cfg(unix)]
-                    let _ = map.advise(memmap2::Advice::Sequential);
-                    let has_events = detect_has_events_bytes(&map);
-                    return Ok(stream_jsonl_spans(
-                        &r.id,
-                        &map,
-                        Some(r.path.clone()),
-                        has_events,
-                        opts.offsets,
-                        sink,
-                    ));
+        crate::stream::checked(sink, |sink| {
+            let is_jsonl = is_jsonl_path(&r.path);
+            if !is_jsonl {
+                // 2025 legacy layout is a single JSON document — inherently whole-file. Parse it whole
+                // and replay (these sessions are rare and small).
+                let text = read_rollout_to_string(&r.path)?;
+                return crate::stream::replay(parse_str(&r.id, &text, false, Some(r.path.clone())), sink);
+            }
+            // Modern `.jsonl` rollout: stream it. `has_events` is a whole-file property (do NL text
+            // come from `event_msg`s or `response_item`s?), so we make a cheap first pass to detect it,
+            // then a second streaming pass that emits one record's messages at a time. The native
+            // lazy path borrows both passes from one mapping, avoiding a giant private line buffer.
+            // Span path (partial-access / chunked index): mmap the file and emit a lazy `Span` for a giant
+            // `function_call_output` string output instead of reading/materializing the 100s-of-MB line.
+            // Never for a compressed rollout — a span can't point into zstd frames.
+            #[cfg(feature = "mmap")]
+            if opts.spans && !is_zst_path(&r.path) {
+                if let Ok(file) = fs::File::open(&r.path) {
+                    if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+                        // One forward pass: tell the kernel, so it reads ahead in big runs instead of
+                        // faulting the file in a page at a time. Measured on a 12-thread recount of
+                        // 88 GB of rollouts: 41-44 s with this hint, 58-59 s without; our own read-ahead on
+                        // top (`madvise(WILLNEED)` or `F_RDADVISE`, 32 MB ahead of the parser) made it
+                        // 150-180 s, and `WILLNEED` on the whole file pages all of it in for a reader
+                        // that stops at the first hit.
+                        #[cfg(unix)]
+                        let _ = map.advise(memmap2::Advice::Sequential);
+                        let has_events = detect_has_events_bytes(&map);
+                        return Ok(stream_jsonl_spans(
+                            &r.id,
+                            &map,
+                            Some(r.path.clone()),
+                            has_events,
+                            opts.offsets,
+                            sink,
+                        ));
+                    }
                 }
             }
-        }
-        let has_events = detect_has_events(open_rollout(&r.path)?);
-        Ok(stream_jsonl(
-            &r.id,
-            open_rollout(&r.path)?,
-            Some(r.path.clone()),
-            has_events,
-            opts,
-            sink,
-        ))
+            let has_events = detect_has_events(open_rollout(&r.path)?);
+            Ok(stream_jsonl(
+                &r.id,
+                open_rollout(&r.path)?,
+                Some(r.path.clone()),
+                has_events,
+                opts,
+                sink,
+            ))
+        })
     }
 
     fn resume_format(&self) -> Option<u32> {
@@ -249,38 +251,41 @@ impl Adapter for Codex {
         sink: &mut dyn MessageSink,
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
-        #[cfg(feature = "mmap")]
-        {
-            if !opts.spans || is_zst_path(&r.path) || !is_jsonl_path(&r.path) {
-                return Ok(None);
+        crate::stream::checked(sink, |sink| {
+            #[cfg(feature = "mmap")]
+            {
+                if !opts.spans || is_zst_path(&r.path) || !is_jsonl_path(&r.path) {
+                    return Ok(None);
+                }
+                let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
+                    return Ok(None);
+                };
+                let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+                let map =
+                    unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mapping {}", r.path.display()))?;
+                if (map.len() as u64) < from.offset {
+                    return Ok(None);
+                }
+                if detect_has_events_bytes(&map) != state.has_events {
+                    return Ok(None);
+                }
+                #[cfg(unix)]
+                let _ = map.advise(memmap2::Advice::Sequential);
+                Ok(Some(stream_jsonl_spans_at(
+                    &r.id,
+                    &map,
+                    state,
+                    from.offset,
+                    opts.offsets,
+                    sink,
+                )))
             }
-            let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
-                return Ok(None);
-            };
-            let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
-            let map = unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mapping {}", r.path.display()))?;
-            if (map.len() as u64) < from.offset {
-                return Ok(None);
+            #[cfg(not(feature = "mmap"))]
+            {
+                let _ = (r, opts, sink, from);
+                Ok(None)
             }
-            if detect_has_events_bytes(&map) != state.has_events {
-                return Ok(None);
-            }
-            #[cfg(unix)]
-            let _ = map.advise(memmap2::Advice::Sequential);
-            Ok(Some(stream_jsonl_spans_at(
-                &r.id,
-                &map,
-                state,
-                from.offset,
-                opts.offsets,
-                sink,
-            )))
-        }
-        #[cfg(not(feature = "mmap"))]
-        {
-            let _ = (r, opts, sink, from);
-            Ok(None)
-        }
+        })
     }
 }
 

@@ -191,121 +191,123 @@ impl Adapter for KimiCode {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // The ref points at the session dir (the `main` agent) or, from [`subagent_refs`], at one
-        // sub-agent's dir (`…/agents/agent-N`); the state file is the session's either way.
-        let (session_dir, agent_id) = split_agent_path(&r.path);
-        let state = read_state(session_dir);
-        let wire = agent_wire(session_dir, agent_id);
+        crate::stream::checked(sink, |sink| {
+            // The ref points at the session dir (the `main` agent) or, from [`subagent_refs`], at one
+            // sub-agent's dir (`…/agents/agent-N`); the state file is the session's either way.
+            let (session_dir, agent_id) = split_agent_path(&r.path);
+            let state = read_state(session_dir);
+            let wire = agent_wire(session_dir, agent_id);
 
-        let mut s = Session {
-            id: r.id.clone(),
-            harness: Harness::KimiCode,
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
-            cwd: r
-                .cwd
-                .clone()
-                .or_else(|| state.get("cwd").and_then(Value::as_str).map(PathBuf::from)),
-            title: r.title.clone(),
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            // The model is bound by the 2nd record (`profile.bind`); peek at the head so the sink's
-            // header knows it before the body streams.
-            model: peek_model(&wire),
-            git: None,
-            messages: Vec::new(),
-            source_path: Some(r.path.clone()),
-            extra: Map::new(),
-        };
-        // The system prompt is bound by the head of the wire (`profile.bind`); peek so the
-        // session-level copy is known before the body streams (INTERFACE-V2 §4).
-        s.system_prompt = peek_system_prompt(&wire);
-        if agent_id == "main" {
-            // Session facts live in the harness bag, `extra["kimi-code"]`, never at the top level.
-            let bag = s.harness_extra_mut(Harness::KimiCode);
-            if let Some(native) = state.get("id").and_then(Value::as_str) {
-                // The id as Kimi Code writes it (`session_<uuid>`); cv keys the session by the bare uuid.
-                bag.insert("native_id".into(), Value::String(native.to_string()));
-            }
-            for key in [
-                "archived",
-                "lastTurnReason",
-                "titleKind",
-                "isCustomTitle",
-                "lastPrompt",
-                "forkedFrom",
-            ] {
-                if let Some(v) = state.get(key).filter(|v| !v.is_null()) {
-                    bag.insert(key.to_string(), v.clone());
+            let mut s = Session {
+                id: r.id.clone(),
+                harness: Harness::KimiCode,
+                system_prompt: None,
+                lineage: crate::ir::Lineage::default(),
+                cwd: r
+                    .cwd
+                    .clone()
+                    .or_else(|| state.get("cwd").and_then(Value::as_str).map(PathBuf::from)),
+                title: r.title.clone(),
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+                // The model is bound by the 2nd record (`profile.bind`); peek at the head so the sink's
+                // header knows it before the body streams.
+                model: peek_model(&wire),
+                git: None,
+                messages: Vec::new(),
+                source_path: Some(r.path.clone()),
+                extra: Map::new(),
+            };
+            // The system prompt is bound by the head of the wire (`profile.bind`); peek so the
+            // session-level copy is known before the body streams (INTERFACE-V2 §4).
+            s.system_prompt = peek_system_prompt(&wire);
+            if agent_id == "main" {
+                // Session facts live in the harness bag, `extra["kimi-code"]`, never at the top level.
+                let bag = s.harness_extra_mut(Harness::KimiCode);
+                if let Some(native) = state.get("id").and_then(Value::as_str) {
+                    // The id as Kimi Code writes it (`session_<uuid>`); cv keys the session by the bare uuid.
+                    bag.insert("native_id".into(), Value::String(native.to_string()));
                 }
-            }
-            // Sub-agents (`Agent` tool): everything in `state.json.agents` but `main`.
-            if let Some(agents) = state.get("agents").and_then(Value::as_object) {
-                let subs: Map<String, Value> = agents
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != "main")
-                    .map(|(k, v)| {
-                        let mut a = Map::new();
-                        for key in ["type", "parentAgentId", "labels"] {
-                            if let Some(x) = v.get(key) {
-                                a.insert(key.to_string(), x.clone());
+                for key in [
+                    "archived",
+                    "lastTurnReason",
+                    "titleKind",
+                    "isCustomTitle",
+                    "lastPrompt",
+                    "forkedFrom",
+                ] {
+                    if let Some(v) = state.get(key).filter(|v| !v.is_null()) {
+                        bag.insert(key.to_string(), v.clone());
+                    }
+                }
+                // Sub-agents (`Agent` tool): everything in `state.json.agents` but `main`.
+                if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+                    let subs: Map<String, Value> = agents
+                        .iter()
+                        .filter(|(k, _)| k.as_str() != "main")
+                        .map(|(k, v)| {
+                            let mut a = Map::new();
+                            for key in ["type", "parentAgentId", "labels"] {
+                                if let Some(x) = v.get(key) {
+                                    a.insert(key.to_string(), x.clone());
+                                }
                             }
-                        }
-                        (k.clone(), Value::Object(a))
-                    })
-                    .collect();
-                if !subs.is_empty() {
-                    bag.insert("agents".into(), Value::Object(subs));
+                            (k.clone(), Value::Object(a))
+                        })
+                        .collect();
+                    if !subs.is_empty() {
+                        bag.insert("agents".into(), Value::Object(subs));
+                    }
                 }
-            }
-            // `kimi fork` (2.x): `state.json.forkedFrom` names the source (`session_<uuid>`).
-            s.lineage.forked_from = state
-                .get("forkedFrom")
-                .and_then(Value::as_str)
-                .map(|f| f.strip_prefix("session_").unwrap_or(f).to_string());
-        } else {
-            // A sub-agent's own session: the parent is the session it lives in (its uuid), the
-            // nickname is the agent dir. `parentAgentId` says which agent spawned it (`main`, or
-            // another sub-agent for nested spawns); the `Agent` tool call that did so is not
-            // recorded on the child's side, so `spawned_by_tool_use` stays unknown.
-            s.lineage.parent = Some(session_uuid(session_dir).to_string());
-            s.lineage.agent_path = Some(agent_id.to_string());
-            let bag = s.harness_extra_mut(Harness::KimiCode);
-            bag.insert("agent_id".into(), Value::String(agent_id.to_string()));
-            if let Some(a) = state.pointer(&format!("/agents/{agent_id}")) {
-                for key in ["parentAgentId", "labels"] {
-                    if let Some(x) = a.get(key).filter(|x| !x.is_null()) {
-                        bag.insert(key.to_string(), x.clone());
+                // `kimi fork` (2.x): `state.json.forkedFrom` names the source (`session_<uuid>`).
+                s.lineage.forked_from = state
+                    .get("forkedFrom")
+                    .and_then(Value::as_str)
+                    .map(|f| f.strip_prefix("session_").unwrap_or(f).to_string());
+            } else {
+                // A sub-agent's own session: the parent is the session it lives in (its uuid), the
+                // nickname is the agent dir. `parentAgentId` says which agent spawned it (`main`, or
+                // another sub-agent for nested spawns); the `Agent` tool call that did so is not
+                // recorded on the child's side, so `spawned_by_tool_use` stays unknown.
+                s.lineage.parent = Some(session_uuid(session_dir).to_string());
+                s.lineage.agent_path = Some(agent_id.to_string());
+                let bag = s.harness_extra_mut(Harness::KimiCode);
+                bag.insert("agent_id".into(), Value::String(agent_id.to_string()));
+                if let Some(a) = state.pointer(&format!("/agents/{agent_id}")) {
+                    for key in ["parentAgentId", "labels"] {
+                        if let Some(x) = a.get(key).filter(|x| !x.is_null()) {
+                            bag.insert(key.to_string(), x.clone());
+                        }
                     }
                 }
             }
-        }
 
-        sink.meta(&s);
+            sink.meta(&s);
 
-        let Ok(file) = fs::File::open(&wire) else {
-            return Ok(s);
-        };
-        let mut ctx = Ctx {
-            opts,
-            step: None,
-            call_names: HashMap::new(),
-            seen_prompts: HashSet::new(),
-            protocol_version: None,
-            facts: Map::new(),
-            stopped: false,
-        };
-        let skipped = super::for_each_json_line(BufReader::new(file), |v| ctx.record(&v, sink));
-        if !ctx.stopped {
-            ctx.flush_step(sink);
-        }
-        s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
-        if let Some(pv) = ctx.protocol_version.take() {
-            s.harness_extra_mut(Harness::KimiCode)
-                .insert("protocol_version".into(), Value::String(pv));
-        }
-        super::note_skipped_lines(&mut s, skipped);
-        Ok(s)
+            let Ok(file) = fs::File::open(&wire) else {
+                return Ok(s);
+            };
+            let mut ctx = Ctx {
+                opts,
+                step: None,
+                call_names: HashMap::new(),
+                seen_prompts: HashSet::new(),
+                protocol_version: None,
+                facts: Map::new(),
+                stopped: false,
+            };
+            let skipped = super::for_each_json_line(BufReader::new(file), |v| ctx.record(&v, sink));
+            if !ctx.stopped {
+                ctx.flush_step(sink);
+            }
+            s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
+            if let Some(pv) = ctx.protocol_version.take() {
+                s.harness_extra_mut(Harness::KimiCode)
+                    .insert("protocol_version".into(), Value::String(pv));
+            }
+            super::note_skipped_lines(&mut s, skipped);
+            Ok(s)
+        })
     }
 }
 

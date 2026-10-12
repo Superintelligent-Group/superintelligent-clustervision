@@ -114,65 +114,67 @@ impl Adapter for LmStudio {
     /// turned into one small `Value` ([`parse_message`]), emitted to `sink`, and dropped before the
     /// next — so peak memory is O(largest turn) + the mmap (reclaimable) + the slice vec.
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        let bytes = read_bytes(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-        let doc: Doc =
-            serde_json::from_slice(bytes.as_ref()).with_context(|| format!("parsing {}", r.path.display()))?;
+        crate::stream::checked(sink, |sink| {
+            let bytes = read_bytes(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
+            let doc: Doc =
+                serde_json::from_slice(bytes.as_ref()).with_context(|| format!("parsing {}", r.path.display()))?;
 
-        let created_at = doc.created_at.as_ref().and_then(super::ts_from_value);
-        let updated_at = file_mtime(&r.path).or(created_at);
+            let created_at = doc.created_at.as_ref().and_then(super::ts_from_value);
+            let updated_at = file_mtime(&r.path).or(created_at);
 
-        // The per-chat / global system prompt is the session-level fact (never a message).
-        let system_prompt = doc.system_prompt().map(str::to_string).filter(|s| !s.trim().is_empty());
-        let pinned = doc.pinned == Some(true);
+            // The per-chat / global system prompt is the session-level fact (never a message).
+            let system_prompt = doc.system_prompt().map(str::to_string).filter(|s| !s.trim().is_empty());
+            let pinned = doc.pinned == Some(true);
 
-        let mut s = Session {
-            id: r.id.clone(),
-            harness: Harness::LmStudio,
-            cwd: None, // LM Studio is a chat app: no working directory.
-            title: r.title.clone(),
-            created_at,
-            updated_at,
-            model: None,
-            git: None,
-            messages: Vec::new(),
-            source_path: Some(r.path.clone()),
-            extra: serde_json::Map::new(),
-            system_prompt,
-            lineage: crate::ir::Lineage::default(),
-        };
-        if pinned {
-            s.harness_extra_mut(Harness::LmStudio)
-                .insert("pinned".into(), Value::Bool(true));
-        }
-
-        // `model` is backfilled from the first genInfo seen while iterating turns, so hand the
-        // metadata to the sink after the loop (the bridge sinks read it from the returned Session).
-        let mut session_model: Option<String> = None;
-        sink.meta(&s);
-        'outer: for raw in doc.messages {
-            // ONE small Value per turn — parsed, emitted, dropped before the next.
-            let Ok(v) = serde_json::from_str::<Value>(raw.get()) else {
-                continue;
+            let mut s = Session {
+                id: r.id.clone(),
+                harness: Harness::LmStudio,
+                cwd: None, // LM Studio is a chat app: no working directory.
+                title: r.title.clone(),
+                created_at,
+                updated_at,
+                model: None,
+                git: None,
+                messages: Vec::new(),
+                source_path: Some(r.path.clone()),
+                extra: serde_json::Map::new(),
+                system_prompt,
+                lineage: crate::ir::Lineage::default(),
             };
-            // The `currentlySelected` version is the conversation.
-            if let Some(m) = parse_message(&v, &mut session_model) {
-                if sink.message(m) == Flow::Stop {
-                    break;
-                }
+            if pinned {
+                s.harness_extra_mut(Harness::LmStudio)
+                    .insert("pinned".into(), Value::Bool(true));
             }
-            // Under `complete`, the regenerated/edited `versions[]` alternates ride along as
-            // `Branch` turns, each tagged with its index in `extra["lmstudio"]["variant"]`.
-            if opts.complete {
-                for m in parse_variants(&v) {
+
+            // `model` is backfilled from the first genInfo seen while iterating turns, so hand the
+            // metadata to the sink after the loop (the bridge sinks read it from the returned Session).
+            let mut session_model: Option<String> = None;
+            sink.meta(&s);
+            'outer: for raw in doc.messages {
+                // ONE small Value per turn — parsed, emitted, dropped before the next.
+                let Ok(v) = serde_json::from_str::<Value>(raw.get()) else {
+                    continue;
+                };
+                // The `currentlySelected` version is the conversation.
+                if let Some(m) = parse_message(&v, &mut session_model) {
                     if sink.message(m) == Flow::Stop {
-                        break 'outer;
+                        break;
+                    }
+                }
+                // Under `complete`, the regenerated/edited `versions[]` alternates ride along as
+                // `Branch` turns, each tagged with its index in `extra["lmstudio"]["variant"]`.
+                if opts.complete {
+                    for m in parse_variants(&v) {
+                        if sink.message(m) == Flow::Stop {
+                            break 'outer;
+                        }
                     }
                 }
             }
-        }
-        s.model = session_model;
+            s.model = session_model;
 
-        Ok(s)
+            Ok(s)
+        })
     }
 }
 

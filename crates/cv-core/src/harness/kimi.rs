@@ -200,157 +200,160 @@ impl Adapter for Kimi {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        // r.path is the session dir (modern), the hash dir (legacy), or a sub-agent's dir
-        // (`<session>/subagents/<agent_id>`, from [`subagent_refs`]). Locate the transcript and
-        // the rotated segments before it.
-        let (transcript, wire) = locate_transcript(&r.path, &r.id);
-        let segments = transcript_segments(&r.path, &transcript);
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            // r.path is the session dir (modern), the hash dir (legacy), or a sub-agent's dir
+            // (`<session>/subagents/<agent_id>`, from [`subagent_refs`]). Locate the transcript and
+            // the rotated segments before it.
+            let (transcript, wire) = locate_transcript(&r.path, &r.id);
+            let segments = transcript_segments(&r.path, &transcript);
 
-        let mut s = Session {
-            id: r.id.clone(),
-            harness: Harness::Kimi,
-            cwd: r.cwd.clone(),
-            title: r.title.clone(),
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            model: self
-                .root
-                .as_ref()
-                .and_then(|root| default_model_from_config(&root.join("config.toml"))),
-            git: None,
-            messages: Vec::new(),
-            source_path: Some(r.path.clone()),
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: subagent_lineage(&r.path),
-        };
-        if let Some(meta) = subagent_meta(&r.path) {
-            s.harness_extra_mut(Harness::Kimi).insert("subagent".into(), meta);
-        }
-
-        // Sidecar enrichment from wire.jsonl (tolerant: absent/empty/malformed ⇒ empty). The
-        // per-message `tool_results` map (keyed by tool_call_id) is a per-line enrichment; the
-        // positional passes (StatusUpdate usage/message_id zipped onto assistant turns, the first
-        // wire timestamp stamped onto the first user turn) only ever walk *forward* with O(1)
-        // state, so they run inline here too — `parse()` is exactly `collect(stream())`.
-        let enrich = wire
-            .as_ref()
-            .map(|p| read_wire_enrichment(p, opts.spans))
-            .unwrap_or_default();
-
-        // Rotated segments (context_1.jsonl…) are read first, in order; their count stays as
-        // bookkeeping.
-        let seg_count = segments.len().saturating_sub(1) as u64;
-        if seg_count > 0 {
-            s.harness_extra_mut(Harness::Kimi)
-                .insert("compaction_segments".into(), Value::Number(seg_count.into()));
-        }
-        // The system prompt is the first `context.jsonl` record; peek so the session-level copy is
-        // known before the body streams.
-        s.system_prompt = peek_system_prompt(&segments[0]);
-
-        if let Some(mode) = approval_mode(&r.path) {
-            crate::affordance::note_mode(s.harness_extra_mut(Harness::Kimi), &mode);
-        }
-
-        // Session metadata is known up front; hand it to the sink before the body.
-        sink.meta(&s);
-
-        // Stream the segments line-by-line (a single session can be large; `read_to_string` would
-        // resident-spike the whole file). Each record becomes at most one Message, emitted to `sink`
-        // and dropped before the next line, so peak memory is O(largest message).
-        if !segments.iter().any(|p| p.exists()) {
-            return Ok(s);
-        }
-        // Positional wire enrichment, streamed: one StatusUpdate per assistant step (in wire
-        // order) and the first wire timestamp for the first user turn. Forward-only, O(1) state.
-        let mut statuses = enrich.statuses.iter();
-        let first_wire_ts = enrich.first_timestamp;
-        let mut first_user_seen = false;
-        // `tool_call_id` → tool name from the assistant's `tool_calls`, so a result names its tool.
-        let mut call_names: HashMap<String, String> = HashMap::new();
-        let complete = opts.complete;
-        // One-message lookahead: a `_usage` record describes the message BEFORE it, so each message
-        // waits here until the next record shows what follows. Peak memory stays O(one message).
-        let mut pending: Option<Message> = None;
-        let mut stopped = false;
-        // Set at the first new record of a rotated-in segment: unless that record is the
-        // compaction summary (which gets its own boundary), the rotation was a `/clear` or a
-        // rewind, and what follows does not continue what precedes.
-        let mut rotated: Option<String> = None;
-        // `_checkpoint` records (rewind targets), tallied for the session's affordances.
-        let mut checkpoints = 0u64;
-        let skipped = for_each_segment_record(&segments, |v, starts| {
-            if let Some(name) = starts {
-                rotated = Some(name.to_string());
-            }
-            checkpoints += u64::from(v.get("role").and_then(Value::as_str) == Some("_checkpoint"));
-            if v.get("role").and_then(Value::as_str) == Some("_usage") {
-                if let Some(p) = pending.as_mut() {
-                    fold_usage_record(p, &v);
-                }
-                return Flow::Continue;
-            }
-            let Some(mut m) = context_message(&v, &enrich, complete, &mut call_names) else {
-                return Flow::Continue;
+            let mut s = Session {
+                id: r.id.clone(),
+                harness: Harness::Kimi,
+                cwd: r.cwd.clone(),
+                title: r.title.clone(),
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+                model: self
+                    .root
+                    .as_ref()
+                    .and_then(|root| default_model_from_config(&root.join("config.toml"))),
+                git: None,
+                messages: Vec::new(),
+                source_path: Some(r.path.clone()),
+                extra: serde_json::Map::new(),
+                system_prompt: None,
+                lineage: subagent_lineage(&r.path),
             };
-            match m.role {
-                Role::Assistant => {
-                    if let Some(st) = statuses.next() {
-                        if m.usage.is_none() {
-                            m.usage = st.usage.clone();
-                        }
-                        if m.id.is_none() {
-                            m.id = st.message_id.clone();
+            if let Some(meta) = subagent_meta(&r.path) {
+                s.harness_extra_mut(Harness::Kimi).insert("subagent".into(), meta);
+            }
+
+            // Sidecar enrichment from wire.jsonl (tolerant: absent/empty/malformed ⇒ empty). The
+            // per-message `tool_results` map (keyed by tool_call_id) is a per-line enrichment; the
+            // positional passes (StatusUpdate usage/message_id zipped onto assistant turns, the first
+            // wire timestamp stamped onto the first user turn) only ever walk *forward* with O(1)
+            // state, so they run inline here too — `parse()` is exactly `collect(stream())`.
+            let enrich = wire
+                .as_ref()
+                .map(|p| read_wire_enrichment(p, opts.spans))
+                .unwrap_or_default();
+
+            // Rotated segments (context_1.jsonl…) are read first, in order; their count stays as
+            // bookkeeping.
+            let seg_count = segments.len().saturating_sub(1) as u64;
+            if seg_count > 0 {
+                s.harness_extra_mut(Harness::Kimi)
+                    .insert("compaction_segments".into(), Value::Number(seg_count.into()));
+            }
+            // The system prompt is the first `context.jsonl` record; peek so the session-level copy is
+            // known before the body streams.
+            s.system_prompt = peek_system_prompt(&segments[0]);
+
+            if let Some(mode) = approval_mode(&r.path) {
+                crate::affordance::note_mode(s.harness_extra_mut(Harness::Kimi), &mode);
+            }
+
+            // Session metadata is known up front; hand it to the sink before the body.
+            sink.meta(&s);
+
+            // Stream the segments line-by-line (a single session can be large; `read_to_string` would
+            // resident-spike the whole file). Each record becomes at most one Message, emitted to `sink`
+            // and dropped before the next line, so peak memory is O(largest message).
+            if !segments.iter().any(|p| p.exists()) {
+                return Ok(s);
+            }
+            // Positional wire enrichment, streamed: one StatusUpdate per assistant step (in wire
+            // order) and the first wire timestamp for the first user turn. Forward-only, O(1) state.
+            let mut statuses = enrich.statuses.iter();
+            let first_wire_ts = enrich.first_timestamp;
+            let mut first_user_seen = false;
+            // `tool_call_id` → tool name from the assistant's `tool_calls`, so a result names its tool.
+            let mut call_names: HashMap<String, String> = HashMap::new();
+            let complete = opts.complete;
+            // One-message lookahead: a `_usage` record describes the message BEFORE it, so each message
+            // waits here until the next record shows what follows. Peak memory stays O(one message).
+            let mut pending: Option<Message> = None;
+            let mut stopped = false;
+            // Set at the first new record of a rotated-in segment: unless that record is the
+            // compaction summary (which gets its own boundary), the rotation was a `/clear` or a
+            // rewind, and what follows does not continue what precedes.
+            let mut rotated: Option<String> = None;
+            // `_checkpoint` records (rewind targets), tallied for the session's affordances.
+            let mut checkpoints = 0u64;
+            let skipped = for_each_segment_record(&segments, |v, starts| {
+                if let Some(name) = starts {
+                    rotated = Some(name.to_string());
+                }
+                checkpoints += u64::from(v.get("role").and_then(Value::as_str) == Some("_checkpoint"));
+                if v.get("role").and_then(Value::as_str) == Some("_usage") {
+                    if let Some(p) = pending.as_mut() {
+                        fold_usage_record(p, &v);
+                    }
+                    return Flow::Continue;
+                }
+                let Some(mut m) = context_message(&v, &enrich, complete, &mut call_names) else {
+                    return Flow::Continue;
+                };
+                match m.role {
+                    Role::Assistant => {
+                        if let Some(st) = statuses.next() {
+                            if m.usage.is_none() {
+                                m.usage = st.usage.clone();
+                            }
+                            if m.id.is_none() {
+                                m.id = st.message_id.clone();
+                            }
                         }
                     }
+                    Role::User if !first_user_seen => {
+                        first_user_seen = true;
+                        if m.timestamp.is_none() {
+                            m.timestamp = first_wire_ts;
+                        }
+                    }
+                    _ => {}
                 }
-                Role::User if !first_user_seen => {
-                    first_user_seen = true;
-                    if m.timestamp.is_none() {
-                        m.timestamp = first_wire_ts;
+                if let Some(prev) = pending.take() {
+                    if sink.message(prev) == Flow::Stop {
+                        stopped = true;
+                        return Flow::Stop;
                     }
                 }
-                _ => {}
-            }
-            if let Some(prev) = pending.take() {
-                if sink.message(prev) == Flow::Stop {
-                    stopped = true;
-                    return Flow::Stop;
-                }
-            }
-            // The compaction summary seeds a rotated segment; the boundary itself is the rotation,
-            // which leaves no record — synthesize it so the compaction detector can pair the two.
-            if m.kind == MessageKind::CompactionSummary && sink.message(compaction_boundary(m.timestamp)) == Flow::Stop
-            {
-                stopped = true;
-                return Flow::Stop;
-            }
-            if let Some(segment) = rotated.take() {
-                if m.kind != MessageKind::CompactionSummary
-                    && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
+                // The compaction summary seeds a rotated segment; the boundary itself is the rotation,
+                // which leaves no record — synthesize it so the compaction detector can pair the two.
+                if m.kind == MessageKind::CompactionSummary
+                    && sink.message(compaction_boundary(m.timestamp)) == Flow::Stop
                 {
                     stopped = true;
                     return Flow::Stop;
                 }
+                if let Some(segment) = rotated.take() {
+                    if m.kind != MessageKind::CompactionSummary
+                        && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
+                    {
+                        stopped = true;
+                        return Flow::Stop;
+                    }
+                }
+                pending = Some(m);
+                Flow::Continue
+            });
+            if !stopped {
+                if let Some(last) = pending.take() {
+                    sink.message(last);
+                }
             }
-            pending = Some(m);
-            Flow::Continue
-        });
-        if !stopped {
-            if let Some(last) = pending.take() {
-                sink.message(last);
+            if checkpoints > 0 {
+                crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), checkpoints, []);
             }
-        }
-        if checkpoints > 0 {
-            crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), checkpoints, []);
-        }
-        super::note_skipped_lines(&mut s, skipped);
+            super::note_skipped_lines(&mut s, skipped);
 
-        Ok(s)
+            Ok(s)
+        })
     }
 
     /// The todo list `SetTodoList` keeps in the session dir's `state.json` (`todos: [{title,

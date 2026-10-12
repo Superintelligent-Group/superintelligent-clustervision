@@ -100,106 +100,108 @@ impl Adapter for Grok {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        // r.path is the session directory. `summary.json` (small) carries all session-level
-        // metadata; the transcript is `chat_history.jsonl`, one record per line — streamed.
-        let dir = &r.path;
-        let summary: Value = fs::read_to_string(dir.join("summary.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or(Value::Null);
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            // r.path is the session directory. `summary.json` (small) carries all session-level
+            // metadata; the transcript is `chat_history.jsonl`, one record per line — streamed.
+            let dir = &r.path;
+            let summary: Value = fs::read_to_string(dir.join("summary.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(Value::Null);
 
-        let mut s = Session {
-            id: r.id.clone(),
-            harness: Harness::Grok,
-            cwd: summary
-                .pointer("/info/cwd")
-                .and_then(Value::as_str)
-                .map(PathBuf::from)
-                .or_else(|| r.cwd.clone()),
-            title: r.title.clone(),
-            created_at: summary.get("created_at").and_then(Value::as_str).and_then(parse_ts),
-            updated_at: summary
-                .get("updated_at")
-                .and_then(Value::as_str)
-                .and_then(parse_ts)
-                .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
-            model: summary
-                .get("current_model_id")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            git: grok_git(&summary),
-            messages: Vec::new(),
-            source_path: Some(dir.clone()),
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: crate::ir::Lineage::default(),
-        };
-
-        // Sidecar enrichment: tool_call / tool_call_update entries from the ACP update stream.
-        let enrich = read_update_enrichment(dir);
-
-        // Subagent / agent-name facts + lineage from summary.json (and a sub-agent's parent from the
-        // parent's `subagents/<id>/meta.json`).
-        grok_session_facts(&mut s, &summary);
-        grok_lineage(&mut s, &summary, dir);
-
-        // Grok persists the system prompt it sent as `system_prompt.txt` — byte-identical to the
-        // leading `system` transcript record. It is the session-level fact, never a message.
-        if let Ok(sp) = fs::read_to_string(dir.join("system_prompt.txt")) {
-            if !sp.trim().is_empty() {
-                s.system_prompt = Some(sp);
-            }
-        }
-
-        // All session metadata comes from summary.json (already set above), so hand it to the sink
-        // before the body — header-rendering consumers (cv show) get the title/model/cwd up front.
-        sink.meta(&s);
-
-        // IR diet: a message names its model only when it differs from the session default.
-        let session_model = s.model.clone();
-        let file = fs::File::open(dir.join("chat_history.jsonl"))
-            .with_context(|| format!("reading chat_history in {}", dir.display()))?;
-        // A 1.0.5x `reasoning` record joins the assistant turn after it, so one model turn stays one
-        // message (and discover's user+assistant count still matches); reasoning with no assistant
-        // turn after it (an interrupted turn) is flushed as a message of its own.
-        let mut pending: Option<Message> = None;
-        let mut stopped = false;
-        let skipped = super::for_each_json_line(BufReader::new(file), |v| {
-            let is_reasoning = v.get("type").and_then(Value::as_str) == Some("reasoning");
-            let Some(mut m) = chat_message(&v, &enrich) else {
-                return Flow::Continue;
+            let mut s = Session {
+                id: r.id.clone(),
+                harness: Harness::Grok,
+                cwd: summary
+                    .pointer("/info/cwd")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .or_else(|| r.cwd.clone()),
+                title: r.title.clone(),
+                created_at: summary.get("created_at").and_then(Value::as_str).and_then(parse_ts),
+                updated_at: summary
+                    .get("updated_at")
+                    .and_then(Value::as_str)
+                    .and_then(parse_ts)
+                    .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
+                model: summary
+                    .get("current_model_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                git: grok_git(&summary),
+                messages: Vec::new(),
+                source_path: Some(dir.clone()),
+                extra: serde_json::Map::new(),
+                system_prompt: None,
+                lineage: crate::ir::Lineage::default(),
             };
-            if is_reasoning {
-                match pending.as_mut() {
-                    Some(p) => p.content.append(&mut m.content),
-                    None => pending = Some(m),
+
+            // Sidecar enrichment: tool_call / tool_call_update entries from the ACP update stream.
+            let enrich = read_update_enrichment(dir);
+
+            // Subagent / agent-name facts + lineage from summary.json (and a sub-agent's parent from the
+            // parent's `subagents/<id>/meta.json`).
+            grok_session_facts(&mut s, &summary);
+            grok_lineage(&mut s, &summary, dir);
+
+            // Grok persists the system prompt it sent as `system_prompt.txt` — byte-identical to the
+            // leading `system` transcript record. It is the session-level fact, never a message.
+            if let Ok(sp) = fs::read_to_string(dir.join("system_prompt.txt")) {
+                if !sp.trim().is_empty() {
+                    s.system_prompt = Some(sp);
                 }
-                return Flow::Continue;
             }
-            if let Some(mut p) = pending.take() {
-                if m.role == Role::Assistant {
-                    p.content.append(&mut m.content);
-                    m.content = p.content;
-                } else if let Flow::Stop = sink.message(p) {
-                    stopped = true;
-                    return Flow::Stop;
+
+            // All session metadata comes from summary.json (already set above), so hand it to the sink
+            // before the body — header-rendering consumers (cv show) get the title/model/cwd up front.
+            sink.meta(&s);
+
+            // IR diet: a message names its model only when it differs from the session default.
+            let session_model = s.model.clone();
+            let file = fs::File::open(dir.join("chat_history.jsonl"))
+                .with_context(|| format!("reading chat_history in {}", dir.display()))?;
+            // A 1.0.5x `reasoning` record joins the assistant turn after it, so one model turn stays one
+            // message (and discover's user+assistant count still matches); reasoning with no assistant
+            // turn after it (an interrupted turn) is flushed as a message of its own.
+            let mut pending: Option<Message> = None;
+            let mut stopped = false;
+            let skipped = super::for_each_json_line(BufReader::new(file), |v| {
+                let is_reasoning = v.get("type").and_then(Value::as_str) == Some("reasoning");
+                let Some(mut m) = chat_message(&v, &enrich) else {
+                    return Flow::Continue;
+                };
+                if is_reasoning {
+                    match pending.as_mut() {
+                        Some(p) => p.content.append(&mut m.content),
+                        None => pending = Some(m),
+                    }
+                    return Flow::Continue;
                 }
+                if let Some(mut p) = pending.take() {
+                    if m.role == Role::Assistant {
+                        p.content.append(&mut m.content);
+                        m.content = p.content;
+                    } else if let Flow::Stop = sink.message(p) {
+                        stopped = true;
+                        return Flow::Stop;
+                    }
+                }
+                if m.model.is_some() && m.model == session_model {
+                    m.model = None;
+                }
+                let f = sink.message(m);
+                stopped = matches!(f, Flow::Stop);
+                f
+            });
+            if let (Some(p), false) = (pending, stopped) {
+                sink.message(p);
             }
-            if m.model.is_some() && m.model == session_model {
-                m.model = None;
-            }
-            let f = sink.message(m);
-            stopped = matches!(f, Flow::Stop);
-            f
-        });
-        if let (Some(p), false) = (pending, stopped) {
-            sink.message(p);
-        }
-        super::note_skipped_lines(&mut s, skipped);
-        Ok(s)
+            super::note_skipped_lines(&mut s, skipped);
+            Ok(s)
+        })
     }
 
     /// The todo list `todo_write` keeps in the session directory (`plan.json` `{todos: {id: …}}`),

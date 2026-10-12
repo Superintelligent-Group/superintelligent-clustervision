@@ -253,13 +253,15 @@ impl Adapter for Hermes {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Hermes, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
-        // what lets one Hermes adapter span many profile DBs without id collisions.
-        let conn = open_ro(&r.path)?;
-        stream_conn(&conn, r, opts, sink)
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Hermes, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
+            // what lets one Hermes adapter span many profile DBs without id collisions.
+            let conn = open_ro(&r.path)?;
+            stream_conn(&conn, r, opts, sink)
+        })
     }
 
     /// What `/goal`, `/loop` and `/heartbeat` keep in `state_meta` under `<kind>:<session id>`.

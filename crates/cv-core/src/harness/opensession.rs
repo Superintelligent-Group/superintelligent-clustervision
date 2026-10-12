@@ -154,7 +154,7 @@ impl Adapter for OpenSession {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        stream_document(&r.path, opts, sink)
+        crate::stream::checked(sink, |sink| stream_document(&r.path, opts, sink))
     }
 }
 
@@ -181,7 +181,7 @@ impl Adapter for RootedOpenSession {
         )))
     }
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        stream_document(&r.path, opts, sink)
+        crate::stream::checked(sink, |sink| stream_document(&r.path, opts, sink))
     }
 }
 

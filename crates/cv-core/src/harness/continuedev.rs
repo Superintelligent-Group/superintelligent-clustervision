@@ -142,87 +142,89 @@ impl Adapter for Continue {
     /// into one small `Value` ([`history_item_to_message`]), emitted to `sink`, and dropped before
     /// the next — so peak memory is O(largest item) + the mmap (reclaimable) + the slice vec.
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Continue, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        let mut s = Session {
-            cwd: r.cwd.clone(),
-            title: r.title.clone(),
-            created_at: r.created_at,
-            updated_at: r.updated_at.or_else(|| mtime(&r.path)),
-            source_path: Some(r.path.clone()),
-            ..Session::new(r.id.clone(), Harness::Continue)
-        };
-
-        // Map (or read) the file's raw bytes; the borrowed `Doc` slices into them.
-        let Some(bytes) = read_bytes(&r.path) else {
-            sink.meta(&s);
-            return Ok(s);
-        };
-        let Ok(doc) = serde_json::from_slice::<Doc>(bytes.as_ref()) else {
-            sink.meta(&s);
-            return Ok(s);
-        };
-
-        // Backfill session-level fields from the file itself (index may be sparse/absent).
-        if s.title.is_none() {
-            s.title = doc
-                .title
-                .as_deref()
-                .filter(|t| !t.trim().is_empty())
-                .map(|t| crate::ir::truncate(t, 80));
-        }
-        if s.cwd.is_none() {
-            s.cwd = doc
-                .workspace_directory
-                .as_deref()
-                .filter(|p| !p.is_empty())
-                .map(workspace_to_path);
-        }
-
-        // Metadata is fully known now (model is only ever backfilled per-item below, and the bridge
-        // sinks read it from the returned Session); hand the header to the sink before the body.
-        sink.meta(&s);
-
-        // Tool calls whose results came from an item's `toolCallStates` (the cn CLI's shape), so a
-        // later `role: "tool"` item answering the same call is not emitted twice.
-        let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for item in doc.history {
-            // ONE small Value per item — parsed, emitted, dropped before the next.
-            let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
-                continue;
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Continue, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            let mut s = Session {
+                cwd: r.cwd.clone(),
+                title: r.title.clone(),
+                created_at: r.created_at,
+                updated_at: r.updated_at.or_else(|| mtime(&r.path)),
+                source_path: Some(r.path.clone()),
+                ..Session::new(r.id.clone(), Harness::Continue)
             };
-            let reply_id = v.pointer("/message/toolCallId").and_then(Value::as_str);
-            if reply_id.is_some_and(|id| answered.contains(id)) {
-                continue;
+
+            // Map (or read) the file's raw bytes; the borrowed `Doc` slices into them.
+            let Some(bytes) = read_bytes(&r.path) else {
+                sink.meta(&s);
+                return Ok(s);
+            };
+            let Ok(doc) = serde_json::from_slice::<Doc>(bytes.as_ref()) else {
+                sink.meta(&s);
+                return Ok(s);
+            };
+
+            // Backfill session-level fields from the file itself (index may be sparse/absent).
+            if s.title.is_none() {
+                s.title = doc
+                    .title
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                    .map(|t| crate::ir::truncate(t, 80));
             }
-            let results = tool_states_message(&v);
-            if let Some(m) = history_item_to_message(&v, &mut s.model) {
-                // A `system` history item is the system prompt — the session-level fact.
-                if s.system_prompt.is_none() && m.kind == MessageKind::SystemPrompt {
-                    if let Some(t) = m.text() {
-                        if !t.trim().is_empty() {
-                            s.system_prompt = Some(t);
+            if s.cwd.is_none() {
+                s.cwd = doc
+                    .workspace_directory
+                    .as_deref()
+                    .filter(|p| !p.is_empty())
+                    .map(workspace_to_path);
+            }
+
+            // Metadata is fully known now (model is only ever backfilled per-item below, and the bridge
+            // sinks read it from the returned Session); hand the header to the sink before the body.
+            sink.meta(&s);
+
+            // Tool calls whose results came from an item's `toolCallStates` (the cn CLI's shape), so a
+            // later `role: "tool"` item answering the same call is not emitted twice.
+            let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for item in doc.history {
+                // ONE small Value per item — parsed, emitted, dropped before the next.
+                let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
+                    continue;
+                };
+                let reply_id = v.pointer("/message/toolCallId").and_then(Value::as_str);
+                if reply_id.is_some_and(|id| answered.contains(id)) {
+                    continue;
+                }
+                let results = tool_states_message(&v);
+                if let Some(m) = history_item_to_message(&v, &mut s.model) {
+                    // A `system` history item is the system prompt — the session-level fact.
+                    if s.system_prompt.is_none() && m.kind == MessageKind::SystemPrompt {
+                        if let Some(t) = m.text() {
+                            if !t.trim().is_empty() {
+                                s.system_prompt = Some(t);
+                            }
                         }
                     }
-                }
-                if sink.message(m) == Flow::Stop {
-                    break;
-                }
-            }
-            if let Some(r) = results {
-                for b in &r.content {
-                    if let Block::ToolResult { tool_use_id, .. } = b {
-                        answered.insert(tool_use_id.clone());
+                    if sink.message(m) == Flow::Stop {
+                        break;
                     }
                 }
-                if sink.message(r) == Flow::Stop {
-                    break;
+                if let Some(r) = results {
+                    for b in &r.content {
+                        if let Block::ToolResult { tool_use_id, .. } = b {
+                            answered.insert(tool_use_id.clone());
+                        }
+                    }
+                    if sink.message(r) == Flow::Stop {
+                        break;
+                    }
                 }
             }
-        }
 
-        Ok(s)
+            Ok(s)
+        })
     }
 }
 

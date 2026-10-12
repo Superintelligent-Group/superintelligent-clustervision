@@ -129,8 +129,10 @@ impl Adapter for Zed {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        let conn = open_ro(&r.path)?;
-        stream_thread(&conn, r, sink)
+        crate::stream::checked(sink, |sink| {
+            let conn = open_ro(&r.path)?;
+            stream_thread(&conn, r, sink)
+        })
     }
 }
 

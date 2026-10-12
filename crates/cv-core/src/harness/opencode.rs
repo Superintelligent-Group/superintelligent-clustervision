@@ -249,86 +249,88 @@ impl Adapter for OpenCode {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
-        let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenCode, sink);
-        let sink: &mut dyn MessageSink = &mut spawns;
-        // A db-backed ref points at the `.db` file itself (like the other SQLite adapters).
-        #[cfg(feature = "sqlite")]
-        if db::is_db_ref(r) {
-            return db::stream(r, _opts, sink);
-        }
-        // OpenCode stores a session as a *directory* of per-message JSON files (plus per-message
-        // part files). The old `parse` slurped every message body into a `Vec` to sort it — for a
-        // large session that resident-spikes the whole transcript. Here we instead:
-        //   1. read the small session meta file,
-        //   2. cheaply order the message files (read each only to pull its `time/created` key, then
-        //      drop the body — peak is O(one message file), not the whole session),
-        //   3. re-read each file in order, build its IR message(s), emit to `sink`, and drop it
-        //      before touching the next.
-        // `load_parts` already loads one message's parts at a time, so peak stays O(one message).
-        let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-        let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        crate::stream::checked(sink, |sink| {
+            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::OpenCode, sink);
+            let sink: &mut dyn MessageSink = &mut spawns;
+            // A db-backed ref points at the `.db` file itself (like the other SQLite adapters).
+            #[cfg(feature = "sqlite")]
+            if db::is_db_ref(r) {
+                return db::stream(r, _opts, sink);
+            }
+            // OpenCode stores a session as a *directory* of per-message JSON files (plus per-message
+            // part files). The old `parse` slurped every message body into a `Vec` to sort it — for a
+            // large session that resident-spikes the whole transcript. Here we instead:
+            //   1. read the small session meta file,
+            //   2. cheaply order the message files (read each only to pull its `time/created` key, then
+            //      drop the body — peak is O(one message file), not the whole session),
+            //   3. re-read each file in order, build its IR message(s), emit to `sink`, and drop it
+            //      before touching the next.
+            // `load_parts` already loads one message's parts at a time, so peak stays O(one message).
+            let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
+            let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
 
-        let mut s = Session {
-            id: r.id.clone(),
-            harness: Harness::OpenCode,
-            cwd: meta.get("directory").and_then(Value::as_str).map(PathBuf::from),
-            title: meta.get("title").and_then(Value::as_str).map(str::to_string),
-            created_at: meta.pointer("/time/created").and_then(super::ts_from_value),
-            updated_at: meta.pointer("/time/updated").and_then(super::ts_from_value),
-            model: None,
-            git: None,
-            messages: Vec::new(),
-            source_path: Some(r.path.clone()),
-            extra: serde_json::Map::new(),
-            system_prompt: None,
-            lineage: Lineage {
-                parent: meta
-                    .get("parentID")
-                    .and_then(Value::as_str)
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_string),
-                ..Lineage::default()
-            },
-        };
+            let mut s = Session {
+                id: r.id.clone(),
+                harness: Harness::OpenCode,
+                cwd: meta.get("directory").and_then(Value::as_str).map(PathBuf::from),
+                title: meta.get("title").and_then(Value::as_str).map(str::to_string),
+                created_at: meta.pointer("/time/created").and_then(super::ts_from_value),
+                updated_at: meta.pointer("/time/updated").and_then(super::ts_from_value),
+                model: None,
+                git: None,
+                messages: Vec::new(),
+                source_path: Some(r.path.clone()),
+                extra: serde_json::Map::new(),
+                system_prompt: None,
+                lineage: Lineage {
+                    parent: meta
+                        .get("parentID")
+                        .and_then(Value::as_str)
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string),
+                    ..Lineage::default()
+                },
+            };
 
-        // Order message files by `time/created` (same ordering as before) while holding only the
-        // sort key + path per file — never all message bodies at once.
-        let mut order: Vec<(i64, PathBuf)> = Vec::new();
-        if let Some(mdir) = self.message_dir(&r.id) {
-            if let Ok(rd) = fs::read_dir(&mdir) {
-                for e in rd.filter_map(|e| e.ok()) {
-                    let path = e.path();
-                    if let Ok(t) = fs::read_to_string(&path) {
-                        if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                            let when = v.pointer("/time/created").and_then(Value::as_i64).unwrap_or(0);
-                            order.push((when, path));
+            // Order message files by `time/created` (same ordering as before) while holding only the
+            // sort key + path per file — never all message bodies at once.
+            let mut order: Vec<(i64, PathBuf)> = Vec::new();
+            if let Some(mdir) = self.message_dir(&r.id) {
+                if let Ok(rd) = fs::read_dir(&mdir) {
+                    for e in rd.filter_map(|e| e.ok()) {
+                        let path = e.path();
+                        if let Ok(t) = fs::read_to_string(&path) {
+                            if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                                let when = v.pointer("/time/created").and_then(Value::as_i64).unwrap_or(0);
+                                order.push((when, path));
+                            }
                         }
                     }
                 }
             }
-        }
-        order.sort_by_key(|(t, _)| *t);
+            order.sort_by_key(|(t, _)| *t);
 
-        sink.meta(&s);
+            sink.meta(&s);
 
-        // Re-read one message file at a time, emit, then drop before the next.
-        for (_, path) in &order {
-            let Ok(t) = fs::read_to_string(path) else { continue };
-            let Ok(mv) = serde_json::from_str::<Value>(&t) else {
-                continue;
-            };
-            let msg_id = mv.get("id").and_then(Value::as_str).unwrap_or("");
-            let parts = self.load_parts(msg_id);
-            for mut built in build_messages(&mv, &parts) {
-                fold_into_session(&mut s, &mut built);
-                if sink.message(built) == Flow::Stop {
-                    return Ok(s);
+            // Re-read one message file at a time, emit, then drop before the next.
+            for (_, path) in &order {
+                let Ok(t) = fs::read_to_string(path) else { continue };
+                let Ok(mv) = serde_json::from_str::<Value>(&t) else {
+                    continue;
+                };
+                let msg_id = mv.get("id").and_then(Value::as_str).unwrap_or("");
+                let parts = self.load_parts(msg_id);
+                for mut built in build_messages(&mv, &parts) {
+                    fold_into_session(&mut s, &mut built);
+                    if sink.message(built) == Flow::Stop {
+                        return Ok(s);
+                    }
                 }
             }
-        }
 
-        Ok(s)
+            Ok(s)
+        })
     }
 
     /// The todo list `todowrite` keeps in `opencode.db`'s `todo` table (1.x; 2.x has none).

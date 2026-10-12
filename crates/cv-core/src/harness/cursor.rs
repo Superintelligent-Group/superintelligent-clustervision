@@ -134,12 +134,14 @@ impl Adapter for Cursor {
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // `path` is the DB the thread lives in. Legacy refs carry a `legacy:` id prefix.
-        let conn = open_ro(&r.path)?;
-        if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
-            return stream_legacy(&conn, r, legacy_id, sink);
-        }
-        stream_global(&conn, r, sink)
+        crate::stream::checked(sink, |sink| {
+            // `path` is the DB the thread lives in. Legacy refs carry a `legacy:` id prefix.
+            let conn = open_ro(&r.path)?;
+            if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
+                return stream_legacy(&conn, r, legacy_id, sink);
+            }
+            stream_global(&conn, r, sink)
+        })
     }
 }
 
