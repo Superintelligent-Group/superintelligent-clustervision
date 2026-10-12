@@ -610,8 +610,15 @@ fn sqlite_key_facts(conn: &rusqlite::Connection, session_id: &str) -> Result<Key
             let mut events = EventReader::new(conn)?;
             let mut found = None;
             for c in candidates {
-                let (entries, _) = events.entries(&c)?;
-                if entries.iter().any(|v| names_child(&v.to_string(), &key)) {
+                let mut entries = events.rows(&c, parse_line)?;
+                // Keep reading after finding the child so a later SQL error still fails the
+                // lookup, as it did when this collected the candidate's complete transcript.
+                let mut names = false;
+                for (_, v) in entries.by_ref() {
+                    names |= names_child(&v.to_string(), &key);
+                }
+                entries.finish()?;
+                if names {
                     found = Some(c);
                     break;
                 }
@@ -1271,27 +1278,28 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
         Option<String>,
         Option<String>,
     );
-    let rows: Vec<WindowRow> = windows
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-            ))
-        })?
-        .collect::<std::result::Result<_, _>>()?;
+    let rows = windows.query_map([], |row| -> rusqlite::Result<WindowRow> {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+        ))
+    })?;
     let mut events = EventReader::new(&conn)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for (session_id, created, updated, transcript_updated, w_display, n_label, n_display, entry_json) in rows {
+    let mut out = Vec::new();
+    for row in rows {
+        let (session_id, created, updated, transcript_updated, w_display, n_label, n_display, entry_json) = row?;
         let mut acc = ScanAcc::default();
-        for v in events.entries(&session_id)?.0 {
+        let mut entries = events.rows(&session_id, parse_line)?;
+        for (_, v) in entries.by_ref() {
             acc.feed(&v);
         }
+        entries.finish()?;
         let entry: Option<Value> = entry_json.as_deref().and_then(|e| serde_json::from_str(e).ok());
         let title = n_label
             .or(n_display)
@@ -1334,34 +1342,74 @@ impl<'c> EventReader<'c> {
     fn new(conn: &'c rusqlite::Connection) -> Result<Self> {
         let zstd = super::store::sqlite::columns(conn, "transcript_events").contains("event_zstd");
         let sql = if zstd {
-            "SELECT event_json, event_zstd FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC"
+            "SELECT seq, event_json, event_zstd FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC"
         } else {
-            "SELECT event_json, NULL FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC"
+            "SELECT seq, event_json, NULL FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC"
         };
         Ok(EventReader {
             stmt: conn.prepare(sql)?,
         })
     }
 
-    /// The decoded entries, and how many rows decoded to nothing (`extra["cv"]["skipped_lines"]`).
-    fn entries(&mut self, session_id: &str) -> Result<(Vec<Value>, u64)> {
-        let rows = self.stmt.query_map([session_id], |row| {
-            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
-        })?;
-        let (mut out, mut skipped) = (Vec::new(), 0);
-        for row in rows {
-            let (json, zstd) = row?;
-            let text = match (json, zstd) {
-                (Some(j), _) => Some(j),
-                (None, Some(z)) => decompress_zstd(&z).and_then(|b| String::from_utf8(b).ok()),
-                (None, None) => None,
-            };
-            match text.as_deref().and_then(parse_line) {
-                Some(v) => out.push(v),
-                None => skipped += 1,
+    fn rows(&mut self, session_id: &str, parse: fn(&str) -> Option<Value>) -> Result<EventRows<'_>> {
+        Ok(EventRows {
+            rows: self.stmt.query([session_id])?,
+            parse,
+            skipped: 0,
+            error: None,
+        })
+    }
+}
+
+/// A SQLite cursor whose decoded payload is dropped before the next row. Keep SQL errors apart
+/// from unreadable payloads: the latter are tolerated, while callers must check `finish` even if
+/// their sink stopped early.
+#[cfg(feature = "sqlite")]
+struct EventRows<'s> {
+    rows: rusqlite::Rows<'s>,
+    parse: fn(&str) -> Option<Value>,
+    skipped: u64,
+    error: Option<rusqlite::Error>,
+}
+
+#[cfg(feature = "sqlite")]
+impl Iterator for EventRows<'_> {
+    type Item = (i64, Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let decoded = (|| -> rusqlite::Result<Option<(i64, Option<Value>)>> {
+                let Some(row) = self.rows.next()? else { return Ok(None) };
+                let seq = row.get(0)?;
+                let json: Option<String> = row.get(1)?;
+                let zstd: Option<Vec<u8>> = row.get(2)?;
+                let text = match (json, zstd) {
+                    (Some(j), _) => Some(j),
+                    (None, Some(z)) => decompress_zstd(&z).and_then(|b| String::from_utf8(b).ok()),
+                    (None, None) => None,
+                };
+                Ok(Some((seq, text.as_deref().and_then(self.parse))))
+            })();
+            match decoded {
+                Ok(Some((seq, Some(v)))) => return Some((seq, v)),
+                Ok(Some((_, None))) => self.skipped += 1,
+                Ok(None) => return None,
+                Err(e) => {
+                    self.error = Some(e);
+                    return None;
+                }
             }
         }
-        Ok((out, skipped))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl EventRows<'_> {
+    fn finish(self) -> Result<u64> {
+        match self.error {
+            Some(e) => Err(e.into()),
+            None => Ok(self.skipped),
+        }
     }
 }
 
@@ -1385,7 +1433,10 @@ fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
 fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
     let conn = open_ro(&r.path)?;
     let facts = sqlite_key_facts(&conn, &r.id)?;
-    let (entries, skipped) = EventReader::new(&conn)?.entries(&r.id)?;
+    let mut reader = EventReader::new(&conn)?;
+    let mut rows = reader.rows(&r.id, parse_line)?;
+    let entries = rows.by_ref().map(|(_, v)| v).collect();
+    let skipped = rows.finish()?;
     let mut s = stream_rows(
         rows_from_values(entries, opts.complete).into_iter(),
         r,
