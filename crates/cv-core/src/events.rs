@@ -589,7 +589,12 @@ mod db {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .ok();
-        !sync_fresh(r, stored, mtime_ns, file_size(&r.path))
+        let source = crate::source::Snapshot {
+            primary: (mtime_ns, file_size(&r.path)),
+            dependencies: crate::source::Probe::default().dependencies(r),
+        };
+        !sync_fresh(r, stored, source.primary.0, source.primary.1)
+            || !crate::source::Table::load("events").fresh(r, source.primary, &source.dependencies)
     }
 
     /// The whole `event_sync` skip-table, loaded with **one** connection + query, for bulk passes
@@ -606,13 +611,15 @@ mod db {
     pub struct SyncTable {
         /// The loaded skip-table; `None` when the catalog is unavailable.
         rows: Option<SyncRows>,
+        dependencies: crate::source::Table,
     }
 
     impl SyncTable {
         pub fn load() -> SyncTable {
-            let load = || -> Option<SyncRows> {
-                let conn = open()?;
-                let mut stmt = conn
+            let load = || -> Option<(SyncRows, crate::source::Table)> {
+                let mut conn = open()?;
+                let tx = conn.transaction().ok()?;
+                let mut stmt = tx
                     .prepare("SELECT harness, id, path, mtime_ns, size FROM event_sync")
                     .ok()?;
                 let rows = stmt
@@ -627,22 +634,41 @@ mod db {
                         ))
                     })
                     .ok()?;
-                Some(rows.flatten().collect())
+                Some((rows.flatten().collect(), crate::source::Table::load_in(&tx, "events")))
             };
-            SyncTable { rows: load() }
+            match load() {
+                Some((rows, dependencies)) => SyncTable {
+                    rows: Some(rows),
+                    dependencies,
+                },
+                None => SyncTable {
+                    rows: None,
+                    dependencies: Default::default(),
+                },
+            }
         }
 
         /// Same answer [`needs_ingest`] would give for `r`, from the preloaded table. Takes the
         /// file `size` the caller already stat'ed (bulk sweeps have it from `file_sig`) instead of
         /// re-stat'ing per row.
         pub fn needs_ingest(&self, r: &SessionRef, mtime_ns: i64, size: i64) -> bool {
+            let source = crate::source::Snapshot {
+                primary: (mtime_ns, size),
+                dependencies: crate::source::Probe::default().dependencies(r),
+            };
+            self.needs_ingest_with_source(r, &source)
+        }
+
+        /// The same decision with dependencies already gathered by the operation's shared probe.
+        pub fn needs_ingest_with_source(&self, r: &SessionRef, source: &crate::source::Snapshot) -> bool {
             let Some(rows) = &self.rows else { return false };
             let key = (
                 r.harness.as_str().to_string(),
                 r.id.clone(),
                 r.path.to_string_lossy().into_owned(),
             );
-            !sync_fresh(r, rows.get(&key).copied(), mtime_ns, size)
+            !sync_fresh(r, rows.get(&key).copied(), source.primary.0, source.primary.1)
+                || !self.dependencies.fresh(r, source.primary, &source.dependencies)
         }
     }
 
@@ -671,44 +697,78 @@ mod db {
     /// [`record_with`] for a pass that resumed at message `from`: only the rows of messages
     /// `from` and later are replaced by `events` (all of which are), the earlier ones stay as the
     /// pass that read them stored them. The same dedup rule, within the new rows.
+    /// `mtime_ns` and `size` must have been captured before the source read, never after it.
+    /// This legacy API leaves auxiliary dependencies stale; [`record_from_with_source`] carries
+    /// their before-read snapshot and can publish auxiliary freshness.
     pub fn record_from(r: &SessionRef, from: usize, events: &[Event], mtime_ns: i64, size: i64, prov: &Provenance) {
-        let Some(mut conn) = open() else { return };
-        let Ok(tx) = conn.transaction() else { return };
+        let source = crate::source::Snapshot {
+            primary: (mtime_ns, size),
+            dependencies: None,
+        };
+        record_from_inner(r, from, events, mtime_ns, size, prov, &source);
+    }
+
+    /// Record a completed pass and its captured dependencies atomically with the event rows.
+    pub fn record_from_with_source(
+        r: &SessionRef,
+        from: usize,
+        events: &[Event],
+        source: &crate::source::Snapshot,
+        prov: &Provenance,
+    ) {
+        record_from_inner(r, from, events, source.primary.0, source.primary.1, prov, source);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_from_inner(
+        r: &SessionRef,
+        from: usize,
+        events: &[Event],
+        mtime_ns: i64,
+        size: i64,
+        prov: &Provenance,
+        source: &crate::source::Snapshot,
+    ) -> Option<()> {
+        let mut conn = open()?;
+        let Ok(tx) = conn.transaction() else { return None };
         let harness = r.harness.as_str();
-        let _ = tx.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO event_sessions(harness, session_id) VALUES(?1,?2)",
             params![harness, r.id],
-        );
+        )
+        .ok()?;
         // Stamp provenance on every record (idempotent re-ingest keeps it current); top-level
         // sessions write NULLs, which leaves the existing top-level rows exactly as before.
-        let _ = tx.execute(
+        tx.execute(
             "UPDATE event_sessions SET parent_id=?3, agent_id=?4, workflow=?5
              WHERE harness=?1 AND session_id=?2",
             params![harness, r.id, prov.parent_id, prov.agent_id, prov.workflow],
-        );
+        )
+        .ok()?;
         let Ok(session) = tx.query_row(
             "SELECT id FROM event_sessions WHERE harness=?1 AND session_id=?2",
             params![harness, r.id],
             |row| row.get::<_, i64>(0),
         ) else {
-            return;
+            return None;
         };
-        let _ = tx.execute(
+        tx.execute(
             "DELETE FROM events WHERE session=?1 AND msg_idx>=?2",
             params![session, from as i64],
-        );
+        )
+        .ok()?;
         {
             let Ok(mut intern) = tx.prepare("INSERT OR IGNORE INTO event_targets(target) VALUES(?1)") else {
-                return;
+                return None;
             };
             let Ok(mut intern_id) = tx.prepare("SELECT id FROM event_targets WHERE target=?1") else {
-                return;
+                return None;
             };
             let Ok(mut insert) = tx.prepare(
                 "INSERT INTO events(session,msg_idx,ts,kind,tool,target_id,detail)
                  VALUES(?1,?2,?3,?4,?5,?6,?7)",
             ) else {
-                return;
+                return None;
             };
             let mut seen: std::collections::HashSet<(usize, &str, &str)> = std::collections::HashSet::new();
             let mut targets: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
@@ -721,31 +781,35 @@ mod db {
                     Some(t) => match targets.get(t) {
                         Some(&id) => Some(id),
                         None => {
-                            let _ = intern.execute(params![t]);
+                            intern.execute(params![t]).ok()?;
                             let Ok(id) = intern_id.query_row(params![t], |row| row.get(0)) else {
-                                return;
+                                return None;
                             };
                             targets.insert(t, id);
                             Some(id)
                         }
                     },
                 };
-                let _ = insert.execute(params![
-                    session,
-                    e.msg_idx as i64,
-                    e.ts,
-                    e.kind,
-                    e.tool,
-                    target_id,
-                    e.detail,
-                ]);
+                insert
+                    .execute(params![
+                        session,
+                        e.msg_idx as i64,
+                        e.ts,
+                        e.kind,
+                        e.tool,
+                        target_id,
+                        e.detail,
+                    ])
+                    .ok()?;
             }
         }
-        let _ = tx.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO event_sync(harness,id,path,mtime_ns,size) VALUES(?1,?2,?3,?4,?5)",
             params![harness, r.id, r.path.to_string_lossy(), mtime_ns, size],
-        );
-        let _ = tx.commit();
+        )
+        .ok()?;
+        crate::source::publish_in(&tx, "events", r, source)?;
+        tx.commit().ok()
     }
 
     /// (Re)ingest events for one session: stream it (lazily — large content stays on disk) through
@@ -755,11 +819,11 @@ mod db {
     pub fn ingest_ref(r: &SessionRef) -> Result<usize> {
         let adapter =
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
-        let (mtime_ns, size) = crate::offsets::file_sig(&r.path);
+        let source = crate::source::Probe::default().snapshot(r);
         let mut sink = EventSink::new(r.cwd.clone());
         adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
         let events = sink.into_events();
-        record(r, &events, mtime_ns, size);
+        record_from_with_source(r, 0, &events, &source, &Provenance::default());
         Ok(events.len())
     }
 
@@ -769,11 +833,11 @@ mod db {
     pub fn ingest_subagent(r: &SessionRef, prov: &Provenance) -> Result<usize> {
         let adapter =
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
-        let (mtime_ns, size) = crate::offsets::file_sig(&r.path);
+        let source = crate::source::Probe::default().snapshot(r);
         let mut sink = EventSink::new(r.cwd.clone());
         adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
         let events = sink.into_events();
-        record_with(r, &events, mtime_ns, size, prov);
+        record_from_with_source(r, 0, &events, &source, prov);
         Ok(events.len())
     }
 
@@ -789,9 +853,10 @@ mod db {
     pub fn ingest_all(force: bool, subagents: bool) -> Result<usize> {
         let mut n = 0usize;
         let sync = SyncTable::load();
+        let mut probe = crate::source::Probe::default();
         for r in crate::discover_all() {
-            let (mtime_ns, size) = crate::offsets::file_sig(&r.path);
-            let top_stale = sync.needs_ingest(&r, mtime_ns, size);
+            let source = probe.snapshot(&r);
+            let top_stale = sync.needs_ingest_with_source(&r, &source);
             if force || top_stale {
                 match ingest_ref(&r) {
                     Ok(_) => n += 1,
@@ -1014,7 +1079,7 @@ mod db {
 #[cfg(feature = "sqlite")]
 pub use db::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_from, record_with, sessions_editing, sessions_touching, SyncTable,
+    record_from, record_from_with_source, record_with, sessions_editing, sessions_touching, SyncTable,
 };
 
 /// No-op fallbacks without sqlite: extraction still works (the sink is pure), persistence and
@@ -1036,9 +1101,20 @@ mod db_stub {
         pub fn needs_ingest(&self, _r: &SessionRef, _mtime_ns: i64, _size: i64) -> bool {
             false
         }
+        pub fn needs_ingest_with_source(&self, _r: &SessionRef, _source: &crate::source::Snapshot) -> bool {
+            false
+        }
     }
     pub fn record(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64) {}
     pub fn record_with(_r: &SessionRef, _events: &[Event], _mtime_ns: i64, _size: i64, _prov: &Provenance) {}
+    pub fn record_from_with_source(
+        _r: &SessionRef,
+        _from: usize,
+        _events: &[Event],
+        _source: &crate::source::Snapshot,
+        _prov: &Provenance,
+    ) {
+    }
     pub fn record_from(
         _r: &SessionRef,
         _from: usize,
@@ -1076,7 +1152,7 @@ mod db_stub {
 #[cfg(not(feature = "sqlite"))]
 pub use db_stub::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_from, record_with, sessions_editing, sessions_touching, SyncTable,
+    record_from, record_from_with_source, record_with, sessions_editing, sessions_touching, SyncTable,
 };
 
 #[cfg(test)]

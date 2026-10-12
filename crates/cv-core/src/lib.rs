@@ -41,6 +41,7 @@ pub mod rewind;
 pub mod rows;
 pub mod sanitize;
 pub mod scan;
+pub mod source;
 pub mod stats;
 pub mod stream;
 pub mod task;

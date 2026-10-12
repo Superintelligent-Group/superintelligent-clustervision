@@ -346,10 +346,13 @@ pub fn stream_counted(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
+    let source = crate::source::Probe::default().snapshot(r);
     let (session, counter) = stream_with_counter(adapter, r, opts, sink)?;
-    if let Some((turns, counter)) = counter {
+    if let Some((turns, counter)) = counter.filter(|_| crate::source::unchanged(r, &source)) {
         note_turns(r, turns);
-        crate::catalog::note_affordances(r, || counter.finish(&session, &adapter.store_affordances(r)));
+        crate::catalog::note_affordances_with_source(r, &source, || {
+            counter.finish(&session, &adapter.store_affordances(r))
+        });
     }
     Ok(session)
 }
@@ -362,17 +365,24 @@ pub struct Counted {
 }
 
 impl Counted {
-    /// Write what [`stream_counted`] writes: the turn count into a "not counted" row, and the
-    /// affordance counts unless the catalog's are still fresh.
-    pub fn record(self, r: &SessionRef) {
-        note_turns(r, self.turns);
-        crate::catalog::note_affordances(r, || self.counts);
+    /// Legacy compatibility entry point. Without a before-read source snapshot, it cannot
+    /// safely publish cached turn or affordance counts, and therefore does nothing.
+    /// Use [`Self::record_with_source`] to publish counts against the source that was read.
+    #[deprecated(note = "no-op without a before-read source snapshot; use record_with_source")]
+    pub fn record(self, _r: &SessionRef) {}
+
+    /// Publish against the dependencies captured before this pass, including any side-store rows.
+    pub fn record_with_source(self, r: &SessionRef, source: &crate::source::Snapshot) {
+        if crate::source::unchanged(r, source) {
+            note_turns(r, self.turns);
+            crate::catalog::note_affordances_with_source(r, source, || self.counts);
+        }
     }
 }
 
 /// [`stream_counted`] without the catalog writes: what the pass counted comes back (`None` when the
-/// sink stopped early) for the caller to [`Counted::record`], so a sweep that parses on many
-/// threads keeps its catalog writes on one. Reads the adapter's side store every time (the
+/// sink stopped early) for the caller to publish through [`Counted::record_with_source`] with a
+/// before-read snapshot. A sweep that parses on many threads keeps its catalog writes on one. Reads the adapter's side store every time (the
 /// recording path reads it only when a write is due).
 pub fn stream_counting(
     adapter: &dyn Adapter,

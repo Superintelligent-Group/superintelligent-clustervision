@@ -331,6 +331,8 @@ struct Job {
     /// Only growth relative to the indexed source can be an append. Equal-size timestamp changes
     /// and truncations require a whole pass, even if a sampled mark still matches.
     grew: bool,
+    source: cv_core::source::Snapshot,
+    dependencies_fresh: bool,
     prov: cv_core::events::Provenance,
     /// Where the last pass over this file left off, if it left a mark.
     mark: Option<cv_core::resume::MarkHead>,
@@ -347,7 +349,7 @@ enum Out {
     /// A session's read finished: its events (from the message index given on), counts and new
     /// mark are the writer's to record.
     Done {
-        job: Job,
+        job: Box<Job>,
         events: Option<(usize, Vec<cv_core::events::Event>)>,
         counted: Option<cv_core::stream::Counted>,
         mark: Option<(cv_core::resume::MarkHead, cv_core::stream::Checkpoint)>,
@@ -411,17 +413,31 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
     let event_sync = cv_core::events::SyncTable::load();
     let affordances = cv_core::catalog::AffordanceTable::load();
     let marks = cv_core::resume::MarkTable::load();
+    let consumer = format!(
+        "fts:{}",
+        std::fs::canonicalize(dir)
+            .context("identifying search index dependencies")?
+            .display()
+    );
+    let dependencies = cv_core::source::Table::load(&consumer);
+    let mut probe = cv_core::source::Probe::default();
 
     let total = refs.len();
     let mut seen: HashSet<String> = HashSet::new();
     let mut jobs: Vec<Job> = Vec::new();
     for r in &refs {
         seen.insert(r.id.clone());
-        let (mtime, size) = cv_core::offsets::file_sig(&r.path);
-        let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size);
-        let events = event_sync.needs_ingest(r, mtime, size);
+        let source = probe.snapshot(r);
+        let (mtime, size) = source.primary;
+        let dependencies_fresh = dependencies.fresh(
+            r,
+            existing.get(&r.id).copied().unwrap_or(source.primary),
+            &source.dependencies,
+        );
+        let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size) && dependencies_fresh;
+        let events = event_sync.needs_ingest_with_source(r, &source);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
-        if fts_fresh && !events && !affordances.stale(r) {
+        if fts_fresh && !events && affordances.counts_with_source(r, &source).is_some() {
             continue;
         }
         jobs.push(Job {
@@ -436,6 +452,8 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
                 .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
             prov: Default::default(),
             mark: marks.get(r).cloned(),
+            source,
+            dependencies_fresh,
         });
     }
     // The sub-agent forest (opt-in): every claude session's `subagent_tree_of`, tagged with
@@ -445,9 +463,15 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
             for sub in cv_core::subagent_tree_of(r) {
                 let sr = &sub.session;
                 seen.insert(sr.id.clone());
-                let (mtime, size) = cv_core::offsets::file_sig(&sr.path);
-                let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size);
-                let events = event_sync.needs_ingest(sr, mtime, size);
+                let source = probe.snapshot(sr);
+                let (mtime, size) = source.primary;
+                let dependencies_fresh = dependencies.fresh(
+                    sr,
+                    existing.get(&sr.id).copied().unwrap_or(source.primary),
+                    &source.dependencies,
+                );
+                let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size) && dependencies_fresh;
+                let events = event_sync.needs_ingest_with_source(sr, &source);
                 if fts_fresh && !events {
                     continue;
                 }
@@ -468,13 +492,15 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
                         .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
                     prov,
                     mark: marks.get(sr).cloned(),
+                    source,
+                    dependencies_fresh,
                 });
             }
         }
     }
     jobs.retain(|j| cv_core::harness::for_harness(j.r.harness).is_some());
 
-    let ran = run_jobs(&mut writer, &f, jobs)?;
+    let ran = run_jobs(&mut writer, &f, jobs, &consumer)?;
 
     // Reap sessions that disappeared from disk since the last index (incremental only). A plain
     // refresh never reaps the folded sub-agent forest — see [`reap_missing`].
@@ -485,6 +511,7 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
     };
     writer.commit().context("committing index")?;
     cv_core::resume::update(&ran.marks);
+    cv_core::source::update(&consumer, &ran.dependencies);
     compact(dir, &index, &mut writer)?;
     Ok(Swept {
         total,
@@ -524,14 +551,20 @@ struct Ran {
     resumed: usize,
     /// Mark updates still waiting for the commit that holds their docs.
     marks: Vec<cv_core::resume::MarkUpdate>,
+    dependencies: Vec<cv_core::source::Update>,
 }
 
 /// Run every job on a pool of workers, writing on this thread.
-fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<Ran> {
+fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str) -> Result<Ran> {
     use std::sync::{mpsc, Condvar, Mutex};
     if jobs.is_empty() {
         return Ok(Ran::default());
     }
+    let changing: Vec<_> = jobs.iter().filter(|j| j.fts).map(|j| j.r.clone()).collect();
+    anyhow::ensure!(
+        cv_core::source::invalidate(consumer, &changing),
+        "invalidating old search dependency baselines"
+    );
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut groups: Vec<Vec<Job>> = Vec::new();
     for j in jobs {
@@ -627,16 +660,17 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<Ran>
                     // Only stamp events after a complete pass: a parse error leaves the sync rows
                     // untouched so the session is retried next run.
                     if let Some((from, events)) = events {
-                        cv_core::events::record_from(&job.r, from, &events, job.mtime, job.size, &job.prov);
+                        cv_core::events::record_from_with_source(&job.r, from, &events, &job.source, &job.prov);
                     }
                     if let Some(c) = counted {
-                        c.record(&job.r);
+                        c.record_with_source(&job.r, &job.source);
                     }
                     if mark.is_some() || job.mark.is_some() {
                         ran.marks.push((job.r.clone(), mark));
                     }
                     ran.resumed += usize::from(resumed);
                     if job.fts {
+                        ran.dependencies.push((job.r.clone(), job.source.clone()));
                         ran.changed += 1;
                         open.remove(&job.r.id);
                     }
@@ -658,6 +692,7 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<Ran>
                 if open.is_empty() {
                     writer.commit().context("interim commit")?;
                     cv_core::resume::update(&std::mem::take(&mut ran.marks));
+                    cv_core::source::update(consumer, &std::mem::take(&mut ran.dependencies));
                     since_commit = 0;
                     let mut q = queue.lock().unwrap();
                     q.draining = false;
@@ -718,7 +753,7 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>) -> bool 
                 Some((cv_core::resume::MarkHead::of(&job.r.path, &cp, v)?, cp))
             });
             Out::Done {
-                job,
+                job: Box::new(job),
                 events: p.events,
                 counted: p.counted,
                 mark,
@@ -747,7 +782,7 @@ const RESUME_TAG: &str = "fts1";
 /// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's
 /// immutable-prefix append contract; the mark's samples do not prove the whole prefix unchanged.
 fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoint> {
-    if !job.grew {
+    if !job.grew || !job.dependencies_fresh {
         return None;
     }
     let head = job.mark.as_ref()?;
@@ -896,6 +931,7 @@ fn index_session_clean(
     events: Option<&mut cv_core::events::EventSink>,
     prov: cv_core::events::Provenance,
 ) -> Result<usize> {
+    let source = cv_core::source::Probe::default().snapshot(r);
     let result = {
         let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()).map_err(Into::into) };
         index_session(&mut add, f, adapter, r, mtime, size, events, prov, None)
@@ -904,7 +940,7 @@ fn index_session_clean(
     match result {
         Ok((docs, done)) => {
             if let Some(c) = done.counted {
-                c.record(r);
+                c.record_with_source(r, &source);
             }
             Ok(docs)
         }
@@ -2183,6 +2219,120 @@ mod tests {
         assert!(fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 4096));
         assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 222, 4096));
         assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 8192));
+    }
+
+    #[test]
+    fn auxiliary_directory_changes_refresh_search_events_and_counts() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        std::fs::write(
+            sdir.join("summary.json"),
+            r#"{"info":{"id":"grok-child","cwd":"/repo"}}"#,
+        )
+        .unwrap();
+        let transcript = sdir.join("chat_history.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"user\",\"content\":\"zqbeforechild\"}\n").unwrap();
+        let r = cv_core::SessionRef {
+            harness: cv_core::Harness::Grok,
+            path: sdir.clone(),
+            ..sref("grok-child", "child", "unused".into())
+        };
+        sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 0);
+        let primary = cv_core::offsets::file_sig(&sdir);
+        let line = serde_json::json!({"type":"assistant","content":"zqafterchild",
+            "tool_calls":[{"id":"call","name":"read_file","arguments":"{\"path\":\"/repo/new.rs\"}"}]});
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&transcript).unwrap(),
+            "{line}"
+        )
+        .unwrap();
+        assert_eq!(
+            cv_core::offsets::file_sig(&sdir),
+            primary,
+            "child append leaves directory signature unchanged"
+        );
+        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
+        assert_eq!(text_search(&dir, "zqafterchild", 10).unwrap().len(), 1);
+        assert_eq!(cv_core::events::events_for("grok", &r.id, Some("file_read")).len(), 1);
+        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn auxiliary_claude_agent_metadata_invalidates_each_consumer() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let parent = write_claude(&sdir, "parent-meta", "orchestrator");
+        let agent = write_subagent(&parent, "meta", "zqmetabody");
+        let r = sref("agent-meta", "agent", agent.to_string_lossy().into_owned());
+        sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 0);
+        let primary = cv_core::offsets::file_sig(&agent);
+        std::fs::write(
+            agent.with_extension("meta.json"),
+            r#"{"agentType":"reviewer","description":"new role","toolUseId":"spawn"}"#,
+        )
+        .unwrap();
+        assert_eq!(cv_core::offsets::file_sig(&agent), primary);
+        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
+        cv_core::events::ingest_ref(&r).unwrap();
+        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(
+            cv_core::catalog::AffordanceTable::load().stale(&r),
+            "events refresh cannot refresh counts"
+        );
+        assert_eq!(
+            sweep(&dir, vec![r.clone()], false, false).unwrap().changed,
+            1,
+            "events refresh cannot refresh FTS"
+        );
+        assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
+        assert_eq!(sweep(&dir, vec![r], false, false).unwrap().changed, 0);
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn auxiliary_wal_only_updates_refresh_search_events_and_counts() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let db = sdir.join("sessions.db");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE sessions(id TEXT PRIMARY KEY,source TEXT NOT NULL,model TEXT,started_at REAL NOT NULL,ended_at REAL,message_count INTEGER DEFAULT 0,title TEXT);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT,tool_call_id TEXT,tool_calls TEXT,tool_name TEXT,timestamp REAL NOT NULL);
+            INSERT INTO sessions(id,source,started_at) VALUES('wal-session','cli',1000);
+            INSERT INTO messages(session_id,role,content,timestamp) VALUES('wal-session','user','zqbeforewal',1001);").unwrap();
+        let r = cv_core::SessionRef {
+            harness: cv_core::Harness::Hermes,
+            path: db.clone(),
+            ..sref("wal-session", "wal", "unused".into())
+        };
+        sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 0);
+        let primary = cv_core::offsets::file_sig(&db);
+        writer.execute_batch("INSERT INTO messages(session_id,role,content,timestamp) VALUES('wal-session','user','zqafterwal',1002);
+            INSERT INTO messages(session_id,role,tool_calls,timestamp) VALUES('wal-session','assistant','[{\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/repo/new.rs\\\"}\"}}]',1003);").unwrap();
+        assert_eq!(cv_core::offsets::file_sig(&db), primary, "write stayed in WAL");
+        assert!(cv_core::events::needs_ingest(&r, primary.0));
+        assert!(cv_core::catalog::AffordanceTable::load().stale(&r));
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
+        assert_eq!(text_search(&dir, "zqafterwal", 10).unwrap().len(), 1);
+        assert_eq!(cv_core::events::events_for("hermes", &r.id, Some("file_read")).len(), 1);
+        assert!(!cv_core::events::needs_ingest(&r, primary.0));
+        assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
     }
 
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several

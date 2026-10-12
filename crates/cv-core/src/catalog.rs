@@ -475,15 +475,12 @@ mod imp {
         crate::discover_cache::fill_count(&conn, &r.path, r.harness, &r.id, n);
     }
 
-    /// `(harness, id, path)` → the affordance signature and counts a full read recorded.
+    /// `(harness, id, path)` → the captured primary source tuple and counts a full read recorded.
     type AffordanceRows = std::collections::HashMap<(String, String, String), (i64, i64, String)>;
 
-    /// What a full read of `r` stored as its affordance counts is still true while this holds: the
-    /// transcript file's `(mtime_ns, size)`; for a session directory (Grok, Kimi, Roo, Cline) the
-    /// newest mtime and total size of the files directly in it (an append to the transcript inside
-    /// does not touch the directory's own mtime); for a database many sessions share (Hermes,
-    /// OpenCode, Goose, …) the session's own `updated_at` from its catalog row, since any session's
-    /// write moves the file's mtime. `(0, 0)` when nothing can be stat'ed: never fresh.
+    /// Legacy aggregate signature retained for API compatibility. Fresh affordance counts use
+    /// the captured primary tuple plus exact auxiliary dependencies instead: directory totals
+    /// and a shared database session's catalog timestamp cannot establish those dependencies.
     pub fn affordance_sig(r: &SessionRef) -> (i64, i64) {
         let Ok(md) = std::fs::metadata(&r.path) else {
             return (0, 0);
@@ -545,18 +542,29 @@ mod imp {
         )
     }
 
-    /// A full read of `r` finished: record its affordance counts unless the stored ones are still
-    /// fresh (same [`affordance_sig`]), so `has:<kind>` answers from the catalog from then on.
-    /// `counts` runs only when a write is due (it may read a side store). Never creates the catalog.
-    pub fn note_affordances(r: &SessionRef, counts: impl FnOnce() -> crate::affordance::Counts) {
+    /// Compatibility entry point without a before-read source snapshot. It cannot publish fresh
+    /// counts safely: the closure may contain counts from an earlier read. Use
+    /// [`note_affordances_with_source`] with a snapshot captured before counting instead.
+    #[deprecated(note = "no-op without a before-read source snapshot; use note_affordances_with_source")]
+    pub fn note_affordances(_r: &SessionRef, _counts: impl FnOnce() -> crate::affordance::Counts) {}
+
+    /// Record counts against the dependencies captured before their complete source pass.
+    pub fn note_affordances_with_source(
+        r: &SessionRef,
+        source: &crate::source::Snapshot,
+        counts: impl FnOnce() -> crate::affordance::Counts,
+    ) {
         if !db_path().is_some_and(|p| p.exists()) {
             return;
         }
-        let (a, b) = affordance_sig(r);
+        if !crate::source::unchanged(r, source) {
+            return;
+        }
+        let (a, b) = source.primary;
         if a == 0 {
             return;
         }
-        let Some(conn) = open() else { return };
+        let Some(mut conn) = open() else { return };
         let path = r.path.to_string_lossy();
         let stored: Option<(i64, i64, String)> = conn
             .query_row(
@@ -565,25 +573,33 @@ mod imp {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok();
-        if stored.is_some_and(|(sa, sb, text)| (sa, sb) == (a, b) && counts_of(&text).is_some()) {
+        if stored.is_some_and(|(sa, sb, text)| (sa, sb) == (a, b) && counts_of(&text).is_some())
+            && crate::source::fresh_in(&conn, "counts", r, source.primary, &source.dependencies)
+        {
             return;
         }
-        let _ = conn.execute(
+        let Ok(tx) = conn.transaction() else { return };
+        let written = tx.execute(
             "INSERT OR REPLACE INTO affordance_counts(harness,id,path,sig_a,sig_b,counts) VALUES(?1,?2,?3,?4,?5,?6)",
             params![r.harness.as_str(), r.id, path, a, b, counts_text(&counts())],
         );
+        if written.is_ok() && crate::source::publish_in(&tx, "counts", r, source).is_some() {
+            let _ = tx.commit();
+        }
     }
 
     /// Every recorded affordance count, loaded once for a sweep (`cv ls -q has:plan`, `cv index`).
     pub struct AffordanceTable {
         rows: AffordanceRows,
+        dependencies: crate::source::Table,
     }
 
     impl AffordanceTable {
         pub fn load() -> AffordanceTable {
-            let load = || -> Option<AffordanceRows> {
-                let conn = open()?;
-                let mut stmt = conn
+            let load = || -> Option<AffordanceTable> {
+                let mut conn = open()?;
+                let tx = conn.transaction().ok()?;
+                let mut stmt = tx
                     .prepare("SELECT harness, id, path, sig_a, sig_b, counts FROM affordance_counts")
                     .ok()?;
                 let rows = stmt
@@ -594,23 +610,37 @@ mod imp {
                         ))
                     })
                     .ok()?;
-                Some(rows.flatten().collect())
+                Some(AffordanceTable {
+                    rows: rows.flatten().collect(),
+                    dependencies: crate::source::Table::load_in(&tx, "counts"),
+                })
             };
-            AffordanceTable {
-                rows: load().unwrap_or_default(),
-            }
+            load().unwrap_or_else(|| AffordanceTable {
+                rows: Default::default(),
+                dependencies: Default::default(),
+            })
         }
 
         /// `r`'s counts when a full read by this view recorded them and they are still fresh;
         /// `None` ("not counted") otherwise. Stats the session once.
         pub fn counts(&self, r: &SessionRef) -> Option<crate::affordance::Counts> {
+            self.counts_with_source(r, &crate::source::Probe::default().snapshot(r))
+        }
+
+        /// Use a shared operation's dependency probe rather than stat'ing shared files again.
+        pub fn counts_with_source(
+            &self,
+            r: &SessionRef,
+            source: &crate::source::Snapshot,
+        ) -> Option<crate::affordance::Counts> {
             let key = (
                 r.harness.as_str().to_string(),
                 r.id.clone(),
                 r.path.to_string_lossy().into_owned(),
             );
             let (a, b, text) = self.rows.get(&key)?;
-            if (*a, *b) == affordance_sig(r) && *a != 0 {
+            if (*a, *b) == source.primary && *a != 0 && self.dependencies.fresh(r, source.primary, &source.dependencies)
+            {
                 counts_of(text)
             } else {
                 None
@@ -746,7 +776,10 @@ mod imp {
 }
 
 #[cfg(feature = "sqlite")]
-pub use imp::{affordance_sig, fill_count, lookup, note_affordances, sync, AffordanceTable};
+#[allow(deprecated)]
+pub use imp::{
+    affordance_sig, fill_count, lookup, note_affordances, note_affordances_with_source, sync, AffordanceTable,
+};
 #[cfg(feature = "sqlite")]
 pub(crate) use imp::{
     all_sessions, last_full_sync, open_db, probe_stale, replace_harness, stamp_full_sync, watches_for,
@@ -758,7 +791,15 @@ pub fn sync(_refs: &[SessionRef]) {}
 #[cfg(not(feature = "sqlite"))]
 pub fn fill_count(_r: &SessionRef, _n: usize) {}
 #[cfg(not(feature = "sqlite"))]
+#[deprecated(note = "no-op without a before-read source snapshot; use note_affordances_with_source")]
 pub fn note_affordances(_r: &SessionRef, _counts: impl FnOnce() -> crate::affordance::Counts) {}
+#[cfg(not(feature = "sqlite"))]
+pub fn note_affordances_with_source(
+    _r: &SessionRef,
+    _source: &crate::source::Snapshot,
+    _counts: impl FnOnce() -> crate::affordance::Counts,
+) {
+}
 /// Without a catalog nothing is ever counted: every `has:<kind>` parses.
 #[cfg(not(feature = "sqlite"))]
 pub struct AffordanceTable;
@@ -768,6 +809,13 @@ impl AffordanceTable {
         AffordanceTable
     }
     pub fn counts(&self, _r: &SessionRef) -> Option<crate::affordance::Counts> {
+        None
+    }
+    pub fn counts_with_source(
+        &self,
+        _r: &SessionRef,
+        _source: &crate::source::Snapshot,
+    ) -> Option<crate::affordance::Counts> {
         None
     }
     pub fn stale(&self, _r: &SessionRef) -> bool {

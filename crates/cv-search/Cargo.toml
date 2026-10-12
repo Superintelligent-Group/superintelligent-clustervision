@@ -32,5 +32,6 @@ default = ["semantic"]
 semantic = ["dep:model2vec-rs"]
 
 [dev-dependencies]
+rusqlite.workspace = true
 # Tests name their scratch dirs with a fresh UUID.
 uuid.workspace = true
