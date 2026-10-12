@@ -1221,6 +1221,7 @@ mod tests {
     /// prefix, result details and side-store rows. Streaming must preserve all of those in order.
     #[test]
     fn streamed_read_matches_full_session_and_side_store() {
+        let _world = cv_testkit::World::in_process("affordance-stream");
         struct Fixture;
         impl crate::harness::Adapter for Fixture {
             fn harness(&self) -> Harness {
