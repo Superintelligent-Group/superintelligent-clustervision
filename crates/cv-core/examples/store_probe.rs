@@ -134,7 +134,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|collect|window|affordances|affordance-read|hash|discover|chunks\n\
+                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|chunks|resolve\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -255,6 +255,7 @@ struct Outcome {
     // Keep actual collection alive until the stage's heap snapshot is taken.
     session: Option<Session>,
     rows: Vec<cv_core::affordance::Affordance>,
+    resolved: Option<String>,
 }
 
 fn affordance_detail(rows: &[cv_core::affordance::Affordance], hash_output: bool) -> Result<Value> {
@@ -304,6 +305,14 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             if a.operation == "count" {
                 out.detail = serde_json::to_value(counter.finish(&s, &adapter.store_affordances(r)))?;
             }
+        }
+        "doctor" => {
+            let mut report = cv_core::doctor::Report::default();
+            let mut pass = report.session(Some(r.path.clone()));
+            adapter.stream(r, &opts, &mut pass)?;
+            pass.finish();
+            out.messages = report.messages as usize;
+            out.detail = report.to_json();
         }
         "collect" | "affordances" => {
             let opts = if a.operation == "affordances" {
@@ -392,8 +401,8 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail["metadata"] = serde_json::to_value(&s)?;
             }
         }
-        "chunks" => {
-            let (offset, len) = a.span.context("chunks requires --span OFFSET:LENGTH")?;
+        "chunks" | "resolve" => {
+            let (offset, len) = a.span.context("chunks/resolve requires --span OFFSET:LENGTH")?;
             if offset
                 .checked_add(len)
                 .is_none_or(|end| end > std::fs::metadata(&r.path).map_or(0, |m| m.len()))
@@ -407,6 +416,17 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 escaped: a.escaped,
             };
             let resolver = cv_core::Resolver::new(Some(r.path.clone()));
+            if a.operation == "resolve" {
+                let text = resolver.resolve(&span).into_owned();
+                out.detail = json!({ "decoded_bytes": text.len() });
+                if a.hash_output {
+                    let mut digest = DigestWriter::default();
+                    digest.write_all(text.as_bytes())?;
+                    out.detail["decoded_sha256"] = json!(digest.digest.finish_hex());
+                }
+                out.resolved = Some(text);
+                return Ok(out);
+            }
             let (mut chunks, mut bytes, mut max) = (0usize, 0usize, 0usize);
             resolver.for_each_chunk(&span, a.chunk_bytes, |text| {
                 chunks += 1;
@@ -457,7 +477,7 @@ fn main() -> Result<()> {
             "effective_mode": match a.operation.as_str() {
                 "affordances" => "full",
                 "affordance-read" => "production-defined",
-                "baseline" | "discover" | "chunks" => "not-applicable",
+                "baseline" | "discover" | "chunks" | "resolve" => "not-applicable",
                 _ => &a.mode,
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }
@@ -470,7 +490,7 @@ fn main() -> Result<()> {
             "requested_rust_heap": requested_rust_heap, "detail": out.detail,
         })
     );
-    std::hint::black_box((&out.session, &out.rows));
+    std::hint::black_box((&out.session, &out.rows, &out.resolved));
     Ok(())
 }
 
