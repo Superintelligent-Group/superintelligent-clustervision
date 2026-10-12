@@ -87,7 +87,7 @@ impl ReadState {
     /// Freshness against the same concrete adapter that will perform the next read.
     pub fn fresh_with(&self, adapter: &dyn Adapter, r: &SessionRef) -> bool {
         let mut probe = source::Probe::default();
-        let now = probe.snapshot(r);
+        let now = probe.snapshot_from(r, &adapter.resume_source(r));
         self.version == state_version(adapter)
             && self.path == r.path
             && self.identity.as_ref().is_some_and(|guard| guard.fresh(&mut probe))
@@ -137,8 +137,11 @@ impl ReadState {
         }
         let anchor = self.anchor.as_ref()?;
         let version = crate::resume::version(adapter, CONSUMER)?;
-        (anchor.checkpoint.messages()? <= skip && anchor.head.holds(&r.path, current.primary.1 as u64, &version))
-            .then_some(&anchor.checkpoint)
+        (anchor.checkpoint.messages()? <= skip
+            && anchor
+                .head
+                .holds(&adapter.resume_source(r), current.primary.1 as u64, &version))
+        .then_some(&anchor.checkpoint)
     }
 }
 
@@ -256,13 +259,14 @@ fn read_inner(
     keep: usize,
     session_output: bool,
 ) -> Result<ReadPass> {
-    let captured = source::Probe::default().snapshot(r);
+    let primary = adapter.resume_source(r);
+    let captured = source::Probe::default().snapshot_from(r, &primary);
     let cached = previous
         .filter(|state| !session_output && state.fresh_with(adapter, r))
         .and_then(|state| state.completed.as_ref());
     let stop_after_selection = cached.is_some_and(|complete| skip.saturating_add(keep) < complete.total);
     let mut primary_reads = source::ReadSet::default();
-    primary_reads.record(&r.path);
+    primary_reads.record(&primary);
     let metadata_guard = primary_reads;
     let from = previous.and_then(|state| state.from(adapter, r, &captured, skip));
     if session_output {
@@ -326,7 +330,7 @@ fn read_inner(
                 ..
             } = block
             {
-                if range.path() != r.path {
+                if range.path() != primary {
                     reads.record(range.path());
                 }
             }
@@ -337,7 +341,7 @@ fn read_inner(
             };
             if let Some(path) = span
                 .and_then(|span| span.source.as_ref())
-                .filter(|path| *path != &r.path)
+                .filter(|path| *path != &primary)
             {
                 reads.record(path);
             }
@@ -351,7 +355,7 @@ fn read_inner(
             return None;
         }
         Some(Anchor {
-            head: crate::resume::MarkHead::of(&r.path, cp, version.as_deref()?)?,
+            head: crate::resume::MarkHead::of(&primary, cp, version.as_deref()?)?,
             checkpoint: cp.clone(),
         })
     };
@@ -359,9 +363,9 @@ fn read_inner(
     let last = done.last.as_ref().or(sink.last.as_ref()).and_then(anchor);
     anyhow::ensure!(
         if source.dependencies.is_some() {
-            source::unchanged(r, &source)
+            source::unchanged_from(r, &primary, &source)
         } else {
-            source::Probe::default().snapshot(r).primary == source.primary
+            source::Probe::default().snapshot_from(r, &primary).primary == source.primary
         },
         "session source changed during read: {}",
         r.path.display()
@@ -621,7 +625,9 @@ mod tests {
             .unwrap();
         assert_eq!(source::Probe::default().snapshot(&r).primary, complete.source.primary);
         let anchor = complete.anchor.as_ref().unwrap();
-        assert!(anchor.head.holds(&r.path, body.len() as u64, &anchor.head.version));
+        assert!(anchor
+            .head
+            .holds(&adapter.resume_source(&r), body.len() as u64, &anchor.head.version));
         assert!(!complete.fresh_with(adapter.as_ref(), &r));
         let mut rewritten = read_session(adapter.as_ref(), &r, Some(&complete), next.total).unwrap();
         assert!(!rewritten.resumed);

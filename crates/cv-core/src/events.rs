@@ -618,9 +618,17 @@ mod db {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .ok();
-        let source = crate::source::Snapshot {
-            primary: (mtime_ns, file_size(&r.path)),
-            dependencies: crate::source::Probe::default().dependencies(r),
+        let primary = crate::source::primary_path(r);
+        let mut probe = crate::source::Probe::default();
+        let source = if primary == r.path {
+            crate::source::Snapshot {
+                primary: (mtime_ns, file_size(&r.path)),
+                dependencies: probe.dependencies(r),
+            }
+        } else {
+            // Existing callers pass the logical directory's mtime. Directory adapters stamp
+            // their actual append file; keep the legacy signature without mixing two sources.
+            probe.snapshot_from(r, &primary)
         };
         !sync_fresh(r, stored, source.primary.0, source.primary.1)
             || !crate::source::Table::load("events").fresh(r, source.primary, &source.dependencies)
@@ -989,7 +997,7 @@ mod db {
         let mut n = 0usize;
         for sub in crate::subagent_tree_of(parent) {
             let sr = &sub.session;
-            let (mtime_ns, size) = crate::offsets::file_sig(&sr.path);
+            let (mtime_ns, size) = crate::offsets::file_sig(&crate::source::primary_path(sr));
             if !force && !sync.needs_ingest(sr, mtime_ns, size) {
                 continue;
             }

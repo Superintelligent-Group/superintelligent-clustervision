@@ -946,7 +946,10 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admissio
         Ok(p) => {
             let mark = version.as_deref().and_then(|v| {
                 let cp = p.last?;
-                Some((cv_core::resume::MarkHead::of(&job.r.path, &cp, v)?, cp))
+                Some((
+                    cv_core::resume::MarkHead::of(&adapter.resume_source(&job.r), &cp, v)?,
+                    cp,
+                ))
             });
             Out::Done {
                 job: Box::new(job),
@@ -983,7 +986,7 @@ fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoin
         return None;
     }
     let head = job.mark.as_ref()?;
-    if !head.holds(&job.r.path, job.size.max(0) as u64, version) {
+    if !head.holds(&cv_core::source::primary_path(&job.r), job.size.max(0) as u64, version) {
         return None;
     }
     let cp = cv_core::resume::state(&job.r, head)?;
@@ -1760,7 +1763,7 @@ pub fn days_behind(dir: &Path) -> Option<u64> {
     let indexed = newest_indexed_mtime(dir)?;
     let newest_on_disk = cv_core::sessions()
         .iter()
-        .map(|r| cv_core::offsets::file_sig(&r.path).0)
+        .map(|r| cv_core::offsets::file_sig(&cv_core::source::primary_path(r)).0)
         .max()?;
     let days = newest_on_disk.saturating_sub(indexed) / DAY_NS;
     (days >= 1).then_some(days as u64)

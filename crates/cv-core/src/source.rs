@@ -244,6 +244,10 @@ impl Probe {
     /// Collect the currently declared session-local dependencies. Plain file transcripts have
     /// an empty set; shared databases depend on WAL even when it is absent.
     pub fn dependencies(&mut self, r: &SessionRef) -> Option<Stamp> {
+        self.dependencies_from(r, &primary_path(r))
+    }
+
+    fn dependencies_from(&mut self, r: &SessionRef, primary: &Path) -> Option<Stamp> {
         let mut files = Vec::new();
         let mut directories = Vec::new();
         let ext = r.path.extension().and_then(|e| e.to_str());
@@ -436,6 +440,12 @@ impl Probe {
             files.extend(self.directory(&dir)?);
         }
         for file in files {
+            // A directory adapter's append file belongs to the primary signature and sampled
+            // checkpoint guard. Keeping it in the auxiliary set would reject every append.
+            // Preserve existing shared-database inventories when the logical path is the primary.
+            if primary != r.path && absolute(&file)? == absolute(primary)? {
+                continue;
+            }
             entries.insert(file.clone(), self.entry(&file)?);
         }
         Some(Stamp(
@@ -449,20 +459,36 @@ impl Probe {
     }
 
     pub fn snapshot(&mut self, r: &SessionRef) -> Snapshot {
+        self.snapshot_from(r, &primary_path(r))
+    }
+
+    /// Capture the concrete adapter's append source while retaining its logical session key
+    /// and all other auxiliary inputs. Path selection must not perform unrecorded source reads.
+    pub fn snapshot_from(&mut self, r: &SessionRef, primary: &Path) -> Snapshot {
         Snapshot {
             primary: self
-                .entry(&r.path)
+                .entry(primary)
                 .and_then(|entry| entry.state)
                 .map_or((0, 0), |state| (state.modified_ns as i64, state.len as i64)),
-            dependencies: self.dependencies(r),
+            dependencies: self.dependencies_from(r, primary),
         }
     }
 }
 
+/// The built-in adapter's actual append file, which may differ from a directory session key.
+pub fn primary_path(r: &SessionRef) -> PathBuf {
+    crate::harness::for_harness(r.harness).map_or_else(|| r.path.clone(), |adapter| adapter.resume_source(r))
+}
+
 /// A captured source still matches at publication time. Errors never establish freshness.
 pub fn unchanged(r: &SessionRef, snapshot: &Snapshot) -> bool {
+    unchanged_from(r, &primary_path(r), snapshot)
+}
+
+/// Publication guard against the concrete adapter's source path.
+pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bool {
     let mut probe = Probe::default();
-    let now = probe.snapshot(r);
+    let now = probe.snapshot_from(r, primary);
     if now.primary != snapshot.primary {
         return false;
     }
@@ -675,6 +701,39 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[test]
+    fn selected_directory_primary_grows_without_blessing_metadata_changes() {
+        let w = cv_testkit::World::in_process("source-directory-primary");
+        let session = w.base.join("session");
+        let agent = session.join("agents/agent-child");
+        std::fs::create_dir_all(&agent).unwrap();
+        let wire = agent.join("wire.jsonl");
+        let state = session.join("state.json");
+        std::fs::write(&wire, "prefix\n").unwrap();
+        std::fs::write(&state, "{}").unwrap();
+        let r = crate::SessionRef::new("session/agent-child", crate::Harness::KimiCode, &agent);
+        let before = super::Probe::default()
+            .snapshot_from(&r, &wire)
+            .with_reads(&super::ReadSet::default());
+        assert_eq!(before.primary, crate::offsets::file_sig(&wire));
+        std::fs::write(&wire, "prefix\nappend\n").unwrap();
+        let grown = super::Probe::default().snapshot_from(&r, &wire);
+        assert_ne!(before.primary, grown.primary);
+        assert!(before.dependencies_fresh(&grown, &mut super::Probe::default()));
+        assert!(!before.fresh(&grown, &mut super::Probe::default()));
+        assert!(!super::unchanged_from(&r, &wire, &before));
+        std::fs::write(&state, "{\"title\":\"edited\"}").unwrap();
+        let changed = super::Probe::default().snapshot_from(&r, &wire);
+        assert!(!before.dependencies_fresh(&changed, &mut super::Probe::default()));
+        // Missing controls are stamped too: later creation must invalidate the baseline.
+        std::fs::remove_file(&state).unwrap();
+        let absent = super::Probe::default()
+            .snapshot_from(&r, &wire)
+            .with_reads(&super::ReadSet::default());
+        std::fs::write(&state, "{}").unwrap();
+        assert!(!super::unchanged_from(&r, &wire, &absent));
+    }
+
     #[test]
     fn serialized_consumer_reads_survive_growth_and_reject_dependency_changes() {
         let w = cv_testkit::World::in_process("source-read-state");
