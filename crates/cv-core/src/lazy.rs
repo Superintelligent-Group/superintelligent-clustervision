@@ -227,18 +227,20 @@ impl Resolver {
     /// UTF-8-decode or JSON-unescape. (The result borrows only from `self`, so a caller-built
     /// temporary `Span` — e.g. a capped copy — works fine.)
     pub fn resolve<'a>(&'a self, sp: &Span) -> Cow<'a, str> {
+        if sp.escaped && sp.len > 64 * 1024 {
+            // Materialization owns the final text, but does not need another whole quoted body
+            // or serde decode scratch. In particular, don't ranged-read the entire source first
+            // on non-mmap builds. Chunking retains the same malformed-body raw fallback.
+            // At <=64KiB the old one-pass decoder's temporary memory is already bounded.
+            let mut text = String::new();
+            self.for_each_chunk(sp, 64 * 1024, |s| text.push_str(s));
+            return Cow::Owned(text);
+        }
         match self.raw_bytes(sp) {
             None => Cow::Borrowed(""),
-            Some(bytes) => {
-                if sp.escaped {
-                    Cow::Owned(unescape_json_body(&bytes))
-                } else {
-                    match bytes {
-                        Cow::Borrowed(b) => String::from_utf8_lossy(b),
-                        Cow::Owned(b) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
-                    }
-                }
-            }
+            Some(bytes) if sp.escaped => Cow::Owned(unescape_json_body(&bytes)),
+            Some(Cow::Borrowed(b)) => String::from_utf8_lossy(b),
+            Some(Cow::Owned(b)) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
         }
     }
 
@@ -829,6 +831,83 @@ mod tests {
     fn source_len(raw: &str) -> u64 {
         // The invalid span starts after "prefix", so include all remaining bytes plus one.
         raw.len() as u64 + 6
+    }
+
+    #[test]
+    fn whole_resolve_matches_old_unescape_and_respects_source_bounds() {
+        let dir = std::env::temp_dir().join(format!("cv-lazy-whole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bodies = vec![
+            Vec::new(),
+            b"plain without escapes".to_vec(),
+            b"raw quote \" and newline\n".to_vec(),
+            b"invalid UTF8 \xff".to_vec(),
+            br#"\"\\\/\b\f\n\r\t\u0000\u007f\u0080\u07ff\u0800\uffff\uD834\uDD1E"#.to_vec(),
+            br#"valid\nthen\uD834"#.to_vec(),
+            br#"valid\nthen\uDD1E"#.to_vec(),
+            br#"valid\nthen\q"#.to_vec(),
+            b"valid\\nthen invalid \xff".to_vec(),
+        ];
+        // Both sides of the one-pass/collection cutoff must decode and fall back identically.
+        for size in [65535, 65536, 65537] {
+            bodies.push(format!("{}\\n", "a".repeat(size - 2)).into_bytes());
+            bodies.push(format!("{}\\q", "a".repeat(size - 2)).into_bytes());
+        }
+        // Exercise both 64KiB decoder boundaries and a malformed tail after valid windows.
+        for padding in 65522..65538 {
+            let raw = format!("{}é\\uD834\\uDD1E\\n{}😀", "a".repeat(padding), "b".repeat(65529));
+            bodies.push(raw.as_bytes().to_vec());
+            bodies.push(format!("{raw}\\u00").into_bytes());
+        }
+        for (i, raw) in bodies.iter().enumerate() {
+            let path = dir.join(format!("body-{i}"));
+            std::fs::write(&path, [b"prefix".as_slice(), raw, b"suffix"].concat()).unwrap();
+            let resolver = Resolver::new(Some(dir.join("wrong-primary")));
+            let span = Span {
+                source: Some(path.clone()),
+                offset: 6,
+                len: raw.len() as u64,
+                escaped: true,
+            };
+            // Independent old whole-body parser remains the prefix resolver's oracle.
+            assert_eq!(resolver.resolve(&span), unescape_json_body(raw), "body {i}");
+            for invalid in [
+                Span {
+                    offset: 6,
+                    len: raw.len() as u64 + 7,
+                    ..span.clone()
+                },
+                Span {
+                    offset: u64::MAX,
+                    len: 1,
+                    ..span.clone()
+                },
+                Span {
+                    len: u64::MAX,
+                    ..span.clone()
+                },
+                Span {
+                    source: Some(dir.join("missing")),
+                    ..span.clone()
+                },
+            ] {
+                assert_eq!(resolver.resolve(&invalid), "", "body {i}: {invalid:?}");
+            }
+        }
+        let path = dir.join("ordinary");
+        std::fs::write(&path, "ordinary é text").unwrap();
+        let resolver = Resolver::new(Some(path));
+        let ordinary = Span {
+            source: None,
+            offset: 0,
+            len: 16,
+            escaped: false,
+        };
+        assert_eq!(resolver.resolve(&ordinary), "ordinary é text");
+        #[cfg(feature = "mmap")]
+        assert!(matches!(resolver.resolve(&ordinary), Cow::Borrowed(_)));
+        drop(resolver);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
