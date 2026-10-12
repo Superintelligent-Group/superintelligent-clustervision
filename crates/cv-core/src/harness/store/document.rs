@@ -287,6 +287,7 @@ impl<'a> Record<'a> {
                 .flatten()
         })
     }
+    #[cfg(test)]
     pub fn values_in_order(&self) -> impl Iterator<Item = Raw<'a>> + '_ {
         self.entries_in_order().map(|(_, value)| value)
     }

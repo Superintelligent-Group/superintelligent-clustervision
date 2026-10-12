@@ -26,8 +26,7 @@ use serde_json::value::RawValue;
 
 mod native;
 #[cfg(test)]
-use serde_json::Map;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
