@@ -1,0 +1,854 @@
+//! Complete JSON values with explicit owned and read-only source representations.
+//!
+//! Generic Serde serialization always emits the actual value, resolving a selected source value
+//! when necessary. Consumers that only need projections or compact serialized length can use
+//! [`Json::with_view`], [`Json::canonical_len`] and [`Json::write_canonical`] without constructing
+//! a descendant value tree. This module does not yet change the IR or enable lazy producers.
+//!
+//! Native source views borrow mapped bytes. Without `mmap`, the current document backend owns
+//! the selected encoded range. The canonical walker bounds decoded string scratch in both builds;
+//! object key/order state grows with object width. Neither limitation is hidden by this API.
+
+use crate::harness::store::document::{self, Raw, Record, Source};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Number, Value};
+use std::borrow::Cow;
+use std::fs::Metadata;
+use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
+
+/// A complete JSON value. Source descriptors clone cheaply; owned values retain Value semantics.
+/// Deserialization always produces `Owned`, including objects that resemble source descriptors.
+#[derive(Clone, Debug)]
+pub enum Json {
+    Owned(Value),
+    Source(Arc<JsonRange>),
+}
+
+/// A validated complete value range, tied to a read-only source identity. Fields are private so
+/// callers cannot create an unchecked range. Normal edits, appends and replacement invalidate it.
+/// Metadata checks do not provide an immutable snapshot against arbitrary external in-place
+/// rewrites or prevent external truncation of a mapped file.
+#[derive(Debug)]
+pub struct JsonRange {
+    source: JsonSource,
+    offset: u64,
+    len: u64,
+}
+
+/// Capture before an adapter validates its source. Only already accepted complete values may use
+/// validated_range afterward; this avoids validating each giant input again at producer handoff.
+#[derive(Clone, Debug)]
+pub(crate) struct JsonSource(Arc<CapturedSource>);
+#[derive(Debug)]
+struct CapturedSource {
+    path: PathBuf,
+    identity: Identity,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct Identity {
+    len: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+impl Identity {
+    fn read(path: &Path) -> Result<Self> {
+        let metadata = std::fs::metadata(path).with_context(|| format!("reading JSON source {}", path.display()))?;
+        Self::from_metadata(metadata)
+    }
+    fn from_metadata(metadata: Metadata) -> Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(metadata.is_file(), "JSON source is not a regular file");
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified()?,
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
+impl JsonSource {
+    pub(crate) fn capture(path: &Path) -> Result<Self> {
+        // Preserve symlink spelling so later retargeting changes the observed identity.
+        let path = std::path::absolute(path).context("locating JSON source")?;
+        let identity = Identity::read(&path)?;
+        Ok(Self(Arc::new(CapturedSource { path, identity })))
+    }
+    pub(crate) fn check(&self) -> Result<()> {
+        anyhow::ensure!(
+            Identity::read(&self.0.path)? == self.0.identity,
+            "JSON source changed: {}",
+            self.0.path.display()
+        );
+        Ok(())
+    }
+    fn range(&self, offset: u64, len: u64) -> Result<JsonRange> {
+        anyhow::ensure!(len != 0, "JSON range is empty");
+        anyhow::ensure!(
+            offset.checked_add(len).is_some_and(|end| end <= self.0.identity.len),
+            "JSON range is out of bounds"
+        );
+        Ok(JsonRange {
+            source: self.clone(),
+            offset,
+            len,
+        })
+    }
+    /// Caller must have syntax AND Value-compatible scalar/depth validation for this complete
+    /// range since capture. Quotes/containers are included; surrounding whitespace is excluded.
+    /// Never use this for a decoded JSON string that represents a different IR argument value.
+    pub(crate) fn validated_range(&self, offset: u64, len: u64) -> Result<Json> {
+        self.check()?;
+        Ok(Json::Source(Arc::new(self.range(offset, len)?)))
+    }
+}
+impl JsonRange {
+    pub fn path(&self) -> &Path {
+        &self.source.0.path
+    }
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    fn with_raw<T>(&self, f: impl for<'a> FnOnce(Raw<'a>) -> Result<T>) -> Result<T> {
+        self.source.check()?;
+        #[cfg(feature = "mmap")]
+        let source = Source::open(self.path())?;
+        #[cfg(not(feature = "mmap"))]
+        let source = Source::range(self.path(), self.offset, self.len)?;
+        self.source.check()?;
+        // Even validated ranges keep the safe UTF-8 check on newly mapped/read external bytes.
+        // No unchecked string cast is justified by metadata identity.
+        let raw = source
+            .slice(self.offset, self.len)
+            .context("JSON range is unreadable or not UTF-8")?;
+        let result = f(raw);
+        // Check even after callback failure: an intentional staged-output cap must not hide
+        // a source mutation. Source failure takes precedence over the callback error.
+        self.source.check()?;
+        result
+    }
+    fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        // Strict syntax/scalar validation happened before this private descriptor was created.
+        // A scoped operation shares the mapping and bounded endpoint memo for all its lookups.
+        self.with_raw(|raw| {
+            f(JsonView(View::Source(SourceView {
+                raw,
+                range: self,
+                base: raw.get().as_ptr() as usize,
+            })))
+        })
+    }
+}
+
+impl From<Value> for Json {
+    fn from(value: Value) -> Self {
+        Self::Owned(value)
+    }
+}
+impl Default for Json {
+    fn default() -> Self {
+        Self::Owned(Value::Null)
+    }
+}
+impl Serialize for Json {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        self.resolve().map_err(serde::ser::Error::custom)?.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for Json {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Value::deserialize(deserializer).map(Self::Owned)
+    }
+}
+impl Json {
+    /// Validate a complete JSON range before constructing a source descriptor. Missing files,
+    /// overflow, truncated ranges and values rejected by serde_json Value return errors.
+    pub fn source(path: impl AsRef<Path>, offset: u64, len: u64) -> Result<Self> {
+        let source = JsonSource::capture(path.as_ref())?;
+        let mut range = source.range(offset, len)?;
+        let (leading, normalized_len) = range.with_raw(|raw| {
+            // RawValue validates syntax; the shared strict preflight supplies Value's finite
+            // numbers, UTF-16 and recursion budget without decoding descendant strings.
+            let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).context("invalid JSON range")?;
+            let index = document::Index::default();
+            let checked = Raw::new(syntax.get(), &index);
+            anyhow::ensure!(
+                document::accepts_value(checked),
+                "JSON range is not a valid serde_json Value"
+            );
+            Ok((
+                (syntax.get().as_ptr() as usize - raw.get().as_ptr() as usize) as u64,
+                syntax.get().len() as u64,
+            ))
+        })?;
+        range.offset += leading;
+        range.len = normalized_len;
+        Ok(Self::Source(Arc::new(range)))
+    }
+    /// Select a child value without materializing its descendants. Source children retain their
+    /// validated range and source identity; missing keys/nonobjects remain distinct from errors.
+    pub fn select(&self, key: &str) -> Result<Option<Self>> {
+        self.with_view(|view| view.get(key)?.map(JsonView::to_json).transpose())
+    }
+
+    /// Borrow owned data or materialize the selected complete source value. This is deliberately
+    /// explicit: there is no implicit Deref that builds a giant tree or substitutes missing data.
+    pub fn resolve(&self) -> Result<Cow<'_, Value>> {
+        match self {
+            Self::Owned(value) => Ok(Cow::Borrowed(value)),
+            Self::Source(range) => range.with_view(|view| Ok(Cow::Owned(view.resolve()?.into_owned()))),
+        }
+    }
+    /// Resolve before mutation. A failed read leaves the source descriptor intact.
+    pub fn make_owned(&mut self) -> Result<&mut Value> {
+        if let Self::Source(_) = self {
+            *self = Self::Owned(self.resolve()?.into_owned());
+        }
+        match self {
+            Self::Owned(value) => Ok(value),
+            Self::Source(_) => unreachable!(),
+        }
+    }
+    /// A scoped view cannot outlive its backing mapping/buffer. All source read/validation errors
+    /// are distinct from a missing field; a changed source also rejects the completed operation.
+    pub fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        match self {
+            Self::Owned(value) => f(JsonView(View::Owned(value))),
+            Self::Source(range) => range.with_view(f),
+        }
+    }
+    /// Byte length of Value's compact serialization, preserving insertion order and duplicates'
+    /// final values at their first key position. Does not materialize descendant strings.
+    pub fn canonical_len(&self) -> Result<u64> {
+        let mut counter = CountWriter(0);
+        self.write_canonical(&mut counter)?;
+        Ok(counter.0)
+    }
+    /// Emit the exact compact JSON that serde_json serializes from the complete Value.
+    ///
+    /// An I/O or source-change error may occur after a prefix has been written. Callers must
+    /// discard/reset staged output on Err and must not publish consumer freshness for that pass.
+    /// Generic Serialize instead resolves the selected value, as serializers cannot stream pieces
+    /// of one string. This explicit writer keeps decoded leaf scratch bounded.
+    pub fn write_canonical(&self, writer: &mut impl Write) -> Result<()> {
+        self.with_view(|view| view.write_canonical(writer))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum View<'a> {
+    Owned(&'a Value),
+    Source(SourceView<'a>),
+}
+#[derive(Clone, Copy)]
+struct SourceView<'a> {
+    raw: Raw<'a>,
+    range: &'a JsonRange,
+    base: usize,
+}
+/// A typed projection of an already validated complete JSON value, scoped by Json::with_view.
+#[derive(Clone, Copy)]
+pub struct JsonView<'a>(View<'a>);
+impl<'a> From<&'a Value> for JsonView<'a> {
+    fn from(value: &'a Value) -> Self {
+        Self(View::Owned(value))
+    }
+}
+impl<'a> JsonView<'a> {
+    /// A nonobject or missing field is None; backing-source failures occur before this view exists.
+    pub fn get(self, key: &str) -> Result<Option<Self>> {
+        Ok(match self.0 {
+            View::Owned(value) => value.get(key).map(|value| Self(View::Owned(value))),
+            View::Source(source) => Record::parse(source.raw)
+                .and_then(|record| record.get(key))
+                .map(|raw| Self(View::Source(SourceView { raw, ..source }))),
+        })
+    }
+    pub fn is_null(self) -> Result<bool> {
+        Ok(match self.0 {
+            View::Owned(value) => value.is_null(),
+            View::Source(source) => source.raw.get() == "null",
+        })
+    }
+    pub fn as_bool(self) -> Result<Option<bool>> {
+        Ok(match self.0 {
+            View::Owned(value) => value.as_bool(),
+            View::Source(source) => match source.raw.get() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+        })
+    }
+    pub fn as_number(self) -> Result<Option<Number>> {
+        match self.0 {
+            View::Owned(value) => Ok(value.as_number().cloned()),
+            View::Source(source) if matches!(source.raw.get().as_bytes().first(), Some(b'-' | b'0'..=b'9')) => {
+                Ok(Some(serde_json::from_str(source.raw.get())?))
+            }
+            View::Source(_) => Ok(None),
+        }
+    }
+    /// Chronological array traversal holds one descriptor, not a vector of all children.
+    pub fn array(self) -> Result<Option<JsonArray<'a>>> {
+        Ok(match self.0 {
+            View::Owned(value) => value.as_array().map(|array| JsonArray(Array::Owned(array.iter()))),
+            View::Source(source) => {
+                document::array_iter(source.raw).map(|array| JsonArray(Array::Source { array, source }))
+            }
+        })
+    }
+    /// Visit normalized object entries in Value's insertion order. Structural key state grows
+    /// with object width; descendant payloads are borrowed, not decoded into a tree.
+    pub fn for_each_entry(self, mut f: impl FnMut(&str, Self) -> Result<()>) -> Result<bool> {
+        match self.0 {
+            View::Owned(Value::Object(object)) => {
+                for (key, value) in object {
+                    f(key, Self(View::Owned(value)))?;
+                }
+            }
+            View::Source(source) => {
+                let Some(record) = Record::parse(source.raw) else {
+                    return Ok(false);
+                };
+                for (key, value) in record.entries_in_order() {
+                    f(&key, Self(View::Source(SourceView { raw: value, ..source })))?;
+                }
+            }
+            View::Owned(_) => return Ok(false),
+        }
+        Ok(true)
+    }
+    /// Visit decoded string fragments with bounded source scratch. Returns false for a nonstring.
+    /// Errors are explicit; callback effects must be discarded if this operation returns Err.
+    pub fn for_each_str_chunk(self, mut f: impl FnMut(&str) -> Result<()>) -> Result<bool> {
+        match self.0 {
+            View::Owned(value) => match value.as_str() {
+                Some(text) => {
+                    f(text)?;
+                    Ok(true)
+                }
+                None => Ok(false),
+            },
+            View::Source(source) if source.raw.get().starts_with('"') => {
+                decode_string(source.raw, &mut f)?;
+                Ok(true)
+            }
+            View::Source(_) => Ok(false),
+        }
+    }
+    /// Own a descriptor for this complete child. Source values copy only range metadata, while
+    /// already owned values explicitly clone their selected data.
+    pub fn to_json(self) -> Result<Json> {
+        match self.0 {
+            View::Owned(value) => Ok(Json::Owned(value.clone())),
+            View::Source(source) => {
+                let delta = (source.raw.get().as_ptr() as usize)
+                    .checked_sub(source.base)
+                    .context("JSON child outside source")? as u64;
+                let offset = source
+                    .range
+                    .offset
+                    .checked_add(delta)
+                    .context("JSON child offset overflow")?;
+                source
+                    .range
+                    .source
+                    .validated_range(offset, source.raw.get().len() as u64)
+            }
+        }
+    }
+    /// Materialize only this selected view. Source strings/containers may allocate their full data.
+    pub fn resolve(self) -> Result<Cow<'a, Value>> {
+        match self.0 {
+            View::Owned(value) => Ok(Cow::Borrowed(value)),
+            View::Source(source) => Ok(Cow::Owned(serde_json::from_str(source.raw.get())?)),
+        }
+    }
+    pub fn canonical_len(self) -> Result<u64> {
+        let mut counter = CountWriter(0);
+        self.write_canonical(&mut counter)?;
+        Ok(counter.0)
+    }
+    /// Same partial-output-on-error contract as Json::write_canonical.
+    pub fn write_canonical(self, writer: &mut impl Write) -> Result<()> {
+        match self.0 {
+            View::Owned(value) => serde_json::to_writer(writer, value).map_err(Into::into),
+            View::Source(source) => write_raw(source.raw, writer),
+        }
+    }
+}
+
+enum Array<'a> {
+    Owned(std::slice::Iter<'a, Value>),
+    Source {
+        array: document::ArrayIter<'a>,
+        source: SourceView<'a>,
+    },
+}
+/// A scoped chronological array iterator. No source payloads or child roster are owned.
+/// Items are fallible so file-backed cursor implementations can propagate read errors.
+pub struct JsonArray<'a>(Array<'a>);
+impl<'a> Iterator for JsonArray<'a> {
+    type Item = Result<JsonView<'a>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.0 {
+            Array::Owned(array) => array.next().map(|value| Ok(JsonView(View::Owned(value)))),
+            Array::Source { array, source } => array
+                .next()
+                .map(|raw| Ok(JsonView(View::Source(SourceView { raw, ..*source })))),
+        }
+    }
+}
+
+struct CountWriter(u64);
+impl Write for CountWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| std::io::Error::other("JSON length overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn decode_string(raw: Raw<'_>, f: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+    let body = &raw.get()[1..raw.get().len() - 1];
+    // Validated unescaped text is borrowed directly. A callback can choose its own bounded scan.
+    if !body.as_bytes().contains(&b'\\') {
+        return f(body);
+    }
+    let mut error = None;
+    let decoded = crate::lazy::decode_json_body(&mut Cursor::new(body.as_bytes()), &mut |text| {
+        if error.is_none() {
+            error = f(text).err();
+        }
+    });
+    if let Some(error) = error {
+        return Err(error);
+    }
+    anyhow::ensure!(decoded.is_ok(), "validated JSON string failed decoding");
+    Ok(())
+}
+fn write_raw(raw: Raw<'_>, writer: &mut impl Write) -> Result<()> {
+    match raw.get().as_bytes().first() {
+        Some(b'{') => {
+            let record = Record::parse(raw).context("invalid validated JSON object")?;
+            writer.write_all(b"{")?;
+            for (i, (key, value)) in record.entries_in_order().enumerate() {
+                if i != 0 {
+                    writer.write_all(b",")?;
+                }
+                serde_json::to_writer(&mut *writer, &key)?;
+                writer.write_all(b":")?;
+                write_raw(value, writer)?;
+            }
+            writer.write_all(b"}")?;
+        }
+        Some(b'[') => {
+            writer.write_all(b"[")?;
+            for (i, value) in document::array_iter(raw)
+                .context("invalid validated JSON array")?
+                .enumerate()
+            {
+                if i != 0 {
+                    writer.write_all(b",")?;
+                }
+                write_raw(value, writer)?;
+            }
+            writer.write_all(b"]")?;
+        }
+        Some(b'"') => {
+            if !raw.get().as_bytes().contains(&b'\\') {
+                writer.write_all(raw.get().as_bytes())?;
+            } else {
+                writer.write_all(b"\"")?;
+                let mut scratch = Vec::new();
+                decode_string(raw, &mut |text| {
+                    scratch.clear();
+                    serde_json::to_writer(&mut scratch, text)?;
+                    writer.write_all(&scratch[1..scratch.len() - 1])?;
+                    Ok(())
+                })?;
+                writer.write_all(b"\"")?;
+            }
+        }
+        Some(b'-' | b'0'..=b'9') => {
+            let number: Number = serde_json::from_str(raw.get())?;
+            serde_json::to_writer(writer, &number)?;
+        }
+        _ => writer.write_all(raw.get().as_bytes())?, // Validated null/bool.
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct Fixture {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+    impl Fixture {
+        fn new(bytes: &[u8]) -> Self {
+            let dir = std::env::temp_dir().join(format!("cv-json-foundation-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("source.json");
+            std::fs::write(&path, bytes).unwrap();
+            Self { dir, path }
+        }
+        fn value(&self) -> Json {
+            Json::source(&self.path, 0, std::fs::metadata(&self.path).unwrap().len()).unwrap()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).unwrap();
+        }
+    }
+    fn canonical(value: &Json) -> Vec<u8> {
+        let mut output = Vec::new();
+        value.write_canonical(&mut output).unwrap();
+        assert_eq!(value.canonical_len().unwrap(), output.len() as u64);
+        output
+    }
+
+    #[test]
+    fn owned_wire_and_mutation_are_value_transparent() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Json>();
+        let values = [
+            Value::Null,
+            json!(true),
+            json!(-7),
+            json!(1.25),
+            json!(["x", null, {"a": 1}]),
+            json!({"Source": {"path": "missing", "offset": 0, "len": 100}, "Owned": null}),
+        ];
+        for value in values {
+            let expected = serde_json::to_vec(&value).unwrap();
+            let mut wrapped = Json::from(value.clone());
+            assert!(matches!(wrapped.resolve().unwrap(), Cow::Borrowed(_)));
+            assert_eq!(serde_json::to_vec(&wrapped).unwrap(), expected);
+            assert_eq!(canonical(&wrapped), expected);
+            let decoded: Json = serde_json::from_slice(&expected).unwrap();
+            assert!(matches!(decoded, Json::Owned(_)));
+            assert_eq!(*decoded.resolve().unwrap(), value);
+            *wrapped.make_owned().unwrap() = json!("mutated");
+            assert_eq!(canonical(&wrapped), br#""mutated""#);
+        }
+    }
+
+    #[test]
+    fn source_writer_and_selected_serde_match_independent_value_oracle() {
+        let mut cases: Vec<String> = [
+            "null",
+            "true",
+            "false",
+            "-0",
+            "1.234e+10",
+            "1e-400",
+            "18446744073709551616",
+            "-99999999999999999999999",
+            r#""literal UTF8 é\n\r\t\b\f\/\\\"\u0000\u001f\ud83c\udf19""#,
+            r#"{"z":0,"a":1,"z":{"b":2,"a":3,"b":4},"a":[true,null,"\u0041"],"":5}"#,
+            r#"{"\u0061":1,"b":2,"a":3,"\u0062":4}"#,
+            "[[],{},[1,2],\"\",{\"x\": [false, -0, 1e2]}]",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        for split in 0..=12 {
+            cases.push(format!(
+                "{{\"prefix\":\"{}\\ud83c\\udf19é\\n{}\",\"tail\":1}}",
+                "x".repeat(65_536 - split),
+                "\\\\".repeat(32_769)
+            ));
+        }
+        // Large escaped controls exercise the serializer's worst-case per-window expansion.
+        cases.push(format!("\"{}\"", "\\u0000\\t\\n".repeat(20_000)));
+        for input in cases {
+            let oracle: Value = serde_json::from_str(&input).unwrap();
+            let expected = serde_json::to_vec(&oracle).unwrap();
+            let fixture = Fixture::new(input.as_bytes());
+            let value = fixture.value();
+            assert_eq!(canonical(&value), expected);
+            assert_eq!(serde_json::to_vec(&value).unwrap(), expected);
+            assert_eq!(*value.resolve().unwrap(), oracle);
+        }
+    }
+
+    #[test]
+    fn source_acceptance_matches_value_including_overwritten_invalid_values() {
+        let mut cases: Vec<Vec<u8>> = [
+            "",
+            " ",
+            "[] trailing",
+            "[1,]",
+            "{",
+            "00",
+            "1e400",
+            "-1e400",
+            r#""\ud800""#,
+            r#""\udc00""#,
+            r#"{"a":"\ud800","a":0}"#,
+            r#"{"a":1e400,"a":0}"#,
+            r#""\ud800\u0041""#,
+            r#""\q""#,
+            "\"raw\ncontrol\"",
+            " \n true \r ",
+            r#""\\ud800""#,
+        ]
+        .into_iter()
+        .map(|s| s.as_bytes().to_vec())
+        .collect();
+        cases.push(b"{\"unused\":\"\xff\"}".to_vec());
+        cases.push(format!("\"{}\\ud800\"", "x".repeat(131_072)).into_bytes());
+        cases.push("9".repeat(2000).into_bytes());
+        for depth in 125..=130 {
+            cases.push(format!("{}0{}", "[".repeat(depth), "]".repeat(depth)).into_bytes());
+            cases.push(format!("{}0{}", "{\"a\":".repeat(depth), "}".repeat(depth)).into_bytes());
+        }
+        for input in cases {
+            let expected = serde_json::from_slice::<Value>(&input).is_ok();
+            let fixture = Fixture::new(&input);
+            assert_eq!(
+                Json::source(&fixture.path, 0, input.len() as u64).is_ok(),
+                expected,
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_projections_match_owned_and_preserve_duplicate_order() {
+        let input = r#"{"z":{"n":1.5,"b":false},"a":[true,null,"\ud83c\udf19"],"z":{"n":2,"b":true},"s":"head\n尾"}"#;
+        let fixture = Fixture::new(input.as_bytes());
+        let owned = Json::from(serde_json::from_str::<Value>(input).unwrap());
+        for value in [owned, fixture.value()] {
+            let (keys, strings) = value
+                .with_view(|view| {
+                    assert!(view.get("missing")?.is_none());
+                    let z = view.get("z")?.unwrap();
+                    assert_eq!(z.get("n")?.unwrap().as_number()?, Some(Number::from(2)));
+                    assert_eq!(z.get("b")?.unwrap().as_bool()?, Some(true));
+                    assert!(z.get("n")?.unwrap().get("anything")?.is_none());
+                    let array = view.get("a")?.unwrap().array()?.unwrap().collect::<Result<Vec<_>>>()?;
+                    assert_eq!(array.len(), 3);
+                    assert_eq!(array[0].as_bool()?, Some(true));
+                    assert!(array[1].is_null()?);
+                    assert!(!array[1].for_each_str_chunk(|_| panic!("nonstring callback"))?);
+                    let mut keys = Vec::new();
+                    view.for_each_entry(|key, _| {
+                        keys.push(key.to_string());
+                        Ok(())
+                    })?;
+                    let mut strings = String::new();
+                    array[2].for_each_str_chunk(|part| {
+                        strings.push_str(part);
+                        Ok(())
+                    })?;
+                    view.get("s")?.unwrap().for_each_str_chunk(|part| {
+                        strings.push_str(part);
+                        Ok(())
+                    })?;
+                    Ok((keys, strings))
+                })
+                .unwrap();
+            assert_eq!(keys, ["z", "a", "s"]);
+            assert_eq!(strings, "🌙head\n尾");
+        }
+    }
+
+    #[test]
+    fn exact_range_bounds_and_read_errors_never_become_null_or_missing() {
+        let body = b" {\"value\":\"range\"} \n";
+        // Keep non-JSON prefix/suffix outside the selected range.
+        let fixture = Fixture::new(&[b"junk".as_slice(), body.as_slice(), b"trailing".as_slice()].concat());
+        let mut value = Json::source(&fixture.path, 4, body.len() as u64).unwrap();
+        assert_eq!(canonical(&value), br#"{"value":"range"}"#);
+        assert!(Json::source(&fixture.path, 0, 4).is_err());
+        assert!(Json::source(&fixture.path, u64::MAX, 2).is_err());
+        assert!(Json::source(&fixture.path, 0, u64::MAX).is_err());
+        assert!(Json::source(&fixture.path, 1000, 1).is_err());
+        assert!(Json::source(fixture.dir.join("absent"), 0, 1).is_err());
+        std::fs::remove_file(&fixture.path).unwrap();
+        assert!(value.resolve().is_err());
+        assert!(value.with_view(|view| Ok(view.get("absent")?.is_none())).is_err());
+        assert!(value.canonical_len().is_err());
+        assert!(serde_json::to_vec(&value).is_err());
+        assert!(value.make_owned().is_err());
+        assert!(matches!(value, Json::Source(_)));
+    }
+
+    #[test]
+    fn source_identity_rejects_append_replacement_and_mutation_during_projection() {
+        let fixture = Fixture::new(br#"{"a":1}"#);
+        let value = fixture.value();
+        std::fs::write(&fixture.path, br#"{"a":1} "#).unwrap();
+        assert!(value.canonical_len().is_err());
+        let value = fixture.value();
+        value
+            .with_view(|view| {
+                assert_eq!(view.get("a")?.unwrap().as_number()?, Some(Number::from(1)));
+                // Preserve length so mapped bytes remain valid; a deliberate mtime makes the check
+                // deterministic on filesystems with coarse timestamp granularity.
+                std::fs::write(&fixture.path, br#"{"a":2} "#)?;
+                std::fs::File::open(&fixture.path)?.set_modified(SystemTime::UNIX_EPOCH)?;
+                Ok(())
+            })
+            .expect_err("post-operation source change must reject its output");
+        let value = fixture.value();
+        let replacement = fixture.dir.join("replacement");
+        std::fs::write(&replacement, br#"{"a":3} "#).unwrap();
+        std::fs::File::open(&replacement)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        std::fs::rename(replacement, &fixture.path).unwrap();
+        #[cfg(unix)]
+        assert!(value.canonical_len().is_err()); // Same size/mtime; inode distinguishes replacement.
+        drop(value);
+        let mut value = fixture.value();
+        let expected = value.resolve().unwrap().into_owned();
+        assert_eq!(*value.make_owned().unwrap(), expected);
+        std::fs::remove_file(&fixture.path).unwrap();
+        assert_eq!(*value.resolve().unwrap(), expected); // Explicit ownership survives source loss.
+    }
+
+    #[test]
+    fn selected_children_share_validated_identity_and_borrowed_owned_views() {
+        let input = br#" {"ignored":"large","wrapper":{"n":7,"list":[{"a":"first"},{"a":"last"}]}} "#;
+        let fixture = Fixture::new(input);
+        let snapshot = JsonSource::capture(&fixture.path).unwrap();
+        let index = document::Index::default();
+        let raw: &crate::lazy::RawValue = serde_json::from_slice(input).unwrap();
+        assert!(document::accepts_value(Raw::new(raw.get(), &index)));
+        let value = snapshot.validated_range(1, input.len() as u64 - 2).unwrap();
+        let wrapper = value.select("wrapper").unwrap().unwrap();
+        let child = wrapper
+            .with_view(|view| view.get("list")?.unwrap().array()?.unwrap().nth(1).unwrap()?.to_json())
+            .unwrap();
+        assert_eq!(canonical(&child), br#"{"a":"last"}"#);
+        assert_eq!(canonical(&wrapper.select("n").unwrap().unwrap()), b"7");
+        assert!(wrapper.select("missing").unwrap().is_none());
+        assert!(matches!(&child, Json::Source(range) if range.path() == fixture.path && range.offset() > 1));
+        let public_value = fixture.value();
+        assert_eq!(
+            canonical(&public_value.select("wrapper").unwrap().unwrap()),
+            canonical(&wrapper)
+        );
+        let owned: Value = serde_json::from_slice(input).unwrap();
+        assert!(matches!(JsonView::from(&owned).resolve().unwrap(), Cow::Borrowed(_)));
+        assert_eq!(
+            canonical(
+                &JsonView::from(&owned)
+                    .get("wrapper")
+                    .unwrap()
+                    .unwrap()
+                    .to_json()
+                    .unwrap()
+            ),
+            canonical(&wrapper)
+        );
+        std::fs::File::open(&fixture.path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        assert!(child.resolve().is_err());
+        assert!(snapshot.validated_range(1, input.len() as u64 - 2).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_rejects_restored_mtime_and_symlink_retargeting() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new(br#"{"a":1}"#);
+        let original_time = std::fs::metadata(&fixture.path).unwrap().modified().unwrap();
+        let value = fixture.value();
+        std::fs::write(&fixture.path, br#"{"a":2}"#).unwrap();
+        std::fs::File::open(&fixture.path)
+            .unwrap()
+            .set_modified(original_time)
+            .unwrap();
+        assert!(value.resolve().is_err()); // Unix change time captures the restored mtime edit.
+        let other = fixture.dir.join("other");
+        std::fs::write(&other, br#"{"a":3}"#).unwrap();
+        let link = fixture.dir.join("link");
+        symlink(&fixture.path, &link).unwrap();
+        let value = Json::source(&link, 0, 7).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(&other, &link).unwrap();
+        assert!(value.resolve().is_err());
+    }
+
+    struct FailingWriter {
+        remaining: usize,
+        written: usize,
+    }
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::other("injected writer failure"));
+            }
+            let n = bytes.len().min(self.remaining);
+            self.remaining -= n;
+            self.written += n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn writer_and_string_reducer_errors_are_propagated() {
+        let input = format!("{{\"a\":\"{}\"}}", "\\n".repeat(100_000));
+        let fixture = Fixture::new(input.as_bytes());
+        for value in [
+            Json::from(serde_json::from_str::<Value>(&input).unwrap()),
+            fixture.value(),
+        ] {
+            let mut writer = FailingWriter {
+                remaining: 100,
+                written: 0,
+            };
+            let error = value.write_canonical(&mut writer).unwrap_err();
+            assert!(error.to_string().contains("injected writer failure"));
+            assert_eq!(writer.written, 100);
+            let mut calls = 0;
+            let error = value
+                .with_view(|view| {
+                    view.get("a")?.unwrap().for_each_str_chunk(|_| {
+                        calls += 1;
+                        anyhow::bail!("injected reducer failure")
+                    })
+                })
+                .unwrap_err();
+            assert_eq!(calls, 1);
+            assert!(error.to_string().contains("injected reducer failure"));
+        }
+    }
+}

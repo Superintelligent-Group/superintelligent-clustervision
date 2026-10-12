@@ -244,14 +244,21 @@ impl<'a> Record<'a> {
     }
     /// serde_json's preserve_order keeps a key's first position and its final value. Only
     /// callers that require navigation order retain the set; ordinary records retain no roster.
-    pub fn values_in_order(&self) -> impl Iterator<Item = Raw<'a>> + '_ {
+    pub fn entries_in_order(&self) -> impl Iterator<Item = (String, Raw<'a>)> + '_ {
         let mut seen = HashSet::new();
         ObjectIter {
             raw: self.raw,
             cursor: 1,
             done: self.fields.is_empty(),
         }
-        .filter_map(move |(key, _)| seen.insert(key.clone()).then(|| self.get(&key)).flatten())
+        .filter_map(move |(key, _)| {
+            seen.insert(key.clone())
+                .then(|| self.get(&key).map(|value| (key, value)))
+                .flatten()
+        })
+    }
+    pub fn values_in_order(&self) -> impl Iterator<Item = Raw<'a>> + '_ {
+        self.entries_in_order().map(|(_, value)| value)
     }
     pub fn get(&self, key: &str) -> Option<Raw<'a>> {
         self.fields.get(key).copied()
