@@ -140,23 +140,29 @@ pub(super) fn note_json_sources(message: &crate::Message, reads: &mut ReadSet) {
     }
 }
 
-fn captured(r: &SessionRef) -> (Snapshot, ReadSet) {
-    let before = Probe::default().snapshot(r);
+fn captured(r: &SessionRef, primary: &std::path::Path) -> (Snapshot, ReadSet) {
+    let before = Probe::default().snapshot_from(r, primary);
     let mut reads = ReadSet::default();
     // Include replacement identity and ctime, even when size and mtime were restored.
-    reads.record(&r.path);
+    reads.record(primary);
     (before, reads)
 }
 
-fn fresh(r: &SessionRef, before: &Snapshot) -> bool {
+fn fresh(r: &SessionRef, before: &Snapshot, primary: &std::path::Path) -> bool {
     let mut probe = Probe::default();
-    let current = probe.snapshot(r);
+    let current = probe.snapshot_from(r, primary);
     before.fresh(&current, &mut probe)
 }
 
-fn window_sink(r: &SessionRef, start: usize, end: Option<usize>, capture: bool, reads: ReadSet) -> WindowSink {
+fn window_sink(
+    primary: &std::path::Path,
+    start: usize,
+    end: Option<usize>,
+    capture: bool,
+    reads: ReadSet,
+) -> WindowSink {
     WindowSink {
-        resolver: crate::Resolver::new(Some(r.path.clone())),
+        resolver: crate::Resolver::new(Some(primary.to_path_buf())),
         idx: 0,
         start,
         end,
@@ -183,18 +189,19 @@ pub(super) fn window(
         ..ParseOptions::lazy()
     };
     let version = crate::resume::version(adapter, "api-window1");
+    let primary = adapter.resume_source(r);
     if version.is_none() {
-        let mut sink = window_sink(r, start, end, false, ReadSet::default());
+        let mut sink = window_sink(&primary, start, end, false, ReadSet::default());
         return Ok((adapter.try_stream(r, &opts, &mut sink)?, sink));
     }
     let key = version.and_then(|version| Key::admitted(r, version, extra));
-    let (before, reads) = captured(r);
-    let mut sink = window_sink(r, start, end, key.is_some(), reads);
+    let (before, reads) = captured(r, &primary);
+    let mut sink = window_sink(&primary, start, end, key.is_some(), reads);
     let mut resumed = false;
     let mut shell = None;
     if let Some(key) = &key {
         if let Some(entry) = cache.get(key) {
-            if fresh(r, &entry.source) {
+            if fresh(r, &entry.source, &primary) {
                 if let Payload::Window {
                     index,
                     checkpoint,
@@ -218,19 +225,19 @@ pub(super) fn window(
     }
     if shell.is_none() {
         // A declined resume promises no callbacks, but discard its initial state too.
-        let (_, reads) = captured(r);
-        sink = window_sink(r, start, end, key.is_some(), reads);
+        let (_, reads) = captured(r, &primary);
+        sink = window_sink(&primary, start, end, key.is_some(), reads);
         shell = Some(adapter.try_stream(r, &opts, &mut sink)?);
     }
     let source = before.with_reads(&sink.reads);
-    let stable = fresh(r, &source);
+    let stable = fresh(r, &source, &primary);
     if resumed && !stable {
         // Do not return a new suffix composed with an old prefix's metadata after a mutation.
         if let Some(key) = &key {
             cache.remove(key);
         }
-        let (_, reads) = captured(r);
-        let mut whole = window_sink(r, start, end, false, reads);
+        let (_, reads) = captured(r, &primary);
+        let mut whole = window_sink(&primary, start, end, false, reads);
         let shell = adapter.try_stream(r, &opts, &mut whole)?;
         return Ok((shell, whole));
     }
@@ -252,9 +259,10 @@ pub(super) fn window(
 }
 
 pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
+    let primary = adapter.resume_source(r);
     let key = Key::admitted(r, format!("{}/api-head1", env!("CARGO_PKG_VERSION")), false);
     if let Some(entry) = key.as_ref().and_then(|key| cache.get(key)) {
-        if fresh(r, &entry.source) {
+        if fresh(r, &entry.source, &primary) {
             if let Payload::Head(value) = entry.payload {
                 return Ok(value);
             }
@@ -262,7 +270,7 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
             cache.remove(key.as_ref().expect("cached head has a key"));
         }
     }
-    let (before, reads) = captured(r);
+    let (before, reads) = captured(r, &primary);
     struct Counter {
         total: usize,
         reads: ReadSet,
@@ -284,7 +292,7 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
     map.insert("total".into(), json!(counter.total));
     map.insert("extra".into(), Value::Object(shell.extra));
     let source = before.with_reads(&counter.reads);
-    if let Some(key) = key.filter(|_| fresh(r, &source) && bounded_size(&value).is_some()) {
+    if let Some(key) = key.filter(|_| fresh(r, &source, &primary) && bounded_size(&value).is_some()) {
         cache.insert(Entry {
             key,
             source,
@@ -370,6 +378,9 @@ mod tests {
         fn resume_format(&self) -> Option<u32> {
             self.inner.resume_format()
         }
+        fn resume_source(&self, r: &SessionRef) -> std::path::PathBuf {
+            self.inner.resume_source(r)
+        }
         fn resume(
             &self,
             r: &SessionRef,
@@ -402,7 +413,7 @@ mod tests {
             "meta": sink.meta.clone().unwrap_or_else(|| session_meta_json(shell)) })
     }
     fn oracle(adapter: &dyn Adapter, r: &SessionRef, start: usize, end: Option<usize>, extra: bool) -> Value {
-        let mut sink = window_sink(r, start, end, false, ReadSet::default());
+        let mut sink = window_sink(&adapter.resume_source(r), start, end, false, ReadSet::default());
         let shell = adapter
             .try_stream(
                 r,
@@ -435,12 +446,15 @@ mod tests {
         let world = cv_testkit::World::in_process("api_native_windows");
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
         let mut checked = 0;
-        for harness in [Harness::Claude, Harness::Codex] {
+        for harness in [Harness::Claude, Harness::Codex, Harness::KimiCode] {
             let adapter: Box<dyn Adapter> = match harness {
                 Harness::Claude => Box::new(crate::harness::claude::Claude::with_config_dir(
                     &world.home.join(".claude"),
                 )),
-                _ => Box::new(crate::harness::codex::Codex::with_home(&world.home.join(".codex"))),
+                Harness::Codex => Box::new(crate::harness::codex::Codex::with_home(&world.home.join(".codex"))),
+                _ => Box::new(crate::harness::kimi_code::KimiCode::with_home(
+                    &world.home.join(".kimi-code"),
+                )),
             };
             for file in walkdir::WalkDir::new(root.join(harness.as_str()))
                 .into_iter()
@@ -449,7 +463,20 @@ mod tests {
                 if file.path().extension().and_then(|x| x.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let r = SessionRef::new("oracle", harness, file.path());
+                let path = if harness == Harness::KimiCode {
+                    if file.file_name() != "wire.jsonl" {
+                        continue;
+                    }
+                    let agent = file.path().parent().unwrap();
+                    if agent.file_name().unwrap() == "main" {
+                        agent.parent().unwrap().parent().unwrap()
+                    } else {
+                        agent
+                    }
+                } else {
+                    file.path()
+                };
+                let r = SessionRef::new("oracle", harness, path);
                 for extra in [false, true] {
                     let cache = Cache::default();
                     for (start, end) in [
@@ -475,7 +502,7 @@ mod tests {
         }
         assert!(
             checked >= 30,
-            "expected frozen Claude/Codex native JSONL fixtures, found {checked}"
+            "expected frozen Claude/Codex/Kimi-Code native JSONL fixtures, found {checked}"
         );
     }
 
@@ -576,7 +603,7 @@ mod tests {
     fn cache_retention_has_entry_and_byte_budgets() {
         let world = cv_testkit::World::in_process("api_cache_budget");
         let r = fixture(&world, 1);
-        let (source, reads) = captured(&r);
+        let (source, reads) = captured(&r, &crate::source::primary_path(&r));
         let source = source.with_reads(&reads);
         let cache = Cache::default();
         for i in 0..100 {
@@ -679,6 +706,63 @@ mod tests {
         eprintln!("pages=100 selected=20000 cached_page_callbacks={page_callbacks} repeated_heads=5 head_callbacks={head_callbacks}");
     }
     #[test]
+    fn directory_pages_reuse_actual_wire_and_invalidate_on_wire_or_state_changes() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("api_kimi_code_pages");
+        let dir = world.home.join(".kimi-code/sessions/wd_test/session_pages");
+        std::fs::create_dir_all(dir.join("agents/main")).unwrap();
+        let wire = dir.join("agents/main/wire.jsonl");
+        let state = dir.join("state.json");
+        std::fs::write(&state, r#"{"id":"session_pages","cwd":"/old"}"#).unwrap();
+        let line = "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n";
+        std::fs::write(&wire, line.repeat(20_000)).unwrap();
+        let r = SessionRef::new("pages", Harness::KimiCode, dir);
+        let inner = crate::harness::kimi_code::KimiCode::with_home(&world.home.join(".kimi-code"));
+        let adapter = Observed::new(&inner);
+        let cache = Cache::default();
+        for start in (0..20_000).step_by(200) {
+            let (shell, sink) = window(&cache, &adapter, &r, start, Some(start + 200), false).unwrap();
+            assert_eq!(sink.msgs.len(), 200);
+            assert_eq!(sink.idx, (start + 201).min(20_000));
+            if start % 2000 == 0 || start == 19800 {
+                assert_eq!(
+                    result(&shell, &sink),
+                    oracle(&inner, &r, start, Some(start + 200), false)
+                );
+            }
+        }
+        assert_eq!(adapter.messages.load(Ordering::Relaxed), 20_099);
+        let first = head(&cache, &adapter, &r).unwrap();
+        assert_eq!(head(&cache, &adapter, &r).unwrap(), first);
+        assert_eq!(adapter.messages.load(Ordering::Relaxed), 40_099);
+        // Direct changes to the nested source must invalidate a directory-keyed head and page.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wire)
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+        assert_eq!(head(&cache, &adapter, &r).unwrap()["total"], 20_001);
+        let before = adapter.messages.load(Ordering::Relaxed);
+        let (shell, sink) = window(&cache, &adapter, &r, 19900, Some(19905), false).unwrap();
+        assert_eq!(result(&shell, &sink), oracle(&inner, &r, 19900, Some(19905), false));
+        assert_eq!(adapter.messages.load(Ordering::Relaxed) - before, 19_906);
+        std::fs::write(&state, r#"{"id":"session_pages","cwd":"/new"}"#).unwrap();
+        let before = adapter.messages.load(Ordering::Relaxed);
+        let (shell, sink) = window(&cache, &adapter, &r, 19905, Some(19910), false).unwrap();
+        assert_eq!(result(&shell, &sink), oracle(&inner, &r, 19905, Some(19910), false));
+        assert_eq!(shell.cwd.as_deref(), Some(std::path::Path::new("/new")));
+        assert_eq!(adapter.messages.load(Ordering::Relaxed) - before, 19_911);
+        assert!(cache
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.bytes < 16 * 1024));
+        eprintln!("kimi-code actual API: pages=100 selected=20000 callbacks=20099; two heads callbacks=20000; wire/state changes force exact whole fallback");
+    }
+
+    #[test]
     fn source_json_paths_are_dependencies_even_without_adapter_notifications() {
         struct External {
             path: std::path::PathBuf,
@@ -720,13 +804,13 @@ mod tests {
         head(&cache, &adapter, &r).unwrap();
         head(&cache, &adapter, &r).unwrap();
         assert_eq!(adapter.calls.load(Ordering::Relaxed), 1);
-        let (before, reads) = captured(&r);
-        let mut sink = window_sink(&r, 1, Some(2), false, reads);
+        let (before, reads) = captured(&r, &crate::source::primary_path(&r));
+        let mut sink = window_sink(&crate::source::primary_path(&r), 1, Some(2), false, reads);
         adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink).unwrap();
         let source = before.with_reads(&sink.reads);
-        assert!(fresh(&r, &source));
+        assert!(fresh(&r, &source, &crate::source::primary_path(&r)));
         std::fs::write(path, r#"{"command":"updated"}"#).unwrap();
-        assert!(!fresh(&r, &source));
+        assert!(!fresh(&r, &source, &crate::source::primary_path(&r)));
         head(&cache, &adapter, &r).unwrap();
         assert_eq!(adapter.calls.load(Ordering::Relaxed), 3);
     }
