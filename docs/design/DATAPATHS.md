@@ -67,19 +67,19 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Kimi Code | One LLM step buffered; source-projected inventory; sidecar output references | Step and structured carriers can be large; mutable state/wire semantics |
 | Grok | History stream + pending reasoning; metadata-projected discovery and sidecars | One history record and retained tool metadata; enrichment can revise old messages |
 | Cline/Roo legacy | mmap raw history items, one record at a time | Full discovery/UI sidecar trees; no lazy text |
-| Cline SDK | Native source mapping, raw records, shared Anthropic block dispatch | Portable cold source buffer; rich structured fields remain owned |
+| Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
 | Continue | mmap raw history items; tool-answer dedup | Metadata-only discovery now skips bodies; stream records and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
 | Cursor SQLite | Indexed composer key range; prepared bubble lookups | Composed sessions/blobs; global/workspace dependencies |
 | Devin SQLite | Compact structural forest projection, then selected full metadata per emitted row | Necessary navigation state grows with nodes; strict metadata projection has a measured CPU cost |
-| Hermes SQLite | Indexed rows; prompt suppression uses bounded exact keys with temporary spill | Initial SQL spill has significant CPU/temp-I/O cost; shared portable exact-set replacement pending |
+| Hermes SQLite | Indexed rows; prompt suppression uses the shared portable exact string set | Initial SQL spill had significant CPU/temp-I/O cost; final cached exact-set CPU proof pending |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
 | LM Studio | Raw-turn mmap stream | Metadata-only discovery skips body trees; escaped scratch and first-title candidate remain owned |
-| ChatGPT / Claude account exports | Bounded metadata cache and source ranges; selected-conversation replay | Cold portable source buffer, branch descriptors, joined text and tool argument Values |
-| OpenSession | Native raw document validation and per-message IR projection | Portable cold source buffer; authoritative rich IR fields remain owned |
+| ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text, selected owned output and sender/empty-archive compatibility edges |
+| OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |
 
 Registry: `cv-core/src/harness/mod.rs`; implementations under `cv-core/src/harness/`.
 Directory entry sizes and whole database sizes are **not** per-session transcript byte counts.
@@ -98,11 +98,11 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
 | FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep | Writer arenas coexist with admitted documents; giant escaped-body composition proof pending |
-| Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
+| Semantic indexing | Shares discovery inventory; source/model identity enables unchanged-vector reuse and deferred model load; atomic streamed save | Fallible lazy text projections and final end-to-end cost proof; vector store still grows with session count |
 | API pagination | Bounded source-verified page checkpoints and head metadata cache; no messages cached | Safe continuation formats only; source/dependency changes and oversized state fall back |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
 | Archive | Skip verified unchanged artifacts before parsing; safe append reuses source suffixes | Prior archive JSON prefix is still materialized and canonical output rewritten; full fallback remains owned |
-| Dataset | One session's lazy message vector, writer resolves output | Escaped chunk bound; streaming filters where semantics allow |
+| Dataset | Current lazy message vector, writer resolves output; streamed output/filter staging in an active lane | Preserve selection/error atomicity; selected output remains output-sized |
 | Pack/tools/token stats | Tool histograms fold bounded per-message event scratch; pack excerpts use a ring | Stats usage aggregation and repeated passes; preserve duplicate precedence and float addition order |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
@@ -317,11 +317,42 @@ reduces its initial CPU regression to about 1.25× on the same 32 MB control: us
 0.01644 s, system 0.01176 → 0.01312 s; paired wall 0.02760 → 0.03236 s under uncontrolled load.
 Cursor inline composer Values and OpenCode many-part logical messages remain unbounded cases.
 
+Cold portable document sources now use the shared positioned view rather than a whole encoded
+source buffer. On the frozen 16/64 MiB plain/escaped count/discovery fixtures, all 32 cases retain
+exact expected message/session counts. Peak live requested Rust heap, **including stage baseline**,
+is flat across source sizes:
+
+| Portable format | Count plain / escaped (B) | Discovery plain / escaped (B) |
+|---|---:|---:|
+| Cline SDK | 264,030 / 329,552 | 264,772 / 330,289 |
+| OpenSession | 263,604 / 329,127 | 263,760 / 329,282 |
+| ChatGPT export | 329,317 / 394,847 | 329,484 / 395,013 |
+| Claude export | 329,311 / 394,841 | 329,477 / 395,006 |
+
+These are no-mmap allocation probes through the document source activation; they exclude C,
+allocator overhead and process footprint and make no timing claim. Small raw serialization
+oracles pass in both configurations; giant full-output/hash composition and the Claude sender
+count/empty-archive error corrections remain separate pending checks.
+
 Token statistics have a separate retention counterexample. On 16k/64k native usage calls,
 current aggregation peaks at 6,743,774/26,955,998 B for duplicated Claude response blocks and
 2,654,678/10,557,782 B for unkeyed Codex calls. Counts, totals and duplicates match expectations;
-these allocator measurements make no CPU claim. A shared bounded usage fold/exact-set design is
-in progress; distinct dedup keys and late model fallback must preserve historical precedence.
+these allocator measurements make no CPU claim. The ordered usage spool/shared portable exact set is integrated (`0016240` + `6a496d3`).
+The four fixtures now peak at 816,122 B Claude / 244,348 B Codex with exact report parity;
+completed batches are limited by configured worker count and dedup keys spill. An independent
+old-compute oracle checks raw report and float bits with duplicate IDs, different/late models,
+failed sources and Rayon 1/2/4 workers. Final CPU evidence is pending the 64 KiB key append cache;
+output model-row cardinality, worker allowances and the largest individual key/model remain
+legitimate memory terms.
+
+Semantic reuse (`630b361`, integrated as `29af9c0`) shares the discovery inventory and stores
+per-row source/dependency snapshots with vectors, plus a global projection version and resolved
+model artifact identity. Unchanged sweeps avoid adapter parsing, model load and saving; vectors
+compact in place and atomic buffered output avoids a second serialized vector buffer. Legacy
+rows rebuild once. Ten scoped refresh/store/model tests and eight corpus tests pass without
+network/model downloads; there is no semantic throughput or RSS proof. Exact discovery-reference
+hints and query projection checks are a follow-up (`daa0183`); fallible lazy Text projection
+remains active so failed text reads cannot silently embed empty strings.
 
 API continuation/head changes (`0769d1a` + `cb844b4`) reduce callback work on the controlled
 20,000-message fixture: 100 successive pages of 200 messages emit 20,099 callbacks instead of
@@ -383,7 +414,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
 - [x] Native SDK, exports and OpenSession source-backed readers; bounded export metadata cache.
-- [ ] Portable cold document buffers, composite payloads and Continue/LM Studio selected records.
+- [x] Shared positioned portable document views: 32 frozen count/discovery scale cases retain flat live Rust heap.
+- [ ] Portable giant full-output/compatibility completion; composite payloads and Continue/LM Studio selected records (LM Studio lane active).
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
@@ -400,7 +432,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
 - [x] Lane summaries project relevant messages without resolving unrelated bodies.
-- [ ] Stats aggregation and semantic rebuilds: active targeted lanes; preserve exact output and float/dedup order.
+- [x] Ordered usage staging/shared exact dedup and semantic source/model reuse implementations; scoped ordering/identity oracles.
+- [ ] Final stats/Hermes cached-spill CPU and semantic end-to-end evidence; fallible lazy Text demands and dataset stream/filter staging (active lanes).
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
