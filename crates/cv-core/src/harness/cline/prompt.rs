@@ -101,11 +101,12 @@ struct Cwd {
     matched: usize,
     // 0: prefix; 1: whitespace before '('; 2: path; 3: ignore line; 4: terminal.
     state: u8,
-    path: String,
-    result: Option<PathBuf>,
+    first: Option<u64>,
+    last: u64,
+    result: Option<(u64, u64)>,
 }
 impl Cwd {
-    fn feed(&mut self, c: char) {
+    fn feed(&mut self, c: char, at: u64) {
         if self.state == 4 {
             return;
         }
@@ -137,16 +138,17 @@ impl Cwd {
             1 if c == '(' => self.state = 2,
             1 => self.state = 4,
             2 if c == ')' => {
-                let path = self.path.trim();
-                if !path.is_empty() {
-                    self.result = Some(PathBuf::from(path));
+                if let Some(first) = self.first {
+                    self.result = Some((first, self.last));
                     self.state = 4;
                 } else {
-                    self.path.clear();
                     self.state = 3;
                 }
             }
-            2 => self.path.push(c),
+            2 if !c.is_whitespace() => {
+                self.first.get_or_insert(at);
+                self.last = at + c.len_utf8() as u64;
+            }
             _ => {}
         }
     }
@@ -166,8 +168,8 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()
         }
         environment.feed(chunk.as_bytes(), position, 0);
         environment_end.feed(chunk.as_bytes(), position, 0);
-        for c in chunk.chars() {
-            cwd.feed(c);
+        for (offset, c) in chunk.char_indices() {
+            cwd.feed(c, position + offset as u64);
         }
         position += chunk.len() as u64;
     })?;
@@ -180,12 +182,16 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()
         .zip(environment_end.found)
         .filter(|(start, end)| end >= start)
         .map(|(start, end)| (start, end + environment_end.needle.len() as u64));
+    let mut path = String::new();
     let mut explicit = FirstLine::default();
     let mut prose = FirstLine::default();
     position = 0;
     visit(&mut |chunk| {
         for (i, c) in chunk.char_indices() {
             let at = position + i as u64;
+            if cwd.result.is_some_and(|(start, end)| start <= at && at < end) {
+                path.push(c);
+            }
             if task_range.is_some_and(|(start, end)| start <= at && at < end) {
                 explicit.feed(c);
             }
@@ -199,7 +205,7 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()
     prose.finish_line();
     Ok(Summary {
         title: explicit.title.or(prose.title),
-        cwd: cwd.result,
+        cwd: cwd.result.map(|_| PathBuf::from(path)),
         task: task.found.is_some(),
         environment: environment.found.is_some(),
     })
