@@ -14,6 +14,7 @@
 - OpenClaw SQLite reads retain navigation and selected payloads; discovery and side registries release unrelated bodies row by row.
 - Qwen discovery counts streamed turns without retaining their messages.
 - Giant Codex tool outputs preserve tool names, namespaces, timestamps and inherited-history filtering through the ordinary dispatch path.
+- Codex format detection inspects raw metadata without allocating giant output bodies, including tool-only transcripts and resumed reads.
 - Gemini accepts escaped wrapper metadata and preserves saved-chat message classification.
 - Same-size transcript edits invalidate search and event caches; checkpoint reuse requires source growth.
 - Counts, events and search track known sidecar and SQLite WAL changes independently; discovery caches invalidate when metadata interpretation changes.

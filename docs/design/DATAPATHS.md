@@ -58,7 +58,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
 | Claude JSONL | Parallel cached discovery; mmap lazy lines; typed borrowed hot records; checkpoints | Discovery parses all records; full extras and uncommon fallback records remain owned; fork side reads |
-| Codex JSONL | mmap line scan; selective records; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; inherited-prefix and metadata parity now covered by regressions |
+| Codex JSONL | mmap line scan and bounded event-authority prepass; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; buffered/zstd input still retains the largest raw line |
 | Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
 | Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
@@ -191,6 +191,18 @@ Completed Cursor discovery query check: with 20,000 unrelated bubble rows and th
 SQLite VM steps fell from 80,043 to 52 and full-scan steps to zero. The binary prefix range keeps
 the former row order and has a fallback for tables without rowids.
 
+The frozen fleet comparison covers 5,960 references (5,959 primary paths, 95.92 GB) in three
+modes: 17,880 baseline/candidate pairs. Claude and Gemini match in every mode; Codex bulk/full
+match, and its 955 changed lazy results exactly match the baseline ordinary bulk parser. These
+are corrected giant-path metadata omissions, not unexplained content drift. A 43-reference
+complete-mode subset also matches. The frozen 35,116 source/companion files remained unchanged;
+live edits occurring after the freeze are excluded from the comparison.
+
+The giant Codex gate found a hidden full-Value allocation in event-authority detection before the
+mapped stream. Detection now projects only discriminants from strictly validated raw records and
+reuses the mapping. Tool-only histories therefore stay bounded even when no natural-language
+record allows an early exit. Buffered/zstd traversal still retains a largest-line buffer.
+
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
 - [x] Source map: readers, consumers, caches, index, follow/archive, write paths and gates.
@@ -199,7 +211,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Streaming affordance and full-fidelity JSON-window consumers.
 - [x] Index-only text matching and deferred snippets.
 - [x] Bounded escaped-string chunk decoding, with and without mmap; serde windows replace the slower initial decoder.
-- [x] Process-isolated heap gates for Claude, Codex, Gemini and escaped span decoding; negative baseline proof.
+- [x] Process-isolated heap gates for growing histories and giant Claude/Codex/Gemini fields, plus escaped span decoding; negative baseline proof.
 - [ ] Extend scale fixtures and heap gates to the remaining store formats.
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
@@ -213,7 +225,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Format-safe append reuse beyond Claude/Codex; watcher and archive amplification.
 - [ ] Reassess index admission/events/queues after reader and consumer measurements.
 - [ ] API pagination, query facts, pack/tools/stats, semantic rebuilds: prioritize by measurements.
-- [ ] Whole-fleet parity, integration measurements, complete CI gates, integrate and publish branch.
+- [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
+- [ ] Final integration gates, publish the implementation, and retain the remaining workload priorities above.
 
 The full gate roster is `.github/workflows/ci.yml`, including release parse budget, manual build,
 search without default features, dist plan, wasm-pack, the separate desktop workspace and web

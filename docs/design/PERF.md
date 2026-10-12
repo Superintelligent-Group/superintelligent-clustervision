@@ -107,6 +107,8 @@ promise about interactive wall latency.
 | Gemini production affordance read, same source | 841,530,697 B | 41,702 B |
 | Gemini one hook with late summary, 64 MiB plain text | 201,381,306 B | 137,865 B |
 | Gemini one hook with late summary, 64 MiB escaped text | 201,381,306 B | 399,854 B |
+| Codex tool-only lazy count, 16 → 64 MiB plain payloads | 12.4 → 49.7 MB | 4,263 B, flat |
+| Codex tool-only lazy count, 16 → 64 MiB escaped payloads | 18.4 → 73.5 MB | 4,261 B, flat |
 | Claude lazy count, frozen 189.8 MB | 5,138,961 B | 203,285 B |
 | Claude lazy count, generated 100 MB plain text | 230,658,294 B | 10,914 B |
 | Claude lazy count, generated 100 MB decoded escaped text | 364,875,160 B | 10,926 B |
