@@ -156,3 +156,42 @@ pub(crate) fn nonblank_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<S
     })?;
     Ok((is_string && nonblank).then(|| out.finish()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::json::Json;
+
+    #[test]
+    fn source_prefixes_preserve_trim_flatten_and_unicode_boundaries() {
+        let path = std::env::temp_dir().join(format!("cv-argument-prefix-{}", uuid::Uuid::new_v4()));
+        for text in [
+            format!("{}short{}", "\u{2003}".repeat(40_000), "\n".repeat(80_000)),
+            format!("{}{}", "λ\n".repeat(61), " ".repeat(80_000)),
+            format!("{}late", " ".repeat(80_000)),
+            "\n\u{2003}".repeat(40_000),
+            "create".to_string(),
+            "create\n".to_string(),
+        ] {
+            let raw = serde_json::to_vec(&text).unwrap();
+            std::fs::write(&path, &raw).unwrap();
+            let source = Json::source(&path, 0, raw.len() as u64).unwrap();
+            source
+                .with_view(|view| {
+                    assert_eq!(prefix(view, 120)?, Some(crate::ir::truncate(&text, 120)));
+                    assert_eq!(trimmed_prefix(view, 120)?, Some(crate::ir::truncate(text.trim(), 120)));
+                    assert_eq!(
+                        nonblank_prefix(view, 120)?,
+                        (!text.trim().is_empty()).then(|| crate::ir::truncate(&text, 120))
+                    );
+                    assert_eq!(
+                        word(view, &["create", "delete"])?,
+                        ["create", "delete"].iter().position(|word| *word == text)
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
