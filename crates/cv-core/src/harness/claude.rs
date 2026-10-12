@@ -11,6 +11,7 @@ use super::{parse_ts, Adapter};
 /// `cv adopt`: move a sub-agent stranded by a dead session into a live one — Claude-only byte
 /// surgery on this store's layout, so it lives beside the adapter that knows it.
 pub mod adopt;
+mod borrowed;
 pub(crate) mod emit;
 mod fork;
 mod lean;
@@ -401,6 +402,15 @@ fn ingest_bytes(
         return Flow::Continue;
     }
     let slice = &buf[lead..end];
+    let ctx = opts.spans.then(|| SpanCtx {
+        slice,
+        base_off: file_off + lead as u64,
+    });
+    if !opts.extra && !opts.complete {
+        if let Some(flow) = borrowed::ingest(session, slice, opts, sink, ctx.as_ref()) {
+            return flow;
+        }
+    }
     let lean = (!opts.extra && !opts.complete)
         .then(|| lean::parse(slice).ok())
         .flatten();
@@ -410,10 +420,6 @@ fn ingest_bytes(
     };
     // Only defer large content to spans when the consumer asked for it (partial-access). Bulk/full
     // consumers read everything, so inline content is cheaper (no mmap on resolve).
-    let ctx = opts.spans.then(|| SpanCtx {
-        slice,
-        base_off: file_off + lead as u64,
-    });
     ingest_value(session, &v, opts, sink, ctx.as_ref())
 }
 
@@ -625,39 +631,54 @@ fn ingest_value(
         _ => {}
     }
 
+    note_conversation_metadata(
+        session,
+        v.get("cwd").and_then(Value::as_str),
+        v.get("gitBranch").and_then(Value::as_str),
+        v.get("timestamp").and_then(Value::as_str).and_then(parse_ts),
+    );
+
+    match parse_message(ty, v, opts, span) {
+        Some(msg) => emit_conversation(session, msg, opts, sink, span),
+        None => Flow::Continue,
+    }
+}
+
+fn note_conversation_metadata(
+    session: &mut Session,
+    cwd: Option<&str>,
+    branch: Option<&str>,
+    timestamp: Option<DateTime<Utc>>,
+) {
     if session.cwd.is_none() {
-        if let Some(cwd) = v.get("cwd").and_then(Value::as_str) {
-            session.cwd = Some(PathBuf::from(cwd));
-        }
+        session.cwd = cwd.map(PathBuf::from);
     }
     if session.git.is_none() {
-        if let Some(branch) = v.get("gitBranch").and_then(Value::as_str) {
-            session.git = Some(GitInfo {
-                branch: Some(branch.to_string()),
-                ..Default::default()
-            });
-        }
+        session.git = branch.map(|branch| GitInfo {
+            branch: Some(branch.to_string()),
+            ..Default::default()
+        });
     }
-    if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_ts) {
-        // min/max, not first/last: real transcripts contain out-of-order timestamps (sub-ms clock
-        // skew between queued writes), and created_at > updated_at breaks downstream invariants.
+    // Real transcripts can contain out-of-order timestamps from queued writes and clock skew.
+    if let Some(ts) = timestamp {
         session.created_at = Some(session.created_at.map_or(ts, |c| c.min(ts)));
         session.updated_at = Some(session.updated_at.map_or(ts, |u| u.max(ts)));
     }
+}
 
-    if let Some(mut msg) = parse_message(ty, v, opts, span) {
-        stamp_offset(&mut msg, opts, span);
-        // A synthetic notice (`model: "<synthetic>"`, kept only under `complete`) never names the model.
-        if session.model.is_none() && msg.model.as_deref() != Some(SYNTHETIC_MODEL) {
-            session.model = msg.model.clone();
-        }
-        // An assistant turn KEEPS the model it names, even when it matches the session default:
-        // a record's parse must not depend on how much of the file preceded it, and the model is
-        // the only thing that tells a windowed read, and `task`'s reviewer scan, which model was
-        // in play, since this adapter emits no `meta()`. Redundant strings are the cheaper price.
-        return sink.message(msg);
+fn emit_conversation(
+    session: &mut Session,
+    mut msg: Message,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    span: Option<&SpanCtx>,
+) -> Flow {
+    stamp_offset(&mut msg, opts, span);
+    // Record-local models must not depend on how much of a transcript preceded the window.
+    if session.model.is_none() && msg.model.as_deref() != Some(SYNTHETIC_MODEL) {
+        session.model = msg.model.clone();
     }
-    Flow::Continue
+    sink.message(msg)
 }
 
 /// Offset-stamping pass: stamp the record's byte offset so `cv rewind` can map a message to its
@@ -729,16 +750,23 @@ fn copy_str_field(v: &Value, from: &str, to: &str, bag: &mut Map<String, Value>)
 /// cron/loop fire (`scheduledTaskId`) or a `ScheduleWakeup` turn (`turnOrigin: "scheduled"`, which
 /// 2.1.296 writes with `isMeta` and no task id) is the scheduler.
 fn user_origin(v: &Value) -> Origin {
-    if v.get("scheduledTaskId").is_some()
-        || v.get("scheduledFireId").is_some()
-        || v.get("turnOrigin").and_then(Value::as_str) == Some("scheduled")
-    {
+    user_origin_from(
+        v.get("scheduledTaskId").is_some()
+            || v.get("scheduledFireId").is_some()
+            || v.get("turnOrigin").and_then(Value::as_str) == Some("scheduled"),
+        v.get("isMeta").and_then(Value::as_bool) == Some(true),
+        v.pointer("/origin/kind").and_then(Value::as_str),
+    )
+}
+
+fn user_origin_from(scheduled: bool, is_meta: bool, kind: Option<&str>) -> Origin {
+    if scheduled {
         return Origin::Scheduler;
     }
-    if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+    if is_meta {
         return Origin::Harness;
     }
-    match v.pointer("/origin/kind").and_then(Value::as_str) {
+    match kind {
         None | Some("human") => Origin::Human,
         Some(_) => Origin::Harness,
     }
@@ -761,6 +789,11 @@ fn user_kind(v: &Value, msg: &Value) -> (MessageKind, Origin) {
             .unwrap_or(""),
         _ => "",
     };
+    user_kind_from_head(origin, head)
+}
+
+fn user_kind_from_head(origin: Origin, head: &str) -> (MessageKind, Origin) {
+    let head = head.trim_start();
     if head.starts_with("[Request interrupted by user") {
         return (MessageKind::InjectedContext, Origin::Harness);
     }
@@ -1365,47 +1398,17 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
             role
         };
 
-    // Claude Code's synthetic assistant notices (client-side API errors like "Prompt is too long",
-    // "No response requested.", …) are not model output and are never sent to the API. The lean
-    // passes surface them as System notices so turn counts, `--keep-last` windows and renders stay
-    // honest; `complete` keeps the record's own shape (`assistant` + its fields) for round-trip.
     let synthetic = ty == "assistant" && is_synthetic_assistant(v, msg);
-    let api_error = synthetic && v.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false);
-    let (role, model) = if synthetic && !opts.complete {
-        (Role::System, None)
-    } else {
-        (role, model)
+    let class = ConversationClass {
+        synthetic,
+        api_error: synthetic && v.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false),
+        compact_summary: v.get("isCompactSummary").and_then(Value::as_bool) == Some(true),
+        sync_agent_return: is_sync_agent_return(v),
+        slash_command: is_slash_command_record(msg),
+        user: user_kind(v, msg),
     };
-
-    // What the turn IS and where it came from — set here even under `complete` (the record keeps its
-    // wire role for replay; `kind`/`origin` are IR facts consumers may always trust).
-    let compact_summary = v.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
-    let (kind, origin) = if synthetic {
-        (
-            if api_error {
-                MessageKind::Error
-            } else {
-                MessageKind::Notice
-            },
-            Origin::Harness,
-        )
-    } else if compact_summary {
-        (MessageKind::CompactionSummary, Origin::Harness)
-    } else {
-        match role {
-            Role::Tool if is_sync_agent_return(v) => (MessageKind::SubagentReturn, Origin::Subagent),
-            Role::Tool => (MessageKind::ToolResult, Origin::Harness),
-            Role::Assistant => (MessageKind::Reply, Origin::Model),
-            // Claude Code ≥ 2.1 records a slash command's invocation (`<command-name>…`) and its
-            // output (`<local-command-stdout>…`) as `user` rows — the same two records older
-            // versions wrote as `system`/`local_command`. They are the harness's bookkeeping of
-            // the command, not what the person typed (that is the plain `/compact` row just
-            // before them), so they classify as the system rows do: a notice from the harness.
-            Role::User if is_slash_command_record(msg) => (MessageKind::Notice, Origin::Harness),
-            Role::User => user_kind(v, msg),
-            Role::System => (MessageKind::Notice, Origin::Harness),
-        }
-    };
+    let (role, kind, origin) = classify_conversation(role, class, opts.complete);
+    let model = if synthetic && !opts.complete { None } else { model };
 
     // Everything Claude-specific lands in `extra["claude"]`; the top level stays clean.
     let mut bag = Map::new();
@@ -1447,6 +1450,50 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
         usage,
         extra,
     })
+}
+
+/// The classification shared by owned and borrowed records. Content storage never chooses kind.
+struct ConversationClass {
+    synthetic: bool,
+    api_error: bool,
+    compact_summary: bool,
+    sync_agent_return: bool,
+    slash_command: bool,
+    user: (MessageKind, Origin),
+}
+
+fn classify_conversation(role: Role, class: ConversationClass, complete: bool) -> (Role, MessageKind, Origin) {
+    // Synthetic client-side notices are not model turns. Complete preserves their wire role for
+    // round-trip; kind/origin still identify a harness notice in every fidelity.
+    let role = if class.synthetic && !complete {
+        Role::System
+    } else {
+        role
+    };
+    let (kind, origin) = if class.synthetic {
+        (
+            if class.api_error {
+                MessageKind::Error
+            } else {
+                MessageKind::Notice
+            },
+            Origin::Harness,
+        )
+    } else if class.compact_summary {
+        (MessageKind::CompactionSummary, Origin::Harness)
+    } else {
+        match role {
+            Role::Tool if class.sync_agent_return => (MessageKind::SubagentReturn, Origin::Subagent),
+            Role::Tool => (MessageKind::ToolResult, Origin::Harness),
+            Role::Assistant => (MessageKind::Reply, Origin::Model),
+            // New Claude versions write command invocations/output as user records. They are
+            // the same harness bookkeeping older versions emitted as system/local_command.
+            Role::User if class.slash_command => (MessageKind::Notice, Origin::Harness),
+            Role::User => class.user,
+            Role::System => (MessageKind::Notice, Origin::Harness),
+        }
+    };
+    (role, kind, origin)
 }
 
 /// `system` records cover a grab-bag of subtypes. Only some carry user-visible text worth surfacing
