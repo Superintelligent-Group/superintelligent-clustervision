@@ -40,6 +40,7 @@
 //! with no filesystem access.
 
 mod emit;
+mod input;
 mod lean;
 pub use emit::emit;
 
@@ -464,7 +465,13 @@ fn stream_legacy_json_recording(
         kind: Option<std::borrow::Cow<'a, str>>,
     }
 
+    let source = (opts.spans && !opts.complete)
+        .then(|| crate::json::JsonSource::capture(path))
+        .transpose()?;
     let bytes = map_file(path)?;
+    if let Some(source) = &source {
+        source.check_metadata(bytes.file.metadata()?)?;
+    }
     // A legacy recording is a single JSON object with both `sessionId` and `messages`. If this parse
     // fails, or those keys are absent, it's not the whole-file shape — let the caller try JSONL.
     let Ok(w) = serde_json::from_slice::<Wrapper>(&bytes) else {
@@ -505,13 +512,26 @@ fn stream_legacy_json_recording(
 
     let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
     let index = lean::Index::default();
+    let mut sink = input::SourceSink::new(source.as_ref(), sink);
     for item in raw_msgs {
         if opts.spans {
             let raw = lean::Raw::new(item.get(), &index);
             if !lean::accepts_value(raw) {
                 continue;
             }
-            if lean::emit(raw, &bytes, harness, &mut st, &resolver, sink) == Flow::Stop {
+            if lean::emit(
+                raw,
+                lean::Context {
+                    bytes: &bytes,
+                    base: 0,
+                    source: source.as_ref(),
+                },
+                harness,
+                &mut st,
+                &resolver,
+                &mut sink,
+            )? == Flow::Stop
+            {
                 break;
             }
             continue;
@@ -521,9 +541,14 @@ fn stream_legacy_json_recording(
             continue;
         };
         let Some(obj) = rm.as_object() else { continue };
-        if emit_record_message(harness, obj, &mut st, sink) == Flow::Stop {
+        if emit_record_message(harness, obj, &mut st, &mut sink) == Flow::Stop {
             break;
         }
+    }
+    if sink.finish()? {
+        let source = source.as_ref().expect("sourced argument has a capture");
+        source.check_metadata(bytes.file.metadata()?)?;
+        source.check()?;
     }
 
     session.model = st.session_model;
@@ -534,24 +559,35 @@ fn stream_legacy_json_recording(
 /// Memory-map `path` (feature `mmap`) or read it into a `Vec<u8>` (fallback). Returns an opaque
 /// byte container that derefs to `[u8]` either way, so callers don't branch on the feature.
 fn map_file(path: &Path) -> Result<FileBytes> {
+    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     #[cfg(feature = "mmap")]
     {
-        let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
         // Safety: cv reads its own on-disk transcripts; we treat the mapping as immutable bytes and
         // never alias it mutably. A concurrent external truncation is the documented mmap caveat and
         // not a case cv creates.
         let mmap = unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mmapping {}", path.display()))?;
-        Ok(FileBytes::Mapped(mmap))
+        Ok(FileBytes {
+            file,
+            bytes: FileContents::Mapped(mmap),
+        })
     }
     #[cfg(not(feature = "mmap"))]
     {
-        let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(FileBytes::Owned(bytes))
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut &file, &mut bytes).with_context(|| format!("reading {}", path.display()))?;
+        Ok(FileBytes {
+            file,
+            bytes: FileContents::Owned(bytes),
+        })
     }
 }
 
 /// Byte container abstracting over an mmap (feature `mmap`) and an owned read (fallback).
-enum FileBytes {
+struct FileBytes {
+    file: fs::File,
+    bytes: FileContents,
+}
+enum FileContents {
     #[cfg(feature = "mmap")]
     Mapped(memmap2::Mmap),
     #[cfg(not(feature = "mmap"))]
@@ -561,11 +597,11 @@ enum FileBytes {
 impl std::ops::Deref for FileBytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        match self {
+        match &self.bytes {
             #[cfg(feature = "mmap")]
-            FileBytes::Mapped(m) => m,
+            FileContents::Mapped(m) => m,
             #[cfg(not(feature = "mmap"))]
-            FileBytes::Owned(v) => v,
+            FileContents::Owned(v) => v,
         }
     }
 }
@@ -583,7 +619,13 @@ fn stream_jsonl_recording(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
+    let source = (opts.spans && !opts.complete)
+        .then(|| crate::json::JsonSource::capture(path))
+        .transpose()?;
     let bytes = map_file(path)?;
+    if let Some(source) = &source {
+        source.check_metadata(bytes.file.metadata()?)?;
+    }
     let index = lean::Index::default();
     let mut replay = RecordingReplay::<ReplayBody<'_>>::default();
     for line in bytes.split(|b| *b == b'\n') {
@@ -592,7 +634,7 @@ fn stream_jsonl_recording(
         };
         let raw = lean::Raw::new(raw.get(), &index);
         if lean::accepts_value(raw) {
-            replay.ingest_raw(raw);
+            replay.ingest_projected(raw, ReplayBody::Raw, ReplayBody::Marker);
         }
     }
     if !replay.saw_meta && replay.msgs.is_empty() {
@@ -602,22 +644,39 @@ fn stream_jsonl_recording(
     let summary = session.title.take();
     let mut st = EmitState::default();
     let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
+    let mut sink = input::SourceSink::new(source.as_ref(), sink);
     for id in &replay.order {
         let Some(body) = replay.msgs.remove(id) else { continue };
         let flow = match body {
-            ReplayBody::Raw(raw) if opts.spans => lean::emit(raw, &bytes, harness, &mut st, &resolver, sink),
+            ReplayBody::Raw(raw) if opts.spans => lean::emit(
+                raw,
+                lean::Context {
+                    bytes: &bytes,
+                    base: 0,
+                    source: source.as_ref(),
+                },
+                harness,
+                &mut st,
+                &resolver,
+                &mut sink,
+            )?,
             body => {
                 let rm = match body {
                     ReplayBody::Raw(raw) => serde_json::from_str::<Value>(raw.get()).unwrap_or(Value::Null),
                     ReplayBody::Marker(v) => v,
                 };
                 let Some(obj) = rm.as_object() else { continue };
-                emit_record_message(harness, obj, &mut st, sink)
+                emit_record_message(harness, obj, &mut st, &mut sink)
             }
         };
         if flow == Flow::Stop {
             break;
         }
+    }
+    if sink.finish()? {
+        let source = source.as_ref().expect("sourced argument has a capture");
+        source.check_metadata(bytes.file.metadata()?)?;
+        source.check()?;
     }
     session.model = st.session_model;
     session.title = summary.or(st.title);
@@ -630,9 +689,12 @@ fn stream_jsonl_recording(
 fn stream_jsonl_recording(
     path: &Path,
     harness: Harness,
-    _opts: &ParseOptions,
+    opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
+    if opts.spans && !opts.complete {
+        return stream_jsonl_ranges(path, harness, sink);
+    }
     let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
 
     let mut replay = RecordingReplay::default();
@@ -658,6 +720,103 @@ fn stream_jsonl_recording(
         }
     }
 
+    session.model = st.session_model;
+    session.title = summary.or(st.title);
+    Ok(Some(session))
+}
+
+/// Portable lazy replay owns navigation ranges and one encoded record at a time. The positioned
+/// cursor is the same captured source used by JSON consumers, not a second source authority.
+#[cfg(not(feature = "mmap"))]
+fn stream_jsonl_ranges(path: &Path, harness: Harness, sink: &mut dyn MessageSink) -> Result<Option<Session>> {
+    use super::store::document::range::{Range, RangeSource};
+    use std::io::{BufRead, Read};
+    enum Body {
+        Range(Range),
+        Marker(Value),
+    }
+    let captured = crate::json::JsonSource::capture(path)?;
+    let source = RangeSource::from_captured(captured.clone())?;
+    let mut cursor = source.cursor(source.range())?;
+    let mut line = Vec::new();
+    let mut replay = RecordingReplay::<Body>::default();
+    loop {
+        let base = cursor.position();
+        line.clear();
+        if cursor.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        // The old buffered reader skipped invalid UTF-8 lines and trimmed Unicode whitespace.
+        let Ok(text) = std::str::from_utf8(&line) else { continue };
+        let text = text.trim();
+        let Ok(raw) = serde_json::from_str::<&crate::lazy::RawValue>(text) else {
+            continue;
+        };
+        // The endpoint index belongs to this buffer content, not its reused allocation.
+        let index = lean::Index::default();
+        let raw = lean::Raw::new(raw.get(), &index);
+        if lean::accepts_value(raw) {
+            replay.ingest_projected(
+                raw,
+                |raw| {
+                    Body::Range(Range {
+                        offset: base + (raw.get().as_ptr() as usize - line.as_ptr() as usize) as u64,
+                        len: raw.get().len() as u64,
+                    })
+                },
+                Body::Marker,
+            );
+        }
+    }
+    if !replay.saw_meta && replay.msgs.is_empty() {
+        return Ok(None);
+    }
+    let mut session = record_metadata(&replay.metadata, harness, Some(path.to_path_buf()));
+    let summary = session.title.take();
+    let mut st = EmitState::default();
+    // An inactive giant line must not keep its intake allocation alive during selected replay.
+    drop(cursor);
+    drop(line);
+    let mut line = Vec::new();
+    let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
+    let mut sink = input::SourceSink::new(Some(&captured), sink);
+    for id in &replay.order {
+        let Some(body) = replay.msgs.remove(id) else { continue };
+        let flow = match body {
+            Body::Range(range) => {
+                line.clear();
+                source.cursor(range)?.read_to_end(&mut line)?;
+                let index = lean::Index::default();
+                let raw = serde_json::from_slice::<&crate::lazy::RawValue>(&line)?;
+                let raw = lean::Raw::new(raw.get(), &index);
+                if !lean::accepts_value(raw) {
+                    continue;
+                }
+                lean::emit(
+                    raw,
+                    lean::Context {
+                        bytes: &line,
+                        base: range.offset,
+                        source: Some(&captured),
+                    },
+                    harness,
+                    &mut st,
+                    &resolver,
+                    &mut sink,
+                )?
+            }
+            Body::Marker(v) => {
+                let Some(obj) = v.as_object() else { continue };
+                emit_record_message(harness, obj, &mut st, &mut sink)
+            }
+        };
+        if flow == Flow::Stop {
+            break;
+        }
+    }
+    if sink.finish()? {
+        source.check_identity()?;
+    }
     session.model = st.session_model;
     session.title = summary.or(st.title);
     Ok(Some(session))
@@ -737,14 +896,18 @@ impl<T> RecordingReplay<T> {
     }
 }
 
-#[cfg(feature = "mmap")]
-impl<'a> RecordingReplay<ReplayBody<'a>> {
-    fn ingest_raw(&mut self, raw: lean::Raw<'a>) {
+impl<T> RecordingReplay<T> {
+    fn ingest_projected<'a>(
+        &mut self,
+        raw: lean::Raw<'a>,
+        mut body: impl FnMut(lean::Raw<'a>) -> T,
+        marker: impl FnOnce(Value) -> T,
+    ) {
         let Some(rec) = lean::Record::parse(raw) else {
             return;
         };
         if let Some(target) = rec.string("$rewindTo") {
-            self.rewind(&target, ReplayBody::Marker);
+            self.rewind(&target, marker);
             return;
         }
         if let Some(set) = rec.fields.get("$set") {
@@ -757,7 +920,7 @@ impl<'a> RecordingReplay<ReplayBody<'a>> {
                             for raw in messages {
                                 if let Some(m) = lean::Record::parse(raw) {
                                     if let Some(key) = raw_replay_key(&m) {
-                                        self.insert(key, ReplayBody::Raw(raw));
+                                        self.insert(key, body(raw));
                                     }
                                 }
                             }
@@ -771,7 +934,7 @@ impl<'a> RecordingReplay<ReplayBody<'a>> {
         }
         if let Some(key) = raw_replay_key(&rec) {
             if rec.fields.contains_key("type") || rec.fields.contains_key("content") {
-                self.insert(key, ReplayBody::Raw(raw));
+                self.insert(key, body(raw));
             }
             return;
         }
@@ -786,7 +949,6 @@ impl<'a> RecordingReplay<ReplayBody<'a>> {
     }
 }
 
-#[cfg(feature = "mmap")]
 fn raw_replay_key(rec: &lean::Record<'_>) -> Option<String> {
     Some(format!(
         "{}\u{1f}{}",
@@ -1179,14 +1341,16 @@ fn emit_record_message_with(
                         .and_then(Value::as_str)
                         .map(str::to_string)
                         .unwrap_or_else(|| format!("{name}-call"));
-                    let input = c.get("args").cloned().unwrap_or(Value::Null);
+                    let input = payload
+                        .and_then(|p| p.take_input(i))
+                        .unwrap_or_else(|| c.get("args").cloned().unwrap_or(Value::Null).into());
                     if let Some(a) = c.get("agentId").and_then(Value::as_str) {
                         agent_ids.push(Value::String(a.to_string()));
                     }
                     m.content.push(Block::ToolUse {
                         id: call_id.clone(),
                         name: name.to_string(),
-                        input: input.into(),
+                        input,
                         namespace: None,
                     });
                     let status = c.get("status").and_then(Value::as_str);
@@ -1750,6 +1914,209 @@ mod tests {
     fn fixture(name: &str) -> String {
         let path = format!("{}/tests/fixtures/gemini/{}", env!("CARGO_MANIFEST_DIR"), name);
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+    }
+
+    fn json_inputs(session: &Session) -> Vec<&crate::Json> {
+        session
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                Block::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn native_json_arguments_keep_real_values_and_exact_ranges() {
+        let world = cv_testkit::World::in_process("gemini-json-inputs");
+        let chats = world.base.join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let big = serde_json::to_string(&"x\nβ".repeat(crate::lazy::INLINE_MAX)).unwrap();
+        let args = [
+            format!("{{\"payload\":{big},\"duplicate\":1,\"dupl\\u0069cate\":2}}"),
+            format!("[{big},null,true,3]"),
+            big,
+            "true".into(),
+            "null".into(),
+            "2.5".into(),
+            format!("\"{}\"", "x".repeat(crate::lazy::INLINE_MAX - 2)),
+            format!("\"{}\"", "x".repeat(crate::lazy::INLINE_MAX - 1)),
+        ];
+        let mut records: Vec<String> = args.iter().enumerate().map(|(i, arg)| format!(
+            "{{\"type\":\"gemini\",\"id\":\"a{i}\",\"toolCalls\":[{{\"name\":\"custom\",\"id\":\"c{i}\",\"args\": {arg} }}]}}"
+        )).collect();
+        records.push(format!("{{\"type\":\"gemini\",\"id\":\"parts\",\"content\":[{{\"functionCall\":{{\"name\":\"custom\",\"args\": {} }} }}]}}", args[0]));
+        records.push(r#"{"type":"gemini","id":"missing","toolCalls":[{"name":"custom"}]}"#.into());
+        for modern in [false, true] {
+            let path = chats.join(if modern {
+                "session-source.jsonl"
+            } else {
+                "session-source.json"
+            });
+            let text = if modern {
+                format!(
+                    "{{\"sessionId\":\"source\",\"projectHash\":\"x\"}}\r\n \t{}\r\n",
+                    records.join("\r\n \t")
+                )
+            } else {
+                format!(
+                    "{{\"sessionId\":\"source\",\"messages\":[ {} ]}}",
+                    records.join(",\n \t")
+                )
+            };
+            fs::write(&path, &text).unwrap();
+            let adapter = Gemini { roots: vec![] };
+            let reference = SessionRef::new("source", Harness::Gemini, path.clone());
+            let pure = parse_all_str(&text, Some(path.clone())).remove(0);
+            assert!(json_inputs(&pure).iter().all(|j| matches!(j, crate::Json::Owned(_))));
+            for opts in [
+                ParseOptions::full(),
+                ParseOptions::bulk(),
+                ParseOptions::complete(),
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+            ] {
+                let mut actual = crate::stream::collect_with(&adapter, &reference, &opts).unwrap();
+                let inputs = json_inputs(&actual);
+                assert_eq!(inputs.len(), args.len() + 2);
+                for (i, input) in inputs.iter().enumerate() {
+                    let expected_source = opts.spans
+                        && !opts.complete
+                        && (i == args.len() || (i < args.len() && args[i].len() > crate::lazy::INLINE_MAX));
+                    assert_eq!(
+                        matches!(input, crate::Json::Source(_)),
+                        expected_source,
+                        "mode {opts:?}, input {i}"
+                    );
+                    if let crate::Json::Source(range) = input {
+                        let actual_raw = &text[range.offset() as usize..(range.offset() + range.len()) as usize];
+                        assert_eq!(actual_raw, &args[if i == args.len() { 0 } else { i }]);
+                    }
+                }
+                actual.materialize().unwrap();
+                assert_eq!(as_json(&actual), as_json(&pure));
+            }
+        }
+    }
+
+    #[test]
+    fn native_json_arguments_survive_set_replacement_rewind_and_invalid_lines() {
+        let world = cv_testkit::World::in_process("gemini-json-replay");
+        let chats = world.base.join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let path = chats.join("session-source.jsonl");
+        let large = serde_json::json!({"payload": "x\nβ".repeat(5000)});
+        let record = |id: &str| serde_json::json!({"type":"gemini","id":id,"content":[{"functionCall":{"name":"custom","id":id,"args":large}}]});
+        let lines = [
+            serde_json::json!({"sessionId":"source","projectHash":"x"}),
+            record("old"),
+            serde_json::json!({"$set":{"messages":[record("keep"),record("replace"),record("drop")]}}),
+            serde_json::json!({"type":"user","id":"keep","content":"same id, separate kind"}),
+            serde_json::json!({"$rewindTo":"drop"}),
+            record("replace"),
+            record("after"),
+        ];
+        let mut bytes = Vec::new();
+        for line in lines {
+            bytes.extend_from_slice(format!(" \t{line}\r\n").as_bytes());
+            bytes.extend_from_slice(b"invalid JSON\n\xff\n{\"$set\":{\"messages\":[]},\"invalid\":\"\\ud800\"}\n");
+        }
+        bytes.extend_from_slice(
+            "\u{2003}{\"type\":\"user\",\"id\":\"unicode-whitespace\",\"content\":\"keep portable trim\"}\u{2003}\n"
+                .as_bytes(),
+        );
+        fs::write(&path, bytes).unwrap();
+        let adapter = Gemini { roots: vec![] };
+        let reference = SessionRef::new("source", Harness::Gemini, path);
+        let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full()).unwrap();
+        let mut actual = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        assert_eq!(json_inputs(&actual).len(), 3);
+        assert!(json_inputs(&actual).iter().all(|j| matches!(j, crate::Json::Source(_))));
+        actual.materialize().unwrap();
+        assert_eq!(as_json(&actual), as_json(&expected));
+    }
+
+    #[test]
+    fn native_json_source_mutation_stops_before_paired_result_and_at_completion() {
+        let world = cv_testkit::World::in_process("gemini-json-errors");
+        let chats = world.base.join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let path = chats.join("session-source.jsonl");
+        struct Delete {
+            path: PathBuf,
+            at: usize,
+            calls: usize,
+        }
+        impl MessageSink for Delete {
+            fn message(&mut self, _: Message) -> Flow {
+                self.calls += 1;
+                if self.calls == self.at {
+                    fs::remove_file(&self.path).unwrap();
+                }
+                Flow::Continue
+            }
+        }
+        let large = serde_json::json!({"payload":"x".repeat(6000)});
+        let assistant = serde_json::json!({"type":"gemini","id":"a","toolCalls":[{"id":"c","name":"custom","args":large,"status":"success","result":"done"}]});
+        let text = format!("{{\"sessionId\":\"source\",\"projectHash\":\"x\"}}\n{assistant}\n{{\"type\":\"user\",\"id\":\"u\",\"content\":\"later\"}}\n");
+        for at in [1, 3] {
+            fs::write(&path, &text).unwrap();
+            let mut sink = Delete {
+                path: path.clone(),
+                at,
+                calls: 0,
+            };
+            let result = Gemini { roots: vec![] }.stream(
+                &SessionRef::new("source", Harness::Gemini, path.clone()),
+                &ParseOptions::lazy(),
+                &mut sink,
+            );
+            assert!(result.is_err());
+            assert_eq!(sink.calls, at);
+        }
+    }
+
+    #[test]
+    fn native_json_arguments_feed_consumers_and_fail_when_detached_source_changes() {
+        let world = cv_testkit::World::in_process("gemini-json-consumers");
+        let chats = world.base.join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let path = chats.join("session-source.jsonl");
+        let tools = [
+            ("read_file", serde_json::json!({"absolute_path":"/tmp/a.rs"})),
+            ("run_shell_command", serde_json::json!({"command":"echo hello"})),
+            (
+                "write_todos",
+                serde_json::json!({"todos":[{"description":"ship", "status":"pending"}]}),
+            ),
+        ];
+        let text = "{\"sessionId\":\"source\",\"projectHash\":\"x\"}\n".to_owned() + &tools.into_iter().enumerate().map(|(i, (name, mut args))| {
+            args.as_object_mut().unwrap().insert("ignored_payload".into(), Value::String("x\nβ".repeat(6000)));
+            serde_json::json!({"type":"gemini","id":i.to_string(),"toolCalls":[{"id":i.to_string(),"name":name,"args":args}]}).to_string() + "\n"
+        }).collect::<String>();
+        fs::write(&path, text).unwrap();
+        let adapter = Gemini { roots: vec![] };
+        let reference = SessionRef::new("source", Harness::Gemini, path.clone());
+        let full = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full()).unwrap();
+        let mut expected = crate::events::EventSink::new(None);
+        for message in &full.messages {
+            expected.try_message(message.clone()).unwrap();
+        }
+        let mut actual = crate::events::EventSink::new(None);
+        adapter.stream(&reference, &ParseOptions::lazy(), &mut actual).unwrap();
+        assert_eq!(actual.into_events().unwrap(), expected.into_events().unwrap());
+        assert_eq!(
+            serde_json::to_value(crate::affordance::read(&adapter, &reference).unwrap()).unwrap(),
+            serde_json::to_value(crate::affordance::of_session(&full).unwrap()).unwrap()
+        );
+        let lazy = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        assert!(json_inputs(&lazy).iter().all(|j| matches!(j, crate::Json::Source(_))));
+        fs::remove_file(path).unwrap();
+        assert!(json_inputs(&lazy)[0].resolve().is_err());
+        let mut events = crate::events::EventSink::new(None);
+        assert!(events.try_message(lazy.messages[0].clone()).is_err());
     }
 
     #[test]

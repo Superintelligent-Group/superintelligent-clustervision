@@ -3,12 +3,14 @@
 
 use super::*;
 use crate::lazy::{Resolver, Span, Text, INLINE_MAX};
+use anyhow::Context as _;
 
 pub(super) use super::super::store::document::{accepts_value, array, Index, Raw, Record};
 
 pub(super) struct Payload<'a> {
     content: std::cell::RefCell<Vec<Block>>,
     results: std::cell::RefCell<Vec<Option<Text>>>,
+    inputs: std::cell::RefCell<Vec<Option<crate::Json>>>,
     tool_response: bool,
     resolver: &'a Resolver,
 }
@@ -20,6 +22,10 @@ impl Payload<'_> {
 
     pub fn take_result(&self, i: usize) -> Option<Text> {
         self.results.borrow_mut().get_mut(i).and_then(Option::take)
+    }
+
+    pub fn take_input(&self, i: usize) -> Option<crate::Json> {
+        self.inputs.borrow_mut().get_mut(i).and_then(Option::take)
     }
 
     pub fn is_tool_response(&self) -> bool {
@@ -111,16 +117,46 @@ impl TextInfo {
     }
 }
 
+/// Offsets describe the actual source, even when portable replay holds only one record buffer.
+#[derive(Clone, Copy)]
+pub(super) struct Context<'a> {
+    pub bytes: &'a [u8],
+    pub base: u64,
+    pub source: Option<&'a crate::json::JsonSource>,
+}
+impl Context<'_> {
+    fn offset(self, raw: Raw<'_>) -> Result<u64> {
+        let b = raw.get().as_bytes();
+        let off = (b.as_ptr() as usize)
+            .checked_sub(self.bytes.as_ptr() as usize)
+            .filter(|off| off.checked_add(b.len()).is_some_and(|end| end <= self.bytes.len()))
+            .context("record field is outside its source bytes")?;
+        self.base
+            .checked_add(off as u64)
+            .context("record field offset overflows")
+    }
+    fn argument(self, raw: Option<Raw<'_>>) -> Result<crate::Json> {
+        let Some(raw) = raw else { return Ok(Value::Null.into()) };
+        if raw.get().len() > INLINE_MAX {
+            if let Some(source) = self.source {
+                // The record boundary has already established complete Value-compatible JSON.
+                return source.validated_range(self.offset(raw)?, raw.get().len() as u64);
+            }
+        }
+        Ok(serde_json::from_str::<Value>(raw.get())?.into())
+    }
+}
+
 pub(super) fn emit(
     raw: Raw<'_>,
-    bytes: &[u8],
+    ctx: Context<'_>,
     harness: Harness,
     st: &mut EmitState,
     resolver: &Resolver,
     sink: &mut dyn MessageSink,
-) -> Flow {
+) -> Result<Flow> {
     let Some(rec) = Record::parse(raw) else {
-        return Flow::Continue;
+        return Ok(Flow::Continue);
     };
     let mut meta = serde_json::Map::new();
     for key in [
@@ -142,7 +178,7 @@ pub(super) fn emit(
     let mut content = Vec::new();
     let raw_content = rec.fields.get("content").copied();
     if let Some(raw) = raw_content {
-        content_blocks(raw, bytes, &mut content);
+        content_blocks(raw, ctx, &mut content)?;
     }
     let tool_response = raw_content.and_then(|r| array(r)).is_some_and(|parts| {
         !parts.is_empty()
@@ -151,6 +187,7 @@ pub(super) fn emit(
                 .all(|p| Record::parse(*p).is_some_and(|p| p.fields.contains_key("functionResponse")))
     });
     let mut results = Vec::new();
+    let mut inputs = Vec::new();
     if let Some(calls) = rec.fields.get("toolCalls") {
         if let Some(calls) = array(*calls) {
             let calls: Vec<Value> = calls
@@ -159,7 +196,7 @@ pub(super) fn emit(
                     let mut call_meta = serde_json::Map::new();
                     let call = Record::parse(*raw);
                     if let Some(call) = &call {
-                        for key in ["id", "name", "args", "agentId", "status"] {
+                        for key in ["id", "name", "agentId", "status"] {
                             if let Some(raw) = call.fields.get(key) {
                                 if let Ok(v) = serde_json::from_str(raw.get()) {
                                     call_meta.insert(key.into(), v);
@@ -167,43 +204,40 @@ pub(super) fn emit(
                             }
                         }
                     }
+                    inputs.push(Some(
+                        ctx.argument(call.as_ref().and_then(|c| c.fields.get("args").copied()))?,
+                    ));
                     results.push(call.and_then(|call| {
                         call.fields
                             .get("result")
-                            .and_then(|raw| result_text(*raw, bytes, resolver))
-                            .or_else(|| {
-                                call.fields
-                                    .get("resultDisplay")
-                                    .and_then(|raw| string_text(*raw, bytes))
-                            })
+                            .and_then(|raw| result_text(*raw, ctx, resolver))
+                            .or_else(|| call.fields.get("resultDisplay").and_then(|raw| string_text(*raw, ctx)))
                     }));
-                    Value::Object(call_meta)
+                    Ok(Value::Object(call_meta))
                 })
-                .collect();
+                .collect::<Result<_>>()?;
             meta.insert("toolCalls".into(), Value::Array(calls));
         }
     }
     let payload = Payload {
         content: std::cell::RefCell::new(content),
         results: std::cell::RefCell::new(results),
+        inputs: std::cell::RefCell::new(inputs),
         tool_response,
         resolver,
     };
-    emit_record_message_with(harness, &meta, st, Some(&payload), sink)
+    Ok(emit_record_message_with(harness, &meta, st, Some(&payload), sink))
 }
 
-fn string_text(raw: Raw<'_>, bytes: &[u8]) -> Option<Text> {
+fn string_text(raw: Raw<'_>, ctx: Context<'_>) -> Option<Text> {
     let b = raw.get().as_bytes();
     if b.first() != Some(&b'"') || b.last() != Some(&b'"') || b.len() < 2 {
         return None;
     }
-    let off = (b.as_ptr() as usize).checked_sub(bytes.as_ptr() as usize)?;
-    if off + b.len() > bytes.len() {
-        return None;
-    }
+    let off = ctx.offset(raw).ok()?;
     let span = Span {
         source: None,
-        offset: off as u64 + 1,
+        offset: off + 1,
         len: b.len() as u64 - 2,
         escaped: memchr::memchr(b'\\', &b[1..b.len() - 1]).is_some(),
     };
@@ -214,13 +248,13 @@ fn string_text(raw: Raw<'_>, bytes: &[u8]) -> Option<Text> {
     }
 }
 
-fn value_text(raw: Raw<'_>, bytes: &[u8]) -> Text {
-    if let Some(text) = string_text(raw, bytes) {
+fn value_text(raw: Raw<'_>, ctx: Context<'_>) -> Text {
+    if let Some(text) = string_text(raw, ctx) {
         return text;
     }
     if let Some(obj) = Record::parse(raw) {
         for key in ["output", "error"] {
-            if let Some(text) = obj.fields.get(key).and_then(|r| string_text(*r, bytes)) {
+            if let Some(text) = obj.fields.get(key).and_then(|r| string_text(*r, ctx)) {
                 return text;
             }
         }
@@ -232,13 +266,13 @@ fn value_text(raw: Raw<'_>, bytes: &[u8]) -> Text {
         .into()
 }
 
-fn result_text(raw: Raw<'_>, bytes: &[u8], resolver: &Resolver) -> Option<Text> {
-    if let Some(text) = string_text(raw, bytes) {
+fn result_text(raw: Raw<'_>, ctx: Context<'_>, resolver: &Resolver) -> Option<Text> {
+    if let Some(text) = string_text(raw, ctx) {
         return Some(text);
     }
     if let Some(parts) = array(raw) {
         let mut chunks = parts.into_iter().filter_map(|p| {
-            let chunk = result_part(p, bytes, true);
+            let chunk = result_part(p, ctx, true);
             (!chunk.is_empty()).then_some(chunk)
         });
         let first = chunks.next()?;
@@ -257,55 +291,63 @@ fn result_text(raw: Raw<'_>, bytes: &[u8], resolver: &Resolver) -> Option<Text> 
         return Some(joined.into());
     }
     if Record::parse(raw).is_some() {
-        Some(result_part(raw, bytes, false))
+        Some(result_part(raw, ctx, false))
     } else {
         None
     }
 }
 
-fn result_part(raw: Raw<'_>, bytes: &[u8], text_part: bool) -> Text {
+fn result_part(raw: Raw<'_>, ctx: Context<'_>, text_part: bool) -> Text {
     if let Some(obj) = Record::parse(raw) {
         if let Some(fr) = obj.fields.get("functionResponse") {
             return Record::parse(*fr)
-                .and_then(|fr| fr.fields.get("response").map(|r| value_text(*r, bytes)))
+                .and_then(|fr| fr.fields.get("response").map(|r| value_text(*r, ctx)))
                 .unwrap_or_default();
         }
         if text_part {
-            if let Some(text) = obj.fields.get("text").and_then(|r| string_text(*r, bytes)) {
+            if let Some(text) = obj.fields.get("text").and_then(|r| string_text(*r, ctx)) {
                 return text;
             }
         }
     }
-    value_text(raw, bytes)
+    value_text(raw, ctx)
 }
 
-fn content_blocks(raw: Raw<'_>, bytes: &[u8], out: &mut Vec<Block>) {
-    if let Some(text) = string_text(raw, bytes) {
+fn content_blocks(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<()> {
+    if let Some(text) = string_text(raw, ctx) {
         if !text.is_empty() {
             out.push(Block::Text { text });
         }
     } else if let Some(parts) = array(raw) {
         for part in parts {
-            part_block(part, bytes, out);
+            part_block(part, ctx, out)?;
         }
     } else {
-        part_block(raw, bytes, out);
+        part_block(raw, ctx, out)?;
     }
+    Ok(())
 }
 
-fn part_block(raw: Raw<'_>, bytes: &[u8], out: &mut Vec<Block>) {
-    if let Some(text) = string_text(raw, bytes) {
+fn part_block(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<()> {
+    if let Some(text) = string_text(raw, ctx) {
         if !text.is_empty() {
             out.push(Block::Text { text });
         }
-        return;
+        return Ok(());
     }
     let Some(obj) = Record::parse(raw) else {
-        return;
+        return Ok(());
     };
     if let Some(fc) = obj.fields.get("functionCall").filter(|r| r.get().starts_with('{')) {
-        if let Ok(fc) = serde_json::from_str::<Value>(fc.get()) {
-            push_part(out, &serde_json::json!({"functionCall": fc}));
+        if let Some(fc) = Record::parse(*fc) {
+            let name = fc.string("name").unwrap_or_else(|| "tool".into());
+            let id = fc.string("id").unwrap_or_else(|| format!("{name}-call"));
+            out.push(Block::ToolUse {
+                id,
+                name,
+                input: ctx.argument(fc.fields.get("args").copied())?,
+                namespace: None,
+            });
         }
     } else if let Some(fr) = obj.fields.get("functionResponse").filter(|r| r.get().starts_with('{')) {
         if let Some(fr) = Record::parse(*fr) {
@@ -316,7 +358,7 @@ fn part_block(raw: Raw<'_>, bytes: &[u8], out: &mut Vec<Block>) {
                 content: fr
                     .fields
                     .get("response")
-                    .map(|r| value_text(*r, bytes))
+                    .map(|r| value_text(*r, ctx))
                     .unwrap_or_default(),
                 is_error: false,
                 tool_name: Some(name),
@@ -339,7 +381,7 @@ fn part_block(raw: Raw<'_>, bytes: &[u8], out: &mut Vec<Block>) {
                 source: fd.string("fileUri"),
             });
         }
-    } else if let Some(text) = obj.fields.get("text").and_then(|r| string_text(*r, bytes)) {
+    } else if let Some(text) = obj.fields.get("text").and_then(|r| string_text(*r, ctx)) {
         if !text.is_empty() {
             let thought = obj.fields.get("thought").is_some_and(|r| r.get() == "true");
             out.push(if thought {
@@ -354,4 +396,5 @@ fn part_block(raw: Raw<'_>, bytes: &[u8], out: &mut Vec<Block>) {
             });
         }
     }
+    Ok(())
 }
