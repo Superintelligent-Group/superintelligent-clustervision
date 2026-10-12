@@ -56,6 +56,8 @@ pub struct ReadState {
     #[serde(default)]
     version: String,
     path: PathBuf,
+    #[serde(default)]
+    primary: Option<PathBuf>,
     pub source: source::Snapshot,
     anchor: Option<Anchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,6 +74,7 @@ impl ReadState {
             version: crate::harness::for_harness(r.harness)
                 .map_or_else(String::new, |adapter| state_version(adapter.as_ref())),
             path: r.path.clone(),
+            primary: Some(source::primary_path(r)),
             source: source::Probe::default().snapshot(r),
             anchor: None,
             completed: None,
@@ -90,6 +93,7 @@ impl ReadState {
         let now = probe.snapshot_from(r, &adapter.resume_source(r));
         self.version == state_version(adapter)
             && self.path == r.path
+            && self.primary.as_ref() == Some(&adapter.resume_source(r))
             && self.identity.as_ref().is_some_and(|guard| guard.fresh(&mut probe))
             && self.source.fresh(&now, &mut probe)
     }
@@ -97,11 +101,17 @@ impl ReadState {
     pub(crate) fn baseline_unchanged(&self, r: &SessionRef) -> bool {
         crate::harness::for_harness(r.harness).is_some_and(|adapter| self.version == state_version(adapter.as_ref()))
             && self.path == r.path
+            && self.primary.as_ref() == Some(&source::primary_path(r))
             && source::unchanged(r, &self.source)
             && self
                 .identity
                 .as_ref()
                 .is_none_or(|guard| guard.fresh(&mut source::Probe::default()))
+    }
+
+    /// Number of old messages covered by the accepted stable checkpoint, when available.
+    pub fn stable_prefix(&self) -> Option<usize> {
+        self.anchor.as_ref()?.checkpoint.messages()
     }
 
     pub fn fits_cache(&self, limit: usize) -> bool {
@@ -117,7 +127,11 @@ impl ReadState {
         current: &source::Snapshot,
         skip: usize,
     ) -> Option<&'a stream::Checkpoint> {
-        if self.version != state_version(adapter) || self.path != r.path || current.primary.1 < self.source.primary.1 {
+        if self.version != state_version(adapter)
+            || self.path != r.path
+            || self.primary.as_ref() != Some(&adapter.resume_source(r))
+            || current.primary.1 < self.source.primary.1
+        {
             return None;
         }
         let same = current.primary == self.source.primary;
@@ -162,6 +176,7 @@ pub struct ReadPass {
     pub suffix_bytes: u64,
     source: source::Snapshot,
     path: PathBuf,
+    primary: PathBuf,
     before: Option<Anchor>,
     last: Option<Anchor>,
     completed: Option<Completed>,
@@ -183,6 +198,7 @@ impl ReadPass {
         ReadState {
             version: self.version.clone(),
             path: self.path.clone(),
+            primary: Some(self.primary.clone()),
             source: self.source.clone(),
             anchor,
             completed: self.completed.clone(),
@@ -191,7 +207,13 @@ impl ReadPass {
     }
 }
 
-struct Tail {
+struct Tail<'a> {
+    output: Option<&'a mut dyn stream::MessageSink>,
+    resolver_source: Option<PathBuf>,
+    used_implicit_source: bool,
+    primary: PathBuf,
+    materialized_reads: source::ReadSet,
+    error: Option<anyhow::Error>,
     total: usize,
     skip: usize,
     keep: usize,
@@ -201,8 +223,53 @@ struct Tail {
     last: Option<stream::Checkpoint>,
     stop_after_selection: bool,
 }
-impl stream::MessageSink for Tail {
+impl stream::MessageSink for Tail<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error
+            .take()
+            .or_else(|| self.output.as_mut().and_then(|sink| sink.take_error()))
+    }
+    fn dependency(&mut self, path: &std::path::Path) {
+        if let Some(output) = self.output.as_mut() {
+            output.dependency(path);
+        }
+    }
+    fn meta(&mut self, session: &Session) {
+        if self.output.is_some() {
+            if self.used_implicit_source && session.source_path != self.resolver_source {
+                self.error
+                    .get_or_insert_with(|| anyhow::anyhow!("session materialization source changed during streaming"));
+            }
+            self.resolver_source = session.source_path.clone();
+        }
+        if let Some(output) = self.output.as_mut() {
+            output.meta(session);
+        }
+    }
     fn message(&mut self, message: Message) -> stream::Flow {
+        if self.error.is_some() {
+            return stream::Flow::Stop;
+        }
+        if self.total >= self.skip && self.output.is_some() {
+            self.total += 1;
+            self.used_implicit_source |= message.content.iter().any(|block| {
+                match block {
+                    crate::Block::Text { text } | crate::Block::Thinking { text, .. } => text.as_span(),
+                    crate::Block::ToolResult { content, .. } => content.as_span(),
+                    _ => None,
+                }
+                .is_some_and(|span| span.source.is_none())
+            });
+            record_reads(&message, &self.primary, &mut self.materialized_reads);
+            let result = self.output.as_mut().unwrap().try_message(message);
+            return match result {
+                Ok(flow) => flow,
+                Err(error) => {
+                    self.error = Some(error);
+                    stream::Flow::Stop
+                }
+            };
+        }
         if self.total >= self.skip && self.messages.len() < self.keep {
             self.messages.push(message);
         }
@@ -225,6 +292,9 @@ impl stream::MessageSink for Tail {
             self.before = Some(cp.clone());
         }
         self.last = Some(cp.clone());
+        if let Some(output) = self.output.as_mut() {
+            output.checkpoint(cp);
+        }
     }
 }
 
@@ -237,7 +307,7 @@ pub fn read(
     skip: usize,
     keep: usize,
 ) -> Result<ReadPass> {
-    read_inner(adapter, r, previous, skip, keep, false)
+    read_inner(adapter, r, previous, skip, keep, false, None)
 }
 
 /// Full session output: on a verified append retain only the checkpoint's stable old prefix,
@@ -248,7 +318,46 @@ pub fn read_session(
     previous: Option<&ReadState>,
     previous_count: usize,
 ) -> Result<ReadPass> {
-    read_inner(adapter, r, previous, previous_count, usize::MAX, true)
+    read_inner(adapter, r, previous, previous_count, usize::MAX, true, None)
+}
+
+/// Full-fidelity views through one bounded consumer, preserving final metadata and verified
+/// suffix admission without retaining selected history. The sink receives resolver metadata
+/// through `meta` and may stream Source/Span payloads instead of owning them. Consumer errors
+/// never publish state.
+pub fn read_session_into(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    previous: Option<&ReadState>,
+    previous_count: usize,
+    output: &mut dyn stream::MessageSink,
+) -> Result<ReadPass> {
+    read_inner(adapter, r, previous, previous_count, usize::MAX, true, Some(output))
+}
+
+fn record_reads(message: &Message, primary: &std::path::Path, reads: &mut source::ReadSet) {
+    for block in &message.content {
+        if let crate::Block::ToolUse {
+            input: crate::Json::Source(range),
+            ..
+        } = block
+        {
+            if range.path() != primary {
+                reads.record(range.path());
+            }
+        }
+        let span = match block {
+            crate::Block::Text { text } | crate::Block::Thinking { text, .. } => text.as_span(),
+            crate::Block::ToolResult { content, .. } => content.as_span(),
+            _ => None,
+        };
+        if let Some(path) = span
+            .and_then(|span| span.source.as_ref())
+            .filter(|path| path.as_path() != primary)
+        {
+            reads.record(path);
+        }
+    }
 }
 
 fn read_inner(
@@ -258,6 +367,7 @@ fn read_inner(
     mut skip: usize,
     keep: usize,
     session_output: bool,
+    output: Option<&mut dyn stream::MessageSink>,
 ) -> Result<ReadPass> {
     let primary = adapter.resume_source(r);
     let captured = source::Probe::default().snapshot_from(r, &primary);
@@ -272,14 +382,20 @@ fn read_inner(
     if session_output {
         skip = from.and_then(stream::Checkpoint::messages).unwrap_or(0);
     }
-    // Claude's buffered full-fidelity reader already checkpoints. Codex's native checkpoint
-    // path needs spans; its full-extra equivalence is exercised separately after materialization.
-    let opts = if matches!(r.harness, Harness::Codex) {
+    // Native Claude/Codex spans retain the same full-extra metadata. Exact materialized parity
+    // is checked against the independent full collector; discarded payloads remain unowned.
+    let opts = if matches!(r.harness, Harness::Claude | Harness::Codex) {
         stream::ParseOptions::lazy_extra()
     } else {
         stream::ParseOptions::full()
     };
     let mut sink = Tail {
+        output,
+        resolver_source: Some(r.path.clone()),
+        used_implicit_source: false,
+        primary: primary.clone(),
+        materialized_reads: source::ReadSet::default(),
+        error: None,
         total: from.and_then(stream::Checkpoint::messages).unwrap_or(0),
         skip,
         keep,
@@ -294,7 +410,14 @@ fn read_inner(
         Some(done) => done,
         None => {
             resumed = false;
+            let output = sink.output.take();
             sink = Tail {
+                output,
+                resolver_source: Some(r.path.clone()),
+                used_implicit_source: false,
+                primary: primary.clone(),
+                materialized_reads: source::ReadSet::default(),
+                error: None,
                 total: 0,
                 skip: if session_output { 0 } else { skip },
                 keep,
@@ -322,30 +445,14 @@ fn read_inner(
             reads.merge(&prefix_reads);
         }
     }
+    anyhow::ensure!(
+        !sink.used_implicit_source || sink.resolver_source == done.session.source_path,
+        "session materialization source changed before EOF"
+    );
+    reads.merge(&sink.materialized_reads);
     let resolver = done.session.resolver();
     for message in &mut sink.messages {
-        for block in &message.content {
-            if let crate::Block::ToolUse {
-                input: crate::Json::Source(range),
-                ..
-            } = block
-            {
-                if range.path() != primary {
-                    reads.record(range.path());
-                }
-            }
-            let span = match block {
-                crate::Block::Text { text } | crate::Block::Thinking { text, .. } => text.as_span(),
-                crate::Block::ToolResult { content, .. } => content.as_span(),
-                _ => None,
-            };
-            if let Some(path) = span
-                .and_then(|span| span.source.as_ref())
-                .filter(|path| *path != &primary)
-            {
-                reads.record(path);
-            }
-        }
+        record_reads(message, &primary, &mut reads);
         message.materialize(&resolver)?;
     }
     let source = captured.with_reads(&reads);
@@ -411,6 +518,7 @@ fn read_inner(
         prefix: first,
         source,
         path: r.path.clone(),
+        primary,
         before,
         last,
         completed,
@@ -422,6 +530,65 @@ fn read_inner(
 mod tests {
     use super::*;
     use crate::harness;
+
+    #[test]
+    fn different_concrete_primary_files_cannot_reuse_equal_stat_metadata() {
+        struct Foreign(PathBuf);
+        impl Adapter for Foreign {
+            fn harness(&self) -> Harness {
+                Harness::Codex
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn resume_source(&self, _: &SessionRef) -> PathBuf {
+                self.0.clone()
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                _: &stream::ParseOptions,
+                sink: &mut dyn stream::MessageSink,
+            ) -> Result<Session> {
+                let mut session = Session::new(&r.id, r.harness);
+                session.title = Some(self.0.file_name().unwrap().to_string_lossy().into());
+                session.source_path = Some(self.0.clone());
+                sink.meta(&session);
+                sink.try_message(Message::new(crate::Role::User))?;
+                sink.try_message(Message::new(crate::Role::User))?;
+                Ok(session)
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("cv-watch-foreign-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.jsonl"), dir.join("b.jsonl"));
+        std::fs::write(&a, "same").unwrap();
+        std::fs::write(&b, "same").unwrap();
+        let modified = std::fs::metadata(&a).unwrap().modified().unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&b)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(crate::offsets::file_sig(&a), crate::offsets::file_sig(&b));
+        let r = SessionRef::new("foreign", Harness::Codex, dir.join("logical"));
+        let first = read(&Foreign(a), &r, None, 0, 0).unwrap();
+        let state = first.accepted(first.total);
+        assert!(!state.fresh_with(&Foreign(b.clone()), &r));
+        let second = read(&Foreign(b), &r, Some(&state), 0, 0).unwrap();
+        assert_eq!(second.session.title.as_deref(), Some("b.jsonl"));
+        assert_eq!(second.total, 2);
+        let mut old = state;
+        old.primary = None;
+        assert!(!old.fresh_with(&Foreign(dir.join("a.jsonl")), &r));
+        let mut failed = stream::TryFnSink::new(|_| anyhow::bail!("owned output failed"));
+        assert!(read_session_into(&Foreign(dir.join("a.jsonl")), &r, None, 0, &mut failed).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn failed_materialization_never_establishes_a_completed_read() {
@@ -484,6 +651,24 @@ mod tests {
                     serde_json::to_value(pass.session).unwrap(),
                     serde_json::to_value(expected).unwrap(),
                     "{}",
+                    path.display()
+                );
+                let mut messages = Vec::new();
+                let mut output = stream::TryFnSink::new(|message| {
+                    messages.push(message);
+                    Ok(stream::Flow::Continue)
+                });
+                let mut streamed = read_session_into(adapter.as_ref(), &r, None, 0, &mut output).unwrap();
+                assert!(streamed.messages.is_empty());
+                let resolver = streamed.session.resolver();
+                for message in &mut messages {
+                    message.materialize(&resolver).unwrap();
+                }
+                streamed.session.messages = messages;
+                assert_eq!(
+                    serde_json::to_value(streamed.session).unwrap(),
+                    serde_json::to_value(adapter.parse(&r).unwrap()).unwrap(),
+                    "streamed {}",
                     path.display()
                 );
                 checked += 1;

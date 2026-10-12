@@ -389,8 +389,9 @@ with exact EOF metadata/count. Archive append still reads 3,766,301 prior JSON b
 throughput measurements. Full serialized output matches the original parser for Claude/Codex
 fixtures, native/legacy Qwen and Gemini/OpenClaw/LM Studio/Cline/Roo cases. Narrow tests cover
 cursor partial consumption, held EOF usage, artifact repair, source invalidation and publication
-failure/retry. Claude's full-extra fallback remains eager for giant inputs; enabling source-backed
-arguments on that path requires a full-compatible spans mode, not a lazy-extra substitution.
+failure/retry. The later current-source oracle establishes exact materialized Claude parity with
+existing `lazy_extra`; watch now uses that mode to avoid owning discarded giant arguments. The
+prior assertion that full extras required another mode was unproven and is corrected here.
 
 Lane-summary projection (`5ffbd10`) has eight scoped tests; it skips irrelevant bodies.
 
@@ -423,7 +424,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Hermes shared portable exact-set CPU proof; Kimi Code logical-step/selected payloads, Cursor inline composers and OpenCode many-part records.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watch tail and archive suffix reuse with strict source/dependency identity and demanded-error propagation.
-- [ ] Other format-safe continuation; full-compatible span extras and archive prefix/output retention costs.
+- [ ] Other format-safe continuation and bounded archive prefix/output retention costs.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [x] Byte-capacity document admission held through Tantivy consumption, including release/error behavior and mixed-sweep negative control.
 - [x] Composed giant plain/escaped canonical index-body parity and live-heap proof at production chunk settings.

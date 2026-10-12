@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 mod read;
-pub use read::{read as read_tail, read_session, ReadPass, ReadState};
+pub use read::{read as read_tail, read_session, read_session_into, ReadPass, ReadState};
 
 /// What changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
