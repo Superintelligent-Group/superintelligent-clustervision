@@ -48,6 +48,8 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `hash` | Resolve each message, sort owned JSON maps recursively, hash streamed JSON and final metadata |
 | `discover` | Explicit-root discovery; requires scratch `CLUSTERVISION_HOME` |
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
+| `checked-chunks` | Same chunk callback work, using fallible source reads; same span flags |
+| `prefix` / `checked-prefix` | Retain a text prefix under `--prefix-bytes N` raw encoded bytes, using legacy / fallible reads; same span flags |
 | `resolve` | Direct span materialization into a retained owned string; `--span OFFSET:LENGTH [--escaped]` |
 | `resolved-len` | Direct decoded byte counting without owning text; same span flags |
 
@@ -237,3 +239,10 @@ Devin metadata cases isolate session-wide navigation retention, while prompt-onl
 Hermes inputs exercise replay dedup without an assistant clearing the look-back.
 Cursor inline and OpenCode parts intentionally exercise a single large native record
 or logical message: report these separately from row-count scaling.
+
+`checked-chunks` and `checked-prefix` report demanded source failures. The prefix budget counts
+raw encoded bytes, with UTF-8/escape boundary handling; it is distinct from `json-prefix`'s
+canonical output budget. Both prefix operations retain the returned string through the heap
+snapshot and hash it only with `--hash-output`. The checked operations guard the whole supplied
+span even when the prefix budget is zero. They do not prove historical source identity from an
+unstamped `Span`; the resolver captures identity at first demand.

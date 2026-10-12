@@ -75,7 +75,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
-                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len|json-len|json-write|json-prefix\n\
+                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|checked-chunks|prefix|checked-prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -523,10 +523,8 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail = json!({ "canonical_bytes": writer.0 });
             }
         }
-        "chunks" | "resolve" | "resolved-len" => {
-            let (offset, len) = a
-                .span
-                .context("chunks/resolve/resolved-len requires --span OFFSET:LENGTH")?;
+        "chunks" | "checked-chunks" | "prefix" | "checked-prefix" | "resolve" | "resolved-len" => {
+            let (offset, len) = a.span.context("text span operations require --span OFFSET:LENGTH")?;
             if offset
                 .checked_add(len)
                 .is_none_or(|end| end > std::fs::metadata(&r.path).map_or(0, |m| m.len()))
@@ -544,6 +542,22 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail = json!({ "decoded_bytes": resolver.resolved_len(&span) });
                 return Ok(out);
             }
+            if matches!(a.operation.as_str(), "prefix" | "checked-prefix") {
+                let text = if a.operation == "checked-prefix" {
+                    resolver.try_resolve_prefix(&span, a.prefix_bytes as u64)?
+                } else {
+                    resolver.resolve_prefix(&span, a.prefix_bytes as u64)
+                }
+                .into_owned();
+                out.detail = json!({ "prefix_bytes": text.len(), "raw_budget_bytes": a.prefix_bytes });
+                if a.hash_output {
+                    let mut digest = DigestWriter::default();
+                    digest.write_all(text.as_bytes())?;
+                    out.detail["decoded_sha256"] = json!(digest.digest.finish_hex());
+                }
+                out.resolved = Some(text);
+                return Ok(out);
+            }
             if a.operation == "resolve" {
                 let text = resolver.resolve(&span).into_owned();
                 out.detail = json!({ "decoded_bytes": text.len() });
@@ -556,12 +570,20 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 return Ok(out);
             }
             let (mut chunks, mut bytes, mut max) = (0usize, 0usize, 0usize);
-            resolver.for_each_chunk(&span, a.chunk_bytes, |text| {
+            let mut consume = |text: &str| {
                 chunks += 1;
                 bytes += text.len();
                 max = max.max(text.len());
                 std::hint::black_box(text);
-            });
+            };
+            if a.operation == "checked-chunks" {
+                resolver.try_for_each_chunk(&span, a.chunk_bytes, |text| {
+                    consume(text);
+                    Ok(())
+                })?;
+            } else {
+                resolver.for_each_chunk(&span, a.chunk_bytes, consume);
+            }
             out.detail = json!({ "chunks": chunks, "decoded_bytes": bytes, "largest_chunk_bytes": max });
         }
         op => bail!("unknown operation {op}"),
@@ -619,7 +641,7 @@ fn main() -> Result<()> {
                 "affordances" => "full",
                 "affordance-read" | "token-stats" => "production-defined",
                 "query" | "query-collect" | "tools" | "tools-collect" => "lazy",
-                "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
+                "baseline" | "discover" | "chunks" | "checked-chunks" | "prefix" | "checked-prefix" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
                 _ => &a.mode,
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }
