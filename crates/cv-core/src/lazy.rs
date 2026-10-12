@@ -228,19 +228,49 @@ impl Resolver {
     /// temporary `Span` — e.g. a capped copy — works fine.)
     pub fn resolve<'a>(&'a self, sp: &Span) -> Cow<'a, str> {
         if sp.escaped && sp.len > 64 * 1024 {
-            // Materialization owns the final text, but does not need another whole quoted body
-            // or serde decode scratch. In particular, don't ranged-read the entire source first
-            // on non-mmap builds. Chunking retains the same malformed-body raw fallback.
+            // Owned output can retract an invalid decode, unlike streaming callbacks.
             // At <=64KiB the old one-pass decoder's temporary memory is already bounded.
-            let mut text = String::new();
-            self.for_each_chunk(sp, 64 * 1024, |s| text.push_str(s));
-            return Cow::Owned(text);
+            return Cow::Owned(self.fold_span(sp, String::new(), append_materialized, String::clear));
         }
         match self.raw_bytes(sp) {
             None => Cow::Borrowed(""),
             Some(bytes) if sp.escaped => Cow::Owned(unescape_json_body(&bytes)),
             Some(Cow::Borrowed(b)) => String::from_utf8_lossy(b),
             Some(Cow::Owned(b)) => Cow::Owned(String::from_utf8_lossy(&b).into_owned()),
+        }
+    }
+
+    /// Length in decoded UTF-8 bytes, with the same JSON and lossy fallback as [`Self::resolve`].
+    /// Counts without allocating the whole text; decoder scratch stays bounded by source windows.
+    pub fn resolved_len(&self, sp: &Span) -> usize {
+        #[cfg(feature = "mmap")]
+        if !sp.escaped {
+            let Some(bytes) = self.raw_bytes(sp) else { return 0 };
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                return text.len();
+            }
+        }
+        self.fold_span(
+            sp,
+            0usize,
+            |len, text| *len = len.saturating_add(text.len()),
+            |len| *len = 0,
+        )
+    }
+
+    fn fold_span<T>(&self, sp: &Span, output: T, add: impl FnMut(&mut T, &str), reset: impl FnMut(&mut T)) -> T {
+        #[cfg(feature = "mmap")]
+        {
+            let Some(bytes) = self.raw_bytes(sp) else { return output };
+            let mut reader = std::io::Cursor::new(bytes.as_ref());
+            fold_body(&mut reader, 0, sp.len, sp.escaped, output, add, reset)
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            let Some(mut reader) = self.ranged_reader(sp) else {
+                return output;
+            };
+            fold_body(&mut reader, sp.offset, sp.len, sp.escaped, output, add, reset)
         }
     }
 
@@ -288,20 +318,24 @@ impl Resolver {
         }
         #[cfg(not(feature = "mmap"))]
         {
-            use std::io::Seek;
-            let Some(path) = self.path_for(sp) else { return };
-            let Ok(file) = std::fs::File::open(path) else { return };
-            let Some(end) = sp.offset.checked_add(sp.len) else {
+            let Some(mut reader) = self.ranged_reader(sp) else {
                 return;
             };
-            if !file.metadata().is_ok_and(|m| end <= m.len()) {
-                return;
-            }
-            let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
-            if reader.seek(std::io::SeekFrom::Start(sp.offset)).is_ok() {
-                stream_body(&mut reader, sp.offset, sp.len, sp.escaped, chunk.max(1), &mut f);
-            }
+            stream_body(&mut reader, sp.offset, sp.len, sp.escaped, chunk.max(1), &mut f);
         }
+    }
+
+    #[cfg(not(feature = "mmap"))]
+    fn ranged_reader(&self, sp: &Span) -> Option<std::io::BufReader<std::fs::File>> {
+        use std::io::Seek;
+        let file = std::fs::File::open(self.path_for(sp)?).ok()?;
+        let end = sp.offset.checked_add(sp.len)?;
+        if end > file.metadata().ok()?.len() {
+            return None;
+        }
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+        reader.seek(std::io::SeekFrom::Start(sp.offset)).ok()?;
+        Some(reader)
     }
 
     #[cfg(feature = "mmap")]
@@ -381,6 +415,51 @@ fn emit_chunks(s: &str, chunk: usize, f: &mut impl FnMut(&str)) {
         f(&s[start..end]);
         start = end;
     }
+}
+
+/// Keep compressed results compact, then grow geometrically from fixed capacities rather than
+/// from the escape-dependent size of the first decoded source window.
+fn append_materialized(output: &mut String, text: &str) {
+    let needed = output
+        .len()
+        .checked_add(text.len())
+        .expect("materialized text exceeds address space");
+    if needed > output.capacity() {
+        let capacity = if needed <= 64 * 1024 {
+            needed
+        } else {
+            needed.checked_next_power_of_two().unwrap_or(needed)
+        };
+        output.reserve_exact(capacity - output.len());
+    }
+    output.push_str(text);
+}
+
+/// Fold retractable output in one decode pass. A malformed JSON body discards decoded output
+/// and rereads only the span as raw lossy UTF-8; no whole source buffer is needed in either pass.
+fn fold_body<R: std::io::BufRead + std::io::Seek, T>(
+    reader: &mut R,
+    start: u64,
+    len: u64,
+    escaped: bool,
+    mut output: T,
+    mut add: impl FnMut(&mut T, &str),
+    mut reset: impl FnMut(&mut T),
+) -> T {
+    use std::io::{Read, SeekFrom};
+    if escaped {
+        let mut body = reader.by_ref().take(len);
+        if decode_json_body(&mut body, &mut |text| add(&mut output, text)).is_ok() {
+            return output;
+        }
+        reset(&mut output);
+        if reader.seek(SeekFrom::Start(start)).is_err() {
+            return output;
+        }
+    }
+    let mut body = reader.by_ref().take(len);
+    stream_lossy_utf8(&mut body, &mut |text| add(&mut output, text));
+    output
 }
 
 /// Decode using a bounded output buffer and, when necessary, a validation pass. Validation
@@ -871,6 +950,20 @@ mod tests {
             };
             // Independent old whole-body parser remains the prefix resolver's oracle.
             assert_eq!(resolver.resolve(&span), unescape_json_body(raw), "body {i}");
+            assert_eq!(
+                resolver.resolved_len(&span),
+                unescape_json_body(raw).len(),
+                "length {i}"
+            );
+            let literal = Span {
+                escaped: false,
+                ..span.clone()
+            };
+            assert_eq!(
+                resolver.resolved_len(&literal),
+                String::from_utf8_lossy(raw).len(),
+                "literal length {i}"
+            );
             for invalid in [
                 Span {
                     offset: 6,
@@ -892,6 +985,7 @@ mod tests {
                 },
             ] {
                 assert_eq!(resolver.resolve(&invalid), "", "body {i}: {invalid:?}");
+                assert_eq!(resolver.resolved_len(&invalid), 0, "length {i}: {invalid:?}");
             }
         }
         let path = dir.join("ordinary");
@@ -904,10 +998,116 @@ mod tests {
             escaped: false,
         };
         assert_eq!(resolver.resolve(&ordinary), "ordinary é text");
+        assert_eq!(resolver.resolved_len(&ordinary), 16);
         #[cfg(feature = "mmap")]
         assert!(matches!(resolver.resolve(&ordinary), Cow::Borrowed(_)));
         drop(resolver);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn large_compressed_materialization_keeps_its_owned_result_compact() {
+        let dir = std::env::temp_dir().join(format!("cv-lazy-compressed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("body");
+        let raw = r"\u0061".repeat(10923);
+        assert!(raw.len() > 64 * 1024);
+        std::fs::write(&path, &raw).unwrap();
+        let resolver = Resolver::new(Some(path));
+        let span = Span {
+            source: None,
+            offset: 0,
+            len: raw.len() as u64,
+            escaped: true,
+        };
+        let text = resolver.resolve(&span).into_owned();
+        assert_eq!(text, "a".repeat(10923));
+        assert!(
+            text.capacity() < 2 * text.len(),
+            "small decoded output must not retain a source window"
+        );
+        drop(resolver);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retractable_folds_decode_once_and_reset_malformed_output() {
+        struct CountedReader {
+            inner: std::io::Cursor<Vec<u8>>,
+            consumed: usize,
+            seeks: usize,
+        }
+        impl std::io::Read for CountedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.inner.read(buf)?;
+                self.consumed += n;
+                Ok(n)
+            }
+        }
+        impl std::io::BufRead for CountedReader {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                self.inner.fill_buf()
+            }
+            fn consume(&mut self, n: usize) {
+                self.inner.consume(n);
+                self.consumed += n;
+            }
+        }
+        impl std::io::Seek for CountedReader {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.seeks += 1;
+                self.inner.seek(pos)
+            }
+        }
+        let raw = format!(
+            "{}{}",
+            "a".repeat(65525),
+            r#"é😀\"\\\/\b\f\n\r\t\u0000\uD834\uDD1E"#.repeat(5000)
+        );
+        let expected: String = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
+        for suffix in [b"".as_slice(), br"\q", br"\uD800", b"\xff\xf0\x90"] {
+            let body = [raw.as_bytes(), suffix].concat();
+            let expected = if suffix.is_empty() {
+                expected.clone()
+            } else {
+                String::from_utf8_lossy(&body).into_owned()
+            };
+            let new_reader = || {
+                let mut inner = std::io::Cursor::new([b"prefix".as_slice(), &body, b"suffix"].concat());
+                inner.set_position(6);
+                CountedReader {
+                    inner,
+                    consumed: 0,
+                    seeks: 0,
+                }
+            };
+            let mut reader = new_reader();
+            let text = fold_body(
+                &mut reader,
+                6,
+                body.len() as u64,
+                true,
+                String::new(),
+                String::push_str,
+                String::clear,
+            );
+            assert_eq!(text, expected);
+            assert_eq!(reader.seeks, usize::from(!suffix.is_empty()));
+            assert_eq!(reader.consumed, body.len() * (1 + usize::from(!suffix.is_empty())));
+            let mut reader = new_reader();
+            let len = fold_body(
+                &mut reader,
+                6,
+                body.len() as u64,
+                true,
+                0usize,
+                |len, s| *len += s.len(),
+                |len| *len = 0,
+            );
+            assert_eq!(len, expected.len());
+            assert_eq!(reader.seeks, usize::from(!suffix.is_empty()));
+            assert_eq!(reader.consumed, body.len() * (1 + usize::from(!suffix.is_empty())));
+        }
     }
 
     #[test]
