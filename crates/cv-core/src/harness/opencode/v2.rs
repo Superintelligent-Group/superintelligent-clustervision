@@ -302,7 +302,7 @@ fn tool_blocks(c: &Value) -> (Block, Vec<Block>) {
     let use_block = Block::ToolUse {
         id: id.clone(),
         name: name.clone(),
-        input,
+        input: input.into(),
         namespace: None,
     };
     let mut text = Vec::new();

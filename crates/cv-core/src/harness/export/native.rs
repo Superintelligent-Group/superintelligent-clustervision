@@ -450,7 +450,8 @@ fn chatgpt_message(
             name: recipient.clone(),
             input: raw_content
                 .and_then(|raw| serde_json::from_str(raw.get()).ok())
-                .unwrap_or(Value::Null),
+                .unwrap_or(Value::Null)
+                .into(),
             namespace: None,
         });
         calls.insert(recipient, id.clone());

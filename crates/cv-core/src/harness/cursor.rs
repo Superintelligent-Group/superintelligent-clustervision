@@ -533,7 +533,7 @@ fn push_tool_former(m: &mut Message, tf: &Value) {
     m.content.push(Block::ToolUse {
         id: id.clone(),
         name,
-        input,
+        input: input.into(),
         namespace: None,
     });
 
@@ -852,7 +852,10 @@ mod tests {
         let (name, input, tid) = tu.expect("tool use");
         assert_eq!(name, "run_terminal_cmd");
         assert_eq!(tid, "t1");
-        assert_eq!(input.get("command").and_then(Value::as_str), Some("cargo test"));
+        assert_eq!(
+            input.resolve().unwrap().get("command").and_then(Value::as_str),
+            Some("cargo test")
+        );
         assert!(a
             .content
             .iter()

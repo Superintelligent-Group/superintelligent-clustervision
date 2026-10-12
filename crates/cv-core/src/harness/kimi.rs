@@ -1324,7 +1324,7 @@ mod tests {
                 panic!("tool result")
             };
             assert_eq!(content.is_span(), opts.spans);
-            session.materialize();
+            session.materialize().unwrap();
             session.messages.retain(|m| m.kind != MessageKind::Carrier);
             let value = serde_json::to_value(session).unwrap();
             if let Some(expected) = &lean {
@@ -1424,7 +1424,7 @@ mod tests {
             Block::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "tool_1");
                 assert_eq!(name, "Shell");
-                assert_eq!(input["command"], "cat .gitmodules");
+                assert_eq!(input.resolve().unwrap()["command"], "cat .gitmodules");
             }
             o => panic!("expected tool_use, got {o:?}"),
         }

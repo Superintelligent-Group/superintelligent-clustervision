@@ -508,13 +508,13 @@ fn content_blocks(rec: &Map<String, Value>) -> Vec<Block> {
                 Some(inner) => Block::ToolUse {
                     id,
                     name: inner.to_string(),
-                    input: args.get("arguments").cloned().unwrap_or(Value::Null),
+                    input: args.get("arguments").cloned().unwrap_or(Value::Null).into(),
                     namespace: Some(TOOL_CALL.to_string()),
                 },
                 None => Block::ToolUse {
                     id,
                     name: name.to_string(),
-                    input: args,
+                    input: args.into(),
                     namespace: None,
                 },
             });
@@ -1148,7 +1148,7 @@ mod tests {
             } => {
                 assert_eq!(name, "agent");
                 assert_eq!(namespace.as_deref(), Some("tool_call"));
-                assert_eq!(input["prompt"], "say ok");
+                assert_eq!(input.resolve().unwrap()["prompt"], "say ok");
             }
             b => panic!("expected the unwrapped call, got {b:?}"),
         }

@@ -190,7 +190,7 @@ mod tests {
             Block::ToolUse {
                 id: "toolu_42".into(),
                 name: "write_to_file".into(),
-                input: serde_json::json!({ "path": "src/lib.rs" }),
+                input: serde_json::json!({ "path": "src/lib.rs" }).into(),
                 namespace: None,
             },
         ];

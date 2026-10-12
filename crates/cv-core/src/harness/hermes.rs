@@ -1546,7 +1546,7 @@ mod tests {
         let tu = &s.messages[0].content[0];
         assert!(matches!(tu, Block::ToolUse { name, id, .. } if name == "web_search" && id == "c1"));
         if let Block::ToolUse { input, .. } = tu {
-            assert_eq!(input.get("q").and_then(Value::as_str), Some("x"));
+            assert_eq!(input.resolve().unwrap().get("q").and_then(Value::as_str), Some("x"));
         }
         let tr = &s.messages[1].content[0];
         assert!(

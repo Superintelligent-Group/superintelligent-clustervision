@@ -1027,7 +1027,7 @@ fn node_to_message(
                     m.content.push(Block::ToolUse {
                         id,
                         name,
-                        input,
+                        input: input.into(),
                         namespace: None,
                     });
                 }

@@ -464,7 +464,8 @@ fn block(item: Item<'_>, span: Option<&SpanCtx>) -> Option<Option<Block>> {
             input: match item.input.0 {
                 Some(v) => serde_json::from_str(v.get()).ok()?,
                 None => Value::Null,
-            },
+            }
+            .into(),
             namespace: None,
         }),
         Some("tool_result") => {
@@ -951,7 +952,7 @@ mod tests {
             let reader = BufReader::new(std::fs::File::open(&path).unwrap());
             let mut actual = stream_reader("session", reader, Some(path.clone()), &opts, &mut actual_sink);
             actual.messages = actual_sink.messages;
-            actual.materialize();
+            actual.materialize().unwrap();
             assert_eq!(
                 serde_json::to_vec(&actual).unwrap(),
                 serde_json::to_vec(&expected).unwrap(),
@@ -970,7 +971,7 @@ mod tests {
                     &mut mapped_sink,
                 );
                 mapped.messages = mapped_sink.messages;
-                mapped.materialize();
+                mapped.materialize().unwrap();
                 assert!(
                     serde_json::to_value(mapped).unwrap() == expected,
                     "mapped mode {opts:?}"

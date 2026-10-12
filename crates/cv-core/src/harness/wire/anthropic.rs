@@ -131,7 +131,7 @@ fn block_from_fields(item: &Value, q: &Quirks, text: &mut dyn FnMut(&'static str
         return Some(Block::ToolUse {
             id: str_field(item, "id"),
             name: str_field(item, "name"),
-            input: item.get(q.tool_use.1).cloned().unwrap_or(Value::Null),
+            input: item.get(q.tool_use.1).cloned().unwrap_or(Value::Null).into(),
             namespace: None,
         });
     }
@@ -473,7 +473,7 @@ mod tests {
             {"type": "image", "mimeType": "image/png", "data": "0123456789"}
         ]);
         let b = blocks_from(Some(&oc), &OPENCLAW);
-        assert!(matches!(&b[0], Block::ToolUse { input, .. } if input["cmd"] == "ls"));
+        assert!(matches!(&b[0], Block::ToolUse { input, .. } if input.resolve().unwrap()["cmd"] == "ls"));
         assert!(matches!(&b[1], Block::Thinking { signature: Some(s), .. } if s == "S"));
         assert!(
             matches!(&b[2], Block::Image { media_type: Some(m), data_ref: Some(d) } if m == "image/png" && d == "0123456789")
@@ -504,7 +504,7 @@ mod tests {
             Block::ToolUse {
                 id: "t1".into(),
                 name: "Read".into(),
-                input: json!({"path": "x"}),
+                input: json!({"path": "x"}).into(),
                 namespace: None,
             },
             Block::Image {

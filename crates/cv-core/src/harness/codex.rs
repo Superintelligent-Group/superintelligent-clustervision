@@ -1785,7 +1785,7 @@ fn handle_item_with_output(
             m.content.push(Block::ToolUse {
                 id: call_id,
                 name,
-                input,
+                input: input.into(),
                 namespace: p.get("namespace").and_then(Value::as_str).map(str::to_string),
             });
             out.push(m);
@@ -1842,7 +1842,7 @@ fn handle_item_with_output(
             m.content.push(Block::ToolUse {
                 id: call_id,
                 name: "tool_search".into(),
-                input: Value::Object(input),
+                input: Value::Object(input).into(),
                 namespace: None,
             });
             out.push(m);
@@ -1879,7 +1879,7 @@ fn handle_item_with_output(
             m.content.push(Block::ToolUse {
                 id: call_id,
                 name: "web_search".into(),
-                input,
+                input: input.into(),
                 namespace: None,
             });
             out.push(m);
@@ -2338,7 +2338,7 @@ mod tests {
             Block::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "c1");
                 assert_eq!(name, "shell");
-                assert_eq!(input["command"][0], "ls");
+                assert_eq!(input.resolve().unwrap()["command"][0], "ls");
             }
             _ => unreachable!(),
         }
@@ -2363,7 +2363,10 @@ mod tests {
         match &s.messages[0].content[0] {
             Block::ToolUse { name, input, .. } => {
                 assert_eq!(name, "apply_patch");
-                assert_eq!(input, &Value::String("*** Begin Patch".into()));
+                assert_eq!(
+                    input.resolve().unwrap().as_ref(),
+                    &Value::String("*** Begin Patch".into())
+                );
             }
             _ => unreachable!(),
         }
@@ -2380,7 +2383,7 @@ mod tests {
             Block::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "ls1");
                 assert_eq!(name, "local_shell");
-                assert_eq!(input["action"]["command"][1], "hi");
+                assert_eq!(input.resolve().unwrap()["action"]["command"][1], "hi");
             }
             _ => unreachable!(),
         }
@@ -2392,7 +2395,7 @@ mod tests {
         match &s.messages[0].content[0] {
             Block::ToolUse { name, input, .. } => {
                 assert_eq!(name, "web_search");
-                assert_eq!(input["query"], "rust serde");
+                assert_eq!(input.resolve().unwrap()["query"], "rust serde");
             }
             _ => unreachable!(),
         }
@@ -2497,7 +2500,7 @@ mod tests {
         let mut sink = crate::stream::CollectSink::default();
         let mut lazy = stream_jsonl_spans("fallback", text.as_bytes(), Some(path.clone()), false, false, &mut sink);
         lazy.messages = sink.messages;
-        lazy.materialize();
+        lazy.materialize().unwrap();
         let full = parse_str("fallback", text, true, Some(path));
         assert_eq!(serde_json::to_value(lazy).unwrap(), serde_json::to_value(full).unwrap());
         std::fs::remove_dir_all(dir).unwrap();

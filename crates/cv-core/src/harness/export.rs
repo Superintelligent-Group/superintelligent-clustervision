@@ -340,7 +340,7 @@ fn chatgpt_messages(conv: &Value) -> Vec<Message> {
             content.push(Block::ToolUse {
                 id: node_id.clone(),
                 name: recipient.to_string(),
-                input: msg.get("content").cloned().unwrap_or(Value::Null),
+                input: msg.get("content").cloned().unwrap_or(Value::Null).into(),
                 namespace: None,
             });
             last_call.insert(recipient.to_string(), node_id.clone());

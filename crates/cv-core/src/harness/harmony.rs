@@ -85,7 +85,7 @@ pub fn decode_content(text: &str) -> Vec<Block> {
                     blocks.push(Block::ToolUse {
                         id: String::new(),
                         name: name.to_string(),
-                        input: parse_input(msg.body),
+                        input: parse_input(msg.body).into(),
                         namespace: None,
                     });
                 } else {
@@ -105,7 +105,7 @@ pub fn decode_content(text: &str) -> Vec<Block> {
                     blocks.push(Block::ToolUse {
                         id: String::new(),
                         name: strip_tool_prefix(recipient).to_string(),
-                        input: parse_input(msg.body),
+                        input: parse_input(msg.body).into(),
                         namespace: None,
                     });
                 } else {
@@ -291,7 +291,7 @@ mod tests {
             Block::ToolUse { name, input, id, .. } => {
                 assert_eq!(name, "get_weather", "functions. prefix stripped");
                 assert!(id.is_empty());
-                assert_eq!(input["location"], "SF");
+                assert_eq!(input.resolve().unwrap()["location"], "SF");
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }
@@ -354,7 +354,10 @@ mod tests {
         match &blocks[0] {
             Block::ToolUse { name, input, .. } => {
                 assert_eq!(name, "run");
-                assert_eq!(input, &serde_json::Value::String("not json here".into()));
+                assert_eq!(
+                    input.resolve().unwrap().as_ref(),
+                    &serde_json::Value::String("not json here".into())
+                );
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }

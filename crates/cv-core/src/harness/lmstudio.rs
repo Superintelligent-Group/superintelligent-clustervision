@@ -1199,7 +1199,7 @@ mod tests {
         match &a.content[1] {
             Block::ToolUse { name, input, .. } => {
                 assert_eq!(name, "get_weather");
-                assert_eq!(input["location"], "San Francisco, CA");
+                assert_eq!(input.resolve().unwrap()["location"], "San Francisco, CA");
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }

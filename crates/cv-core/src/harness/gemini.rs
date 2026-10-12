@@ -1186,7 +1186,7 @@ fn emit_record_message_with(
                     m.content.push(Block::ToolUse {
                         id: call_id.clone(),
                         name: name.to_string(),
-                        input,
+                        input: input.into(),
                         namespace: None,
                     });
                     let status = c.get("status").and_then(Value::as_str);
@@ -1441,7 +1441,7 @@ fn push_part(out: &mut Vec<Block>, part: &Value) {
         out.push(Block::ToolUse {
             id,
             name: name.to_string(),
-            input: fc.get("args").cloned().unwrap_or(Value::Null),
+            input: fc.get("args").cloned().unwrap_or(Value::Null).into(),
             namespace: None,
         });
         return;
@@ -2107,7 +2107,7 @@ mod tests {
             .iter()
             .flat_map(|m| &m.content)
             .any(|b| matches!(b, Block::Text { text } if text.is_span())));
-        s.materialize();
+        s.materialize().unwrap();
         assert_eq!(
             as_json(&s),
             as_json(&parse_all_str(&text, Some(file.clone())).remove(0))
@@ -2149,7 +2149,7 @@ mod tests {
                     )
                     .unwrap();
                 s.messages = sink.messages;
-                s.materialize();
+                s.materialize().unwrap();
                 assert_eq!(as_json(&s), as_json(&reference));
             }
             let refs = scan_session_file(&file, Harness::Gemini);
@@ -2188,7 +2188,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 streamed.messages = sink.messages;
-                streamed.materialize();
+                streamed.materialize().unwrap();
                 assert_eq!(as_json(&streamed), as_json(&reference), "invalid field {unknown}");
             }
         }
@@ -2206,7 +2206,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             streamed.messages = sink.messages;
-            streamed.materialize();
+            streamed.materialize().unwrap();
             assert_eq!(streamed.messages.len(), 1);
             sessions.push(as_json(&streamed));
         }
@@ -2229,7 +2229,7 @@ mod tests {
                 )
                 .unwrap();
             s.messages = sink.messages;
-            s.materialize();
+            s.materialize().unwrap();
             assert_eq!(as_json(&s), as_json(&reference));
             fs::remove_dir_all(dir).unwrap();
         }

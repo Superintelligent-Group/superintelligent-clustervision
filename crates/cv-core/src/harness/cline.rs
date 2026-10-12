@@ -1085,7 +1085,7 @@ mod tests {
             Block::ToolUse {
                 id: "toolu_1".to_string(),
                 name: "read_file".to_string(),
-                input: json!({ "path": "a.rs" }),
+                input: json!({ "path": "a.rs" }).into(),
                 namespace: None,
             },
         ];

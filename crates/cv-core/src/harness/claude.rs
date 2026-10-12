@@ -2942,7 +2942,7 @@ mod tests {
             _ => panic!("expected text block"),
         }
         // And materialize() makes it inline and equal.
-        s.materialize();
+        s.materialize().unwrap();
         match &s.messages[0].content[0] {
             Block::Text { text } => {
                 assert!(!text.is_span());
@@ -2990,7 +2990,7 @@ mod tests {
         }
         fn resolved(mut session: Session, sink: &mut Capture) -> Value {
             session.messages = std::mem::take(&mut sink.messages);
-            session.materialize();
+            session.materialize().unwrap();
             serde_json::to_value(session).unwrap()
         }
         let dir = cv_testkit::temp_dir("claude-mapped-lines");
@@ -3183,8 +3183,8 @@ mod tests {
             );
         }
         assert_eq!(
-            full.searchable_text(),
-            bulk.searchable_text(),
+            full.searchable_text().unwrap(),
+            bulk.searchable_text().unwrap(),
             "gating extra must not change searchable text"
         );
     }
@@ -3220,6 +3220,6 @@ mod tests {
         assert_eq!(whole.created_at, streamed.created_at);
         assert_eq!(whole.updated_at, streamed.updated_at);
         assert_eq!(whole.messages.len(), streamed.messages.len());
-        assert_eq!(whole.searchable_text(), streamed.searchable_text());
+        assert_eq!(whole.searchable_text().unwrap(), streamed.searchable_text().unwrap());
     }
 }

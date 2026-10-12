@@ -605,7 +605,7 @@ fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Messa
             m.content.push(Block::ToolUse {
                 id,
                 name,
-                input,
+                input: input.into(),
                 namespace: None,
             });
         }
@@ -923,8 +923,8 @@ mod tests {
             Block::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "call-1");
                 assert_eq!(name, "read_file");
-                assert_eq!(input["target_file"], "a.rs");
-                assert_eq!(input["limit"], 10);
+                assert_eq!(input.resolve().unwrap()["target_file"], "a.rs");
+                assert_eq!(input.resolve().unwrap()["limit"], 10);
             }
             other => panic!("expected tool_use, got {other:?}"),
         }

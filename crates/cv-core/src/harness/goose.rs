@@ -939,7 +939,7 @@ fn item_to_block(item: &Value, tool_names: &mut HashMap<String, String>) -> Opti
             Some(Block::ToolUse {
                 id,
                 name,
-                input,
+                input: input.into(),
                 namespace: None,
             })
         }
@@ -1311,7 +1311,7 @@ mod tests {
         );
         assert!(matches!(&a.content[1], Block::Text { text } if text == "Working on it"));
         assert!(
-            matches!(&a.content[2], Block::ToolUse { name, id, input , ..} if name == "shell" && id == "call_1" && input.get("command").and_then(Value::as_str) == Some("ls"))
+            matches!(&a.content[2], Block::ToolUse { name, id, input , ..} if name == "shell" && id == "call_1" && input.resolve().unwrap().get("command").and_then(Value::as_str) == Some("ls"))
         );
         assert_eq!(a.usage.as_ref().unwrap().output_tokens, Some(42));
 

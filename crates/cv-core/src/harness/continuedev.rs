@@ -963,7 +963,7 @@ mod tests {
             Some(Block::ToolUse { id, name, input, .. }) => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "read_file");
-                assert_eq!(input["path"], "a.rs");
+                assert_eq!(input.resolve().unwrap()["path"], "a.rs");
             }
             _ => panic!("expected tool_use"),
         }
@@ -1109,7 +1109,7 @@ mod tests {
         asst.content.push(Block::ToolUse {
             id: "call_1".into(),
             name: "read_file".into(),
-            input: json!({ "path": "a.rs" }),
+            input: json!({ "path": "a.rs" }).into(),
             namespace: None,
         });
         session.messages.push(asst);

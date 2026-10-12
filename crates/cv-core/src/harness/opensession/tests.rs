@@ -252,7 +252,7 @@ fn every_field_session() -> Session {
         Block::ToolUse {
             id: "call_1".into(),
             name: "Bash".into(),
-            input: json!({ "command": "ls" }),
+            input: json!({ "command": "ls" }).into(),
             namespace: Some("mcp".into()),
         },
     ];
@@ -431,7 +431,7 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
         let mut sink = CollectSink::default();
         let mut actual = stream_document(&path, &opts, &mut sink).unwrap();
         actual.messages = sink.messages;
-        actual.materialize();
+        actual.materialize().unwrap();
         assert_eq!(
             serde_json::to_string(&actual).unwrap(),
             serde_json::to_string(&expected).unwrap()

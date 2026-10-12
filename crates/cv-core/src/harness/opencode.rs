@@ -925,7 +925,7 @@ fn tool_blocks(part: &Value) -> (Block, Vec<Block>) {
     let use_block = Block::ToolUse {
         id: call_id.clone(),
         name,
-        input: part.pointer("/state/input").cloned().unwrap_or(Value::Null),
+        input: part.pointer("/state/input").cloned().unwrap_or(Value::Null).into(),
         namespace: None,
     };
 

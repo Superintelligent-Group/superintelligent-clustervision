@@ -928,7 +928,7 @@ impl Ctx<'_> {
                     step.msg.content.push(Block::ToolUse {
                         id,
                         name,
-                        input: e.get("args").cloned().unwrap_or(Value::Null),
+                        input: e.get("args").cloned().unwrap_or(Value::Null).into(),
                         namespace: None,
                     });
                 }
@@ -1391,7 +1391,7 @@ mod tests {
             matches!(&step1.content[0], Block::Thinking { text, .. } if text.as_ref() as &str == "Look at the test first.")
         );
         assert!(
-            matches!(&step1.content[1], Block::ToolUse { id, name, input , ..} if id == "tool_A" && name == "Read" && input["path"] == "/Users/u/proj/tests/flaky.rs")
+            matches!(&step1.content[1], Block::ToolUse { id, name, input , ..} if id == "tool_A" && name == "Read" && input.resolve().unwrap()["path"] == "/Users/u/proj/tests/flaky.rs")
         );
         assert!(matches!(&step1.content[2], Block::ToolUse { name, .. } if name == "Bash"));
         let u = step1.usage.as_ref().unwrap();

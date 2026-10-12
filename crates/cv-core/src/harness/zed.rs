@@ -530,7 +530,7 @@ fn legacy_message(m: &Value, tool_names: &mut HashMap<String, String>, f: &mut d
         msg.content.push(Block::ToolUse {
             id,
             name,
-            input: tu.get("input").cloned().unwrap_or(Value::Null),
+            input: tu.get("input").cloned().unwrap_or(Value::Null).into(),
             namespace: None,
         });
     }
@@ -755,7 +755,7 @@ fn agent_content_block(item: &Value) -> Option<Block> {
         return Some(Block::ToolUse {
             id: tu.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
             name: tu.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-            input: tu.get("input").cloned().unwrap_or(Value::Null),
+            input: tu.get("input").cloned().unwrap_or(Value::Null).into(),
             namespace: None,
         });
     }
@@ -1034,7 +1034,7 @@ mod tests {
         assert!(matches!(&a.content[1], Block::Text { text } if text == "Checking the test now."));
         assert!(matches!(&a.content[2], Block::ToolUse { id, name, input , ..}
             if id == "toolu_1" && name == "read_file"
-            && input.get("path").and_then(Value::as_str) == Some("foo.rs")));
+            && input.resolve().unwrap().get("path").and_then(Value::as_str) == Some("foo.rs")));
         let t = &s.messages[2];
         assert_eq!(t.role, Role::Tool);
         assert!(

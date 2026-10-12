@@ -84,8 +84,8 @@ fn chatgpt_tool_call_links_to_result() {
     };
     assert_eq!(id, "call");
     assert_eq!(name, "browser");
-    assert!(input.to_string().contains("search")); // raw content kept as input
-                                                   // the result, wired back to the call id by tool name
+    assert!(serde_json::to_string(input).unwrap().contains("search")); // raw content kept as input
+                                                                       // the result, wired back to the call id by tool name
     let Block::ToolResult {
         tool_use_id,
         content,
@@ -278,7 +278,7 @@ fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
             let mut sink = CollectSink::default();
             let mut actual = native::stream(kind, &expected_ref, &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
-            actual.materialize();
+            actual.materialize().unwrap();
             assert_eq!(
                 serde_json::to_string(&actual).unwrap(),
                 serde_json::to_string(&expected).unwrap()
@@ -325,7 +325,7 @@ fn native_archive_matches_raw_value_acceptance_and_duplicate_precedence() {
         let mut sink = CollectSink::default();
         let mut actual = native::stream(Kind::Claude, &r, &ParseOptions::lazy(), &mut sink).unwrap();
         actual.messages = sink.messages;
-        actual.materialize();
+        actual.materialize().unwrap();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
@@ -378,7 +378,7 @@ fn native_chatgpt_fallback_keeps_insertion_order_and_final_duplicate_value() {
         let mut sink = CollectSink::default();
         let mut actual = native::stream(Kind::ChatGpt, &r, &opts, &mut sink).unwrap();
         actual.messages = sink.messages;
-        actual.materialize();
+        actual.materialize().unwrap();
         assert_eq!(
             serde_json::to_string(&actual).unwrap(),
             serde_json::to_string(&expected).unwrap()

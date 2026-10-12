@@ -210,7 +210,7 @@ pub fn tool_call(c: &Value) -> Block {
     Block::ToolUse {
         id,
         name,
-        input: parse_arguments(func.and_then(|f| f.get("arguments")).or_else(|| c.get("arguments"))),
+        input: parse_arguments(func.and_then(|f| f.get("arguments")).or_else(|| c.get("arguments"))).into(),
         namespace: None,
     }
 }
@@ -307,10 +307,10 @@ mod tests {
         ]);
         let b = tool_calls(Some(&calls));
         assert!(
-            matches!(&b[0], Block::ToolUse { id, name, input, .. } if id == "c1" && name == "shell" && input["cmd"] == "ls")
+            matches!(&b[0], Block::ToolUse { id, name, input, .. } if id == "c1" && name == "shell" && input.resolve().unwrap()["cmd"] == "ls")
         );
         assert!(
-            matches!(&b[1], Block::ToolUse { id, name, input, .. } if id == "c2" && name == "grep" && input == &json!({}))
+            matches!(&b[1], Block::ToolUse { id, name, input, .. } if id == "c2" && name == "grep" && input.resolve().unwrap().as_ref() == &json!({}))
         );
         assert!(tool_calls(Some(&json!("not an array"))).is_empty());
     }
