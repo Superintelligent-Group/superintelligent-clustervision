@@ -350,7 +350,13 @@ construction/length/writer campaign: peak above-baseline Rust heap is 328,535 B 
 Writer hashes and 28 bounded-prefix oracles match the independent expected output; retaining a
 64 KiB prefix peaks at 394,214 B plain / 361,440 B escaped. This establishes portable live-heap
 bounds for the primitive too. Cumulative allocation traffic still grows with escaped payload
-size; neither campaign measures activated adapters or clean throughput.
+size. Five alternating allocator-instrumented release pairs also expose a material cold
+portable CPU cost: for the plain 100 MB range, median user CPU rises from 0.0387 s in the old
+resident backend to 0.8116 s for length / 0.8260 s for write; for the escaped 64 MiB range,
+0.4030 / 0.3914 s rises to 1.5815 / 1.5728 s. These include strict constructor validation,
+exclude hashing, and compare the old resident foundation with the positioned-range bridge.
+They are instrumented primitive-stage measurements, not clean adapter throughput. Hot validated
+ranges bypass that admission work; cold portable reader optimization remains separate.
 
 Native Claude producer activation is integrated. Arguments with at most 4,096 encoded bytes
 remain owned; larger inputs use source ranges in lazy and lazy-extra modes. Full/bulk/complete
