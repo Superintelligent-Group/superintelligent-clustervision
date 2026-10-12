@@ -233,6 +233,22 @@ rose from 3.75 MB to 5.36 MB in this probe because the connection/page cache liv
 stage timings do not claim the same multiplier for full indexing: a later fleet sample was waiting
 on Tantivy merges after parsing had finished.
 
+A giant `ToolUse.input` exposed another composed bound: compact JSON was serialized into a whole
+String, copied into the chunk buffer, then copied into a single oversized Tantivy document. FTS
+now streams Value's same compact serialization into UTF-8-safe documents capped at twice
+`CHUNK_BYTES` (8 MiB in production). Canonical bytes, source insertion order and previews are
+preserved. Giant-argument document boundaries change, so term conjunctions still obey the existing
+per-document search semantics; this unreleased index version already requires a first-run rebuild.
+
+The ignored `fts::tests::tool_input_fts_demand_probe` accepts frozen scratch
+`CV_FTS_INPUT_PROBE`/`CV_FTS_INPUT_BYTES`, emits and drops real documents from `index_session`, and
+verifies the concatenated canonical body hash plus event/count publication. It excludes Tantivy
+tokenization, writer queues, commits and merging. With 100 MB of plain input, the old maximum body
+document was 100,000,092 B; the candidate stays at the test configuration's 4,096 B cap. Process
+footprint fell from 503,857,920 B to 203,571,752 B; RSS fell from 614,481,920 B to 314,343,424 B.
+These debug-stage process measurements include mapped/native memory. Owned JSON input and the
+tee clone remain proportional to input size; this is not a universal index heap bound.
+
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
 - [x] Source map: readers, consumers, caches, index, follow/archive, write paths and gates.

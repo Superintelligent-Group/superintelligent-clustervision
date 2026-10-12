@@ -1279,15 +1279,32 @@ impl<'w> ChunkSink<'w> {
 }
 
 impl<'w> ChunkSink<'w> {
-    /// Append `s` to the buffer; a giant message (twice a chunk in the buffer) flushes mid-way.
+    /// Append at UTF-8 boundaries, flushing before an inline field can exceed two chunks.
     fn push_chunk(&mut self, s: &str) {
         self.extend_preview(s);
-        if self.buf.is_empty() {
-            self.buf_first = self.msgs;
-        }
-        self.buf.push_str(s);
-        if self.buf.len() >= 2 * CHUNK_BYTES {
-            self.flush_chunk();
+        self.push_body(s);
+    }
+
+    fn push_body(&mut self, mut s: &str) {
+        let cap = 2 * CHUNK_BYTES;
+        while !s.is_empty() && self.err.is_none() {
+            if self.buf.is_empty() {
+                self.buf_first = self.msgs;
+            }
+            let take = floor_char(s, (cap - self.buf.len()).min(s.len()));
+            if take == 0 {
+                self.flush_chunk();
+                continue;
+            }
+            // String's geometric growth must not create an allocation beyond the document cap.
+            if self.buf.capacity().saturating_mul(2) > cap {
+                self.buf.reserve_exact(take);
+            }
+            self.buf.push_str(&s[..take]);
+            s = &s[take..];
+            if self.buf.len() == cap || !s.is_empty() {
+                self.flush_chunk();
+            }
         }
     }
 
@@ -1355,7 +1372,11 @@ impl<'w> ChunkSink<'w> {
             Block::ToolUse { name, input, .. } => {
                 self.push_chunk(name);
                 self.push_chunk(" ");
-                self.push_chunk(&input.to_string());
+                // Value Display streams serde's compact canonical JSON into fmt::Write. Unlike
+                // to_string, even a single giant string fragment goes straight to bounded docs.
+                if std::fmt::write(&mut JsonChunks::new(self), format_args!("{input}")).is_err() && self.err.is_none() {
+                    self.err = Some(anyhow::anyhow!("serializing tool input for search"));
+                }
                 self.push_chunk("\n");
             }
             Block::ToolResult { content, .. } => {
@@ -1381,6 +1402,54 @@ impl<'w> ChunkSink<'w> {
                 }
             }
             Block::Image { .. } => {}
+        }
+    }
+}
+
+/// Formatter fragments are valid UTF-8; the chunk reducer owns splitting and output failures.
+struct JsonChunks<'a, 'w> {
+    sink: &'a mut ChunkSink<'w>,
+    preview_chars: usize,
+    word_open: bool,
+}
+impl<'a, 'w> JsonChunks<'a, 'w> {
+    fn new(sink: &'a mut ChunkSink<'w>) -> Self {
+        Self {
+            preview_chars: sink.preview.chars().count(),
+            sink,
+            word_open: false,
+        }
+    }
+}
+impl std::fmt::Write for JsonChunks<'_, '_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        // Formatter fragments can split a word. Carry its state across writes so the preview
+        // stays identical to extend_preview on the former single serialized string.
+        if self.preview_chars < PREVIEW_CHARS {
+            for c in s.chars() {
+                if self.preview_chars >= PREVIEW_CHARS {
+                    break;
+                }
+                if c.is_whitespace() {
+                    self.word_open = false;
+                } else {
+                    if !self.word_open && !self.sink.preview.is_empty() {
+                        self.sink.preview.push(' ');
+                        self.preview_chars += 1;
+                    }
+                    if self.preview_chars < PREVIEW_CHARS {
+                        self.sink.preview.push(c);
+                        self.preview_chars += 1;
+                    }
+                    self.word_open = true;
+                }
+            }
+        }
+        self.sink.push_body(s);
+        if self.sink.err.is_some() {
+            Err(std::fmt::Error)
+        } else {
+            Ok(())
         }
     }
 }
@@ -1948,6 +2017,156 @@ fn head(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_input_json_streaming_preserves_unicode_and_canonical_body() {
+        let f = fields_of(&build_schema()).unwrap();
+        let r = cv_core::SessionRef::new("input", cv_core::Harness::Claude, "/absent.jsonl");
+        let input = serde_json::json!({
+            "first": "é🙂中\\\"\n".repeat(CHUNK_BYTES),
+            "nested": [null, true, 4.25, {"key":"尾巴"}],
+            "last": "done"
+        });
+        let expected = format!("Edit {input}\n");
+        let mut ignore = |_doc: TantivyDocument| -> Result<()> { Ok(()) };
+        let mut former = ChunkSink::new(&mut ignore, &f, &r, 1, 1, Default::default());
+        former.extend_preview("Edit");
+        former.extend_preview(&input.to_string());
+        let expected_preview = former.preview;
+        let mut bodies = Vec::new();
+        let mut out = |doc: TantivyDocument| -> Result<()> {
+            if let Some(body) = doc.get_first(f.body).and_then(|value| value.as_str()) {
+                assert!(body.len() <= 2 * CHUNK_BYTES);
+                bodies.push(body.to_owned());
+            }
+            Ok(())
+        };
+        let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
+        sink.append_block(
+            &cv_core::Resolver::new(None),
+            &cv_core::Block::ToolUse {
+                id: "call".into(),
+                name: "Edit".into(),
+                input,
+                namespace: None,
+            },
+        );
+        assert!(sink.buf.capacity() <= 2 * CHUNK_BYTES);
+        assert_eq!(sink.preview, expected_preview);
+        sink.finish().unwrap();
+        drop(sink);
+        assert!(bodies.len() > 1);
+        assert_eq!(bodies.concat(), expected);
+    }
+
+    #[test]
+    fn tool_input_json_streaming_retains_document_output_error() {
+        let f = fields_of(&build_schema()).unwrap();
+        let r = cv_core::SessionRef::new("input", cv_core::Harness::Claude, "/absent.jsonl");
+        let mut emitted = 0;
+        let mut out = |_doc: TantivyDocument| -> Result<()> {
+            emitted += 1;
+            anyhow::bail!("test document output closed")
+        };
+        let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
+        sink.append_block(
+            &cv_core::Resolver::new(None),
+            &cv_core::Block::ToolUse {
+                id: "call".into(),
+                name: "Edit".into(),
+                input: serde_json::json!({"content":"x".repeat(8 * CHUNK_BYTES)}),
+                namespace: None,
+            },
+        );
+        assert!(sink
+            .finish()
+            .unwrap_err()
+            .to_string()
+            .contains("test document output closed"));
+        drop(sink);
+        assert_eq!(emitted, 1);
+    }
+
+    /// Run alone under /usr/bin/time -l with frozen scratch fixtures; emits and drops real FTS
+    /// documents before Tantivy tokenization so source/tee/chunk demand is measured separately.
+    #[test]
+    #[ignore = "explicit scratch CV_FTS_INPUT_PROBE and CV_FTS_INPUT_BYTES required"]
+    fn tool_input_fts_demand_probe() {
+        let path = std::fs::canonicalize(std::env::var_os("CV_FTS_INPUT_PROBE").unwrap()).unwrap();
+        let input_bytes: usize = std::env::var("CV_FTS_INPUT_BYTES").unwrap().parse().unwrap();
+        let _home = IsolatedHome::new();
+        let mut r = cv_core::SessionRef::new("perf", cv_core::Harness::Claude, &path);
+        r.cwd = Some("/perf".into());
+        let source = cv_core::source::Probe::default().snapshot(&r);
+        let adapter = cv_core::harness::claude::Claude::with_config_dir(path.parent().unwrap());
+        let fields = fields_of(&build_schema()).unwrap();
+        fn hash(mut hash: u64, bytes: &[u8]) -> u64 {
+            for &byte in bytes {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
+            }
+            hash
+        }
+        let initial = 14_695_981_039_346_656_037;
+        let mut digest = initial;
+        let mut body_bytes = 0;
+        let mut largest_body = 0;
+        let mut body_docs = 0;
+        let mut emit = |doc: TantivyDocument| -> Result<()> {
+            if let Some(body) = doc.get_first(fields.body).and_then(|value| value.as_str()) {
+                digest = hash(digest, body.as_bytes());
+                body_bytes += body.len();
+                largest_body = largest_body.max(body.len());
+                body_docs += 1;
+            }
+            Ok(())
+        };
+        let start = std::time::Instant::now();
+        let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone());
+        let (_, done, _) = index_session(
+            &mut emit,
+            &fields,
+            &adapter,
+            &r,
+            source.primary.0,
+            source.primary.1,
+            Some(&mut events),
+            Default::default(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let event_source = source.with_reads(events.inner().dependencies());
+        let spool = events.into_spool().unwrap();
+        assert_eq!(spool.len(), 1);
+        let counted = done.counted.unwrap();
+        assert_eq!(counted.turns, 2);
+        let mut writer = cv_core::catalog::Writer::open().unwrap();
+        writer
+            .record_events(&r, 0, spool, &event_source, &Default::default())
+            .unwrap();
+        writer.record_counted(&r, &source, counted);
+        drop(writer);
+        let wall = start.elapsed().as_secs_f64();
+        let rows = cv_core::events::events_for("claude", "perf", None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "file_edit");
+        assert_eq!(rows[0].target.as_deref(), Some("/perf/a.rs"));
+        let prefix = b"Inspect the file\nEdit {\"file_path\":\"/perf/a.rs\",\"content\":\"";
+        let suffix = b"\",\"metadata\":{\"n\":3,\"flag\":true}}\n";
+        let mut expected = hash(initial, prefix);
+        let x = [b'x'; 4096];
+        for _ in 0..input_bytes / x.len() {
+            expected = hash(expected, &x);
+        }
+        expected = hash(expected, &x[..input_bytes % x.len()]);
+        expected = hash(expected, suffix);
+        assert_eq!(digest, expected, "canonical searchable JSON must be exact");
+        assert_eq!(body_bytes, prefix.len() + input_bytes + suffix.len());
+        eprintln!(
+            "{}",
+            serde_json::json!({"input_bytes":input_bytes,"body_bytes":body_bytes,"body_docs":body_docs,"largest_body_bytes":largest_body,"wall_seconds":wall,"body_hash":format!("{digest:016x}"),"events":rows.len(),"chunk_bytes":CHUNK_BYTES,"tantivy_tokenization":false})
+        );
+    }
 
     fn tmpdir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("cv-search-test-{}", uuid::Uuid::new_v4()));
