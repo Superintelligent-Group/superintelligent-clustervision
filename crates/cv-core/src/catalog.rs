@@ -815,6 +815,13 @@ mod imp {
             assert_eq!(counts_of(&counts_text(&c)), Some(c));
             assert_eq!(counts_of(r#"{"plan": 1}"#), None);
             assert_eq!(counts_of(r#"{"plan": 1, "_v": 1}"#), None);
+            // Classifier changes can turn a previous view's zero into a positive count.
+            // Reject that row so both has:approval and its negation trigger a recount.
+            let previous = serde_json::json!({
+                "approval": 0,
+                "_v": crate::affordance::VIEW_VERSION - 1,
+            });
+            assert_eq!(counts_of(&previous.to_string()), None);
         }
     }
 }
