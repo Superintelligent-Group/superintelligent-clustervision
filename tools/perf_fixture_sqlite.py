@@ -16,11 +16,12 @@ REPO = Path(__file__).resolve().parent.parent
 def generate_sqlite(harness, root, size, records, escaped, shape):
     allowed = {"devin": ("history", "metadata", "unselected"),
                "hermes": ("history", "prompt-only"), "goose": ("history",),
-               "opencode": ("history", "parts"), "cursor": ("history", "inline")}
+               "opencode": ("history", "parts"), "cursor": ("history", "inline", "legacy")}
     if shape not in allowed[harness]:
         raise ValueError(f"{harness} supports shapes {allowed[harness]}")
     name = {"devin": "sessions.db", "hermes": "state.db", "goose": "sessions.db",
             "opencode": "opencode.db", "cursor": "globalStorage/state.vscdb"}[harness]
+    if harness == "cursor" and shape == "legacy": name = "workspaceStorage/perf/state.vscdb"
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
     pattern = 'line\n"quoted"\t\\end' if escaped else "plain payload "
@@ -67,19 +68,26 @@ def generate_sqlite(harness, root, size, records, escaped, shape):
                     db.execute("INSERT INTO message VALUES(?,?,?,?)", (mid, SID, 1767225600000 + i, j({"role": "assistant", "time": {"created": 1767225600000 + i}})))
                 db.execute("INSERT INTO part VALUES(?,?,?)", (f"p{i:09d}", mid, j({"type": "text", "text": payload(i)})))
         else:
-            db.execute("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY,value TEXT)")
+            table = "ItemTable" if shape == "legacy" else "cursorDiskKV"
+            db.execute(f"CREATE TABLE {table}(key TEXT PRIMARY KEY,value TEXT)")
             # Stream the inline JSON to a temporary generator file to avoid a whole Python tree.
             composer = {"name": "scale fixture", "createdAt": 1767225600000, "modelConfig": {"modelName": "fixture-model"}}
-            if shape == "inline":
+            if shape in ("inline", "legacy"):
                 parts = root / "composer-generation.json"
                 with parts.open("w") as out:
-                    out.write(j(composer)[:-1] + ',"conversation":[')
+                    out.write('{"tabs":[{"tabId":"scale-tab","chatTitle":"scale fixture","bubbles":[' if shape == "legacy" else j(composer)[:-1] + ',"conversation":[')
                     for i in range(records):
                         if i: out.write(',')
-                        out.write(j({"bubbleId": f"b{i}", "type": 2, "text": payload(i)}))
-                    out.write(']}')
-                # sqlite text cells are one record: generation transiently reads that record.
-                db.execute("INSERT INTO cursorDiskKV VALUES(?,?)", (f"composerData:{SID}", parts.read_text()))
+                        out.write(j({"bubbleId": f"b{i}", "type": "ai" if shape == "legacy" else 2, "text": payload(i)}))
+                    out.write(']}]}' if shape == 'legacy' else ']}')
+                # Native stores accept BLOB values too. Allocate the cell without a giant
+                # Python/String/SQLite binding copy, then fill it through SQLite's blob API.
+                key = "workbench.panel.aichat.view.aichat.chatdata" if shape == "legacy" else f"composerData:{SID}"
+                db.execute(f"INSERT INTO {table} VALUES(?,zeroblob(?))", (key, parts.stat().st_size))
+                rowid = db.execute(f"SELECT rowid FROM {table} WHERE key=?", (key,)).fetchone()[0]
+                with db.blobopen(table, "value", rowid) as blob, parts.open("rb") as source:
+                    while chunk := source.read(65536):
+                        blob.write(chunk)
                 parts.unlink()
             else:
                 composer["fullConversationHeadersOnly"] = [{"bubbleId": f"b{i}"} for i in range(records)]
@@ -87,7 +95,7 @@ def generate_sqlite(harness, root, size, records, escaped, shape):
                 for i in range(records):
                     db.execute("INSERT INTO cursorDiskKV VALUES(?,?)", (f"bubbleId:{SID}:b{i}", j({"bubbleId": f"b{i}", "type": 2, "text": payload(i)})))
     count = 1 if shape in ("unselected", "parts") else records
-    return {"harness": harness, "id": SID, "root": str(root), "path": str(path), "shape": shape,
+    return {"harness": harness, "id": "legacy:scale-tab" if harness == "cursor" and shape == "legacy" else SID, "root": str(root), "path": str(path), "shape": shape,
             "requested_payload_bytes": size, "records": records, "expected_messages": count,
             "escaped": escaped, "physical_input_bytes": path.stat().st_size,
             "synthetic": True, "provenance": "adapter-supported native schema; made-up IDs and payloads"}

@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
     parser.add_argument("--entropy", action="store_true", help="Zed only: deterministic low-compressibility payloads")
-    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "parts"], default="history")
+    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "legacy", "parts"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
