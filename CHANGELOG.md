@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Large Claude tool arguments stay source-backed in partial reads; changed sources fail explicitly instead of publishing incomplete results.
+- Portable structured-argument projections use bounded file windows instead of loading encoded values.
+- Watch and archive reuse verified record checkpoints; unchanged sources avoid reparsing, and modified archive files are repaired.
+- API pagination reuses bounded, source-verified continuations and head summaries, avoiding repeated scans of earlier messages.
+- Lane summaries resolve assistant reports and bounded tool arguments without decoding unrelated message bodies.
+- Large Zed threads decode once into bounded temporary storage, avoiding repeated decompression while retaining exact replay.
+
 - Native Qwen JSONL resumes at finalized record boundaries; changed metadata and legacy replay formats still trigger whole reads.
 - Full-text indexing streams structured tool arguments into bounded documents without an extra serialized string.
 - Index publication reuses its catalog connection while preserving independent transactions and reporting partial failures for retry.
