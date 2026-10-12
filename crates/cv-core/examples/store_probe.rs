@@ -134,7 +134,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|chunks|resolve\n\
+                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|events|events-collected|chunks|resolve\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -298,6 +298,32 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                                  "serialized_ref_bytes": digest.bytes });
             }
         }
+        "events" | "events-collected" => {
+            let source = cv_core::source::Probe::default().snapshot(r);
+            let mut count = |_m: Message| {
+                out.messages += 1;
+                Flow::Continue
+            };
+            let (events, temporary_bytes) = if a.operation == "events" {
+                let mut sink = cv_core::events::SpoolingSink::new(r.cwd.clone());
+                adapter.stream(r, &opts, &mut cv_core::TeeSink::new(&mut count, &mut sink))?;
+                let source = source.with_reads(sink.inner().dependencies());
+                let spool = sink.into_spool()?;
+                let events = spool.len();
+                let temporary_bytes = spool.temporary_bytes()?;
+                cv_core::events::record_spooled_with_source(r, 0, spool, &source, &Default::default())?;
+                (events, temporary_bytes)
+            } else {
+                let mut sink = cv_core::events::EventSink::new(r.cwd.clone());
+                adapter.stream(r, &opts, &mut cv_core::TeeSink::new(&mut count, &mut sink))?;
+                let source = source.with_reads(sink.dependencies());
+                let events = sink.into_events();
+                cv_core::events::record_from_with_source(r, 0, &events, &source, &Default::default());
+                (events.len(), 0)
+            };
+            out.detail = json!({ "events": events, "temporary_bytes_written": temporary_bytes,
+                               "temporary_bytes_read": temporary_bytes });
+        }
         "discard" | "count" => {
             let mut counter = cv_core::affordance::Counter::new(r);
             let mut sink = |m: Message| {
@@ -451,7 +477,10 @@ fn main() -> Result<()> {
     let a = args()?;
     // Production affordance::read can persist counts, and discovery cache initialization opens
     // a writable catalog. Keep composed operations faithful with an explicitly isolated catalog.
-    if matches!(a.operation.as_str(), "affordance-read" | "discover") {
+    if matches!(
+        a.operation.as_str(),
+        "affordance-read" | "discover" | "events" | "events-collected"
+    ) {
         let home = std::fs::canonicalize(
             std::env::var_os("CLUSTERVISION_HOME").context("this operation requires scratch CLUSTERVISION_HOME")?,
         )

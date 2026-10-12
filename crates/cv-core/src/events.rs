@@ -25,6 +25,9 @@ use crate::stream::{Checkpoint, Flow, MessageSink};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+mod spool;
+pub use spool::{EventSpool, SpoolingSink};
+
 /// Cap (chars) on a command-string target. File-path targets are never truncated.
 const TARGET_MAX: usize = 300;
 /// Cap (chars) on the `detail` context (e.g. the head of an error result).
@@ -50,7 +53,7 @@ const FILE_KEYS: &[&str] = &[
 /// `kind` is one of: `file_edit`, `file_read`, `command`, `tool` (other/unknown), `error`
 /// (a tool result flagged as failed). `target` is an absolute file path for file ops (relative
 /// paths resolved against the session cwd), the command head for commands, `None` otherwise.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Event {
     /// Index of the message (in transcript stream order) this event came from.
     pub msg_idx: usize,
@@ -742,7 +745,7 @@ mod db {
             primary: (mtime_ns, size),
             dependencies: None,
         };
-        record_from_inner(r, from, events, mtime_ns, size, prov, &source);
+        record_from_inner(r, from, events.iter().map(Ok), false, mtime_ns, size, prov, &source);
     }
 
     /// Record a completed pass and its captured dependencies atomically with the event rows.
@@ -753,14 +756,38 @@ mod db {
         source: &crate::source::Snapshot,
         prov: &Provenance,
     ) {
-        record_from_inner(r, from, events, source.primary.0, source.primary.1, prov, source);
+        record_from_inner(
+            r,
+            from,
+            events.iter().map(Ok),
+            false,
+            source.primary.0,
+            source.primary.1,
+            prov,
+            source,
+        );
+    }
+
+    /// Publish a completed ordered batch with bounded row/target retention in one transaction.
+    /// Any spill read, ordering or SQL failure rolls back rows and freshness together.
+    pub fn record_spooled_with_source(
+        r: &SessionRef,
+        from: usize,
+        events: EventSpool,
+        source: &crate::source::Snapshot,
+        prov: &Provenance,
+    ) -> Result<()> {
+        let rows = events.rows()?;
+        record_from_inner(r, from, rows, true, source.primary.0, source.primary.1, prov, source)
+            .ok_or_else(|| anyhow::anyhow!("event catalog publication failed"))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_from_inner(
+    fn record_from_inner<E: std::borrow::Borrow<Event>>(
         r: &SessionRef,
         from: usize,
-        events: &[Event],
+        events: impl IntoIterator<Item = Result<E>>,
+        ordered: bool,
         mtime_ns: i64,
         size: i64,
         prov: &Provenance,
@@ -807,10 +834,24 @@ mod db {
             ) else {
                 return None;
             };
-            let mut seen: std::collections::HashSet<(usize, &str, &str)> = std::collections::HashSet::new();
-            let mut targets: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+            let mut seen: std::collections::HashSet<(usize, &'static str, String)> = std::collections::HashSet::new();
+            let mut targets: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            let mut previous = None;
             for e in events {
-                if !seen.insert((e.msg_idx, e.kind, e.target.as_deref().unwrap_or(""))) {
+                let item = e.ok()?;
+                let e = item.borrow();
+                if ordered {
+                    if e.msg_idx < from || previous.is_some_and(|idx| e.msg_idx < idx) {
+                        return None;
+                    }
+                    if previous != Some(e.msg_idx) {
+                        // Stream extraction emits consecutive rows for each message. Dedup keys
+                        // cannot recur in later messages, so retain only this message's keys.
+                        seen.clear();
+                    }
+                    previous = Some(e.msg_idx);
+                }
+                if !seen.insert((e.msg_idx, e.kind, e.target.clone().unwrap_or_default())) {
                     continue;
                 }
                 let target_id: Option<i64> = match e.target.as_deref() {
@@ -822,7 +863,12 @@ mod db {
                             let Ok(id) = intern_id.query_row(params![t], |row| row.get(0)) else {
                                 return None;
                             };
-                            targets.insert(t, id);
+                            // Repeated targets benefit from interning without retaining every
+                            // distinct file in a session-sized map.
+                            if targets.len() >= 256 {
+                                targets.clear();
+                            }
+                            targets.insert(t.to_string(), id);
                             Some(id)
                         }
                     },
@@ -850,19 +896,20 @@ mod db {
     }
 
     /// (Re)ingest events for one session: stream it (lazily — large content stays on disk) through
-    /// an [`EventSink`] and persist the rows. Returns the number of events extracted. The
+    /// a [`SpoolingSink`] and persist the rows. Returns the number of events extracted. The
     /// `(mtime, size)` stamp is captured **before** the streamed pass, so anything appended while
     /// we were reading still shows as stale next time.
     pub fn ingest_ref(r: &SessionRef) -> Result<usize> {
         let adapter =
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
         let source = crate::source::Probe::default().snapshot(r);
-        let mut sink = EventSink::new(r.cwd.clone());
+        let mut sink = SpoolingSink::new(r.cwd.clone());
         adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
-        let source = source.with_reads(sink.dependencies());
-        let events = sink.into_events();
-        record_from_with_source(r, 0, &events, &source, &Provenance::default());
-        Ok(events.len())
+        let source = source.with_reads(sink.inner().dependencies());
+        let events = sink.into_spool()?;
+        let len = events.len();
+        record_spooled_with_source(r, 0, events, &source, &Provenance::default())?;
+        Ok(len)
     }
 
     /// (Re)ingest events for one sub-agent transcript, stamping `prov`enance on its catalog row so
@@ -872,12 +919,13 @@ mod db {
         let adapter =
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
         let source = crate::source::Probe::default().snapshot(r);
-        let mut sink = EventSink::new(r.cwd.clone());
+        let mut sink = SpoolingSink::new(r.cwd.clone());
         adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
-        let source = source.with_reads(sink.dependencies());
-        let events = sink.into_events();
-        record_from_with_source(r, 0, &events, &source, prov);
-        Ok(events.len())
+        let source = source.with_reads(sink.inner().dependencies());
+        let events = sink.into_spool()?;
+        let len = events.len();
+        record_spooled_with_source(r, 0, events, &source, prov)?;
+        Ok(len)
     }
 
     /// (Re)ingest events for every discovered session, skipping unchanged ones (by the
@@ -1118,7 +1166,8 @@ mod db {
 #[cfg(feature = "sqlite")]
 pub use db::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_from, record_from_with_source, record_with, sessions_editing, sessions_touching, SyncTable,
+    record_from, record_from_with_source, record_spooled_with_source, record_with, sessions_editing, sessions_touching,
+    SyncTable,
 };
 
 /// No-op fallbacks without sqlite: extraction still works (the sink is pure), persistence and
@@ -1162,6 +1211,15 @@ mod db_stub {
         _prov: &Provenance,
     ) {
     }
+    pub fn record_spooled_with_source(
+        _r: &SessionRef,
+        _from: usize,
+        _events: EventSpool,
+        _source: &crate::source::Snapshot,
+        _prov: &Provenance,
+    ) -> Result<()> {
+        Ok(())
+    }
     pub fn record_from(
         _r: &SessionRef,
         _from: usize,
@@ -1199,7 +1257,8 @@ mod db_stub {
 #[cfg(not(feature = "sqlite"))]
 pub use db_stub::{
     catalog_has_events, edits_touching_file, events_for, ingest_all, ingest_ref, ingest_subagent, needs_ingest, record,
-    record_from, record_from_with_source, record_with, sessions_editing, sessions_touching, SyncTable,
+    record_from, record_from_with_source, record_spooled_with_source, record_with, sessions_editing, sessions_touching,
+    SyncTable,
 };
 
 #[cfg(test)]

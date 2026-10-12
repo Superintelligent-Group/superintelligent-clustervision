@@ -350,7 +350,7 @@ enum Out {
     /// mark are the writer's to record.
     Done {
         job: Box<Job>,
-        events: Option<(usize, Vec<cv_core::events::Event>)>,
+        events: Option<(usize, cv_core::events::EventSpool)>,
         counted: Option<cv_core::stream::Counted>,
         mark: Option<(cv_core::resume::MarkHead, cv_core::stream::Checkpoint)>,
         /// The pass resumed at the job's mark.
@@ -667,17 +667,25 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
                 } => {
                     // Only stamp events after a complete pass: a parse error leaves the sync rows
                     // untouched so the session is retried next run.
-                    if let Some((from, events)) = events {
-                        let source = counted
-                            .as_ref()
-                            .map_or_else(|| job.source.clone(), |c| job.source.with_reads(&c.dependencies));
-                        cv_core::events::record_from_with_source(&job.r, from, &events, &source, &job.prov);
-                    }
+                    let source = counted
+                        .as_ref()
+                        .map_or_else(|| job.source.clone(), |c| job.source.with_reads(&c.dependencies));
+                    let events_published = match events {
+                        Some((from, events)) => {
+                            cv_core::events::record_spooled_with_source(&job.r, from, events, &source, &job.prov)
+                                .is_ok()
+                        }
+                        None => true,
+                    };
                     if let Some(c) = counted {
                         c.record_with_source(&job.r, &job.source);
                     }
                     if mark.is_some() || job.mark.is_some() {
-                        ran.marks.push((job.r.clone(), mark));
+                        // A mark must describe persisted event rows as well as FTS docs. If the
+                        // SQL transaction failed, retry the entire event pass rather than resume
+                        // past a missing suffix and incorrectly stamp it fresh.
+                        ran.marks
+                            .push((job.r.clone(), if events_published { mark } else { None }));
                     }
                     ran.resumed += usize::from(resumed);
                     if job.fts {
@@ -818,7 +826,7 @@ struct JobPass {
     resumed: bool,
     fts_reads: cv_core::source::ReadSet,
     counted: Option<cv_core::stream::Counted>,
-    events: Option<(usize, Vec<cv_core::events::Event>)>,
+    events: Option<(usize, cv_core::events::EventSpool)>,
     last: Option<cv_core::stream::Checkpoint>,
 }
 
@@ -832,11 +840,13 @@ fn job_pass(
     from: Option<&cv_core::stream::Checkpoint>,
 ) -> Result<Option<JobPass>> {
     let first = from.and_then(|cp| cp.messages()).unwrap_or(0);
-    let mut events = match (job.events, from) {
-        (false, _) => None,
-        (true, None) => Some(cv_core::events::EventSink::new(job.r.cwd.clone())),
-        (true, Some(cp)) => Some(cv_core::events::EventSink::resume(cp).context("checkpoint without events")?),
+    let mut events = match from {
+        None => cv_core::events::SpoolingSink::new(job.r.cwd.clone()),
+        Some(cp) => cv_core::events::SpoolingSink::resume(cp).context("checkpoint without events")?,
     };
+    if !job.events {
+        events = events.without_events();
+    }
     let done = if job.fts {
         let delete = match (from, job.existing) {
             (Some(_), _) => Delete::From(first),
@@ -865,25 +875,28 @@ fn job_pass(
             &job.r,
             job.mtime,
             job.size,
-            events.as_mut(),
+            Some(&mut events),
             job.prov.clone(),
             from,
         )?
         .map(|(_, done, reads)| (done, reads))
     } else {
         let opts = cv_core::ParseOptions::lazy();
-        let sink: &mut dyn cv_core::MessageSink = match events.as_mut() {
-            Some(es) => es,
-            None => &mut cv_core::stream::Discard,
-        };
+        let sink: &mut dyn cv_core::MessageSink = &mut events;
         cv_core::stream::stream_resumable(adapter, &job.r, &opts, sink, CHECKPOINT_EVERY, from)?
             .map(|done| (done, cv_core::source::ReadSet::default()))
     };
-    Ok(done.map(|(done, reads)| JobPass {
+    let Some((done, reads)) = done else { return Ok(None) };
+    let events = if job.events {
+        Some((first, events.into_spool()?))
+    } else {
+        None
+    };
+    Ok(Some(JobPass {
         fts_reads: reads,
         resumed: from.is_some(),
         counted: done.counted,
-        events: events.map(|es| (first, es.into_events())),
+        events,
         last: done.last,
     }))
 }
@@ -904,7 +917,7 @@ fn index_session(
     r: &cv_core::SessionRef,
     mtime: i64,
     size: i64,
-    events: Option<&mut cv_core::events::EventSink>,
+    events: Option<&mut dyn cv_core::MessageSink>,
     prov: cv_core::events::Provenance,
     from: Option<&cv_core::stream::Checkpoint>,
 ) -> Result<Option<(usize, cv_core::stream::Resumed, cv_core::source::ReadSet)>> {
@@ -950,8 +963,18 @@ fn index_session_clean(
     let source = cv_core::source::Probe::default().snapshot(r);
     let result = {
         let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()).map_err(Into::into) };
-        index_session(&mut add, f, adapter, r, mtime, size, events, prov, None)
-            .and_then(|done| done.context("a whole pass never declines"))
+        index_session(
+            &mut add,
+            f,
+            adapter,
+            r,
+            mtime,
+            size,
+            events.map(|s| s as &mut dyn cv_core::MessageSink),
+            prov,
+            None,
+        )
+        .and_then(|done| done.context("a whole pass never declines"))
     };
     match result {
         Ok((docs, done, reads)) => {
@@ -3287,6 +3310,92 @@ mod tests {
             let resumed = observe(&dir, &refs, &words);
             assert_eq!(resumed, whole_sweep(&refs, &words), "at {num}/{den}");
         }
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn fts_only_reread_keeps_event_checkpoints_for_later_append() {
+        let home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let fleet = resumable_fleet(&sdir, 2);
+        let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
+        write_heads(&fleet, 1, 3);
+        sweep(&dir, refs.clone(), false, false).unwrap();
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        conn.execute(
+            "DELETE FROM source_dependencies WHERE consumer=?1",
+            [source_consumer(&dir).unwrap()],
+        )
+        .unwrap();
+        for r in &refs {
+            assert!(!cv_core::events::needs_ingest(
+                r,
+                cv_core::events::file_mtime_ns(&r.path)
+            ));
+        }
+        let reread = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((reread.changed, reread.resumed), (refs.len(), 0));
+        write_heads(&fleet, 1, 1);
+        let appended = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(
+            appended.resumed,
+            refs.len(),
+            "FTS-only rereads must keep event checkpoint coverage"
+        );
+        let words = some_words(&refs);
+        assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn failed_event_publication_cannot_advance_a_resume_mark_on_retry() {
+        let home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let fleet = resumable_fleet(&sdir, 2);
+        let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
+        write_heads(&fleet, 1, 3);
+        sweep(&dir, refs.clone(), false, false).unwrap();
+        assert!(refs.iter().all(|r| cv_core::resume::MarkTable::load().get(r).is_some()));
+        let before: Vec<_> = refs
+            .iter()
+            .map(|r| format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None)))
+            .collect();
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'test'); END;",
+        )
+        .unwrap();
+        write_heads(&fleet, 1, 1);
+        let grown = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(grown.resumed, refs.len());
+        // FTS commits successfully, but the event suffix transaction rolls back and its mark
+        // must be removed. An events-only retry over an unchanged source must read whole.
+        for (r, expected) in refs.iter().zip(&before) {
+            assert_eq!(
+                format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None)),
+                *expected
+            );
+            assert!(cv_core::events::needs_ingest(
+                r,
+                cv_core::events::file_mtime_ns(&r.path)
+            ));
+            assert!(cv_core::resume::MarkTable::load().get(r).is_none());
+        }
+        conn.execute_batch("DROP TRIGGER reject_event;").unwrap();
+        let retry = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(retry.resumed, 0);
+        for r in &refs {
+            assert!(!cv_core::events::needs_ingest(
+                r,
+                cv_core::events::file_mtime_ns(&r.path)
+            ));
+        }
+        let words = some_words(&refs);
+        assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }
