@@ -351,7 +351,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             out.detail = serde_json::to_value(histogram)?;
         }
         "token-stats" => {
-            out.detail = cv_core::stats::TokenStats::compute(std::slice::from_ref(r)).to_json();
+            out.detail = cv_core::stats::TokenStats::compute(std::slice::from_ref(r))?.to_json();
         }
         "doctor" => {
             let mut report = cv_core::doctor::Report::default();

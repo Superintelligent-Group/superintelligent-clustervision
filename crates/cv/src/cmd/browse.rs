@@ -169,7 +169,7 @@ pub(crate) fn cmd_stats(query: Option<String>, json: bool, tokens: bool) -> Resu
     // accumulate its own from whichever sessions the user had happened to open.
     let s = cv_core::stats::CorpusStats::compute(&refs);
     let total = s.sessions;
-    let t = tokens.then(|| cv_core::stats::TokenStats::compute(&refs));
+    let t = tokens.then(|| cv_core::stats::TokenStats::compute(&refs)).transpose()?;
 
     if json {
         let mut v = s.to_json();

@@ -8,10 +8,13 @@
 //! and said so in the UI.
 
 use crate::ir::{home_rel, Harness, Message, SessionRef, Usage};
+use crate::spill::{ExactStrings, Ordered, Record};
 use crate::stream::{Flow, ParseOptions};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
 
 /// How many cwds `to_json` (and `cv stats`' table) keeps.
 pub const TOP_CWDS: usize = 10;
@@ -195,82 +198,205 @@ pub(crate) fn usage_key(h: Harness, m: &Message) -> Option<String> {
     }
 }
 
-fn usage_hits(r: &SessionRef) -> Option<Vec<UsageHit>> {
-    let adapter = crate::harness::for_harness(r.harness)?;
-    let mut hits = Vec::new();
-    // `lazy_extra`: content stays unread on disk, but the bag carrying Claude's `message.id` is
-    // materialized.
-    let session = adapter
-        .try_stream(r, &ParseOptions::lazy_extra(), &mut |m: Message| {
-            if let Some(u) = m
-                .usage
-                .as_ref()
-                .filter(|u| u.total_tokens() > 0 || u.cost_usd.is_some())
-            {
-                hits.push(UsageHit {
-                    key: usage_key(r.harness, &m),
-                    harness: r.harness,
-                    model: m.model.clone().unwrap_or_default(),
-                    usage: u.clone(),
-                });
+/// A transcript is staged until EOF: failures discard every hit and missing per-message models
+/// use the final session model. The bounded spool preserves record and floating-point order.
+struct UsageBatch {
+    hits: Ordered<UsageHit>,
+    fallback_model: String,
+}
+
+fn usage_hits(r: &SessionRef) -> Result<Option<UsageBatch>> {
+    let Some(adapter) = crate::harness::for_harness(r.harness) else {
+        return Ok(None);
+    };
+    let mut hits = Ordered::default();
+    let mut spill_error = None;
+    // `lazy_extra` carries Claude's response ID; content remains source-backed.
+    let session = adapter.try_stream(r, &ParseOptions::lazy_extra(), &mut |m: Message| {
+        if let Some(usage) = m
+            .usage
+            .as_ref()
+            .filter(|u| u.total_tokens() > 0 || u.cost_usd.is_some())
+        {
+            if let Err(error) = hits.push(UsageHit {
+                key: usage_key(r.harness, &m),
+                harness: r.harness,
+                model: m.model.clone().unwrap_or_default(),
+                usage: usage.clone(),
+            }) {
+                spill_error = Some(error);
+                return Flow::Stop;
             }
-            Flow::Continue
-        })
-        .ok()?;
-    for h in &mut hits {
-        if h.model.is_empty() {
-            h.model = session.model.clone().unwrap_or_else(|| "(unknown)".into());
         }
+        Flow::Continue
+    });
+    if let Some(error) = spill_error {
+        return Err(error);
     }
-    Some(hits)
+    let Ok(session) = session else {
+        return Ok(None);
+    };
+    Ok(Some(UsageBatch {
+        hits,
+        fallback_model: session.model.unwrap_or_else(|| "(unknown)".into()),
+    }))
+}
+
+/// Binary usage rows keep cost bits exactly; serializing floats through a JSON staging codec
+/// would add a second conversion and could change rounding before the ordered sum.
+impl Record for UsageHit {
+    type ReadState = ();
+    fn heap_bytes(&self) -> usize {
+        self.key.as_ref().map_or(0, String::capacity) + self.model.capacity()
+    }
+    fn write(&self, writer: &mut impl Write) -> Result<()> {
+        write_string(writer, self.key.as_deref())?;
+        write_string(writer, Some(self.harness.as_str()))?;
+        write_string(writer, Some(&self.model))?;
+        for value in [
+            self.usage.input_tokens,
+            self.usage.output_tokens,
+            self.usage.cache_read_tokens,
+            self.usage.cache_creation_tokens,
+            self.usage.reasoning_tokens,
+            self.usage.cost_usd.map(f64::to_bits),
+        ] {
+            writer.write_all(&[u8::from(value.is_some())])?;
+            if let Some(value) = value {
+                writer.write_all(&value.to_le_bytes())?;
+            }
+        }
+        Ok(())
+    }
+    fn read(reader: &mut impl BufRead, _: &mut ()) -> Result<Self> {
+        let key = read_string(reader)?;
+        let harness = read_string(reader)?
+            .and_then(|s| Harness::parse(&s))
+            .context("invalid usage spool harness")?;
+        let model = read_string(reader)?.context("missing usage spool model")?;
+        let mut fields = [None; 6];
+        for field in &mut fields {
+            let mut flag = [0];
+            reader.read_exact(&mut flag)?;
+            *field = match flag[0] {
+                0 => None,
+                1 => {
+                    let mut bytes = [0; 8];
+                    reader.read_exact(&mut bytes)?;
+                    Some(u64::from_le_bytes(bytes))
+                }
+                _ => anyhow::bail!("invalid usage spool field"),
+            };
+        }
+        Ok(Self {
+            key,
+            harness,
+            model,
+            usage: Usage {
+                input_tokens: fields[0],
+                output_tokens: fields[1],
+                cache_read_tokens: fields[2],
+                cache_creation_tokens: fields[3],
+                reasoning_tokens: fields[4],
+                cost_usd: fields[5].map(f64::from_bits),
+            },
+        })
+    }
+}
+fn write_string(writer: &mut impl Write, value: Option<&str>) -> Result<()> {
+    writer.write_all(&[u8::from(value.is_some())])?;
+    if let Some(value) = value {
+        writer.write_all(&(value.len() as u64).to_le_bytes())?;
+        writer.write_all(value.as_bytes())?;
+    }
+    Ok(())
+}
+fn read_string(reader: &mut impl BufRead) -> Result<Option<String>> {
+    let mut flag = [0];
+    reader.read_exact(&mut flag)?;
+    match flag[0] {
+        0 => Ok(None),
+        1 => {
+            let mut bytes = [0; 8];
+            reader.read_exact(&mut bytes)?;
+            let len = usize::try_from(u64::from_le_bytes(bytes)).context("usage spool string too large")?;
+            let mut bytes = vec![0; len];
+            reader.read_exact(&mut bytes)?;
+            Ok(Some(String::from_utf8(bytes).context("invalid usage spool UTF-8")?))
+        }
+        _ => anyhow::bail!("invalid usage spool string"),
+    }
+}
+
+fn parse_workers() -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        rayon::current_num_threads().max(1)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        1
+    }
+}
+
+fn parse_chunk(refs: &[SessionRef]) -> Vec<Result<Option<UsageBatch>>> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        // Indexed collection preserves input order even when workers finish out of order.
+        refs.par_iter().map(usage_hits).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        refs.iter().map(usage_hits).collect()
+    }
 }
 
 impl TokenStats {
-    pub fn compute(refs: &[SessionRef]) -> TokenStats {
+    /// Ordinary source parse failures are counted; temporary storage failures are returned.
+    pub fn compute(refs: &[SessionRef]) -> Result<TokenStats> {
         let mut stats = TokenStats {
             sessions: refs.len(),
             ..TokenStats::default()
         };
-        let mut all: Vec<SessionRef> = refs.to_vec();
         let subs: Vec<SessionRef> = crate::par_flat_map(refs.to_vec(), |r| {
             crate::subagent_tree_of(&r).into_iter().map(|s| s.session).collect()
         });
         stats.subagents = subs.len();
-        all.extend(subs);
-        let total = all.len();
-        let parsed: Vec<Vec<UsageHit>> = crate::par_filter_map(all, |r| usage_hits(&r));
-        stats.failed = total - parsed.len();
-        stats.fold(parsed.into_iter().flatten());
-        stats
-    }
-
-    /// Sum `hits` into [`rows`](TokenStats::rows), dropping every keyed hit after the first.
-    fn fold(&mut self, hits: impl Iterator<Item = UsageHit>) {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut rows: HashMap<(&'static str, String), TokenRow> = HashMap::new();
-        for hit in hits {
-            if let Some(k) = hit.key {
-                if !seen.insert(k) {
-                    self.duplicates += 1;
-                    continue;
+        let mut fold = TokenFold::default();
+        // Bound completed spool retention to one 256KiB allowance per configured worker.
+        // Main sessions precede every subagent, matching the existing first-response-ID oracle.
+        for group in [refs, subs.as_slice()] {
+            for chunk in group.chunks(parse_workers()) {
+                let parsed = parse_chunk(chunk);
+                for batch in parsed {
+                    match batch? {
+                        None => stats.failed += 1,
+                        Some(batch) => {
+                            for hit in batch.hits.rows()? {
+                                let mut hit = hit?;
+                                if hit.model.is_empty() {
+                                    hit.model.clone_from(&batch.fallback_model);
+                                }
+                                fold.add(hit)?;
+                            }
+                        }
+                    }
                 }
             }
-            let h = hit.harness.as_str();
-            rows.entry((h, hit.model.clone()))
-                .or_insert_with(|| TokenRow {
-                    harness: h,
-                    model: hit.model,
-                    ..TokenRow::default()
-                })
-                .add(&hit.usage);
         }
-        self.rows = rows.into_values().collect();
-        self.rows.sort_by(|a, b| {
-            b.total()
-                .cmp(&a.total())
-                .then(a.harness.cmp(b.harness))
-                .then(a.model.cmp(&b.model))
-        });
+        fold.finish(&mut stats);
+        Ok(stats)
+    }
+
+    #[cfg(test)]
+    fn fold(&mut self, hits: impl Iterator<Item = UsageHit>) -> Result<()> {
+        let mut fold = TokenFold::default();
+        for hit in hits {
+            fold.add(hit)?;
+        }
+        fold.finish(self);
+        Ok(())
     }
 
     /// Per-harness subtotals (model = `*`), in the rows' ranking order by total.
@@ -315,6 +441,43 @@ impl TokenStats {
             "by_harness": self.by_harness().iter().map(TokenRow::to_json).collect::<Vec<_>>(),
             "by_model": self.rows.iter().map(TokenRow::to_json).collect::<Vec<_>>(),
         })
+    }
+}
+
+#[derive(Default)]
+struct TokenFold {
+    seen: ExactStrings,
+    rows: HashMap<(&'static str, String), TokenRow>,
+    duplicates: usize,
+}
+impl TokenFold {
+    fn add(&mut self, hit: UsageHit) -> Result<()> {
+        if let Some(key) = hit.key {
+            if !self.seen.insert(key)? {
+                self.duplicates += 1;
+                return Ok(());
+            }
+        }
+        let harness = hit.harness.as_str();
+        self.rows
+            .entry((harness, hit.model.clone()))
+            .or_insert_with(|| TokenRow {
+                harness,
+                model: hit.model,
+                ..TokenRow::default()
+            })
+            .add(&hit.usage);
+        Ok(())
+    }
+    fn finish(self, stats: &mut TokenStats) {
+        stats.duplicates += self.duplicates;
+        stats.rows = self.rows.into_values().collect();
+        stats.rows.sort_by(|a, b| {
+            b.total()
+                .cmp(&a.total())
+                .then(a.harness.cmp(b.harness))
+                .then(a.model.cmp(&b.model))
+        });
     }
 }
 
@@ -432,7 +595,8 @@ mod tests {
                 hit(None, Harness::Codex, "gpt", usage(3, 30, 0, 1)),
             ]
             .into_iter(),
-        );
+        )
+        .unwrap();
         assert_eq!(t.duplicates, 1);
         assert_eq!(t.rows.len(), 2);
         let opus = &t.rows[0];
@@ -455,6 +619,96 @@ mod tests {
         assert_eq!(v["total"]["total"], 393);
         assert_eq!(v["by_model"][0]["model"], "opus");
         assert!(v["total"]["cost_usd"].is_null(), "no row reported a cost");
+    }
+
+    #[test]
+    fn keyed_usage_keeps_first_model_and_cost_addition_order() {
+        let mut t = TokenStats::default();
+        let cost = |value| Usage {
+            input_tokens: Some(1),
+            cost_usd: Some(value),
+            ..Usage::default()
+        };
+        t.fold(
+            [
+                hit(Some("claude:first"), Harness::Claude, "first-model", cost(0.1)),
+                hit(Some("claude:first"), Harness::Claude, "ignored-model", cost(900.0)),
+                hit(None, Harness::Claude, "first-model", cost(0.2)),
+                hit(None, Harness::Claude, "first-model", cost(0.3)),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(t.duplicates, 1);
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(t.rows[0].model, "first-model");
+        assert_eq!(t.rows[0].calls, 3);
+        assert_eq!(t.rows[0].cost_usd.unwrap().to_bits(), ((0.1_f64 + 0.2) + 0.3).to_bits());
+        assert_ne!(
+            t.rows[0].cost_usd.unwrap().to_bits(),
+            (0.1_f64 + (0.2 + 0.3)).to_bits(),
+            "grouping file costs is not an exact aggregate"
+        );
+    }
+
+    #[test]
+    fn usage_spill_keeps_optional_fields_cost_bits_and_eof_model_order() {
+        let mut spool = Ordered::default();
+        let mut oracle = TokenStats::default();
+        let mut expected = Vec::new();
+        for i in 0..9000 {
+            let model = if i % 3 == 1 { "late-model" } else { "" };
+            let cost = [0.1, 0.2, 0.3][i % 3];
+            let usage = Usage {
+                input_tokens: Some(1),
+                cache_read_tokens: Some(0),
+                reasoning_tokens: Some(3),
+                cost_usd: Some(cost),
+                ..Usage::default()
+            };
+            spool
+                .push(hit(Some(&format!("id-{i}")), Harness::Claude, model, usage.clone()))
+                .unwrap();
+            expected.push(hit(Some(&format!("id-{i}")), Harness::Claude, "late-model", usage));
+        }
+        assert!(spool.temporary_bytes().unwrap() > 0);
+        oracle.fold(expected.into_iter()).unwrap();
+        let mut fold = TokenFold::default();
+        for row in spool.rows().unwrap() {
+            let mut row = row.unwrap();
+            assert_eq!(row.usage.cache_read_tokens, Some(0));
+            assert_eq!(row.usage.output_tokens, None);
+            if row.model.is_empty() {
+                row.model = "late-model".into();
+            }
+            fold.add(row).unwrap();
+        }
+        let mut actual = TokenStats::default();
+        fold.finish(&mut actual);
+        assert_eq!(
+            serde_json::to_vec(&actual.to_json()).unwrap(),
+            serde_json::to_vec(&oracle.to_json()).unwrap()
+        );
+        assert_eq!(
+            actual.rows[0].cost_usd.unwrap().to_bits(),
+            oracle.rows[0].cost_usd.unwrap().to_bits()
+        );
+        // The staging codec preserves the value itself, including signed zero and hard rounding.
+        for cost in [-0.0, f64::from_bits(0x3fb999999999999b), f64::MIN_POSITIVE] {
+            let row = hit(
+                None,
+                Harness::Codex,
+                "",
+                Usage {
+                    cost_usd: Some(cost),
+                    ..Usage::default()
+                },
+            );
+            let mut bytes = Vec::new();
+            row.write(&mut bytes).unwrap();
+            let decoded = UsageHit::read(&mut std::io::Cursor::new(bytes), &mut ()).unwrap();
+            assert_eq!(decoded.usage.cost_usd.unwrap().to_bits(), cost.to_bits());
+        }
     }
 
     #[test]
@@ -491,7 +745,7 @@ mod tests {
             updated_at: None,
             message_count: 1,
         };
-        let t = TokenStats::compute(&[sref("sess", &parent), sref("resumed", &resumed)]);
+        let t = TokenStats::compute(&[sref("sess", &parent), sref("resumed", &resumed)]).unwrap();
         std::fs::remove_dir_all(&root).ok();
 
         assert_eq!((t.sessions, t.subagents, t.failed), (2, 1, 0));
