@@ -1098,7 +1098,7 @@ fn emit_record_message_with(
     sink: &mut dyn MessageSink,
 ) -> Flow {
     let content_blocks = |out: &mut Vec<Block>| match payload {
-        Some(payload) => out.extend(payload.content()),
+        Some(payload) => out.extend(payload.take_content()),
         None => push_content_blocks(out, obj.get("content")),
     };
     let mty = obj.get("type").and_then(Value::as_str).unwrap_or("user");
@@ -1192,7 +1192,7 @@ fn emit_record_message_with(
                     let status = c.get("status").and_then(Value::as_str);
                     let is_error = status.map(|s| s.eq_ignore_ascii_case("error")).unwrap_or(false);
                     let content = payload
-                        .and_then(|p| p.result(i))
+                        .and_then(|p| p.take_result(i))
                         .or_else(|| {
                             tool_result_text(c.get("result"))
                                 .or_else(|| c.get("resultDisplay").and_then(Value::as_str).map(str::to_string))

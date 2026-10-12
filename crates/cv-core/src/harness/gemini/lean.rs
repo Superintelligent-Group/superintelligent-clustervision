@@ -152,19 +152,19 @@ fn value_end(b: &[u8], mut i: usize, index: &Index) -> Option<usize> {
 }
 
 pub(super) struct Payload<'a> {
-    content: Vec<Block>,
-    results: Vec<Option<Text>>,
+    content: std::cell::RefCell<Vec<Block>>,
+    results: std::cell::RefCell<Vec<Option<Text>>>,
     tool_response: bool,
     resolver: &'a Resolver,
 }
 
 impl Payload<'_> {
-    pub fn content(&self) -> Vec<Block> {
-        self.content.clone()
+    pub fn take_content(&self) -> Vec<Block> {
+        std::mem::take(&mut *self.content.borrow_mut())
     }
 
-    pub fn result(&self, i: usize) -> Option<Text> {
-        self.results.get(i).cloned().flatten()
+    pub fn take_result(&self, i: usize) -> Option<Text> {
+        self.results.borrow_mut().get_mut(i).and_then(Option::take)
     }
 
     pub fn is_tool_response(&self) -> bool {
@@ -329,8 +329,8 @@ pub(super) fn emit(
         }
     }
     let payload = Payload {
-        content,
-        results,
+        content: std::cell::RefCell::new(content),
+        results: std::cell::RefCell::new(results),
         tool_response,
         resolver,
     };
