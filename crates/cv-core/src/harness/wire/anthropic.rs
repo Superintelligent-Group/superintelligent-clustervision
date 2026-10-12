@@ -83,24 +83,35 @@ pub fn block_from(item: &Value, q: &Quirks) -> Option<Block> {
 /// replace — a tool result's `content` only when it is a plain string (array content is coerced and
 /// can never be a verbatim slice).
 pub fn block_from_with(item: &Value, q: &Quirks, text: Texter<'_>) -> Option<Block> {
+    block_from_fields(item, q, &mut |key| {
+        let value = item.get(key).and_then(Value::as_str);
+        if item.get("type").and_then(Value::as_str) == Some("thinking") && key == q.thinking.0 {
+            Some(text(value.unwrap_or(""), key))
+        } else {
+            value.map(|s| text(s, key))
+        }
+    })
+}
+
+fn block_from_fields(item: &Value, q: &Quirks, text: &mut dyn FnMut(&'static str) -> Option<Text>) -> Option<Block> {
     let ty = item.get("type").and_then(Value::as_str)?;
     if ty == "text" {
-        let s = item.get("text").and_then(Value::as_str)?;
-        if q.skip_empty_text && s.is_empty() {
+        let value = text("text")?;
+        if q.skip_empty_text && value.is_empty() {
             return None;
         }
-        return Some(Block::Text { text: text(s, "text") });
+        return Some(Block::Text { text: value });
     }
     if ty == "thinking" {
         let (text_key, sig_key) = q.thinking;
-        let s = item.get(text_key).and_then(Value::as_str).unwrap_or("");
+        let value = text(text_key).unwrap_or_default();
         let signature = item
             .get(sig_key)
             .and_then(Value::as_str)
             .filter(|s| !(q.empty_signature_is_none && s.is_empty()))
             .map(str::to_string);
         return Some(Block::Thinking {
-            text: text(s, text_key),
+            text: value,
             signature,
             encrypted: None,
             redacted: false,
@@ -127,10 +138,7 @@ pub fn block_from_with(item: &Value, q: &Quirks, text: Texter<'_>) -> Option<Blo
     match ty {
         "tool_result" => {
             let cv = item.get("content");
-            let content = match cv {
-                Some(Value::String(s)) => text(s, "content"),
-                _ => Text::Inline(coerce_text(cv)),
-            };
+            let content = text("content").unwrap_or_else(|| Text::Inline(coerce_text(cv)));
             Some(Block::ToolResult {
                 tool_use_id: str_field(item, "tool_use_id"),
                 content,
@@ -145,6 +153,75 @@ pub fn block_from_with(item: &Value, q: &Quirks, text: Texter<'_>) -> Option<Blo
         "document" => Some(document_from(item, q)),
         _ => None,
     }
+}
+
+/// A validated raw block, choosing source spans before strings are decoded. Metadata and
+/// rich tool inputs retain their Value semantics; the same dispatcher handles owned/raw input.
+pub(crate) fn block_from_raw(
+    raw: super::super::store::document::Raw<'_>,
+    source: &super::super::store::document::Source,
+    q: &Quirks,
+    spans: bool,
+) -> Option<Block> {
+    use super::super::store::document::Record;
+    if !spans || q.flat_media.is_some() {
+        return serde_json::from_str::<Value>(raw.get())
+            .ok()
+            .and_then(|v| block_from(&v, q));
+    }
+    let record = Record::parse(raw)?;
+    let ty = record.string("type")?;
+    if matches!(ty.as_str(), "image" | "document") {
+        let src = record.get("source").and_then(Record::parse);
+        let media_type = src.as_ref().and_then(|r| r.string("media_type"));
+        let marker = ty == "image";
+        let data_ref = src.as_ref().and_then(|r| match r.string("type").as_deref() {
+            Some("url") => r.string("url"),
+            Some("file") => r.string("file_id").map(|id| format!("file:{id}")),
+            Some("base64") | None if marker => r
+                .get("data")
+                .filter(|raw| raw.get().starts_with('"'))
+                .map(|_| "base64:inline".into()),
+            Some(other) if marker => Some(other.to_string()),
+            _ => None,
+        });
+        return Some(if marker {
+            Block::Image { media_type, data_ref }
+        } else {
+            Block::File {
+                mime: media_type,
+                path: record.string("title"),
+                source: data_ref,
+            }
+        });
+    }
+    let keys: Vec<&str> = if ty == "text" {
+        vec!["type"]
+    } else if ty == "thinking" {
+        vec!["type", q.thinking.1]
+    } else if Some(ty.as_str()) == q.redacted_thinking {
+        vec!["type", "data"]
+    } else if ty == q.tool_use.0 {
+        vec!["type", "id", "name", q.tool_use.1]
+    } else if ty == "tool_result" {
+        vec!["type", "tool_use_id", "is_error"]
+    } else {
+        return None;
+    };
+    let mut fields = Map::new();
+    for key in keys {
+        if let Some(value) = record.value(key) {
+            fields.insert(key.into(), value);
+        }
+    }
+    if ty == "tool_result" {
+        if let Some(content) = record.get("content").filter(|raw| !raw.get().starts_with('"')) {
+            fields.insert("content".into(), serde_json::from_str(content.get()).ok()?);
+        }
+    }
+    block_from_fields(&Value::Object(fields), q, &mut |key| {
+        record.get(key).and_then(|raw| source.text(raw, true))
+    })
 }
 
 /// Every block of a `content` array; a bare string is one text block. (Claude's lazy reader spans
