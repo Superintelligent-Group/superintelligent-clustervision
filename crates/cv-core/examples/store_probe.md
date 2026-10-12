@@ -35,8 +35,12 @@ directory containing `*.conversation.json` itself. OpenClaw expects its state di
 | `affordances` | Full collection and materialization, classify and retain affordance rows |
 | `affordance-read` | Production `affordance::read`; requires scratch `CLUSTERVISION_HOME` |
 | `hash` | Resolve each message, sort owned JSON maps recursively, hash streamed JSON and final metadata |
-| `discover` | Explicit-root adapter discovery; requires scratch `CLUSTERVISION_HOME` |
+| `discover` | Explicit-root discovery, hash returned refs sorted by ID/path; requires scratch `CLUSTERVISION_HOME` |
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
+
+Discovery hashes all returned `SessionRef` metadata, sorted by ID/path (paths included).
+Both affordance operations hash their ordered rows, including summaries/items and store rows.
+These digests make consumer output parity reviewable alongside memory measurements.
 
 `hash` emits independent SHA-256 digests of newline-delimited canonical message JSON and final
 session metadata. It resolves spans and sorts input/details/extra maps in place, avoiding a second

@@ -245,14 +245,33 @@ struct Outcome {
     rows: Vec<cv_core::affordance::Affordance>,
 }
 
+fn affordance_detail(rows: &[cv_core::affordance::Affordance]) -> Result<Value> {
+    let mut digest = DigestWriter::default();
+    for row in rows {
+        serde_json::to_writer(&mut digest, row)?;
+        digest.write_all(b"\n")?;
+    }
+    Ok(
+        json!({ "affordances": rows.len(), "affordances_sha256": digest.digest.finish_hex(),
+               "serialized_affordance_bytes": digest.bytes }),
+    )
+}
+
 fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
     let opts = options(&a.mode);
     let mut out = Outcome::default();
     match a.operation.as_str() {
         "baseline" => {}
         "discover" => {
-            let refs = adapter.discover()?;
-            out.detail = json!({ "discovered_sessions": refs.len() });
+            let mut refs = adapter.discover()?;
+            refs.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
+            let mut digest = DigestWriter::default();
+            for r in &refs {
+                serde_json::to_writer(&mut digest, r)?;
+                digest.write_all(b"\n")?;
+            }
+            out.detail = json!({ "discovered_sessions": refs.len(), "discovery_sha256": digest.digest.finish_hex(),
+                                 "serialized_ref_bytes": digest.bytes });
         }
         "discard" | "count" => {
             let mut counter = cv_core::affordance::Counter::new(r);
@@ -284,7 +303,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             if a.operation == "affordances" {
                 out.rows = cv_core::affordance::of_session(&s);
                 out.rows.extend(adapter.store_affordances(r));
-                out.detail = json!({ "affordances": out.rows.len() });
+                out.detail = affordance_detail(&out.rows)?;
             }
             out.session = Some(s);
         }
@@ -310,7 +329,8 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         }
         "affordance-read" => {
             out.rows = cv_core::affordance::read(adapter, r)?;
-            out.detail = json!({ "affordances": out.rows.len(), "message_callbacks": "not observed" });
+            out.detail = affordance_detail(&out.rows)?;
+            out.detail["message_callbacks"] = json!("not observed");
         }
         "hash" => {
             let resolver = cv_core::Resolver::new(Some(r.path.clone()));
