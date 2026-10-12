@@ -1,5 +1,6 @@
 //! Fallible projections of tool arguments, shared by affordance and event reducers.
 use crate::json::JsonView;
+use crate::projection::{string_prefix, string_until};
 use anyhow::Result;
 
 /// Enough decoded text to reproduce `truncate(text, cap)`, across arbitrary chunk boundaries.
@@ -22,6 +23,9 @@ impl Prefix {
             self.chars += 1;
         }
     }
+    fn complete(&self) -> bool {
+        self.chars > self.cap
+    }
     pub(crate) fn finish(self) -> String {
         crate::ir::truncate(&self.text, self.cap)
     }
@@ -43,13 +47,7 @@ pub(crate) fn field_string(view: JsonView<'_>, key: &str) -> Result<Option<Strin
 }
 
 pub(crate) fn prefix(view: JsonView<'_>, cap: usize) -> Result<Option<String>> {
-    let mut out = Prefix::new(cap);
-    Ok(view
-        .for_each_str_chunk(|chunk| {
-            out.push(chunk);
-            Ok(())
-        })?
-        .then(|| out.finish()))
+    Ok(string_prefix(view, cap + 1)?.map(|text| crate::ir::truncate(&text, cap)))
 }
 
 pub(crate) fn scalar_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<String>> {
@@ -105,7 +103,7 @@ pub(crate) fn word(view: JsonView<'_>, words: &[&str]) -> Result<Option<usize>> 
     let cap = words.iter().map(|word| word.len()).max().unwrap_or(0);
     let mut text = String::new();
     let mut bytes = 0;
-    if !view.for_each_str_chunk(|chunk| {
+    if !string_until(view, |chunk| {
         bytes += chunk.len();
         if text.len() <= cap {
             for ch in chunk.chars() {
@@ -115,7 +113,7 @@ pub(crate) fn word(view: JsonView<'_>, words: &[&str]) -> Result<Option<usize>> 
                 }
             }
         }
-        Ok(())
+        bytes > cap
     })? {
         return Ok(None);
     }
@@ -149,10 +147,10 @@ pub(crate) fn trimmed_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<St
 pub(crate) fn nonblank_prefix(view: JsonView<'_>, cap: usize) -> Result<Option<String>> {
     let mut out = Prefix::new(cap);
     let mut nonblank = false;
-    let is_string = view.for_each_str_chunk(|chunk| {
+    let is_string = string_until(view, |chunk| {
         out.push(chunk);
         nonblank |= !chunk.trim().is_empty();
-        Ok(())
+        out.complete() && nonblank
     })?;
     Ok((is_string && nonblank).then(|| out.finish()))
 }

@@ -1,5 +1,7 @@
 //! Bounded text projections shared by search and API consumers.
+mod string;
 use crate::{Resolver, Text};
+pub(crate) use string::{string_prefix, string_until};
 
 /// Append complete canonical JSON into an already demanded string without an intermediate copy.
 /// A failure can leave a prefix appended; callers must discard their staged output on error.
@@ -7,7 +9,8 @@ pub fn append_json(out: &mut String, json: &crate::json::Json) -> anyhow::Result
     struct StringWriter<'a>(&'a mut String);
     impl std::io::Write for StringWriter<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.push_str(std::str::from_utf8(bytes).map_err(std::io::Error::other)?);
+            self.0
+                .push_str(std::str::from_utf8(bytes).map_err(std::io::Error::other)?);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
