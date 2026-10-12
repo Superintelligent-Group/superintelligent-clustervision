@@ -2,7 +2,8 @@
 
 The ask (ember): "cv should have affordances for richly querying all those things in a way that
 feels natural to agents when they are within those harnesses." Plans, schedules, background jobs,
-sub-agent spawns, skills, hooks, branches, forks, model switches: every harness has them, each
+sub-agent spawns, skills, hooks, approvals, checkpoints, branches, forks, model switches: every
+harness has them, each
 spells them its own way (`TodoWrite`, `update_plan`, `write_todos`, `todo_write`, `todowrite`,
 `todo__todo_write`, `SetTodoList`, `Checklist`, `update_todo_list`, `todo` are one thing), and
 several keep the state in a side file cv never opened. The evidence is the per-harness
@@ -10,7 +11,7 @@ several keep the state in a side file cv never opened. The evidence is the per-h
 
 ## The vocabulary
 
-Twelve words, snake_case, each a value of `cv_core::affordance::Kind`:
+Fourteen words, snake_case, each a value of `cv_core::affordance::Kind`:
 
 | kind | what it is | actions |
 |---|---|---|
@@ -23,15 +24,29 @@ Twelve words, snake_case, each a value of `cv_core::affordance::Kind`:
 | `skill` | a skill loaded or managed | `load`, `manage` |
 | `hook` | a user hook's output reached the model | `output` |
 | `question` | the agent asked the person | `ask` |
+| `approval` | a permission request and its outcome, or the approval mode the session ran under | `ask`, `deny`, `state` (the mode) |
+| `checkpoint` | a restorable point (file snapshot, shadow-git commit, saved chat) and its restore | `create`, `restore`, `state` (a tally) |
 | `branch` | rewind / undo / reset / clear: what follows does not continue what precedes | `branch` |
 | `fork` | this session was forked from another | `fork` |
 | `model_change` | the model (or effort) changed | `change` |
 
-Not in it: approvals (no store in the corpus records a per-call approval cv can read: Roo `ask`
-events live in unread `ui_messages.json`, Devin `tool_call_state` duplicates the call, Kimi carries
-`permission.*` records only under `complete`, Goose refuses headless), checkpoints (Claude
-`file-history-snapshot`, Kimi `_checkpoint`, Roo `checkpoint_saved` are carried, not read). Both
-become kinds when a reader exists; a kind with nothing behind it is a promise, not an affordance.
+**Checkpoint or branch.** A checkpoint is the restorable *point*: what a restore would put back
+(files, or a saved conversation). A restore that cuts the conversation is a `branch`, and stays
+one: the IR's `Branch` marker sits where the history stops continuing (Kimi `/undo`, Gemini
+`$rewindTo`, Kimi Code `/undo`). `checkpoint/restore` is the restore of a recorded point, read
+where the store records which point (OpenCode's `revert{messageID, snapshot}`); a harness that
+restores files and cuts history at once shows both rows when it marks both. A rewind with no
+recorded point is only a branch; a point never restored is only a checkpoint.
+
+**Approval rows or approval mode.** A row per request needs a store that records the request or
+its outcome: Roo's `ui_messages.json` `ask`s, Claude's and OpenCode's refusal results, Codex's
+refused MCP call. Where a harness keeps only the mode it ran under (Claude `permissionMode`, Codex
+`approval_policy`, Kimi Code `permission.set_mode`, Qwen `approvalMode`, Kimi `state.json`
+`approval`, Devin `agent_mode`, OpenCode's session ruleset), that is one session-level
+`approval/state` row, never a row per call: in `auto` / `yolo` / `bypass` no call was asked about,
+and cv will not invent the asks. No corpus store records a per-call *allow*: Kimi Code's
+`permission.record_approval_result` is never written in auto mode, Devin's `tool_call_state`
+holds a completion status, not a decision, so neither is read.
 
 ## Where it lives: a derived view over the IR, plus three IR corrections
 
@@ -53,7 +68,27 @@ is ambiguous: OpenCode `task` is a sub-agent, Qwen `task_create` is a plan item)
 affordances come from the IR's existing kinds and origins: `SubagentSpawn`, `SubagentReturn`,
 `Branch`, `ModelChange`, `Origin::Hook`, `Origin::Scheduler` (a `schedule` `fire`), and a short
 record table for background completions (Claude `<task-notification>` of a command, Kimi
-`<notification>`, Kimi Code origin `task`, Hermes `process_complete`).
+`<notification>`, Kimi Code origin `task`, Hermes `process_complete`) and Codex's refused MCP call.
+
+**Session-level rows** (`affordance::session_rows`, printed as `session`, no index): what a harness
+keeps once per session rather than at a message. The fork, and two bag keys any adapter fills
+while it reads past bookkeeping records the lean passes drop: `permission_modes` (the approval
+modes, in order of first appearance; `affordance::note_mode`) and `checkpoints` (`{count, files?,
+tag?}`; `affordance::note_checkpoints`), plus the facts the IR already carried (Devin
+`agent_mode`, OpenCode's `permission` ruleset and `revert`). A tally, not a row per point, because
+the records arrive after the message they belong to (a Claude `file-history-snapshot` follows its
+prompt) and a streamed pass cannot go back to mark it; one per prompt would also only restate the
+prompt list. The catalog's counter adds these rows at `finish`, so a streamed pass and the view
+agree.
+
+**Per-message details**: a tool result whose text is the harness's refusal (Claude "Permission to
+use … denied" / "doesn't want to proceed", OpenCode's rule refusal and rejection; error results
+only) is an `approval/deny` at that message; OpenCode's `patch` parts (1.x) and file-changing
+`snapshot{start,end,files}` (2.x) and Devin's `details.restorable` are a `checkpoint/create` there.
+
+**The catalog's counts carry the view's version** (`affordance::VIEW_VERSION`, stored as `_v`): a
+row counted by an older view is "not counted", so adding a kind or a reader never makes
+`has:<kind>` answer a stale no. Bump it with any change to what `Counter` counts.
 
 **IR corrections** (existing kinds, assigned where adapters left them out; CHANGELOG'd):
 
@@ -73,6 +108,8 @@ record table for background completions (Claude `<task-notification>` of a comma
    arguments}` and OpenClaw 10.1 `tool_call{id, args}` become `ToolUse{name: <inner>, namespace:
    "tool_call", input: <arguments>}`, so `tools`, `events`, `tool:` and this table see the real
    tool (the table strips OpenClaw's `openclaw:core:` prefix). Both emitters wrap them back.
+4. Devin's `chisel/undo` `restore_file` entries become `ToolResult::details.restorable` (the
+   paths `/revert` can put back; the original content stays in the store).
 
 ## The mapping (from the evidence)
 
@@ -85,6 +122,8 @@ record table for background completions (Claude `<task-notification>` of a comma
 | subagent_spawn / _return | Claude `Agent` `Task` `Workflow` (+ agent `<task-notification>` returns); OpenCode `task` `subagent`; Gemini `invoke_agent`; Qwen `agent`; Hermes `delegate_task`; OpenClaw `sessions_spawn`; Goose `delegate`; Grok `spawn_subagent`; Kimi `Agent`; Kimi Code `Agent` `AgentSwarm` (records); Roo `new_task`; Cline `spawn_agent` `team_spawn_teammate`; Devin `run_subagent`; Continue `Subagent`; Codex `SubAgentActivity` records |
 | skill | Claude `Skill`; OpenCode `skill`; Gemini `activate_skill`; Qwen `skill`; Goose `load_skill`; Hermes `skill_manage`; Kimi Code `Skill`; Roo `skill`; Continue `Skills` |
 | hook | every `Origin::Hook` message (Claude attachments and stop summaries, Gemini `<hook_context>`, Qwen prompt-submit context) |
+| approval | requests: Roo `ui_messages.json` `ask` `tool` / `command` / `use_mcp_server` / `browser_action_launch` (store, `ask`); denials: Claude refusal results (`dontAsk` "Permission to use … denied", rejection "doesn't want to proceed"), OpenCode rule refusal / rejection results, Codex `McpToolCall` "requires approval" notice (`deny`); modes (`state`): Claude `permissionMode` (turns, `permission-mode` records), Codex `approval_policy` (`turn_context`, `thread_settings_applied`), Kimi Code `permission.set_mode`, Qwen `executionContext.approvalMode`, Kimi `state.json` `approval{yolo, afk, auto_approve_actions}`, Devin `sessions.agent_mode`, OpenCode `session.permission` ruleset |
+| checkpoint | points (`create`): Roo `checkpoint_saved` (store), Grok `rewind_points.jsonl` (store), OpenCode `patch` parts / `snapshot{files}`, Devin `chisel/undo` `restore_file`; tallies (`state`): Claude `file-history-snapshot` / `file-history-delta`, Kimi Code `file_history.checkpoint`, Kimi `_checkpoint`, Gemini `checkpoint-<tag>.json` (the session is the saved chat); restores (`restore`): OpenCode `session.revert` / `session_v2.revert` |
 | question | Claude `AskUserQuestion`; Kimi `AskUserQuestion`; Gemini `ask_user`; Qwen `ask_user_question`; Hermes `clarify`; OpenCode `question`; Roo `ask_followup_question`; Cline `ask_question`; Continue `AskQuestion` |
 | branch | every `MessageKind::Branch` (Kimi `/clear`, undo; Kimi Code `/undo`; OpenClaw `reset`; Gemini `$rewindTo`) |
 | fork | `Lineage::forked_from` (Codex, Grok, Hermes `/branch`, Kimi Code, Qwen, OpenCode 2.x) |
@@ -110,13 +149,24 @@ Closes: no `SubagentSpawn` in Claude/OpenCode/Hermes/OpenClaw/Goose (and Grok, R
 Continue, Kimi); Claude task-notification and interrupt turns typed `Prompt`; `tool_call` hiding
 the real tool in Hermes and OpenClaw 10.1; unread side state for Claude `tasks/`, Grok `plan.json`,
 OpenCode's `todo` table, Gemini `tracker/` and `plans/`, Goose `extension_data` todo, Hermes
-`state_meta` goals, loops and heartbeats.
+`state_meta` goals, loops and heartbeats; and (the two later kinds) Roo's unread `ui_messages.json`
+checkpoints and asks, Grok `rewind_points.jsonl`, and the approval-mode and file-history records
+Claude, Codex, Kimi, Kimi Code and Qwen read past.
 
 Leaves (named, not done here): Qwen `scheduled_tasks.json` (the `corpus-tidy` lane owns
 `harness/qwen*` this round); Cline `schedules` / `teams.db`; OpenClaw `cron/jobs.json` and the
 sub-agent registries; Kimi `state.json` todos and Kimi Code `tools.update_store` (carried
-records); Grok `hook_execution` and `rewind_points.jsonl`; Claude `--fork-session` and Goose
+records); Grok `hook_execution`; Claude `--fork-session` and Goose
 fork, which record no link; OpenClaw 1.29 completions that are plain user text; Roo's
 `new_task` result, which rides a mixed user turn the adapter types `Prompt` (so no
 `subagent_return`); Kimi Code 0.39.1 spawns, which have no record of their own; Claude skills run
 by slash command, whose only trace is the command notice and an `isMeta` body.
+
+For `approval` and `checkpoint`, left: a per-call *allow* (no corpus store records one: Kimi Code
+`permission.record_approval_result` is unwritten in auto mode, Devin `tool_call_state` holds only a
+status); Claude `/rewind` and Roo's checkpoint restore, which are interactive and in no corpus
+store; Qwen `file_history_snapshot` and `session_approval_mode` records, Gemini's shadow-git file
+checkpoints, Hermes `checkpoints/` shadow repos, OpenClaw's approvals tables and Goose's
+`toolConfirmationRequest`, none of which the corpus persisted; OpenCode's `permission` table (saved
+"always allow" rules are per project, not per session); Continue `permissions.yaml` and Cline's
+approval mode (configuration only).

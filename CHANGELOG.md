@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- New affordance kinds `approval` (asks, denials, the session's approval mode) and `checkpoint` (restorable points, restores) in `show --kind` and `has:`.
+- Roo `ui_messages.json` checkpoints and permission asks, and Grok `rewind_points.jsonl`, are now read.
+- Session JSON gains `permission_modes` and `checkpoints` in the harness bag (Claude, Codex, Kimi, Kimi Code, Qwen, Gemini saved chats).
+- Devin edit results carry `details.restorable`, the files `/revert` can restore.
+- Catalog affordance counts from 0.16.0 are recounted on the next full read, so `has:approval` / `has:checkpoint` never answer from stale counts.
+
 ## 0.16.0 — 2026-10-12 — every harness, every version, every affordance
 
 cv now carries a corpus of real sessions written by 17 harnesses at the versions in use and their
