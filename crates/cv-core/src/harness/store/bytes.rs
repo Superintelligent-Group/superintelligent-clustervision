@@ -10,7 +10,7 @@ impl Drop for Spill {
         let _ = std::fs::remove_file(&self.path);
     }
 }
-pub(crate) struct ByteSource {
+pub struct ByteSource {
     bytes: Bytes,
 }
 enum Bytes {
@@ -20,7 +20,7 @@ enum Bytes {
 
 /// Writable until finish, then immutable. Partial/failed operations own and remove their spill.
 #[derive(Default)]
-pub(crate) struct ByteStage {
+pub struct ByteStage {
     memory: Vec<u8>,
     spill: Option<Spill>,
 }
@@ -75,10 +75,10 @@ impl std::io::Write for ByteStage {
     }
 }
 impl ByteStage {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
-    pub(crate) fn finish(mut self) -> std::io::Result<ByteSource> {
+    pub fn finish(mut self) -> std::io::Result<ByteSource> {
         use std::io::Write;
         self.flush()?;
         Ok(ByteSource {
@@ -126,7 +126,7 @@ impl ByteSource {
         }
     }
     /// Each bounded reader has an independent position, including on unlinked private spills.
-    pub(crate) fn reader(&self) -> std::io::Result<Box<dyn std::io::Read + '_>> {
+    pub fn reader(&self) -> std::io::Result<Box<dyn std::io::Read + '_>> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(Box::new(std::io::Cursor::new(bytes))),
             Bytes::File(spill) => Ok(Box::new(std::io::BufReader::new(FileReader {
@@ -137,7 +137,7 @@ impl ByteSource {
     }
     /// Publish only after the owning operation has validated its successful completion.
     #[allow(dead_code)] // Publication consumers land separately from SQLite byte-source extraction.
-    pub(crate) fn copy_to(&self, out: &mut (impl std::io::Write + ?Sized)) -> std::io::Result<u64> {
+    pub fn copy_to(&self, out: &mut (impl std::io::Write + ?Sized)) -> std::io::Result<u64> {
         match &self.bytes {
             Bytes::Memory(bytes) => {
                 out.write_all(bytes)?;
