@@ -38,6 +38,7 @@
 //! `extra["codex"]`, the only bag this adapter writes; images become `Block::Image` references.
 
 mod emit;
+mod lean;
 pub use emit::emit;
 
 use super::wire::{openai, text_parts};
@@ -556,7 +557,16 @@ pub fn stream_jsonl<R: BufRead>(
     let mut ctx = CodexCtx::for_opts(opts);
     let mut meta_sent = false;
     let mut stopped = false;
-    let skipped = super::for_each_json_line(reader, |v| {
+    let complete = ctx.complete;
+    let parse = |line: &str| -> Option<Value> {
+        if !complete {
+            if let Ok(l) = lean::parse(line.as_bytes(), false) {
+                return Some(l.v);
+            }
+        }
+        serde_json::from_str(line).ok()
+    };
+    let skipped = super::for_each_json_line_with(reader, parse, |v| {
         dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx);
         // Hand the session metadata to the sink as soon as the model is known (session_meta /
         // turn_context land in the first records, before any message), so header-rendering sinks
@@ -628,13 +638,28 @@ pub fn stream_jsonl_spans(
         let base_off = line_off + lead as u64;
 
         let before = scratch.len();
-        if let Some(msg) = giant_fco_span(slice, base_off, &mut s) {
-            scratch.push(msg);
-        } else if let Ok(v) = serde_json::from_slice::<Value>(slice) {
-            dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx);
-        } else {
-            skipped += 1; // corrupt line — tolerated, but counted (see note_skipped_lines)
-            continue;
+        let giant = slice.len() > crate::lazy::INLINE_MAX;
+        match lean::parse(slice, giant) {
+            Ok(lean::LeanLine { mut v, output }) => match output {
+                Some(raw) => match giant_fco_span(&v, raw, slice, base_off, &mut s) {
+                    Some(msg) => scratch.push(msg),
+                    None => {
+                        // Not the span case after all: build the output in its place.
+                        if let Some(slot) = v.get_mut("payload").and_then(|p| p.get_mut("output")) {
+                            *slot = serde_json::from_str(raw.get()).unwrap_or(Value::Null);
+                        }
+                        dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx);
+                    }
+                },
+                None => dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx),
+            },
+            Err(_) => match serde_json::from_slice::<Value>(slice) {
+                Ok(v) => dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx),
+                Err(_) => {
+                    skipped += 1; // corrupt line — tolerated, but counted (see note_skipped_lines)
+                    continue;
+                }
+            },
         }
         if stamp_offsets {
             // Stamp this record's byte offset on the message(s) it produced (see
@@ -670,43 +695,33 @@ pub fn stream_jsonl_spans(
     s
 }
 
-/// If `slice` is a large `function_call_output`/`custom_tool_call_output` whose `output` is a plain
-/// JSON string, emit a Tool message whose content is a lazy [`Span`](crate::lazy::Span) of that
-/// string — without materializing it. Updates `s` timestamps as `dispatch_line` would. `None` ⇒ fall
-/// back to the normal Value dispatch (small records, non-string outputs, other types).
+/// If a giant line (`v`, parsed by [`lean::parse`] with its `output` captured `raw`) is a
+/// `function_call_output`/`custom_tool_call_output` whose `output` is a plain JSON string, emit a
+/// Tool message whose content is a lazy [`Span`](crate::lazy::Span) of that string — without
+/// materializing it. Updates `s` timestamps as `dispatch_line` would. `None` ⇒ the caller builds
+/// the output and dispatches the record normally (other types, non-string outputs).
 #[cfg(feature = "mmap")]
-fn giant_fco_span(slice: &[u8], base_off: u64, s: &mut Session) -> Option<Message> {
-    if slice.len() <= crate::lazy::INLINE_MAX {
+fn giant_fco_span(v: &Value, raw: &RawValue, slice: &[u8], base_off: u64, s: &mut Session) -> Option<Message> {
+    let str_field = |o: &Value, k: &str| -> Option<Option<String>> {
+        match o.get(k) {
+            None | Some(Value::Null) => Some(None),
+            Some(Value::String(t)) => Some(Some(t.clone())),
+            Some(_) => None,
+        }
+    };
+    if v.get("type").and_then(Value::as_str) != Some("response_item") {
         return None;
     }
-    #[derive(serde::Deserialize)]
-    struct Rec<'a> {
-        #[serde(rename = "type")]
-        ty: Option<&'a str>,
-        timestamp: Option<&'a str>,
-        #[serde(borrow)]
-        payload: Option<&'a RawValue>,
-    }
-    let rec: Rec = serde_json::from_slice(slice).ok()?;
-    if rec.ty != Some("response_item") {
+    let timestamp = str_field(v, "timestamp")?;
+    let payload = v.get("payload")?;
+    if !matches!(
+        payload.get("type").and_then(Value::as_str),
+        Some("function_call_output") | Some("custom_tool_call_output")
+    ) {
         return None;
     }
-    let payload = rec.payload?;
-    #[derive(serde::Deserialize)]
-    struct Pay<'a> {
-        #[serde(rename = "type")]
-        pty: Option<&'a str>,
-        call_id: Option<String>,
-        #[serde(borrow, default)]
-        output: Option<&'a RawValue>,
-    }
-    let pay: Pay = serde_json::from_str(payload.get()).ok()?;
-    if !matches!(pay.pty, Some("function_call_output") | Some("custom_tool_call_output")) {
-        return None;
-    }
-    // Only a plain *string* output spans (object/array output is transformed by coerce_output → fall
-    // back to the materializing path; those giant cases are rare).
-    let mut span = json_string_span(pay.output?, slice, base_off)?;
+    let call_id = str_field(payload, "call_id")?;
+    let mut span = json_string_span(raw, slice, base_off)?;
     // cv's own emitter writes a failed result as the string "[error] <content>" (Codex never
     // persists an error bit) — same convention as the materializing path: strip it, flag it. The
     // prefix has no escapes, so the raw span can simply be advanced past it.
@@ -716,7 +731,7 @@ fn giant_fco_span(slice: &[u8], base_off: u64, s: &mut Session) -> Option<Messag
         span.offset += ERROR_PREFIX.len() as u64;
         span.len -= ERROR_PREFIX.len() as u64;
     }
-    let ts = rec.timestamp.and_then(parse_ts);
+    let ts = timestamp.as_deref().and_then(parse_ts);
     if let Some(ts) = ts {
         s.created_at.get_or_insert(ts);
         s.updated_at = Some(ts);
@@ -724,7 +739,7 @@ fn giant_fco_span(slice: &[u8], base_off: u64, s: &mut Session) -> Option<Messag
     let mut m = Message::new(Role::Tool);
     m.timestamp = ts;
     m.content.push(Block::ToolResult {
-        tool_use_id: pay.call_id.unwrap_or_default(),
+        tool_use_id: call_id.unwrap_or_default(),
         content: Text::Span(span),
         is_error,
         tool_name: None,

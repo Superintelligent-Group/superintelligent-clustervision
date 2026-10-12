@@ -102,7 +102,17 @@ impl EpochNumber for u64 {
 /// Returns how many non-blank lines were skipped as unreadable (corrupt JSON or an undecodable
 /// read) before the pass ended — adapters surface a non-zero count via
 /// [`note_skipped_lines`] so silent corruption is at least visible in the session metadata.
-pub(crate) fn for_each_json_line<R: BufRead>(reader: R, mut f: impl FnMut(Value) -> Flow) -> u64 {
+pub(crate) fn for_each_json_line<R: BufRead>(reader: R, f: impl FnMut(Value) -> Flow) -> u64 {
+    for_each_json_line_with(reader, |line| serde_json::from_str(line).ok(), f)
+}
+
+/// [`for_each_json_line`] with the line parser given: `parse` returns `None` for a line it cannot
+/// read (counted as skipped).
+pub(crate) fn for_each_json_line_with<R: BufRead>(
+    reader: R,
+    mut parse: impl FnMut(&str) -> Option<Value>,
+    mut f: impl FnMut(Value) -> Flow,
+) -> u64 {
     let mut skipped = 0u64;
     for line in reader.lines() {
         // A read error on one line (rare: invalid UTF-8 chunk) shouldn't abort the whole session.
@@ -110,7 +120,7 @@ pub(crate) fn for_each_json_line<R: BufRead>(reader: R, mut f: impl FnMut(Value)
             skipped += 1;
             continue;
         };
-        if each_json_line_inner(&line, &mut skipped, &mut f) == Flow::Stop {
+        if each_json_line_inner(&line, &mut skipped, &mut parse, &mut f) == Flow::Stop {
             break;
         }
     }
@@ -120,20 +130,26 @@ pub(crate) fn for_each_json_line<R: BufRead>(reader: R, mut f: impl FnMut(Value)
 /// [`for_each_json_line`] over already-read text (no per-line allocation). Returns the skip count.
 pub(crate) fn for_each_json_line_str(text: &str, mut f: impl FnMut(Value) -> Flow) -> u64 {
     let mut skipped = 0u64;
+    let mut parse = |line: &str| serde_json::from_str(line).ok();
     for line in text.lines() {
-        if each_json_line_inner(line, &mut skipped, &mut f) == Flow::Stop {
+        if each_json_line_inner(line, &mut skipped, &mut parse, &mut f) == Flow::Stop {
             break;
         }
     }
     skipped
 }
 
-fn each_json_line_inner(line: &str, skipped: &mut u64, f: &mut impl FnMut(Value) -> Flow) -> Flow {
+fn each_json_line_inner(
+    line: &str,
+    skipped: &mut u64,
+    parse: &mut impl FnMut(&str) -> Option<Value>,
+    f: &mut impl FnMut(Value) -> Flow,
+) -> Flow {
     let line = line.trim();
     if line.is_empty() {
         return Flow::Continue;
     }
-    let Ok(v) = serde_json::from_str::<Value>(line) else {
+    let Some(v) = parse(line) else {
         *skipped += 1;
         return Flow::Continue; // tolerate the occasional corrupt line
     };
