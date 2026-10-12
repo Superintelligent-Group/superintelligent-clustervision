@@ -76,13 +76,16 @@
 use super::wire::{openai, text_parts};
 use super::Adapter;
 use crate::ir::*;
+use crate::lazy::{RawValue, Span, Text, INLINE_MAX};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::BufReader;
+#[cfg(not(feature = "mmap"))]
+use std::io::BufRead;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub struct Kimi {
@@ -233,7 +236,10 @@ impl Adapter for Kimi {
         // positional passes (StatusUpdate usage/message_id zipped onto assistant turns, the first
         // wire timestamp stamped onto the first user turn) only ever walk *forward* with O(1)
         // state, so they run inline here too — `parse()` is exactly `collect(stream())`.
-        let enrich = wire.as_ref().map(read_wire_enrichment).unwrap_or_default();
+        let enrich = wire
+            .as_ref()
+            .map(|p| read_wire_enrichment(p, opts.spans))
+            .unwrap_or_default();
 
         // Rotated segments (context_1.jsonl…) are read first, in order; their count stays as
         // bookkeeping.
@@ -761,15 +767,15 @@ fn context_message(
             // Prefer the richer wire return_value if we have it; else the context text parts.
             let we = enrich.tool_results.get(&tool_use_id);
             let (content, is_error, details) = match we {
-                Some(tr) => (tr.output.clone(), tr.is_error, tr.extras.clone()),
-                None => (text_parts(v.get("content")), false, None),
+                Some(tr) => (enrich.output(tr), tr.is_error, enrich.extras(tr)),
+                None => (text_parts(v.get("content")).into(), false, None),
             };
             let status = Some(if is_error { "error" } else { "completed" }.to_string());
             let mut m = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
             m.content.push(Block::ToolResult {
                 tool_name: call_names.get(&tool_use_id).cloned(),
                 tool_use_id,
-                content: content.into(),
+                content,
                 is_error,
                 status,
                 details,
@@ -847,20 +853,61 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 // wire.jsonl sidecar enrichment
 // ---------------------------------------------------------------------------
 
+/// Only navigation survives the wire pass: no output or extras body is retained.
 #[derive(Default)]
 struct WireEnrich {
-    /// tool_call_id → richer result from `ToolResult.return_value`.
     tool_results: HashMap<String, WireToolResult>,
-    /// Per assistant step, in wire order.
     statuses: Vec<WireStatus>,
-    /// Timestamps of `TurnBegin` and `ContentPart`/`ToolCall` events, in order (best-effort).
     msg_timestamps: Vec<DateTime<Utc>>,
+    file: Option<fs::File>,
+    path: PathBuf,
+    spans: bool,
+}
+
+#[derive(Clone, Copy)]
+struct WireRange {
+    offset: u64,
+    len: usize,
 }
 
 struct WireToolResult {
     is_error: bool,
-    output: String,
-    extras: Option<Value>,
+    output: Option<WireRange>,
+    extras: Option<WireRange>,
+}
+
+impl WireEnrich {
+    fn read(&self, range: WireRange) -> Option<Vec<u8>> {
+        // Keep the original descriptor open: replacing the path during a pass cannot redirect
+        // full-mode enrichment to an unrelated file. This reader is used sequentially.
+        let mut file = self.file.as_ref()?;
+        file.seek(SeekFrom::Start(range.offset)).ok()?;
+        let mut bytes = vec![0; range.len];
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    fn output(&self, result: &WireToolResult) -> Text {
+        let Some(range) = result.output else {
+            return String::new().into();
+        };
+        if self.spans && range.len.saturating_sub(2) > INLINE_MAX {
+            return Text::Span(Span {
+                source: Some(self.path.clone()),
+                offset: range.offset + 1,
+                len: range.len as u64 - 2,
+                escaped: true,
+            });
+        }
+        self.read(range)
+            .and_then(|b| serde_json::from_slice::<String>(&b).ok())
+            .unwrap_or_default()
+            .into()
+    }
+
+    fn extras(&self, result: &WireToolResult) -> Option<Value> {
+        self.read(result.extras?).and_then(|b| serde_json::from_slice(&b).ok())
+    }
 }
 
 #[derive(Default)]
@@ -869,40 +916,98 @@ struct WireStatus {
     message_id: Option<String>,
 }
 
-/// Parse `wire.jsonl`. Tolerant of `protocol_version` drift and unknown message types.
-fn read_wire_enrichment(wire: &PathBuf) -> WireEnrich {
-    let mut e = WireEnrich::default();
-    let Ok(text) = fs::read_to_string(wire) else {
-        return e;
-    };
-    super::for_each_json_line_str(&text, |v| {
-        // header line: {"type":"metadata","protocol_version":"1.x"}
-        if v.get("type").and_then(Value::as_str) == Some("metadata") {
-            return Flow::Continue;
-        }
-        let Some(msg) = v.get("message") else {
-            return Flow::Continue;
+/// Borrow object values and retain Value's decoded-key, duplicate-last-wins behavior.
+fn wire_fields(raw: &RawValue) -> HashMap<String, &RawValue> {
+    serde_json::from_str(raw.get()).unwrap_or_default()
+}
+
+fn wire_string(raw: Option<&&RawValue>) -> Option<String> {
+    serde_json::from_str(raw?.get()).ok()
+}
+
+/// Validate one line before inspecting it, including values ignored by the projection. Whole
+/// file UTF-8/read failure returns None (the old read_to_string contract), not a partial prefix.
+/// With mmap the source is borrowed; the portable path retains only one line's scratch buffer.
+fn scan_wire(wire: &Path, mut visit: impl FnMut(&RawValue, u64)) -> Option<fs::File> {
+    let file = fs::File::open(wire).ok()?;
+    let mut each = |line: &str, offset: u64| {
+        let trimmed = line.trim();
+        let Ok(raw) = serde_json::from_str::<&RawValue>(trimmed) else {
+            return;
         };
-        let mty = msg.get("type").and_then(Value::as_str).unwrap_or("");
-        let payload = msg.get("payload");
-        match mty {
-            "ToolResult" => {
-                if let Some(p) = payload {
-                    let id = p.get("tool_call_id").and_then(Value::as_str).unwrap_or("").to_string();
-                    let rv = p.get("return_value");
-                    let is_error = rv
-                        .and_then(|r| r.get("is_error"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    // Prefer `output`, fall back to `message`.
-                    let output = rv
-                        .and_then(|r| r.get("output"))
-                        .and_then(Value::as_str)
-                        .or_else(|| rv.and_then(|r| r.get("message")).and_then(Value::as_str))
-                        .unwrap_or("")
-                        .to_string();
-                    let extras = rv.and_then(|r| r.get("extras")).filter(|x| !x.is_null()).cloned();
+        if super::store::json::value_compatible(raw.get().as_bytes()) {
+            visit(
+                raw,
+                offset + (trimmed.as_ptr() as usize - line.as_ptr() as usize) as u64,
+            );
+        }
+    };
+    #[cfg(feature = "mmap")]
+    {
+        if file.metadata().ok()?.len() == 0 {
+            return Some(file);
+        }
+        // Safety: immutable, read-only transcript mapping; external truncation has the same
+        // documented caveat as the other mapped adapters.
+        let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+        let text = std::str::from_utf8(&map).ok()?;
+        for line in text.lines() {
+            each(line, (line.as_ptr() as usize - text.as_ptr() as usize) as u64);
+        }
+    }
+    #[cfg(not(feature = "mmap"))]
+    {
+        let mut reader = BufReader::new(file.try_clone().ok()?);
+        let mut line = Vec::new();
+        let mut offset = 0;
+        loop {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line).ok()?;
+            if n == 0 {
+                break;
+            }
+            each(std::str::from_utf8(&line).ok()?, offset);
+            offset += n as u64;
+        }
+    }
+    Some(file)
+}
+
+/// Index ToolResult fields by byte range, decoding only usage/identity metadata. A later result
+/// for the same call replaces its descriptor, including missing/non-string output and null extras.
+fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
+    let mut e = WireEnrich {
+        path: wire.to_path_buf(),
+        spans,
+        ..WireEnrich::default()
+    };
+    let file = scan_wire(wire, |raw, offset| {
+        let v = wire_fields(raw);
+        if wire_string(v.get("type")).as_deref() == Some("metadata") {
+            return;
+        }
+        let Some(msg) = v.get("message") else { return };
+        let msg = wire_fields(msg);
+        let mty = wire_string(msg.get("type")).unwrap_or_default();
+        if let Some(payload) = msg.get("payload") {
+            let p = wire_fields(payload);
+            match mty.as_str() {
+                "ToolResult" => {
+                    let id = wire_string(p.get("tool_call_id")).unwrap_or_default();
                     if !id.is_empty() {
+                        let rv = p.get("return_value").map(|r| wire_fields(r)).unwrap_or_default();
+                        let range = |r: &&RawValue| WireRange {
+                            offset: offset + (r.get().as_ptr() as usize - raw.get().as_ptr() as usize) as u64,
+                            len: r.get().len(),
+                        };
+                        let string = |r: &&&RawValue| r.get().starts_with('"');
+                        let output = rv
+                            .get("output")
+                            .filter(string)
+                            .or_else(|| rv.get("message").filter(string))
+                            .map(range);
+                        let extras = rv.get("extras").filter(|r| r.get() != "null").map(range);
+                        let is_error = rv.get("is_error").is_some_and(|r| r.get() == "true");
                         e.tool_results.insert(
                             id,
                             WireToolResult {
@@ -913,29 +1018,32 @@ fn read_wire_enrichment(wire: &PathBuf) -> WireEnrich {
                         );
                     }
                 }
-            }
-            "StatusUpdate" => {
-                if let Some(p) = payload {
-                    let usage = p.get("token_usage").map(wire_usage);
-                    let message_id = p.get("message_id").and_then(Value::as_str).map(str::to_string);
+                "StatusUpdate" => {
+                    let usage = p.get("token_usage").map(|r| wire_usage(r));
+                    let message_id = wire_string(p.get("message_id"));
                     e.statuses.push(WireStatus { usage, message_id });
                 }
+                _ => {}
             }
-            _ => {}
         }
-        // Record a timestamp for content-bearing turn boundaries.
-        if matches!(mty, "TurnBegin" | "ContentPart" | "ToolCall") {
-            if let Some(ts) = v.get("timestamp").and_then(Value::as_f64).and_then(epoch_to_dt) {
+        if matches!(mty.as_str(), "TurnBegin" | "ContentPart" | "ToolCall") {
+            if let Some(ts) = v.get("timestamp").and_then(|r| wire_timestamp(r)) {
                 e.msg_timestamps.push(ts);
             }
         }
-        Flow::Continue
     });
-    e
+    match file {
+        Some(file) => {
+            e.file = Some(file);
+            e
+        }
+        None => WireEnrich::default(),
+    }
 }
 
-fn wire_usage(tu: &Value) -> Usage {
-    let g = |k: &str| tu.get(k).and_then(Value::as_u64);
+fn wire_usage(raw: &RawValue) -> Usage {
+    let tu = wire_fields(raw);
+    let g = |k: &str| tu.get(k).and_then(|r| serde_json::from_str::<u64>(r.get()).ok());
     Usage {
         input_tokens: g("input_other"),
         output_tokens: g("output"),
@@ -945,20 +1053,26 @@ fn wire_usage(tu: &Value) -> Usage {
     }
 }
 
+fn wire_timestamp(raw: &RawValue) -> Option<DateTime<Utc>> {
+    serde_json::from_str::<serde_json::Number>(raw.get())
+        .ok()?
+        .as_f64()
+        .and_then(epoch_to_dt)
+}
+
 /// First and last event timestamps in a wire file (epoch floats), for created/updated bounds.
 fn wire_time_bounds(wire: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let text = fs::read_to_string(wire).ok()?;
     let mut first = None;
     let mut last = None;
-    super::for_each_json_line_str(&text, |v| {
-        if let Some(ts) = v.get("timestamp").and_then(Value::as_f64).and_then(epoch_to_dt) {
+    scan_wire(wire, |raw, _| {
+        let v = wire_fields(raw);
+        if let Some(ts) = v.get("timestamp").and_then(|r| wire_timestamp(r)) {
             if first.is_none() {
                 first = Some(ts);
             }
             last = Some(ts);
         }
-        Flow::Continue
-    });
+    })?;
     Some((first?, last?))
 }
 
@@ -1100,6 +1214,147 @@ mod tests {
     use crate::harness::Parse;
 
     #[test]
+    fn wire_ranges_match_value_enrichment_oracle() {
+        let world = cv_testkit::World::new("kimi-wire-ranges");
+        let path = world.base.join("wire.jsonl");
+        let giant = "雪\n\"\\".repeat(3000);
+        let mut lines = vec![
+            serde_json::json!({"message":{"type":"ToolResult","payload":{
+                "tool_call_id":"giant", "return_value":{"output":giant, "extras":{"rich": [1, true]}}
+            }}}).to_string(),
+            r#"{"message":{"type":"ToolResult","payload":{"tool_call_id":"dup","return_value":{"output":"old","extras":{"old":1}}}}}"#.into(),
+            r#"{"message":{"type":"ToolResult","payload":{"tool_call_id":"dup","return_value":{"output":"first","outp\u0075t":9,"message":"fallback","is_error":true,"extras":null}}}}}"#.into(),
+            r#"{"message":{"type":"ToolResult","payload":{"tool_call_id":"bad","return_value":{"output":"must not win"}},"ignored":"\ud800"}}"#.into(),
+            r#"{"message":{"type":"ToolResult","payload":{"tool_call_id":"bad-number","return_value":{"output":"must not win"}},"ignored":1e400}}"#.into(),
+            r#"{"type":"metadata","message":{"type":"ToolResult","payload":{"tool_call_id":"header","return_value":{"output":"ignored"}}}}"#.into(),
+            r#"{"message":{"type":"ToolResult","payload":{"tool_call_id":"empty","return_value":{"output":null,"message":false,"extras":42}}}}"#.into(),
+            r#"{"timestamp":1700000000,"message":{"type":"TurnBegin","payload":{}}}"#.into(),
+            r#"{"timestamp":1700000001,"message":{"type":"StatusUpdate","payload":{"message_id":"reply","token_usage":null}}}"#.into(),
+            r#"{"message":{"type":"StatusUpdate","payload":false}}"#.into(),
+        ];
+        lines.push(format!(r#"{{"message":{{"type":"ToolResult","payload":{{"tool_call_id":"too-deep","return_value":{{"output":"ignored"}}}},"ignored":{}0{}}}}}"#, "[".repeat(128), "]".repeat(128)));
+        let text = format!(" \n{}\ninvalid\n", lines.join("\n"));
+        fs::write(&path, &text).unwrap();
+        let mut expected = HashMap::new();
+        super::super::for_each_json_line_str(&text, |v| {
+            if v.get("type").and_then(Value::as_str) != Some("metadata")
+                && v.pointer("/message/type").and_then(Value::as_str) == Some("ToolResult")
+            {
+                let p = &v["message"]["payload"];
+                let id = p.get("tool_call_id").and_then(Value::as_str).unwrap_or("");
+                if !id.is_empty() {
+                    let rv = &p["return_value"];
+                    let output = rv
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .or_else(|| rv.get("message").and_then(Value::as_str))
+                        .unwrap_or("")
+                        .to_string();
+                    expected.insert(
+                        id.to_string(),
+                        (
+                            output,
+                            rv.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                            rv.get("extras").filter(|x| !x.is_null()).cloned(),
+                        ),
+                    );
+                }
+            }
+            Flow::Continue
+        });
+        for spans in [false, true] {
+            let e = read_wire_enrichment(&path, spans);
+            assert_eq!(e.tool_results.len(), expected.len());
+            let resolver = crate::lazy::Resolver::new(None);
+            for (id, (output, is_error, extras)) in &expected {
+                let result = &e.tool_results[id];
+                let actual = e.output(result);
+                assert_eq!(actual.resolve(&resolver).as_ref(), output, "{id}");
+                assert_eq!(result.is_error, *is_error);
+                assert_eq!(e.extras(result), *extras);
+                assert_eq!(actual.is_span(), spans && id == "giant");
+                if let Some(span) = actual.as_span() {
+                    assert_eq!(span.source.as_ref(), Some(&path));
+                }
+            }
+            assert_eq!(e.statuses.len(), 2);
+            assert_eq!(e.statuses[0].message_id.as_deref(), Some("reply"));
+            assert!(
+                e.statuses[0].usage.is_some(),
+                "present null token_usage is default Usage"
+            );
+            assert!(e.statuses[1].usage.is_none());
+            assert_eq!(e.msg_timestamps.len(), 1);
+        }
+        assert_eq!(
+            wire_time_bounds(&path),
+            Some((epoch_to_dt(1700000000.).unwrap(), epoch_to_dt(1700000001.).unwrap()))
+        );
+        // UTF-8 failure anywhere discards even the earlier valid enrichment, like read_to_string.
+        let mut invalid = text.into_bytes();
+        invalid.extend_from_slice(b"\xff\n");
+        fs::write(&path, invalid).unwrap();
+        assert!(read_wire_enrichment(&path, false).tool_results.is_empty());
+        assert!(wire_time_bounds(&path).is_none());
+    }
+
+    #[test]
+    fn wire_spans_preserve_all_stream_modes() {
+        let world = cv_testkit::World::in_process("kimi-wire-modes");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("context.jsonl"),
+            r#"{"role":"_checkpoint","id":0}
+{"role":"user","content":"question"}
+{"role":"assistant","content":"answer"}
+{"role":"tool","tool_call_id":"selected","content":"fallback"}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("wire.jsonl"),
+            serde_json::json!({"message":{"type":"ToolResult","payload":{
+                "tool_call_id":"selected","return_value":{"output":"雪\n\"\\".repeat(3000),"extras":{"k":"v"}}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let adapter = Kimi::with_home(&world.base);
+        let r = SessionRef::new("session", Harness::Kimi, dir);
+        let mut lean = None;
+        for opts in [
+            ParseOptions::full(),
+            ParseOptions::bulk(),
+            ParseOptions::lazy(),
+            ParseOptions::lazy_extra(),
+            ParseOptions::complete(),
+            ParseOptions {
+                spans: true,
+                ..ParseOptions::complete()
+            },
+        ] {
+            let mut sink = crate::stream::CollectSink::default();
+            let mut session = adapter.stream(&r, &opts, &mut sink).unwrap();
+            session.messages = sink.messages;
+            assert_eq!(session.messages.len(), if opts.complete { 4 } else { 3 });
+            let tool = session.messages.last().unwrap();
+            let Block::ToolResult { content, .. } = &tool.content[0] else {
+                panic!("tool result")
+            };
+            assert_eq!(content.is_span(), opts.spans);
+            session.materialize();
+            session.messages.retain(|m| m.kind != MessageKind::Carrier);
+            let value = serde_json::to_value(session).unwrap();
+            if let Some(expected) = &lean {
+                assert_eq!(&value, expected);
+            } else {
+                lean = Some(value);
+            }
+        }
+    }
+
+    #[test]
     fn md5_matches_reference() {
         assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
@@ -1223,15 +1478,10 @@ mod tests {
         }
 
         // With wire enrichment, output/is_error come from return_value.
-        let mut enrich = WireEnrich::default();
-        enrich.tool_results.insert(
-            "tool_1".into(),
-            WireToolResult {
-                is_error: true,
-                output: "boom".into(),
-                extras: Some(serde_json::json!({"k":"v"})),
-            },
-        );
+        let temp = cv_testkit::World::new("kimi-wire-enrich");
+        let wire = temp.base.join("wire.jsonl");
+        fs::write(&wire, r#"{"message":{"type":"ToolResult","payload":{"tool_call_id":"tool_1","return_value":{"is_error":true,"output":"boom","extras":{"k":"v"}}}}}"#).unwrap();
+        let enrich = read_wire_enrichment(&wire, false);
         let m = context_message(&v, &enrich, false, &mut HashMap::new()).unwrap();
         match &m.content[0] {
             Block::ToolResult {
