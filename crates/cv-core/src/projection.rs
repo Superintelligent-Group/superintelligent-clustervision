@@ -86,3 +86,37 @@ impl Head {
         self.text
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_cannot_skip_a_scalar_that_does_not_fit() {
+        let mut head = Head::new(3);
+        head.push("ab");
+        head.push("é");
+        head.push("x");
+        assert_eq!(head.as_str(), "ab");
+        assert!(head.full());
+        assert_eq!(head.capacity(), 3);
+    }
+
+    #[test]
+    fn canonical_json_and_following_text_share_one_prefix_budget() {
+        let json = crate::json::Json::from(serde_json::json!({"arg":"é\n\""}));
+        let expected = format!("tool {}\ntail", json.resolve().unwrap());
+        for cap in 0..=expected.len() {
+            let mut head = Head::new(cap);
+            head.push("tool ");
+            head.push_json(&json).unwrap();
+            head.push("\ntail");
+            let mut end = cap.min(expected.len());
+            while !expected.is_char_boundary(end) {
+                end -= 1;
+            }
+            assert_eq!(head.as_str(), &expected[..end], "cap {cap}");
+            assert_eq!(head.capacity(), cap);
+        }
+    }
+}
