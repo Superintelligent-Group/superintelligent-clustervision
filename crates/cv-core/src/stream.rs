@@ -354,6 +354,19 @@ pub fn stream_counted(
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
     let source = crate::source::Probe::default().snapshot(r);
+    stream_counted_with_source(adapter, r, opts, sink, &source)
+}
+
+/// [`stream_counted`] using an operation's already captured source snapshot. The caller must
+/// capture it before this pass reads the source; publication still revalidates it and the
+/// adapter's dynamic read set. Side-store counts remain conditional on cache freshness.
+pub fn stream_counted_with_source(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    source: &crate::source::Snapshot,
+) -> Result<Session> {
     let (session, counter) = stream_with_counter(adapter, r, opts, sink)?;
     if let Some((turns, counter, dependencies)) = counter {
         let source = source.with_reads(&dependencies);
