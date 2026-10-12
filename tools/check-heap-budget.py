@@ -68,6 +68,102 @@ def stores(binary, root, env):
             bound(peaks, STORE_CEILING, STORE_GROWTH, f"{harness} shape={shape} escaped={escaped}")
 
 
+def active_formats(binary, root, env, baseline=None, formats=None):
+    """Bound discarded history/unrelated bodies; selected giant output is deliberately excluded."""
+    generator = Path(__file__).with_name("perf-fixture.py")
+    cases = (("cline-sdk", "history"), ("opensession", "history"),
+             ("chatgpt-export", "unrelated"), ("claude-export", "unrelated"),
+             ("kimi", "sidecar-unmatched"))
+    # Compression generation needs zstd on PATH; explicitly opt in to this native-codec case.
+    if formats and "zed" in formats:
+        cases += (("zed", "history"),)
+    for format_name, shape in cases:
+        if formats and format_name not in formats:
+            continue
+        for escaped in (False, True):
+            peaks = {"discard": [], "discover": []}
+            for size in SIZES:
+                command = [sys.executable, str(generator), format_name,
+                           str(root / f"{format_name}-{shape}-{size}-{escaped}"),
+                           "--payload-bytes", str(size), "--records", str(size // (256 << 10)), "--shape", shape]
+                if escaped:
+                    command.append("--escaped")
+                if format_name == "zed":
+                    command.append("--entropy")
+                manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
+                for operation in peaks:
+                    # A fresh discovery catalog prevents a cache hit from hiding a growing scan.
+                    catalog = root / f"catalog-{format_name}-{size}-{escaped}-{operation}"
+                    catalog.mkdir()
+                    case_env = dict(env, CLUSTERVISION_HOME=str(catalog))
+                    row, peak = probe(binary, [operation, *common], case_env, True)
+                    if operation == "discard":
+                        assert row["messages"] == manifest["expected_messages"], "truncated or skipped source"
+                    else:
+                        assert row["detail"]["discovered_sessions"] == manifest["expected_discovered_sessions"], "missing discovered session"
+                    peaks[operation].append(peak)
+                    print(json.dumps({"case": f"{format_name}-{shape}-{operation}-{'escaped' if escaped else 'plain'}",
+                                      "decoded_payload_bytes": size, "selected_payload_bytes": manifest["selected_payload_bytes"],
+                                      "physical_input_bytes": manifest["physical_input_bytes"], "messages": row["messages"],
+                                      "decoded_document_bytes": manifest.get("decoded_document_bytes"),
+                                      "compressed_blob_bytes": manifest.get("compressed_blob_bytes"),
+                                      "peak_live_rust_bytes": peak}), flush=True)
+            for operation, operation_peaks in peaks.items():
+                bound(operation_peaks, STORE_CEILING, STORE_GROWTH, f"{format_name} {shape} {operation} escaped={escaped}")
+            if baseline:
+                # Fidelity runs remain separate from allocation probes and use small payloads.
+                command = [sys.executable, str(generator), format_name,
+                           str(root / f"parity-{format_name}-{escaped}"), "--payload-bytes", str(64 << 10),
+                           "--records", "4", "--shape", shape]
+                if escaped:
+                    command.append("--escaped")
+                if format_name == "zed":
+                    command.append("--entropy")
+                manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
+                for mode in ("lazy", "full"):
+                    left, _ = probe(baseline, ["hash", *common, "--mode", mode], env, True)
+                    right, _ = probe(binary, ["hash", *common, "--mode", mode], env, True)
+                    assert left["messages"] == right["messages"] == manifest["expected_messages"], "fidelity count differs"
+                    assert left["detail"] == right["detail"], f"{format_name}: resolved content or metadata changed ({mode})"
+                refs = []
+                for label, comparison_binary in (("baseline", baseline), ("candidate", binary)):
+                    catalog = root / f"parity-catalog-{format_name}-{escaped}-{label}"
+                    catalog.mkdir()
+                    row, _ = probe(comparison_binary, ["discover", *common, "--hash-output"],
+                                   dict(env, CLUSTERVISION_HOME=str(catalog)), True)
+                    refs.append(row["detail"])
+                assert refs[0] == refs[1], f"{format_name}: discovered metadata changed"
+
+
+def doctors(binary, root, env, baseline=None):
+    """Doctor counts decoded content but does not demand an owned transcript/output body."""
+    generator = Path(__file__).with_name("perf-fixture.py")
+    for harness in ("claude", "codex", "gemini"):
+        for escaped in (False, True):
+            peaks = []
+            for size in SIZES:
+                command = [sys.executable, str(generator), harness,
+                           str(root / f"doctor-{harness}-{size}-{escaped}"),
+                           "--payload-bytes", str(size), "--records", "4"]
+                if escaped:
+                    command.append("--escaped")
+                manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                common = [harness, manifest["id"], manifest["path"], "--root", manifest["root"]]
+                row, peak = probe(binary, ["doctor", *common, "--mode", "lazy-extra"], env, True)
+                assert row["messages"] == manifest["expected_messages"], "doctor skipped or truncated source"
+                peaks.append(peak)
+                # Full-mode reference is a separate process and outside the bounded consumer claim.
+                reference, _ = probe(baseline or binary, ["doctor", *common, "--mode", "full"], env, True)
+                assert reference["messages"] == row["messages"] and reference["detail"] == row["detail"], "doctor report changed"
+                print(json.dumps({"case": f"doctor-{harness}-{'escaped' if escaped else 'plain'}",
+                                  "decoded_payload_bytes": size, "physical_input_bytes": manifest["physical_input_bytes"],
+                                  "messages": row["messages"], "peak_live_rust_bytes": peak,
+                                  "full_reference_peak_live_rust_bytes": reference["requested_rust_heap"]["peak_above_baseline_bytes"]}), flush=True)
+            bound(peaks, STORE_CEILING, STORE_GROWTH, f"doctor {harness} escaped={escaped}")
+
+
 def raw_body(path, repeats, malformed):
     block_repeats = 16 << 10
     block = b"x\\n" * block_repeats
@@ -102,16 +198,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks"), help="focused local check; CI runs both")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "doctor"), help="focused local check; default CI runs stores and chunks")
+    parser.add_argument("--baseline-probe", type=Path, help="with active/doctor, separately check baseline behavior parity")
+    parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
+                        help="repeat to focus --only active on selected native formats")
     args = parser.parse_args()
+    if args.format and args.only != "active":
+        parser.error("--format applies only to --only active")
+    if args.baseline_probe and args.only not in ("active", "doctor"):
+        parser.error("--baseline-probe applies only to active/doctor checks")
     with tempfile.TemporaryDirectory(prefix="cv-heap-budget-") as temporary:
         root = Path(temporary)
         catalog = root / "catalog"
         catalog.mkdir()
         env = dict(os.environ, CLUSTERVISION_HOME=str(catalog))
-        if args.only != "chunks":
+        if args.only == "doctor":
+            doctors(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
+        elif args.only == "active":
+            active_formats(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None, args.format)
+        elif args.only != "chunks":
             stores(args.probe.resolve(), root, env)
-        if args.only != "stores":
+        if args.only in (None, "chunks"):
             chunks(args.probe.resolve(), root, env, True)
             chunks(args.no_mmap_probe.resolve(), root, env, False)
     print("live Rust heap budgets passed", flush=True)

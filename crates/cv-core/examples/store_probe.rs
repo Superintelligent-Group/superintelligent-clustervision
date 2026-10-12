@@ -204,6 +204,8 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
         Harness::ClaudeExport => Box::new(cv_core::harness::export::ClaudeExport::with_roots(vec![a.root.clone()])),
         #[cfg(feature = "sqlite")]
         Harness::Devin => Box::new(cv_core::harness::devin::Devin::with_root(&a.root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Zed => Box::new(cv_core::harness::zed::Zed::with_root(&a.root)),
         _ => {
             bail!("unsupported probe harness or disabled feature; use explicit-root constructors when extending it")
         }

@@ -9,23 +9,32 @@ import argparse
 import json
 from pathlib import Path
 from perf_fixtures import FORMATS, generate
+from perf_fixture_zed import generate_zed
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("harness", choices=["claude", "codex", "gemini", "continue", "lmstudio", *FORMATS])
+    parser.add_argument("harness", choices=["claude", "codex", "gemini", "continue", "lmstudio", "zed", *FORMATS])
     parser.add_argument("out", type=Path)
     parser.add_argument("--payload-bytes", type=int, default=100_000_000)
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
+    parser.add_argument("--entropy", action="store_true", help="Zed only: deterministic low-compressibility payloads")
     parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
+    if args.entropy and args.harness != "zed":
+        parser.error("--entropy applies only to Zed compressed fixtures")
     args.out.mkdir(parents=True, exist_ok=False)
     root = args.out.resolve()
-    if args.harness in FORMATS:
-        manifest = generate(args.harness, root, args.payload_bytes, args.records, args.escaped, args.shape)
+    if args.harness in (*FORMATS, "zed"):
+        if args.harness == "zed":
+            if args.shape != "history":
+                parser.error("Zed supports only --shape history")
+            manifest = generate_zed(root, args.payload_bytes, args.records, args.escaped, args.entropy)
+        else:
+            manifest = generate(args.harness, root, args.payload_bytes, args.records, args.escaped, args.shape)
         (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(manifest))
         return

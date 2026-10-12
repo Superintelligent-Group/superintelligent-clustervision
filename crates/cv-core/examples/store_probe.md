@@ -2,7 +2,7 @@
 
 This diagnostic example performs one read-only operation per process on an explicit source.
 It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok
-OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Devin through explicit-root constructors. It does not
+OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Devin/Zed through explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
 The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
 scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
@@ -26,7 +26,7 @@ pass the config/runtime root explicitly (`projects/`, `sessions/`, or `tmp/` liv
 Continue expects its global directory containing `sessions/`; LM Studio expects the conversations
 directory containing `*.conversation.json` itself. OpenClaw expects its state directory.
 Cline expects a home containing `.cline/`; Kimi, Kimi Code and Grok expect their native homes
-containing `sessions/`. Devin expects the directory containing `sessions.db`. Directory session
+containing `sessions/`. Devin/Zed expect the directory containing `sessions.db`/`threads.db`. Directory session
 paths (Kimi, Kimi Code and Grok) report directory metadata size, not total transcript/sidecar bytes;
 use the generator manifest for total generated physical source sizes.
 OpenSession and account exports scan only the explicit root, excluding configured exports and
@@ -46,6 +46,7 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `discover` | Explicit-root discovery; requires scratch `CLUSTERVISION_HOME` |
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
 | `resolve` | Direct span materialization into a retained owned string; `--span OFFSET:LENGTH [--escaped]` |
+| `resolved-len` | Direct decoded byte counting without owning text; same span flags |
 
 `--hash-output` explicitly enables consumer fidelity digests. Discovery hashes all returned
 `SessionRef` metadata, sorted by ID/path (paths included); both affordance operations hash their
@@ -104,6 +105,9 @@ tiny selected last-wins result; `sidecar-selected` grows the output actually req
 Manifests distinguish total generated payload, selected payload and each physical input file.
 These cases derive their envelopes from corpus schemas, but are synthetic fixtures and do not
 replace or regenerate corpus versions. Use `--records TOTAL_BYTES/262144` for fixed-size fields.
+`zed` uses the corpus thread schema and the native level-3 zstd codec (the generator needs `zstd`
+on PATH). Its manifest separates decoded JSON size, compressed blob size and SQLite file size;
+generation and compression run outside the measured process.
 
 For standalone escaped decoder allocation testing, `chunks` bypasses the parser entirely. A
 file containing `x\\n` repeated N times is a valid raw JSON string body: use offset 0, length 3N,
@@ -130,3 +134,5 @@ giant outputs and whole selected ChatGPT mappings are not included in these boun
 `--only doctor` checks giant Claude/Codex/Gemini decoded attribution in lazy-extra mode against
 separate full-mode processes, optionally using the supplied old baseline. Default CI's suite
 remains stores/chunks; opt-in checks require the respective reader improvements to pass.
+`--only active --format zed` explicitly opts into compressed-thread discovery/streaming with
+fixed-size messages, retaining the same budgets; native SQLite allocations remain excluded.
