@@ -225,6 +225,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Format-safe append reuse beyond Claude/Codex; watcher and archive amplification.
 - [ ] Reassess index admission/events/queues after reader and consumer measurements.
 - [ ] API pagination, query facts, pack/tools/stats, semantic rebuilds: prioritize by measurements.
+- [ ] Selected escaped materialization: measure a single decode pass with rollback to raw text; an owned result can retract output, unlike streaming callbacks.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [ ] Final integration gates, publish the implementation, and retain the remaining workload priorities above.
 

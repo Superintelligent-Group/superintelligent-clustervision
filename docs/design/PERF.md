@@ -135,6 +135,13 @@ source takes median 0.87 → 0.64 s user+system CPU and 0.894 → 0.653 s wall. 
 64 MiB late-summary fixture instead costs about 1.45× CPU: the bounded reducer trades a second
 validation pass for dramatically lower peak allocation. No hashing runs contribute to these times.
 
+Actual CLI JSON-window checks used paired debug builds, isolated catalogs and four 4 MiB Gemini
+replies. All four first/last plain/escaped output hashes match the full-reader oracle. Selecting
+only the first message lowers peak native footprint from 15–20 MB to about 6.8 MB. Selecting a
+giant escaped tail remains output-sized and overlaps the full-reader footprint; no tail or
+throughput improvement is claimed. Large selected escaped spans avoid whole quoted temporary
+copies; spans at most 64 KiB retain the direct one-pass decoder.
+
 Cursor's composer discovery query on 20,000 unrelated bubble rows falls from 80,043 to 52
 SQLite VM steps, with zero full-scan steps. OpenClaw's bounded row/tree replay trades roughly
 1.5× CPU on the measured flat/tree fixtures for the lower heap; registry CPU is approximately
