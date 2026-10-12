@@ -131,8 +131,18 @@ pub(crate) fn for_each_json_line_with<R: BufRead>(
 /// `complete` is true only after a newline and known byte accounting; a partial EOF record is
 /// emitted but must be replayed on growth. JSON/UTF-8 failures remain per-line skips.
 pub(crate) fn for_each_json_line_at<R: BufRead>(
+    reader: R,
+    offset: u64,
+    f: impl FnMut(Value, u64, bool, u64) -> Flow,
+) -> u64 {
+    for_each_json_line_at_with(reader, offset, |line| serde_json::from_str(line).ok(), f)
+}
+
+/// Offset-tracked records with the same caller-supplied parser as [`for_each_json_line_with`].
+pub(crate) fn for_each_json_line_at_with<R: BufRead>(
     mut reader: R,
     mut offset: u64,
+    mut parse: impl FnMut(&str) -> Option<Value>,
     mut f: impl FnMut(Value, u64, bool, u64) -> Flow,
 ) -> u64 {
     let mut skipped = 0;
@@ -160,7 +170,7 @@ pub(crate) fn for_each_json_line_at<R: BufRead>(
         if text.is_empty() {
             continue;
         }
-        let Ok(value) = serde_json::from_str(text) else {
+        let Some(value) = parse(text) else {
             skipped += 1;
             continue;
         };
