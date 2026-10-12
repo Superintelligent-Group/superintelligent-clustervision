@@ -646,10 +646,10 @@ unknown fields, duplicate keys, Unicode title prefixes and empty array text part
 arbitrarily large metadata and full demanded output are separate. Clean discovery CPU controls
 are in progress.
 
-The integrated CLI JSON heap gate also passes after the decoder changes: 60,001,188 emitted
-bytes use 1,057,238 bytes of peak requested Rust heap, versus 111,114,689 for the materialized
-control. The one-byte difference from the earlier run is variable scratch-path metadata, not a
-changed output contract. Independent exact-window oracles cover output fidelity.
+The integrated CLI JSON heap gate also passes after the decoder changes: 60,001,189 emitted
+bytes (including the final newline) use 1,057,238 bytes of peak requested Rust heap, versus 111,114,689 for the materialized
+control. The diagnostic reports the materialized control length without that final newline. Independent
+exact-window oracles cover output fidelity.
 
 Cursor's installed IDE uses numeric modes; the adapter now preserves both the interpreted name
 and original value, including unknown enums. A genuine newer CLI capture exposed a separate
