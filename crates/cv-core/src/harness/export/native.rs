@@ -61,7 +61,20 @@ fn slot(kind: Kind) -> usize {
 
 /// A cache hit validates the file identity and carries only metadata. An uncached source is
 /// retained through the current consumer so a cold selected read need not open the archive twice.
-fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
+fn load(path: &Path, selected: Option<&str>) -> Result<(Arc<Archive>, Option<Source>)> {
+    // Leave room for Vec growth and the current metadata record while building a selected
+    // lookup. Discovery's output is itself an unbounded list, but selected reads need no roster.
+    load_bounded(
+        path,
+        selected,
+        if selected.is_some() {
+            CACHE_BYTES / 2
+        } else {
+            CACHE_BYTES
+        },
+    )
+}
+fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> Result<(Arc<Archive>, Option<Source>)> {
     let cache = CACHE.get_or_init(Mutex::default);
     // Relative roots can name different archives after a cwd change. Cache by absolute spelling,
     // while discovery stamps the caller's original path spelling onto returned refs.
@@ -96,6 +109,10 @@ fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
             .map(|r| [r.get("mapping").is_some(), r.get("chat_messages").is_some()])
             .unwrap_or([false; 2]);
         let mut entries = Vec::new();
+        let mut selected_entry = None;
+        let mut payload_charge = key.as_os_str().len();
+        let mut charge = payload_charge;
+        let mut cacheable = true;
         for raw in values {
             // Match Value acceptance at each conversation boundary, including discarded fields.
             if !accepts_value(raw) {
@@ -111,30 +128,52 @@ fn load(path: &Path) -> Result<(Arc<Archive>, Option<Source>)> {
                 continue;
             };
             let (offset, len) = source.location(raw).context("export source range")?;
+            if selected == Some(id.as_str()) && selected_entry.is_none() {
+                // Retain the first accepted duplicate, independent of cache admission. Reads
+                // receive their metadata in SessionRef and do not need unrelated discovery refs.
+                selected_entry = Some(Entry {
+                    id: id.clone(),
+                    offset,
+                    len,
+                    refs: [None, None],
+                });
+            }
+            if !cacheable && selected.is_some() {
+                continue;
+            }
             let refs = [Kind::ChatGpt, Kind::Claude].map(|kind| {
                 shapes[slot(kind)]
                     .then(|| raw_ref(kind, Path::new(""), &record, &id))
                     .flatten()
             });
+            payload_charge = payload_charge.saturating_add(id.capacity());
+            for r in refs.iter().flatten() {
+                payload_charge = payload_charge.saturating_add(r.id.capacity() + r.path.as_os_str().len());
+                payload_charge = payload_charge.saturating_add(r.title.as_ref().map_or(0, String::capacity));
+            }
             entries.push(Entry { id, offset, len, refs });
+            charge = payload_charge.saturating_add(entries.capacity() * std::mem::size_of::<Entry>());
+            if charge > admission_bytes {
+                cacheable = false;
+                if selected.is_some() {
+                    // Drop the complete roster at the threshold rather than after the archive
+                    // ends. Remaining siblings need validation and id comparison only.
+                    drop(std::mem::take(&mut entries));
+                }
+            }
         }
         if Identity::read(path)? != identity {
             continue;
         }
-        let mut charge = key.as_os_str().len() + entries.capacity() * std::mem::size_of::<Entry>();
-        for entry in &entries {
-            charge = charge.saturating_add(entry.id.capacity());
-            for r in entry.refs.iter().flatten() {
-                charge = charge.saturating_add(r.id.capacity() + r.path.as_os_str().len());
-                charge = charge.saturating_add(r.title.as_ref().map_or(0, String::capacity));
-            }
+        if !cacheable && selected.is_some() {
+            entries = selected_entry.into_iter().collect();
         }
         let archive = Arc::new(Archive {
             identity,
             entries,
             charge,
         });
-        if charge <= CACHE_BYTES {
+        if cacheable && charge <= CACHE_BYTES {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
             // Concurrent readers may build the same archive; replace rather than double-charge.
             if let Some(position) = guard.entries.iter().position(|e| e.path == key) {
@@ -163,7 +202,7 @@ pub(super) fn discover(kind: Kind, paths: Vec<PathBuf>) -> Vec<SessionRef> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for path in paths {
-        let Ok((archive, _)) = load(&path) else { continue };
+        let Ok((archive, _)) = load(&path, None) else { continue };
         for r in archive.entries.iter().filter_map(|e| e.refs[slot(kind)].as_ref()) {
             if seen.insert(r.id.clone()) {
                 let mut r = r.clone();
@@ -247,7 +286,7 @@ impl<'a> Iterator for Nodes<'a> {
 }
 
 pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-    let (archive, cold) = load(&r.path)?;
+    let (archive, cold) = load(&r.path, Some(&r.id))?;
     let entry = archive
         .entries
         .iter()
@@ -481,4 +520,52 @@ fn chatgpt_text(r: Option<&Record<'_>>, source: &Source, spans: bool, resolver: 
     r.get("text")
         .and_then(|raw| source.text(raw, spans))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_selected_lookup_keeps_the_first_accepted_duplicate_on_either_side_of_admission() {
+        let dir = std::env::temp_dir().join(format!("cv-export-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conversations.json");
+        let first = r#"{"uuid":"target","chat_messages":[{"sender":"human","text":"first"}]}"#;
+        let duplicate = r#"{"uuid":"target","chat_messages":[{"sender":"human","text":"later"}]}"#;
+        let bad = r#"{"uuid":"target","chat_messages":[],"unknown":1e400,"unknown":0}"#;
+        let unrelated = (0..64)
+            .map(|i| format!(r#"{{"uuid":"other{i}","chat_messages":[]}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        for archive in [
+            format!("[{bad},{first},{unrelated},{duplicate}]"),
+            format!("[{bad},{unrelated},{first},{duplicate}]"),
+        ] {
+            std::fs::write(&path, &archive).unwrap();
+            let (loaded, source) = load_bounded(&path, Some("target"), 1024).unwrap();
+            assert!(loaded.charge > 1024, "the complete metadata cache must be rejected");
+            assert_eq!(
+                loaded.entries.len(),
+                1,
+                "unrelated entries must be dropped during construction"
+            );
+            assert_eq!(loaded.entries[0].id, "target");
+            let entry = &loaded.entries[0];
+            let source = source.unwrap();
+            assert_eq!(source.slice(entry.offset, entry.len).unwrap().get(), first);
+            // Even after admission is rejected, discovery still returns its complete output.
+            let (discovery, _) = load_bounded(&path, None, 1024).unwrap();
+            assert_eq!(discovery.entries.len(), 66);
+        }
+        let mut sink = crate::stream::CollectSink::default();
+        std::fs::write(&path, format!("[{first},]")).unwrap();
+        let r = SessionRef::new("target", Harness::ClaudeExport, path.clone());
+        assert!(stream(Kind::Claude, &r, &ParseOptions::lazy(), &mut sink).is_err());
+        assert!(
+            sink.messages.is_empty(),
+            "whole archive syntax must pass before callbacks"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
