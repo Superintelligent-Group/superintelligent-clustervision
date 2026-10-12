@@ -892,6 +892,97 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Isolated requested-Rust-heap oracle; includes native parsing and atomic fake-vector save.
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "explicit giant fixture and isolated allocator process required"]
+    fn production_semantic_heap_probe() {
+        use std::io::Write;
+        let input = std::path::PathBuf::from(std::env::var_os("CV_SWEEP_INPUT_PROBE").expect("CV_SWEEP_INPUT_PROBE"));
+        let bytes: usize = std::env::var("CV_SWEEP_INPUT_BYTES")
+            .expect("CV_SWEEP_INPUT_BYTES")
+            .parse()
+            .unwrap();
+        assert!(bytes >= 64 * 1024);
+        let dir = std::env::temp_dir().join(format!("cv-semantic-heap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let mut reports = Vec::new();
+        for kind in ["arguments", "plain-text", "escaped-text"] {
+            let source = if kind == "arguments" {
+                input.clone()
+            } else {
+                dir.join(format!("{kind}.jsonl"))
+            };
+            if kind != "arguments" {
+                let mut out = std::io::BufWriter::new(std::fs::File::create(&source).unwrap());
+                out.write_all(br#"{"type":"user","uuid":"u","sessionId":"perf","message":{"role":"user","content":[{"type":"text","text":""#).unwrap();
+                let scalar = if kind == "escaped-text" { "\\u0078" } else { "x" };
+                let block = scalar.repeat(8192);
+                for _ in 0..bytes / 8192 {
+                    out.write_all(block.as_bytes()).unwrap();
+                }
+                out.write_all(scalar.repeat(bytes % 8192).as_bytes()).unwrap();
+                out.write_all(b"\"}]}}\n").unwrap();
+                out.flush().unwrap();
+            }
+            let path = dir.join(format!("{kind}.bin"));
+            let mut r = fixture_ref(&source, "perf");
+            r.message_count = if kind == "arguments" { 2 } else { 1 };
+            let refs = [r];
+            let mut calls = 0;
+            let baseline = cv_testkit::heap::begin();
+            refresh(
+                &path,
+                &refs,
+                "fake",
+                PROJECTION_VERSION,
+                ReadSet::default(),
+                crate::read_corpus_doc,
+                |bodies| {
+                    calls += 1;
+                    assert_eq!(bodies.len(), 1);
+                    if kind == "arguments" {
+                        let prefix = "Inspect the file\nEdit {\"file_path\":\"/perf/a.rs\",\"content\":\"";
+                        assert_eq!(bodies[0].len(), 64 * 1024);
+                        assert!(bodies[0].starts_with(prefix));
+                        assert!(bodies[0][prefix.len()..].bytes().all(|b| b == b'x'));
+                    } else if kind == "plain-text" {
+                        assert_eq!(bodies[0], "x".repeat(64 * 1024));
+                    } else {
+                        assert_eq!(bodies[0], format!("{}\n", "x".repeat(64 * 1024 / 6)));
+                    }
+                    fake_encode(bodies)
+                },
+                save_store,
+            )
+            .unwrap();
+            let heap = cv_testkit::heap::end(baseline);
+            assert_eq!(calls, 1);
+            assert!(
+                heap.peak_above_baseline_bytes < 8 * 1024 * 1024,
+                "{kind}: {}",
+                heap.peak_above_baseline_bytes
+            );
+            refresh(
+                &path,
+                &refs,
+                "fake",
+                PROJECTION_VERSION,
+                ReadSet::default(),
+                |_| panic!("unchanged producer must not parse"),
+                |_| panic!("unchanged producer must not embed"),
+                |_, _| panic!("unchanged vectors must not save"),
+            )
+            .unwrap();
+            reports.push(serde_json::json!({"kind":kind,"decoded_payload_bytes":bytes,"source_bytes":std::fs::metadata(&source).unwrap().len(),"heap":heap}));
+        }
+        println!(
+            "{}",
+            serde_json::json!({"semantic_projection_heap":reports,"ceiling_bytes":8 * 1024 * 1024,"model":"fake; no model allocations or downloads"})
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn semantic_freshness_compares_exact_reference_hints_not_derived_metadata() {
         let dir = std::env::temp_dir().join(format!("cv-semantic-hints-{}", uuid::Uuid::new_v4()));
