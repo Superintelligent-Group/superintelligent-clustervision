@@ -980,20 +980,61 @@ pub fn est_tokens_bytes(len: usize, bytes_per_token: f64) -> u64 {
 /// [`IMAGE_TOKENS`]; a file reference as nothing. The one definition `doctor`, `distill` and `stats`
 /// share — change what a block costs here, nowhere else.
 pub fn est_tokens(block: &Block, bytes_per_token: f64) -> u64 {
+    est_tokens_with(block, bytes_per_token, crate::lazy::Text::len)
+}
+
+/// The same estimate as [`est_tokens`] after materializing the block, without retaining its
+/// decoded text. Spans are read in bounded chunks; malformed fields retain the resolver's raw
+/// fallback. This is useful for byte-counting consumers such as the compaction doctor.
+pub fn est_tokens_resolved(block: &Block, bytes_per_token: f64, resolver: &crate::lazy::Resolver) -> u64 {
+    est_tokens_with(block, bytes_per_token, |text| match text {
+        crate::lazy::Text::Inline(s) => s.len(),
+        crate::lazy::Text::Span(span) => {
+            let mut bytes = 0;
+            resolver.for_each_chunk(span, 64 * 1024, |s| bytes += s.len());
+            bytes
+        }
+    })
+}
+
+fn est_tokens_with(block: &Block, bytes_per_token: f64, text_len: impl Fn(&crate::lazy::Text) -> usize) -> u64 {
     let b = |len: usize| est_tokens_bytes(len, bytes_per_token);
     match block {
-        Block::Text { text } => b(text.len()),
+        Block::Text { text } => b(text_len(text)),
         Block::Thinking {
             text,
             signature,
             encrypted,
             ..
-        } => b(text.len()) + b(signature.as_deref().map_or(0, str::len)) + b(encrypted.as_deref().map_or(0, str::len)),
-        Block::ToolUse { input, .. } => b(input.to_string().len()),
-        Block::ToolResult { content, .. } => b(content.len()),
+        } => {
+            b(text_len(text))
+                + b(signature.as_deref().map_or(0, str::len))
+                + b(encrypted.as_deref().map_or(0, str::len))
+        }
+        Block::ToolUse { input, .. } => b(json_bytes(input)),
+        Block::ToolResult { content, .. } => b(text_len(content)),
         Block::Image { .. } => IMAGE_TOKENS,
         Block::File { .. } => 0,
     }
+}
+
+/// Count exactly the compact JSON representation without allocating another copy of the input.
+fn json_bytes(value: &serde_json::Value) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Counter(0);
+    // A Value contains only JSON values, and this writer cannot fail.
+    serde_json::to_writer(&mut count, value).expect("counting JSON bytes cannot fail");
+    count.0
 }
 
 /// Whether a tool is an MCP server's: Claude Code names those `mcp__<server>__<tool>`. Decided by
@@ -1063,6 +1104,85 @@ pub fn home_rel(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_token_estimate_matches_materialized_fields() {
+        use crate::lazy::{Resolver, Span, Text};
+
+        let dir = cv_testkit::temp_dir("resolved-token-estimate");
+        let source = dir.join("body");
+        for raw in [
+            "hello π".as_bytes().to_vec(),
+            br"\n\t\u03c0\ud83d\ude42".repeat(20_000),
+            [br"\u03c0".repeat(20_000), br"\q".to_vec()].concat(),
+            [b"abc".repeat(30_000), vec![0xff, 0xe2]].concat(),
+        ] {
+            std::fs::write(&source, &raw).unwrap();
+            for escaped in [false, true] {
+                let resolver = Resolver::new(None);
+                let text = Text::Span(Span {
+                    source: Some(source.clone()),
+                    offset: 0,
+                    len: raw.len() as u64,
+                    escaped,
+                });
+                let blocks = vec![
+                    Block::Text { text: text.clone() },
+                    Block::Thinking {
+                        text: text.clone(),
+                        signature: Some("abc".into()),
+                        encrypted: Some("π".into()),
+                        redacted: false,
+                    },
+                    Block::ToolResult {
+                        tool_use_id: "t".into(),
+                        content: text,
+                        is_error: false,
+                        tool_name: None,
+                        status: None,
+                        details: None,
+                    },
+                ];
+                for block in blocks {
+                    let mut message = Message::new(Role::Assistant);
+                    message.content.push(block.clone());
+                    message.materialize(&resolver);
+                    for ratio in [2.4, 3.5, 4.0] {
+                        assert_eq!(
+                            est_tokens_resolved(&block, ratio, &resolver),
+                            est_tokens(&message.content[0], ratio),
+                            "escaped={escaped}, ratio={ratio}"
+                        );
+                    }
+                }
+            }
+        }
+        let resolver = Resolver::new(Some(source));
+        for (offset, len) in [(u64::MAX, 1), (0, u64::MAX)] {
+            let block = Block::Text {
+                text: Text::Span(Span {
+                    source: None,
+                    offset,
+                    len,
+                    escaped: true,
+                }),
+            };
+            assert_eq!(est_tokens_resolved(&block, 3.5, &resolver), 0);
+        }
+        drop(resolver);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn token_json_byte_count_matches_compact_serialization() {
+        for input in [
+            serde_json::json!(null),
+            serde_json::json!([1, -100, 1.5, true, false, null]),
+            serde_json::json!({"escape\n": "\u{0000}\t\n\\\"π🙂".repeat(20_000), "nested": [{"x": 9}]}),
+        ] {
+            assert_eq!(json_bytes(&input), input.to_string().len());
+        }
+    }
 
     #[test]
     fn human_bytes_picks_the_unit() {

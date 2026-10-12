@@ -10,7 +10,7 @@
 //! the conversation, not the system block, so it's only *sized* from token usage, not broken down.
 
 use crate::compaction::CompactionSink;
-use crate::ir::{est_tokens, is_mcp_tool, Block, Message, MessageKind, Role};
+use crate::ir::{est_tokens_resolved, is_mcp_tool, Block, Message, MessageKind, Role};
 use crate::stream::{Flow, MessageSink};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -38,7 +38,7 @@ pub struct ToolStat {
     pub is_mcp: bool,
 }
 
-/// A context-attribution report. Accumulate sessions with [`Report::observe`], then render
+/// A context-attribution report. Accumulate sessions with [`Report::session`], then render
 /// (CLI) or serialize ([`Report::to_json`], for `--json` and the MCP tool).
 #[derive(Default, Debug, Clone, Serialize)]
 pub struct Report {
@@ -68,9 +68,9 @@ pub struct Report {
 
 impl Report {
     /// Start folding one session into the report. Stream its messages into the returned sink (a
-    /// [`ParseOptions::full`](crate::ParseOptions::full) pass: attribution counts decoded text,
-    /// and the attachment kind and compaction metadata live in `extra`), then call
-    /// [`SessionPass::finish`]. One pass, one message in memory at a time.
+    /// [`ParseOptions::lazy_extra`](crate::ParseOptions::lazy_extra) pass: attribution counts
+    /// decoded text in bounded chunks, and attachment/compaction metadata live in `extra`), then
+    /// call [`SessionPass::finish`]. Rich metadata still follows the adapter's allocation policy.
     pub fn session(&mut self, source: Option<std::path::PathBuf>) -> SessionPass<'_> {
         self.sessions += 1;
         SessionPass {
@@ -191,7 +191,7 @@ impl SessionPass<'_> {
         for b in &m.content {
             // What this block costs, by the one shared rule; the arms below only decide which
             // bucket the number lands in.
-            let t = est_tokens(b, BYTES_PER_TOKEN);
+            let t = est_tokens_resolved(b, BYTES_PER_TOKEN, &self.resolver);
             match b {
                 Block::Text { .. } => {
                     match (m.role, m.kind) {
@@ -244,8 +244,7 @@ impl SessionPass<'_> {
 }
 
 impl MessageSink for SessionPass<'_> {
-    fn message(&mut self, mut m: Message) -> Flow {
-        m.materialize(&self.resolver);
+    fn message(&mut self, m: Message) -> Flow {
         self.observe(&m);
         self.compactions.message(m)
     }

@@ -357,6 +357,42 @@ fn every_corpus_version_reads_as_its_golden_summary() {
     );
 }
 
+/// Doctor needs rich metadata but only decoded byte counts from text. Check every actual
+/// adapter's lazy-extra interpretation against its full reader, including child sessions.
+#[test]
+fn doctor_lazy_report_matches_full_corpus() {
+    let _world = World::in_process("corpus-doctor");
+    let mut checked = 0;
+    for harness in HARNESSES {
+        for version in subdirs(&corpus_root().join(harness.name)) {
+            let adapter = (harness.adapter)(&version);
+            let mut refs = adapter.discover().unwrap();
+            if let Some(children) = harness.children {
+                refs.extend(refs.clone().iter().flat_map(children));
+            }
+            for session in refs {
+                let report = |options: &cv_core::ParseOptions| {
+                    let mut report = cv_core::doctor::Report::default();
+                    let mut pass = report.session(Some(session.path.clone()));
+                    adapter.stream(&session, options, &mut pass).unwrap();
+                    pass.finish();
+                    report.to_json()
+                };
+                assert_eq!(
+                    report(&cv_core::ParseOptions::lazy_extra()),
+                    report(&cv_core::ParseOptions::full()),
+                    "doctor changed for {}:{} ({})",
+                    harness.name,
+                    session.id,
+                    session.path.display()
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 20, "doctor corpus unexpectedly empty: {checked}");
+}
+
 /// Nothing secret or personal in any committed corpus file: GitHub push protection rejects
 /// real-looking tokens, and a secret-shaped string in a fixture breaks releases.
 #[test]

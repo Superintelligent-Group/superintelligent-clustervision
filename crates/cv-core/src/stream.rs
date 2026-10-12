@@ -107,7 +107,8 @@ impl ParseOptions {
     /// [`lazy()`](ParseOptions::lazy) **plus** the harness-specific `extra` sidecars — giant content
     /// stays lazy on disk (memory-safe on a multi-GB transcript) while the small record metadata
     /// (`subtype`, `compactMetadata`, `isCompactSummary`, attribution, …) is still materialized.
-    /// For consumers that scan record *metadata* over a huge file (e.g. compaction detection).
+    /// Sidecars and other rich metadata can themselves be large: only supported content fields
+    /// become spans. For metadata scans and bounded decoded-text reducers (e.g. doctor).
     pub fn lazy_extra() -> Self {
         ParseOptions {
             spans: true,

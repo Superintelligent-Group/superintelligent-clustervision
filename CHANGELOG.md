@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Doctor counts decoded text in bounded chunks and tool arguments without a serialized copy, preserving attribution and compaction reports.
 - Claude lazy reads borrow typed hot records and map JSONL lines, avoiding allocations proportional to giant text records.
 - Gemini lazy reads retain source ranges for message bodies and replay history; discovery skips unused payloads.
 - Continue and LM Studio discovery skip message bodies instead of constructing complete transcript trees.
