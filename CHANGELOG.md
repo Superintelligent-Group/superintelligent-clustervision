@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Native Qwen JSONL resumes at finalized record boundaries; changed metadata and legacy replay formats still trigger whole reads.
+- Full-text indexing streams structured tool arguments into bounded documents without an extra serialized string.
 - Index publication reuses its catalog connection while preserving independent transactions and reporting partial failures for retry.
 - Tool histograms fold streamed events without retaining an event list.
 - Zed discovery sorts metadata and reads blobs incrementally under one SQLite snapshot, avoiding whole-blob sorting and copying.

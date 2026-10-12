@@ -195,7 +195,7 @@ remains a largest-record cost. Compare fixed-size records at increasing message 
 heap and clean timing runs, and state whether the scratch catalog is new or already populated.
 
 `tools/check-heap-budget.py MMAP_HEAP_PROBE --no-mmap-probe RANGED_HEAP_PROBE --only events`
-is an opt-in event retention gate; default CI cases are unchanged. It generates 20,000 and 200,000
+is the event retention gate run in CI. It generates 20,000 and 200,000
 small Claude Edit records with distinct targets, verifies every persisted row and the source stamp,
 checks temporary-file cleanup and I/O accounting, and bounds Rust heap at 1 MiB with 256 KiB growth.
 The retained `events-collected` oracle must produce identical rows and demonstrate growing heap.
@@ -207,3 +207,5 @@ digests. It detects serialization-order drift that the default canonical digest 
 normalizes. It does not compare original harness JSON bytes or whitespace. The report marks
 canonical JSON version as null and serialization order as preserved; ordinary hash output stays
 compatible with canonical version 1. Use the same switch on both compared binaries.
+
+CI also runs `--only active --format zed` with zstd installed for generated compressed rowid fixtures. This caps requested Rust heap; separate process-footprint measurements cover SQLite native memory.

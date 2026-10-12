@@ -62,7 +62,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
 | Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
-| Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery now counts without collecting; record text remains owned |
+| Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery counts without collecting; direct project JSONL resumes finalized records; record text remains owned |
 | Kimi | Context stream + pending usage message, rotated prefix dedup | Wire sidecar uses raw ranges and lazy output spans; structural lookup state and mutable trailing usage remain |
 | Kimi Code | One LLM step buffered; source-projected inventory; sidecar output references | Step and structured carriers can be large; mutable state/wire semantics |
 | Grok | History stream + pending reasoning; metadata-projected discovery and sidecars | One history record and retained tool metadata; enrichment can revise old messages |
@@ -280,7 +280,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
 - [ ] Kimi Code logical-step and selected structured payload retention; preserve necessary Devin forest navigation state.
-- [ ] Format-safe append reuse beyond Claude/Codex; watcher and archive amplification.
+- [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
+- [ ] Other format-safe continuation; repeated watcher tails and archive rereads.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [ ] Index admission and queued payload bytes; assess transaction batching with write-lock contention measurements and final Tantivy merge/query costs.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
