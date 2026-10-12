@@ -46,14 +46,16 @@ def bound(peaks, ceiling, growth, case):
 
 def stores(binary, root, env):
     generator = Path(__file__).with_name("perf-fixture.py")
-    for harness in ("gemini", "claude", "codex"):
+    # Store promises here are for mmap builds. The no-mmap guarantee below applies to the
+    # positioned-read chunk resolver, not adapters that must own giant source records.
+    for harness, shape in (("gemini", "giant"), ("claude", "fixed"), ("claude", "giant"), ("codex", "fixed")):
         for escaped in (False, True):
             peaks = []
             for size in SIZES:
-                # JSONL adapters still read raw lines: hold record size fixed while growing the store.
-                # Gemini's lazy record spans should handle genuinely giant individual fields.
-                records = 4 if harness == "gemini" else size // (256 << 10)
-                out = root / f"{harness}-{size}-{escaped}"
+                # Fixed records refute whole-history retention; giant records refute temporary
+                # field/line ownership in mmap-backed lazy Gemini and Claude parsing.
+                records = 4 if shape == "giant" else size // (256 << 10)
+                out = root / f"{harness}-{shape}-{size}-{escaped}"
                 command = [sys.executable, str(generator), harness, str(out), "--payload-bytes", str(size), "--records", str(records)]
                 if escaped:
                     command.append("--escaped")
@@ -61,9 +63,9 @@ def stores(binary, root, env):
                 row, peak = probe(binary, ["count", harness, manifest["id"], manifest["path"], "--root", manifest["root"], "--mode", "lazy"], env, True)
                 assert row["messages"] == manifest["expected_messages"], f"{harness}: truncated or skipped source"
                 peaks.append(peak)
-                print(json.dumps({"case": f"{harness}-{'escaped' if escaped else 'plain'}", "decoded_payload_bytes": size,
+                print(json.dumps({"case": f"{harness}-{shape}-{'escaped' if escaped else 'plain'}", "decoded_payload_bytes": size,
                                   "physical_input_bytes": manifest["physical_input_bytes"], "messages": row["messages"], "peak_live_rust_bytes": peak}), flush=True)
-            bound(peaks, STORE_CEILING, STORE_GROWTH, f"{harness} escaped={escaped}")
+            bound(peaks, STORE_CEILING, STORE_GROWTH, f"{harness} shape={shape} escaped={escaped}")
 
 
 def raw_body(path, repeats, malformed):
