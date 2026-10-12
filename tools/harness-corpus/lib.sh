@@ -1,7 +1,8 @@
 # tools/harness-corpus/lib.sh — sourced by every <harness>/generate.sh. Bash only.
 #
-#   corpus_work                  -> sets WORK (a fresh temp dir) and CORPUS_HOME=$WORK/home (the
-#                                   throwaway $HOME; the project lives at $CORPUS_HOME/project)
+#   corpus_work                  -> sets WORK (a fresh temp dir named cv-corpus.<lane>.XXXXXX, the lane
+#                                   being $CORPUS_LANE or the harness dir) and CORPUS_HOME=$WORK/home
+#                                   (the throwaway $HOME; the project lives at $CORPUS_HOME/project)
 #   corpus_guard VAR...          -> refuse unless each named env var is set, non-empty, inside $WORK,
 #                                   and not ember's real home or anything under it
 #   corpus_proxy KEYFILE TRANSLATOR UPSTREAM [key_proxy.py args...]
@@ -21,7 +22,9 @@ CORPUS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REAL_HOME="$(cd ~ && pwd -P)"
 
 corpus_work() {
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/cv-corpus.XXXXXX")"
+  # Named per lane, so a lane cleaning up after itself can name exactly its own dirs.
+  local lane="${CORPUS_LANE:-$(basename "$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)")}"
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/cv-corpus.$lane.XXXXXX")"
   WORK="$(cd "$WORK" && pwd -P)"
   CORPUS_HOME="$WORK/home"
   mkdir -p "$CORPUS_HOME/project"

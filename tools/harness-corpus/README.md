@@ -23,7 +23,7 @@ Every `generate.sh` sources `lib.sh`:
 
 | function | what it does |
 |---|---|
-| `corpus_work` | sets `WORK` (fresh temp dir) and `CORPUS_HOME=$WORK/home`, with the project at `$CORPUS_HOME/project` |
+| `corpus_work` | sets `WORK` (a fresh `cv-corpus.<lane>.XXXXXX` dir; the lane is `$CORPUS_LANE` or the harness dir) and `CORPUS_HOME=$WORK/home`, with the project at `$CORPUS_HOME/project` |
 | `corpus_guard VAR...` | exits unless each env var (`HOME`, `CODEX_HOME`, `TMPDIR`, ...) resolves inside `$WORK` |
 | `corpus_proxy KEYFILE TRANSLATOR UPSTREAM [args...]` | starts `key_proxy.py` (below) on a free port, capped at `$MAX_CALLS` (default 40) and logging to `$CALLS_LOG` (default `$WORK/calls.jsonl`); sets `PORT`, `PROXY_URL`, `PROXY_PID`, and records the key file so the scrub can check that literal key |
 | `corpus_proxy_stop` / `corpus_calls` | stops the proxy (put it in the EXIT trap) / the number of model calls it forwarded |
@@ -67,9 +67,11 @@ any of these is left anywhere:
 
 ## Rules that are easy to break
 
-- **Throwaway dirs live in your lane's own directory.** Run generators with `TMPDIR` set to a directory
-  only your lane uses, and never delete by glob in a shared one: `lib.sh` names every work dir
-  `cv-corpus.XXXXXX`, so `rm -rf cv-corpus.*` in a shared TMPDIR deletes other lanes' runs.
+- **Lane work dirs are named per lane, and nothing deletes by glob in a shared directory.** Run
+  generators with `TMPDIR` set to a directory only your lane uses and `CORPUS_LANE` set to your lane
+  name; `corpus_work` names each dir `cv-corpus.<lane>.XXXXXX`. Clean up by the exact path a run
+  printed (`kept /path`), never by pattern: on 2026-10-11 a lane's `rm -rf cv-corpus.*` in a shared
+  TMPDIR destroyed other lanes' runs.
 - **Throwaway home always.** Set `HOME` and the harness's own variable (`CODEX_HOME`, `GOOSE_PATH_ROOT`,
   `HERMES_HOME`, ...) and `TMPDIR` into `$WORK`, and run `corpus_guard` on all of them. Harnesses
   record `$TMPDIR` too: Codex lists it as a sandbox writable root.
