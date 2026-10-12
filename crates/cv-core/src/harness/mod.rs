@@ -261,6 +261,13 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// File whose immutable-prefix byte positions this adapter checkpoints. Directory-backed
+    /// stores override this with their transcript file; side stores remain freshness dependencies.
+    /// Consumers must use this same file for size, identity, sampled guards, and primary read state.
+    fn resume_source(&self, r: &SessionRef) -> PathBuf {
+        r.path.clone()
+    }
+
     /// Continue a [`stream`](Adapter::stream) of `r` from `from`, a checkpoint an earlier stream of
     /// the same file (then shorter) took: read from `from.offset` on with the adapter state it
     /// kept, so `sink` sees exactly the messages the whole stream would deliver after that point,
