@@ -201,6 +201,13 @@ impl<'a> Record<'a> {
     pub fn value(&self, key: &str) -> Option<Value> {
         serde_json::from_str(self.get(key)?.get()).ok()
     }
+    /// Materialize only named fields after strict validation at the source boundary.
+    pub fn project(&self, keys: &[&str]) -> Result<serde_json::Map<String, Value>> {
+        keys.iter()
+            .filter_map(|key| self.get(key).map(|raw| (*key, raw)))
+            .map(|(key, raw)| Ok((key.to_string(), serde_json::from_str(raw.get())?)))
+            .collect()
+    }
     pub fn without(&self, keys: &[&str]) -> Result<serde_json::Map<String, Value>> {
         self.fields
             .iter()
