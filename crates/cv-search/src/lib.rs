@@ -23,6 +23,8 @@ use std::path::PathBuf;
 pub mod fts;
 #[cfg(feature = "semantic")]
 pub mod semantic;
+#[cfg(feature = "semantic")]
+mod semantic_corpus;
 
 /// A single search result, shared by full-text and semantic search.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -136,135 +138,24 @@ pub fn semantic_search(path: impl Into<Option<PathBuf>>, query: &str, k: usize) 
 /// Stream the `(id, harness, cwd, title, body-head)` corpus by discovering + streaming every
 /// session, invoking `f` once per session and **dropping the `Doc` immediately after**.
 ///
-/// Peak memory is O(head), NOT O(session) or O(corpus). History: `build_corpus() -> Vec<Doc>`
+/// Retained body and label memory is bounded per session; parser-owned IR (including structured
+/// tool arguments and metadata) has separate costs. History: `build_corpus() -> Vec<Doc>`
 /// held every session's full searchable body (~35 GB) and the semantic path `.clone()`d them all
 /// again — ~65 GB RSS, OOM-killed. The streaming driver fixed the corpus dimension; the head cap
-/// (`EMBED_HEAD_BYTES` below) fixed the per-session one, since the only consumer left is the
+/// (`semantic_corpus::EMBED_HEAD_BYTES`) fixed the per-session one, since the only consumer left is the
 /// embedder and model2vec reads ≤512 tokens anyway. (The FTS indexer doesn't use this — it
 /// streams chunk-wise into `fts::ChunkSink`.)
 #[cfg(feature = "semantic")]
 pub(crate) fn stream_corpus(mut f: impl FnMut(Doc) -> Result<()>) -> Result<usize> {
-    use cv_core::{Block, Flow, Message, MessageSink, ParseOptions, Role};
-
-    /// How much body to keep per session. The only consumer is the embedder, and model2vec
-    /// truncates each input to **512 tokens** (≈2–3 KB of text) — 64 KiB is a 20×+ safety margin,
-    /// so the resulting vectors are unchanged while a multi-GB session contributes kilobytes
-    /// instead of its whole transcript. Also bounds the `EMBED_BATCH` residency (128 heads ≈ 8 MB,
-    /// where 128 full bodies used to be gigabytes).
-    const EMBED_HEAD_BYTES: usize = 64 * 1024;
-
-    /// Raw bytes of a lazy span resolved while hunting the first user text — the label only ever
-    /// reads its first 72 chars ([`cv_core::label_from`]), so 512 bytes is plenty.
-    const FIRST_USER_HEAD: u64 = 512;
-
-    /// Builds a [`Doc`] body **head** as messages stream past, dropping each message immediately.
-    /// Streams under [`ParseOptions::lazy`]: large content arrives as spans and is resolved only
-    /// up to the remaining head budget, so a giant field is never materialized. Stops the parse
-    /// as soon as the head is full and a first-user label candidate has been seen.
-    struct DocSink {
-        body: String,
-        first_user_text: Option<String>,
-        resolver: cv_core::Resolver,
-    }
-    impl MessageSink for DocSink {
-        fn message(&mut self, m: Message) -> Flow {
-            if self.first_user_text.is_none() && m.role == Role::User {
-                // Same projection as `Message::text()` (text blocks joined by '\n'), span-aware.
-                let mut s = String::new();
-                for b in &m.content {
-                    if let Block::Text { text } = b {
-                        if !s.is_empty() {
-                            s.push('\n');
-                        }
-                        match text.as_span() {
-                            Some(sp) => s.push_str(&self.resolver.resolve_prefix(sp, FIRST_USER_HEAD)),
-                            None => {
-                                if let Some(t) = text.inline_str() {
-                                    s.push_str(t);
-                                }
-                            }
-                        }
-                    }
-                }
-                if !s.trim().is_empty() {
-                    self.first_user_text = Some(s);
-                }
-            }
-            if self.body.len() < EMBED_HEAD_BYTES {
-                self.append_searchable_capped(&m);
-            }
-            if self.body.len() >= EMBED_HEAD_BYTES && self.first_user_text.is_some() {
-                Flow::Stop
-            } else {
-                Flow::Continue
-            }
-        }
-    }
-    impl DocSink {
-        /// Append one content text: inline as-is, a span resolved to at most the remaining budget.
-        fn push_text(&mut self, text: &cv_core::Text) {
-            if let Some(sp) = text.as_span() {
-                let remaining = EMBED_HEAD_BYTES.saturating_sub(self.body.len()) as u64;
-                if remaining > 0 {
-                    self.body.push_str(&self.resolver.resolve_prefix(sp, remaining));
-                }
-            } else if let Some(s) = text.inline_str() {
-                self.body.push_str(s);
-            }
-        }
-
-        /// The `Message::append_searchable` projection, span-aware and head-capped.
-        fn append_searchable_capped(&mut self, m: &Message) {
-            use std::fmt::Write as _;
-            for b in &m.content {
-                match b {
-                    Block::Text { text } | Block::Thinking { text, .. } => {
-                        self.push_text(text);
-                        self.body.push('\n');
-                    }
-                    Block::ToolUse { name, input, .. } => {
-                        self.body.push_str(name);
-                        self.body.push(' ');
-                        let _ = write!(self.body, "{input}");
-                        self.body.push('\n');
-                    }
-                    Block::ToolResult { content, .. } => {
-                        self.push_text(content);
-                        self.body.push('\n');
-                        // A persisted-output stub: the real output lives in a sidecar file the model
-                        // only saw a pointer to — index its head too, within the same budget.
-                        if let Some(p) = b.persisted_output_path() {
-                            let remaining = EMBED_HEAD_BYTES.saturating_sub(self.body.len());
-                            if remaining > 0 {
-                                if let Some(t) = cv_core::lazy::read_head(std::path::Path::new(p), remaining) {
-                                    self.body.push_str(&t);
-                                    self.body.push('\n');
-                                }
-                            }
-                        }
-                    }
-                    Block::File { path, source, .. } => {
-                        if let Some(p) = path.as_deref().or(source.as_deref()) {
-                            self.body.push_str(p);
-                            self.body.push('\n');
-                        }
-                    }
-                    Block::Image { .. } => {}
-                }
-            }
-        }
-    }
+    use cv_core::ParseOptions;
+    use semantic_corpus::DocSink;
 
     let mut n = 0usize;
     for r in cv_core::discover_all() {
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
             continue;
         };
-        let mut sink = DocSink {
-            body: String::new(),
-            first_user_text: None,
-            resolver: cv_core::Resolver::new(Some(r.path.clone())),
-        };
+        let mut sink = DocSink::new(cv_core::Resolver::new(Some(r.path.clone())));
         let meta = match cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), &mut sink) {
             Ok(m) => m,
             Err(e) => {
@@ -278,7 +169,7 @@ pub(crate) fn stream_corpus(mut f: impl FnMut(Doc) -> Result<()>) -> Result<usiz
             harness: r.harness.as_str().to_string(),
             cwd: r.cwd.as_ref().map(|p| p.display().to_string()),
             title: Some(title),
-            body: sink.body,
+            body: sink.body.into_string(),
             created_at: r.created_at.map(|t| t.timestamp()),
             updated_at: r.updated_at.map(|t| t.timestamp()),
         };
