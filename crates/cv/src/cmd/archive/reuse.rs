@@ -591,6 +591,71 @@ mod tests {
     }
 
     #[test]
+    fn failed_selected_source_serialization_leaves_artifact_catalog_and_stamp_unchanged() {
+        struct Input(Option<PathBuf>);
+        impl cv_core::Adapter for Input {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                _: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                let mut session = Session::new(&r.id, r.harness);
+                session.source_path = Some(r.path.clone());
+                sink.meta(&session);
+                let mut message = cv_core::Message::new(cv_core::Role::Assistant);
+                if let Some(path) = &self.0 {
+                    let input = cv_core::Json::source(path, 0, 2)?;
+                    fs::remove_file(path)?;
+                    message.content.push(cv_core::Block::ToolUse {
+                        id: "call".into(),
+                        name: "opaque".into(),
+                        namespace: None,
+                        input,
+                    });
+                }
+                sink.try_message(message)?;
+                Ok(session)
+            }
+        }
+        let (root, a, r, _) = setup(Harness::Claude);
+        a.store_ref(&Input(None), &r).unwrap();
+        let artifact = a.session_path(r.harness, &r.id);
+        let before = (
+            fs::read(&artifact).unwrap(),
+            fs::read(a.catalog_path()).unwrap(),
+            fs::read(a.source_path(&r)).unwrap(),
+        );
+        let external = root.join("selected.json");
+        fs::write(&external, "{}").unwrap();
+        fs::write(&r.path, "changed primary").unwrap();
+        assert!(a.store_ref(&Input(Some(external)), &r).is_err());
+        assert_eq!(
+            before,
+            (
+                fs::read(&artifact).unwrap(),
+                fs::read(a.catalog_path()).unwrap(),
+                fs::read(a.source_path(&r)).unwrap()
+            )
+        );
+        assert!(fs::read_dir(artifact.parent().unwrap()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn failed_catalog_publication_keeps_the_old_stamp_and_retry_repairs_it() {
         let (root, a, r, mut body) = setup(Harness::Claude);
         let adapter = cv_core::harness::for_harness(r.harness).unwrap();

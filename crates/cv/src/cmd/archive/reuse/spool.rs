@@ -66,13 +66,11 @@ impl cv_core::MessageSink for Spool {
     fn meta(&mut self, session: &Session) {
         self.resolver = session.resolver();
     }
-    fn message(&mut self, mut message: cv_core::Message) -> cv_core::Flow {
+    fn message(&mut self, message: cv_core::Message) -> cv_core::Flow {
         if self.error.is_some() {
             return cv_core::Flow::Stop;
         }
         let result = (|| -> Result<()> {
-            // Replaced by the shared bounded IR writer once integrated. This owns only the
-            // current selected message; it never grows with transcript history.
             if self.first_user.is_none() && message.role == cv_core::Role::User {
                 let mut head = String::new();
                 let mut chars = 0;
@@ -100,7 +98,10 @@ impl cv_core::MessageSink for Spool {
                         }
                         match text {
                             cv_core::Text::Inline(text) => add(text),
-                            cv_core::Text::Span(span) => self.resolver.for_each_chunk(span, 64 * 1024, &mut add),
+                            cv_core::Text::Span(span) => self.resolver.try_for_each_chunk(span, 64 * 1024, |text| {
+                                add(text);
+                                Ok(())
+                            })?,
                         }
                     }
                 }
@@ -109,10 +110,9 @@ impl cv_core::MessageSink for Spool {
                     head: nonwhite.get().then_some(head),
                 });
             }
-            message.materialize(&self.resolver)?;
             let stage = self.stage.as_mut().unwrap();
             stage.write_all(&[0x1e])?;
-            serde_json::to_writer_pretty(stage, &message)?;
+            message.write_json_pretty(stage, &self.resolver)?;
             self.messages += 1;
             Ok(())
         })();
