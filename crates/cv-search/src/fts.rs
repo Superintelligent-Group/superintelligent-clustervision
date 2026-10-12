@@ -355,6 +355,7 @@ enum Out {
         mark: Option<(cv_core::resume::MarkHead, cv_core::stream::Checkpoint)>,
         /// The pass resumed at the job's mark.
         resumed: bool,
+        fts_reads: cv_core::source::ReadSet,
     },
     /// A session's read failed: any docs it sent are deleted and it stays stale.
     Failed {
@@ -433,15 +434,16 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         seen.insert(r.id.clone());
         let source = probe.snapshot(r);
         let (mtime, size) = source.primary;
-        let dependencies_fresh = dependencies.fresh(
+        let dependencies_fresh = dependencies.fresh_with_probe(
             r,
             existing.get(&r.id).copied().unwrap_or(source.primary),
             &source.dependencies,
+            &mut probe,
         );
         let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size) && dependencies_fresh;
-        let events = event_sync.needs_ingest_with_source(r, &source);
+        let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
-        if fts_fresh && !events && affordances.counts_with_source(r, &source).is_some() {
+        if fts_fresh && !events && affordances.counts_with_probe(r, &source, &mut probe).is_some() {
             continue;
         }
         jobs.push(Job {
@@ -469,13 +471,14 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
                 seen.insert(sr.id.clone());
                 let source = probe.snapshot(sr);
                 let (mtime, size) = source.primary;
-                let dependencies_fresh = dependencies.fresh(
+                let dependencies_fresh = dependencies.fresh_with_probe(
                     sr,
                     existing.get(&sr.id).copied().unwrap_or(source.primary),
                     &source.dependencies,
+                    &mut probe,
                 );
                 let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size) && dependencies_fresh;
-                let events = event_sync.needs_ingest_with_source(sr, &source);
+                let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
                 if fts_fresh && !events {
                     continue;
                 }
@@ -660,11 +663,15 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
                     counted,
                     mark,
                     resumed,
+                    fts_reads,
                 } => {
                     // Only stamp events after a complete pass: a parse error leaves the sync rows
                     // untouched so the session is retried next run.
                     if let Some((from, events)) = events {
-                        cv_core::events::record_from_with_source(&job.r, from, &events, &job.source, &job.prov);
+                        let source = counted
+                            .as_ref()
+                            .map_or_else(|| job.source.clone(), |c| job.source.with_reads(&c.dependencies));
+                        cv_core::events::record_from_with_source(&job.r, from, &events, &source, &job.prov);
                     }
                     if let Some(c) = counted {
                         c.record_with_source(&job.r, &job.source);
@@ -674,7 +681,8 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
                     }
                     ran.resumed += usize::from(resumed);
                     if job.fts {
-                        ran.dependencies.push((job.r.clone(), job.source.clone()));
+                        ran.dependencies
+                            .push((job.r.clone(), job.source.with_reads(&fts_reads)));
                         ran.changed += 1;
                         open.remove(&job.r.id);
                     }
@@ -762,6 +770,7 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>) -> bool 
                 counted: p.counted,
                 mark,
                 resumed: p.resumed,
+                fts_reads: p.fts_reads,
             }
         }
         Err(err) => Out::Failed { job, err },
@@ -807,6 +816,7 @@ fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoin
 /// What one pass over a job's session found.
 struct JobPass {
     resumed: bool,
+    fts_reads: cv_core::source::ReadSet,
     counted: Option<cv_core::stream::Counted>,
     events: Option<(usize, Vec<cv_core::events::Event>)>,
     last: Option<cv_core::stream::Checkpoint>,
@@ -859,7 +869,7 @@ fn job_pass(
             job.prov.clone(),
             from,
         )?
-        .map(|(_, done)| done)
+        .map(|(_, done, reads)| (done, reads))
     } else {
         let opts = cv_core::ParseOptions::lazy();
         let sink: &mut dyn cv_core::MessageSink = match events.as_mut() {
@@ -867,8 +877,10 @@ fn job_pass(
             None => &mut cv_core::stream::Discard,
         };
         cv_core::stream::stream_resumable(adapter, &job.r, &opts, sink, CHECKPOINT_EVERY, from)?
+            .map(|done| (done, cv_core::source::ReadSet::default()))
     };
-    Ok(done.map(|done| JobPass {
+    Ok(done.map(|(done, reads)| JobPass {
+        fts_reads: reads,
         resumed: from.is_some(),
         counted: done.counted,
         events: events.map(|es| (first, es.into_events())),
@@ -895,7 +907,7 @@ fn index_session(
     events: Option<&mut cv_core::events::EventSink>,
     prov: cv_core::events::Provenance,
     from: Option<&cv_core::stream::Checkpoint>,
-) -> Result<Option<(usize, cv_core::stream::Resumed)>> {
+) -> Result<Option<(usize, cv_core::stream::Resumed, cv_core::source::ReadSet)>> {
     let opts = cv_core::ParseOptions::lazy();
     let mut sink = match from {
         Some(cp) => ChunkSink::resume(out, f, r, mtime, size, prov, cp).context("checkpoint without fts state")?,
@@ -910,7 +922,7 @@ fn index_session(
     };
     let Some(done) = done else { return Ok(None) };
     sink.finish()?;
-    Ok(Some((sink.docs, done)))
+    Ok(Some((sink.docs, done, sink.dependencies)))
 }
 
 /// [`index_session`] straight into `writer`, guaranteeing the writer holds **no** docs for the
@@ -934,7 +946,7 @@ fn index_session_clean(
     size: i64,
     events: Option<&mut cv_core::events::EventSink>,
     prov: cv_core::events::Provenance,
-) -> Result<usize> {
+) -> Result<(usize, cv_core::source::ReadSet)> {
     let source = cv_core::source::Probe::default().snapshot(r);
     let result = {
         let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()).map_err(Into::into) };
@@ -942,11 +954,11 @@ fn index_session_clean(
             .and_then(|done| done.context("a whole pass never declines"))
     };
     match result {
-        Ok((docs, done)) => {
+        Ok((docs, done, reads)) => {
             if let Some(c) = done.counted {
                 c.record_with_source(r, &source);
             }
-            Ok(docs)
+            Ok((docs, reads))
         }
         Err(e) => {
             writer.delete_term(Term::from_field_text(f.id, &r.id));
@@ -1008,6 +1020,7 @@ struct ChunkSink<'w> {
     /// (all-`None`) for a top-level session, leaving its docs unchanged.
     prov: cv_core::events::Provenance,
     resolver: cv_core::Resolver,
+    dependencies: cv_core::source::ReadSet,
     buf: String,
     /// Messages seen so far: the index of the message being appended.
     msgs: usize,
@@ -1030,6 +1043,8 @@ const FTS_LAYER: &str = "fts";
 /// the index).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FtsState {
+    #[serde(default = "cv_core::source::ReadSet::unrecorded")]
+    dependencies: cv_core::source::ReadSet,
     msgs: usize,
     cwd: Option<String>,
     meta_title: Option<String>,
@@ -1071,6 +1086,7 @@ impl<'w> ChunkSink<'w> {
             first_user: None,
             prov,
             resolver: cv_core::Resolver::new(Some(r.path.clone())),
+            dependencies: Default::default(),
             buf: String::new(),
             msgs: 0,
             buf_first: 0,
@@ -1096,6 +1112,7 @@ impl<'w> ChunkSink<'w> {
     ) -> Option<Self> {
         let st: FtsState = cp.get(FTS_LAYER)?;
         let mut sink = ChunkSink::new(out, f, r, mtime, size, prov);
+        sink.dependencies = st.dependencies;
         sink.msgs = st.msgs;
         sink.cwd = st.cwd;
         sink.meta_title = st.meta_title;
@@ -1240,6 +1257,13 @@ impl<'w> ChunkSink<'w> {
     /// the chunk callback, which mutates `self`).
     fn append_text(&mut self, r: &cv_core::Resolver, text: &cv_core::Text) {
         if let Some(sp) = text.as_span() {
+            if let Some(path) = sp
+                .source
+                .as_ref()
+                .filter(|path| path.as_path() != Path::new(&self.path))
+            {
+                self.dependencies.record(path);
+            }
             r.for_each_chunk(sp, CHUNK_BYTES, |s| self.push_chunk(s));
         } else if let Some(s) = text.inline_str() {
             self.push_chunk(s);
@@ -1268,6 +1292,7 @@ impl<'w> ChunkSink<'w> {
                 // `<session>/tool-results/<id>.txt`): index the file's head too, so the text the tool
                 // produced is findable even though the transcript holds only the pointer.
                 if let Some(p) = b.persisted_output_path() {
+                    self.dependencies.record(Path::new(p));
                     if let Some(t) = cv_core::lazy::read_head(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
                         for piece in t.as_bytes().chunks(CHUNK_BYTES) {
                             self.push_chunk(&String::from_utf8_lossy(piece));
@@ -1292,6 +1317,9 @@ impl<'w> ChunkSink<'w> {
 const PERSISTED_INDEX_CAP: usize = 1024 * 1024;
 
 impl cv_core::MessageSink for ChunkSink<'_> {
+    fn dependency(&mut self, path: &Path) {
+        self.dependencies.record(path);
+    }
     fn meta(&mut self, s: &cv_core::Session) {
         self.meta_title = s.title.clone();
         self.meta_received = true;
@@ -1318,6 +1346,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
         cp.put(
             FTS_LAYER,
             &FtsState {
+                dependencies: self.dependencies.clone(),
                 msgs: self.msgs,
                 cwd: self.cwd.clone(),
                 meta_title: self.meta_title.clone(),
@@ -1496,7 +1525,7 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         let source = probe.snapshot(r);
         let (mtime, size) = source.primary;
         let mut es = catalog.then(|| cv_core::events::EventSink::new(r.cwd.clone()));
-        index_session_clean(
+        let (_, reads) = index_session_clean(
             &mut writer,
             &f,
             adapter.as_ref(),
@@ -1508,9 +1537,15 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         )
         .with_context(|| format!("indexing {}", r.id))?;
         if let Some(es) = es {
-            cv_core::events::record_from_with_source(r, 0, es.events(), &source, &Default::default());
+            cv_core::events::record_from_with_source(
+                r,
+                0,
+                es.events(),
+                &source.with_reads(es.dependencies()),
+                &Default::default(),
+            );
         }
-        dependencies.push((r.clone(), source));
+        dependencies.push((r.clone(), source.with_reads(&reads)));
     }
     writer.commit().context("committing index")?;
     cv_core::source::update(&consumer, &dependencies);
@@ -2092,6 +2127,92 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    #[test]
+    fn adopted_output_read_sets_invalidate_search_and_survive_resume() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir, external) = (tmpdir(), tmpdir(), tmpdir());
+        // Adoption retains an absolute pointer into a different parent's directory.
+        let file = external.join("output.txt");
+        let stub = format!(
+            "<persisted-output>\nFull output saved to: {}\n\nPreview (first 2KB):\npreview\n</persisted-output>",
+            file.display()
+        );
+        let p = sdir.join("adopted.jsonl");
+        let mut lines = vec![serde_json::json!({"type":"user","uuid":"tool","sessionId":"adopted",
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":stub}]}})];
+        for i in 0..60 {
+            lines.push(
+                serde_json::json!({"type":"user","uuid":format!("u{i}"),"sessionId":"adopted",
+                "message":{"role":"user","content":"body ".repeat(100)}}),
+            );
+        }
+        std::fs::write(&p, lines.iter().map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
+        let r = sref("adopted", "adopted", p.display().to_string());
+        let refresh = || sweep(&dir, vec![r.clone()], false, false).unwrap();
+        std::fs::write(&file, "zanzibar").unwrap();
+        assert_eq!(refresh().changed, 1);
+        assert_eq!(text_search(&dir, "zanzibar", 10).unwrap().len(), 1);
+        assert_eq!(refresh().changed, 0);
+        use std::io::Write;
+        let appended = serde_json::json!({"type":"user","uuid":"last","sessionId":"adopted",
+            "message":{"role":"user","content":"appendmarker"}});
+        writeln!(std::fs::OpenOptions::new().append(true).open(&p).unwrap(), "{appended}").unwrap();
+        let appended = refresh();
+        assert_eq!((appended.changed, appended.resumed), (1, 1));
+        std::fs::write(&file, "kilimanj").unwrap(); // Same length, prefix output was reused above.
+        let base = cv_core::source::Probe::default().snapshot(&r);
+        assert!(cv_core::catalog::AffordanceTable::load()
+            .counts_with_source(&r, &base)
+            .is_some());
+        assert!(!cv_core::events::SyncTable::load().needs_ingest_with_source(&r, &base));
+        let changed = refresh();
+        assert_eq!((changed.changed, changed.resumed), (1, 0));
+        assert!(text_search(&dir, "zanzibar", 10).unwrap().is_empty());
+        assert_eq!(text_search(&dir, "kilimanj", 10).unwrap().len(), 1);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(refresh().changed, 1);
+        assert!(text_search(&dir, "kilimanj", 10).unwrap().is_empty());
+        assert_eq!(refresh().changed, 0);
+        std::fs::write(&file, "zanzibar").unwrap(); // The resumed read set retains absence too.
+        assert_eq!(refresh().changed, 1);
+        assert_eq!(text_search(&dir, "zanzibar", 10).unwrap().len(), 1);
+        assert_eq!(refresh().changed, 0);
+        for d in [dir, sdir, external] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    #[test]
+    fn conditional_fork_read_sets_track_new_and_rewritten_siblings() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let p = sdir.join("fork.jsonl");
+        let copied = serde_json::json!({"type":"user","uuid":"shared","sessionId":"fork",
+            "timestamp":"2026-09-19T00:00:00Z","message":{"role":"user","content":"forkbody"}});
+        let queued = serde_json::json!({"type":"queue-operation","timestamp":"2026-09-19T01:00:00Z"});
+        std::fs::write(&p, format!("{queued}\n{copied}\n")).unwrap();
+        let r = sref("fork", "fork", p.display().to_string());
+        let refresh = || sweep(&dir, vec![r.clone()], false, false).unwrap();
+        let counts = || cv_core::catalog::AffordanceTable::load().counts(&r).unwrap();
+        assert_eq!(refresh().changed, 1);
+        assert_eq!(counts().get(&cv_core::affordance::Kind::Fork).copied().unwrap_or(0), 0);
+        assert_eq!(refresh().changed, 0);
+        let sibling = sdir.join("source.jsonl");
+        std::fs::write(&sibling, format!("{copied}\n")).unwrap();
+        assert_eq!(refresh().changed, 1);
+        assert_eq!(counts().get(&cv_core::affordance::Kind::Fork), Some(&1));
+        assert_eq!(refresh().changed, 0);
+        let directory_mtime = std::fs::metadata(&sdir).unwrap().modified().unwrap();
+        std::fs::write(&sibling, format!("{copied}\n").replace("shared", "other!")).unwrap();
+        assert_eq!(std::fs::metadata(&sdir).unwrap().modified().unwrap(), directory_mtime);
+        assert_eq!(refresh().changed, 1);
+        assert_eq!(counts().get(&cv_core::affordance::Kind::Fork).copied().unwrap_or(0), 0);
+        assert_eq!(refresh().changed, 0);
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
     }
 
     #[test]
@@ -3044,7 +3165,11 @@ mod tests {
             .flat_map(|(a, b)| [a, b])
             .take(n)
             .map(|(h, src)| {
-                let p = dir.join(src.file_name().unwrap());
+                // Independent source projects: appending one session must not also change a
+                // sibling consulted by another session's conditional fork inference.
+                let project = dir.join(src.file_stem().unwrap());
+                std::fs::create_dir_all(&project).unwrap();
+                let p = project.join(src.file_name().unwrap());
                 let bytes = std::fs::read(&src).unwrap();
                 let r = cv_core::SessionRef {
                     id: p.file_stem().unwrap().to_string_lossy().into_owned(),

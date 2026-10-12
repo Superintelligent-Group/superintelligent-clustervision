@@ -478,7 +478,7 @@ struct CounterState {
     messages: usize,
     turns: usize,
     counts: std::collections::BTreeMap<String, u32>,
-    #[serde(default)]
+    #[serde(default = "crate::source::ReadSet::unrecorded")]
     dependencies: crate::source::ReadSet,
 }
 
@@ -677,6 +677,19 @@ mod tests {
         counting.dependency(&extra);
         let mut cp = Checkpoint::new(1);
         counting.checkpoint(&mut cp);
+        let mut legacy = cp.clone();
+        legacy
+            .state
+            .get_mut(COUNTER_LAYER)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("dependencies");
+        let legacy_state = legacy.get::<CounterState>(COUNTER_LAYER).unwrap();
+        assert!(!crate::source::unchanged(
+            &r,
+            &base.with_reads(&legacy_state.dependencies)
+        ));
         let state = cp.get::<CounterState>(COUNTER_LAYER).unwrap();
         let events_resumed = crate::events::EventSink::resume(&cp).unwrap();
         let mut keep = Keep::default();

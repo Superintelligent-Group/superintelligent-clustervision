@@ -228,11 +228,11 @@ impl Adapter for Claude {
                 #[cfg(unix)]
                 let _ = map.advise(memmap2::Advice::Sequential);
                 let s = stream_bytes_at(new_session(&r.id, Some(r.path.clone())), &map, 0, opts, sink);
-                return Ok(with_fork_source(s, &r.path));
+                return Ok(with_fork_source(s, &r.path, sink));
             }
         }
         let s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
-        Ok(with_fork_source(s, &r.path))
+        Ok(with_fork_source(s, &r.path, sink))
     }
 
     fn resume_format(&self) -> Option<u32> {
@@ -263,13 +263,13 @@ impl Adapter for Claude {
                     .and_then(|offset| map.get(offset..))
                     .unwrap_or(&[]);
                 let s = stream_bytes_at(session, bytes, from.offset, opts, sink);
-                return Ok(Some(with_fork_source(s, &r.path)));
+                return Ok(Some(with_fork_source(s, &r.path, sink)));
             }
         }
         file.seek(SeekFrom::Start(from.offset))
             .with_context(|| format!("seeking {}", r.path.display()))?;
         let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink);
-        Ok(Some(with_fork_source(s, &r.path)))
+        Ok(Some(with_fork_source(s, &r.path, sink)))
     }
 
     /// The task list (`TaskCreate`/`TaskUpdate`) Claude Code keeps beside the transcripts:
@@ -285,9 +285,9 @@ const RESUME_FORMAT: u32 = 1;
 
 /// A `--fork-session` copy names no source; the records it shares with one do ([`fork`]). Runs
 /// after every stream, whole or resumed, since it reads other files.
-fn with_fork_source(mut s: Session, path: &Path) -> Session {
+fn with_fork_source(mut s: Session, path: &Path, sink: &mut dyn MessageSink) -> Session {
     if s.lineage.parent.is_none() && s.lineage.forked_from.is_none() {
-        s.lineage.forked_from = fork::source(path);
+        s.lineage.forked_from = fork::source_tracked(path, sink);
     }
     s
 }

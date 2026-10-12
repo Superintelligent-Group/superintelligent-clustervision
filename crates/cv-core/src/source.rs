@@ -88,6 +88,15 @@ impl Default for ReadSet {
 }
 
 impl ReadSet {
+    /// A legacy checkpoint did not capture the dependencies of its reused prefix. It may be
+    /// replayed, but cannot establish cache freshness until a complete pass replaces it.
+    pub fn unrecorded() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            known: false,
+        }
+    }
+
     pub fn record(&mut self, path: &Path) {
         if !self.entries.contains_key(path) {
             match Probe::default().entry(path) {

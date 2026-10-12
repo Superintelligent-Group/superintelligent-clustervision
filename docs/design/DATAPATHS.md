@@ -121,8 +121,10 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
    each search index now keep separate canonical dependency metadata baselines, tied to the primary
    tuple. SQL output and stamps publish atomically; FTS invalidates its old baseline before changes
    and publishes a revalidated baseline after commit. Operation-local probes share file stats.
-   Known adapter-local sidecars, directory members and WAL files are covered; conditional Claude
-   fork siblings and adopted external tool-output pointers still need a consumer-recorded read set.
+   Known adapter-local sidecars, directory members and WAL files are covered. Consumers capture
+   conditional Claude fork siblings and resolved external output paths before reading them, including
+   absent files. Complete read sets survive prefix checkpoints and are revalidated at publication.
+   Version-1 dependency baselines reread once through normal refresh without an index rebuild.
 3. Current resume marks sample the first 4 KiB and the 4 KiB preceding the mark. This is not a
    proof that the entire prefix is unchanged. FTS now requires growth before using a mark, so
    same-size rewrites take a whole pass; inode replacement also rejects reuse. A rewrite followed by
@@ -217,7 +219,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [ ] Claude metadata scan and remaining rich/fallback record allocations.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
-- [ ] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
+- [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
 - [ ] Remaining document readers: SDK, exports and OpenSession; Continue/LM Studio selected records.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.

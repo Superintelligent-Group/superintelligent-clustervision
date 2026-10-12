@@ -78,22 +78,32 @@ fn holds(path: &Path, needle: &str) -> bool {
 
 /// The session id `path` was forked from, when its head says it is a fork and a sibling holds the
 /// records it copied.
+#[cfg(test)]
 pub(super) fn source(path: &Path) -> Option<String> {
+    source_tracked(path, &mut crate::stream::Discard)
+}
+
+pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> Option<String> {
     let me = head(path)?;
     if !me.copied {
         return None;
     }
     let at = me.at?;
     let dir = path.parent()?;
+    sink.dependency(dir); // A new/deleted eligible sibling can change the inferred source.
     let mut candidates: Vec<(DateTime<Utc>, PathBuf, Head)> = fs::read_dir(dir)
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p != path && p.is_file())
+        .filter(|p| p != path)
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.ends_with(".jsonl") && !n.ends_with(".flat.jsonl"))
+        })
+        .filter(|p| {
+            sink.dependency(p);
+            p.is_file()
         })
         // Live at the copied record's time: written since.
         .filter(|p| modified(p).is_some_and(|m| m >= at))

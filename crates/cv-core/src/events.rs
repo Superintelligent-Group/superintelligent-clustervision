@@ -133,7 +133,7 @@ const EVENTS_LAYER: &str = "events";
 struct EventState {
     msg_idx: usize,
     cwd: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default = "crate::source::ReadSet::unrecorded")]
     dependencies: crate::source::ReadSet,
 }
 
