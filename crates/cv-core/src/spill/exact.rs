@@ -9,6 +9,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 const MEMORY_BYTES: usize = 1024 * 1024;
 const SLOT_BYTES: u64 = 24;
 const COMPARE_BYTES: usize = 8192;
+const APPEND_BYTES: usize = 64 * 1024;
 
 pub(crate) struct ExactStrings {
     memory: HashSet<String>,
@@ -193,6 +194,8 @@ struct Disk {
     capacity: u64,
     len: u64,
     end: u64,
+    flushed: u64,
+    pending: Vec<u8>,
 }
 impl Disk {
     fn new(len: usize) -> Result<Self> {
@@ -211,6 +214,8 @@ impl Disk {
             capacity,
             len: 0,
             end: 0,
+            flushed: 0,
+            pending: Vec::with_capacity(APPEND_BYTES),
         })
     }
     fn find(&mut self, text: &[u8], hash: u64) -> Result<(u64, bool)> {
@@ -228,17 +233,59 @@ impl Disk {
         bail!("exact set index is full")
     }
     fn equal(&mut self, slot: Slot, text: &[u8]) -> Result<bool> {
-        self.data.seek(SeekFrom::Start(slot.offset - 1))?;
-        let mut scratch = [0; COMPARE_BYTES];
-        for chunk in text.chunks(COMPARE_BYTES) {
-            self.data
-                .read_exact(&mut scratch[..chunk.len()])
-                .context("reading exact set key")?;
-            if chunk != &scratch[..chunk.len()] {
-                return Ok(false);
+        if text.is_empty() {
+            return Ok(true);
+        }
+        let start = slot.offset - 1;
+        let disk_len = self.flushed.saturating_sub(start).min(text.len() as u64) as usize;
+        if disk_len > 0 {
+            self.data.seek(SeekFrom::Start(start))?;
+            let mut scratch = [0; COMPARE_BYTES];
+            for chunk in text[..disk_len].chunks(COMPARE_BYTES) {
+                self.data
+                    .read_exact(&mut scratch[..chunk.len()])
+                    .context("reading exact set key")?;
+                if chunk != &scratch[..chunk.len()] {
+                    return Ok(false);
+                }
             }
         }
-        Ok(true)
+        if disk_len == text.len() {
+            return Ok(true);
+        }
+        let offset =
+            usize::try_from(start + disk_len as u64 - self.flushed).context("exact set pending offset overflow")?;
+        let end = offset
+            .checked_add(text.len() - disk_len)
+            .context("exact set pending size overflow")?;
+        let pending = self.pending.get(offset..end).context("invalid exact set key range")?;
+        Ok(pending == &text[disk_len..])
+    }
+    fn append(&mut self, mut text: &[u8]) -> Result<()> {
+        while !text.is_empty() {
+            // Large keys pass directly to the append file; small consecutive IDs share a buffer
+            // and repeated recent IDs compare against those exact bytes without another syscall.
+            if self.pending.is_empty() && text.len() >= APPEND_BYTES {
+                let count = text.len() / APPEND_BYTES * APPEND_BYTES;
+                self.data.seek(SeekFrom::Start(self.flushed))?;
+                self.data.write_all(&text[..count]).context("writing exact set key")?;
+                self.flushed += count as u64;
+                text = &text[count..];
+                continue;
+            }
+            let count = text.len().min(APPEND_BYTES - self.pending.len());
+            self.pending.extend_from_slice(&text[..count]);
+            text = &text[count..];
+            if self.pending.len() == APPEND_BYTES {
+                self.data.seek(SeekFrom::Start(self.flushed))?;
+                self.data
+                    .write_all(&self.pending)
+                    .context("writing exact set key window")?;
+                self.flushed += self.pending.len() as u64;
+                self.pending.clear();
+            }
+        }
+        Ok(())
     }
     fn insert(&mut self, text: &[u8], hash: u64) -> Result<bool> {
         let (mut bucket, present) = self.find(text, hash)?;
@@ -249,10 +296,10 @@ impl Disk {
             self.grow()?;
             bucket = self.find(text, hash)?.0;
         }
-        self.data.seek(SeekFrom::Start(self.end))?;
-        self.data.write_all(text).context("writing exact set key")?;
         let offset = self.end.checked_add(1).context("spill offset overflow")?;
-        self.end = self.end.checked_add(text.len() as u64).context("spill size overflow")?;
+        let end = self.end.checked_add(text.len() as u64).context("spill size overflow")?;
+        self.append(text)?;
+        self.end = end;
         Slot {
             hash,
             offset,
@@ -338,6 +385,27 @@ mod tests {
                     .unwrap()
                     .1
             );
+        }
+    }
+    #[test]
+    fn exact_comparison_crosses_flushed_and_pending_boundaries() {
+        let mut disk = Disk::new(0).unwrap();
+        for (i, len) in [0, APPEND_BYTES - 3, 11, APPEND_BYTES * 2 + 9, 2]
+            .into_iter()
+            .enumerate()
+        {
+            let key = vec![i as u8; len];
+            assert!(disk.insert(&key, i as u64).unwrap());
+            assert!(!disk.insert(&key, i as u64).unwrap());
+        }
+        for (i, len) in [0, APPEND_BYTES - 3, 11, APPEND_BYTES * 2 + 9, 2]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(disk.find(&vec![i as u8; len], i as u64).unwrap().1);
+            if len > 0 {
+                assert!(!disk.find(&vec![99; len], i as u64).unwrap().1);
+            }
         }
     }
     #[test]
