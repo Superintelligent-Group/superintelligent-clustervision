@@ -1052,16 +1052,28 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
         .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
         .context("running search")?;
 
+    // Equal scores rank by session id, not by where a doc happens to sit in the segments (which
+    // depends on how, and in what order, the index was written).
+    let mut ranked = Vec::with_capacity(top.len());
+    for (score, addr) in top {
+        let doc: TantivyDocument = searcher.doc(addr).context("loading stored doc")?;
+        let id = doc
+            .get_first(f.id)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        ranked.push((score, id, doc));
+    }
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
     let mut hits = Vec::with_capacity(limit);
     let mut seen: HashSet<String> = HashSet::new();
-    for (score, addr) in top {
+    for (score, id, doc) in ranked {
         if hits.len() >= limit {
             break;
         }
-        let doc: TantivyDocument = searcher.doc(addr).context("loading stored doc")?;
         let get_str =
             |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
-        let id = get_str(f.id).unwrap_or_default();
         if !seen.insert(id.clone()) {
             continue; // another chunk of a session we already have
         }
@@ -1958,6 +1970,26 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Equal scores rank by session id, whatever order the index was written in.
+    #[test]
+    fn ties_rank_by_session_id_not_by_write_order() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let refs: Vec<_> = ["zz", "aa", "mm"]
+            .iter()
+            .map(|id| sref(id, "t", write_claude(&sdir, id, "zqtied identical body")))
+            .collect();
+        index_refs(&dir, &refs, false).unwrap();
+        let ids: Vec<String> = text_search(&dir, "zqtied", 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(ids, ["aa", "mm", "zz"]);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// Regression (B2): an FTS-fresh sub-agent whose *catalog* is stale (e.g. first run after an
