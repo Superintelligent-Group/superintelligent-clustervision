@@ -1374,6 +1374,11 @@ impl<'w> ChunkSink<'w> {
                 self.push_chunk("\n");
             }
             Block::ToolUse { name, input, .. } => {
+                if let cv_core::json::Json::Source(range) = input {
+                    if range.path() != Path::new(&self.path) {
+                        self.dependencies.record(range.path());
+                    }
+                }
                 self.push_chunk(name);
                 self.push_chunk(" ");
                 // Canonical JSON streams into bounded body documents without owning a value tree.
