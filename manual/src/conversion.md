@@ -46,7 +46,7 @@ These are the harnesses `emit()` can currently write — the authoritative list 
 | Cline | `cline` | per-task `api_conversation_history.json` |
 | Roo Code | `roo` | Cline-format per-task dir |
 | Continue | `continue` | `~/.continue/sessions` JSON |
-| Qwen Code | `qwen` | reuses Gemini's `ConversationRecord` emitter |
+| Qwen Code | `qwen` | 0.25 session JSONL, `~/.qwen/projects/<cwd>/chats/<id>.jsonl` (`--out` takes a Qwen home or its `projects/`); needs a cwd |
 
 > The other nine parseable harnesses — **Cursor**, **Goose**, **Zed**, **Devin CLI**, **Kimi Code**, **OpenSession**, **Kimi CLI** (its
 > `~/.kimi` store is frozen; kimi-cli migrates it to `~/.kimi-code` on open), and the

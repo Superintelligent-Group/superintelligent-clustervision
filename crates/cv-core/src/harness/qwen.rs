@@ -26,6 +26,9 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+mod emit;
+pub use emit::emit;
+
 pub struct Qwen {
     /// `~/.qwen/tmp`: the gemini-cli-shaped recordings.
     root: Option<PathBuf>,

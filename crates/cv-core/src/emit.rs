@@ -134,8 +134,9 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
         Harness::Cline => crate::harness::cline::emit,
         Harness::Roo => crate::harness::roo::emit,
         Harness::Continue => crate::harness::continuedev::emit,
-        // Qwen Code stores the same ConversationRecord shape Gemini does, so it reuses that emitter.
-        Harness::Qwen => crate::harness::gemini::emit,
+        // Qwen Code 0.25's session JSONL (`~/.qwen/projects/<cwd>/chats/<id>.jsonl`), not the
+        // gemini-cli recording it no longer reads.
+        Harness::Qwen => crate::harness::qwen::emit,
         // Parse-only harnesses (Cursor, Goose, desktop apps, …) aren't conversion targets. Kimi
         // (`~/.kimi`) is not one either: kimi-cli froze that store in 2026-06 and migrates it to
         // `~/.kimi-code` on open, so a session written there was a port to nowhere.

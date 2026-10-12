@@ -83,7 +83,6 @@ pub(super) fn reparse_emitted(target: Harness, result: &EmitResult, opts: &Parse
             &crate::harness::continuedev::Continue::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
         ),
-        // Qwen reuses Gemini's emitter (same record shape) but its own parser.
         Harness::Qwen => collect(
             &crate::harness::qwen::Qwen::detect(),
             &sref(result.new_id.clone(), result.path.clone()),
@@ -427,9 +426,9 @@ pub(super) fn target_holds(t: Harness, field: &str) -> bool {
         "thinking_signature" => matches!(t, Claude | OpenCode | OpenClaw),
         "thinking_encrypted" => matches!(t, Codex | Grok | Hermes),
         "image" => !matches!(t, Grok | LmStudio),
-        "file" => matches!(t, Claude | OpenCode | Gemini),
+        "file" => matches!(t, Claude | OpenCode | Gemini | Qwen),
         "tool_use" | "tool_result" => !matches!(t, LmStudio),
-        "tool_name" => matches!(t, OpenClaw | Hermes | Codex | Gemini | OpenCode),
+        "tool_name" => matches!(t, OpenClaw | Hermes | Codex | Gemini | OpenCode | Qwen),
         // Hermes has no slot for a tool result's error flag. Its `messages` table (schema v30,
         // `hermes_state_common.py` `SCHEMA_SQL`) is
         //   id, session_id, role, content, tool_call_id, tool_calls, tool_name,
@@ -451,7 +450,7 @@ pub(super) fn target_holds(t: Harness, field: &str) -> bool {
         // Grok's `chat_history.jsonl` turns carry no per-message timestamp; LM Studio none either.
         "timestamp" => !matches!(t, LmStudio | Grok),
         // Per-message ids: kept by the stores that thread by a stable id.
-        "id" => matches!(t, Claude | OpenCode | OpenClaw | Gemini | Kimi | Cline | Roo),
+        "id" => matches!(t, Claude | OpenCode | OpenClaw | Gemini | Kimi | Cline | Roo | Qwen),
         // A TOOL turn's own id/timestamp, which is a narrower question than the turn above. Where
         // the store keeps a tool result INSIDE its originating call's record ([`folds_tool_result`])
         // the tool turn has no record of its own, so there is nowhere for an id or a timestamp to

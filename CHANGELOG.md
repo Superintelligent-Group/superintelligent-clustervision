@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv port --harness qwen` writes Qwen Code 0.25 session JSONL under `~/.qwen/projects`; it wrote the gemini-cli shape 0.25 no longer reads.
 - Qwen Code 0.25: sessions in `~/.qwen/projects/*/chats/*.jsonl` and their sub-agent transcripts are read; cv previously found none.
 - Gemini: tool results and thoughts no longer appear twice after a resume, and a resumed 0.46 session is no longer hidden by its empty twin.
 - Gemini: hook context is its own turn; `invoke_agent` calls are sub-agent spawns and returns.
