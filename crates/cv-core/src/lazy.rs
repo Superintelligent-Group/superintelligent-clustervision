@@ -647,6 +647,30 @@ pub(crate) fn decode_validated_json_body_until(
 }
 
 fn decode_json_body_control(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str) -> bool) -> Result<bool, ()> {
+    json_body_windows(reader, &mut |quoted| {
+        let mut decoder = serde_json::Deserializer::from_slice(quoted);
+        let keep_going = decoder.deserialize_str(JsonWindow(f)).map_err(|_| ())?;
+        decoder.end().map_err(|_| ())?;
+        Ok(keep_going)
+    })
+}
+
+/// Validate string syntax in bounded windows without requiring Unicode surrogate pairs.
+/// Like serde's IgnoredAny/RawValue, this accepts lone UTF-16 escapes. Value-compatible
+/// acceptance belongs to a separate boundary; callbacks never receive this validation view.
+#[cfg(any(not(feature = "mmap"), test))]
+pub(crate) fn validate_json_body_syntax(reader: &mut impl std::io::BufRead) -> Result<(), ()> {
+    json_body_windows(reader, &mut |quoted| {
+        serde_json::from_slice::<&serde_json::value::RawValue>(quoted).map_err(|_| ())?;
+        Ok(true)
+    })
+    .map(|_| ())
+}
+
+fn json_body_windows(
+    reader: &mut impl std::io::BufRead,
+    visit: &mut impl FnMut(&[u8]) -> Result<bool, ()>,
+) -> Result<bool, ()> {
     const WINDOW: usize = 64 * 1024;
     let mut raw = Vec::with_capacity(WINDOW);
     let mut quoted = Vec::with_capacity(WINDOW + 2);
@@ -686,10 +710,7 @@ fn decode_json_body_control(reader: &mut impl std::io::BufRead, f: &mut impl FnM
         quoted.push(b'"');
         quoted.extend_from_slice(&raw[..end]);
         quoted.push(b'"');
-        let mut decoder = serde_json::Deserializer::from_slice(&quoted);
-        let keep_going = decoder.deserialize_str(JsonWindow(f)).map_err(|_| ())?;
-        decoder.end().map_err(|_| ())?;
-        if !keep_going {
+        if !visit(&quoted)? {
             return Ok(has_escape);
         }
         raw.drain(..end);

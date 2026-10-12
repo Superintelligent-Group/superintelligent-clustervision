@@ -285,16 +285,99 @@ fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
     }
 }
 
+/// A grammar-only view: quoted tokens are independently validated in bounded windows, then
+/// represented by an empty string. The original source and all consumer values remain intact.
+/// Keeping punctuation, numbers and literals lets serde retain authority over JSON grammar.
+struct SyntaxReader<'a> {
+    source: &'a RangeSource,
+    cursor: Cursor<'a>,
+    plain_left: usize,
+    quotes_left: usize,
+    invalid_string: bool,
+}
+impl<'a> SyntaxReader<'a> {
+    fn new(source: &'a RangeSource, range: Range) -> io::Result<Self> {
+        Ok(Self {
+            source,
+            cursor: source.cursor(range)?,
+            plain_left: 0,
+            quotes_left: 0,
+            invalid_string: false,
+        })
+    }
+}
+impl Read for SyntaxReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.quotes_left > 0 {
+            let n = self.quotes_left.min(output.len());
+            output[..n].fill(b'"');
+            self.quotes_left -= n;
+            return Ok(n);
+        }
+        if self.plain_left == 0 {
+            let bytes = self.cursor.fill_buf()?;
+            if bytes.is_empty() {
+                return Ok(0);
+            }
+            self.plain_left = memchr::memchr(b'"', bytes).unwrap_or(bytes.len());
+            if self.plain_left == 0 {
+                let string = match self.cursor.string() {
+                    Ok(string) => string,
+                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                        self.invalid_string = true;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let valid = if let Some(bytes) = self.cursor.borrow_range(string) {
+                    serde_json::from_slice::<&serde_json::value::RawValue>(bytes).is_ok()
+                } else {
+                    let mut body = self.source.cursor(Range {
+                        offset: string.offset + 1,
+                        len: string.len - 2,
+                    })?;
+                    let valid = crate::lazy::validate_json_body_syntax(&mut body).is_ok();
+                    if let Some(kind) = body.read_error {
+                        return Err(io::Error::new(kind, "reading JSON string syntax"));
+                    }
+                    valid
+                };
+                if !valid {
+                    self.invalid_string = true;
+                    return Err(invalid("invalid JSON string syntax"));
+                }
+                self.quotes_left = 2;
+                return self.read(output);
+            }
+        }
+        let bytes = self.cursor.fill_buf()?;
+        let n = output.len().min(self.plain_left).min(bytes.len());
+        output[..n].copy_from_slice(&bytes[..n]);
+        self.cursor.consume(n);
+        self.plain_left -= n;
+        Ok(n)
+    }
+}
+
 impl RangeSource {
     /// Validate grammar and whole-range UTF-8 once. Export archives use this boundary before
     /// validating individual conversations with Value's independently reset recursion budget.
     pub fn syntax(&self, range: Range) -> Result<bool> {
         use serde::Deserialize;
         self.check_identity()?;
-        let mut decoder = serde_json::Deserializer::from_reader(self.cursor(range)?);
-        let result = serde::de::IgnoredAny::deserialize(&mut decoder).and_then(|_| decoder.end());
+        let mut reader = SyntaxReader::new(self, range)?;
+        let result = {
+            let mut decoder = serde_json::Deserializer::from_reader(&mut reader);
+            serde::de::IgnoredAny::deserialize(&mut decoder).and_then(|_| decoder.end())
+        };
         if let Err(error) = result {
             self.check_identity()?;
+            if reader.invalid_string {
+                return Ok(false);
+            }
             if error.is_io() {
                 return Err(error.into());
             }
@@ -745,6 +828,91 @@ mod tests {
         assert!(source.check_identity().is_err());
         let mut truncated = source.cursor(source.range()).unwrap();
         assert!(truncated.read_to_end(&mut Vec::new()).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod syntax_tests {
+    use super::*;
+    use serde::Deserialize;
+
+    fn oracle(bytes: &[u8]) -> bool {
+        let mut parser = serde_json::Deserializer::from_slice(bytes);
+        serde::de::IgnoredAny::deserialize(&mut parser)
+            .and_then(|_| parser.end())
+            .is_ok()
+            && std::str::from_utf8(bytes).is_ok()
+    }
+
+    #[test]
+    fn grammar_reader_preserves_a_late_io_failure() {
+        let path = std::env::temp_dir().join(format!("cv-syntax-io-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, format!("[null,\"{}\"]", "a".repeat(WINDOW * 3))).unwrap();
+        let source = RangeSource::open(&path).unwrap();
+        let mut reader = SyntaxReader::new(&source, source.range()).unwrap();
+        assert_eq!(reader.read(&mut [0; 6]).unwrap(), 6);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(1)
+            .unwrap();
+        let mut parser = serde_json::Deserializer::from_reader(&mut reader);
+        let error = serde::de::IgnoredAny::deserialize(&mut parser).unwrap_err();
+        assert!(error.is_io());
+        assert!(!reader.invalid_string);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_string_grammar_matches_ignored_any_without_value_narrowing() {
+        let path = std::env::temp_dir().join(format!("cv-range-syntax-{}", uuid::Uuid::new_v4()));
+        let mut cases = vec![
+            br#"{"a":"x","b":[true,null,-1.2e3],"a":2}"#.to_vec(),
+            br#"{"\ud800":"\udc00","a":1e9999}"#.to_vec(),
+            br#"["\ud800x","\udc00","\ud800\u0041"]"#.to_vec(),
+            br#"{"x" "y"}"#.to_vec(),
+            br#"["a""b"]"#.to_vec(),
+            br#"[true,]"#.to_vec(),
+            br#"{1:"x"}"#.to_vec(),
+            br#""abc\q""#.to_vec(),
+            br#""abc\u00xz""#.to_vec(),
+            b"\"invalid\xff\"".to_vec(),
+            b"\"raw\ncontrol\"".to_vec(),
+            b"\"unterminated".to_vec(),
+        ];
+        for delta in 0..16 {
+            let pad = "a".repeat(WINDOW - 16 + delta);
+            for tail in [
+                r"\ud800",
+                r"\udc00",
+                r"\ud800\udc00",
+                r"\ud800x",
+                r#"\\\""#,
+                "é😀",
+                r"\u000x",
+                "\\",
+            ] {
+                cases.push(format!("[\"{pad}{tail}\",null]").into_bytes());
+            }
+        }
+        for token in [b"null".as_slice(), b"true", b"1.0e10", br#""\ud800""#, br#"{"a":[1]}"#] {
+            for end in 0..=token.len() {
+                cases.push(token[..end].to_vec());
+            }
+        }
+        for bytes in cases {
+            std::fs::write(&path, &bytes).unwrap();
+            let source = RangeSource::open(&path).unwrap();
+            assert_eq!(
+                source.syntax(source.range()).unwrap(),
+                oracle(&bytes),
+                "{} bytes: {:?}",
+                bytes.len(),
+                &bytes[bytes.len().saturating_sub(32)..]
+            );
+        }
         std::fs::remove_file(path).unwrap();
     }
 }
