@@ -1,5 +1,7 @@
 //! Bounded semantic body and label projections; no embedding model is needed to test them.
-use cv_core::{Block, Flow, Message, MessageSink, Resolver, Role, Text};
+use cv_core::{Block, Flow, Message, MessageSink, Resolver, Role};
+#[cfg(test)]
+use cv_core::Text;
 
 const EMBED_HEAD_BYTES: usize = 64 * 1024;
 const FIRST_USER_RAW_HEAD: u64 = 512;

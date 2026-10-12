@@ -524,7 +524,7 @@ pub fn collect(adapter: &dyn Adapter, r: &SessionRef) -> Result<Session> {
     let mut session = collect_with(adapter, r, &ParseOptions::full())?;
     // Full-fidelity parse: resolve any lazy content spans so the returned `Session` owns all its
     // content inline (safe for `--json` serialization, cross-harness emit, `Deref` reads, etc.).
-    session.materialize();
+    session.materialize()?;
     Ok(session)
 }
 

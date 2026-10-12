@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::harness::claude::{subagent_end, task_notices, ApiErrorNotice, SubagentEnd, TaskNotice};
 use crate::ir::{Block, Message, MessageKind, Role, SessionRef, Usage};
