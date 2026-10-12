@@ -37,6 +37,7 @@
 //! Harness-specific facts (rate limits, turn ids, the structured `item`, swarm routing) live in
 //! `extra["codex"]`, the only bag this adapter writes; images become `Block::Image` references.
 
+mod detect;
 mod emit;
 mod lean;
 pub use emit::emit;
@@ -193,9 +194,8 @@ impl Adapter for Codex {
         }
         // Modern `.jsonl` rollout: stream it. `has_events` is a whole-file property (do NL text
         // come from `event_msg`s or `response_item`s?), so we make a cheap first pass to detect it,
-        // then a second streaming pass that emits one record's messages at a time. Both passes are
-        // O(largest line); the previous `parse_str` collected the entire file into a `Vec<Value>`.
-        let has_events = detect_has_events(open_rollout(&r.path)?);
+        // then a second streaming pass that emits one record's messages at a time. The native
+        // lazy path borrows both passes from one mapping, avoiding a giant private line buffer.
         // Span path (partial-access / chunked index): mmap the file and emit a lazy `Span` for a giant
         // `function_call_output` string output instead of reading/materializing the 100s-of-MB line.
         // Never for a compressed rollout — a span can't point into zstd frames.
@@ -211,6 +211,7 @@ impl Adapter for Codex {
                     // that stops at the first hit.
                     #[cfg(unix)]
                     let _ = map.advise(memmap2::Advice::Sequential);
+                    let has_events = detect_has_events_bytes(&map);
                     return Ok(stream_jsonl_spans(
                         &r.id,
                         &map,
@@ -222,6 +223,7 @@ impl Adapter for Codex {
                 }
             }
         }
+        let has_events = detect_has_events(open_rollout(&r.path)?);
         Ok(stream_jsonl(
             &r.id,
             open_rollout(&r.path)?,
@@ -255,12 +257,12 @@ impl Adapter for Codex {
             let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
                 return Ok(None);
             };
-            if detect_has_events(open_rollout(&r.path)?) != state.has_events {
-                return Ok(None);
-            }
             let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
             let map = unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mapping {}", r.path.display()))?;
             if (map.len() as u64) < from.offset {
+                return Ok(None);
+            }
+            if detect_has_events_bytes(&map) != state.has_events {
                 return Ok(None);
             }
             #[cfg(unix)]
@@ -549,7 +551,11 @@ impl EventDetector {
 
     /// Feed one record; returns [`Flow::Stop`] once the verdict is decided.
     fn feed(&mut self, v: &Value) -> Flow {
-        if is_nl_event(v) {
+        self.feed_flags(is_nl_event(v), is_nl_response_message(v))
+    }
+
+    fn feed_flags(&mut self, event: bool, response: bool) -> Flow {
+        if event {
             self.found = true;
             return Flow::Stop;
         }
@@ -558,7 +564,7 @@ impl EventDetector {
             if *n > Self::LOOKAHEAD {
                 return Flow::Stop; // old format: NL response_item with no event_msg echo
             }
-        } else if is_nl_response_message(v) {
+        } else if response {
             self.past_first_nl_resp = Some(0);
         }
         Flow::Continue
@@ -569,7 +575,31 @@ impl EventDetector {
 /// [`EventDetector`] for the bounding rule and its corpus-measured safety margin.)
 fn detect_has_events<R: BufRead>(reader: R) -> bool {
     let mut det = EventDetector::default();
-    super::for_each_json_line(reader, |v| det.feed(&v));
+    // Retain the buffered/no-mmap transport contract, but never build its giant output Values.
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if let Some((event, response)) = detect::line(line.as_bytes()) {
+            if det.feed_flags(event, response) == Flow::Stop {
+                break;
+            }
+        }
+    }
+    det.found
+}
+
+#[cfg(feature = "mmap")]
+fn detect_has_events_bytes(bytes: &[u8]) -> bool {
+    let mut det = EventDetector::default();
+    let mut start = 0;
+    for end in memchr::memchr_iter(b'\n', bytes).chain(std::iter::once(bytes.len())) {
+        let line = &bytes[start..end];
+        start = end + 1;
+        if let Some((event, response)) = detect::line(line) {
+            if det.feed_flags(event, response) == Flow::Stop {
+                break;
+            }
+        }
+    }
     det.found
 }
 
@@ -886,7 +916,6 @@ fn giant_fco_span(v: &Value, raw: &RawValue, slice: &[u8], base_off: u64) -> Opt
 
 /// Raw byte length of an ASCII prefix in a validated JSON string body. ASCII characters can
 /// be literal or `\u00xx`; no whole-output decoding is needed to recognize our error marker.
-#[cfg(feature = "mmap")]
 fn json_ascii_prefix(raw: &[u8], prefix: &[u8]) -> Option<usize> {
     let mut at = 0;
     for &expected in prefix {
