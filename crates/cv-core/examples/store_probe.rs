@@ -347,7 +347,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 let mut sink = cv_core::events::EventSink::new(r.cwd.clone());
                 adapter.try_stream(r, &opts, &mut cv_core::TeeSink::new(&mut count, &mut sink))?;
                 let source = source.with_reads(sink.dependencies());
-                let events = sink.into_events();
+                let events = sink.into_events()?;
                 cv_core::events::record_from_with_source(r, 0, &events, &source, &Default::default());
                 (events.len(), 0)
             };
@@ -408,7 +408,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 // per-record checkpoints, because the forest reader requested them too.
                 let mut sink = cv_core::events::EventSink::new(r.cwd.clone());
                 adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
-                cv_core::tools::ToolHistogram::from_events(sink.events())
+                cv_core::tools::ToolHistogram::from_events(&sink.into_events()?)
             };
             out.detail = serde_json::to_value(histogram)?;
         }
@@ -416,7 +416,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let mut report = cv_core::doctor::Report::default();
             let mut pass = report.session(Some(r.path.clone()));
             adapter.try_stream(r, &opts, &mut pass)?;
-            pass.finish();
+            pass.finish()?;
             out.messages = report.messages as usize;
             out.detail = report.to_json();
         }
@@ -451,7 +451,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             }
             out.messages = s.messages.len();
             if a.operation == "affordances" {
-                out.rows = cv_core::affordance::of_session(&s);
+                out.rows = cv_core::affordance::of_session(&s)?;
                 out.rows.extend(adapter.store_affordances(r));
                 out.detail = affordance_detail(&out.rows, a.hash_output)?;
             }
