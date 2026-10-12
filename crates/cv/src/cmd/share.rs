@@ -49,7 +49,7 @@ pub(crate) fn cmd_share(id: &str, harness: Option<String>, out: Option<PathBuf>,
         count: 0,
         result: Ok(()),
     };
-    adapter.stream(&r, &ParseOptions::bulk(), &mut sink)?;
+    adapter.try_stream(&r, &ParseOptions::bulk(), &mut sink)?;
     sink.finish(env!("CARGO_PKG_VERSION"));
 
     let count = sink.count;
@@ -149,6 +149,18 @@ impl<W: Write> ShareSink<'_, W> {
 }
 
 impl<W: Write> MessageSink for ShareSink<'_, W> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        if self.result.is_err() {
+            std::mem::replace(
+                &mut self.result,
+                Err(std::io::Error::other("share output has already failed")),
+            )
+            .err()
+            .map(Into::into)
+        } else {
+            None
+        }
+    }
     fn meta(&mut self, s: &Session) {
         // Parsed metadata beats discovery-time guesses (same contract as `cv show`'s sink).
         self.title = s.title.clone();

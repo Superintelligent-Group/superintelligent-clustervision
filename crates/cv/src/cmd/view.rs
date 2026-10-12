@@ -317,6 +317,9 @@ fn session_json_window(
         }
     }
     impl cv_core::MessageSink for Selection {
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.error.take().map(Into::into)
+        }
         fn message(&mut self, m: Message) -> cv_core::Flow {
             let index = self.seen;
             self.seen += 1;
@@ -1105,6 +1108,18 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
         }
     }
     impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> String> MessageSink for Sink<'_, W, H, R> {
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            if self.result.is_err() {
+                std::mem::replace(
+                    &mut self.result,
+                    Err(std::io::Error::other("view output has already failed")),
+                )
+                .err()
+                .map(Into::into)
+            } else {
+                None
+            }
+        }
         fn meta(&mut self, s: &Session) {
             // Authoritative *parsed* session metadata, delivered before the body by the bridge
             // `stream` and by adapters that call `sink.meta` (e.g. codex). The parsed title overrides
