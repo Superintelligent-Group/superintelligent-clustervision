@@ -19,10 +19,10 @@ Fourteen words, snake_case, each a value of `cv_core::affordance::Kind`:
 | `goal` | a standing objective the harness tracks | `create`, `update`, `read`, `state` |
 | `schedule` | cron jobs, wakeups, loops, heartbeats | `create`, `delete`, `list`, `fire`, `state` |
 | `background_job` | a shell or task left running | `start`, `read`, `stop`, `complete` |
-| `subagent_spawn` | a sub-agent launched here | `spawn` |
+| `subagent_spawn` | a sub-agent launched here | `spawn`, `state` (a registry's record of the run) |
 | `subagent_return` | a sub-agent's result delivered | `return` |
 | `skill` | a skill loaded or managed | `load`, `manage` |
-| `hook` | a user hook's output reached the model | `output` |
+| `hook` | a user hook's output reached the model (or, where no output is kept, ran) | `output`, `run` |
 | `question` | the agent asked the person | `ask` |
 | `approval` | a permission request and its outcome, or the approval mode the session ran under | `ask`, `deny`, `state` (the mode) |
 | `checkpoint` | a restorable point (file snapshot, shadow-git commit, saved chat) and its restore | `create`, `restore`, `state` (a tally) |
@@ -115,18 +115,18 @@ row counted by an older view is "not counted", so adding a kind or a reader neve
 
 | kind | tools and records, by harness |
 |---|---|
-| plan | Claude `TodoWrite` `TaskCreate` `TaskUpdate` `TaskList` `TaskGet` `EnterPlanMode` `ExitPlanMode` + `tasks/<sid>/*.json` (store); Codex `update_plan`; Grok `todo_write` `enter_plan_mode` `exit_plan_mode` + `plan.json` (store); OpenCode `todowrite` `todoread` + `todo` table (store); Gemini `write_todos` `tracker_*` `enter_plan_mode` `exit_plan_mode` + `tracker/*.json`, `plans/*.md` (store); Qwen `todo_write` `task_create` `task_update` `task_list` `exit_plan_mode`; Goose `todo__todo_write` + `extension_data["todo.v0"]` (store); Hermes `todo` `todo_list`; Kimi `SetTodoList` `EnterPlanMode` `ExitPlanMode`; Kimi Code `TodoList` `EnterPlanMode` `ExitPlanMode`; Continue `Checklist`; Roo `update_todo_list`; Devin `todo_write` |
+| plan | Claude `TodoWrite` `TaskCreate` `TaskUpdate` `TaskList` `TaskGet` `EnterPlanMode` `ExitPlanMode` + `tasks/<sid>/*.json` (store); Codex `update_plan`; Grok `todo_write` `enter_plan_mode` `exit_plan_mode` + `plan.json` (store); OpenCode `todowrite` `todoread` + `todo` table (store); Gemini `write_todos` `tracker_*` `enter_plan_mode` `exit_plan_mode` + `tracker/*.json`, `plans/*.md` (store); Qwen `todo_write` `task_create` `task_update` `task_list` `exit_plan_mode`; Goose `todo__todo_write` + `extension_data["todo.v0"]` (store); Hermes `todo` `todo_list`; Kimi `SetTodoList` `EnterPlanMode` `ExitPlanMode` + `state.json` `todos` (store); Kimi Code `TodoList` `EnterPlanMode` `ExitPlanMode`; Continue `Checklist`; Roo `update_todo_list`; Devin `todo_write` |
 | goal | Kimi Code `CreateGoal` `UpdateGoal` `GetGoal` `SetGoalBudget`; Qwen `get_goal` `update_goal`; Hermes `state_meta` `goal:<sid>` (store) |
-| schedule | Claude `CronCreate` `CronList` `CronDelete` `ScheduleWakeup`; Grok `scheduler_create` `scheduler_list` `scheduler_delete`; Kimi Code `CronCreate` `CronList` `CronDelete`; Qwen `cron_create` `cron_list` `cron_delete` `loop_wakeup`; Hermes `cronjob` `cronjob_manage` + `state_meta` `loop:` / `heartbeat:` (store); OpenClaw `cron` `automations`; fires: every `Origin::Scheduler` turn (Claude wakeups, OpenClaw cron runs, Goose scheduled sessions) |
+| schedule | Claude `CronCreate` `CronList` `CronDelete` `ScheduleWakeup`; Grok `scheduler_create` `scheduler_list` `scheduler_delete`; Kimi Code `CronCreate` `CronList` `CronDelete`; Qwen `cron_create` `cron_list` `cron_delete` `loop_wakeup` + `tmp/<sha256(cwd)>/scheduled_tasks.json` (store); Hermes `cronjob` `cronjob_manage` + `state_meta` `loop:` / `heartbeat:` (store); OpenClaw `cron` `automations` + `cron/jobs.json` / `cron_jobs` (store); Cline `schedule_executions` / `cron_runs` (store fires); fires: every `Origin::Scheduler` turn (Claude wakeups, OpenClaw cron runs, Goose scheduled sessions) |
 | background_job | Claude `Bash{run_in_background}` `BashOutput` `KillShell` `Monitor` + command `<task-notification>`; Grok `run_terminal_command{background}` `get_command_or_subagent_output` `monitor` `kill_command_or_subagent`; Gemini/Qwen `run_shell_command{is_background}`; Hermes `terminal{background}` `process` `process_manage` + `process_complete`; OpenClaw `process`; Kimi `TaskOutput` `TaskStop` `TaskList` + `<notification>`; Kimi Code `TaskOutput` `TaskStop` `TaskList` `WaitFor` + origin `task`; Continue `CheckBackgroundJob` |
-| subagent_spawn / _return | Claude `Agent` `Task` `Workflow` (+ agent `<task-notification>` returns); OpenCode `task` `subagent`; Gemini `invoke_agent`; Qwen `agent`; Hermes `delegate_task`; OpenClaw `sessions_spawn`; Goose `delegate`; Grok `spawn_subagent`; Kimi `Agent`; Kimi Code `Agent` `AgentSwarm` (records); Roo `new_task`; Cline `spawn_agent` `team_spawn_teammate`; Devin `run_subagent`; Continue `Subagent`; Codex `SubAgentActivity` records |
+| subagent_spawn / _return | Claude `Agent` `Task` `Workflow` (+ agent `<task-notification>` returns); OpenCode `task` `subagent`; Gemini `invoke_agent`; Qwen `agent`; Hermes `delegate_task`; OpenClaw `sessions_spawn`; Goose `delegate`; Grok `spawn_subagent`; Kimi `Agent`; Kimi Code `Agent` `AgentSwarm` (records); Roo `new_task`; Cline `spawn_agent` `team_spawn_teammate` + `teams.db` `team_events` (store); OpenClaw `subagents/runs.json` / `subagent_runs` (store); Devin `run_subagent`; Continue `Subagent`; Codex `SubAgentActivity` records |
 | skill | Claude `Skill`; OpenCode `skill`; Gemini `activate_skill`; Qwen `skill`; Goose `load_skill`; Hermes `skill_manage`; Kimi Code `Skill`; Roo `skill`; Continue `Skills` |
-| hook | every `Origin::Hook` message (Claude attachments and stop summaries, Gemini `<hook_context>`, Qwen prompt-submit context) |
+| hook | every `Origin::Hook` message (Claude attachments and stop summaries, Gemini `<hook_context>`, Qwen prompt-submit context); Grok `updates.jsonl` `hook_execution` (store, `run`) |
 | approval | requests: Roo `ui_messages.json` `ask` `tool` / `command` / `use_mcp_server` / `browser_action_launch` (store, `ask`); denials: Claude refusal results (`dontAsk` "Permission to use … denied", rejection "doesn't want to proceed"), OpenCode rule refusal / rejection results, Codex `McpToolCall` "requires approval" notice (`deny`); modes (`state`): Claude `permissionMode` (turns, `permission-mode` records), Codex `approval_policy` (`turn_context`, `thread_settings_applied`), Kimi Code `permission.set_mode`, Qwen `executionContext.approvalMode`, Kimi `state.json` `approval{yolo, afk, auto_approve_actions}`, Devin `sessions.agent_mode`, OpenCode `session.permission` ruleset |
 | checkpoint | points (`create`): Roo `checkpoint_saved` (store), Grok `rewind_points.jsonl` (store), OpenCode `patch` parts / `snapshot{files}`, Devin `chisel/undo` `restore_file`; tallies (`state`): Claude `file-history-snapshot` / `file-history-delta`, Kimi Code `file_history.checkpoint`, Kimi `_checkpoint`, Gemini `checkpoint-<tag>.json` (the session is the saved chat); restores (`restore`): OpenCode `session.revert` / `session_v2.revert` |
 | question | Claude `AskUserQuestion`; Kimi `AskUserQuestion`; Gemini `ask_user`; Qwen `ask_user_question`; Hermes `clarify`; OpenCode `question`; Roo `ask_followup_question`; Cline `ask_question`; Continue `AskQuestion` |
 | branch | every `MessageKind::Branch` (Kimi `/clear`, undo; Kimi Code `/undo`; OpenClaw `reset`; Gemini `$rewindTo`) |
-| fork | `Lineage::forked_from` (Codex, Grok, Hermes `/branch`, Kimi Code, Qwen, OpenCode 2.x) |
+| fork | `Lineage::forked_from` (Codex, Grok, Hermes `/branch`, Kimi Code, Qwen, OpenCode 2.x; Claude `--fork-session` and Goose `--fork` inferred from the records the fork copied) |
 | model_change | every `MessageKind::ModelChange` (OpenClaw, OpenCode 2.x, Qwen `/model`) |
 
 ## The query surface
@@ -153,11 +153,14 @@ OpenCode's `todo` table, Gemini `tracker/` and `plans/`, Goose `extension_data` 
 checkpoints and asks, Grok `rewind_points.jsonl`, and the approval-mode and file-history records
 Claude, Codex, Kimi, Kimi Code and Qwen read past.
 
-Leaves (named, not done here): Qwen `scheduled_tasks.json` (the `corpus-tidy` lane owns
-`harness/qwen*` this round); Cline `schedules` / `teams.db`; OpenClaw `cron/jobs.json` and the
-sub-agent registries; Kimi `state.json` todos and Kimi Code `tools.update_store` (carried
-records); Grok `hook_execution`; Claude `--fork-session` and Goose
-fork, which record no link; OpenClaw 1.29 completions that are plain user text; Roo's
+Then closed (lane `aff-sidefiles`): Qwen `scheduled_tasks.json`; Cline schedule fires and
+`teams.db` runs; OpenClaw's cron and sub-agent registries; Kimi `state.json` todos; Grok
+`hook_execution`; Claude `--fork-session` and Goose fork lineage, which no store records but the
+copied records imply. A side store is read only when a full read rewrites the session's
+`affordance_counts` row (its signature moved), or for the view itself.
+
+Leaves (named, not done here): Kimi Code `tools.update_store` (carried records); a Cline
+schedule's maker (no session is recorded); OpenClaw 1.29 completions that are plain user text; Roo's
 `new_task` result, which rides a mixed user turn the adapter types `Prompt` (so no
 `subagent_return`); Kimi Code 0.39.1 spawns, which have no record of their own; Claude skills run
 by slash command, whose only trace is the command notice and an `isMeta` body.

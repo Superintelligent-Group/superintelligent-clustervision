@@ -211,7 +211,10 @@ verbatim carrier record under `ParseOptions::complete`) and `cv_byte_offset`.
   `turnOrigin:"task_notification"`, and its body adds `<output-file>`, `<result>`, `<usage>`. A
   `ScheduleWakeup` fire is a `user` turn with `isMeta`, `turnOrigin:"scheduled"` and no
   `scheduledTaskId` (cv reads it as `origin: scheduler`). `--fork-session` copies the records under the
-  new `sessionId` with no pointer back; the shared `uuid`s are the only link. New bookkeeping records:
+  new `sessionId` with no pointer back; the shared `uuid`s are the only link. The copy starts at the
+  source's last `compact_boundary` (or its root) and comes after the fork's own head records
+  (`custom-title`, `queue-operation` for the new prompt), which are newer than it; cv reads that head as
+  a fork and takes `lineage.forked_from` from the sibling transcript holding the copied `uuid`. New bookkeeping records:
   `file-history-delta` and `worktree-state` (with `relocated` on EnterWorktree/ExitWorktree); new
   attachments `plan_mode`, `structured_output`, `hook_additional_context`. Assistant turns add
   `requestedModel`, `thinkingDisplay`, `thinkingDurationMs`, `perTurnEffort`; user turns add
@@ -363,7 +366,8 @@ Re-verified 2026-09-19 at `132c2be23` (CLI 0.154); 2026-10-11 against the `rust-
   `signals.json` (session token totals), `plan.json` (todo_write), `plan_mode.json`,
   `rewind_points.jsonl`, `prompt_context.json`, `tool_definitions.json`, `resources_state.json`,
   `announcement_state.json`, `terminal/` (background command output). `updates.jsonl` adds
-  `hook_execution`, `background_tasks`, `task_backgrounded`/`task_completed`,
+  `hook_execution` (`{event_name, runs: [{name, status: {status, elapsed_ms}}]}`, no output; cv: `hook`/`run`
+  rows), `background_tasks`, `task_backgrounded`/`task_completed`,
   `scheduled_task_created`/`deleted`, `subagent_spawned`/`finished`, `workflow_updated`,
   `auto_compact_completed`, `compaction_checkpoint`, `current_mode_update`, `plan`, `turn_completed`.
 - **Indexes (sqlite):** `~/.grok/sessions/session_search.sqlite` (FTS5: `session_docs` + `session_docs_fts`
@@ -573,7 +577,9 @@ is *there*, not in the `.sql`), `src/config/sessions/*`,
   *current* session only: in 2026.1 a reset gives `agent:main:main` a new session id, so the spawner is pinned by
   the transcript whose `sessions_spawn` result records the child as `childSessionKey`. Sub-agent and cron
   registries: 2026.1 `subagents/runs.json`, `cron/jobs.json`, `cron/runs/<job>.jsonl`; 2026.10
-  `state/openclaw.sqlite` `subagent_runs`, `cron_jobs`, `cron_run_receipts`.
+  `state/openclaw.sqlite` `subagent_runs`, `cron_jobs`, `cron_run_receipts`. Both key by session key: a run by
+  `requesterSessionKey`/`controllerSessionKey`, a job by its owner (2026.10 `owner.sessionKey`; a 2026.1 job
+  names none), its run keys, and `sessionTarget: "main"` (cv: `subagent_spawn`/`state`, `schedule`/`state`).
 - **User-turn provenance** (`src/sessions/input-provenance.ts`, absent in 2026.1): `message.provenance{kind:
   external_user|inter_session|internal_system, sourceSessionKey?, sourceTool?, sourceRole?, jobId?, runId?}`. A
   sub-agent's announce to its requester is `inter_session` from the sub-agent key; a cron run's prompt is
@@ -648,8 +654,8 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   + `compaction_summary`), any other rotation gets a synthetic `branch`. Sub-agents (`Agent` tool) live
   in `<session>/subagents/<agent_id>/` (`context.jsonl`, `wire.jsonl`, `meta.json{subagent_type,
   description, …}`, `prompt.txt`, `output`) and parse as child sessions; `tasks/<id>/` (background
-  shells) and `notifications/<id>/` sit beside them, and `state.json` keeps `todos`, `plan_mode`,
-  `approval`. 1.49+ (kosong 0.55) writes `{"type":"think","think":"","encrypted":null}` for every
+  shells) and `notifications/<id>/` sit beside them, and `state.json` keeps `todos` (`[{title, status}]`, cv:
+  `plan`/`state`), `plan_mode`, `approval`. 1.49+ (kosong 0.55) writes `{"type":"think","think":"","encrypted":null}` for every
   step that streamed no reasoning; cv drops those. 1.52.0, the final release, only prints a pointer
   to Kimi Code; 1.51.0 is the last version that writes a store (corpus: 1.48.0, 1.51.0).
 - **Kimi Code (`$KIMI_CODE_HOME` or `~/.kimi-code`)** — a different format: `session_index.jsonl`
@@ -709,7 +715,9 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
     `turn_result`. `ui_telemetry` (a third of the bytes), `attribution_snapshot`, `file_history_snapshot` and
     the session-settings echoes are ignored (`formats/qwen.toml`).
   - Beside the sessions: `tmp/<hash>/background-shells/<sessionId>/shell-*.{output,status}`,
-    `tmp/<hash>/scheduled_tasks.json` (cron), `~/.qwen/memories/` and `projects/<cwd>/memory/` (memory files).
+    `tmp/<hash>/scheduled_tasks.json` (cron: `[{id, cron, prompt, recurring, createdAt, lastFiredAt?, sessionId?,
+    runs?}]`; `<hash>` is the sha256 of the cwd; a job names its session only when one owns it, else cv gives
+    it to the session live at `createdAt`), `~/.qwen/memories/` and `projects/<cwd>/memory/` (memory files).
 - **Legacy (the fork's original layout):** gemini-cli-shaped `~/.qwen/tmp/<projectHash>/{logs.json,
   chats/session-*.json|jsonl, checkpoint-*.json}`. The adapter delegates these to the Gemini parser and re-tags
   `Harness::Qwen`.
@@ -742,8 +750,10 @@ Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv
   `displayRole: "error"` marks a run error → `kind: error`). Children sit in the same dir:
   `agent_<uuid>.messages.json` (spawn_agent) and `<teammate>__<id>.messages.json` (agent teams), with
   `origin.parentThreadId` → `lineage.parent`; cv's id for them is `<sid>/<stem>`. `db/sessions.db` repeats the
-  rows (plus `schedules`, `schedule_executions`, `subagent_spawn_queue`) and `db/teams.db` holds team state;
-  neither is read. `~/.cline/tasks/` is now the SDK's task-SPEC dir, not transcripts.
+  rows (plus `schedules`, `schedule_executions`, `subagent_spawn_queue`), `db/cron.db` the hub's `cron_specs` +
+  `cron_runs`, and `db/teams.db` team state keyed `team_name = <lead session id>`. cv reads an execution's or a
+  cron run's `session_id` (that session's `schedule`/`fire`) and `team_events` (the lead's `subagent_spawn`/`state`
+  rows); a schedule names no session that made it. `~/.cline/tasks/` is now the SDK's task-SPEC dir, not transcripts.
 
 ## Roo Code — a Cline fork (`<globalStorage>/rooveterinaryinc.roo-cline|roo-code/`)
 
@@ -809,7 +819,9 @@ Ground truth: `crates/goose/src/session/session_manager.rs` (schema + writers),
   tool-pair summary is also an agent-only user row, but it hides only its own pair.
 - **Sub-agents:** summon's `delegate` makes a child session (`session_type = sub_agent`,
   `parent_session_id`), and the parent's `toolResponse.value._meta.subagent_session_id` names it.
-  A `--fork` copy stores no link to its source. MCP tools are named `<extension>__<tool>`.
+  A `--fork` copy stores no link to its source, but its messages keep their `message_id` and
+  `created_timestamp`, so its first message is older than the session: cv names the earliest-created other
+  session holding that `message_id` as `lineage.forked_from`. MCP tools are named `<extension>__<tool>`.
 - **IR mapping:** `usage` → `Usage`, with `cost` → **`Usage::cost_usd`** (Goose reports no
   reasoning-token count). `userVisible = 0` is not a drop: the row becomes a `Role::System` turn —
   `kind: compaction_summary` for the agent-only user row with nothing agent-visible before it (or

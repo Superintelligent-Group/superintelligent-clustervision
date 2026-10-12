@@ -486,9 +486,15 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "approval/state",
             "approval/deny",
             "checkpoint/state",
+            // `--fork-session`: inferred from the uuids the fork copied.
+            "fork",
         ],
     ),
-    ("cline/", &["subagent_spawn", "subagent_return", "question"]),
+    // `teams.db` team runs.
+    (
+        "cline/",
+        &["subagent_spawn", "subagent_spawn/state", "subagent_return", "question"],
+    ),
     (
         "codex/",
         &["subagent_spawn", "subagent_return", "approval/state", "approval/deny"],
@@ -526,6 +532,8 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "skill",
             "subagent_spawn",
             "subagent_return",
+            // `--fork`: inferred from the message ids the fork copied.
+            "fork",
         ],
     ),
     (
@@ -537,6 +545,7 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "subagent_spawn",
             "fork",
             "checkpoint/create",
+            "hook/run",
         ],
     ),
     (
@@ -557,6 +566,7 @@ const PERSISTED: &[(&str, &[&str])] = &[
         "kimi/",
         &[
             "plan",
+            "plan/state",
             "background_job",
             "subagent_spawn",
             "subagent_return",
@@ -584,7 +594,14 @@ const PERSISTED: &[(&str, &[&str])] = &[
     ),
     (
         "openclaw/",
-        &["schedule", "background_job", "subagent_spawn", "model_change"],
+        &[
+            "schedule",
+            "schedule/state",
+            "background_job",
+            "subagent_spawn",
+            "subagent_spawn/state",
+            "model_change",
+        ],
     ),
     ("openclaw/2026.10.1", &["subagent_return", "branch"]),
     ("opencode/", &["skill", "subagent_spawn", "subagent_return"]),
@@ -611,6 +628,7 @@ const PERSISTED: &[(&str, &[&str])] = &[
             "plan",
             "goal",
             "schedule",
+            "schedule/state",
             "subagent_spawn",
             "subagent_return",
             "skill",
