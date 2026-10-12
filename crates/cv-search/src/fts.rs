@@ -328,6 +328,9 @@ struct Job {
     events: bool,
     /// The index holds docs for its id, to delete before the new ones land.
     existing: bool,
+    /// Only growth relative to the indexed source can be an append. Equal-size timestamp changes
+    /// and truncations require a whole pass, even if a sampled mark still matches.
+    grew: bool,
     prov: cv_core::events::Provenance,
     /// Where the last pass over this file left off, if it left a mark.
     mark: Option<cv_core::resume::MarkHead>,
@@ -383,10 +386,11 @@ enum Delete {
 ///
 /// **Resumption:** a claude or plain-`.jsonl` codex transcript that has grown since the last pass
 /// is read only from that pass's last [`cv_core::stream::Checkpoint`] (its mark, one per file in
-/// the catalog, taken every [`CHECKPOINT_EVERY`] bytes) when the mark still describes the file
+/// the catalog, taken every [`CHECKPOINT_EVERY`] bytes) when the mark's sampled guards match
 /// ([`cv_core::resume::MarkHead::holds`]) and covers everything this pass feeds: the docs from the
 /// mark's message on are replaced, the events from there on, and the counts continue from the
-/// mark's. Otherwise the session is read whole. New marks are stored only after the commit that
+/// mark's. This relies on the adapter's immutable-prefix append contract, not a proof of the
+/// whole prefix's contents. Otherwise the session is read whole. New marks are stored only after the commit that
 /// holds their docs, so a crash between the two can never leave a mark ahead of the index.
 pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<Swept> {
     let (index, f) = open_or_create(dir)?;
@@ -427,6 +431,9 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
             fts: !fts_fresh,
             events,
             existing: existing.contains_key(&r.id),
+            grew: existing
+                .get(&r.id)
+                .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
             prov: Default::default(),
             mark: marks.get(r).cloned(),
         });
@@ -456,6 +463,9 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
                     fts: !fts_fresh,
                     events,
                     existing: existing.contains_key(&sr.id),
+                    grew: existing
+                        .get(&sr.id)
+                        .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
                     prov,
                     mark: marks.get(sr).cloned(),
                 });
@@ -733,9 +743,13 @@ const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
 /// version: bump it when [`FtsState`], the doc layout or [`CHECKPOINT_EVERY`] changes.
 const RESUME_TAG: &str = "fts1";
 
-/// The checkpoint `job` can resume from: its mark still describes the file, and its state covers
-/// every consumer this pass feeds (the index docs it continues must be there too).
+/// The checkpoint `job` can resume from: the source grew, its sampled mark still matches, and
+/// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's
+/// immutable-prefix append contract; the mark's samples do not prove the whole prefix unchanged.
 fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoint> {
+    if !job.grew {
+        return None;
+    }
     let head = job.mark.as_ref()?;
     if !head.holds(&job.r.path, job.size.max(0) as u64, version) {
         return None;
@@ -1309,21 +1323,14 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     }
 }
 
-// The size-primary policy (append-only JSONL logs skip on unchanged size even when mtimes were
-// mass-bumped) is shared with the event catalog and lives in cv-core.
-use cv_core::events::size_primary_freshness;
-
 /// Whether an indexed session is FTS-fresh given its stored `(mtime, size)` and the current file
-/// signature. For append-only transcript logs, size is primary: unchanged size means no new content
-/// even if mtime was spuriously bumped (touch / rsync / restore). For non-append stores, a same-size
-/// rewrite is possible, so mtime must also match. A `size` of 0 (unreadable file) is never fresh,
+/// signature. Both must match, including for append logs: a same-size edit is still a change.
+/// A `size` of 0 (unreadable file) is never fresh,
 /// mirroring [`cv_core::offsets`]'s `(0, 0)` semantics. An entry is present only when a doc carried a
 /// size; a pre-`size` index never reaches here (it's rebuilt by [`open_or_create`]), so an unknown
 /// size is correctly treated as not-fresh rather than skipped.
-fn fts_is_fresh(r: &cv_core::SessionRef, stored: Option<&(i64, i64)>, mtime: i64, size: i64) -> bool {
-    stored.is_some_and(|&(stored_mtime, stored_size)| {
-        stored_size == size && size != 0 && (size_primary_freshness(r) || (stored_mtime == mtime && mtime != 0))
-    })
+fn fts_is_fresh(_r: &cv_core::SessionRef, stored: Option<&(i64, i64)>, mtime: i64, size: i64) -> bool {
+    stored.is_some_and(|&stored| cv_core::offsets::sig_is_fresh(stored, (mtime, size)))
 }
 
 /// `id → (mtime, size)` for every live doc (the incremental skip-set), plus the set of ids that
@@ -2058,13 +2065,17 @@ mod tests {
     }
 
     /// Rewrite a file with its own byte-identical content — bumping mtime (the OS stamps "now" on
-    /// write) while leaving size unchanged: the precise "mtime mass-bump, no real change" condition
-    /// from the live incident. No new dep needed; the freshness check ignores the mtime value anyway,
-    /// so an unchanged size is all that decides the skip.
+    /// write) while leaving size unchanged. Set a distinct time explicitly so this works on
+    /// filesystems whose write timestamps have coarse resolution.
     fn bump_mtime(path: &str) {
         let content = std::fs::read(path).unwrap();
         let before = std::fs::metadata(path).unwrap().len();
+        let next_mtime = std::fs::metadata(path).unwrap().modified().unwrap() + std::time::Duration::from_secs(1);
         std::fs::write(path, &content).unwrap();
+        std::fs::File::open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(next_mtime))
+            .unwrap();
         assert_eq!(
             std::fs::metadata(path).unwrap().len(),
             before,
@@ -2089,13 +2100,10 @@ mod tests {
         );
     }
 
-    /// Regression for bug-class `fts-incremental-lossy-mtime`: incremental freshness for append-only
-    /// transcripts keys on file **size**, not mtime. A pure mtime bump (touch / rsync / restore) with
-    /// byte-identical content must **skip** — the pre-fix mtime-only check
-    /// re-indexed the whole corpus here, which is what blew past the caller timeout and spiralled.
-    /// A real append (size grows) must re-index exactly that one session.
+    /// Equal length does not establish equal content. Same-size edits update search results;
+    /// timestamp changes conservatively re-index, while unchanged sources skip.
     #[test]
-    fn incremental_keys_on_size_not_mtime() {
+    fn incremental_detects_same_size_rewrites_and_mtime_changes() {
         let _home = IsolatedHome::new();
         let dir = tmpdir();
         let sdir = tmpdir();
@@ -2110,15 +2118,30 @@ mod tests {
             "first pass indexes both new sessions"
         );
 
-        // Bump BOTH files' mtime forward while keeping content (and therefore size) identical — the
-        // exact "mtimes mass-bumped" condition from the live incident. Size unchanged ⇒ must skip.
+        assert_eq!(
+            index_refs_incremental(&dir, &refs()).unwrap(),
+            0,
+            "unchanged sources skip"
+        );
+
+        let original = std::fs::read_to_string(&p1).unwrap();
+        let edited = original.replace("alpha", "omega");
+        assert_eq!(edited.len(), original.len());
+        std::fs::write(&p1, edited).unwrap();
+        bump_mtime(&p1);
+        assert_eq!(
+            index_refs_incremental(&dir, &refs()).unwrap(),
+            1,
+            "same-size rewrite re-indexes"
+        );
+        assert!(text_search(&dir, "alpha", 10).unwrap().is_empty());
+        assert_eq!(text_search(&dir, "omega", 10).unwrap().len(), 1);
+
+        // Byte-identical rewrites still require a pass: file metadata cannot establish equality.
         bump_mtime(&p1);
         bump_mtime(&p2);
         let reindexed = index_refs_incremental(&dir, &refs()).unwrap();
-        assert_eq!(
-            reindexed, 0,
-            "pure mtime bump (size unchanged) must re-index NOTHING — got {reindexed} (the lossy-mtime bug)"
-        );
+        assert_eq!(reindexed, 2, "mtime changes conservatively re-index both sources");
 
         // Append to exactly one session (size grows) → that one re-indexes, the other still skips.
         append(&p2, "gamma appended tail");
@@ -2136,11 +2159,9 @@ mod tests {
         std::fs::remove_dir_all(&sdir).ok();
     }
 
-    /// Unit guard on the freshness predicate itself: append-only logs use size as the primary signal,
-    /// while rewriteable stores still require mtime. An unknown size (no entry) or a 0 size (unreadable
-    /// file) is never fresh.
+    /// Every source requires both mtime and size to match. Unknown or empty sources are stale.
     #[test]
-    fn fts_is_fresh_uses_size_primary_only_for_append_only_sources() {
+    fn fts_is_fresh_requires_mtime_and_size_for_every_source() {
         let append_only = sref("append", "append", "/tmp/append.jsonl".into());
         let non_append = cv_core::SessionRef {
             id: "cline-task".into(),
@@ -2153,11 +2174,8 @@ mod tests {
             message_count: 1,
         };
 
-        assert!(size_primary_freshness(&append_only));
-        assert!(!size_primary_freshness(&non_append));
-
-        // Same size, different mtime is fresh only for append-only logs.
-        assert!(fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096));
+        assert!(fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096));
         assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 8192));
         assert!(!fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0));
         assert!(!fts_is_fresh(&append_only, None, 111, 4096));
@@ -2932,8 +2950,53 @@ mod tests {
         }
     }
 
-    /// A mark that no longer describes its file is never resumed from: a byte changed before
-    /// it, the file cut short of it, or a mark another parser version wrote. Each such session is
+    /// Equal-size edits require a whole pass even when the old checkpoint's samples match.
+    #[test]
+    fn same_size_rewrite_does_not_resume_from_a_matching_sampled_mark() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let path = sdir.join("edited.jsonl");
+        let body: String = (0..20)
+            .map(|i| {
+                let marker = if i == 10 { "zqoldone" } else { "ordinary" };
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "user", "uuid": format!("u{i}"), "sessionId": "edited",
+                        "message": {"role": "user", "content": format!("{} {marker}", "stable payload ".repeat(200))}
+                    })
+                )
+            })
+            .collect();
+        std::fs::write(&path, &body).unwrap();
+        let r = sref("edited", "edited", path.to_string_lossy().into_owned());
+        sweep(&dir, vec![r.clone()], false, false).unwrap();
+        let head = cv_core::resume::MarkTable::load().get(&r).unwrap().clone();
+        let at = body.find("zqoldone").unwrap() as u64;
+        assert!(
+            at > 4096 && at + 4096 < head.offset,
+            "edit is outside both sampled ranges"
+        );
+        let edited = body.replace("zqoldone", "zqnewone");
+        assert_eq!(body.len(), edited.len());
+        std::fs::write(&path, edited).unwrap();
+        bump_mtime(path.to_str().unwrap());
+        assert!(
+            head.holds(&path, body.len() as u64, &head.version),
+            "sampled mark cannot detect this edit"
+        );
+
+        let swept = sweep(&dir, vec![r], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (1, 0));
+        assert!(text_search(&dir, "zqoldone", 10).unwrap().is_empty());
+        assert_eq!(text_search(&dir, "zqnewone", 10).unwrap().len(), 1);
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    /// A mark whose sampled bytes no longer match is never resumed from: an edit near the mark,
+    /// the file cut short of it, or a mark another parser version wrote. Each such session is
     /// read whole and leaves what a whole sweep does.
     #[test]
     fn a_stale_mark_falls_back_to_a_whole_pass() {

@@ -20,7 +20,7 @@
 //! Like [`crate::catalog`], the persistence side is best-effort: SQLite errors degrade to empty
 //! results / no-ops, never failing the caller.
 
-use crate::ir::{truncate, Block, Harness, Message, Session, SessionRef};
+use crate::ir::{truncate, Block, Message, Session, SessionRef};
 use crate::stream::{Checkpoint, Flow, MessageSink};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -344,24 +344,11 @@ pub fn file_size(path: &Path) -> i64 {
     std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
 }
 
-/// Whether this session source can use file **size** as its primary freshness key — the policy
-/// shared by every incremental store (the FTS index, this event catalog, the message-offsets
-/// store). These are the append-only JSONL transcript logs where an mtime-only check caused the
-/// live re-index spiral: a pure mtime bump (touch / rsync / restore) does not mean new content,
-/// while a real append grows the file. Other stores (SQLite DBs, JSON arrays/objects, and metadata
-/// files) can rewrite in place at the same byte length, so they must keep mtime in the freshness
-/// predicate.
-pub fn size_primary_freshness(r: &SessionRef) -> bool {
-    let is_jsonl = r
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"));
-    is_jsonl
-        && matches!(
-            r.harness,
-            Harness::Claude | Harness::Codex | Harness::Gemini | Harness::Qwen | Harness::Kimi | Harness::OpenClaw
-        )
+/// Compatibility entry point for the former size-only freshness policy. No source can safely
+/// ignore a changed mtime merely because its size is unchanged: an edit can preserve length.
+/// Incremental stores now use [`crate::offsets::sig_is_fresh`].
+pub fn size_primary_freshness(_r: &SessionRef) -> bool {
+    false
 }
 
 /// Provenance for a sub-agent event source: which parent session, which workflow run (if any), and
@@ -576,17 +563,14 @@ mod db {
         Some(conn)
     }
 
-    /// The event-catalog freshness predicate over a stored `(mtime_ns, size)` stamp, mirroring the
-    /// FTS indexer's policy ([`size_primary_freshness`]): for append-only transcript logs an
-    /// unchanged size means no new content even when mtimes were mass-bumped (touch / rsync /
-    /// restore — the whole-corpus re-parse trigger); rewriteable stores must match on mtime too.
+    /// The event-catalog freshness predicate over a stored `(mtime_ns, size)` stamp, shared with
+    /// FTS. Both must match, including for append logs: a same-size edit is still a change.
     /// A missing stored size (a pre-`size` catalog row) or a 0 size (unreadable file) is never
     /// fresh, so those re-ingest — best-effort-cache semantics: errors mean re-ingest, never skip.
-    fn sync_fresh(r: &SessionRef, stored: Option<(i64, Option<i64>)>, mtime_ns: i64, size: i64) -> bool {
+    fn sync_fresh(_r: &SessionRef, stored: Option<(i64, Option<i64>)>, mtime_ns: i64, size: i64) -> bool {
         stored.is_some_and(|(stored_mtime, stored_size)| {
-            stored_size == Some(size)
-                && size != 0
-                && (size_primary_freshness(r) || (stored_mtime == mtime_ns && mtime_ns != 0))
+            stored_size
+                .is_some_and(|stored_size| crate::offsets::sig_is_fresh((stored_mtime, stored_size), (mtime_ns, size)))
         })
     }
 
@@ -1380,15 +1364,30 @@ mod tests {
         // Kind filter narrows.
         assert_eq!(events_for("claude", "evt-e2e", Some("command")).len(), 1);
 
-        // Freshness keys on (mtime, size), size-primary for this append-only jsonl: a pure mtime
-        // bump (byte-identical rewrite) is still fresh — the mass-mtime-bump condition that used
-        // to re-parse the whole corpus — while a real append reads stale.
+        // A same-size rewrite must invalidate events, even for this normally append-only log.
         let content = std::fs::read(&path).unwrap();
-        std::fs::write(&path, &content).unwrap();
+        let edited = String::from_utf8(content.clone())
+            .unwrap()
+            .replace("parser.rs", "reader.rs");
+        assert_eq!(edited.len(), content.len());
+        let next_mtime = std::fs::metadata(&path).unwrap().modified().unwrap() + std::time::Duration::from_secs(1);
+        std::fs::write(&path, edited).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(next_mtime))
+            .unwrap();
         assert!(
-            !needs_ingest(&r, file_mtime_ns(&r.path)),
-            "a pure mtime bump (size unchanged) must not force an event re-ingest"
+            needs_ingest(&r, file_mtime_ns(&r.path)),
+            "same-size rewrites must force an event re-ingest"
         );
+        ingest_ref(&r).unwrap();
+        let edited_rows = events_for("claude", "evt-e2e", Some("file_edit"));
+        assert_eq!(edited_rows.len(), 1);
+        assert_eq!(edited_rows[0].target.as_deref(), Some("/repo/src/reader.rs"));
+        assert!(!needs_ingest(&r, file_mtime_ns(&r.path)));
+
+        // Restore the original edit for the remaining query checks below.
+        std::fs::write(&path, &content).unwrap();
         {
             use std::io::Write as _;
             let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -1400,10 +1399,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(
-            needs_ingest(&r, file_mtime_ns(&r.path)),
-            "a real append (size grew) must read stale"
-        );
+        assert!(needs_ingest(&r, file_mtime_ns(&r.path)), "an append must read stale");
         ingest_ref(&r).unwrap();
         assert!(!needs_ingest(&r, file_mtime_ns(&r.path)));
 

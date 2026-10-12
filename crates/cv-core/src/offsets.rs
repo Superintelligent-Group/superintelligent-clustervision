@@ -35,3 +35,23 @@ pub fn file_sig(path: &Path) -> (i64, i64) {
         .unwrap_or(0);
     (mtime, md.len() as i64)
 }
+
+/// Whether a stored file signature still matches a readable, nonempty source. File size alone
+/// cannot distinguish an unchanged transcript from a same-size rewrite, even for append logs.
+pub fn sig_is_fresh(stored: (i64, i64), current: (i64, i64)) -> bool {
+    current.0 != 0 && current.1 > 0 && stored == current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freshness_requires_both_known_mtime_and_size() {
+        assert!(sig_is_fresh((111, 4096), (111, 4096)));
+        assert!(!sig_is_fresh((111, 4096), (222, 4096)), "same-size rewrites are stale");
+        assert!(!sig_is_fresh((111, 4096), (111, 8192)), "appends are stale");
+        assert!(!sig_is_fresh((0, 4096), (0, 4096)));
+        assert!(!sig_is_fresh((111, 0), (111, 0)));
+    }
+}
