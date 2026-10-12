@@ -18,7 +18,7 @@
 
 use super::{parse_ts, Adapter};
 use crate::ir::*;
-use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
+use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -236,9 +236,15 @@ fn subagent_parent(path: &Path) -> Option<String> {
 }
 
 fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
-    let mut sink = CollectSink::default();
+    let mut messages = 0usize;
+    let mut turns = 0usize;
+    let mut sink = |m: Message| {
+        messages += 1;
+        turns += usize::from(matches!(m.role, Role::User | Role::Assistant));
+        Flow::Continue
+    };
     let s = stream_session_jsonl(path, &mut sink).ok()?;
-    if sink.messages.is_empty() && s.created_at.is_none() {
+    if messages == 0 && s.created_at.is_none() {
         return None;
     }
     let mut r = SessionRef::new(s.id.clone(), Harness::Qwen, path.to_path_buf());
@@ -246,11 +252,7 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
     r.title = s.title.clone();
     r.created_at = s.created_at;
     r.updated_at = s.updated_at;
-    r.message_count = sink
-        .messages
-        .iter()
-        .filter(|m| matches!(m.role, Role::User | Role::Assistant))
-        .count();
+    r.message_count = turns;
     Some(r)
 }
 
