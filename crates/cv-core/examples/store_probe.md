@@ -41,6 +41,8 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `resume` | Continue fixture checkpoint from `--resume-from FILE`; report suffix callbacks and whole-session counts |
 | `doctor` | Production context attribution report, using the requested parse mode |
 | `token-stats` | Production token statistics for the explicit session and its subagent forest; scratch catalog required |
+| `dataset` | Production staged ChatML export; optional `--query EXPR`, scratch catalog required |
+| `dataset-collect` | Former lazy collection plus ChatML writer; same filters and scratch requirement |
 | `collect` | Direct stream into a retained message vector; optional materialization |
 | `window` | Stream to EOF, retain only `--last N` messages (default 20), optionally materialize |
 | `affordances` | Full collection and materialization, classify and retain affordance rows |
@@ -52,6 +54,12 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `prefix` / `checked-prefix` | Retain a text prefix under `--prefix-bytes N` raw encoded bytes, using legacy / fallible reads; same span flags |
 | `resolve` | Direct span materialization into a retained owned string; `--span OFFSET:LENGTH [--escaped]` |
 | `resolved-len` | Direct decoded byte counting without owning text; same span flags |
+
+`dataset` and `dataset-collect` render the same newline-terminated ChatML record to a counting
+discard writer; `--hash-output` adds its SHA-256 digest. Both use lazy parsing regardless of
+`--mode`; `--query` uses empty indexed text membership. The collected baseline retains its
+session through the heap snapshot. The staged consumer retains no transcript messages and
+reports callback counts as unobserved. Private staged bytes are included in its measured work.
 
 `token-stats` calls `TokenStats::compute` on the explicit session reference. Its parse policy is
 production-defined; `--mode` is ignored. The complete statistics are in `detail`; `messages`

@@ -75,7 +75,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
-                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|checked-chunks|prefix|checked-prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
+                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|dataset|dataset-collect|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|checked-chunks|prefix|checked-prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -350,6 +350,65 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             };
             out.detail = serde_json::to_value(histogram)?;
         }
+        "dataset" | "dataset-collect" => {
+            let query = a
+                .query
+                .as_deref()
+                .map(cv_core::SessionQuery::parse)
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
+            let texts = cv_core::query::TextSets::default();
+            let mut digest = DigestWriter::default();
+            struct CountWriter(u64);
+            impl Write for CountWriter {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    self.0 += bytes.len() as u64;
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut count = CountWriter(0);
+            let writer: &mut dyn Write = if a.hash_output { &mut digest } else { &mut count };
+            let wrote = if a.operation == "dataset" {
+                let record = cv_core::dataset::stage_record(
+                    adapter,
+                    r,
+                    cv_core::dataset::Format::Chatml,
+                    None,
+                    0,
+                    query.as_ref(),
+                    &texts,
+                )?;
+                if let Some(record) = &record {
+                    record.publish(writer)?;
+                }
+                record.is_some()
+            } else {
+                let session = cv_core::stream::collect_with(adapter, r, &ParseOptions::lazy())?;
+                out.messages = session.messages.len();
+                let matched = match query.as_ref() {
+                    Some(query) => cv_core::query::matches_full(query, r, &session, &texts)?,
+                    None => true,
+                };
+                let wrote = matched
+                    && cv_core::dataset::write_record(&session, &mut *writer, cv_core::dataset::Format::Chatml, None)?;
+                if wrote {
+                    writer.write_all(b"\n")?;
+                }
+                out.session = Some(session);
+                wrote
+            };
+            out.detail = json!({"record_written":wrote,
+                "serialized_record_bytes":if a.hash_output { digest.bytes } else { count.0 }});
+            if a.hash_output {
+                out.detail["record_sha256"] = json!(digest.digest.finish_hex());
+            }
+            if a.operation == "dataset" {
+                out.detail["message_callbacks"] = json!("not observed");
+            }
+        }
         "token-stats" => {
             out.detail = cv_core::stats::TokenStats::compute(std::slice::from_ref(r))?.to_json();
         }
@@ -598,7 +657,15 @@ fn main() -> Result<()> {
     if a.warm_discover
         || matches!(
             a.operation.as_str(),
-            "affordance-read" | "discover" | "events" | "events-collected" | "query" | "query-collect" | "token-stats"
+            "affordance-read"
+                | "discover"
+                | "events"
+                | "events-collected"
+                | "query"
+                | "query-collect"
+                | "token-stats"
+                | "dataset"
+                | "dataset-collect"
         )
     {
         let home = std::fs::canonicalize(
@@ -640,7 +707,7 @@ fn main() -> Result<()> {
             "effective_mode": match a.operation.as_str() {
                 "affordances" => "full",
                 "affordance-read" | "token-stats" => "production-defined",
-                "query" | "query-collect" | "tools" | "tools-collect" => "lazy",
+                "query" | "query-collect" | "tools" | "tools-collect" | "dataset" | "dataset-collect" => "lazy",
                 "baseline" | "discover" | "chunks" | "checked-chunks" | "prefix" | "checked-prefix" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
                 _ => &a.mode,
             },
