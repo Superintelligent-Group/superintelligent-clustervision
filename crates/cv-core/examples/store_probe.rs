@@ -105,6 +105,7 @@ struct Args {
     chunk_bytes: usize,
     last: usize,
     hash_output: bool,
+    hash_detail: bool,
 }
 
 fn args() -> Result<Args> {
@@ -114,12 +115,14 @@ fn args() -> Result<Args> {
     let (mut span, mut escaped, mut chunk_bytes) = (None, false, 64 << 10);
     let mut last = 20;
     let mut hash_output = false;
+    let mut hash_detail = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
-            "--mode" => mode = argv.next().context("--mode needs lazy|bulk|full|complete")?,
+            "--mode" => mode = argv.next().context("--mode needs lazy|lazy-extra|bulk|full|complete")?,
             "--materialize" => materialize = true,
             "--hash-output" => hash_output = true,
+            "--hash-detail" => hash_detail = true,
             "--span" => {
                 let range = argv.next().context("--span needs OFFSET:LENGTH")?;
                 let (off, len) = range.split_once(':').context("--span needs OFFSET:LENGTH")?;
@@ -129,8 +132,8 @@ fn args() -> Result<Args> {
             "--chunk-bytes" => chunk_bytes = argv.next().context("--chunk-bytes needs an integer")?.parse()?,
             "--last" => last = argv.next().context("--last needs an integer")?.parse()?,
             "--help" | "-h" => bail!(
-                "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|bulk|full|complete] \
-                 [--materialize] [--hash-output] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
+                "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
+                 [--materialize] [--hash-output] [--hash-detail] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
                  OP: baseline|discard|count|collect|window|affordances|affordance-read|hash|discover|chunks\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio; use scratch CLUSTERVISION_HOME"
             ),
@@ -144,11 +147,14 @@ fn args() -> Result<Args> {
     let path = std::fs::canonicalize(&positional[3]).context("input path")?;
     let root = root.unwrap_or_else(|| path.parent().unwrap_or(Path::new("/")).to_path_buf());
     let root = std::fs::canonicalize(root).context("adapter root")?;
-    if !matches!(mode.as_str(), "lazy" | "bulk" | "full" | "complete") {
+    if !matches!(mode.as_str(), "lazy" | "lazy-extra" | "bulk" | "full" | "complete") {
         bail!("unknown mode {mode}");
     }
     if chunk_bytes == 0 {
         bail!("--chunk-bytes must be positive");
+    }
+    if hash_detail && positional[0] != "hash" {
+        bail!("--hash-detail applies only to the hash operation");
     }
     Ok(Args {
         operation: positional[0].clone(),
@@ -163,6 +169,7 @@ fn args() -> Result<Args> {
         chunk_bytes,
         last,
         hash_output,
+        hash_detail,
     })
 }
 
@@ -171,6 +178,7 @@ fn options(mode: &str) -> ParseOptions {
         "bulk" => ParseOptions::bulk(),
         "full" => ParseOptions::full(),
         "complete" => ParseOptions::complete(),
+        "lazy-extra" => ParseOptions::lazy_extra(),
         _ => ParseOptions::lazy(),
     }
 }
@@ -346,6 +354,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let resolver = cv_core::Resolver::new(Some(r.path.clone()));
             let mut messages = DigestWriter::default();
             let mut error = None;
+            let mut fingerprints = Vec::new();
             let mut sink = |mut m: Message| {
                 out.messages += 1;
                 canonical_message(&mut m, &resolver);
@@ -354,6 +363,13 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                     return Flow::Stop;
                 }
                 messages.write_all(b"\n").expect("digest writer");
+                if a.hash_detail {
+                    let mut one = DigestWriter::default();
+                    serde_json::to_writer(&mut one, &m).expect("serializable message");
+                    one.write_all(b"\n").expect("digest writer");
+                    fingerprints.push(json!({ "index_zero_based": out.messages - 1,
+                                              "sha256": one.digest.finish_hex(), "serialized_bytes": one.bytes }));
+                }
                 Flow::Continue
             };
             let mut s = adapter.stream(r, &opts, &mut sink)?;
@@ -371,6 +387,10 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 "metadata_sha256": meta.digest.finish_hex(),
                 "serialized_message_bytes": messages.bytes,
             });
+            if a.hash_detail {
+                out.detail["message_fingerprints"] = json!(fingerprints);
+                out.detail["metadata"] = serde_json::to_value(&s)?;
+            }
         }
         "chunks" => {
             let (offset, len) = a.span.context("chunks requires --span OFFSET:LENGTH")?;
@@ -435,14 +455,17 @@ fn main() -> Result<()> {
             "operation": a.operation, "harness": a.harness.as_str(), "id": a.id,
             "path": a.path, "root": a.root, "requested_mode": a.mode,
             "effective_mode": match a.operation.as_str() {
-                "affordances" | "affordance-read" => "full",
+                "affordances" => "full",
+                "affordance-read" => "production-defined",
                 "baseline" | "discover" | "chunks" => "not-applicable",
                 _ => &a.mode,
             },
-            "materialize": a.materialize || matches!(a.operation.as_str(), "affordances" | "hash" | "affordance-read"),
+            "materialize": if a.operation == "affordance-read" { Value::Null }
+                           else { json!(a.materialize || matches!(a.operation.as_str(), "affordances" | "hash")) },
             "physical_input_bytes": physical_bytes, "traversed_bytes": null,
             "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
             "hash_output": a.hash_output,
+            "hash_detail": a.hash_detail,
             "wall_seconds": seconds, "messages": out.messages,
             "requested_rust_heap": requested_rust_heap, "detail": out.detail,
         })

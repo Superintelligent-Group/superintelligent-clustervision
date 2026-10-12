@@ -20,7 +20,7 @@ cp /tmp/my-probe-target/release/examples/store_probe /tmp/my-probe-heap
 ```
 
 Run `OP HARNESS ID PATH`, optionally `--root DIR`, `--mode lazy|bulk|full|complete` and
-`--materialize`. The default mode is lazy. The root defaults to the input's parent; for discovery
+`--materialize`; `--mode lazy-extra` retains extras alongside lazy content. The default mode is lazy. The root defaults to the input's parent; for discovery
 pass the config/runtime root explicitly (`projects/`, `sessions/`, or `tmp/` lives beneath it).
 Continue expects its global directory containing `sessions/`; LM Studio expects the conversations
 directory containing `*.conversation.json` itself. OpenClaw expects its state directory.
@@ -49,6 +49,11 @@ whole-message Value tree or serialized string. It excludes session `source_path`
 location) only; all other serialized metadata remains. Compare **the same mode** before/after;
 full/complete extras and carriers intentionally differ from lean modes. Hashing materializes one
 message and must not be included in throughput/heap claims for a discard/count consumer.
+`hash --hash-detail` also emits each message's fingerprint/serialized size and canonical session
+metadata, to locate a mismatch without dumping all message text. It performs extra serialization
+and retains fingerprint rows, so use it only for fidelity diagnosis. The production
+`affordance-read` reports its parse/materialization policy as production-defined/unknown because
+the same diagnostic must describe baseline and candidate library implementations truthfully.
 
 The heap build reports successful Rust allocation requests, baseline/peak/end live requested
 bytes and cumulative requested bytes. Its hooks include realloc requests and run throughout
