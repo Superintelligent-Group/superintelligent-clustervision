@@ -110,6 +110,14 @@ impl Adapter for Cline {
         }
         stream_task_dir(&r.path, &r.id, Harness::Cline, opts, sink)
     }
+
+    /// The SDK store's side databases: schedule fires and team runs ([`super::cline_sdk`]).
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        if super::cline_sdk::is_sdk_path(&r.path) {
+            return super::cline_sdk::store_affordances(r);
+        }
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

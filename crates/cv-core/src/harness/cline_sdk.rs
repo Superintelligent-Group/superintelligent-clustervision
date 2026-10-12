@@ -21,10 +21,20 @@
 //!   <teammate>__<id>.messages.json        a team teammate: agent "teammate", taskType "team",
 //!                                         origin {mode: "team", parentThreadId, subagent: <name>}
 //! <data>/db/sessions.db                   the same session rows (plus subagent rows, schedules,
-//!                                         schedule_executions, subagent_spawn_queue); not needed
-//!                                         to read the transcripts, so not read
-//! <data>/db/teams.db                      team state (events, tasks, runs, outcomes); not read
+//!                                         schedule_executions, subagent_spawn_queue); only
+//!                                         `schedule_executions` is read ([`store_affordances`])
+//! <data>/db/cron.db                       cron_specs + cron_runs (the hub's automation queue);
+//!                                         `cron_runs` is read
+//! <data>/db/teams.db                      team state (events, tasks, runs, outcomes), keyed by the
+//!                                         lead session id; `team_events` is read
 //! ```
+//!
+//! A schedule names no session that made it (`created_by` is the hub client); a session it ran
+//! as is named by `schedule_executions.session_id` / `cron_runs.session_id`, so those are the
+//! session's `schedule`/`fire` rows. A team's `team_events` (`teammate_spawned`, `run_queued`,
+//! `run_started`, `run_completed`, `run_failed`, `run_cancelled`) are the lead's teammates: one
+//! `subagent_spawn`/`state` row per run (teammate, task, last status, result), and one per
+//! teammate that never ran.
 //!
 //! Only the child files carry no `<id>.json`; their session id here is `<sid>/<file stem>` (for
 //! example `1791750138208_50wuo/agent_6522b1bb-…`), parented to `<sid>`, with the file's own
@@ -368,6 +378,196 @@ fn message(v: &Value, lead: bool, prompted: &mut bool) -> Option<Message> {
     Some(m)
 }
 
+/// The side-database rows of a lead session (see the module docs): schedule fires from
+/// `sessions.db` / `cron.db`, team runs from `teams.db`. A child file (`<sid>/<stem>`) has none.
+#[cfg(feature = "sqlite")]
+pub fn store_affordances(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    if r.id.contains('/') {
+        return Vec::new();
+    }
+    let Some(db) = r
+        .path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|d| d.join("db"))
+    else {
+        return Vec::new();
+    };
+    let mut out = schedule_fires(&db, &r.id);
+    out.extend(team_runs(&db.join("teams.db"), &r.id));
+    out
+}
+
+#[cfg(not(feature = "sqlite"))]
+pub fn store_affordances(_r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    Vec::new()
+}
+
+/// One `schedule`/`fire` row per execution that ran as `sid`.
+#[cfg(feature = "sqlite")]
+fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
+    use super::store::sqlite::{open_ro, table_exists};
+    use crate::affordance::{Affordance, Kind};
+    const QUERIES: [(&str, &str, &str, &str); 2] = [
+        (
+            "sessions.db",
+            "schedule_executions",
+            "schedules",
+            "SELECT s.name, s.cron_pattern, s.prompt, e.status, e.triggered_at FROM schedule_executions e \
+             JOIN schedules s ON s.schedule_id = e.schedule_id WHERE e.session_id = ?1 ORDER BY e.triggered_at",
+        ),
+        (
+            "cron.db",
+            "cron_runs",
+            "cron_specs",
+            "SELECT p.title, p.schedule_expr, p.prompt, r.status, COALESCE(r.started_at, r.created_at) FROM cron_runs r \
+             JOIN cron_specs p ON p.spec_id = r.spec_id WHERE r.session_id = ?1 ORDER BY r.created_at",
+        ),
+    ];
+    let mut out = Vec::new();
+    for (file, runs, specs, sql) in QUERIES {
+        let Ok(conn) = open_ro(&db.join(file)) else {
+            continue;
+        };
+        if !table_exists(&conn, runs) || !table_exists(&conn, specs) {
+            continue;
+        }
+        type Row = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = conn
+            .prepare(sql)
+            .and_then(|mut st| {
+                st.query_map([sid], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                })?
+                .collect()
+            })
+            .unwrap_or_default();
+        for (name, cron, prompt, status, at) in rows {
+            let summary = [name, cron, prompt, status]
+                .into_iter()
+                .flatten()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            out.push(Affordance {
+                action: "fire",
+                timestamp: at.as_deref().and_then(parse_ts),
+                ..Affordance::store(
+                    Kind::Schedule,
+                    format!("{file}:{runs}"),
+                    truncate(&summary, 120),
+                    Vec::new(),
+                )
+            });
+        }
+    }
+    out
+}
+
+/// The lead's team, from `team_events` (keyed `team_name = <lead session id>`): one
+/// `subagent_spawn`/`state` row per run, in the order the runs were queued, then one per teammate
+/// spawned that never ran.
+#[cfg(feature = "sqlite")]
+fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
+    use super::store::sqlite::{open_ro, table_exists};
+    use crate::affordance::{Affordance, Kind};
+    let Ok(conn) = open_ro(teams_db) else {
+        return Vec::new();
+    };
+    if !table_exists(&conn, "team_events") {
+        return Vec::new();
+    }
+    let events: Vec<(String, String, String)> = conn
+        .prepare("SELECT ts, event_type, payload_json FROM team_events WHERE team_name = ?1 ORDER BY id")
+        .and_then(|mut st| {
+            st.query_map([sid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect()
+        })
+        .unwrap_or_default();
+    /// One team run as its events tell it: the last status and result win.
+    struct Run {
+        id: String,
+        queued: Option<DateTime<Utc>>,
+        agent: String,
+        task: String,
+        status: String,
+        result: String,
+    }
+    let mut runs: Vec<Run> = Vec::new();
+    let mut teammates: Vec<(Option<DateTime<Utc>>, String)> = Vec::new();
+    for (ts, ty, payload) in events {
+        let Ok(p) = serde_json::from_str::<Value>(&payload) else {
+            continue;
+        };
+        let at = parse_ts(&ts);
+        if ty == "teammate_spawned" {
+            if let Some(a) = p.get("agentId").and_then(Value::as_str) {
+                teammates.push((at, a.to_string()));
+            }
+            continue;
+        }
+        let Some(run) = p.get("run").filter(|_| ty.starts_with("run_")) else {
+            continue;
+        };
+        let s = |k: &str| run.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let id = s("id");
+        let i = match runs.iter().position(|r| r.id == id) {
+            Some(i) => i,
+            None => {
+                runs.push(Run {
+                    id,
+                    queued: at,
+                    agent: s("agentId"),
+                    task: s("message"),
+                    status: String::new(),
+                    result: String::new(),
+                });
+                runs.len() - 1
+            }
+        };
+        let r = &mut runs[i];
+        r.status = s("status");
+        if let Some(text) = run.pointer("/result/text").and_then(Value::as_str) {
+            r.result = text.to_string();
+        }
+        if let Some(e) = run.get("error").and_then(Value::as_str) {
+            r.result = e.to_string();
+        }
+    }
+    let row = |at: Option<DateTime<Utc>>, summary: String| Affordance {
+        timestamp: at,
+        ..Affordance::store(
+            Kind::SubagentSpawn,
+            "teams.db:team_events",
+            truncate(&summary, 120),
+            Vec::new(),
+        )
+    };
+    let mut out: Vec<Affordance> = runs
+        .iter()
+        .map(|r| {
+            let mut summary = format!("{}: {} · {}", r.agent, r.task, r.status);
+            if !r.result.is_empty() {
+                summary.push_str(&format!(" → {}", r.result));
+            }
+            row(r.queued, summary)
+        })
+        .collect();
+    for (at, agent) in teammates {
+        if !runs.iter().any(|r| r.agent == agent) {
+            out.push(row(at, format!("{agent}: spawned, never ran")));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +651,76 @@ mod tests {
         assert_eq!(child.lineage.parent.as_deref(), Some("100_abcde"));
         assert_eq!(child.lineage.agent_path.as_deref(), Some("agent_x"));
         assert_eq!(child.messages[0].origin, Origin::Subagent);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The corpus run made no schedule, so the fire path is proven on the documented DDL
+    /// (`ensureSessionSchema` / `ensureCronSchema`, the columns the reader selects): an execution
+    /// and a cron run that ran as the session are its fires; the team events are its team.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn schedule_fires_and_team_runs_from_the_side_databases() {
+        use crate::affordance::Kind;
+        let root = std::env::temp_dir().join(format!("cv-cline-sdk-dbs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let sid = "200_fghij";
+        let dir = root.join("sessions").join(sid);
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(root.join("db")).unwrap();
+        let path = dir.join(format!("{sid}.messages.json"));
+        write(&dir, &format!("{sid}.messages.json"), json!({"messages": []}));
+        let exec = |db: &str, sql: &str| {
+            rusqlite::Connection::open(root.join("db").join(db))
+                .unwrap()
+                .execute_batch(sql)
+                .unwrap()
+        };
+        exec(
+            "sessions.db",
+            "CREATE TABLE schedules (schedule_id TEXT PRIMARY KEY, name TEXT NOT NULL, cron_pattern TEXT NOT NULL, prompt TEXT NOT NULL);
+             CREATE TABLE schedule_executions (execution_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL, session_id TEXT,
+               triggered_at TEXT NOT NULL, status TEXT NOT NULL);
+             INSERT INTO schedules VALUES ('s1', 'nightly', '0 3 * * *', 'tidy up');
+             INSERT INTO schedule_executions VALUES ('e1', 's1', '200_fghij', '2026-10-11T03:00:00Z', 'completed');
+             INSERT INTO schedule_executions VALUES ('e2', 's1', 'someone-else', '2026-10-12T03:00:00Z', 'completed');",
+        );
+        exec(
+            "cron.db",
+            "CREATE TABLE cron_specs (spec_id TEXT PRIMARY KEY, title TEXT NOT NULL, prompt TEXT, schedule_expr TEXT);
+             CREATE TABLE cron_runs (run_id TEXT PRIMARY KEY, spec_id TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT,
+               session_id TEXT, created_at TEXT NOT NULL);
+             INSERT INTO cron_specs VALUES ('c1', 'hourly ping', 'ping', '0 * * * *');
+             INSERT INTO cron_runs VALUES ('r1', 'c1', 'done', '2026-10-11T04:00:00Z', '200_fghij', '2026-10-11T04:00:00Z');",
+        );
+        exec(
+            "teams.db",
+            r#"CREATE TABLE team_events (id INTEGER PRIMARY KEY AUTOINCREMENT, team_name TEXT NOT NULL, ts TEXT NOT NULL,
+                 event_type TEXT NOT NULL, payload_json TEXT NOT NULL);
+             INSERT INTO team_events (team_name, ts, event_type, payload_json) VALUES
+               ('200_fghij', '2026-10-11T05:00:00Z', 'teammate_spawned', '{"agentId":"helper"}'),
+               ('200_fghij', '2026-10-11T05:00:01Z', 'teammate_spawned', '{"agentId":"idle"}'),
+               ('200_fghij', '2026-10-11T05:00:02Z', 'run_queued', '{"run":{"id":"run_1","agentId":"helper","status":"queued","message":"say ok"}}'),
+               ('200_fghij', '2026-10-11T05:00:09Z', 'run_completed', '{"run":{"id":"run_1","agentId":"helper","status":"completed","message":"say ok","result":{"text":"ok"}}}');"#,
+        );
+        let mut r = SessionRef::new(sid, Harness::Cline, path);
+        r.created_at = parse_ts("2026-10-11T00:00:00Z");
+        let rows = store_affordances(&r);
+        let got: Vec<(Kind, &str, &str)> = rows.iter().map(|a| (a.kind, a.action, a.summary.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (Kind::Schedule, "fire", "nightly · 0 3 * * * · tidy up · completed"),
+                (Kind::Schedule, "fire", "hourly ping · 0 * * * * · ping · done"),
+                (Kind::SubagentSpawn, "state", "helper: say ok · completed → ok"),
+                (Kind::SubagentSpawn, "state", "idle: spawned, never ran"),
+            ]
+        );
+        let child = SessionRef::new(
+            format!("{sid}/agent_x"),
+            Harness::Cline,
+            dir.join("agent_x.messages.json"),
+        );
+        assert!(store_affordances(&child).is_empty(), "a child file has no side rows");
         let _ = fs::remove_dir_all(&root);
     }
 }

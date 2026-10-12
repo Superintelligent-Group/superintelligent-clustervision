@@ -148,7 +148,8 @@
       "subagent_spawns": 1,
       "subagent_returns": 0,
       "affordances": {
-        "subagent_spawn/spawn": 1
+        "subagent_spawn/spawn": 1,
+        "subagent_spawn/state": 1
       },
       "lineage": {},
       "model": "glm-5.3-flash",
