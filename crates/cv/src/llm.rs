@@ -519,6 +519,42 @@ mod tests {
     }
 
     #[test]
+    fn source_tool_arguments_match_owned_chat_and_reject_changed_or_deleted_source() {
+        let world = cv_testkit::World::in_process("llm-json-boundary");
+        let path = world.base.join("arguments.json");
+        let value = json!({"command": "echo \"月🌙é\"\n".repeat(300), "tail": "complete argument"});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let make_session = |input| {
+            let mut session = sample_session();
+            let mut message = Message::new(Role::Assistant);
+            message.content.push(Block::ToolUse {
+                id: "call".into(),
+                name: "Bash".into(),
+                input,
+                namespace: None,
+            });
+            session.messages.push(message);
+            session
+        };
+        let expected = to_chat_messages(&make_session(value.into())).unwrap();
+        for deleted in [false, true] {
+            std::fs::write(&path, &bytes).unwrap();
+            let session = make_session(cv_core::Json::source(&path, 0, bytes.len() as u64).unwrap());
+            assert_eq!(to_chat_messages(&session).unwrap(), expected);
+            if deleted {
+                std::fs::remove_file(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"{} ").unwrap();
+            }
+            assert!(
+                to_chat_messages(&session).is_err(),
+                "must reject stale arguments before egress"
+            );
+            assert!(build_prompt(&session, &DigestOptions::default()).is_err());
+        }
+    }
+
+    #[test]
     fn prompt_contains_transcript_and_instructions() {
         let s = sample_session();
         let opts = DigestOptions::default();
@@ -603,7 +639,7 @@ mod tests {
         asst.content.push(Block::ToolUse {
             id: "t2".into(),
             name: "Bash".into(),
-            input: serde_json::json!({"command": "ls"}),
+            input: serde_json::json!({"command": "ls"}).into(),
             namespace: None,
         });
         s.messages.push(asst);

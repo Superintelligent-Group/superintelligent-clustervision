@@ -1109,7 +1109,9 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
             self.printed = true;
         }
     }
-    impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> Result<String>> MessageSink for Sink<'_, W, H, R> {
+    impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> Result<String>> MessageSink
+        for Sink<'_, W, H, R>
+    {
         fn take_error(&mut self) -> Option<anyhow::Error> {
             if self.result.is_err() {
                 std::mem::replace(
@@ -1367,6 +1369,95 @@ fn md_message(m: &Message) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn source_show_preview_matches_owned_unicode_and_fails_without_continuation() {
+        let world = cv_testkit::World::in_process("show-json-boundary");
+        let path = world.base.join("arguments.json");
+        let value = serde_json::json!({"argument": "月🌙é\n\"\\".repeat(100_000), "tail": "HIDDEN_TAIL"});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let message = |input| {
+            let mut message = Message::new(Role::Assistant);
+            message.content.push(Block::ToolUse {
+                id: "call".into(),
+                name: "custom".into(),
+                input,
+                namespace: None,
+            });
+            message
+        };
+        let expected = show_message(&message(value.into())).unwrap();
+        assert!(expected.len() < 1024, "show retains a bounded preview");
+        assert!(!expected.contains("HIDDEN_TAIL"));
+        struct Replay(Session);
+        impl Adapter for Replay {
+            fn harness(&self) -> Harness {
+                Harness::OpenSession
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                _: &SessionRef,
+                _: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                cv_core::stream::replay(self.0.clone(), sink)
+            }
+        }
+        for deleted in [false, true] {
+            std::fs::write(&path, &bytes).unwrap();
+            let source_message = message(cv_core::Json::source(&path, 0, bytes.len() as u64).unwrap());
+            assert_eq!(show_message(&source_message).unwrap(), expected);
+            let mut session = Session::new("source-preview", Harness::OpenSession);
+            session.messages.push(source_message.clone());
+            let adapter = Replay(session);
+            let r = SessionRef::new("source-preview", Harness::OpenSession, world.base.join("primary.json"));
+            let mut output = Vec::new();
+            let outcome = stream_session_render(
+                &adapter,
+                &r,
+                &mut output,
+                |_| String::new(),
+                show_message,
+                RenderOpts {
+                    range: Some(Window::Last(1)),
+                    max_bytes: Some(1),
+                },
+            )
+            .unwrap();
+            assert_eq!(String::from_utf8(output).unwrap(), expected);
+            assert_eq!(outcome.next, None);
+            if deleted {
+                std::fs::remove_file(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"{} ").unwrap();
+            }
+            assert!(show_message(&source_message).is_err());
+            for range in [None, Some(Window::Last(1))] {
+                let mut output = Vec::new();
+                assert!(
+                    stream_session_render(
+                        &adapter,
+                        &r,
+                        &mut output,
+                        |_| String::new(),
+                        show_message,
+                        RenderOpts {
+                            range,
+                            max_bytes: Some(1)
+                        }
+                    )
+                    .is_err(),
+                    "projection failure must not return a successful continuation"
+                );
+            }
+        }
+    }
+
     /// Independent oracle: the original full parse, then slice, then apply the byte budget.
     fn full_json_window(
         adapter: &dyn Adapter,
@@ -1623,7 +1714,10 @@ mod tests {
         let mut all = cv_core::CollectSink::default();
         adapter.stream(r, &cv_core::ParseOptions::bulk(), &mut all).unwrap();
         let end = range.1.unwrap_or(usize::MAX).min(all.messages.len());
-        let want: String = all.messages[range.0..end].iter().map(|m| show_message(m).unwrap()).collect();
+        let want: String = all.messages[range.0..end]
+            .iter()
+            .map(|m| show_message(m).unwrap())
+            .collect();
         let windowed = render(r, Some(range));
         let body_at = windowed.find("── ").unwrap_or(windowed.len());
         assert_eq!(
@@ -1898,7 +1992,7 @@ mod tests {
             let md = md_message(m).unwrap();
             assert!(md.starts_with(&format!("## {label}\n\n")) && md.contains(&text), "{md}");
             let mut html = String::new();
-            cv_core::html::share_message(m, 0, &mut html);
+            cv_core::html::share_message(m, 0, &mut html).unwrap();
             assert!(
                 html.contains(&format!("<span class=\"role\">{label}</span>")) && html.contains(&text),
                 "{html}"

@@ -238,3 +238,70 @@ fn safe_stem(id: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cv_core::{Block, Json};
+
+    fn render(input: Json) -> Result<String> {
+        let mut output = Vec::new();
+        let mut sink = ShareSink {
+            out: &mut output,
+            redact: true,
+            opts: RedactOptions::default(),
+            stats: RedactStats::default(),
+            resolver: cv_core::Resolver::new(None),
+            harness: Harness::Claude,
+            id: "source-share".into(),
+            cwd: None,
+            created_at: None,
+            title: Some("source parity".into()),
+            model: None,
+            first_user: None,
+            buf: Vec::new(),
+            printed: false,
+            meta_for_end: None,
+            count: 0,
+            result: Ok(()),
+        };
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "Bash".into(),
+            input,
+            namespace: None,
+        });
+        sink.try_message(message)?;
+        sink.finish("test");
+        if let Some(error) = sink.take_error() {
+            return Err(error);
+        }
+        Ok(String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn source_share_matches_owned_and_rejects_deleted_or_changed_arguments() {
+        let world = cv_testkit::World::in_process("share-json-boundary");
+        let path = world.base.join("arguments.json");
+        let value =
+            serde_json::json!({"command": "echo \"月🌙é\"\n".repeat(300), "api_key": "sk-abcDEF1234567890ghijkl"});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let expected = render(value.into()).unwrap();
+        assert!(!expected.contains("sk-abcDEF1234567890ghijkl"));
+        for deleted in [false, true] {
+            std::fs::write(&path, &bytes).unwrap();
+            let input = Json::source(&path, 0, bytes.len() as u64).unwrap();
+            assert_eq!(render(input.clone()).unwrap(), expected);
+            if deleted {
+                std::fs::remove_file(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"{} ").unwrap();
+            }
+            assert!(
+                render(input).is_err(),
+                "share cannot report a completed artifact for stale arguments"
+            );
+        }
+    }
+}
