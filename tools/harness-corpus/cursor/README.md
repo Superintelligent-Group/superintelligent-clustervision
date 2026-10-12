@@ -33,3 +33,34 @@ data BLOB)`, `meta(key TEXT PRIMARY KEY, value TEXT)`). cv's `cursor` adapter re
 IDE's `state.vscdb` (`formats/cursor.toml`), not this store, so cursor-agent sessions are invisible
 to cv today, corpus or not. ember's machine has no `~/.cursor/chats/`, so there is no local data to
 reverse-engineer from either.
+
+
+## Read-only installed-format assessment, 2026-10-12
+
+The installed IDE is **3.18.25**, product commit
+`280eca2911f1774689696e5f1efa5a4f97a87af0`, product build date 2026-08-31.
+The active `cursor-agent` launcher still targets `2025.09.12-4852336`; the separately
+installed `2026.10.01-e373342` CLI is a different executable and store format.
+No Cursor corpus has been generated, and no CLI `chats/` or `acp-sessions/` store
+was present during this assessment. IDE login alone does not prove an isolated CLI
+run will avoid refreshing the real login keychain.
+
+An immutable, read-only inspection of the IDE SQLite store confirmed both inline
+`conversation` and external `fullConversationHeadersOnly` / `bubbleId` records,
+plus a `composerHeaders` table. Existing records may have been written by older
+IDE releases; this is schema evidence, **not a version-attributed session capture**.
+Bubble `unifiedMode` values are integers, while composer values are strings.
+The installed application bundle, `Contents/Resources/app/out/main.js`, defines
+`aiserver.v1.StreamUnifiedChatRequest.UnifiedMode` explicitly as:
+`0=UNSPECIFIED, 1=CHAT, 2=AGENT, 3=EDIT, 4=CUSTOM, 5=PLAN, 6=DEBUG`.
+This enum was read from the installed bundle, without invoking Cursor or reading
+credential values. cv maps known numbers to lowercase mode names and retains the
+original number as `extra.cursor.unified_mode_raw`, including unknown numbers.
+The adapter regressions exercising these modes are synthetic; they are not a
+real harness-written corpus.
+
+A useful future capture would use the newer CLI in an isolated home/config/data
+root with an explicitly supplied, non-refreshing auth token, or an IDE scratch
+project/session, then copy only the harness-written store and scrub it. The CLI's
+`blobs`/`meta` store still needs an adapter path before it can join corpus golden
+tests. A fresh model session is unnecessary to demonstrate the numeric-mode gap.

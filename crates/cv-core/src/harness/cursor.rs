@@ -27,12 +27,12 @@
 //! panics and never fails the whole session.
 
 use super::store::sqlite::open_ro;
-use super::{Adapter, ts_from_epoch};
+use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Statement};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -376,10 +376,11 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     // fact — the mode the thread was opened in — so it lands in the session bag; a bubble that
     // carries its own overrides it for that message only (see `bubble_to_message`), which is how
     // Cursor records a mode switched mid-thread.
-    if let Some(mode) = d.get("unifiedMode").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-        session
-            .harness_extra_mut(Harness::Cursor)
-            .insert("unified_mode".into(), Value::String(mode.to_string()));
+    if let Some(value) = d.get("unifiedMode") {
+        let metadata = unified_mode_metadata(value);
+        if !metadata.is_empty() {
+            session.harness_extra_mut(Harness::Cursor).extend(metadata);
+        }
     }
 
     // Session model: the latest message's model (whole-Vec `rev().find_map` originally). Tracked
@@ -499,14 +500,42 @@ fn bubble_to_message(b: &Value) -> Option<Message> {
     }
     // A bubble's own `unifiedMode` overrides the composer's (which `stream_global` puts on the
     // session bag) for this message only — a mode switched mid-thread.
-    if let Some(mode) = b.get("unifiedMode").and_then(Value::as_str) {
-        if !mode.is_empty() {
-            m.harness_extra_mut(Harness::Cursor)
-                .insert("unified_mode".into(), Value::String(mode.to_string()));
+    if let Some(value) = b.get("unifiedMode") {
+        let metadata = unified_mode_metadata(value);
+        if !metadata.is_empty() {
+            m.harness_extra_mut(Harness::Cursor).extend(metadata);
         }
     }
 
     (!m.content.is_empty() || !m.extra.is_empty()).then_some(m)
+}
+
+/// Numeric bubble modes use the installed Cursor 3.18.25 protocol enum (see the
+/// read-only evidence in tools/harness-corpus/cursor/README.md). Keep the original
+/// number alongside its readable mode, including unknown future enum values.
+fn unified_mode_metadata(value: &Value) -> Map<String, Value> {
+    let mut extra = Map::new();
+    let mode = match value {
+        Value::String(s) => Some(s.as_str()).filter(|s| !s.is_empty()),
+        Value::Number(_) => {
+            extra.insert("unified_mode_raw".into(), value.clone());
+            match value.as_i64() {
+                Some(0) => Some("unspecified"),
+                Some(1) => Some("chat"),
+                Some(2) => Some("agent"),
+                Some(3) => Some("edit"),
+                Some(4) => Some("custom"),
+                Some(5) => Some("plan"),
+                Some(6) => Some("debug"),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(mode) = mode {
+        extra.insert("unified_mode".into(), mode.into());
+    }
+    extra
 }
 
 /// `toolFormerData` carries a single tool invocation and (usually) its result:
@@ -833,11 +862,10 @@ mod tests {
         let a = &s.messages[1];
         assert_eq!(a.role, Role::Assistant);
         // thinking block present
-        assert!(
-            a.content
-                .iter()
-                .any(|b| matches!(b, Block::Thinking { text, .. } if text == "let me think"))
-        );
+        assert!(a
+            .content
+            .iter()
+            .any(|b| matches!(b, Block::Thinking { text, .. } if text == "let me think")));
         // text block present
         assert_eq!(a.text().as_deref(), Some("Here is how."));
         // tool use + result
@@ -852,12 +880,11 @@ mod tests {
             input.resolve().unwrap().get("command").and_then(Value::as_str),
             Some("cargo test")
         );
-        assert!(
-            a.content
-                .iter()
-                .any(|b| matches!(b, Block::ToolResult { tool_use_id, content, is_error, .. }
-            if tool_use_id == "t1" && content.contains("ok") && !is_error))
-        );
+        assert!(a
+            .content
+            .iter()
+            .any(|b| matches!(b, Block::ToolResult { tool_use_id, content, is_error, .. }
+            if tool_use_id == "t1" && content.contains("ok") && !is_error)));
         // usage mapped
         assert_eq!(a.usage.as_ref().unwrap().input_tokens, Some(10));
         assert_eq!(a.usage.as_ref().unwrap().output_tokens, Some(5));
@@ -886,11 +913,9 @@ mod tests {
             Some("chat"),
             "the bubble's own mode overrides for that message"
         );
-        assert!(
-            s.messages[0]
-                .harness_extra(Harness::Cursor)
-                .is_none_or(|b| !b.contains_key("unified_mode"))
-        );
+        assert!(s.messages[0]
+            .harness_extra(Harness::Cursor)
+            .is_none_or(|b| !b.contains_key("unified_mode")));
         // No flat keys survive anywhere: every top-level key is a namespace (the harness bag, cv's
         // own `cv` bag, or the `_record` carrier). See `docs/INTERFACE-V2.md` §4.
         assert!(
@@ -898,6 +923,63 @@ mod tests {
             "no flat keys besides the harness bag"
         );
         crate::harness::assert_no_flat_keys(&s);
+    }
+
+    #[test]
+    fn numeric_modes_preserve_enum_names_raw_values_and_message_overrides() {
+        for (number, name) in [
+            (0, "unspecified"),
+            (1, "chat"),
+            (2, "agent"),
+            (3, "edit"),
+            (4, "custom"),
+            (5, "plan"),
+            (6, "debug"),
+        ] {
+            let bubble = serde_json::json!({"type":2,"text":"reply","unifiedMode":number});
+            let message = bubble_to_message(&bubble).unwrap();
+            let extra = message.harness_extra(Harness::Cursor).unwrap();
+            assert_eq!(extra["unified_mode"], name);
+            assert_eq!(extra["unified_mode_raw"], number);
+        }
+        for number in [serde_json::json!(-1), serde_json::json!(7), serde_json::json!(2.5)] {
+            let message = bubble_to_message(&serde_json::json!({"type":2,"unifiedMode":number})).unwrap();
+            let extra = message.harness_extra(Harness::Cursor).unwrap();
+            assert!(!extra.contains_key("unified_mode"));
+            assert_eq!(extra["unified_mode_raw"], number);
+        }
+        for value in [
+            serde_json::json!(""),
+            Value::Null,
+            serde_json::json!(true),
+            serde_json::json!({}),
+        ] {
+            assert!(bubble_to_message(&serde_json::json!({"type":2,"unifiedMode":value})).is_none());
+        }
+        assert!(bubble_to_message(&serde_json::json!({"type":2})).is_none());
+        let future = bubble_to_message(&serde_json::json!({"type":2,"unifiedMode":"future-mode"})).unwrap();
+        assert_eq!(
+            future.harness_extra(Harness::Cursor).unwrap()["unified_mode"],
+            "future-mode"
+        );
+
+        let conn = mk_global();
+        put(
+            &conn,
+            "composerData:mode",
+            r#"{"composerId":"mode","unifiedMode":"agent","conversation":[{"type":2,"text":"chat reply","unifiedMode":1}]}"#,
+        );
+        let reference = SessionRef::new("mode", Harness::Cursor, ":memory:");
+        let session = parse_global(&conn, &reference).unwrap();
+        assert_eq!(session.harness_extra(Harness::Cursor).unwrap()["unified_mode"], "agent");
+        assert_eq!(
+            session.messages[0].harness_extra(Harness::Cursor).unwrap()["unified_mode"],
+            "chat"
+        );
+        assert_eq!(
+            session.messages[0].harness_extra(Harness::Cursor).unwrap()["unified_mode_raw"],
+            1
+        );
     }
 
     #[test]

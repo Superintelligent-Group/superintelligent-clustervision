@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Cursor numeric message modes map to readable names, retaining original values and unknown future enum values in harness metadata.
+
 - Codex discovery counts logical turns consistently with parsing and streaming, excluding duplicated event echoes, injected instructions and inherited history.
 - Search fills requested session limits despite dominant matching chunks or rare harness/cwd filters; full-text score ties remain deterministic.
 - Native structured JSON output reuses validated canonical short escapes without decoding and re-encoding whole string windows.
