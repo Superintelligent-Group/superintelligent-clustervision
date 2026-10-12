@@ -4,6 +4,14 @@
 
 - `cv tools --timeline` shows one line per tool call, matching `cv tools` counts; a multi-file patch's other files are in `more_targets`.
 - `cv port --harness qwen` writes Qwen Code 0.25 session JSONL under `~/.qwen/projects`; it wrote the gemini-cli shape 0.25 no longer reads.
+- `cv show <id> --kind plan,schedule,background_job,…` (`affordances` for all) lists plans, goals, schedules, jobs, spawns, skills, hooks and forks across harnesses, side stores included.
+- `-q has:plan`, `has:schedule`, `has:background_job`, …: select sessions by affordance on any harness (`cv ls`, MCP, `cv serve`).
+- Turns that spawn a sub-agent are `subagent_spawn`, and synchronous results `subagent_return`, in Claude, OpenCode, Hermes, OpenClaw, Goose, Grok, Kimi, Roo, Cline, Devin, Continue.
+- Claude: task-notifications are `subagent_return` (agents, workflows) or `injected_context` (commands); interrupt markers and `isMeta` rows are `injected_context`, not `prompt`.
+- Hermes and OpenClaw 10.1: a `tool_call` reads as the tool it calls, namespace `tool_call`; their emitters wrap it back.
+- Side stores read: Claude `tasks/`, Grok `plan.json`, OpenCode `todo`, Gemini `tracker/` and `plans/`, Goose's todo extension, Hermes goals, loops and heartbeats.
+- A reply that spawns a sub-agent counts as a turn and stays in `dataset`, `distill` and lane message counts.
+- The `compact` hook names the command that reads back the session's plan, schedules and background jobs.
 - Qwen Code 0.25: sessions in `~/.qwen/projects/*/chats/*.jsonl` and their sub-agent transcripts are read; cv previously found none.
 - Gemini: tool results and thoughts no longer appear twice after a resume, and a resumed 0.46 session is no longer hidden by its empty twin.
 - Gemini: hook context is its own turn; `invoke_agent` calls are sub-agent spawns and returns.

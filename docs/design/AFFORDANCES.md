@@ -48,7 +48,7 @@ learn twelve kinds that no target store has a record for. Why not a `Block` face
 recompute from the tool name. The attractor ("a `--kind`, a `--sort`, a selector, or a route on
 the one API") is met by one module, one table, one trait method, no new command.
 
-The mapping by tool name is **one shared table** (`affordance::TOOLS`, harness-scoped where a name
+The mapping by tool name is **one shared table** (`affordance::classify_tool`, harness-scoped where a name
 is ambiguous: OpenCode `task` is a sub-agent, Qwen `task_create` is a plan item). Record-shaped
 affordances come from the IR's existing kinds and origins: `SubagentSpawn`, `SubagentReturn`,
 `Branch`, `ModelChange`, `Origin::Hook`, `Origin::Scheduler` (a `schedule` `fire`), and a short
@@ -58,7 +58,7 @@ record table for background completions (Claude `<task-notification>` of a comma
 **IR corrections** (existing kinds, assigned where adapters left them out; CHANGELOG'd):
 
 1. `SubagentSpawn` / `SubagentReturn` by tool name, through one sink wrapper
-   (`affordance::SpawnSink`) the adapter puts around its sink: a `Reply` that calls a spawn tool is
+   (`affordance::AffordanceSink`, which also does correction 3) the adapter puts around its sink: a `Reply` that calls a spawn tool is
    a `SubagentSpawn`; the `ToolResult` of a synchronous spawn is a `SubagentReturn`/`Subagent`.
    Applied to Claude, OpenCode, Hermes, OpenClaw, Goose, Grok, Roo, Cline, Devin, Continue, Kimi.
    Codex and Kimi Code already mark spawns with their own records and are left alone. A spawn turn
@@ -69,15 +69,16 @@ record table for background completions (Claude `<task-notification>` of a comma
    agent or workflow is `SubagentReturn`/`Subagent`, for a command `InjectedContext`/`Harness`; an
    interrupt marker (`[Request interrupted by user…]`) and other `isMeta` rows are
    `InjectedContext`/`Harness`. A scheduler fire stays `Prompt`/`Scheduler`.
-3. Deferred-tool wrappers are unwrapped the way Qwen already is: Hermes and OpenClaw 10.1
-   `tool_call{name, arguments}` becomes `ToolUse{name: <inner>, namespace: "tool_call", input:
-   <arguments>}`, so `tools`, `events`, `tool:` and this table see the real tool.
+3. Deferred-tool wrappers are unwrapped the way Qwen already is: Hermes `tool_call{name,
+   arguments}` and OpenClaw 10.1 `tool_call{id, args}` become `ToolUse{name: <inner>, namespace:
+   "tool_call", input: <arguments>}`, so `tools`, `events`, `tool:` and this table see the real
+   tool (the table strips OpenClaw's `openclaw:core:` prefix). Both emitters wrap them back.
 
 ## The mapping (from the evidence)
 
 | kind | tools and records, by harness |
 |---|---|
-| plan | Claude `TodoWrite` `TaskCreate` `TaskUpdate` `TaskList` `TaskGet` `EnterPlanMode` `ExitPlanMode` + `tasks/<sid>/*.json` (store); Codex `update_plan`; Grok `todo_write` `enter_plan_mode` `exit_plan_mode` + `plan.json` (store); OpenCode `todowrite` `todoread` + `todo` table (store); Gemini `write_todos` `tracker_*` `enter_plan_mode` `exit_plan_mode` + `tracker/*.json`, `plans/*.md` (store); Qwen `todo_write` `task_create` `task_update` `task_list` `exit_plan_mode`; Goose `todo__todo_write` + `extension_data["todo.v0"]` (store); Hermes `todo` `todo_list`; Kimi `SetTodoList` `EnterPlanMode` `ExitPlanMode`; Kimi Code `TodoList` `EnterPlanMode` `ExitPlanMode`; Continue `Checklist`; Roo `update_todo_list` `switch_mode`; Devin `todo_write` |
+| plan | Claude `TodoWrite` `TaskCreate` `TaskUpdate` `TaskList` `TaskGet` `EnterPlanMode` `ExitPlanMode` + `tasks/<sid>/*.json` (store); Codex `update_plan`; Grok `todo_write` `enter_plan_mode` `exit_plan_mode` + `plan.json` (store); OpenCode `todowrite` `todoread` + `todo` table (store); Gemini `write_todos` `tracker_*` `enter_plan_mode` `exit_plan_mode` + `tracker/*.json`, `plans/*.md` (store); Qwen `todo_write` `task_create` `task_update` `task_list` `exit_plan_mode`; Goose `todo__todo_write` + `extension_data["todo.v0"]` (store); Hermes `todo` `todo_list`; Kimi `SetTodoList` `EnterPlanMode` `ExitPlanMode`; Kimi Code `TodoList` `EnterPlanMode` `ExitPlanMode`; Continue `Checklist`; Roo `update_todo_list`; Devin `todo_write` |
 | goal | Kimi Code `CreateGoal` `UpdateGoal` `GetGoal` `SetGoalBudget`; Qwen `get_goal` `update_goal`; Hermes `state_meta` `goal:<sid>` (store) |
 | schedule | Claude `CronCreate` `CronList` `CronDelete` `ScheduleWakeup`; Grok `scheduler_create` `scheduler_list` `scheduler_delete`; Kimi Code `CronCreate` `CronList` `CronDelete`; Qwen `cron_create` `cron_list` `cron_delete` `loop_wakeup`; Hermes `cronjob` `cronjob_manage` + `state_meta` `loop:` / `heartbeat:` (store); OpenClaw `cron` `automations`; fires: every `Origin::Scheduler` turn (Claude wakeups, OpenClaw cron runs, Goose scheduled sessions) |
 | background_job | Claude `Bash{run_in_background}` `BashOutput` `KillShell` `Monitor` + command `<task-notification>`; Grok `run_terminal_command{background}` `get_command_or_subagent_output` `monitor` `kill_command_or_subagent`; Gemini/Qwen `run_shell_command{is_background}`; Hermes `terminal{background}` `process` `process_manage` + `process_complete`; OpenClaw `process`; Kimi `TaskOutput` `TaskStop` `TaskList` + `<notification>`; Kimi Code `TaskOutput` `TaskStop` `TaskList` `WaitFor` + origin `task`; Continue `CheckBackgroundJob` |
@@ -92,8 +93,9 @@ record table for background completions (Claude `<task-notification>` of a comma
 ## The query surface
 
 - **`cv show <id> --kind plan,schedule,…`**: a third `--kind` view family beside `prompt,answer`
-  and the compaction seams. One row per affordance in transcript order (store rows last): index,
-  timestamp, kind, action, tool, summary, and a plan's items. `--kind affordances` is every kind.
+  and the compaction seams. One row per affordance in transcript order (store rows last, and only
+  when the store holds something): index, timestamp, kind, action, tool, summary, a plan's items.
+  A window narrows the transcript rows. `--kind affordances` is every kind.
   `--json` prints the `Affordance` rows. MCP gets it for free (`show` with `kind`), because the
   roster is the clap tree.
 - **`has:<kind>`** in the query calculus: `cv ls -q has:plan`, `cv ls -q 'has:schedule harness:hermes'`.
@@ -114,4 +116,7 @@ Leaves (named, not done here): Qwen `scheduled_tasks.json` (the `corpus-tidy` la
 `harness/qwen*` this round); Cline `schedules` / `teams.db`; OpenClaw `cron/jobs.json` and the
 sub-agent registries; Kimi `state.json` todos and Kimi Code `tools.update_store` (carried
 records); Grok `hook_execution` and `rewind_points.jsonl`; Claude `--fork-session` and Goose
-fork, which record no link; OpenClaw 1.29 completions that are plain user text.
+fork, which record no link; OpenClaw 1.29 completions that are plain user text; Roo's
+`new_task` result, which rides a mixed user turn the adapter types `Prompt` (so no
+`subagent_return`); Kimi Code 0.39.1 spawns, which have no record of their own; Claude skills run
+by slash command, whose only trace is the command notice and an `isMeta` body.
