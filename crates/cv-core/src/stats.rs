@@ -862,7 +862,8 @@ mod tests {
         // Two lines of one streamed response in the parent, the same response again in a resumed
         // copy, and a sub-agent's own call: three distinct calls' worth of lines, two calls counted
         // from the catalog sessions plus one from the sub-agent forest.
-        let root = std::env::temp_dir().join(format!("cv-tokstats-{}", uuid::Uuid::new_v4()));
+        let world = cv_testkit::World::in_process("token-stats");
+        let root = world.base.join("token-fixtures");
         let proj = root.join("-enc");
         let subs = proj.join("sess").join("subagents");
         std::fs::create_dir_all(&subs).unwrap();
