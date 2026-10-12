@@ -224,6 +224,120 @@ pub(crate) fn block_from_raw(
     })
 }
 
+/// A schema projection shared by mapped and portable document readers. Whole value acceptance
+/// happens at their source boundary; only decoded metadata and demanded composite text are owned.
+pub(crate) fn block_from_view(
+    view: crate::json::JsonView<'_>,
+    q: &Quirks,
+    spans: bool,
+) -> anyhow::Result<Option<Block>> {
+    use super::super::store::document::Fields;
+    if !spans || q.flat_media.is_some() {
+        return Ok(block_from(view.resolve()?.as_ref(), q));
+    }
+    let keys = [
+        "type",
+        "source",
+        "title",
+        "id",
+        "name",
+        "data",
+        "tool_use_id",
+        "is_error",
+        "content",
+        "text",
+        q.thinking.0,
+        q.thinking.1,
+        q.tool_use.1,
+    ];
+    let Some(record) = Fields::parse(view, &keys)? else {
+        return Ok(None);
+    };
+    let Some(ty) = record.string("type")? else {
+        return Ok(None);
+    };
+    if ty == q.tool_use.0 {
+        return Ok(Some(Block::ToolUse {
+            id: record.string("id")?.unwrap_or_default(),
+            name: record.string("name")?.unwrap_or_default(),
+            input: record
+                .get(q.tool_use.1)
+                .map(|v| v.argument(true))
+                .transpose()?
+                .unwrap_or_default(),
+            namespace: None,
+        }));
+    }
+    if matches!(ty.as_str(), "image" | "document") {
+        let src = record
+            .get("source")
+            .map(|v| Fields::parse(v, &["type", "media_type", "url", "file_id", "data"]))
+            .transpose()?
+            .flatten();
+        let media_type = src.as_ref().map(|r| r.string("media_type")).transpose()?.flatten();
+        let marker = ty == "image";
+        let data_ref = if let Some(src) = src {
+            match src.string("type")?.as_deref() {
+                Some("url") => src.string("url")?,
+                Some("file") => src.string("file_id")?.map(|id| format!("file:{id}")),
+                Some("base64") | None if marker => {
+                    if src.get("data").map(|v| v.is_string()).transpose()?.unwrap_or(false) {
+                        Some("base64:inline".into())
+                    } else {
+                        None
+                    }
+                }
+                Some(other) if marker => Some(other.to_owned()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        return Ok(Some(if marker {
+            Block::Image { media_type, data_ref }
+        } else {
+            Block::File {
+                mime: media_type,
+                path: record.string("title")?,
+                source: data_ref,
+            }
+        }));
+    }
+    let keys: &[&str] = if ty == "text" {
+        &["type"]
+    } else if ty == "thinking" {
+        &["type", q.thinking.1]
+    } else if Some(ty.as_str()) == q.redacted_thinking {
+        &["type", "data"]
+    } else if ty == "tool_result" {
+        &["type", "tool_use_id", "is_error"]
+    } else {
+        return Ok(None);
+    };
+    let mut fields = record.project(keys)?;
+    if ty == "tool_result" {
+        if let Some(content) = record.get("content") {
+            if !content.is_string()? {
+                fields.insert("content".into(), content.resolve()?.into_owned());
+            }
+        }
+    }
+    let text = record.get("text").map(|v| v.text(true)).transpose()?.flatten();
+    let thinking = record.get(q.thinking.0).map(|v| v.text(true)).transpose()?.flatten();
+    let result = record.get("content").map(|v| v.text(true)).transpose()?.flatten();
+    Ok(block_from_fields(&Value::Object(fields), q, &mut |key| {
+        if key == "content" {
+            result.clone()
+        } else if key == q.thinking.0 {
+            thinking.clone()
+        } else if key == "text" {
+            text.clone()
+        } else {
+            None
+        }
+    }))
+}
+
 /// Every block of a `content` array; a bare string is one text block. (Claude's lazy reader spans
 /// the bare-string case itself, so it walks the array with [`block_from_with`] instead.)
 pub fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
