@@ -854,6 +854,48 @@ mod tests {
     }
 
     #[test]
+    fn source_input_preview_matches_owned_and_stays_short() {
+        let dir = std::env::temp_dir().join(format!("cv-html-json-preview-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        for value in [
+            serde_json::json!({"command": "é\n".repeat(10000), "payload": "ignored".repeat(10000)}),
+            serde_json::json!({"opaque": "é\\\"".repeat(10000)}),
+            serde_json::json!({"command": 4, "description": ""}),
+            serde_json::json!([true, null, "wide α"]),
+        ] {
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let path = dir.join("input");
+            std::fs::write(&path, &bytes).unwrap();
+            let source = crate::Json::source(&path, 0, bytes.len() as u64).unwrap();
+            let owned = crate::Json::Owned(value.clone());
+            let expected = value
+                .as_object()
+                .and_then(|object| {
+                    [
+                        "command",
+                        "file_path",
+                        "path",
+                        "pattern",
+                        "query",
+                        "url",
+                        "prompt",
+                        "description",
+                    ]
+                    .into_iter()
+                    .find_map(|key| object.get(key).and_then(serde_json::Value::as_str))
+                })
+                .map(|text| crate::ir::truncate(text, 80))
+                .unwrap_or_else(|| crate::ir::truncate(&value.to_string(), 80));
+            assert_eq!(input_preview(&source).unwrap(), expected);
+            assert_eq!(input_preview(&owned).unwrap(), expected);
+            assert!(expected.chars().count() <= 80);
+            std::fs::remove_file(path).unwrap();
+            assert!(input_preview(&source).is_err());
+        }
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
     fn share_helpers() {
         assert_eq!(short("abcdef1234567890"), "abcdef12");
         // preview picks the meaningful key
