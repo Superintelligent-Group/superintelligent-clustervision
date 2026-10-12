@@ -83,9 +83,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-#[cfg(not(feature = "mmap"))]
-use std::io::BufRead;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub struct Kimi {
@@ -268,7 +266,7 @@ impl Adapter for Kimi {
         // Positional wire enrichment, streamed: one StatusUpdate per assistant step (in wire
         // order) and the first wire timestamp for the first user turn. Forward-only, O(1) state.
         let mut statuses = enrich.statuses.iter();
-        let first_wire_ts = enrich.msg_timestamps.first().copied();
+        let first_wire_ts = enrich.first_timestamp;
         let mut first_user_seen = false;
         // `tool_call_id` → tool name from the assistant's `tool_calls`, so a result names its tool.
         let mut call_names: HashMap<String, String> = HashMap::new();
@@ -858,7 +856,7 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 struct WireEnrich {
     tool_results: HashMap<String, WireToolResult>,
     statuses: Vec<WireStatus>,
-    msg_timestamps: Vec<DateTime<Utc>>,
+    first_timestamp: Option<DateTime<Utc>>,
     file: Option<fs::File>,
     path: PathBuf,
     spans: bool,
@@ -873,6 +871,7 @@ struct WireRange {
 struct WireToolResult {
     is_error: bool,
     output: Option<WireRange>,
+    output_escaped: bool,
     extras: Option<WireRange>,
 }
 
@@ -896,7 +895,7 @@ impl WireEnrich {
                 source: Some(self.path.clone()),
                 offset: range.offset + 1,
                 len: range.len as u64 - 2,
-                escaped: true,
+                escaped: result.output_escaped,
             });
         }
         self.read(range)
@@ -944,33 +943,39 @@ fn scan_wire(wire: &Path, mut visit: impl FnMut(&RawValue, u64)) -> Option<fs::F
     };
     #[cfg(feature = "mmap")]
     {
-        if file.metadata().ok()?.len() == 0 {
+        if file.metadata().is_ok_and(|m| m.len() == 0) {
             return Some(file);
         }
         // Safety: immutable, read-only transcript mapping; external truncation has the same
         // documented caveat as the other mapped adapters.
-        let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-        let text = std::str::from_utf8(&map).ok()?;
-        for line in text.lines() {
-            each(line, (line.as_ptr() as usize - text.as_ptr() as usize) as u64);
+        if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+            let text = std::str::from_utf8(&map).ok()?;
+            for line in text.lines() {
+                each(line, (line.as_ptr() as usize - text.as_ptr() as usize) as u64);
+            }
+        } else {
+            scan_wire_reader(&file, &mut each)?;
         }
     }
     #[cfg(not(feature = "mmap"))]
-    {
-        let mut reader = BufReader::new(file.try_clone().ok()?);
-        let mut line = Vec::new();
-        let mut offset = 0;
-        loop {
-            line.clear();
-            let n = reader.read_until(b'\n', &mut line).ok()?;
-            if n == 0 {
-                break;
-            }
-            each(std::str::from_utf8(&line).ok()?, offset);
-            offset += n as u64;
-        }
-    }
+    scan_wire_reader(&file, &mut each)?;
     Some(file)
+}
+
+fn scan_wire_reader(file: &fs::File, each: &mut impl FnMut(&str, u64)) -> Option<()> {
+    let mut reader = BufReader::new(file.try_clone().ok()?);
+    let mut line = Vec::new();
+    let mut offset = 0;
+    loop {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line).ok()?;
+        if n == 0 {
+            break;
+        }
+        each(std::str::from_utf8(&line).ok()?, offset);
+        offset += n as u64;
+    }
+    Some(())
 }
 
 /// Index ToolResult fields by byte range, decoding only usage/identity metadata. A later result
@@ -1001,11 +1006,12 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
                             len: r.get().len(),
                         };
                         let string = |r: &&&RawValue| r.get().starts_with('"');
-                        let output = rv
+                        let output_raw = rv
                             .get("output")
                             .filter(string)
-                            .or_else(|| rv.get("message").filter(string))
-                            .map(range);
+                            .or_else(|| rv.get("message").filter(string));
+                        let output = output_raw.map(range);
+                        let output_escaped = output_raw.is_some_and(|r| r.get().as_bytes().contains(&b'\\'));
                         let extras = rv.get("extras").filter(|r| r.get() != "null").map(range);
                         let is_error = rv.get("is_error").is_some_and(|r| r.get() == "true");
                         e.tool_results.insert(
@@ -1013,6 +1019,7 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
                             WireToolResult {
                                 is_error,
                                 output,
+                                output_escaped,
                                 extras,
                             },
                         );
@@ -1028,7 +1035,9 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
         }
         if matches!(mty.as_str(), "TurnBegin" | "ContentPart" | "ToolCall") {
             if let Some(ts) = v.get("timestamp").and_then(|r| wire_timestamp(r)) {
-                e.msg_timestamps.push(ts);
+                if e.first_timestamp.is_none() {
+                    e.first_timestamp = Some(ts);
+                }
             }
         }
     });
@@ -1214,6 +1223,29 @@ mod tests {
     use crate::harness::Parse;
 
     #[test]
+    fn plain_wire_output_span_borrows_without_decoding() {
+        let world = cv_testkit::World::new("kimi-wire-plain");
+        let path = world.base.join("wire.jsonl");
+        let output = "plain 雪".repeat(2000);
+        fs::write(
+            &path,
+            serde_json::json!({"message":{"type":"ToolResult","payload":{
+                "tool_call_id":"plain", "return_value":{"output":output}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let e = read_wire_enrichment(&path, true);
+        let text = e.output(&e.tool_results["plain"]);
+        assert!(!text.as_span().unwrap().escaped);
+        let resolver = crate::lazy::Resolver::new(None);
+        let resolved = text.resolve(&resolver);
+        assert_eq!(resolved.as_ref(), output);
+        #[cfg(feature = "mmap")]
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
     fn wire_ranges_match_value_enrichment_oracle() {
         let world = cv_testkit::World::new("kimi-wire-ranges");
         let path = world.base.join("wire.jsonl");
@@ -1284,7 +1316,7 @@ mod tests {
                 "present null token_usage is default Usage"
             );
             assert!(e.statuses[1].usage.is_none());
-            assert_eq!(e.msg_timestamps.len(), 1);
+            assert_eq!(e.first_timestamp, epoch_to_dt(1700000000.));
         }
         assert_eq!(
             wire_time_bounds(&path),
