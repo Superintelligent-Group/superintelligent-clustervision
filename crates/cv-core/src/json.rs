@@ -922,8 +922,14 @@ fn write_raw(raw: Raw<'_>, writer: &mut impl Write) -> Result<()> {
             writer.write_all(b"]")?;
         }
         Some(b'"') => {
-            if !raw.get().as_bytes().contains(&b'\\') {
-                writer.write_all(raw.get().as_bytes())?;
+            // Strict validation already established UTF-8 and string acceptance. Serde
+            // preserves every short escape except optional slash escaping; Unicode escapes
+            // need decoding to normalize code points and canonical control characters.
+            let bytes = raw.get().as_bytes();
+            if !bytes.contains(&b'\\')
+                || (memchr::memmem::find(bytes, b"\\u").is_none() && memchr::memmem::find(bytes, b"\\/").is_none())
+            {
+                writer.write_all(bytes)?;
             } else {
                 writer.write_all(b"\"")?;
                 let mut scratch = Vec::new();
@@ -1029,6 +1035,23 @@ mod tests {
         value.write_canonical(&mut output).unwrap();
         assert_eq!(value.canonical_len().unwrap(), output.len() as u64);
         output
+    }
+
+    #[test]
+    fn canonical_short_escape_strings_match_serde_value() {
+        let bodies = [
+            r#"plain☺ "#,
+            r#"a\n\r\t\b\f\"\\z"#,
+            r#"a\/b"#,
+            r#"a\u0000\u000A\u0022\u005c\u0061\uD83D\uDE00"#,
+            r#"\\u0041\\/"#,
+        ];
+        for body in bodies {
+            let raw = format!(r#"{{"z":-0,"a":["{body}",{{"x":"{body}"}}],"z":2}}"#);
+            let fixture = Fixture::new(raw.as_bytes());
+            let expected: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(canonical(&fixture.value()), serde_json::to_vec(&expected).unwrap());
+        }
     }
 
     #[test]
