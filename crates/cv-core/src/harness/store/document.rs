@@ -58,6 +58,11 @@ impl Source {
     }
 }
 
+/// A derived-envelope shape rejection, distinct from a backing read or source-change error.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid typed JSON struct: {0}")]
+pub(crate) struct InvalidStruct(pub(crate) &'static str);
+
 /// Schema-selected fields across mapped and positioned sources. Structural descendants remain
 /// scoped views; only requested metadata/output is materialized. No ignored-key roster is kept.
 pub(crate) struct Fields<'a> {
@@ -80,7 +85,9 @@ impl<'a> Fields<'a> {
         let mut fields = Vec::with_capacity(keys.len());
         for (index, value) in values.enumerate() {
             let value = value?;
-            anyhow::ensure!(index < keys.len(), "too many struct fields");
+            if index >= keys.len() {
+                return Err(InvalidStruct("too many positional fields").into());
+            }
             fields.push((keys[index], value));
         }
         Ok(Some(Self { fields }))
@@ -220,10 +227,9 @@ fn select_fields_with<'a>(raw: Raw<'a>, keys: &[&str], unique: bool) -> Result<O
         let start = cursor;
         cursor = string_end(b, start, raw.1).context("invalid JSON key")?;
         if unique {
-            anyhow::ensure!(
-                super::json::value_compatible(&b[start..cursor]),
-                "invalid JSON object key"
-            );
+            if !super::json::value_compatible(&b[start..cursor]) {
+                return Err(InvalidStruct("invalid object key").into());
+            }
         }
         let key = if cursor - start <= key_limit {
             serde_json::from_str::<String>(&raw.get()[start..cursor]).ok()
@@ -241,7 +247,9 @@ fn select_fields_with<'a>(raw: Raw<'a>, keys: &[&str], unique: bool) -> Result<O
         if let Some(key) = key {
             for (i, requested) in keys.iter().enumerate() {
                 if key == *requested {
-                    anyhow::ensure!(!unique || fields[i].is_none(), "duplicate field {key}");
+                    if unique && fields[i].is_some() {
+                        return Err(InvalidStruct("duplicate known field").into());
+                    }
                     fields[i] = Some(Raw(&raw.get()[start..cursor], raw.1));
                 }
             }

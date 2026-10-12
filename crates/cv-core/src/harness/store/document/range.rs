@@ -578,7 +578,9 @@ impl RangeSource {
         for entry in entries {
             let (key, value) = entry?;
             if unique {
-                anyhow::ensure!(self.accepts_value(key)?, "invalid JSON object key");
+                if !self.accepts_value(key)? {
+                    return Err(super::InvalidStruct("invalid object key").into());
+                }
             }
             if key.len > max_key.saturating_mul(6).saturating_add(2) {
                 continue;
@@ -586,7 +588,9 @@ impl RangeSource {
             let key: String = self.materialize(key)?;
             for (i, requested) in keys.iter().enumerate() {
                 if key == *requested {
-                    anyhow::ensure!(!unique || fields[i].is_none(), "duplicate field {key}");
+                    if unique && fields[i].is_some() {
+                        return Err(super::InvalidStruct("duplicate known field").into());
+                    }
                     fields[i] = Some(value);
                 }
             }

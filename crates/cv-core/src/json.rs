@@ -1062,6 +1062,9 @@ mod tests {
                 Ok(())
             });
             assert_eq!(actual.is_ok(), serde_json::from_str::<Doc>(&bytes).is_ok(), "{bytes}");
+            if bytes.contains("ignored\\uD800") || bytes.contains("\\u0062ody") || bytes == "[0,1]" {
+                assert!(actual.unwrap_err().downcast_ref::<document::InvalidStruct>().is_some());
+            }
         }
     }
 
