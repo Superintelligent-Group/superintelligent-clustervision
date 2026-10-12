@@ -366,6 +366,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "fs4",
+ "memchr",
  "memmap2",
  "percent-encoding",
  "rayon",
