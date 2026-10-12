@@ -37,7 +37,7 @@ pub(crate) fn cmd_search(
     // Preferred path: the tantivy full-text index (real tokenization + BM25). Authoritative when
     // present — an empty result means "no match", not "fall back to a live scan".
     if cv_search::default_tantivy_dir().exists() {
-        match cv_search::text_search(None, query, limit.saturating_mul(4)) {
+        match cv_search::text_search_indexed(None, query, limit.saturating_mul(4)) {
             Ok(hits) => {
                 render_search_hits(&hits, want, limit, query, "index", json)?;
                 return Ok(());
@@ -71,11 +71,16 @@ fn render_search_hits(
     source: &str,
     json: bool,
 ) -> Result<()> {
-    let rows: Vec<&cv_search::Hit> = hits
+    let mut selected: Vec<cv_search::Hit> = hits
         .iter()
         .filter(|h| want.is_none_or(|w| h.harness == w.as_str()))
         .take(limit)
+        .cloned()
         .collect();
+    if source == "index" {
+        cv_search::enrich_text_snippets(None, query, &mut selected)?;
+    }
+    let rows: Vec<&cv_search::Hit> = selected.iter().collect();
     if json {
         // Machine-readable hits: a session row (the same shape `ls --json` emits, filled from the
         // catalog) plus the untruncated snippet and the index's relevance score (BM25 for FTS,

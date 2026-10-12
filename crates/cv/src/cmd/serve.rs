@@ -465,7 +465,7 @@ fn search(query: &str) -> Reply {
     // Same fetch-then-filter shape as `cv search`: ask the index for 4× the wanted rows so the
     // harness filter has something to cut into, then take `limit`.
     let fetch = limit.saturating_mul(4);
-    let (hits, source, mut note) = if semantic {
+    let (mut hits, source, mut note) = if semantic {
         match cv_search::semantic_search(None, &q, fetch) {
             Ok(hits) => (hits, "semantic", None),
             Err(e) => {
@@ -481,7 +481,7 @@ fn search(query: &str) -> Reply {
     } else if cv_search::default_tantivy_dir().exists() {
         // The index is authoritative when present — an empty result means "no match", never
         // "fall back to a live scan".
-        match cv_search::text_search(None, &q, fetch) {
+        match cv_search::text_search_indexed(None, &q, fetch) {
             Ok(hits) => (hits, "index", None),
             Err(e) => (
                 Vec::new(),
@@ -496,6 +496,21 @@ fn search(query: &str) -> Reply {
             Some("no index yet — scanned live; run `cv index` for instant, full-transcript search".into()),
         )
     };
+
+    if source != "live" {
+        hits.retain(|h| {
+            want.is_none_or(|w| h.harness == w.as_str())
+                && cwd
+                    .as_ref()
+                    .is_none_or(|needle| h.cwd.as_ref().is_some_and(|c| c.contains(needle.as_str())))
+        });
+        hits.truncate(limit);
+        if source == "index" {
+            if let Err(e) = cv_search::enrich_text_snippets(None, &q, &mut hits) {
+                note = Some(format!("live snippets unavailable ({e:#}); showing indexed previews"));
+            }
+        }
+    }
 
     let mut rows: Vec<Value> = if source == "live" {
         match cv_core::scan::live_search(&q, want, limit) {

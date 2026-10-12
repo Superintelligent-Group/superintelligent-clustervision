@@ -33,7 +33,7 @@ pub struct Hit {
     pub title: Option<String>,
     /// Relevance score (BM25 for FTS, cosine similarity for semantic).
     pub score: f32,
-    /// A representative excerpt of the matching text (generated live from the hit session for FTS).
+    /// A stored preview, or a live excerpt when a displayed full-text hit has been enriched.
     pub snippet: String,
     /// Unix timestamps carried straight off the FTS index / embedding store, so callers can date
     /// rows without re-discovering the corpus. `None` when the session itself had no parseable
@@ -102,6 +102,21 @@ pub fn index_all(dir: impl Into<Option<PathBuf>>, rebuild: bool, subagents: bool
 pub fn text_search(dir: impl Into<Option<PathBuf>>, query: &str, limit: usize) -> Result<Vec<Hit>> {
     let dir = dir.into().unwrap_or_else(default_tantivy_dir);
     fts::text_search(&dir, query, limit)
+}
+
+/// Match every indexed session ID, without ranking or reading source transcripts.
+pub fn text_search_ids(dir: impl Into<Option<PathBuf>>, query: &str) -> Result<std::collections::HashSet<String>> {
+    fts::text_search_ids(&dir.into().unwrap_or_else(default_tantivy_dir), query)
+}
+
+/// Rank sessions with stored previews; no source transcripts are read.
+pub fn text_search_indexed(dir: impl Into<Option<PathBuf>>, query: &str, limit: usize) -> Result<Vec<Hit>> {
+    fts::text_search_indexed(&dir.into().unwrap_or_else(default_tantivy_dir), query, limit)
+}
+
+/// Generate live snippets for only the selected displayed hits.
+pub fn enrich_text_snippets(dir: impl Into<Option<PathBuf>>, query: &str, hits: &mut [Hit]) -> Result<()> {
+    fts::enrich_text_snippets(&dir.into().unwrap_or_else(default_tantivy_dir), query, hits)
 }
 
 /// Discover, parse, and embed every session, persisting vectors to the default store.

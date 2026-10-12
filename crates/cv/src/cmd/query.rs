@@ -25,7 +25,8 @@ pub(crate) fn build(query: Option<String>) -> Result<Option<SessionQuery>> {
     }
 }
 
-/// Run one full-text search per distinct `text:` needle in the query. If there's no index, warn
+/// Resolve every indexed matching ID per distinct `text:` needle, without reading transcripts.
+/// If there's no index, warn
 /// once and treat every `text:` needle as matching nothing.
 pub(crate) fn text_sets(query: &SessionQuery) -> TextSets {
     if query.needles(FieldId::Text).is_empty() {
@@ -35,10 +36,5 @@ pub(crate) fn text_sets(query: &SessionQuery) -> TextSets {
         eprintln!("cv query: text: needs a full-text index — run `cv index` (treating text: as no match)");
         return TextSets::resolve(query, |_| HashSet::new());
     }
-    TextSets::resolve(query, |n| {
-        // A generous cap: we want the full matching set, not a top-K ranking.
-        cv_search::text_search(None, n, 100_000)
-            .map(|hits| hits.into_iter().map(|h| h.id).collect())
-            .unwrap_or_default()
-    })
+    TextSets::resolve(query, |n| cv_search::text_search_ids(None, n).unwrap_or_default())
 }

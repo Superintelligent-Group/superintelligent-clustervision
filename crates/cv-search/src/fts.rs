@@ -1480,6 +1480,64 @@ pub(crate) fn index_refs_with_subagents(dir: &Path, refs: &[cv_core::SessionRef]
     Ok(sweep(dir, refs.to_vec(), false, true)?.changed)
 }
 
+fn parse_text_query(index: &Index, f: &Fields, query: &str) -> Result<Box<dyn tantivy::query::Query>> {
+    let mut parser = QueryParser::for_index(index, vec![f.title, f.body, f.cwd]);
+    parser.set_conjunction_by_default();
+    parser
+        .parse_query(query)
+        .with_context(|| format!("parsing query {query:?}"))
+}
+
+/// The complete set of session IDs matching a full-text query. This reads only the index:
+/// no ranking cap, snippet generation, discovery or transcript access. Chunk documents deduplicate
+/// into their session ID, with the same query syntax and conjunction default as ranked search.
+pub fn text_search_ids(dir: &Path, query: &str) -> Result<HashSet<String>> {
+    use tantivy::collector::DocSetCollector;
+    let (index, f) = open_existing(dir)?;
+    let reader = index.reader().context("opening index reader")?;
+    let searcher = reader.searcher();
+    let parsed = parse_text_query(&index, &f, query)?;
+    let docs = searcher
+        .search(&parsed, &DocSetCollector)
+        .context("matching session IDs")?;
+    let mut ids = HashSet::new();
+    for addr in docs {
+        let doc: TantivyDocument = searcher.doc(addr).context("loading matched ID")?;
+        if let Some(id) = doc.get_first(f.id).and_then(|v| v.as_str()) {
+            ids.insert(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
+/// Add live snippets to selected ranked hits. Only these source transcripts are read; unavailable
+/// sources keep their stored preview, with the same moved-file annotation as [`text_search`].
+pub fn enrich_text_snippets(dir: &Path, query: &str, hits: &mut [Hit]) -> Result<()> {
+    if hits.is_empty() {
+        return Ok(());
+    }
+    let (index, f) = open_existing(dir)?;
+    let reader = index.reader().context("opening index reader")?;
+    let searcher = reader.searcher();
+    for hit in hits {
+        let doc = meta_doc(&searcher, &f, &hit.id);
+        let path = doc.as_ref().and_then(|d| d.get_first(f.path)).and_then(|v| v.as_str());
+        if let Some(snippet) = path
+            .and_then(|p| live_snippet(p, &hit.harness, query))
+            .filter(|s| !s.is_empty())
+        {
+            hit.snippet = snippet;
+        } else if path.is_none_or(|p| !Path::new(p).exists()) {
+            hit.snippet = if hit.snippet.is_empty() {
+                "(source file moved)".to_string()
+            } else {
+                format!("{} (source file moved)", hit.snippet)
+            };
+        }
+    }
+    Ok(())
+}
+
 /// Run a full-text query, returning up to `limit` hits ranked by BM25, each with a live snippet and
 /// its `created_at`/`updated_at` (so callers needn't re-discover the corpus just to date the rows).
 /// If the hit's source file can't be re-read (moved/changed since indexing), the snippet falls back
@@ -1489,6 +1547,14 @@ pub(crate) fn index_refs_with_subagents(dir: &Path, refs: &[cv_core::SessionRef]
 /// The query supports tantivy's syntax: bare terms search title+body+cwd, and fielded terms like
 /// `harness:claude`, phrases `"foo bar"`, and booleans `a AND b` work too.
 pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
+    let mut hits = text_search_indexed(dir, query, limit)?;
+    enrich_text_snippets(dir, query, &mut hits)?;
+    Ok(hits)
+}
+
+/// Rank indexed sessions using their stored previews, without reading source transcripts.
+/// Call [`enrich_text_snippets`] after filtering and truncating the displayed hits.
+pub fn text_search_indexed(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
     if !dir.join("meta.json").exists() {
         anyhow::bail!("no full-text index at {} — run `index_all` first", dir.display());
     }
@@ -1497,11 +1563,7 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
     let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
 
-    let mut parser = QueryParser::for_index(&index, vec![f.title, f.body, f.cwd]);
-    parser.set_conjunction_by_default(); // all terms must match — better precision than OR
-    let parsed = parser
-        .parse_query(query)
-        .with_context(|| format!("parsing query {query:?}"))?;
+    let parsed = parse_text_query(&index, &f, query)?;
 
     // A session is several docs (body chunks) sharing one id, so over-fetch and dedup to one row per
     // id, keeping the best-scoring doc (TopDocs is score-ordered, so the first id occurrence wins).
@@ -1544,25 +1606,7 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
         let get_str =
             |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
         let harness = get_str(f.harness).unwrap_or_default();
-        let path = get_str(f.path);
-        let snippet = match path
-            .as_deref()
-            .and_then(|p| live_snippet(p, &harness, query))
-            .filter(|s| !s.is_empty())
-        {
-            Some(s) => s,
-            // The source file is unreadable (moved/changed) or yielded nothing — fall back to the
-            // preview stored at index time on the meta doc.
-            None => {
-                let preview = get_str(f.preview).unwrap_or_default();
-                let gone = path.as_deref().is_none_or(|p| !Path::new(p).exists());
-                match (gone, preview.is_empty()) {
-                    (true, true) => "(source file moved)".to_string(),
-                    (true, false) => format!("{preview} (source file moved)"),
-                    (false, _) => preview,
-                }
-            }
-        };
+        let snippet = get_str(f.preview).unwrap_or_default();
 
         hits.push(Hit {
             id,
@@ -1829,6 +1873,79 @@ mod tests {
         }
         std::fs::write(&p, out).unwrap();
         p.display().to_string()
+    }
+
+    #[test]
+    fn indexed_matching_reads_no_sources_and_keeps_all_chunk_matches() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let sdir = tmpdir();
+        let path = write_claude(&sdir, "chunked", "alpha beta originalbody");
+        let refs = vec![sref("chunked", "old title", path.clone())];
+        index_refs(&dir, &refs, false).unwrap();
+        let before = text_search_indexed(&dir, "alpha", 10).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let after = text_search_indexed(&dir, "alpha", 10).unwrap();
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+        assert_eq!(
+            text_search_ids(&dir, "\"alpha beta\" harness:claude").unwrap(),
+            HashSet::from(["chunked".to_string()])
+        );
+        assert!(text_search_ids(&dir, "alpha nonexistent").unwrap().is_empty());
+        assert!(text_search_ids(&dir, "harness:codex alpha").unwrap().is_empty());
+        assert!(text_search_ids(&dir, "\"").is_err());
+
+        // More matching chunks than ranked search's overfetch, and more unique sessions than its
+        // minimum fetch: membership must enumerate the actual match set without either cap.
+        let (index, f) = open_existing(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        for _ in 0..300 {
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.id, "chunked");
+            doc.add_text(f.body, "allmatches");
+            writer.add_document(doc).unwrap();
+        }
+        let mut expected = HashSet::from(["chunked".to_string()]);
+        for i in 0..130 {
+            let id = format!("other-{i}");
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.id, &id);
+            doc.add_text(f.body, "allmatches");
+            writer.add_document(doc).unwrap();
+            expected.insert(id);
+        }
+        writer.commit().unwrap();
+        assert_eq!(text_search_ids(&dir, "allmatches").unwrap(), expected);
+        drop(writer);
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sdir).ok();
+    }
+
+    #[test]
+    fn live_snippets_are_enriched_only_for_selected_hits() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let sdir = tmpdir();
+        let refs: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|id| sref(id, "common title", write_claude(&sdir, id, "common originalbody")))
+            .collect();
+        index_refs(&dir, &refs, false).unwrap();
+        let mut hits = text_search_indexed(&dir, "common", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        let untouched = hits[1].snippet.clone();
+        for r in &refs {
+            write_claude(&sdir, &r.id, "common replacementbody");
+        }
+        enrich_text_snippets(&dir, "common", &mut hits[..1]).unwrap();
+        assert!(hits[0].snippet.contains("replacementbody"));
+        assert_eq!(hits[1].snippet, untouched);
+        assert!(hits[1].snippet.contains("originalbody"));
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sdir).ok();
     }
 
     #[test]

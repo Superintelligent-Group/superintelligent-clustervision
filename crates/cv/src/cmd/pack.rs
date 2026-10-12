@@ -130,13 +130,14 @@ fn recall(task: &str, limit: usize) -> Result<Vec<cv_search::Hit>> {
     let mut ranked: Vec<(f32, Vec<cv_search::Hit>)> = Vec::new();
 
     if cv_search::default_tantivy_dir().exists() {
-        match cv_search::text_search(None, task, fetch) {
+        // Recall consumes ranks and session IDs; it parses only the selected sources below.
+        match cv_search::text_search_indexed(None, task, fetch) {
             Ok(hits) if !hits.is_empty() => ranked.push((FTS_WEIGHT, hits)),
             Ok(_) => {
                 // The index parser is conjunctive (all terms must match) — right for search,
                 // too strict for a task phrase. Retry as an OR of the task's words.
                 if let Some(q) = or_query(task) {
-                    match cv_search::text_search(None, &q, fetch) {
+                    match cv_search::text_search_indexed(None, &q, fetch) {
                         Ok(hits) if !hits.is_empty() => ranked.push((FTS_WEIGHT, hits)),
                         Ok(_) => {}
                         Err(e) => eprintln!("(full-text recall failed: {e:#})"),
