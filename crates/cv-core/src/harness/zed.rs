@@ -315,10 +315,21 @@ fn thread_header(
 ) -> Option<blob::Header> {
     if let Some(rowid) = rowid {
         if let Ok(data) = conn.blob_open(rusqlite::DatabaseName::Main, "threads", "data", rowid, true) {
-            return blob::header_reader(data_type, data, count);
+            return if count {
+                blob::header_reader(data_type, data, count)
+            } else {
+                blob::prepare_reader(data_type, data)
+            };
         }
     }
-    with_cell(conn, id, rowid, |data| blob::header(data_type, data, count)).flatten()
+    with_cell(conn, id, rowid, |data| {
+        if count {
+            blob::header(data_type, data, count)
+        } else {
+            blob::prepare_reader(data_type, data)
+        }
+    })
+    .flatten()
 }
 
 fn thread_replay(
@@ -329,6 +340,9 @@ fn thread_replay(
     header: &blob::Header,
     f: &mut dyn FnMut(Message) -> Flow,
 ) {
+    if blob::replay_prepared(header, f) {
+        return;
+    }
     if let Some(rowid) = rowid {
         if let Ok(data) = conn.blob_open(rusqlite::DatabaseName::Main, "threads", "data", rowid, true) {
             blob::replay_reader(data_type, data, header, f);

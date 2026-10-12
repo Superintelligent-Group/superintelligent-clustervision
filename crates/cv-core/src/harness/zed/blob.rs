@@ -1,5 +1,5 @@
-//! Two-pass thread decoding: metadata/validation first, then selected messages. Compressed
-//! offsets cannot become transcript spans; decoded payload memory is bounded by one message.
+//! Strict metadata/validation before selected messages. Stream operations decode once into
+//! bounded memory or a private spill; compressed offsets never become transcript spans.
 
 use super::{legacy_message, modern_message};
 use crate::harness::store::DiscardValue;
@@ -15,6 +15,7 @@ pub(super) struct Header {
     pub metadata: Value,
     pub last_messages: Option<usize>,
     pub message_count: usize,
+    decoded: Option<Decoded>,
 }
 
 pub(super) fn header(data_type: Option<&str>, data: &[u8], count: bool) -> Option<Header> {
@@ -100,6 +101,106 @@ fn pass_reader(
         de.end().ok()?;
         Some(out)
     }
+}
+
+// Only stream operations stage decoded bytes: discovery retains its one reader pass.
+// The spill descriptor is private, immutable after decoding, and never names a transcript.
+const DECODED_MEMORY_LIMIT: usize = 1024 * 1024;
+struct Spill {
+    file: Option<std::fs::File>,
+    path: std::path::PathBuf,
+}
+impl Drop for Spill {
+    fn drop(&mut self) {
+        self.file.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+enum Decoded {
+    Memory(Vec<u8>),
+    File(Spill),
+}
+impl Decoded {
+    fn read(mut input: impl std::io::Read) -> std::io::Result<Self> {
+        use std::io::Write;
+        let mut memory = Vec::new();
+        let mut spill: Option<Spill> = None;
+        let mut chunk = [0; 64 * 1024];
+        loop {
+            let n = input.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            if spill.is_none() && memory.len() + n > DECODED_MEMORY_LIMIT {
+                let path = std::env::temp_dir().join(format!("cv-zed-decoded-{}", uuid::Uuid::new_v4()));
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true).write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let file = options.open(&path)?;
+                spill = Some(Spill { file: Some(file), path });
+                #[cfg(unix)]
+                std::fs::remove_file(&spill.as_ref().unwrap().path)?;
+                spill.as_mut().unwrap().file.as_mut().unwrap().write_all(&memory)?;
+                memory = Vec::new();
+            }
+            if let Some(spill) = &mut spill {
+                spill.file.as_mut().unwrap().write_all(&chunk[..n])?;
+            } else {
+                memory.extend_from_slice(&chunk[..n]);
+            }
+        }
+        Ok(match spill {
+            Some(file) => Self::File(file),
+            None => Self::Memory(memory),
+        })
+    }
+    fn parse(&self, count: bool, target: Option<usize>, f: &mut dyn FnMut(Message) -> Flow) -> Option<Header> {
+        match self {
+            Self::Memory(bytes) => pass(Some("json"), bytes, count, target, f),
+            Self::File(spill) => {
+                let file = spill.file.as_ref()?;
+                #[cfg(feature = "mmap")]
+                if let Ok(map) = unsafe { memmap2::Mmap::map(file) } {
+                    // Exclusively owned descriptor: no other operation can truncate this file.
+                    return pass(Some("json"), &map, count, target, f);
+                }
+                use std::io::Seek;
+                let mut reader = file.try_clone().ok()?;
+                reader.rewind().ok()?;
+                pass_reader(Some("json"), reader, count, target, f)
+            }
+        }
+    }
+}
+
+pub(super) fn prepare_reader(data_type: Option<&str>, data: impl std::io::Read) -> Option<Header> {
+    use std::io::BufRead;
+    let mut data = std::io::BufReader::new(data);
+    let compressed = match data_type {
+        Some("zstd") => true,
+        Some("json") => false,
+        _ => data.fill_buf().ok()?.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+    };
+    let decoded = if compressed {
+        Decoded::read(ruzstd::decoding::StreamingDecoder::new(data).ok()?).ok()?
+    } else {
+        Decoded::read(data).ok()?
+    };
+    let mut header = decoded.parse(false, None, &mut |_| Flow::Continue)?;
+    header.decoded = Some(decoded);
+    Some(header)
+}
+
+pub(super) fn replay_prepared(header: &Header, f: &mut dyn FnMut(Message) -> Flow) -> bool {
+    let Some(decoded) = &header.decoded else { return false };
+    if let Some(target) = header.last_messages {
+        let _ = decoded.parse(false, Some(target), f);
+    }
+    true
 }
 
 // Both root and messages accept non-container scalars, just as Value followed by get/as_array
@@ -238,6 +339,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decoded_spill_is_owned_and_reader_fallback_is_bounded() {
+        use std::io::Read;
+        let input = vec![b' '; DECODED_MEMORY_LIMIT + 17];
+        let source = Decoded::read(input.as_slice()).unwrap();
+        let Decoded::File(spill) = &source else {
+            panic!("expected spill")
+        };
+        assert_eq!(
+            spill.file.as_ref().unwrap().metadata().unwrap().len(),
+            input.len() as u64
+        );
+        #[cfg(unix)]
+        assert!(
+            !spill.path.exists(),
+            "private spill unlinked while descriptor remains live"
+        );
+        let mut reader = spill.file.as_ref().unwrap();
+        use std::io::Seek;
+        reader.rewind().unwrap();
+        let mut prefix = [0; 17];
+        reader.read_exact(&mut prefix).unwrap();
+        assert_eq!(prefix, [b' '; 17]);
+        let path = spill.path.clone();
+        drop(source);
+        assert!(!path.exists());
+        let invalid = format!(
+            "{{\"messages\":[],\"ignored\":\"{}\"}} trailing",
+            "x".repeat(DECODED_MEMORY_LIMIT)
+        );
+        assert!(prepare_reader(Some("json"), invalid.as_bytes()).is_none());
+    }
+
+    #[test]
     fn invalid_utf8_or_compressed_tail_never_emits_a_prefix() {
         let json = b"{\"messages\":[{\"role\":\"user\",\"text\":\"ok\"}],\"ignored\":\"\xff\"}";
         assert!(serde_json::from_slice::<Value>(json).is_err());
@@ -311,6 +445,26 @@ mod tests {
                         assert_eq!(a.metadata, b.metadata);
                         assert_eq!(a.message_count, b.message_count);
                         assert_eq!(a.last_messages, b.last_messages);
+                    }
+                    let prepared = prepare_reader(None, std::io::Cursor::new(&bytes));
+                    assert_eq!(prepared.is_some(), old.is_some());
+                    if let Some(prepared) = &prepared {
+                        let mut actual = Vec::new();
+                        assert!(replay_prepared(prepared, &mut |m| {
+                            actual.push(m);
+                            Flow::Continue
+                        }));
+                        assert_eq!(
+                            serde_json::to_value(actual).unwrap(),
+                            serde_json::to_value(&expected).unwrap()
+                        );
+                        let mut stopped = Vec::new();
+                        replay_prepared(prepared, &mut |m| {
+                            stopped.push(m);
+                            Flow::Stop
+                        });
+                        assert_eq!(stopped.len(), usize::from(!expected.is_empty()));
+                        assert_eq!(prepared.metadata, projection.as_ref().unwrap().metadata);
                     }
                     let Some(h) = projection else { continue };
                     if count {
