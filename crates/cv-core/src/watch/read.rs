@@ -250,7 +250,7 @@ impl stream::MessageSink for Tail<'_> {
         if self.error.is_some() {
             return stream::Flow::Stop;
         }
-        if self.total >= self.skip && self.output.is_some() {
+        if let (true, Some(output)) = (self.total >= self.skip, self.output.as_mut()) {
             self.total += 1;
             self.used_implicit_source |= message.content.iter().any(|block| {
                 match block {
@@ -261,7 +261,7 @@ impl stream::MessageSink for Tail<'_> {
                 .is_some_and(|span| span.source.is_none())
             });
             record_reads(&message, &self.primary, &mut self.materialized_reads);
-            let result = self.output.as_mut().unwrap().try_message(message);
+            let result = output.try_message(message);
             return match result {
                 Ok(flow) => flow,
                 Err(error) => {
