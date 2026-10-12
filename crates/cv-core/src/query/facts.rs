@@ -413,9 +413,9 @@ fn matches_streamed_with_probe(
         }
         session
     } else {
-        // Preserve the recording path's conditional side-store reads when no affordance result
-        // is demanded. Only the cached affordance fast path requires cross-ref probing here.
-        crate::stream::stream_counted(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?
+        // Preserve conditional side-store reads while sharing dependency probes across refs.
+        let source = probe.snapshot(r);
+        crate::stream::stream_counted_with_source(adapter, r, &crate::ParseOptions::lazy(), &mut sink, &source)?
     };
     let reduced = sink.finish(&session);
     let facts = SessionFacts {
