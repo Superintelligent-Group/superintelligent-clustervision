@@ -1,7 +1,8 @@
 # Store probe
 
 This diagnostic example performs one read-only operation per process on an explicit source.
-It supports Claude, Codex, Gemini, OpenClaw, Continue and LM Studio through explicit-root constructors. It does not
+It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok
+and (with SQLite enabled) Devin through explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
 The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
 scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
@@ -24,6 +25,10 @@ Run `OP HARNESS ID PATH`, optionally `--root DIR`, `--mode lazy|bulk|full|comple
 pass the config/runtime root explicitly (`projects/`, `sessions/`, or `tmp/` lives beneath it).
 Continue expects its global directory containing `sessions/`; LM Studio expects the conversations
 directory containing `*.conversation.json` itself. OpenClaw expects its state directory.
+Cline expects a home containing `.cline/`; Kimi, Kimi Code and Grok expect their native homes
+containing `sessions/`. Devin expects the directory containing `sessions.db`. Directory session
+paths (Kimi, Kimi Code and Grok) report directory metadata size, not total transcript/sidecar bytes;
+use the generator manifest for total generated physical source sizes.
 
 | Operation | Work measured |
 |---|---|

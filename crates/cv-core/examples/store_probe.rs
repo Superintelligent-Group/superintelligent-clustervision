@@ -135,7 +135,7 @@ fn args() -> Result<Args> {
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
                  OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|chunks|resolve\n\
-                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio; use scratch CLUSTERVISION_HOME"
+                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ => positional.push(arg),
@@ -191,8 +191,14 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
         Harness::OpenClaw => Box::new(cv_core::harness::openclaw::OpenClaw::with_state_dir(&a.root)),
         Harness::Continue => Box::new(cv_core::harness::continuedev::Continue::with_root(&a.root)),
         Harness::LmStudio => Box::new(cv_core::harness::lmstudio::LmStudio::with_root(&a.root)),
+        Harness::Cline => Box::new(cv_core::harness::cline::Cline::with_home(&a.root)),
+        Harness::Kimi => Box::new(cv_core::harness::kimi::Kimi::with_home(&a.root)),
+        Harness::KimiCode => Box::new(cv_core::harness::kimi_code::KimiCode::with_home(&a.root)),
+        Harness::Grok => Box::new(cv_core::harness::grok::Grok::with_home(&a.root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Devin => Box::new(cv_core::harness::devin::Devin::with_root(&a.root)),
         _ => {
-            bail!("probe supports claude, codex, gemini, openclaw, continue and lmstudio; use explicit-root constructors when extending it")
+            bail!("unsupported probe harness or disabled feature; use explicit-root constructors when extending it")
         }
     })
 }
