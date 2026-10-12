@@ -254,16 +254,17 @@ fn sort_values(values: &mut [Value]) {
     }
 }
 
-fn canonical_message(m: &mut Message, resolver: &cv_core::Resolver) {
-    m.materialize(resolver);
+fn canonical_message(m: &mut Message, resolver: &cv_core::Resolver) -> Result<()> {
+    m.materialize(resolver)?;
     sort_map(&mut m.extra);
     for b in &mut m.content {
         match b {
-            Block::ToolUse { input, .. } => sort_values(std::slice::from_mut(input)),
+            Block::ToolUse { input, .. } => sort_values(std::slice::from_mut(input.make_owned()?)),
             Block::ToolResult { details: Some(d), .. } => sort_values(std::slice::from_mut(d)),
             _ => {}
         }
     }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -430,7 +431,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 cv_core::query::matches_streamed(&query, adapter, r, &texts)?
             } else {
                 let session = cv_core::stream::collect_with(adapter, r, &ParseOptions::lazy())?;
-                let matched = cv_core::query::matches_full(&query, r, &session, &texts);
+                let matched = cv_core::query::matches_full(&query, r, &session, &texts)?;
                 out.session = Some(session);
                 matched
             };
@@ -446,7 +447,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let mut s = adapter.try_stream(r, &opts, &mut sink)?;
             s.messages = sink.messages;
             if a.materialize || a.operation == "affordances" {
-                s.materialize();
+                s.materialize()?;
             }
             out.messages = s.messages.len();
             if a.operation == "affordances" {
@@ -471,7 +472,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let mut s = adapter.try_stream(r, &opts, &mut sink)?;
             s.messages = last.into_iter().collect();
             if a.materialize {
-                s.materialize();
+                s.materialize()?;
             }
             out.detail = json!({ "retained_messages": s.messages.len() });
             out.session = Some(s);
@@ -488,19 +489,26 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let mut fingerprints = Vec::new();
             let mut sink = |mut m: Message| {
                 out.messages += 1;
-                if a.raw_order {
-                    m.materialize(&resolver);
+                let materialized = if a.raw_order {
+                    m.materialize(&resolver)
                 } else {
-                    canonical_message(&mut m, &resolver);
+                    canonical_message(&mut m, &resolver)
+                };
+                if let Err(e) = materialized {
+                    error = Some(e);
+                    return Flow::Stop;
                 }
                 if let Err(e) = serde_json::to_writer(&mut messages, &m) {
-                    error = Some(e);
+                    error = Some(e.into());
                     return Flow::Stop;
                 }
                 messages.write_all(b"\n").expect("digest writer");
                 if a.hash_detail {
                     let mut one = DigestWriter::default();
-                    serde_json::to_writer(&mut one, &m).expect("serializable message");
+                    if let Err(e) = serde_json::to_writer(&mut one, &m) {
+                        error = Some(e.into());
+                        return Flow::Stop;
+                    }
                     one.write_all(b"\n").expect("digest writer");
                     fingerprints.push(json!({ "index_zero_based": out.messages - 1,
                                               "sha256": one.digest.finish_hex(), "serialized_bytes": one.bytes }));
@@ -509,7 +517,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             };
             let mut s = adapter.try_stream(r, &opts, &mut sink)?;
             if let Some(e) = error {
-                return Err(e.into());
+                return Err(e);
             }
             s.messages.clear();
             s.source_path = None; // Transport location, not interpreted session content.
@@ -683,7 +691,7 @@ mod tests {
     use super::*;
 
     fn hash_message(mut m: Message, resolver: &cv_core::Resolver) -> String {
-        canonical_message(&mut m, resolver);
+        canonical_message(&mut m, resolver).unwrap();
         let mut writer = DigestWriter::default();
         serde_json::to_writer(&mut writer, &m).unwrap();
         writer.digest.finish_hex()
@@ -694,7 +702,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!("cv-probe-hash-{}.json", uuid::Uuid::new_v4()));
         let text = "escaped\n\"quote\"\\☃".repeat(1024);
         let quoted = serde_json::to_string(&text).unwrap();
-        std::fs::write(&path, &quoted).unwrap();
+        let raw_input = r#"{"a":0,"z":{"a":1,"b":2}}"#;
+        std::fs::write(&path, format!("{quoted}\n{raw_input}")).unwrap();
         let resolver = cv_core::Resolver::new(Some(path.clone()));
         let mut inline = Message::new(cv_core::Role::Assistant);
         inline.content.push(Block::Text { text: text.into() });
@@ -714,9 +723,11 @@ mod tests {
             }),
         };
         if let Block::ToolUse { input, .. } = &mut lazy.content[1] {
-            *input = serde_json::from_str(r#"{"a":0,"z":{"a":1,"b":2}}"#).unwrap();
+            *input = cv_core::Json::source(&path, quoted.len() as u64 + 1, raw_input.len() as u64).unwrap();
         }
+        let mut stale = lazy.clone();
         assert_eq!(hash_message(inline, &resolver), hash_message(lazy, &resolver));
         std::fs::remove_file(path).unwrap();
+        assert!(canonical_message(&mut stale, &resolver).is_err());
     }
 }
