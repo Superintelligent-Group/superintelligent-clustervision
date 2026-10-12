@@ -16,6 +16,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+// Preserve the path spelling: canonicalize cannot represent missing files and would hide a
+// symlink's later retargeting. Relative reads belong to the cwd of the pass that consulted them.
+fn absolute(path: &Path) -> Option<PathBuf> {
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        Some(std::env::current_dir().ok()?.join(path))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
@@ -98,10 +108,14 @@ impl ReadSet {
     }
 
     pub fn record(&mut self, path: &Path) {
-        if !self.entries.contains_key(path) {
-            match Probe::default().entry(path) {
+        let Some(path) = absolute(path) else {
+            self.known = false;
+            return;
+        };
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.entries.entry(path) {
+            match Probe::default().entry(slot.key()) {
                 Some(entry) => {
-                    self.entries.insert(path.to_path_buf(), entry);
+                    slot.insert(entry);
                 }
                 None => self.known = false,
             }
@@ -143,10 +157,11 @@ pub struct Probe {
 
 impl Probe {
     fn entry(&mut self, path: &Path) -> Option<Entry> {
+        let path = absolute(path)?;
         self.entries
-            .entry(path.to_path_buf())
+            .entry(path.clone())
             .or_insert_with(|| {
-                let state = match std::fs::metadata(path) {
+                let state = match std::fs::metadata(&path) {
                     Ok(md) => {
                         let modified = md
                             .modified()
@@ -170,18 +185,16 @@ impl Probe {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(_) => return None,
                 };
-                Some(Entry {
-                    path: path.to_path_buf(),
-                    state,
-                })
+                Some(Entry { path, state })
             })
             .clone()
     }
 
     fn directory(&mut self, path: &Path) -> Option<Vec<PathBuf>> {
+        let path = absolute(path)?;
         self.directories
-            .entry(path.to_path_buf())
-            .or_insert_with(|| match std::fs::read_dir(path) {
+            .entry(path.clone())
+            .or_insert_with(|| match std::fs::read_dir(&path) {
                 Ok(rd) => rd.map(|e| e.ok().map(|e| e.path())).collect(),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
                 Err(_) => None,
@@ -624,6 +637,57 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_reads_remain_bound_to_the_capture_directory() {
+        // cwd belongs to the process, so exercise the change in a child instead of racing the
+        // workspace test runner's other adapters and file operations.
+        const CHILD_ROOT: &str = "CV_SOURCE_RELATIVE_READS_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let r = SessionRef {
+                harness: Harness::Codex,
+                id: "relative".into(),
+                path: root.join("primary.jsonl"),
+                cwd: None,
+                title: None,
+                created_at: None,
+                updated_at: None,
+                message_count: 0,
+            };
+            let base = Probe::default().snapshot(&r);
+            let mut reads = ReadSet::default();
+            reads.record(Path::new("external.txt"));
+            assert!(reads.entries.keys().all(|path| path.is_absolute()));
+            let captured = base.with_reads(&reads);
+            update("relative", &[(r.clone(), captured.clone())]);
+            std::env::set_current_dir(root.join("other")).unwrap();
+            assert!(unchanged(&r, &captured));
+            assert!(Table::load("relative").fresh(&r, base.primary, &base.dependencies));
+            // A different same-named file in the new cwd is irrelevant to the original read.
+            std::fs::write("external.txt", "unrelated").unwrap();
+            assert!(Table::load("relative").fresh(&r, base.primary, &base.dependencies));
+            std::fs::write(root.join("external.txt"), "after!").unwrap();
+            assert!(!unchanged(&r, &captured));
+            assert!(!Table::load("relative").fresh(&r, base.primary, &base.dependencies));
+            return;
+        }
+        let w = cv_testkit::World::in_process("relative-source-reads");
+        std::fs::write(w.base.join("primary.jsonl"), "primary").unwrap();
+        std::fs::write(w.base.join("external.txt"), "before").unwrap();
+        std::fs::create_dir(w.base.join("other")).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "source::tests::relative_reads_remain_bound_to_the_capture_directory",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, &w.base)
+            .current_dir(&w.base)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn dynamic_reads_capture_absence_and_reject_changes_during_a_pass() {
