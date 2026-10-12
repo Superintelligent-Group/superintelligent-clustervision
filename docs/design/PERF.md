@@ -89,3 +89,54 @@ Not done, and why:
 - **first-run `cv ls`, footprint on the live fleet**: discovery (gemini and kimi-code discover
   serially; claude/codex scans read every head) and the 2 GB+ footprint from non-claude/codex
   stores were not worked on.
+
+
+## Store datapaths pass (2026-10-12)
+
+Source baseline: `c0f0044`; implementation and remaining work: `DATAPATHS.md`. These are
+process-isolated operations over frozen copies or generated fixtures, with a scratch catalog.
+Peak heap is requested live Rust allocation, not RSS, native SQLite allocation, or fragmentation.
+Throughput runs use a clean release binary; allocation and fidelity instrumentation run separately.
+The shared machine carried roughly 150–180 load during this pass, so CPU comparisons below are
+interleaved baseline/candidate medians, not a promise about interactive wall latency.
+
+| Operation/input | Baseline peak Rust heap | Updated peak Rust heap |
+|---|---:|---:|
+| Gemini lazy count, frozen 313.8 MB / 199 messages | 841,082,713 B | 42,730 B |
+| Gemini production affordance read, same source | 841,530,697 B | 41,702 B |
+| Gemini one hook with late summary, 64 MiB plain text | 201,381,306 B | 137,865 B |
+| Gemini one hook with late summary, 64 MiB escaped text | 201,381,306 B | 399,854 B |
+| Claude lazy count, frozen 189.8 MB | 5,138,961 B | 203,285 B |
+| Claude lazy count, generated 100 MB plain text | 230,658,294 B | 10,914 B |
+| Claude lazy count, generated 100 MB decoded escaped text | 364,875,160 B | 10,926 B |
+| Continue discovery, 16 → 64 MiB plain body data | 33.6 → 134.4 MB | 1,242 B, flat |
+| LM Studio discovery, 16 → 64 MiB plain body data | 33.7 → 134.7 MB | 1,392 B, flat |
+| OpenClaw SQLite flat/tree reads, 64 MiB payloads | 67.9 MB | 1.05 MB |
+| OpenClaw registry read, 128 MiB payloads | 135.6 MB | 2.1 MB |
+
+The real Gemini affordance recording emits zero rows; the giant hook fixtures each emit one row
+with the same ordered serialized digest before and after, including the late summary. Discovery
+metadata digests match for all eight Continue/LM Studio scale cases and four indexed Continue cases.
+Escaped discovery fields still require serde scratch: at these fixed record sizes Continue peaks
+at 262,478 B and LM Studio at 131,395 B, independent of total source size.
+
+Claude lazy count CPU medians (three interleaved pairs): frozen 0.307 → 0.273 s;
+100 MB plain 0.0885 → 0.0512 s; escaped 0.718 → 0.404 s; 30,000 small records
+0.0856 → 0.0417 s. Typed borrowed records avoid the old Value tree, and mmap line traversal
+removes the giant-line buffer. Rich extras and uncommon fallback shapes remain owned.
+
+Cursor's composer discovery query on 20,000 unrelated bubble rows falls from 80,043 to 52
+SQLite VM steps, with zero full-scan steps. OpenClaw's bounded row/tree replay trades roughly
+1.5× CPU on the measured flat/tree fixtures for the lower heap; registry CPU is approximately
+unchanged. It should not be described as an across-the-board throughput improvement.
+
+Escaped span chunk decoding now has a source-size-independent working set, with and without
+mmap, including malformed tails. The decoder validates before emission to preserve whole-field
+raw fallback semantics, then emits bounded serde-decoded windows. Dense escaped text takes about
+2.1–2.3× the CPU of the old whole-field decoder; unescaped mmap text remains borrowed. CI gates
+16/64 MiB cases by peak heap and growth, with no noisy wall-time threshold. A baseline reader
+fails the same gate on source scaling, demonstrating that the gate catches the original defect.
+
+These figures do not establish a new full-fleet recount time, first-run listing time, or total
+process memory ceiling. Full output, rich metadata, selected SQLite blobs, non-mmap document
+fallbacks, event queues and other stores still have separate bounds recorded in `DATAPATHS.md`.

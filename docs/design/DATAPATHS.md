@@ -57,27 +57,27 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
-| Claude JSONL | Parallel cached discovery; native stream; lazy content; checkpoints | Discovery parses all records; lazy records still build content Values before extracting spans; extras/fork side reads |
+| Claude JSONL | Parallel cached discovery; mmap lazy lines; typed borrowed hot records; checkpoints | Discovery parses all records; full extras and uncommon fallback records remain owned; fork side reads |
 | Codex JSONL | mmap line scan; selective records; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; inherited-prefix and metadata parity now covered by regressions |
 | Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
-| Gemini legacy JSON | mmap, vector of borrowed raw messages, one owned record at a time | Giant single records; discovery collects whole sessions; escaped wrapper metadata falls back |
-| Gemini JSONL | Replays all records into order + owned body map | Entire retained history payload; `$set`/rewind changes old logical messages |
-| Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery uses CollectSink merely to count; no text spans |
+| Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
+| Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
+| Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery now counts without collecting; record text remains owned |
 | Kimi | Context stream + pending usage message, rotated prefix dedup | Full wire sidecar text and tool outputs; dependency cache misses; mutable trailing usage |
 | Kimi Code | One LLM step buffered; sidecar output references | Full Value discovery scans; step can be large; state/wire dependency mismatch |
 | Grok | History stream + pending reasoning | Whole updates sidecar; uncached discovery; enrichment can revise old messages |
 | Cline/Roo legacy | mmap raw history items, one record at a time | Full discovery/UI sidecar trees; no lazy text |
 | Cline SDK | Whole wrapper document before emission | Primary source-size heap, unlike legacy reader |
-| Continue | mmap raw history items; tool-answer dedup | Full Value discovery count, sometimes twice; mutable snapshots |
+| Continue | mmap raw history items; tool-answer dedup | Metadata-only discovery now skips bodies; stream records and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
 | Cursor SQLite | Indexed composer key range; prepared bubble lookups | Composed sessions/blobs; global/workspace dependencies |
 | Devin SQLite | Session forest, node metadata and selected chain, then rows | Structural prepass over all branches; bodies already streamed |
 | Hermes SQLite | Indexed message rows + generation dedup/trailing user texts | Pathological trailing prompts; shared DB invalidation |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
-| OpenClaw JSONL / SQLite | Flat stream, or whole event bodies for tree navigation | Tree selection needs structure, not every body; registry side tables rescanned per session |
+| OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Decode complete compressed thread blob | Full decode in discovery and stream; blob representation limits direct seeking |
-| LM Studio | Raw-turn mmap stream | Discovery builds whole document tree |
+| LM Studio | Raw-turn mmap stream | Metadata-only discovery skips body trees; escaped scratch and first-title candidate remain owned |
 | ChatGPT / Claude account exports | Whole archive String + owned raw conversation copies, then target parse | Archive reread for every session; repeated prefix parsing; ChatGPT branch selection |
 | OpenSession | Whole JSON document/Session then replay | Can traverse message array while retaining metadata |
 
@@ -92,8 +92,8 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter | Preserve cheap path; measure discovery separately |
 | Full discovery | Scans + cache persistence + catalog replacement/watch construction | Metadata reducers instead of collect-to-count; dependency-aware caching |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
-| JSON show / MCP show | Full-fidelity stream into selected window; EOF metadata retained | Largest incoming decoded message/extras; selected-message serialization for byte budgets |
-| Affordance view | Full-fidelity stream into classified rows; final metadata and side stores retained | Largest incoming decoded message/extras and result rows |
+| JSON show / MCP show | Lazy full-extras stream into selected window; EOF metadata retained | Selected output and rich extras; selected-message serialization for byte budgets |
+| Affordance view | Lazy full-extras stream into classified rows; bounded text summaries | Rich extras, side stores and result rows; escaped validation still traverses the whole field |
 | Doctor | Full-fidelity messages streamed, attribution state | Largest decoded record/extras dominate; decoded-length reducer may help |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Lazy whole-session collection for unknown facts | Small streaming fact reducers; preserve tri-state semantics |
@@ -101,7 +101,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
 | API pagination | Each page starts source traversal at zero; head reads whole source | Verified anchors or cache; head need not block first page rendering |
 | Watch | Discovery, full parse/count of changed session; old prefix parse on first append | Reuse safe stable cursors; logical edits must invalidate old output |
-| Archive | Whole parse/serialize/compare even unchanged; watch reparses again | Skip unchanged dependencies; catalog compaction check currently scans twice per update |
+| Archive | Whole parse/serialize/compare even unchanged; watch reparses again | Skip unchanged dependencies; catalog cleanup scans now grow geometrically |
 | Dataset | One session's lazy message vector, writer resolves output | Escaped chunk bound; streaming filters where semantics allow |
 | Pack/tools/token stats | Repeated passes or retained intermediate event/usage vectors | Fuse consumers and fold smaller state, preserve dedup and ordering |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
@@ -191,13 +191,17 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Independent allocation/throughput/equivalence probes and initial valid scale fixtures.
 - [x] Streaming affordance and full-fidelity JSON-window consumers.
 - [x] Index-only text matching and deferred snippets.
-- [x] Bounded escaped-string chunk decoding, with and without mmap (CPU optimization in progress).
-- [ ] Automated heap gates and fixtures for the remaining store formats.
-- [ ] Gemini metadata/discovery, lazy records and replay payload retention.
-- [ ] Claude typed borrowed hot records and metadata scan; Codex fast-path semantic parity.
+- [x] Bounded escaped-string chunk decoding, with and without mmap; serde windows replace the slower initial decoder.
+- [x] Process-isolated heap gates for Claude, Codex, Gemini and escaped span decoding; negative baseline proof.
+- [ ] Extend scale fixtures and heap gates to the remaining store formats.
+- [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
+- [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
+- [ ] Claude metadata scan and remaining rich/fallback record allocations.
 - [ ] SQLite/dependency freshness, including WAL and sidecar-only changes.
-- [ ] Remaining document readers/discovery: SDK, exports, Continue, LM Studio, OpenSession.
-- [ ] Remaining sidecar/step/tree retention: Kimi, Kimi Code, Grok, OpenClaw, Devin, Zed.
+- [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
+- [ ] Remaining document readers: SDK, exports and OpenSession; Continue/LM Studio selected records.
+- [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
+- [ ] Remaining sidecar/step/tree retention: Kimi, Kimi Code, Grok, Devin and Zed.
 - [ ] Format-safe append reuse beyond Claude/Codex; watcher and archive amplification.
 - [ ] Reassess index admission/events/queues after reader and consumer measurements.
 - [ ] API pagination, query facts, pack/tools/stats, semantic rebuilds: prioritize by measurements.

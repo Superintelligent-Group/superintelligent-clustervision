@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Claude lazy reads borrow typed hot records and map JSONL lines, avoiding allocations proportional to giant text records.
+- Gemini lazy reads retain source ranges for message bodies and replay history; discovery skips unused payloads.
+- Continue and LM Studio discovery skip message bodies instead of constructing complete transcript trees.
+- CI now caps live Rust heap on generated large Claude, Codex and Gemini sessions and escaped span decoding.
+
 - JSON show windows retain selected messages; affordance views classify streamed messages instead of collecting the transcript first.
 - Text predicates match directly against the index; search snippets read source transcripts only after result filtering and limits.
 - Escaped lazy text is decoded in bounded chunks, including builds without memory mapping.
