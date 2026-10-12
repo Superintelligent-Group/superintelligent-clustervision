@@ -989,11 +989,7 @@ pub fn est_tokens(block: &Block, bytes_per_token: f64) -> u64 {
 pub fn est_tokens_resolved(block: &Block, bytes_per_token: f64, resolver: &crate::lazy::Resolver) -> u64 {
     est_tokens_with(block, bytes_per_token, |text| match text {
         crate::lazy::Text::Inline(s) => s.len(),
-        crate::lazy::Text::Span(span) => {
-            let mut bytes = 0;
-            resolver.for_each_chunk(span, 64 * 1024, |s| bytes += s.len());
-            bytes
-        }
+        crate::lazy::Text::Span(span) => resolver.resolved_len(span),
     })
 }
 
