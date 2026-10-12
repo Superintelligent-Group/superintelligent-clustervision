@@ -94,6 +94,14 @@ and Codex. It creates synthetic scratch inputs, not new committed harness corpus
 The generator also supports Continue (unindexed history) and LM Studio (two versions per reply,
 selected version first) for discovery scaling. Use fixed record size while increasing total bytes;
 escaped discarded strings may still require scratch proportional to the largest field.
+The native-format generator also supports `cline-sdk`, `opensession`, `chatgpt-export`,
+`claude-export` and `kimi`. `--shape history` scales the selected transcript; account exports'
+`--shape unrelated` puts a growing unrelated conversation before a tiny selected conversation.
+Kimi's `--shape sidecar-unmatched` grows unmatched wire results and extras while preserving a
+tiny selected last-wins result; `sidecar-selected` grows the output actually requested instead.
+Manifests distinguish total generated payload, selected payload and each physical input file.
+These cases derive their envelopes from corpus schemas, but are synthetic fixtures and do not
+replace or regenerate corpus versions. Use `--records TOTAL_BYTES/262144` for fixed-size fields.
 
 For standalone escaped decoder allocation testing, `chunks` bypasses the parser entirely. A
 file containing `x\\n` repeated N times is a valid raw JSON string body: use offset 0, length 3N,

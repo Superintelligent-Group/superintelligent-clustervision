@@ -8,20 +8,29 @@ is reported separately. Generation is deliberately outside the measured probe pr
 import argparse
 import json
 from pathlib import Path
+from perf_fixtures import FORMATS, generate
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("harness", choices=["claude", "codex", "gemini", "continue", "lmstudio"])
+    parser.add_argument("harness", choices=["claude", "codex", "gemini", "continue", "lmstudio", *FORMATS])
     parser.add_argument("out", type=Path)
     parser.add_argument("--payload-bytes", type=int, default=100_000_000)
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
+    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
     args.out.mkdir(parents=True, exist_ok=False)
     root = args.out.resolve()
+    if args.harness in FORMATS:
+        manifest = generate(args.harness, root, args.payload_bytes, args.records, args.escaped, args.shape)
+        (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(manifest))
+        return
+    if args.shape != "history":
+        parser.error("this harness supports only --shape history")
     sid = "00000000-0000-4000-8000-000000000001"
     stamp = "2026-01-01T00:00:00Z"
     if args.harness == "claude":
