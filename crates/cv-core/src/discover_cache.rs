@@ -36,7 +36,7 @@ struct Cache {
 
 /// Bump when discovery changes the interpretation of unchanged source bytes.
 #[cfg(feature = "sqlite")]
-pub(crate) const INTERPRETATION_VERSION: u32 = 1;
+pub(crate) const INTERPRETATION_VERSION: u32 = 2;
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static INVALIDATE: AtomicBool = AtomicBool::new(false);
 
@@ -288,21 +288,21 @@ mod tests {
         let path = w.base.join("unchanged.jsonl");
         std::fs::write(&path, "unchanged").unwrap();
         let old = SessionRef {
-            harness: crate::Harness::Gemini,
+            harness: crate::Harness::Codex,
             id: "old".into(),
             path: path.clone(),
             cwd: None,
             title: None,
             created_at: None,
             updated_at: None,
-            message_count: 0,
+            message_count: 4,
         };
         assert_eq!(cached_scan(&path, || Some(old.clone())).unwrap().id, "old");
         persist(false);
         let conn = crate::catalog::open_db().unwrap();
         conn.execute_batch(
-            "UPDATE scan_cache SET interpretation_version=NULL;
-            UPDATE catalog_meta SET value='0' WHERE key='discovery_version';
+            "UPDATE scan_cache SET interpretation_version=1;
+            UPDATE catalog_meta SET value='1' WHERE key='discovery_version';
             INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('last_full_sync','1');
             INSERT OR REPLACE INTO watched(harness,path,mtime_ns) VALUES('gemini','old-watch',1);",
         )
@@ -320,12 +320,19 @@ mod tests {
         );
         let current = SessionRef {
             id: "current".into(),
+            message_count: 2,
             ..old
         };
         assert_eq!(
             cached_scan(&path, || Some(current)).unwrap().id,
             "current",
             "process entry invalidated despite unchanged bytes"
+        );
+        assert_eq!(
+            cached_scan(&path, || panic!("current scan must stay cached"))
+                .unwrap()
+                .message_count,
+            2
         );
         persist(false);
         assert_eq!(

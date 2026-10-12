@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Codex discovery counts logical turns consistently with parsing and streaming, excluding duplicated event echoes, injected instructions and inherited history.
+
 - LM Studio partial reads keep selected text in source spans and stream regenerated variants without materializing complete turns.
 - Dataset export streams messages into bounded private staging, preserving filters and exact training formats without retaining transcript history.
 

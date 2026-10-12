@@ -2176,22 +2176,14 @@ impl CodexScan {
             Some("event_msg") => {
                 let pt = v.pointer("/payload/type").and_then(Value::as_str);
                 if pt == Some("user_message") {
-                    self.message_count += 1;
                     if let Some(t) = v.pointer("/payload/message").and_then(Value::as_str) {
                         self.consider_title(t);
                     }
-                } else if pt == Some("agent_message") {
-                    self.message_count += 1;
                 }
             }
             Some("response_item") if v.pointer("/payload/type").and_then(Value::as_str) == Some("message") => {
-                // `developer`/`system` messages are injected instructions (`handle_item` makes them
-                // System turns), not the user + assistant turns `SessionRef::message_count` counts.
                 // An absent role is `user`, as in `handle_item`.
                 let role = v.pointer("/payload/role").and_then(Value::as_str).unwrap_or("user");
-                if matches!(role, "user" | "assistant") {
-                    self.message_count += 1;
-                }
                 if role == "user" {
                     self.consider_title(&text_parts(v.pointer("/payload/content")));
                 }
@@ -2199,7 +2191,6 @@ impl CodexScan {
             // A task handed to this thread by another agent is its prompt — the only one a
             // subagent thread usually gets (its `user`-role messages are the developer preamble).
             Some("response_item") if v.pointer("/payload/type").and_then(Value::as_str) == Some("agent_message") => {
-                self.message_count += 1;
                 let author = v.pointer("/payload/author").and_then(Value::as_str);
                 if author != self.agent_path.as_deref() {
                     let text = v
@@ -2232,13 +2223,14 @@ impl CodexScan {
             .and_then(Value::as_str)
             .and_then(parse_ts);
         self.updated_at = self.created_at;
-        if let Some(items) = root.get("items").and_then(Value::as_array) {
+        if let Some(items) = root.get("items").and_then(Value::as_array).or_else(|| root.as_array()) {
+            let mut ctx = CodexCtx::default();
+            let mut session = Session::new(String::new(), Harness::Codex);
+            apply_meta(&mut session, &mut ctx, root.get("session"));
             for it in items {
+                self.message_count += metadata::count_item(it, &mut ctx);
                 if it.get("type").and_then(Value::as_str) == Some("message") {
                     let role = it.get("role").and_then(Value::as_str).unwrap_or("user");
-                    if matches!(role, "user" | "assistant") {
-                        self.message_count += 1;
-                    }
                     if role == "user" {
                         self.consider_title(&text_parts(it.get("content")));
                     }
@@ -2289,20 +2281,23 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
     let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let is_jsonl = is_jsonl_path(path);
     let mut s = CodexScan::default();
+    let mut turns = metadata::Turns::default();
 
     if is_zst_path(path) {
         // Compressed (cold, > 7 days) rollout: no seeking, so stream the whole decode — these are
         // exactly the files whose bytes we never mmap.
         for line in open_rollout(path)?.lines() {
             let Ok(line) = line else { continue };
-            s.feed_line(&line);
+            turns.feed_line(&line, &mut s);
         }
+        s.message_count = turns.count();
     } else if is_jsonl {
         if size <= full_scan_cap {
             let text = fs::read_to_string(path)?;
             for line in text.lines() {
-                s.feed_line(line);
+                turns.feed_line(line, &mut s);
             }
+            s.message_count = turns.count();
         } else {
             // Head: id / cwd / title / created_at all live near the top.
             let head = read_head(path, SAMPLE)?;
