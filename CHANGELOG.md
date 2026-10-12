@@ -4,6 +4,8 @@
 
 - Codex discovery counts logical turns consistently with parsing and streaming, excluding duplicated event echoes, injected instructions and inherited history.
 - Search fills requested session limits despite dominant matching chunks or rare harness/cwd filters; full-text score ties remain deterministic.
+- Streaming text validates short escapes without duplicate decoding while retaining strict Unicode validation and malformed-text fallback.
+
 - Pretty JSON scans string boundaries without interpreting every escape, preserving exact formatted output.
 
 - LM Studio partial reads keep selected text in source spans and stream regenerated variants without materializing complete turns.

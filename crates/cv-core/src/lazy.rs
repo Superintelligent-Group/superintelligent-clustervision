@@ -878,7 +878,7 @@ fn stream_body<R: std::io::BufRead + std::io::Seek>(
     use std::io::{Read, SeekFrom};
     let decode = if escaped {
         let mut body = reader.by_ref().take(len);
-        decode_json_body(&mut body, &mut |_| {}).unwrap_or(false)
+        validate_value_json_body(&mut body).unwrap_or(false)
     } else {
         false
     };
@@ -913,7 +913,7 @@ fn stream_body_checked<R: std::io::BufRead + std::io::Seek>(
     f: &mut impl FnMut(&str) -> bool,
 ) -> Result<(), ()> {
     use std::io::{Read, SeekFrom};
-    let decode = escaped && decode_json_body(&mut reader.by_ref().take(len), &mut |_| {}).unwrap_or(false);
+    let decode = escaped && validate_value_json_body(&mut reader.by_ref().take(len)).unwrap_or(false);
     reader.seek(SeekFrom::Start(start)).map_err(|_| ())?;
     let mut output = CheckedChunkOutput {
         text: String::with_capacity(
@@ -1107,6 +1107,22 @@ pub(crate) fn validate_json_body_syntax(reader: &mut impl std::io::BufRead) -> R
     .map(|_| ())
 }
 
+/// Transactional streaming preflight needs acceptance, not decoded text. Strings without
+/// Unicode escapes have identical RawValue/Value acceptance and need no decode scratch.
+/// Unicode windows retain serde's strict string decoder, including surrogate pairing.
+fn validate_value_json_body(reader: &mut impl std::io::BufRead) -> Result<bool, ()> {
+    json_body_windows(reader, &mut |quoted| {
+        if memchr::memmem::find(quoted, b"\\u").is_some() {
+            let mut decoder = serde_json::Deserializer::from_slice(quoted);
+            decoder.deserialize_str(JsonWindow(&mut |_: &str| true)).map_err(|_| ())?;
+            decoder.end().map_err(|_| ())?;
+        } else {
+            serde_json::from_slice::<&serde_json::value::RawValue>(quoted).map_err(|_| ())?;
+        }
+        Ok(true)
+    })
+}
+
 fn json_body_windows(
     reader: &mut impl std::io::BufRead,
     visit: &mut impl FnMut(&[u8]) -> Result<bool, ()>,
@@ -1253,6 +1269,38 @@ mod tests {
     impl Drop for CheckedTestDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn validation_preflight_matches_string_decoder_acceptance() {
+        use std::io::{BufReader, Cursor};
+        let codes = [0, 0x41, 0xd7ff, 0xd800, 0xdbff, 0xdc00, 0xdfff, 0xe000, 0xffff];
+        let mut cases = vec![
+            b"a\xff".to_vec(),
+            b"a\\q".to_vec(),
+            b"\\u123".to_vec(),
+            b"\\n\\t".to_vec(),
+        ];
+        for high in codes {
+            cases.push(format!("a\\u{high:04x}z").into_bytes());
+            for low in codes {
+                cases.push(format!("a\\u{high:04x}\\u{low:04x}z").into_bytes());
+            }
+            for slashes in 0..8 {
+                cases.push(format!("{}u{high:04x}", "\\".repeat(slashes)).into_bytes());
+            }
+        }
+        for raw in cases {
+            for window in 1..20 {
+                let mut validate = BufReader::with_capacity(window, Cursor::new(&raw));
+                let mut decode = BufReader::with_capacity(window, Cursor::new(&raw));
+                assert_eq!(
+                    validate_value_json_body(&mut validate).is_ok(),
+                    decode_json_body(&mut decode, &mut |_| {}).is_ok(),
+                    "raw={raw:?}, window={window}"
+                );
+            }
         }
     }
 
