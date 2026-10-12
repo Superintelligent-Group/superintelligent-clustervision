@@ -52,6 +52,11 @@ OpenSession and account exports scan only the explicit root, excluding configure
 `SessionRef` metadata, sorted by ID/path (paths included); both affordance operations hash their
 ordered rows, including summaries/items and store rows. Leave it off for throughput and allocation
 measurements; compare output digests in separate fidelity runs.
+`--warm-discover` runs the explicit-root adapter's discovery during setup and drops its returned
+refs before timing/heap capture. It requires a scratch catalog. The report labels this setup and
+includes retained cache metadata in baseline live heap; released source buffers are excluded
+from the warm selected-read stage. Compare cold and warm separately, especially for no-mmap
+account archives where cold admission can own the archive but warm reads own only a selected range.
 For `resolve`, `--hash-output` adds a SHA-256 digest of the decoded UTF-8 bytes; the default
 reports only decoded length. The owned result remains live through the heap snapshot, so its
 requested output size is part of the measured heap and is not subject to the chunk scratch bound.

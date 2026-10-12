@@ -106,6 +106,7 @@ struct Args {
     last: usize,
     hash_output: bool,
     hash_detail: bool,
+    warm_discover: bool,
 }
 
 fn args() -> Result<Args> {
@@ -116,6 +117,7 @@ fn args() -> Result<Args> {
     let mut last = 20;
     let mut hash_output = false;
     let mut hash_detail = false;
+    let mut warm_discover = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
@@ -123,6 +125,7 @@ fn args() -> Result<Args> {
             "--materialize" => materialize = true,
             "--hash-output" => hash_output = true,
             "--hash-detail" => hash_detail = true,
+            "--warm-discover" => warm_discover = true,
             "--span" => {
                 let range = argv.next().context("--span needs OFFSET:LENGTH")?;
                 let (off, len) = range.split_once(':').context("--span needs OFFSET:LENGTH")?;
@@ -170,6 +173,7 @@ fn args() -> Result<Args> {
         last,
         hash_output,
         hash_detail,
+        warm_discover,
     })
 }
 
@@ -492,7 +496,7 @@ fn main() -> Result<()> {
     let a = args()?;
     // Production affordance::read can persist counts, and discovery cache initialization opens
     // a writable catalog. Keep composed operations faithful with an explicitly isolated catalog.
-    if matches!(
+    if a.warm_discover || matches!(
         a.operation.as_str(),
         "affordance-read" | "discover" | "events" | "events-collected"
     ) {
@@ -508,6 +512,14 @@ fn main() -> Result<()> {
         }
     }
     let adapter = adapter(&a)?;
+    // Warm native descriptor/discovery caches in this process, then drop returned refs before
+    // the stage. Baseline heap includes any cache state that survives setup; source buffers
+    // dropped by discovery are deliberately outside a warm selected-read measurement.
+    let setup_discovered_sessions = if a.warm_discover {
+        Some(adapter.discover()?.len())
+    } else {
+        None
+    };
     let r = SessionRef::new(&a.id, a.harness, &a.path);
     let physical_bytes = std::fs::metadata(&a.path)?.len();
     #[cfg(feature = "probe-heap")]
@@ -536,6 +548,8 @@ fn main() -> Result<()> {
             "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
             "hash_output": a.hash_output,
             "hash_detail": a.hash_detail,
+            "warm_discover": a.warm_discover,
+            "setup_discovered_sessions": setup_discovered_sessions,
             "wall_seconds": seconds, "messages": out.messages,
             "requested_rust_heap": requested_rust_heap, "detail": out.detail,
         })
