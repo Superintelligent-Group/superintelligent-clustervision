@@ -22,6 +22,7 @@ pub mod sidecar;
 use super::wire::anthropic;
 use crate::ir::*;
 use crate::ir::{MessageKind, Origin};
+use crate::json::{Json, JsonSource};
 use crate::lazy::{Span, Text, INLINE_MAX};
 use crate::stream::{Checkpoint, CollectSink, Flow, MessageSink, ParseOptions, ADAPTER_LAYER};
 use anyhow::{Context, Result};
@@ -29,6 +30,7 @@ use chrono::{DateTime, Utc};
 pub use emit::{emit, verify_claude_resumable};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -42,6 +44,76 @@ use walkdir::WalkDir;
 struct SpanCtx<'a> {
     slice: &'a [u8],
     base_off: u64,
+    json_inputs: Option<&'a JsonInputs>,
+}
+
+/// One captured native source shared by all validated tool inputs in a read. Byte-reader helpers
+/// have no such capture: recording a provenance path does not establish where their bytes came from.
+struct JsonInputs {
+    source: JsonSource,
+    error: RefCell<Option<anyhow::Error>>,
+}
+
+impl JsonInputs {
+    fn capture(path: &Path, opts: &ParseOptions) -> Result<Option<Self>> {
+        if !opts.spans || opts.complete {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            source: JsonSource::capture(path)?,
+            error: RefCell::new(None),
+        }))
+    }
+
+    fn check(&self) -> bool {
+        if self.error.borrow().is_some() {
+            return false;
+        }
+        if let Err(error) = self.source.check() {
+            *self.error.borrow_mut() = Some(error);
+            return false;
+        }
+        true
+    }
+
+    fn input(&self, raw: &RawValue, ctx: &SpanCtx<'_>) -> Option<Json> {
+        // borrowed::ingest has strictly validated the entire record before exposing these complete
+        // raw values. Use their actual quoted/braced range, including scalar tool inputs.
+        let result = (|| {
+            let relative = (raw.get().as_ptr() as usize)
+                .checked_sub(ctx.slice.as_ptr() as usize)
+                .context("Claude tool input is outside its validated record")?;
+            let end = relative
+                .checked_add(raw.get().len())
+                .context("Claude tool input range overflow")?;
+            anyhow::ensure!(end <= ctx.slice.len(), "Claude tool input exceeds its validated record");
+            let offset = ctx
+                .base_off
+                .checked_add(relative as u64)
+                .context("Claude tool input offset overflow")?;
+            self.source.validated_range(offset, raw.get().len() as u64)
+        })();
+        match result {
+            Ok(input) => Some(input),
+            Err(error) => {
+                if self.error.borrow().is_none() {
+                    *self.error.borrow_mut() = Some(error);
+                }
+                None
+            }
+        }
+    }
+
+    fn finish(&self) -> Result<()> {
+        if let Some(error) = self.error.borrow_mut().take() {
+            return Err(error);
+        }
+        self.source.check()
+    }
+}
+
+fn finish_inputs(inputs: Option<&JsonInputs>) -> Result<()> {
+    inputs.map_or(Ok(()), JsonInputs::finish)
 }
 
 pub struct Claude {
@@ -220,6 +292,7 @@ impl Adapter for Claude {
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
+            let inputs = JsonInputs::capture(&r.path, opts)?;
             let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
             // Lazy spans borrow record slices from the file: even a giant output needs no private
             // largest-line buffer. Buffered readers remain the fallback and the bulk/full path.
@@ -228,11 +301,27 @@ impl Adapter for Claude {
                 if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
                     #[cfg(unix)]
                     let _ = map.advise(memmap2::Advice::Sequential);
-                    let s = stream_bytes_at(new_session(&r.id, Some(r.path.clone())), &map, 0, opts, sink);
+                    let s = stream_bytes_at(
+                        new_session(&r.id, Some(r.path.clone())),
+                        &map,
+                        0,
+                        opts,
+                        sink,
+                        inputs.as_ref(),
+                    );
+                    finish_inputs(inputs.as_ref())?;
                     return Ok(with_fork_source(s, &r.path, sink));
                 }
             }
-            let s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
+            let s = stream_reader_at(
+                new_session(&r.id, Some(r.path.clone())),
+                BufReader::new(file),
+                0,
+                opts,
+                sink,
+                inputs.as_ref(),
+            );
+            finish_inputs(inputs.as_ref())?;
             Ok(with_fork_source(s, &r.path, sink))
         })
     }
@@ -255,6 +344,7 @@ impl Adapter for Claude {
             let Some(session) = from.get::<Session>(ADAPTER_LAYER) else {
                 return Ok(None);
             };
+            let inputs = JsonInputs::capture(&r.path, opts)?;
             let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
             #[cfg(feature = "mmap")]
             if opts.spans {
@@ -265,13 +355,15 @@ impl Adapter for Claude {
                         .ok()
                         .and_then(|offset| map.get(offset..))
                         .unwrap_or(&[]);
-                    let s = stream_bytes_at(session, bytes, from.offset, opts, sink);
+                    let s = stream_bytes_at(session, bytes, from.offset, opts, sink, inputs.as_ref());
+                    finish_inputs(inputs.as_ref())?;
                     return Ok(Some(with_fork_source(s, &r.path, sink)));
                 }
             }
             file.seek(SeekFrom::Start(from.offset))
                 .with_context(|| format!("seeking {}", r.path.display()))?;
-            let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink);
+            let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink, inputs.as_ref());
+            finish_inputs(inputs.as_ref())?;
             Ok(Some(with_fork_source(s, &r.path, sink)))
         })
     }
@@ -369,7 +461,7 @@ pub fn stream_reader<R: BufRead>(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    stream_reader_at(new_session(id, source_path), reader, 0, opts, sink)
+    stream_reader_at(new_session(id, source_path), reader, 0, opts, sink, None)
 }
 
 /// [`stream_reader`] over a reader positioned `file_off` bytes into the transcript, accumulating
@@ -381,6 +473,7 @@ fn stream_reader_at<R: BufRead>(
     mut file_off: u64,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
+    json_inputs: Option<&JsonInputs>,
 ) -> Session {
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
     let sink = &mut spawns;
@@ -396,7 +489,7 @@ fn stream_reader_at<R: BufRead>(
             Ok(n) => n,
             Err(_) => break,
         };
-        if ingest_bytes(&mut session, &buf[..n], file_off, opts, sink) == Flow::Stop {
+        if ingest_bytes(&mut session, &buf[..n], file_off, opts, sink, json_inputs) == Flow::Stop {
             break;
         }
         file_off += n as u64;
@@ -419,12 +512,21 @@ fn stream_bytes_at(
     base_off: u64,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
+    json_inputs: Option<&JsonInputs>,
 ) -> Session {
     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
     let sink = &mut spawns;
     let mut start = 0;
     for end in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
-        if ingest_bytes(&mut session, &bytes[start..end], base_off + start as u64, opts, sink) == Flow::Stop {
+        if ingest_bytes(
+            &mut session,
+            &bytes[start..end],
+            base_off + start as u64,
+            opts,
+            sink,
+            json_inputs,
+        ) == Flow::Stop
+        {
             return session;
         }
         let file_off = base_off + end as u64;
@@ -436,7 +538,14 @@ fn stream_bytes_at(
         start = end;
     }
     if start < bytes.len() {
-        ingest_bytes(&mut session, &bytes[start..], base_off + start as u64, opts, sink);
+        ingest_bytes(
+            &mut session,
+            &bytes[start..],
+            base_off + start as u64,
+            opts,
+            sink,
+            json_inputs,
+        );
     }
     session
 }
@@ -449,7 +558,11 @@ fn ingest_bytes(
     file_off: u64,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
+    json_inputs: Option<&JsonInputs>,
 ) -> Flow {
+    if json_inputs.is_some_and(|inputs| !inputs.check()) {
+        return Flow::Stop;
+    }
     // Trim leading/trailing ASCII whitespace (incl. the trailing `\n`), tracking how far the content
     // shifted so span offsets stay relative to the file.
     let lead = buf.iter().take_while(|b| b.is_ascii_whitespace()).count();
@@ -461,9 +574,16 @@ fn ingest_bytes(
     let ctx = opts.spans.then(|| SpanCtx {
         slice,
         base_off: file_off + lead as u64,
+        json_inputs,
     });
     if !opts.complete {
-        if let Some(flow) = borrowed::ingest(session, slice, opts, sink, ctx.as_ref()) {
+        let flow = borrowed::ingest(session, slice, opts, sink, ctx.as_ref());
+        // A failed source capture/range is an operation error, never eligibility for the owned
+        // fallback codec. In particular, do not materialize a giant input after invalidation.
+        if json_inputs.is_some_and(|inputs| !inputs.check()) {
+            return Flow::Stop;
+        }
+        if let Some(flow) = flow {
             return flow;
         }
     }
@@ -476,7 +596,12 @@ fn ingest_bytes(
     };
     // Only defer large content to spans when the consumer asked for it (partial-access). Bulk/full
     // consumers read everything, so inline content is cheaper (no mmap on resolve).
-    ingest_value(session, &v, opts, sink, ctx.as_ref())
+    let flow = ingest_value(session, &v, opts, sink, ctx.as_ref());
+    if json_inputs.is_some_and(|inputs| !inputs.check()) {
+        Flow::Stop
+    } else {
+        flow
+    }
 }
 
 /// An empty Claude [`Session`] shell, ready to accumulate records. A sub-agent transcript (by its
@@ -2906,6 +3031,149 @@ mod tests {
     }
 
     #[test]
+    fn native_json_inputs_preserve_values_modes_and_exact_ranges() {
+        let world = cv_testkit::World::in_process("claude-json-inputs");
+        let path = world.proj.join("source.jsonl");
+        let inputs = [
+            r#"{"large":"a\nb","duplicate":1,"duplicate":2}"#,
+            "[null,true,3]",
+            r#""encoded JSON stays a string""#,
+            "false",
+            "1.5",
+            "null",
+        ];
+        let mut text = String::new();
+        for (i, input) in inputs.iter().enumerate() {
+            text.push_str(&format!(" \t{{\"type\":\"assistant\",\"uuid\":\"a{i}\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"t{i}\",\"name\":\"custom_tool\",\"input\": {input} }}]}}}}\r\n"));
+        }
+        text.push_str("{\"type\":\"assistant\",\"uuid\":\"missing\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"missing\",\"name\":\"custom_tool\"}]}}\n");
+        fs::write(&path, &text).unwrap();
+        let reference = SessionRef::new("source", Harness::Claude, path.clone());
+        let adapter = Claude::with_config_dir(&world.proj);
+        for opts in [
+            ParseOptions::lazy(),
+            ParseOptions::lazy_extra(),
+            ParseOptions::bulk(),
+            ParseOptions::full(),
+            ParseOptions::complete(),
+        ] {
+            let mut sink = CollectSink::default();
+            let mut actual = adapter.stream(&reference, &opts, &mut sink).unwrap();
+            actual.messages = sink.messages;
+            let mut expected_sink = CollectSink::default();
+            let mut expected = stream_str("source", &text, Some(path.clone()), &opts, &mut expected_sink);
+            expected.messages = expected_sink.messages;
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{opts:?}"
+            );
+            for (i, message) in actual.messages.iter().enumerate() {
+                let Block::ToolUse { input, .. } = &message.content[0] else {
+                    panic!("expected tool")
+                };
+                match input {
+                    Json::Source(range) => {
+                        assert!(opts.spans && !opts.complete && i < inputs.len());
+                        let start = range.offset() as usize;
+                        assert_eq!(&text[start..start + range.len() as usize], inputs[i]);
+                        assert_eq!(range.path(), path);
+                    }
+                    Json::Owned(value) => {
+                        assert!(!opts.spans || opts.complete || i == inputs.len());
+                        if i == inputs.len() {
+                            assert!(value.is_null());
+                        }
+                    }
+                }
+            }
+            actual.materialize().unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        // A provenance path alone must not bind arbitrary reader/string bytes to that file.
+        for mut actual in [
+            {
+                let mut sink = CollectSink::default();
+                let mut s = stream_reader(
+                    "source",
+                    std::io::Cursor::new(text.as_bytes()),
+                    Some(path.clone()),
+                    &ParseOptions::lazy(),
+                    &mut sink,
+                );
+                s.messages = sink.messages;
+                s
+            },
+            {
+                let mut sink = CollectSink::default();
+                let mut s = stream_str("source", &text, Some(path.clone()), &ParseOptions::lazy(), &mut sink);
+                s.messages = sink.messages;
+                s
+            },
+        ] {
+            assert!(actual.messages.iter().flat_map(|m| &m.content).all(|b| !matches!(
+                b,
+                Block::ToolUse {
+                    input: Json::Source(_),
+                    ..
+                }
+            )));
+            actual.materialize().unwrap();
+        }
+    }
+
+    #[test]
+    fn native_json_inputs_reject_changed_source_and_resume_exact_ranges() {
+        let world = cv_testkit::World::in_process("claude-json-input-errors");
+        let path = world.proj.join("source.jsonl");
+        let line = |id: &str| {
+            format!("{{\"type\":\"assistant\",\"uuid\":\"{id}\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"{id}\",\"name\":\"custom_tool\",\"input\":{{\"id\":\"{id}\"}}}}]}}}}\n")
+        };
+        let first = line("first");
+        let text = format!("{first}{}", line("second"));
+        fs::write(&path, &text).unwrap();
+        let reference = SessionRef::new("source", Harness::Claude, path.clone());
+        let adapter = Claude::with_config_dir(&world.proj);
+        let mut cp = Checkpoint::new(first.len() as u64);
+        cp.put(ADAPTER_LAYER, &new_session("source", Some(path.clone())));
+        let mut sink = CollectSink::default();
+        adapter
+            .resume(&reference, &ParseOptions::lazy(), &mut sink, &cp)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sink.messages.len(), 1);
+        let Block::ToolUse {
+            input: Json::Source(range),
+            ..
+        } = &sink.messages[0].content[0]
+        else {
+            panic!("expected sourced input")
+        };
+        assert!(range.offset() >= first.len() as u64);
+        assert_eq!(Json::Source(range.clone()).resolve().unwrap()["id"], "second");
+        // Deleting the path keeps an existing Unix mmap readable but invalidates its captured
+        // identity. The operation must stop before another callback and return the source error.
+        let mut calls = 0;
+        let mut captured = None;
+        let mut deleting = |message: Message| {
+            calls += 1;
+            if let Block::ToolUse { input, .. } = &message.content[0] {
+                captured = Some(input.clone());
+            }
+            fs::remove_file(&path).unwrap();
+            Flow::Continue
+        };
+        assert!(adapter
+            .stream(&reference, &ParseOptions::lazy(), &mut deleting)
+            .is_err());
+        assert_eq!(calls, 1);
+        assert!(captured.unwrap().resolve().is_err());
+    }
+
+    #[test]
     fn lazy_spans_resolve_to_same_text() {
         // A record with content well over INLINE_MAX: the lazy path must produce a Span whose
         // resolved text equals the inline parse, byte-for-byte (incl. escapes).
@@ -3052,6 +3320,7 @@ mod tests {
                                 cp.offset,
                                 &opts,
                                 &mut buffered_tail,
+                                None,
                             );
                             assert_eq!(mapped_tail.checkpoints, buffered_tail.checkpoints);
                             assert_eq!(

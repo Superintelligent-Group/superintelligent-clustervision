@@ -462,10 +462,12 @@ fn block(item: Item<'_>, span: Option<&SpanCtx>) -> Option<Option<Block>> {
             id: owned(item.id).unwrap_or_default(),
             name: owned(item.name).unwrap_or_default(),
             input: match item.input.0 {
-                Some(v) => serde_json::from_str(v.get()).ok()?,
-                None => Value::Null,
-            }
-            .into(),
+                Some(v) => match span.and_then(|ctx| ctx.json_inputs.map(|inputs| (ctx, inputs))) {
+                    Some((ctx, inputs)) => inputs.input(v, ctx)?,
+                    None => serde_json::from_str::<Value>(v.get()).ok()?.into(),
+                },
+                None => Value::Null.into(),
+            },
             namespace: None,
         }),
         Some("tool_result") => {
@@ -969,6 +971,7 @@ mod tests {
                     0,
                     &opts,
                     &mut mapped_sink,
+                    None,
                 );
                 mapped.messages = mapped_sink.messages;
                 mapped.materialize().unwrap();
@@ -1067,7 +1070,7 @@ mod tests {
         let malformed = br#"{"type":"user","message":{"content":"not a tool"},"toolUseResult":{"ignored":"\ud800"}}"#;
         for (opts, count) in [(ParseOptions::lazy(), 1), (ParseOptions::lazy_extra(), 0)] {
             let mut sink = CollectSink::default();
-            ingest_bytes(&mut new_session("session", None), malformed, 0, &opts, &mut sink);
+            ingest_bytes(&mut new_session("session", None), malformed, 0, &opts, &mut sink, None);
             assert_eq!(sink.messages.len(), count);
         }
     }
@@ -1177,6 +1180,7 @@ mod tests {
         let ctx = SpanCtx {
             slice: quoted.as_bytes(),
             base_off: 0,
+            json_inputs: None,
         };
         assert!(
             !text(raw, Some(&ctx)).unwrap().is_span(),
