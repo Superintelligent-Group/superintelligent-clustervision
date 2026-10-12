@@ -72,8 +72,8 @@ can decode a whole field first. Each bound must hold across the composed path.
 | OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
 | Cursor SQLite | Indexed composer key range; prepared bubble lookups | Composed sessions/blobs; global/workspace dependencies |
-| Devin SQLite | Session forest, node metadata and selected chain, then rows | Structural prepass over all branches; bodies already streamed |
-| Hermes SQLite | Indexed message rows + generation dedup/trailing user texts | Pathological trailing prompts; shared DB invalidation |
+| Devin SQLite | Compact structural forest projection, then selected full metadata per emitted row | Necessary navigation state grows with nodes; strict metadata projection has a measured CPU cost |
+| Hermes SQLite | Indexed rows; prompt suppression uses bounded exact keys with temporary spill | Initial SQL spill has significant CPU/temp-I/O cost; shared portable exact-set replacement pending |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
@@ -97,7 +97,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Doctor | Lazy-extra stream; resolved text lengths and JSON writer counts | Attribution state, adapter rich/fallback parsing and structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
-| FTS | Chunked text, bounded event spool, counts, checkpoint state; one catalog connection per sweep | Inline payloads and queued bytes remain; each consumer still commits independently |
+| FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep | Writer arenas coexist with admitted documents; giant escaped-body composition proof pending |
 | Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
 | API pagination | Bounded source-verified page checkpoints and head metadata cache; no messages cached | Safe continuation formats only; source/dependency changes and oversized state fall back |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
@@ -282,6 +282,38 @@ message and metadata digests, with 128/512 callbacks. The source-sized native-ce
 largest demanded record remain separate limits. Detailed measurement definitions are in
 `PERF.md`; these results do not claim combined final gates or whole-fleet throughput.
 
+The production FTS sweep now keeps byte-capacity permits through Tantivy document consumption
+(`c804b19`, integrated as `762ebda`), instead of releasing them on queue receipt. A debug
+allocator-instrumented mixed sweep uses four 100 MB decoded plain Claude arguments, 32 small
+sessions, actual 4 MiB chunks and a 64 MiB reservation budget. Peak requested Rust heap above
+baseline is 228,994,263 B versus 861,238,323 B in an otherwise identical unbounded control;
+peak charged document capacity is 65,786,618 B versus 800,037,416 B. Writer arenas and extraction
+state coexist with those reservations, so this is not a 64 MiB total-process bound. The single
+samples exclude mmap, C/SQLite, stacks and allocator overhead; they make no throughput claim.
+Scoped fatal-writer, waiter wakeup, drop/commit release and unchanged-sweep checks pass. Exact
+plain/escaped canonical-body composition remains a separate pending campaign.
+
+Focused SQLite scale evidence removes payload retention without promising constant navigation
+state. Devin's compact forest projection reduces requested Rust heap from 8.22/32.52 MB to
+0.269/0.313 MB on 8/32 MB metadata fixtures. At 100 MB/1 GB with 800/8,000 nodes, it uses
+0.379/2.293 MB: retained structural rows legitimately grow. Hermes prompt-only trailing rows
+fall from 8.13/32.14 MB to a flat 1.258 MB through exact spill keys. At 1 GB, native process
+footprints are 8.67 MB Devin / 8.45 MB Hermes; all callbacks and scratch-file cleanup match.
+Twenty-four separate lazy/complete preserved-order hash processes across six 1/8/32 MB fixtures
+match the old readers. The initial Hermes SQL spill writes approximately 1 GB of key data plus
+B-tree overhead at that scale; physical disk I/O was not measured. Its clean 32 MB paired median
+CPU rises about 4.9× (user 0.0256 → 0.0535 s; system 0.0181 → 0.161 s), so the shared portable
+exact-set replacement remains active. Devin's subsequent single-pass projection (`f825ff6`)
+reduces its initial CPU regression to about 1.25× on the same 32 MB control: user 0.01194 →
+0.01644 s, system 0.01176 → 0.01312 s; paired wall 0.02760 → 0.03236 s under uncontrolled load.
+Cursor inline composer Values and OpenCode many-part logical messages remain unbounded cases.
+
+Token statistics have a separate retention counterexample. On 16k/64k native usage calls,
+current aggregation peaks at 6,743,774/26,955,998 B for duplicated Claude response blocks and
+2,654,678/10,557,782 B for unkeyed Codex calls. Counts, totals and duplicates match expectations;
+these allocator measurements make no CPU claim. A shared bounded usage fold/exact-set design is
+in progress; distinct dedup keys and late model fallback must preserve historical precedence.
+
 API continuation/head changes (`0769d1a` + `cb844b4`) reduce callback work on the controlled
 20,000-message fixture: 100 successive pages of 200 messages emit 20,099 callbacks instead of
 1,010,099; five head requests emit 20,000 instead of 100,000. This is a callback-work result,
@@ -346,12 +378,14 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
-- [ ] Kimi Code logical-step and selected structured payload retention; preserve necessary Devin forest navigation state.
+- [x] Devin compact forest metadata and Hermes exact-key prompt spill, with measured native/Rust bounds and output parity.
+- [ ] Hermes shared portable exact-set CPU proof; Kimi Code logical-step/selected payloads, Cursor inline composers and OpenCode many-part records.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watch tail and archive suffix reuse with strict source/dependency identity and demanded-error propagation.
 - [ ] Other format-safe continuation; full-compatible span extras and archive prefix/output retention costs.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
-- [ ] Index admission and queued payload bytes; assess transaction batching with write-lock contention measurements and final Tantivy merge/query costs.
+- [x] Byte-capacity document admission held through Tantivy consumption, including release/error behavior and mixed-sweep negative control.
+- [ ] Composed giant escaped/body index parity and heap proof; transaction batching, final Tantivy merge/query costs.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
@@ -400,7 +434,13 @@ resident backend to 0.8116 s for length / 0.8260 s for write; for the escaped 64
 0.4030 / 0.3914 s rises to 1.5815 / 1.5728 s. These include strict constructor validation,
 exclude hashing, and compare the old resident foundation with the positioned-range bridge.
 They are instrumented primitive-stage measurements, not clean adapter throughput. Hot validated
-ranges bypass that admission work; cold portable reader optimization remains separate.
+ranges bypass that admission work. This first bridge cost is intermediate: the subsequent grammar
+follow-up (`1e6c2db`, integrated as `3703fdd`) changes five paired instrumented plain 100 MB
+length/write user medians from 0.9701/0.9519 s to 0.1353/0.1377 s in its own same-run control,
+about seven times lower. Escaped 64 MiB medians improve from 1.7839/1.8261 s to 1.5699/1.5613 s.
+Maximum retained-prefix heap remains 394,214 B and 36 output/prefix checks match. Cold admission
+is still above the earlier resident control; escaped cursor optimization and composed portable
+reader proof remain active. These controls share allocator instrumentation, not clean throughput.
 
 Native Claude producer activation is integrated. Arguments with at most 4,096 encoded bytes
 remain owned; larger inputs use source ranges in lazy and lazy-extra modes. Full/bulk/complete
@@ -417,6 +457,15 @@ sources remain unchanged. These counters exclude mmap pages, C/SQLite allocation
 overhead, stacks and process RSS/footprint; there is no timing, portable-adapter or FTS queue
 bound claim. Full demanded arguments remain output-sized. Other native producers remain separate
 work.
+
+Separate clean release native CPU trials compare the owned producer and optimized source
+producer with the same diagnostic revision: three alternating pairs per case, no allocator or
+hashing. For 100 MB plain arguments, median user+system CPU falls from 0.083553 to 0.056104 s
+for discard (33%) and 0.137284 to 0.079401 s for doctor (42%). For 600 MB physically encoded /
+100 MB decoded escape-expanded arguments, discard falls from 3.768304 to 2.761361 s (27%),
+while doctor rises from 3.754226 to 3.917641 s (4.35%, slower in all three pairs). Outputs match
+in all trials. Ambient load rises from 85 to 134, so these paired CPU observations establish
+the remaining doctor tradeoff without a wall-time budget or whole-fleet throughput claim.
 
 Its wire contract stays an actual JSON value. Owned/full/deserialized input remains supported;
 selected output and mutation can explicitly materialize. Bounded consumers request typed fields,
