@@ -403,7 +403,12 @@ fn stream_body<R: std::io::BufRead + std::io::Seek>(
         return;
     }
     let mut output = ChunkOutput {
-        text: String::with_capacity(chunk.saturating_add(3)),
+        // A large requested chunk need not allocate beyond this field's possible lossy length.
+        text: String::with_capacity(
+            chunk
+                .saturating_add(3)
+                .min(usize::try_from(len).unwrap_or(usize::MAX).saturating_mul(3)),
+        ),
         chunk,
         f,
     };
@@ -639,7 +644,7 @@ mod tests {
         let mut result = String::new();
         stream_body(&mut reader, 0, raw.len() as u64, escaped, chunk.max(1), &mut |s| {
             assert!(!s.is_empty());
-            assert!(s.len() <= chunk.max(1) + 3, "chunk {chunk}: {s:?}");
+            assert!(s.len() <= chunk.max(1).saturating_add(3), "chunk {chunk}: {s:?}");
             result.push_str(s);
         });
         result
@@ -671,6 +676,12 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn oversized_chunk_budget_still_emits_a_small_field() {
+        assert_eq!(chunked_body(b"a\\nb", true, 1, usize::MAX), "a\nb");
+        assert_eq!(chunked_body(b"\xff", false, 1, usize::MAX), "\u{fffd}");
     }
 
     #[test]
@@ -799,7 +810,7 @@ mod tests {
         for chunk in [0, 1, 2, 3, 7, 65536] {
             let mut got = String::new();
             resolver.for_each_chunk(&span, chunk, |s| {
-                assert!(s.len() <= chunk.max(1) + 3);
+                assert!(s.len() <= chunk.max(1).saturating_add(3));
                 got.push_str(s);
             });
             assert_eq!(got, expected);
