@@ -1,6 +1,22 @@
 //! Bounded text projections shared by search and API consumers.
 use crate::{Resolver, Text};
 
+/// Append complete canonical JSON into an already demanded string without an intermediate copy.
+/// A failure can leave a prefix appended; callers must discard their staged output on error.
+pub fn append_json(out: &mut String, json: &crate::json::Json) -> anyhow::Result<()> {
+    struct StringWriter<'a>(&'a mut String);
+    impl std::io::Write for StringWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.push_str(std::str::from_utf8(bytes).map_err(std::io::Error::other)?);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    json.write_canonical(&mut StringWriter(out))
+}
+
 /// A decoded UTF-8 byte prefix. Once a scalar does not fit, later writes cannot skip it.
 /// All text, punctuation, paths, names and streamed JSON formatting share this one budget.
 pub struct Head {

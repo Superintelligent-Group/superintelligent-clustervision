@@ -645,14 +645,22 @@ impl Message {
     /// inline. Streaming consumers call this per message (peak = one message) instead of holding a
     /// whole materialized session.
     pub fn materialize(&mut self, resolver: &crate::lazy::Resolver) -> anyhow::Result<()> {
+        self.materialize_text(resolver);
+        for block in &mut self.content {
+            if let Block::ToolUse { input, .. } = block {
+                input.make_owned()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Own text fields while leaving complete structured arguments available for explicit
+    /// projection. Renderers with argument previews need no whole argument tree.
+    pub fn materialize_text(&mut self, resolver: &crate::lazy::Resolver) {
         for b in &mut self.content {
             let slot = match b {
                 Block::Text { text } | Block::Thinking { text, .. } => text,
                 Block::ToolResult { content, .. } => content,
-                Block::ToolUse { input, .. } => {
-                    input.make_owned()?;
-                    continue;
-                }
                 _ => continue,
             };
             if slot.is_span() {
@@ -660,7 +668,6 @@ impl Message {
                 *slot = crate::lazy::Text::Inline(owned);
             }
         }
-        Ok(())
     }
 
     /// Append this message's searchable text to `out` — the single canonical projection behind
@@ -668,17 +675,6 @@ impl Message {
     /// [`Message::append_searchable`] (streaming, per message).
     /// Writes into the caller's buffer so neither path allocates intermediates.
     pub fn append_searchable(&self, out: &mut String) -> anyhow::Result<()> {
-        struct Utf8Writer<'a>(&'a mut String);
-        impl std::io::Write for Utf8Writer<'_> {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                let text = std::str::from_utf8(bytes).map_err(std::io::Error::other)?;
-                self.0.push_str(text);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         for b in &self.content {
             match b {
                 Block::Text { text } | Block::Thinking { text, .. } => {
@@ -690,7 +686,7 @@ impl Message {
                     out.push(' ');
                     // Reuse the demanded output allocation while the canonical walker emits
                     // source fields. No intermediate serialized copy of a giant input.
-                    input.write_canonical(&mut Utf8Writer(out))?;
+                    crate::projection::append_json(out, input)?;
                     out.push('\n');
                 }
                 Block::ToolResult { content, .. } => {
