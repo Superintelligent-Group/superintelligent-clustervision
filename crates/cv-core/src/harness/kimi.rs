@@ -73,17 +73,19 @@
 //! We tolerate protocol_version drift (1.1–1.9) and unknown message types: anything we don't
 //! recognize is ignored.
 
+use super::store::document::{Raw, Record};
+use super::store::jsonl::scan as scan_wire;
 use super::wire::{openai, text_parts};
 use super::Adapter;
 use crate::ir::*;
-use crate::lazy::{RawValue, Span, Text, INLINE_MAX};
+use crate::lazy::{Span, Text, INLINE_MAX};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub struct Kimi {
@@ -915,67 +917,10 @@ struct WireStatus {
     message_id: Option<String>,
 }
 
-/// Borrow object values and retain Value's decoded-key, duplicate-last-wins behavior.
-fn wire_fields(raw: &RawValue) -> HashMap<String, &RawValue> {
-    serde_json::from_str(raw.get()).unwrap_or_default()
-}
-
-fn wire_string(raw: Option<&&RawValue>) -> Option<String> {
-    serde_json::from_str(raw?.get()).ok()
-}
-
-/// Validate one line before inspecting it, including values ignored by the projection. Whole
-/// file UTF-8/read failure returns None (the old read_to_string contract), not a partial prefix.
-/// With mmap the source is borrowed; the portable path retains only one line's scratch buffer.
-fn scan_wire(wire: &Path, mut visit: impl FnMut(&RawValue, u64)) -> Option<fs::File> {
-    let file = fs::File::open(wire).ok()?;
-    let mut each = |line: &str, offset: u64| {
-        let trimmed = line.trim();
-        let Ok(raw) = serde_json::from_str::<&RawValue>(trimmed) else {
-            return;
-        };
-        if super::store::json::value_compatible(raw.get().as_bytes()) {
-            visit(
-                raw,
-                offset + (trimmed.as_ptr() as usize - line.as_ptr() as usize) as u64,
-            );
-        }
-    };
-    #[cfg(feature = "mmap")]
-    {
-        if file.metadata().is_ok_and(|m| m.len() == 0) {
-            return Some(file);
-        }
-        // Safety: immutable, read-only transcript mapping; external truncation has the same
-        // documented caveat as the other mapped adapters.
-        if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
-            let text = std::str::from_utf8(&map).ok()?;
-            for line in text.lines() {
-                each(line, (line.as_ptr() as usize - text.as_ptr() as usize) as u64);
-            }
-        } else {
-            scan_wire_reader(&file, &mut each)?;
-        }
-    }
-    #[cfg(not(feature = "mmap"))]
-    scan_wire_reader(&file, &mut each)?;
-    Some(file)
-}
-
-fn scan_wire_reader(file: &fs::File, each: &mut impl FnMut(&str, u64)) -> Option<()> {
-    let mut reader = BufReader::new(file.try_clone().ok()?);
-    let mut line = Vec::new();
-    let mut offset = 0;
-    loop {
-        line.clear();
-        let n = reader.read_until(b'\n', &mut line).ok()?;
-        if n == 0 {
-            break;
-        }
-        each(std::str::from_utf8(&line).ok()?, offset);
-        offset += n as u64;
-    }
-    Some(())
+fn wire_fields(raw: Raw<'_>) -> Record<'_> {
+    Record::parse(raw).unwrap_or(Record {
+        fields: Default::default(),
+    })
 }
 
 /// Index ToolResult fields by byte range, decoding only usage/identity metadata. A later result
@@ -988,24 +933,26 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
     };
     let file = scan_wire(wire, |raw, offset| {
         let v = wire_fields(raw);
-        if wire_string(v.get("type")).as_deref() == Some("metadata") {
+        if v.string("type").as_deref() == Some("metadata") {
             return;
         }
         let Some(msg) = v.get("message") else { return };
         let msg = wire_fields(msg);
-        let mty = wire_string(msg.get("type")).unwrap_or_default();
+        let mty = msg.string("type").unwrap_or_default();
         if let Some(payload) = msg.get("payload") {
             let p = wire_fields(payload);
             match mty.as_str() {
                 "ToolResult" => {
-                    let id = wire_string(p.get("tool_call_id")).unwrap_or_default();
+                    let id = p.string("tool_call_id").unwrap_or_default();
                     if !id.is_empty() {
-                        let rv = p.get("return_value").map(|r| wire_fields(r)).unwrap_or_default();
-                        let range = |r: &&RawValue| WireRange {
+                        let rv = p.get("return_value").map(wire_fields).unwrap_or(Record {
+                            fields: Default::default(),
+                        });
+                        let range = |r: Raw<'_>| WireRange {
                             offset: offset + (r.get().as_ptr() as usize - raw.get().as_ptr() as usize) as u64,
                             len: r.get().len(),
                         };
-                        let string = |r: &&&RawValue| r.get().starts_with('"');
+                        let string = |r: &Raw<'_>| r.get().starts_with('"');
                         let output_raw = rv
                             .get("output")
                             .filter(string)
@@ -1027,7 +974,7 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
                 }
                 "StatusUpdate" => {
                     let usage = p.get("token_usage").map(|r| wire_usage(r));
-                    let message_id = wire_string(p.get("message_id"));
+                    let message_id = p.string("message_id");
                     e.statuses.push(WireStatus { usage, message_id });
                 }
                 _ => {}
@@ -1050,7 +997,7 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
     }
 }
 
-fn wire_usage(raw: &RawValue) -> Usage {
+fn wire_usage(raw: Raw<'_>) -> Usage {
     let tu = wire_fields(raw);
     let g = |k: &str| tu.get(k).and_then(|r| serde_json::from_str::<u64>(r.get()).ok());
     Usage {
@@ -1062,7 +1009,7 @@ fn wire_usage(raw: &RawValue) -> Usage {
     }
 }
 
-fn wire_timestamp(raw: &RawValue) -> Option<DateTime<Utc>> {
+fn wire_timestamp(raw: Raw<'_>) -> Option<DateTime<Utc>> {
     serde_json::from_str::<serde_json::Number>(raw.get())
         .ok()?
         .as_f64()

@@ -34,25 +34,41 @@ impl std::ops::Deref for Bytes {
 impl Source {
     pub fn open(path: &Path) -> Result<Self> {
         #[cfg(feature = "mmap")]
-        let bytes = {
+        {
             let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-            // Transcripts are read-only inputs. The mapping stays alive through every borrowed
-            // descriptor; adapters never mutate its backing file.
-            if file.metadata()?.len() == 0 {
-                Bytes::Owned(Vec::new())
-            } else {
-                Bytes::Mapped(
-                    unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mapping {}", path.display()))?,
-                )
-            }
-        };
+            Self::map_file(&file).with_context(|| format!("mapping {}", path.display()))
+        }
         #[cfg(not(feature = "mmap"))]
-        let bytes = Bytes::Owned(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?);
+        {
+            Ok(Self {
+                bytes: Bytes::Owned(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?),
+                index: Index::default(),
+                base: 0,
+            })
+        }
+    }
+
+    /// Borrow bytes from an already-open read-only descriptor. JSONL callers retain that
+    /// descriptor for selected-field replay and can fall back to buffered lines if mapping fails.
+    #[cfg(feature = "mmap")]
+    pub fn map_file(file: &std::fs::File) -> Result<Self> {
+        // Transcripts are immutable inputs; callers never mutate their backing file. External
+        // truncation has the same documented caveat as the other mapped adapters.
+        let bytes = if file.metadata()?.len() == 0 {
+            Bytes::Owned(Vec::new())
+        } else {
+            Bytes::Mapped(unsafe { memmap2::Mmap::map(file) }.context("mapping source")?)
+        };
         Ok(Self {
             bytes,
             index: Index::default(),
             base: 0,
         })
+    }
+
+    #[cfg(feature = "mmap")]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
     #[cfg(not(feature = "mmap"))]
@@ -271,39 +287,6 @@ fn value_end(b: &[u8], mut i: usize, index: &Index) -> Option<usize> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shallow_slices_preserve_validated_json_semantics() {
-        for input in [
-            r#"{"a":1,"a":2,"\u0061":3,"comma,key":{"q":"escaped\"quote\\slash","a":[1,-2.5e+3,true,false,null,[],{}]},"尾":"🌙"}"#,
-            "{ \n \"a\" : [ 1e-5, {\"a\": \"\\uD83C\\uDF19\"}, \"end\" ], \"z\" : null }",
-        ] {
-            let validated: &crate::lazy::RawValue = serde_json::from_str(input).unwrap();
-            let expected: Value = serde_json::from_str(input).unwrap();
-            let index = Index::default();
-            let actual = Record::parse(Raw::new(validated.get(), &index)).unwrap();
-            assert_eq!(actual.fields.len(), expected.as_object().unwrap().len());
-            for (key, raw) in actual.fields {
-                let value: Value = serde_json::from_str(raw.get()).unwrap();
-                assert_eq!(value, expected[&key]);
-                if let Some(items) = array(raw) {
-                    assert_eq!(items.len(), value.as_array().unwrap().len());
-                    for (raw, expected) in items.into_iter().zip(value.as_array().unwrap()) {
-                        assert_eq!(serde_json::from_str::<Value>(raw.get()).unwrap(), *expected);
-                    }
-                }
-            }
-        }
-        for input in ["null", "true", "123", "[]", "\"string\""] {
-            let index = Index::default();
-            assert!(Record::parse(Raw::new(input, &index)).is_none());
-        }
-    }
-}
-
 /// The same joined text/title as Message::text, retaining only the first 81 characters. When
 /// discovery filters whitespace-only text, scan any remaining whitespace with bounded state.
 pub(crate) fn text_summary<'a>(
@@ -343,4 +326,37 @@ pub(crate) fn text_summary<'a>(
         }
     }
     (present && (!require_nonwhite || nonwhite)).then(|| crate::ir::truncate(&head, 80))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shallow_slices_preserve_validated_json_semantics() {
+        for input in [
+            r#"{"a":1,"a":2,"\u0061":3,"comma,key":{"q":"escaped\"quote\\slash","a":[1,-2.5e+3,true,false,null,[],{}]},"尾":"🌙"}"#,
+            "{ \n \"a\" : [ 1e-5, {\"a\": \"\\uD83C\\uDF19\"}, \"end\" ], \"z\" : null }",
+        ] {
+            let validated: &crate::lazy::RawValue = serde_json::from_str(input).unwrap();
+            let expected: Value = serde_json::from_str(input).unwrap();
+            let index = Index::default();
+            let actual = Record::parse(Raw::new(validated.get(), &index)).unwrap();
+            assert_eq!(actual.fields.len(), expected.as_object().unwrap().len());
+            for (key, raw) in actual.fields {
+                let value: Value = serde_json::from_str(raw.get()).unwrap();
+                assert_eq!(value, expected[&key]);
+                if let Some(items) = array(raw) {
+                    assert_eq!(items.len(), value.as_array().unwrap().len());
+                    for (raw, expected) in items.into_iter().zip(value.as_array().unwrap()) {
+                        assert_eq!(serde_json::from_str::<Value>(raw.get()).unwrap(), *expected);
+                    }
+                }
+            }
+        }
+        for input in ["null", "true", "123", "[]", "\"string\""] {
+            let index = Index::default();
+            assert!(Record::parse(Raw::new(input, &index)).is_none());
+        }
+    }
 }

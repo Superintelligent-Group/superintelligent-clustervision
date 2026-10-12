@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod document;
 pub(crate) mod json;
+pub(crate) mod jsonl;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
