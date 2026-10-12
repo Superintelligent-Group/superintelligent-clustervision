@@ -458,7 +458,7 @@ fn ingest_bytes(
         slice,
         base_off: file_off + lead as u64,
     });
-    if !opts.extra && !opts.complete {
+    if !opts.complete {
         if let Some(flow) = borrowed::ingest(session, slice, opts, sink, ctx.as_ref()) {
             return flow;
         }
@@ -1730,6 +1730,45 @@ fn tag_inner<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
     Some(&s[start..end])
 }
 
+const CLAUDE_EXTRA_TOP: &[&str] = &[
+    "logicalParentUuid",
+    "isSidechain",
+    "isMeta",
+    "isCompactSummary",
+    "isApiErrorMessage",
+    "agentId",
+    "slug",
+    "version",
+    "requestId",
+    "parentToolUseID",
+    "toolUseID",
+    "sourceToolAssistantUUID",
+    "attributionAgent",
+    "attributionMcpServer",
+    "attributionMcpTool",
+    "attributionSkill",
+    "userType",
+];
+const CLAUDE_EXTRA_MSG: &[&str] = &["id", "stop_reason", "stop_sequence", "stop_details"];
+
+fn keep_extra_top(key: &str, val: &Value) -> bool {
+    !matches!((key, val), ("userType", Value::String(s)) if s == "external")
+        && !matches!((key, val), ("isSidechain", Value::Bool(false)))
+}
+
+fn collect_extra_owned(
+    top: impl IntoIterator<Item = (String, Value)>,
+    msg: impl IntoIterator<Item = (String, Value)>,
+    extra: &mut Map<String, Value>,
+) {
+    extra.extend(top.into_iter().filter(|(k, v)| keep_extra_top(k, v)));
+    extra.extend(
+        msg.into_iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| (format!("{MESSAGE_EXTRA_PREFIX}{k}"), v)),
+    );
+}
+
 /// Preserve Claude-specific record fields that the IR has no first-class home for, into the
 /// message's `extra["claude"]` bag, so conversions and the viewer can still surface them. Keys keep
 /// Claude's own spelling; cv-invented names are snake_case.
@@ -1740,43 +1779,17 @@ fn tag_inner<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
 /// — that copy exists only so byte-exact same-harness replay has a fallback if a block's details
 /// were rewritten or dropped between parse and emit.
 fn collect_extra(v: &Value, msg: &Value, extra: &mut Map<String, Value>) {
-    // Threading / provenance fields beyond uuid/parentUuid.
-    for key in [
-        "logicalParentUuid",
-        "isSidechain",
-        "isMeta",
-        "isCompactSummary",
-        "isApiErrorMessage",
-        "agentId",
-        "slug",
-        "version",
-        "requestId",
-        "parentToolUseID",
-        "toolUseID",
-        "sourceToolAssistantUUID",
-        "attributionAgent",
-        "attributionMcpServer",
-        "attributionMcpTool",
-        "attributionSkill",
-        "userType",
-    ] {
-        if let Some(val) = v.get(key) {
-            // Skip the overwhelmingly-common defaults to keep `extra` lean.
-            let skip = matches!(
-                (key, val),
-                ("userType", Value::String(s)) if s == "external"
-            ) || matches!((key, val), ("isSidechain", Value::Bool(false)));
-            if !skip {
-                extra.insert(key.to_string(), val.clone());
-            }
-        }
-    }
-    // Assistant API-response metadata (stop reason, the API message id, etc.).
-    for key in ["id", "stop_reason", "stop_sequence", "stop_details"] {
-        if let Some(val) = msg.get(key).filter(|val| !val.is_null()) {
-            extra.insert(format!("message.{key}"), val.clone());
-        }
-    }
+    collect_extra_owned(
+        CLAUDE_EXTRA_TOP.iter().filter_map(|&k| {
+            v.get(k)
+                .filter(|v| keep_extra_top(k, v))
+                .map(|v| (k.to_owned(), v.clone()))
+        }),
+        CLAUDE_EXTRA_MSG
+            .iter()
+            .filter_map(|&k| msg.get(k).filter(|v| !v.is_null()).map(|v| (k.to_owned(), v.clone()))),
+        extra,
+    );
 }
 
 /// Top-level record fields the IR first-classes (so they must NOT be duplicated into `extra` —
@@ -1838,11 +1851,17 @@ fn coerced_ref<'a>(content: &'a Text, item: &'a Value) -> &'a str {
 /// had a spilled output) leaves no room for that pointer, so the two are parked side by side under
 /// [`TOOL_USE_RESULT_KEY`] and the emitter unwraps them.
 fn attach_tool_use_result(blocks: &mut [Block], tur: &Value) {
+    if blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
+        attach_tool_use_result_owned(blocks, tur.clone());
+    }
+}
+
+fn attach_tool_use_result_owned(blocks: &mut [Block], tur: Value) {
     let Some(Block::ToolResult { details, .. }) = blocks.iter_mut().find(|b| matches!(b, Block::ToolResult { .. }))
     else {
         return;
     };
-    *details = Some(match (tur.clone(), details.take()) {
+    *details = Some(match (tur, details.take()) {
         (Value::Object(mut sidecar), Some(Value::Object(derived))) => {
             sidecar.extend(derived);
             Value::Object(sidecar)

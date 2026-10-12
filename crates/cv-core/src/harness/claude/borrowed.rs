@@ -1,4 +1,4 @@
-//! Borrowed conversational records for lean readers. Full/complete parsing stays in the owned
+//! Borrowed conversational records for lean and rich readers. Complete parsing stays in the owned
 //! codec. Strings that become spans are validated and sized without constructing decoded Values;
 //! escaped metadata strings use Cow rather than rejecting a valid record.
 
@@ -74,7 +74,7 @@ struct Record<'a> {
     #[serde(borrow, default)]
     origin: Raw<'a>,
     #[serde(borrow, default)]
-    tool_use_result: Option<AgentReturn<'a>>,
+    tool_use_result: Raw<'a>,
     #[serde(borrow, default)]
     error: Raw<'a>,
     #[serde(borrow, default)]
@@ -83,6 +83,63 @@ struct Record<'a> {
     api_error_status: Raw<'a>,
     #[serde(borrow, default)]
     request_id: Raw<'a>,
+}
+
+/// The shared rich roster selects only retained facts. Content is never materialized by this
+/// pass; duplicate selected keys have the owned Value codec's last-wins semantics.
+#[derive(Default)]
+struct ExtraFields {
+    top: Map<String, Value>,
+    message: Map<String, Value>,
+}
+impl<'de> Deserialize<'de> for ExtraFields {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = ExtraFields;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a record object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields = ExtraFields::default();
+                while let Some(Str(key)) = map.next_key::<Str<'de>>()? {
+                    if key == "message" {
+                        fields.message = map.next_value::<MessageExtra>()?.0;
+                    } else if CLAUDE_EXTRA_TOP.contains(&key.as_ref()) {
+                        fields.top.insert(key.into_owned(), map.next_value()?);
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(fields)
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+struct MessageExtra(Map<String, Value>);
+impl<'de> Deserialize<'de> for MessageExtra {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = MessageExtra;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a message object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields = Map::new();
+                while let Some(Str(key)) = map.next_key::<Str<'de>>()? {
+                    if CLAUDE_EXTRA_MSG.contains(&key.as_ref()) {
+                        fields.insert(key.into_owned(), map.next_value()?);
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(MessageExtra(fields))
+            }
+        }
+        d.deserialize_map(V)
+    }
 }
 
 fn hot_kind<'de, D: Deserializer<'de>>(d: D) -> Result<Str<'de>, D::Error> {
@@ -226,12 +283,16 @@ pub(super) fn ingest(
         record.is_meta == Some(true),
         s(&origin_kind),
     );
-    let (blocks, head, bare) = content(
+    let (mut blocks, head, bare) = content(
         &record.message.content,
         (role == Role::User).then_some(user_origin),
         span,
     )?;
-    let sync_agent_return = record.tool_use_result.as_ref().is_some_and(|result| {
+    let agent_return = match record.tool_use_result.0 {
+        Some(raw) if raw.get().starts_with('{') => Some(serde_json::from_str::<AgentReturn<'_>>(raw.get()).ok()?),
+        _ => None,
+    };
+    let sync_agent_return = agent_return.as_ref().is_some_and(|result| {
         let status = result
             .status
             .0
@@ -272,6 +333,15 @@ pub(super) fn ingest(
         ] {
             if let Some(raw) = raw.0.filter(|v| v.get() != "null") {
                 bag.insert(key.into(), serde_json::from_str(raw.get()).ok()?);
+            }
+        }
+    }
+    if opts.extra {
+        let captured: ExtraFields = serde_json::from_slice(slice).ok()?;
+        collect_extra_owned(captured.top, captured.message, &mut bag);
+        if blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
+            if let Some(raw) = record.tool_use_result.0.filter(|v| v.get() != "null") {
+                attach_tool_use_result_owned(&mut blocks, serde_json::from_str(raw.get()).ok()?);
             }
         }
     }
@@ -870,6 +940,7 @@ mod tests {
         for opts in [
             ParseOptions::bulk(),
             ParseOptions::lazy(),
+            ParseOptions::lazy_extra(),
             ParseOptions::full(),
             ParseOptions::complete(),
         ] {
@@ -934,6 +1005,62 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn borrowed_rich_projection_retains_metadata_and_sidecars() {
+        let mut record = serde_json::json!({
+            "type":"user", "uuid":"rich", "message":{
+                "content":[{"type":"tool_result", "tool_use_id":"call", "content":"output\n".repeat(2000)}],
+                "id":"api", "stop_reason":"tool_use", "stop_sequence":null,
+                "stop_details":{"reason":"limit"}
+            },
+            "toolUseResult":{"structuredPatch":[{"oldStart":1}], "agentId":null, "status":false}
+        });
+        for &key in CLAUDE_EXTRA_TOP {
+            record[key] = serde_json::json!({"retained":key});
+        }
+        // These classification fields are typed; use their real shapes rather than falling back.
+        record["isMeta"] = Value::Bool(true);
+        record["isCompactSummary"] = Value::Bool(false);
+        record["isApiErrorMessage"] = Value::Bool(false);
+        for sidecar in [
+            serde_json::json!({"agentId":null,"status":false,"data":"retained".repeat(2000)}),
+            serde_json::json!("bare error"),
+            serde_json::json!([1, {"details":"retained"}]),
+            Value::Null,
+        ] {
+            record["toolUseResult"] = sidecar;
+            let wire = format!("{record}\n");
+            assert_modes(&wire);
+            let expected = parse_str("session", &wire, None);
+            if !record["toolUseResult"].is_null() {
+                let Block::ToolResult { details, .. } = &expected.messages[0].content[0] else {
+                    panic!("result")
+                };
+                assert_eq!(details.as_ref(), Some(&record["toolUseResult"]));
+            }
+        }
+        record["message"]["content"][0]["content"] = Value::String("<persisted-output>\nOutput too large (66KB). Full output saved to: /tmp/s/tool-results/b.txt\n\nPreview (first 2KB):\nhi\n</persisted-output>".into());
+        for sidecar in [
+            serde_json::json!({"stdout":"hi", "persistedOutput":{"path":"overridden"}}),
+            serde_json::json!("Error: Exit code 64"),
+            serde_json::json!(["array"]),
+        ] {
+            record["toolUseResult"] = sidecar;
+            assert_modes(&format!("{record}\n"));
+        }
+        assert_modes(
+            r#"{"type":"user","isSidechain":false,"userType":"external","slug":"first","slug":null,"\u0061gentId":"escaped-key","message":{"id":"first","id":"last","stop_details":null,"content":"text"}}"#,
+        );
+        // The historical lean codec permits malformed ignored sidecar fields; rich decoding
+        // rejects the entire Value. Eligibility fallback must keep that mode boundary.
+        let malformed = br#"{"type":"user","message":{"content":"not a tool"},"toolUseResult":{"ignored":"\ud800"}}"#;
+        for (opts, count) in [(ParseOptions::lazy(), 1), (ParseOptions::lazy_extra(), 0)] {
+            let mut sink = CollectSink::default();
+            ingest_bytes(&mut new_session("session", None), malformed, 0, &opts, &mut sink);
+            assert_eq!(sink.messages.len(), count);
+        }
     }
 
     #[test]
@@ -1049,7 +1176,7 @@ mod tests {
         let launch =
             br#"{"type":"user","toolUseResult":{"agentId":"a","status":"async_launched"},"message":{"content":[]}}"#;
         let parsed: Record<'_> = serde_json::from_slice(launch).unwrap();
-        let result = parsed.tool_use_result.unwrap();
+        let result: AgentReturn<'_> = serde_json::from_str(parsed.tool_use_result.0.unwrap().get()).unwrap();
         let status: Str<'_> = serde_json::from_str(result.status.0.unwrap().get()).unwrap();
         assert_eq!(status.0, "async_launched");
         let record = br#"{"type":"assistant","message":{"model":"m","content":"x"},"uuid":"u"}"#;
