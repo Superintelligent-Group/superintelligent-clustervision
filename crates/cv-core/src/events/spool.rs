@@ -411,7 +411,7 @@ mod tests {
         message.content.push(Block::ToolUse {
             id: "edit".into(),
             name: "Edit".into(),
-            input: serde_json::json!({"file_path":"a.rs"}),
+            input: serde_json::json!({"file_path":"a.rs"}).into(),
             namespace: None,
         });
         legacy.message(message.clone());
@@ -435,7 +435,7 @@ mod tests {
             .chain(resumed.into_spool().unwrap().rows().unwrap())
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(full, legacy.into_events());
+        assert_eq!(full, legacy.into_events().unwrap());
     }
 
     #[cfg(feature = "sqlite")]
