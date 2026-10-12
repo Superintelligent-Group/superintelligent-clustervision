@@ -38,6 +38,7 @@ pub(super) struct DocSink {
     pub(super) first_user_text: Option<String>,
     resolver: Resolver,
     error: Option<anyhow::Error>,
+    failed: bool,
 }
 impl DocSink {
     pub(super) fn new(resolver: Resolver) -> Self {
@@ -46,6 +47,7 @@ impl DocSink {
             first_user_text: None,
             resolver,
             error: None,
+            failed: false,
         }
     }
     /// Message::append_searchable's projection, plus persisted-output heads, within one budget.
@@ -96,13 +98,18 @@ impl DocSink {
     }
 }
 impl MessageSink for DocSink {
-    fn take_error(&mut self) -> anyhow::Result<()> {
-        match self.error.take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.failed |= self.error.is_some();
+        self.error.take().or_else(|| {
+            self.failed
+                .then(|| anyhow::anyhow!("semantic projection previously failed"))
+        })
     }
+
     fn message(&mut self, message: Message) -> Flow {
+        if self.failed || self.error.is_some() {
+            return Flow::Stop;
+        }
         if self.first_user_text.is_none() && message.role == Role::User {
             let mut label = UserLabel::default();
             for block in &message.content {
@@ -216,17 +223,13 @@ mod tests {
             let mut actual = sink();
             actual.body = Head::new(limit);
             actual.message(message.clone());
-            actual.take_error().unwrap();
+            assert!(actual.take_error().is_none());
             assert_eq!(actual.body.as_str(), prefix(&expected, limit), "limit {limit}");
         }
         std::fs::write(&path, "null").unwrap();
         let mut actual = sink();
         actual.message(message);
-        assert!(actual
-            .take_error()
-            .unwrap_err()
-            .to_string()
-            .contains("JSON source changed"));
+        assert!(actual.take_error().unwrap().to_string().contains("JSON source changed"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

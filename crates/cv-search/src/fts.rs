@@ -1903,12 +1903,20 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         head: cv_core::projection::Head,
         resolver: cv_core::Resolver,
         error: Option<anyhow::Error>,
+        failed: bool,
     }
     impl MessageSink for Acc {
-        fn take_error(&mut self) -> Result<()> {
-            self.error.take().map_or(Ok(()), Err)
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.failed |= self.error.is_some();
+            self.error.take().or_else(|| {
+                self.failed
+                    .then(|| anyhow::anyhow!("snippet projection previously failed"))
+            })
         }
         fn message(&mut self, m: Message) -> Flow {
+            if self.failed || self.error.is_some() {
+                return Flow::Stop;
+            }
             for b in &m.content {
                 if self.head.full() {
                     break;
@@ -1960,6 +1968,7 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         head: cv_core::projection::Head::new(SNIPPET_SCAN_CAP),
         resolver: cv_core::Resolver::new(Some(PathBuf::from(path))),
         error: None,
+        failed: false,
     };
     cv_core::stream::stream_counted(&*adapter, &sref, &ParseOptions::lazy(), &mut acc).ok()?;
     Some(make_snippet(acc.head.as_str(), query))
@@ -3189,7 +3198,7 @@ mod tests {
         assert_eq!(error.to_string(), "consulted Json source changed");
         assert_eq!(events.seen, 3);
         assert!(
-            !events.inner.into_events().is_empty(),
+            !events.inner.into_events().unwrap().is_empty(),
             "fixture must stage event rows before failure"
         );
         writer.commit().unwrap();

@@ -17,7 +17,9 @@
 //! Both indexes live under `$CLUSTERVISION_HOME` (or `~/.clustervision`): the tantivy index in
 //! `…/tantivy/` and the embedding store in `…/embeddings.bin`.
 
-use anyhow::{Context, Result};
+#[cfg(feature = "semantic")]
+use anyhow::Context;
+use anyhow::Result;
 use std::path::PathBuf;
 
 pub mod fts;
