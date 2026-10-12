@@ -273,6 +273,58 @@ pub fn stream_counted(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
+    let (session, counter) = stream_with_counter(adapter, r, opts, sink)?;
+    if let Some((turns, counter)) = counter {
+        note_turns(r, turns);
+        crate::catalog::note_affordances(r, || counter.finish(&session, &adapter.store_affordances(r)));
+    }
+    Ok(session)
+}
+
+/// What a whole-session read counted: its turns and its affordances.
+#[derive(Debug, Clone)]
+pub struct Counted {
+    pub turns: usize,
+    pub counts: crate::affordance::Counts,
+}
+
+impl Counted {
+    /// Write what [`stream_counted`] writes: the turn count into a "not counted" row, and the
+    /// affordance counts unless the catalog's are still fresh.
+    pub fn record(self, r: &SessionRef) {
+        note_turns(r, self.turns);
+        crate::catalog::note_affordances(r, || self.counts);
+    }
+}
+
+/// [`stream_counted`] without the catalog writes: what the pass counted comes back (`None` when the
+/// sink stopped early) for the caller to [`Counted::record`], so a sweep that parses on many
+/// threads keeps its catalog writes on one. Reads the adapter's side store every time (the
+/// recording path reads it only when a write is due).
+pub fn stream_counting(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<(Session, Option<Counted>)> {
+    let (session, counter) = stream_with_counter(adapter, r, opts, sink)?;
+    let counted = counter.map(|(turns, counter)| Counted {
+        turns,
+        counts: counter.finish(&session, &adapter.store_affordances(r)),
+    });
+    Ok((session, counted))
+}
+
+/// `adapter.stream` with every message counted: the turns and the affordance [`Counter`]
+/// (`None` when the sink stopped early, so the counts would be partial).
+///
+/// [`Counter`]: crate::affordance::Counter
+fn stream_with_counter(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<(Session, Option<(usize, crate::affordance::Counter)>)> {
     struct Counting<'a> {
         inner: &'a mut dyn MessageSink,
         turns: usize,
@@ -298,12 +350,8 @@ pub fn stream_counted(
         stopped: false,
     };
     let session = adapter.stream(r, opts, &mut counting)?;
-    if !counting.stopped {
-        note_turns(r, counting.turns);
-        let counter = counting.affordances;
-        crate::catalog::note_affordances(r, || counter.finish(&session, &adapter.store_affordances(r)));
-    }
-    Ok(session)
+    let counted = (!counting.stopped).then_some((counting.turns, counting.affordances));
+    Ok((session, counted))
 }
 
 /// A whole-session read of `r` counted `turns`: fill a "not counted" catalog row (see
