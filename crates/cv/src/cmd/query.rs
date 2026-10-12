@@ -10,7 +10,7 @@ use anyhow::Result;
 use cv_core::query::{FieldId, SessionQuery};
 use std::collections::HashSet;
 
-pub(crate) use cv_core::query::{filter_refs, matches_full, TextSets};
+pub(crate) use cv_core::query::{filter_refs, TextSets};
 
 /// Parse an optional `-q` string into a query. A malformed query is a caller mistake (exit 2,
 /// like a bad window or a removed flag). The core's messages point at the reference by its 0.10
