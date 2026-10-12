@@ -227,7 +227,14 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] API pagination, query facts, pack/tools/stats, semantic rebuilds: prioritize by measurements.
 - [ ] Selected escaped materialization: measure a single decode pass with rollback to raw text; an owned result can retract output, unlike streaming callbacks.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
-- [ ] Final integration gates, publish the implementation, and retain the remaining workload priorities above.
+- [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
+
+Validation of the implementation through `17a9cd1`: 910 workspace tests, the release corpus parse
+budget, live-heap gates in both configurations, fmt/clippy, workspace/no-default/wasm builds,
+package verification, manual build/names, dist plan, five desktop tests, nine corpus-tool tests and
+55 web selftests passed. Final detector checks add 43 lazy sessions, 30 Codex bulk/full reads and
+78 synthetic before/after pairs, all exact. These do not claim a new full-fleet index timing or
+universal heap bounds for the unfinished paths.
 
 The full gate roster is `.github/workflows/ci.yml`, including release parse budget, manual build,
 search without default features, dist plan, wasm-pack, the separate desktop workspace and web
