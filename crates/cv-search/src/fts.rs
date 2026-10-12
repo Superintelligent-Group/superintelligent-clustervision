@@ -292,14 +292,18 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     // One query for the whole event skip-table — the per-session checks would open (and run DDL
     // on) a fresh sqlite connection per call, which a ~2,400-session sweep pays ~2,400×.
     let event_sync = cv_core::events::SyncTable::load();
+    // Same for the affordance counts `has:<kind>` reads: a session indexed before they existed (or
+    // changed since) gets one read-only pass that records them.
+    let affordances = cv_core::catalog::AffordanceTable::load();
     for r in cv_core::discover_all() {
         total += 1;
         seen.insert(r.id.clone());
         let (mtime, size) = cv_core::offsets::file_sig(&r.path);
         let fts_fresh = fts_is_fresh(&r, existing.get(&r.id), mtime, size);
         let events_stale = event_sync.needs_ingest(&r, mtime, size);
-        // Unchanged on both axes → skip entirely (no re-parse beyond the metadata scan).
-        if fts_fresh && !events_stale {
+        let counts_stale = affordances.stale(&r);
+        // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
+        if fts_fresh && !events_stale && !counts_stale {
             continue;
         }
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
@@ -310,10 +314,17 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
         // FTS docs current but events missing/stale (e.g. first run after upgrading, or after a
         // catalog wipe): a catalog-only pass that never touches tantivy.
         if fts_fresh {
-            let es = events.as_mut().expect("skip above covers fresh+fresh");
-            match cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), es) {
-                Ok(_) => cv_core::events::record(&r, es.events(), mtime, size),
-                Err(e) => eprintln!("cv-search: parse failed for {} ({}): {e:#}", r.id, r.harness),
+            // `stream_counted` records the affordance counts on the way; events only when stale.
+            let result = match events.as_mut() {
+                Some(es) => cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), es)
+                    .map(|_| cv_core::events::record(&r, es.events(), mtime, size)),
+                None => {
+                    let mut drop_all = |_m: cv_core::Message| cv_core::Flow::Continue;
+                    cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), &mut drop_all).map(|_| ())
+                }
+            };
+            if let Err(e) = result {
+                eprintln!("cv-search: parse failed for {} ({}): {e:#}", r.id, r.harness);
             }
             continue;
         }

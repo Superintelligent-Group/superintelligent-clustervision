@@ -99,6 +99,15 @@ mod imp {
                  size     INTEGER NOT NULL,
                  refs     TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS affordance_counts(
+                 harness TEXT NOT NULL,
+                 id      TEXT NOT NULL,
+                 path    TEXT NOT NULL,
+                 sig_a   INTEGER NOT NULL,
+                 sig_b   INTEGER NOT NULL,
+                 counts  TEXT NOT NULL,
+                 PRIMARY KEY(harness, id, path)
+             );
              CREATE TABLE IF NOT EXISTS catalog_meta(
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -432,6 +441,137 @@ mod imp {
         crate::discover_cache::fill_count(&conn, &r.path, r.harness, &r.id, n);
     }
 
+    /// `(harness, id, path)` → the affordance signature and counts a full read recorded.
+    type AffordanceRows = std::collections::HashMap<(String, String, String), (i64, i64, String)>;
+
+    /// What a full read of `r` stored as its affordance counts is still true while this holds: the
+    /// transcript file's `(mtime_ns, size)`; for a session directory (Grok, Kimi, Roo, Cline) the
+    /// newest mtime and total size of the files directly in it (an append to the transcript inside
+    /// does not touch the directory's own mtime); for a database many sessions share (Hermes,
+    /// OpenCode, Goose, …) the session's own `updated_at` from its catalog row, since any session's
+    /// write moves the file's mtime. `(0, 0)` when nothing can be stat'ed: never fresh.
+    pub fn affordance_sig(r: &SessionRef) -> (i64, i64) {
+        let Ok(md) = std::fs::metadata(&r.path) else {
+            return (0, 0);
+        };
+        let shared_db = r
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3" | "vscdb"));
+        if shared_db {
+            return (r.updated_at.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0), -1);
+        }
+        if md.is_dir() {
+            let (mut newest, mut total) = (0i64, 0i64);
+            for e in std::fs::read_dir(&r.path).into_iter().flatten().flatten() {
+                let Ok(m) = e.metadata() else { continue };
+                if m.is_file() {
+                    let t = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_nanos() as i64);
+                    newest = newest.max(t);
+                    total += m.len() as i64;
+                }
+            }
+            return (newest, total);
+        }
+        crate::offsets::file_sig(&r.path)
+    }
+
+    fn counts_text(c: &crate::affordance::Counts) -> String {
+        let obj: serde_json::Map<String, serde_json::Value> = c
+            .iter()
+            .map(|(k, n)| (k.as_str().to_string(), serde_json::json!(n)))
+            .collect();
+        serde_json::Value::Object(obj).to_string()
+    }
+
+    fn counts_of(text: &str) -> crate::affordance::Counts {
+        let Ok(serde_json::Value::Object(o)) = serde_json::from_str(text) else {
+            return Default::default();
+        };
+        o.iter()
+            .filter_map(|(k, v)| Some((crate::affordance::Kind::parse(k)?, v.as_u64()? as u32)))
+            .collect()
+    }
+
+    /// A full read of `r` finished: record its affordance counts unless the stored ones are still
+    /// fresh (same [`affordance_sig`]), so `has:<kind>` answers from the catalog from then on.
+    /// `counts` runs only when a write is due (it may read a side store). Never creates the catalog.
+    pub fn note_affordances(r: &SessionRef, counts: impl FnOnce() -> crate::affordance::Counts) {
+        if !db_path().is_some_and(|p| p.exists()) {
+            return;
+        }
+        let (a, b) = affordance_sig(r);
+        if a == 0 {
+            return;
+        }
+        let Some(conn) = open() else { return };
+        let path = r.path.to_string_lossy();
+        let stored: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT sig_a, sig_b FROM affordance_counts WHERE harness=?1 AND id=?2 AND path=?3",
+                params![r.harness.as_str(), r.id, path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        if stored == Some((a, b)) {
+            return;
+        }
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO affordance_counts(harness,id,path,sig_a,sig_b,counts) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![r.harness.as_str(), r.id, path, a, b, counts_text(&counts())],
+        );
+    }
+
+    /// Every recorded affordance count, loaded once for a sweep (`cv ls -q has:plan`, `cv index`).
+    pub struct AffordanceTable {
+        rows: AffordanceRows,
+    }
+
+    impl AffordanceTable {
+        pub fn load() -> AffordanceTable {
+            let load = || -> Option<AffordanceRows> {
+                let conn = open()?;
+                let mut stmt = conn
+                    .prepare("SELECT harness, id, path, sig_a, sig_b, counts FROM affordance_counts")
+                    .ok()?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            (row.get(0)?, row.get(1)?, row.get(2)?),
+                            (row.get(3)?, row.get(4)?, row.get(5)?),
+                        ))
+                    })
+                    .ok()?;
+                Some(rows.flatten().collect())
+            };
+            AffordanceTable {
+                rows: load().unwrap_or_default(),
+            }
+        }
+
+        /// `r`'s counts when a full read recorded them and they are still fresh; `None` ("not
+        /// counted") otherwise. Stats the session once.
+        pub fn counts(&self, r: &SessionRef) -> Option<crate::affordance::Counts> {
+            let key = (
+                r.harness.as_str().to_string(),
+                r.id.clone(),
+                r.path.to_string_lossy().into_owned(),
+            );
+            let (a, b, text) = self.rows.get(&key)?;
+            ((*a, *b) == affordance_sig(r) && *a != 0).then(|| counts_of(text))
+        }
+
+        /// Whether `r` has no fresh counts (a sweep re-reads it to fill them).
+        pub fn stale(&self, r: &SessionRef) -> bool {
+            self.counts(r).is_none()
+        }
+    }
+
     /// All catalog rows whose id equals `id` or starts with it, optionally constrained to one
     /// harness. Order: exact-id matches first. Empty on any error or a cold catalog.
     pub fn lookup(id: &str, harness: Option<Harness>) -> Vec<SessionRef> {
@@ -456,17 +596,34 @@ mod imp {
 }
 
 #[cfg(feature = "sqlite")]
+pub use imp::{affordance_sig, fill_count, lookup, note_affordances, sync, AffordanceTable};
+#[cfg(feature = "sqlite")]
 pub(crate) use imp::{
     all_sessions, last_full_sync, open_db, probe_stale, replace_harness, stamp_full_sync, watches_for,
 };
-#[cfg(feature = "sqlite")]
-pub use imp::{fill_count, lookup, sync};
 
 /// No-op fallbacks when sqlite is disabled — `find`/`sessions` simply always take the scan path.
 #[cfg(not(feature = "sqlite"))]
 pub fn sync(_refs: &[SessionRef]) {}
 #[cfg(not(feature = "sqlite"))]
 pub fn fill_count(_r: &SessionRef, _n: usize) {}
+#[cfg(not(feature = "sqlite"))]
+pub fn note_affordances(_r: &SessionRef, _counts: impl FnOnce() -> crate::affordance::Counts) {}
+/// Without a catalog nothing is ever counted: every `has:<kind>` parses.
+#[cfg(not(feature = "sqlite"))]
+pub struct AffordanceTable;
+#[cfg(not(feature = "sqlite"))]
+impl AffordanceTable {
+    pub fn load() -> AffordanceTable {
+        AffordanceTable
+    }
+    pub fn counts(&self, _r: &SessionRef) -> Option<crate::affordance::Counts> {
+        None
+    }
+    pub fn stale(&self, _r: &SessionRef) -> bool {
+        false
+    }
+}
 #[cfg(not(feature = "sqlite"))]
 pub fn lookup(_id: &str, _harness: Option<Harness>) -> Vec<SessionRef> {
     Vec::new()

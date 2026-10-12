@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `has:plan` and the other affordance flags answer from per-session counts in the catalog (filled by `cv index` and any full read); only uncounted sessions are parsed.
 - `cv tools --timeline` shows each call's `tool_use_id` (in `--json` too), the id `cv cat <session> <id>` takes.
 - `cv tools --timeline` shows one line per tool call, matching `cv tools` counts; a multi-file patch's other files are in `more_targets`.
 - `cv port --harness qwen` writes Qwen Code 0.25 session JSONL under `~/.qwen/projects`; it wrote the gemini-cli shape 0.25 no longer reads.

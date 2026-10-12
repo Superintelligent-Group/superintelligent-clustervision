@@ -299,3 +299,56 @@ fn a_follower_sees_an_append_the_catalog_probe_misses() {
     assert_eq!(ev.kind, cv_core::watch::EventKind::Updated);
     assert_eq!(ev.new_messages.len(), 1);
 }
+
+/// `has:<affordance>` is a catalog-tier answer: a full read records the session's affordance
+/// counts, `AffordanceTable` serves them while the file is unchanged, an append makes them stale
+/// (and the next query's parse refreshes them), and a session never read is still answered, by a
+/// parse. The query's answer is the same either way.
+#[test]
+fn a_full_read_counts_affordances_for_has() {
+    let w = World::in_process("affordances");
+    let planner = write_session(&w, "proj", "planner", 1);
+    let todo = serde_json::json!({
+        "type": "assistant", "uuid": "planner-a", "sessionId": "planner", "timestamp": "2026-01-02T10:00:00Z",
+        "cwd": "/work/proj",
+        "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "TodoWrite",
+            "input": {"todos": [{"content": "x", "status": "pending"}]}}]}
+    });
+    fs::write(
+        &planner,
+        fs::read_to_string(&planner).unwrap() + &todo.to_string() + "\n",
+    )
+    .unwrap();
+    write_session(&w, "proj", "chatter", 2);
+    let refs = cv_core::sessions();
+    let by = |id: &str| refs.iter().find(|r| r.id == id).cloned().expect("listed");
+    let (planner_ref, chatter_ref) = (by("planner"), by("chatter"));
+
+    // Never read: nothing counted, and the query still answers (by parsing, which counts).
+    let table = cv_core::catalog::AffordanceTable::load();
+    assert!(table.counts(&planner_ref).is_none());
+    let query = cv_core::query::SessionQuery::parse("has:plan").unwrap();
+    assert!(query.needs_counted() && !query.needs_events());
+    let run = || {
+        let mut v = cv_core::sessions();
+        cv_core::query::filter_refs(&mut v, &query, &cv_core::query::TextSets::empty());
+        ids(&v)
+    };
+    assert_eq!(run(), ["planner"]);
+
+    // Counted now, both ways round.
+    let table = cv_core::catalog::AffordanceTable::load();
+    let counts = table.counts(&planner_ref).expect("the query's parse counted it");
+    assert_eq!(counts.get(&cv_core::affordance::Kind::Plan), Some(&1));
+    assert_eq!(table.counts(&chatter_ref), Some(Default::default()));
+    assert_eq!(run(), ["planner"], "the catalog answer is the parse answer");
+
+    // An append (the file signature moves) makes the stored counts stale until re-read.
+    fs::write(
+        &planner,
+        fs::read_to_string(&planner).unwrap() + &user_line("planner", 9),
+    )
+    .unwrap();
+    assert!(cv_core::catalog::AffordanceTable::load().stale(&planner_ref));
+    assert_eq!(run(), ["planner"]);
+}

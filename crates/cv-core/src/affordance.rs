@@ -680,6 +680,73 @@ fn text_head(m: &Message, resolver: &crate::lazy::Resolver) -> String {
     crate::ir::truncate(t.trim(), 120)
 }
 
+/// What one message contributes: a tool call the table names, or the message itself (a kind, a
+/// record, an origin). The one classification behind both [`of_session`] (which builds the rows)
+/// and [`Counter`] (which only counts them), so the catalog's counts and the view cannot disagree.
+enum Hit<'a> {
+    Call {
+        kind: Kind,
+        action: &'static str,
+        id: &'a str,
+        name: &'a str,
+        input: &'a Value,
+    },
+    Message {
+        kind: Kind,
+        action: &'static str,
+        tool: Option<&'static str>,
+    },
+}
+
+fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver) -> Vec<Hit<'a>> {
+    let mut out = Vec::new();
+    let mut spawn_calls = 0;
+    for b in &m.content {
+        let Block::ToolUse { id, name, input, .. } = b else {
+            continue;
+        };
+        let Some((kind, action)) = classify_tool(h, name, input) else {
+            continue;
+        };
+        // A spawn is a spawn when the adapter said so (the message kind); a harness that marks
+        // spawns with its own records (Codex, Kimi Code) is read from those.
+        if kind == Kind::SubagentSpawn {
+            if m.kind != MessageKind::SubagentSpawn {
+                continue;
+            }
+            spawn_calls += 1;
+        }
+        out.push(Hit::Call {
+            kind,
+            action,
+            id,
+            name,
+            input,
+        });
+    }
+    let by_kind = match m.kind {
+        MessageKind::SubagentSpawn if spawn_calls == 0 => Some((Kind::SubagentSpawn, "spawn")),
+        MessageKind::SubagentReturn => Some((Kind::SubagentReturn, "return")),
+        MessageKind::Branch => Some((Kind::Branch, "branch")),
+        MessageKind::ModelChange => Some((Kind::ModelChange, "change")),
+        _ => None,
+    };
+    let message = match by_kind {
+        Some((kind, action)) => Some((kind, action, None)),
+        None => record(h, m, resolver)
+            .map(|(kind, action, tool)| (kind, action, Some(tool)))
+            .or(match m.origin {
+                Origin::Hook => Some((Kind::Hook, "output", None)),
+                Origin::Scheduler => Some((Kind::Schedule, "fire", None)),
+                _ => None,
+            }),
+    };
+    if let Some((kind, action, tool)) = message {
+        out.push(Hit::Message { kind, action, tool });
+    }
+    out
+}
+
 /// Every affordance the transcript shows, in message order (fork first, when the session is one).
 /// Safe on a lazy parse: text is read through the session's resolver, a few KB at most per message.
 pub fn of_session(s: &Session) -> Vec<Affordance> {
@@ -698,76 +765,91 @@ pub fn of_session(s: &Session) -> Vec<Affordance> {
             source: Source::Message,
         });
     }
-    let row =
-        |i: usize, m: &Message, kind: Kind, action: &'static str, tool: Option<String>, summary: String| Affordance {
-            kind,
-            action,
-            index: Some(i),
-            timestamp: m.timestamp,
-            tool,
-            tool_use_id: None,
-            summary,
-            items: Vec::new(),
-            source: Source::Message,
-        };
     for (i, m) in s.messages.iter().enumerate() {
-        let mut spawn_calls = 0;
-        for b in &m.content {
-            let Block::ToolUse { id, name, input, .. } = b else {
-                continue;
-            };
-            let Some((kind, action)) = classify_tool(s.harness, name, input) else {
-                continue;
-            };
-            // A spawn is a spawn when the adapter said so (the message kind); a harness that marks
-            // spawns with its own records (Codex, Kimi Code) is read from those.
-            if kind == Kind::SubagentSpawn {
-                if m.kind != MessageKind::SubagentSpawn {
-                    continue;
+        for hit in hits(s.harness, m, &resolver) {
+            out.push(match hit {
+                Hit::Call {
+                    kind,
+                    action,
+                    id,
+                    name,
+                    input,
+                } => {
+                    let items = if matches!(kind, Kind::Plan | Kind::Goal) {
+                        items_of(input)
+                    } else {
+                        Vec::new()
+                    };
+                    Affordance {
+                        kind,
+                        action,
+                        index: Some(i),
+                        timestamp: m.timestamp,
+                        tool: Some(name.to_string()),
+                        tool_use_id: Some(id.to_string()),
+                        summary: call_summary(kind, input, &items),
+                        items,
+                        source: Source::ToolCall,
+                    }
                 }
-                spawn_calls += 1;
-            }
-            let items = if matches!(kind, Kind::Plan | Kind::Goal) {
-                items_of(input)
-            } else {
-                Vec::new()
-            };
-            out.push(Affordance {
-                kind,
-                action,
-                index: Some(i),
-                timestamp: m.timestamp,
-                tool: Some(name.clone()),
-                tool_use_id: Some(id.clone()),
-                summary: call_summary(kind, input, &items),
-                items,
-                source: Source::ToolCall,
+                Hit::Message { kind, action, tool } => Affordance {
+                    kind,
+                    action,
+                    index: Some(i),
+                    timestamp: m.timestamp,
+                    tool: tool.map(str::to_string),
+                    tool_use_id: None,
+                    summary: match (kind, &m.model) {
+                        (Kind::ModelChange, Some(model)) => model.clone(),
+                        _ => text_head(m, &resolver),
+                    },
+                    items: Vec::new(),
+                    source: Source::Message,
+                },
             });
-        }
-        let kind_row = match m.kind {
-            MessageKind::SubagentSpawn if spawn_calls == 0 => Some((Kind::SubagentSpawn, "spawn")),
-            MessageKind::SubagentReturn => Some((Kind::SubagentReturn, "return")),
-            MessageKind::Branch => Some((Kind::Branch, "branch")),
-            MessageKind::ModelChange => Some((Kind::ModelChange, "change")),
-            _ => None,
-        };
-        if let Some((kind, action)) = kind_row {
-            let summary = match kind {
-                Kind::ModelChange => m.model.clone().unwrap_or_else(|| text_head(m, &resolver)),
-                _ => text_head(m, &resolver),
-            };
-            out.push(row(i, m, kind, action, None, summary));
-            continue;
-        }
-        if let Some((kind, action, tool)) = record(s.harness, m, &resolver) {
-            out.push(row(i, m, kind, action, Some(tool.to_string()), text_head(m, &resolver)));
-        } else if m.origin == Origin::Hook {
-            out.push(row(i, m, Kind::Hook, "output", None, text_head(m, &resolver)));
-        } else if m.origin == Origin::Scheduler {
-            out.push(row(i, m, Kind::Schedule, "fire", None, text_head(m, &resolver)));
         }
     }
     out
+}
+
+/// Affordance counts by kind: what the catalog stores per session so `has:<kind>` never parses.
+pub type Counts = std::collections::BTreeMap<Kind, u32>;
+
+/// Counts a session's affordances one message at a time, inside a pass that is reading it anyway
+/// (`stream::stream_counted`), with the same classification as [`of_session`].
+pub struct Counter {
+    harness: Harness,
+    resolver: crate::lazy::Resolver,
+    counts: Counts,
+}
+
+impl Counter {
+    pub fn new(r: &crate::ir::SessionRef) -> Counter {
+        Counter {
+            harness: r.harness,
+            resolver: crate::lazy::Resolver::new(Some(r.path.clone())),
+            counts: Counts::new(),
+        }
+    }
+
+    pub fn note(&mut self, m: &Message) {
+        for hit in hits(self.harness, m, &self.resolver) {
+            let (Hit::Call { kind, .. } | Hit::Message { kind, .. }) = hit;
+            *self.counts.entry(kind).or_default() += 1;
+        }
+    }
+
+    /// The whole session's counts: what the messages showed, the session's fork, and `store` (the
+    /// adapter's side-store rows).
+    pub fn finish(mut self, s: &Session, store: &[Affordance]) -> Counts {
+        if s.lineage.forked_from.is_some() {
+            *self.counts.entry(Kind::Fork).or_default() += 1;
+        }
+        for a in store {
+            *self.counts.entry(a.kind).or_default() += 1;
+        }
+        self.counts
+    }
 }
 
 /// The transcript rows plus the adapter's side-store rows, for one session ref.

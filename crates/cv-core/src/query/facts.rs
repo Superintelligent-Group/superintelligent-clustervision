@@ -209,17 +209,45 @@ pub fn matches_full(query: &SessionQuery, r: &SessionRef, session: &Session, tex
     })
 }
 
+/// The resolver a sweep evaluates each ref with before deciding to parse it: `has:<affordance>`
+/// from the catalog's fresh counts (definite), everything else `Unknown`.
+struct CountedFacts(Option<crate::affordance::Counts>);
+
+impl ExtFacts for CountedFacts {
+    fn has(&self, flag: &str) -> Tri {
+        match (crate::affordance::Kind::parse(flag), &self.0) {
+            (Some(k), Some(counts)) => Tri::of(counts.get(&k).is_some_and(|n| *n > 0)),
+            _ => Tri::Unknown,
+        }
+    }
+}
+
 /// Apply a parsed query to a ref list in place: prune with the catalog-cheap prefilter, then — if
-/// the query has any parse/index/events/forest term — parse each survivor and keep only full
-/// matches. `cv ls`/`stats` and `cv serve`'s `/api/stats?q=` all go through here, so `-q`
-/// means the same thing on every door.
+/// the query has any parse/index/events/forest/counted term — evaluate each survivor against the
+/// catalog's affordance counts, keeping a definite match and dropping a definite miss without a
+/// parse, and parse only what is still undecided. `cv ls`/`stats` and `cv serve`'s
+/// `/api/stats?q=` all go through here, so `-q` means the same thing on every door.
 pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) {
     refs.retain(|r| query.prefilter(r));
-    if query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest() {
-        refs.retain(|r| {
-            crate::harness::for_harness(r.harness)
-                .and_then(|a| crate::stream::collect_with(a.as_ref(), r, &crate::ParseOptions::lazy()).ok())
-                .is_some_and(|s| matches_full(query, r, &s, text_sets))
-        });
+    let heavy = query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest();
+    if !heavy && !query.needs_counted() {
+        return;
     }
+    let table = query.needs_counted().then(crate::catalog::AffordanceTable::load);
+    refs.retain(|r| {
+        let counted = CountedFacts(table.as_ref().and_then(|t| t.counts(r)));
+        let cheap = query.eval(&Facts {
+            r,
+            session: None,
+            ext: &counted,
+        });
+        match cheap {
+            Tri::True => true,
+            Tri::False => false,
+            // Undecided: parse it (which also records its counts for the next query).
+            Tri::Unknown => crate::harness::for_harness(r.harness)
+                .and_then(|a| crate::stream::collect_with(a.as_ref(), r, &crate::ParseOptions::lazy()).ok())
+                .is_some_and(|s| matches_full(query, r, &s, text_sets)),
+        }
+    });
 }

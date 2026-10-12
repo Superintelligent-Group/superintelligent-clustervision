@@ -85,6 +85,10 @@ pub enum Cost {
     /// Walks the sub-agent forest / workflow runs / compaction seams — the priciest tier (reads many
     /// sidecar files), so always pair a forest term with a cheap one.
     Forest,
+    /// Answered from the catalog's per-session affordance counts (`has:plan`, `has:schedule`, …),
+    /// which any full read fills (`cv index` brings the fleet to counted). A session whose counts
+    /// are missing or stale is parsed once, and counted from then on.
+    Counted,
 }
 
 /// One row of the language: a field, how to spell it, what it takes, and what it costs to answer.
@@ -149,7 +153,7 @@ pub const FIELDS: &[FieldDef] = &[
     FieldDef { id: FieldId::Touched, name: "touched", aliases: &["file"], kind: Kind::Path, cost: Cost::Events,
         desc: "Read or edited a file at this path (events catalog).", example: "touched:src/ir.rs" },
     FieldDef { id: FieldId::Has, name: "has", aliases: &[], kind: Kind::Flag, cost: Cost::Events,
-        desc: "A capability flag (subagents, errors, tools, images, compacted, workflows) or an affordance (plan, schedule, background_job, …).", example: "has:plan" },
+        desc: "A capability flag (subagents, errors, tools, images, compacted, workflows; events tier) or an affordance (plan, schedule, background_job, …; counted tier: catalog-fast once `cv index` or any full read has counted the session, a parse otherwise).", example: "has:plan" },
     FieldDef { id: FieldId::Subtool, name: "subtool", aliases: &[], kind: Kind::Str, cost: Cost::Forest,
         desc: "A tool used by a *sub-agent* (not the orchestrator). Walks the forest.", example: "subtool:Bash" },
     FieldDef { id: FieldId::Agent, name: "agent", aliases: &["subagent"], kind: Kind::Str, cost: Cost::Forest,
@@ -177,6 +181,7 @@ fn cost_label(c: Cost) -> &'static str {
         Cost::Index => "index",
         Cost::Events => "events",
         Cost::Forest => "forest",
+        Cost::Counted => "counted",
     }
 }
 
@@ -396,6 +401,18 @@ impl SessionQuery {
         self.costs.contains(&Cost::Events)
     }
 
+    /// Whether it has an affordance `has:` term, answered from the catalog's counts where a full
+    /// read recorded them (see [`Cost::Counted`]).
+    pub fn needs_counted(&self) -> bool {
+        self.costs.contains(&Cost::Counted)
+    }
+
+    /// The three-valued evaluation against whatever facts are given (`Unknown` where they cannot
+    /// decide) — what a sweep uses to keep a definite `True` without parsing.
+    pub fn eval(&self, facts: &Facts) -> Tri {
+        eval(&self.expr, facts)
+    }
+
     /// Whether it walks the sub-agent forest / workflows / compaction (`subtool:`/`agent:`/`agents`/
     /// `workflow(s)`/`compactions`) — the priciest tier.
     pub fn needs_forest(&self) -> bool {
@@ -461,6 +478,14 @@ fn collect_costs(e: &Expr, out: &mut Vec<Cost>) {
                 .find(|f| f.id == t.field)
                 .map(|f| f.cost)
                 .unwrap_or(Cost::Catalog);
+            // `has:` is two tiers: an affordance (`has:plan`) is counted in the catalog, the
+            // capability flags (`has:errors`) come from events.
+            let c = match (&t.field, &t.val) {
+                (FieldId::Has, Val::Strs(v)) if v.iter().all(|f| crate::affordance::Kind::parse(f).is_some()) => {
+                    Cost::Counted
+                }
+                _ => c,
+            };
             if !out.contains(&c) {
                 out.push(c);
             }
@@ -1064,7 +1089,10 @@ pub fn reference() -> String {
     s.push_str("  msgs>=50 after:2026-01-01 tool:Bash         big recent sessions that ran Bash\n");
     s.push_str("  touched:src/ir.rs has:errors                edited ir.rs and hit an error\n");
     s.push_str("  text:\"SandboxDenied\" harness:codex          full-text within a harness\n");
-    s.push_str("\nNOTE: parse=needs the transcript; index=needs `cv index`; events=needs the events catalog.\n");
+    s.push_str("\nNOTE: parse=needs the transcript; index=needs `cv index`; events=needs the events catalog;\n");
+    s.push_str(
+        "      counted=the catalog's affordance counts (`cv index` fills them; an uncounted session is parsed once).\n",
+    );
     s
 }
 

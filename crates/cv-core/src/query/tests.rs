@@ -403,3 +403,15 @@ fn has_an_affordance_reads_the_view() {
     assert!(!facts::matches_full(&q("has:schedule"), &r, &s, &none));
     assert!(SessionQuery::parse("has:nonsense").is_err());
 }
+
+/// `has:` is two tiers: an affordance is counted in the catalog (no parse once counted), a
+/// capability flag reads events; a mix needs both.
+#[test]
+fn has_an_affordance_is_counted_not_events() {
+    let plan = q("has:plan,schedule");
+    assert!(plan.needs_counted() && !plan.needs_events());
+    let errs = q("has:errors");
+    assert!(errs.needs_events() && !errs.needs_counted());
+    let mixed = q("has:plan has:errors");
+    assert!(mixed.needs_events() && mixed.needs_counted());
+}

@@ -264,7 +264,9 @@ pub fn collect_with(adapter: &dyn Adapter, r: &SessionRef, opts: &ParseOptions) 
 /// sink never said [`Flow::Stop`], the parse's own turn count ([`Message::is_turn`]) is written back
 /// to the catalog for a row that holds `0` ("not counted" — a Codex rollout over the discovery scan
 /// cap, an adapter that cannot count cheaply), so `cv ls` shows the real number from the first full
-/// read on. The full-read doors (`collect`/`parse`, `cv show`, `cv index`) stream through this.
+/// read on. The same pass counts the session's affordances ([`crate::affordance::Counter`]) and
+/// records them unless the catalog's are still fresh, which is what lets `has:<kind>` answer from
+/// the catalog. The full-read doors (`collect`/`parse`, `cv show`, `cv index`) stream through this.
 pub fn stream_counted(
     adapter: &dyn Adapter,
     r: &SessionRef,
@@ -274,6 +276,7 @@ pub fn stream_counted(
     struct Counting<'a> {
         inner: &'a mut dyn MessageSink,
         turns: usize,
+        affordances: crate::affordance::Counter,
         stopped: bool,
     }
     impl MessageSink for Counting<'_> {
@@ -282,6 +285,7 @@ pub fn stream_counted(
         }
         fn message(&mut self, m: Message) -> Flow {
             self.turns += usize::from(m.is_turn());
+            self.affordances.note(&m);
             let flow = self.inner.message(m);
             self.stopped |= flow == Flow::Stop;
             flow
@@ -290,11 +294,14 @@ pub fn stream_counted(
     let mut counting = Counting {
         inner: sink,
         turns: 0,
+        affordances: crate::affordance::Counter::new(r),
         stopped: false,
     };
     let session = adapter.stream(r, opts, &mut counting)?;
     if !counting.stopped {
         note_turns(r, counting.turns);
+        let counter = counting.affordances;
+        crate::catalog::note_affordances(r, || counter.finish(&session, &adapter.store_affordances(r)));
     }
     Ok(session)
 }
