@@ -6,7 +6,7 @@ pub(crate) struct Spill {
     path: std::path::PathBuf,
 }
 impl Spill {
-    fn create(unlink: bool) -> std::io::Result<Self> {
+    fn create() -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!("cv-byte-source-{}", uuid::Uuid::new_v4()));
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create_new(true);
@@ -20,11 +20,7 @@ impl Spill {
             path,
         };
         #[cfg(unix)]
-        if unlink {
-            std::fs::remove_file(&spill.path)?;
-        }
-        #[cfg(not(unix))]
-        let _ = unlink;
+        std::fs::remove_file(&spill.path)?;
         Ok(spill)
     }
 }
@@ -42,10 +38,7 @@ pub struct ByteSource {
 enum Bytes {
     Memory(Vec<u8>),
     File(Spill),
-    Closed {
-        spill: Spill,
-        captured: crate::json::JsonSource,
-    },
+    Arena(std::sync::Mutex<Spill>),
 }
 
 /// Writable until finish, then immutable. Partial/failed operations own and remove their spill.
@@ -57,7 +50,7 @@ pub struct ByteStage {
 impl std::io::Write for ByteStage {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if self.spill.is_none() && self.memory.len().saturating_add(bytes.len()) > MEMORY_LIMIT {
-            self.spill = Some(Spill::create(true)?);
+            self.spill = Some(Spill::create()?);
             self.spill
                 .as_mut()
                 .unwrap()
@@ -97,23 +90,6 @@ impl ByteStage {
     pub fn new() -> Self {
         Self::default()
     }
-    pub(crate) fn disk() -> std::io::Result<Self> {
-        Ok(Self {
-            memory: Vec::new(),
-            spill: Some(Spill::create(false)?),
-        })
-    }
-    /// Retain private backing by path so many decoded documents do not retain one FD each.
-    pub(crate) fn finish_closed(mut self) -> std::io::Result<ByteSource> {
-        use std::io::Write;
-        self.flush()?;
-        let mut spill = self.spill.take().expect("disk stage");
-        let captured = crate::json::JsonSource::capture(&spill.path).map_err(std::io::Error::other)?;
-        spill.file.take();
-        Ok(ByteSource {
-            bytes: Bytes::Closed { spill, captured },
-        })
-    }
     pub fn finish(mut self) -> std::io::Result<ByteSource> {
         use std::io::Write;
         self.flush()?;
@@ -126,33 +102,48 @@ impl ByteStage {
     }
 }
 impl ByteSource {
+    /// An operation-owned append-only arena. Published prefixes are never overwritten/truncated.
+    pub(crate) fn arena() -> std::io::Result<Self> {
+        Ok(Self {
+            bytes: Bytes::Arena(std::sync::Mutex::new(Spill::create()?)),
+        })
+    }
+    pub(crate) fn append(
+        &self,
+        f: impl FnOnce(&mut dyn std::io::Write) -> anyhow::Result<()>,
+    ) -> anyhow::Result<(u64, u64)> {
+        use std::io::{Seek, SeekFrom};
+        let Bytes::Arena(arena) = &self.bytes else {
+            anyhow::bail!("not an append arena")
+        };
+        let mut spill = arena
+            .lock()
+            .map_err(|_| std::io::Error::other("decoded arena poisoned"))?;
+        let file = spill.file.as_mut().unwrap();
+        let offset = file.seek(SeekFrom::End(0))?;
+        // Failed appends remain unreachable; truncating could invalidate previously mapped views.
+        f(file)?;
+        let end = file.stream_position()?;
+        Ok((offset, end - offset))
+    }
     pub(crate) fn len(&self) -> std::io::Result<u64> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(bytes.len() as u64),
             Bytes::File(spill) => Ok(spill.file.as_ref().unwrap().metadata()?.len()),
-            Bytes::Closed { captured, .. } => Ok(captured.len()),
+            Bytes::Arena(_) => Ok(self.file()?.metadata()?.len()),
         }
     }
-
-    pub(crate) fn check(&self) -> anyhow::Result<()> {
-        if let Bytes::Closed { captured, .. } = &self.bytes {
-            captured.check()?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn file(&self) -> std::io::Result<std::fs::File> {
         match &self.bytes {
             Bytes::File(spill) => spill.file.as_ref().unwrap().try_clone(),
-            Bytes::Closed { spill, captured } => {
-                captured.check().map_err(std::io::Error::other)?;
-                let file = std::fs::File::open(&spill.path)?;
-                captured
-                    .check_metadata(file.metadata()?)
-                    .map_err(std::io::Error::other)?;
-                Ok(file)
-            }
-            Bytes::Memory(_) => Err(std::io::Error::other("expected disk-backed bytes")),
+            Bytes::Arena(arena) => arena
+                .lock()
+                .map_err(|_| std::io::Error::other("decoded arena poisoned"))?
+                .file
+                .as_ref()
+                .unwrap()
+                .try_clone(),
+            Bytes::Memory(_) => Err(std::io::Error::other("expected file-backed bytes")),
         }
     }
 
@@ -173,7 +164,7 @@ impl ByteSource {
     pub(crate) fn with_bytes<T>(&self, f: impl FnOnce(&[u8]) -> T) -> std::io::Result<Option<T>> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(Some(f(bytes))),
-            Bytes::Closed { .. } => Ok(None),
+            Bytes::Arena(_) => Ok(None),
             Bytes::File(spill) => {
                 #[cfg(feature = "mmap")]
                 {
@@ -196,7 +187,10 @@ impl ByteSource {
     pub fn reader(&self) -> std::io::Result<Box<dyn std::io::Read + '_>> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(Box::new(std::io::Cursor::new(bytes))),
-            Bytes::Closed { .. } => Ok(Box::new(std::io::BufReader::new(self.file()?))),
+            Bytes::Arena(_) => Ok(Box::new(std::io::BufReader::new(FileReader {
+                file: self.file()?,
+                position: 0,
+            }))),
             Bytes::File(spill) => Ok(Box::new(std::io::BufReader::new(FileReader {
                 file: spill.file.as_ref().unwrap(),
                 position: 0,
@@ -211,30 +205,31 @@ impl ByteSource {
                 out.write_all(bytes)?;
                 Ok(bytes.len() as u64)
             }
-            Bytes::File(_) | Bytes::Closed { .. } => std::io::copy(&mut self.reader()?, out),
+            Bytes::File(_) | Bytes::Arena(_) => std::io::copy(&mut self.reader()?, out),
         }
     }
 }
-struct FileReader<'a> {
-    file: &'a std::fs::File,
+struct FileReader<F> {
+    file: F,
     position: u64,
 }
-impl std::io::Read for FileReader<'_> {
+impl<F: std::borrow::Borrow<std::fs::File>> std::io::Read for FileReader<F> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let backing_file = self.file.borrow();
         #[cfg(unix)]
         let n = {
             use std::os::unix::fs::FileExt;
-            self.file.read_at(bytes, self.position)?
+            backing_file.read_at(bytes, self.position)?
         };
         #[cfg(windows)]
         let n = {
             use std::os::windows::fs::FileExt;
-            self.file.seek_read(bytes, self.position)?
+            backing_file.seek_read(bytes, self.position)?
         };
         #[cfg(not(any(unix, windows)))]
         let n = {
             use std::io::{Read, Seek, SeekFrom};
-            let mut file = self.file.try_clone()?;
+            let mut file = backing_file.try_clone()?;
             file.seek(SeekFrom::Start(self.position))?;
             file.read(bytes)?
         };
@@ -246,51 +241,50 @@ impl std::io::Read for FileReader<'_> {
 mod tests {
     use super::*;
     #[test]
-    fn closed_backing_keeps_private_bytes_without_retaining_a_descriptor() {
-        use std::io::{Read, Write};
-        let mut stage = ByteStage::disk().unwrap();
-        stage.write_all(b"owned bytes").unwrap();
-        let source = stage.finish_closed().unwrap();
-        let Bytes::Closed { spill, .. } = &source.bytes else {
-            panic!("expected closed backing")
-        };
-        assert!(spill.file.is_none());
-        let path = spill.path.clone();
-        let mut output = String::new();
-        source.reader().unwrap().read_to_string(&mut output).unwrap();
-        assert_eq!(output, "owned bytes");
-        std::fs::write(&path, b"changed").unwrap();
-        assert!(source.reader().is_err());
-        drop(source);
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn closed_backing_rejects_replacement_and_partial_stages_remove_their_files() {
-        use std::io::Write;
-        let mut stage = ByteStage::disk().unwrap();
-        stage.write_all(b"owned bytes").unwrap();
-        let source = stage.finish_closed().unwrap();
-        let Bytes::Closed { spill, .. } = &source.bytes else {
+    fn arena_failed_appends_never_truncate_published_prefixes() {
+        use std::io::Read;
+        let source = ByteSource::arena().unwrap();
+        assert_eq!(
+            source
+                .append(|file| {
+                    file.write_all(b"first")?;
+                    Ok(())
+                })
+                .unwrap(),
+            (0, 5)
+        );
+        let error = source
+            .append(|file| {
+                file.write_all(b"partial")?;
+                anyhow::bail!("injected decoder failure")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("injected decoder failure"));
+        assert_eq!(
+            source
+                .append(|file| {
+                    file.write_all(b"last")?;
+                    Ok(())
+                })
+                .unwrap(),
+            (12, 4)
+        );
+        let mut first = source.reader().unwrap();
+        let mut second = source.reader().unwrap();
+        let mut prefix = [0; 5];
+        first.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"first");
+        second.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"first");
+        let Bytes::Arena(arena) = &source.bytes else {
             unreachable!()
         };
-        let path = spill.path.clone();
-        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let replacement = path.with_extension("replacement");
-        std::fs::write(&replacement, b"other bytes").unwrap();
-        std::fs::File::open(&replacement)
-            .unwrap()
-            .set_modified(modified)
-            .unwrap();
-        std::fs::rename(&replacement, &path).unwrap();
+        let path = arena.lock().unwrap().path.clone();
         #[cfg(unix)]
-        assert!(source.file().is_err());
-        drop(source);
         assert!(!path.exists());
-        let mut stage = ByteStage::disk().unwrap();
-        let path = stage.spill.as_ref().unwrap().path.clone();
-        stage.write_all(b"partial bytes").unwrap();
-        drop(stage); // Producer or writer errors drop incomplete output through this same owner.
+        drop(first);
+        drop(second);
+        drop(source);
         assert!(!path.exists());
     }
 

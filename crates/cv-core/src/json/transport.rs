@@ -13,12 +13,12 @@ pub(crate) struct SourceDescriptor {
     decoded: Option<usize>,
 }
 
-/// Structural state scales with distinct captured source identities and decoded argument documents.
-/// Decoded backing is retained until the operation ends so restoration never outlives its bytes.
+/// Structural state scales with distinct captured source identities and decoded arenas.
+/// One append arena is shared by all encoded arguments from a capture and survives transport.
 /// Different captured identities of a single path are deliberately separate accepted sources.
 #[derive(Default)]
 pub(crate) struct SourceRegistry {
-    ids: HashMap<JsonSource, usize>,
+    ids: HashMap<(std::path::PathBuf, super::Identity), usize>,
     sources: Vec<JsonSource>,
     decoded_ids: HashMap<usize, usize>,
     decoded: Vec<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
@@ -27,7 +27,7 @@ impl SourceRegistry {
     /// Replace a source value with an explicit transport placeholder without resolving its bytes.
     pub(crate) fn detach(&mut self, value: &mut Json) -> Option<SourceDescriptor> {
         let Json::Source(range) = value else { return None };
-        let key = range.source.clone();
+        let key = (range.source.0.path.clone(), range.source.0.identity.clone());
         let source = *self.ids.entry(key).or_insert_with(|| {
             let id = self.sources.len();
             self.sources.push(range.source.clone());
@@ -86,6 +86,35 @@ impl SourceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decoded_documents_register_one_arena_and_original_identity() {
+        let world = cv_testkit::World::in_process("decoded-source-transport");
+        let path = world.base.join("source.json");
+        let argument = format!("{{\"p\":\"{}\"}}", "x".repeat(8192));
+        std::fs::write(&path, serde_json::to_vec(&vec![&argument; 32]).unwrap()).unwrap();
+        let source = JsonSource::capture(&path).unwrap();
+        let mut registry = SourceRegistry::default();
+        let descriptors = source
+            .read_document(|view| {
+                view.array()?
+                    .unwrap()
+                    .map(|view| {
+                        let mut value = view?.encoded_argument()?;
+                        Ok(registry.detach(&mut value).unwrap())
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(registry.sources.len(), 1);
+        assert_eq!(registry.decoded.len(), 1);
+        for descriptor in descriptors {
+            let restored = registry.restore(descriptor).unwrap();
+            assert_eq!(restored.canonical_len().unwrap(), argument.len() as u64);
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert!(registry.sources[0].check().is_err());
+    }
+
     #[test]
     fn repeated_sources_share_original_identity_and_never_recapture() {
         let world = cv_testkit::World::in_process("json-source-transport");

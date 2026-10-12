@@ -67,12 +67,25 @@ impl std::error::Error for InvalidJson {}
 /// validated_range afterward; this avoids validating each giant input again at producer handoff.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct JsonSource(Arc<CapturedSource>);
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 struct CapturedSource {
     path: PathBuf,
     identity: Identity,
+    decoded: std::sync::Mutex<Option<Arc<crate::harness::store::bytes::ByteSource>>>,
 }
-#[derive(Debug, PartialEq, Eq, Hash)]
+impl PartialEq for CapturedSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.identity == other.identity
+    }
+}
+impl Eq for CapturedSource {}
+impl std::hash::Hash for CapturedSource {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+        self.identity.hash(state);
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Identity {
     len: u64,
     modified: SystemTime,
@@ -105,11 +118,29 @@ impl Identity {
     }
 }
 impl JsonSource {
+    fn decoded_backing(&self) -> Result<Arc<crate::harness::store::bytes::ByteSource>> {
+        let mut decoded = self
+            .0
+            .decoded
+            .lock()
+            .map_err(|_| std::io::Error::other("decoded backing poisoned"))?;
+        if let Some(bytes) = decoded.as_ref() {
+            return Ok(bytes.clone());
+        }
+        let bytes = Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
+        *decoded = Some(bytes.clone());
+        Ok(bytes)
+    }
+
     pub(crate) fn capture(path: &Path) -> Result<Self> {
         // Preserve symlink spelling so later retargeting changes the observed identity.
         let path = std::path::absolute(path).context("locating JSON source")?;
         let identity = Identity::read(&path)?;
-        Ok(Self(Arc::new(CapturedSource { path, identity })))
+        Ok(Self(Arc::new(CapturedSource {
+            path,
+            identity,
+            decoded: std::sync::Mutex::new(None),
+        })))
     }
     pub(crate) fn check(&self) -> Result<()> {
         anyhow::ensure!(
@@ -123,6 +154,7 @@ impl JsonSource {
     pub(crate) fn path(&self) -> &Path {
         &self.0.path
     }
+    #[cfg(any(not(feature = "mmap"), test))]
     pub(crate) fn len(&self) -> u64 {
         self.0.identity.len
     }
@@ -183,9 +215,6 @@ impl JsonSource {
 impl JsonRange {
     fn check(&self) -> Result<()> {
         self.source.check()?;
-        if let Some(bytes) = &self.decoded {
-            bytes.check()?;
-        }
         Ok(())
     }
 
@@ -596,24 +625,22 @@ impl<'a> JsonView<'a> {
         let Json::Source(range) = &original else {
             return Ok(crate::harness::wire::openai::parse_arguments(Some(self.resolve()?.as_ref())).into());
         };
-        let mut stage = crate::harness::store::bytes::ByteStage::disk()?;
+        let bytes = range.source.decoded_backing()?;
         let mut blank = true;
-        self.for_each_str_chunk(|part| {
-            blank &= part.trim().is_empty();
-            stage.write_all(part.as_bytes())?;
+        let (offset, len) = bytes.append(|writer| {
+            self.for_each_str_chunk(|part| {
+                blank &= part.trim().is_empty();
+                writer.write_all(part.as_bytes())?;
+                Ok(())
+            })?;
             Ok(())
         })?;
         if blank {
             return Ok(serde_json::json!({}).into());
         }
-        let bytes = Arc::new(stage.finish_closed()?);
-        let len = bytes.len()?;
-        if len == 0 {
-            return Ok(serde_json::json!({}).into());
-        }
         let candidate = JsonRange {
             source: range.source.clone(),
-            offset: 0,
+            offset,
             len,
             decoded: Some(bytes),
         };
@@ -1601,6 +1628,43 @@ mod tests {
         std::fs::remove_file(&fixture.path).unwrap();
         assert!(restored.resolve().is_err());
         assert!(child.canonical_len().is_err());
+    }
+
+    #[test]
+    fn decoded_arguments_share_one_append_arena_and_transport_owner() {
+        let inner = [
+            format!("{{\"p\":\"{}\"}}", "a".repeat(9000)),
+            format!("{{\"p\":\"{}\"}}", "b".repeat(9000)),
+        ];
+        let fixture = Fixture::new(&serde_json::to_vec(&inner).unwrap());
+        let values = fixture
+            .value()
+            .with_view(|view| {
+                view.array()?
+                    .unwrap()
+                    .map(|view| view?.encoded_argument())
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        let (Json::Source(first), Json::Source(second)) = (&values[0], &values[1]) else {
+            panic!("source arguments")
+        };
+        assert!(Arc::ptr_eq(
+            first.decoded.as_ref().unwrap(),
+            second.decoded.as_ref().unwrap()
+        ));
+        assert!(first.offset < second.offset);
+        for (value, expected) in values.iter().zip(&inner) {
+            assert!(canonical(value) == expected.as_bytes());
+        }
+        let mut registry = SourceRegistry::default();
+        let descriptors = values
+            .into_iter()
+            .map(|mut value| registry.detach(&mut value).unwrap())
+            .collect::<Vec<_>>();
+        for (descriptor, expected) in descriptors.into_iter().zip(&inner) {
+            assert!(canonical(&registry.restore(descriptor).unwrap()) == expected.as_bytes());
+        }
     }
 
     #[test]

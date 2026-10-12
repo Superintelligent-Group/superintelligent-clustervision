@@ -892,12 +892,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(source.select_unique_fields(source.range(), &["id", "body"]).is_err());
-        assert!(
-            source
-                .select_unique_fields(source.range(), &["body"])
-                .unwrap()
-                .is_some()
-        );
+        assert!(source
+            .select_unique_fields(source.range(), &["body"])
+            .unwrap()
+            .is_some());
         assert_eq!(fields[0], fields[1]);
         assert!(fields[2].is_none());
         assert_eq!(source.materialize::<u64>(fields[0].unwrap()).unwrap(), 2);

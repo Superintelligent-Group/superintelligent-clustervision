@@ -885,6 +885,67 @@ mod tests {
     }
 
     #[test]
+    fn encoded_arguments_survive_minimum_message_deferred_staging() {
+        let world = cv_testkit::World::in_process("continue-encoded-minimum-staging");
+        let path = world.base.join("session.json");
+        let argument = serde_json::to_string(&json!({"payload":"x".repeat(8192)})).unwrap();
+        let history = (0..3).map(|i| json!({"message":{"role":"assistant","usage":{"model":(i == 2).then_some("present")},"toolCalls":[{"id":i.to_string(),"function":{"name":"read","arguments":argument}}]}})).collect::<Vec<_>>();
+        fs::write(&path, serde_json::to_vec(&json!({"history":history})).unwrap()).unwrap();
+        let reference = SessionRef::new("fixture", Harness::Continue, &path);
+        let adapter = Continue { sessions: None };
+        let full = adapter.parse(&reference).unwrap();
+        let mut expected = Vec::new();
+        crate::dataset::write_record(&full, &mut expected, crate::dataset::Format::Chatml, None).unwrap();
+        expected.push(b'\n');
+        for minimum in [1, 2, 3] {
+            let staged = crate::dataset::stage_record(
+                &adapter,
+                &reference,
+                crate::dataset::Format::Chatml,
+                None,
+                minimum,
+                None,
+                &Default::default(),
+            )
+            .unwrap()
+            .unwrap();
+            let mut actual = Vec::new();
+            staged.publish(&mut actual).unwrap();
+            assert!(actual == expected);
+        }
+        assert!(crate::dataset::stage_record(
+            &adapter,
+            &reference,
+            crate::dataset::Format::Chatml,
+            None,
+            4,
+            None,
+            &Default::default()
+        )
+        .unwrap()
+        .is_none());
+        for (query, matched) in [("model:present", true), ("model:absent", false)] {
+            let query = crate::SessionQuery::parse(query).unwrap();
+            let staged = crate::dataset::stage_record(
+                &adapter,
+                &reference,
+                crate::dataset::Format::Chatml,
+                None,
+                0,
+                Some(&query),
+                &Default::default(),
+            )
+            .unwrap();
+            assert_eq!(staged.is_some(), matched);
+            if let Some(staged) = staged {
+                let mut actual = Vec::new();
+                staged.publish(&mut actual).unwrap();
+                assert!(actual == expected);
+            }
+        }
+    }
+
+    #[test]
     fn published_arguments_reject_source_changes_after_a_stopping_callback() {
         let world = cv_testkit::World::new("continue-source-change");
         let path = world.base.join("s.json");

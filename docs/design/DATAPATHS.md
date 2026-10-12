@@ -667,9 +667,46 @@ when its last owner drops; ordinary ByteStage spills remain unlinked.
 
 Native allocation runs at 16/64 MiB plain arguments show discard and doctor fixed at 198,854
 additional requested bytes; staged ChatML output stays 2,298,501 bytes. Three thousand 8 KiB
-arguments pass actual dataset staging with FD limit 64: 1,307,768 bytes peak versus 5,214,256
+arguments pass immediate no-query dataset rendering with FD limit 64: 1,307,768 bytes peak versus 5,214,256
 for collection, with identical 24,804,015 output bytes/SHA256. Source/decoded registry metadata
 and file count still grow per argument: this intermediate implementation does not bound arbitrary
 history retention. A shared decoded arena per captured original source is the next implementation
 step. These are debug allocation measurements, not clean throughput claims. Evidence is private
 under `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence`.
+
+
+### Shared encoded argument arena (2026-10-12)
+
+The intermediate per-argument backing above is superseded: every original JsonSource capture now
+owns one lazy, private unlinked append arena. Published ranges never change; failed appends leave
+unreachable bytes rather than truncating accepted prefixes. All descriptors share arena ownership
+and original provenance, and the transport registry retains one backing entry per capture. The
+append callback exposes only Write, not seeking/truncation. Unix spills remain mode 0600 and
+unlinked, eliminating the intermediate named-file crash residue and per-argument descriptor/file
+count. Metadata identity comparisons ignore the operation-local arena state.
+
+The actual deferred dataset path is selected with `--query model:present`; only the final assistant
+turn declares that model. With 3,000/12,000 fixed 8 KiB encoded arguments and FD limit 64, the
+per-argument backing retains 2,609,127/6,840,335 additional requested bytes; the shared arena retains
+1,199,521/1,199,533 bytes. Both publish exactly 24,804,015/99,216,015 ChatML bytes with matching
+SHA256. This comparison uses the same frozen inputs, query and assertions that a record was
+written. The earlier no-query measurements exercise immediate rendering, not deferred registry
+retention. A `msgs>=1` exploratory miss used the probe's default zero SessionRef count and is not
+an accepted-output oracle.
+
+The arena contains 24,618,000/98,472,000 decoded bytes for these workloads, plus one FD and a
+constant number of source/backing descriptors. Disk still grows with decoded arguments, including
+unreachable failed append ranges; there is no persistent cache. Continue's separate answered-tool
+ID set and canonical object-width bookkeeping are independent retention limits. Full owned modes
+retain their established behavior. Native plain 16/64 MiB doctor stays 199,078 requested bytes;
+this is a debug allocation bound, not a clean CPU speedup. Scoped native/portable regressions cover
+strict Value acceptance, scalar/partial/blank fallback, duplicate keys, normalization, ownership
+across later appends/transport, original mutation during a failing callback, failed append prefix
+preservation, and minimum-message staging before/after its flush threshold.
+
+Portable actual deferred late-model-query scale matches the native output exactly: 3,000/12,000
+arguments retain 1,354,839/1,354,851 requested bytes under FD limit 64. Portable plain 16/64 MiB
+discard stays 395,305 bytes. Native/portable 16 MiB plain and escaped complete-message and
+metadata digests match the established owned bulk parser. The portable accepted-output probes
+use the same late-model inputs/query as the native arena probes; generic serialization/hash
+oracles deliberately materialize values and are separate from allocation runs.
