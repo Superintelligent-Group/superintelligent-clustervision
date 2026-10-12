@@ -79,7 +79,7 @@ use super::wire::{openai, text_parts};
 use super::Adapter;
 use crate::ir::*;
 use crate::lazy::{Span, Text, INLINE_MAX};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -204,155 +204,23 @@ impl Adapter for Kimi {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
-            // r.path is the session dir (modern), the hash dir (legacy), or a sub-agent's dir
-            // (`<session>/subagents/<agent_id>`, from [`subagent_refs`]). Locate the transcript and
-            // the rotated segments before it.
             let (transcript, wire) = locate_transcript(&r.path, &r.id);
             let segments = transcript_segments(&r.path, &transcript);
-
-            let mut s = Session {
-                id: r.id.clone(),
-                harness: Harness::Kimi,
-                cwd: r.cwd.clone(),
-                title: r.title.clone(),
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                model: self
-                    .root
-                    .as_ref()
-                    .and_then(|root| default_model_from_config(&root.join("config.toml"))),
-                git: None,
-                messages: Vec::new(),
-                source_path: Some(r.path.clone()),
-                extra: serde_json::Map::new(),
-                system_prompt: None,
-                lineage: subagent_lineage(&r.path),
-            };
-            if let Some(meta) = subagent_meta(&r.path) {
-                s.harness_extra_mut(Harness::Kimi).insert("subagent".into(), meta);
-            }
-
-            // Sidecar enrichment from wire.jsonl (tolerant: absent/empty/malformed ⇒ empty). The
-            // per-message `tool_results` map (keyed by tool_call_id) is a per-line enrichment; the
-            // positional passes (StatusUpdate usage/message_id zipped onto assistant turns, the first
-            // wire timestamp stamped onto the first user turn) only ever walk *forward* with O(1)
-            // state, so they run inline here too — `parse()` is exactly `collect(stream())`.
-            let enrich = wire
-                .as_ref()
-                .map(|p| read_wire_enrichment(p, opts.spans))
-                .unwrap_or_default();
-
-            // Rotated segments (context_1.jsonl…) are read first, in order; their count stays as
-            // bookkeeping.
-            let seg_count = segments.len().saturating_sub(1) as u64;
-            if seg_count > 0 {
-                s.harness_extra_mut(Harness::Kimi)
-                    .insert("compaction_segments".into(), Value::Number(seg_count.into()));
-            }
-            // The system prompt is the first `context.jsonl` record; peek so the session-level copy is
-            // known before the body streams.
-            s.system_prompt = peek_system_prompt(&segments[0]);
-
-            if let Some(mode) = approval_mode(&r.path) {
-                crate::affordance::note_mode(s.harness_extra_mut(Harness::Kimi), &mode);
-            }
-
-            // Session metadata is known up front; hand it to the sink before the body.
+            note_config_dependency(self, sink);
+            let (s, enrich) = session_header(self, r, opts, &segments, wire.as_deref());
             sink.meta(&s);
-
-            // Stream the segments line-by-line (a single session can be large; `read_to_string` would
-            // resident-spike the whole file). Each record becomes at most one Message, emitted to `sink`
-            // and dropped before the next line, so peak memory is O(largest message).
-            if !segments.iter().any(|p| p.exists()) {
-                return Ok(s);
-            }
-            // Positional wire enrichment, streamed: one StatusUpdate per assistant step (in wire
-            // order) and the first wire timestamp for the first user turn. Forward-only, O(1) state.
-            let mut statuses = enrich.statuses.iter();
-            let first_wire_ts = enrich.first_timestamp;
-            let mut first_user_seen = false;
-            // `tool_call_id` → tool name from the assistant's `tool_calls`, so a result names its tool.
-            let mut call_names: HashMap<String, String> = HashMap::new();
-            let complete = opts.complete;
-            // One-message lookahead: a `_usage` record describes the message BEFORE it, so each message
-            // waits here until the next record shows what follows. Peak memory stays O(one message).
-            let mut pending: Option<Message> = None;
-            let mut stopped = false;
-            // Set at the first new record of a rotated-in segment: unless that record is the
-            // compaction summary (which gets its own boundary), the rotation was a `/clear` or a
-            // rewind, and what follows does not continue what precedes.
-            let mut rotated: Option<String> = None;
-            // `_checkpoint` records (rewind targets), tallied for the session's affordances.
-            let mut checkpoints = 0u64;
-            let skipped = for_each_segment_record(&segments, |v, starts| {
-                if let Some(name) = starts {
-                    rotated = Some(name.to_string());
-                }
-                checkpoints += u64::from(v.get("role").and_then(Value::as_str) == Some("_checkpoint"));
-                if v.get("role").and_then(Value::as_str) == Some("_usage") {
-                    if let Some(p) = pending.as_mut() {
-                        fold_usage_record(p, &v);
-                    }
-                    return Flow::Continue;
-                }
-                let Some(mut m) = context_message(&v, &enrich, complete, &mut call_names) else {
-                    return Flow::Continue;
-                };
-                match m.role {
-                    Role::Assistant => {
-                        if let Some(st) = statuses.next() {
-                            if m.usage.is_none() {
-                                m.usage = st.usage.clone();
-                            }
-                            if m.id.is_none() {
-                                m.id = st.message_id.clone();
-                            }
-                        }
-                    }
-                    Role::User if !first_user_seen => {
-                        first_user_seen = true;
-                        if m.timestamp.is_none() {
-                            m.timestamp = first_wire_ts;
-                        }
-                    }
-                    _ => {}
-                }
-                if let Some(prev) = pending.take() {
-                    if sink.message(prev) == Flow::Stop {
-                        stopped = true;
-                        return Flow::Stop;
-                    }
-                }
-                // The compaction summary seeds a rotated segment; the boundary itself is the rotation,
-                // which leaves no record — synthesize it so the compaction detector can pair the two.
-                if m.kind == MessageKind::CompactionSummary
-                    && sink.message(compaction_boundary(m.timestamp)) == Flow::Stop
-                {
-                    stopped = true;
-                    return Flow::Stop;
-                }
-                if let Some(segment) = rotated.take() {
-                    if m.kind != MessageKind::CompactionSummary
-                        && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
-                    {
-                        stopped = true;
-                        return Flow::Stop;
-                    }
-                }
-                pending = Some(m);
-                Flow::Continue
-            });
-            if !stopped {
-                if let Some(last) = pending.take() {
-                    sink.message(last);
-                }
-            }
-            if checkpoints > 0 {
-                crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), checkpoints, []);
-            }
-            super::note_skipped_lines(&mut s, skipped);
-
-            Ok(s)
+            let primary = self.resume_source(r);
+            let capture = segments.last() == Some(&primary);
+            Ok(stream_context(
+                s,
+                &segments,
+                &enrich,
+                opts,
+                ContextState::default(),
+                None,
+                capture,
+                sink,
+            ))
         })
     }
 
@@ -374,6 +242,362 @@ impl Adapter for Kimi {
             .into_iter()
             .collect()
     }
+
+    fn resume_format(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn resume_source(&self, r: &SessionRef) -> PathBuf {
+        // Native layout is fixed: sessions/<hash>/<id> (or its subagent dir) is modern;
+        // sessions/<hash> is the legacy flat store. No mutable exists() decision selects a mark.
+        let modern = r
+            .path
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == "sessions"))
+            .and_then(|root| r.path.strip_prefix(root).ok())
+            .is_some_and(|p| p.components().count() > 1)
+            || r.path.file_name().and_then(|p| p.to_str()) == r.id.rsplit('/').next();
+        if modern {
+            r.path.join("context.jsonl")
+        } else {
+            r.path.join(format!("{}.jsonl", r.id))
+        }
+    }
+
+    fn resume(
+        &self,
+        r: &SessionRef,
+        opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        from: &Checkpoint,
+    ) -> Result<Option<Session>> {
+        crate::stream::checked(sink, |sink| {
+            let Some(state) = from.get::<ContextCheckpoint>(crate::stream::ADAPTER_LAYER) else {
+                return Ok(None);
+            };
+            let primary = self.resume_source(r);
+            if state.primary != primary || state.flavor != context_flavor(opts) {
+                return Ok(None);
+            }
+            let (transcript, wire) = locate_transcript(&r.path, &r.id);
+            let segments = transcript_segments(&r.path, &transcript);
+            if transcript != primary || state.segments != segments {
+                return Ok(None);
+            }
+            if fs::metadata(&primary)?.len() < from.offset {
+                return Ok(None);
+            }
+            note_config_dependency(self, sink);
+            let (s, enrich) = session_header(self, r, opts, &segments, wire.as_deref());
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, sink);
+            spawns.meta(&s);
+            Ok(Some(stream_context(
+                s,
+                &segments,
+                &enrich,
+                opts,
+                state.ctx,
+                Some(from.offset),
+                true,
+                &mut spawns,
+            )))
+        })
+    }
+}
+
+fn note_config_dependency(adapter: &Kimi, sink: &mut dyn MessageSink) {
+    if let Some(root) = &adapter.root {
+        sink.dependency(&root.join("config.toml"));
+    }
+}
+
+fn session_header(
+    adapter: &Kimi,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    segments: &[PathBuf],
+    wire: Option<&Path>,
+) -> (Session, WireEnrich) {
+    let mut s = Session {
+        id: r.id.clone(),
+        harness: Harness::Kimi,
+        cwd: r.cwd.clone(),
+        title: r.title.clone(),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        model: adapter
+            .root
+            .as_ref()
+            .and_then(|root| default_model_from_config(&root.join("config.toml"))),
+        git: None,
+        messages: Vec::new(),
+        source_path: Some(r.path.clone()),
+        extra: serde_json::Map::new(),
+        system_prompt: None,
+        lineage: subagent_lineage(&r.path),
+    };
+    if let Some(meta) = subagent_meta(&r.path) {
+        s.harness_extra_mut(Harness::Kimi).insert("subagent".into(), meta);
+    }
+
+    // Sidecar enrichment from wire.jsonl (tolerant: absent/empty/malformed ⇒ empty). The
+    // per-message `tool_results` map (keyed by tool_call_id) is a per-line enrichment; the
+    // positional passes (StatusUpdate usage/message_id zipped onto assistant turns, the first
+    // wire timestamp stamped onto the first user turn) only ever walk *forward* with O(1)
+    // state, so they run inline here too — `parse()` is exactly `collect(stream())`.
+    let enrich = wire
+        .as_ref()
+        .map(|p| read_wire_enrichment(p, opts.spans))
+        .unwrap_or_default();
+
+    // Rotated segments (context_1.jsonl…) are read first, in order; their count stays as
+    // bookkeeping.
+    let seg_count = segments.len().saturating_sub(1) as u64;
+    if seg_count > 0 {
+        s.harness_extra_mut(Harness::Kimi)
+            .insert("compaction_segments".into(), Value::Number(seg_count.into()));
+    }
+    // The system prompt is the first `context.jsonl` record; peek so the session-level copy is
+    // known before the body streams.
+    s.system_prompt = peek_system_prompt(&segments[0]);
+
+    if let Some(mode) = approval_mode(&r.path) {
+        crate::affordance::note_mode(s.harness_extra_mut(Harness::Kimi), &mode);
+    }
+
+    (s, enrich)
+}
+
+fn context_flavor(opts: &ParseOptions) -> [bool; 4] {
+    [opts.extra, opts.spans, opts.offsets, opts.complete]
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ContextState {
+    call_names: HashMap<String, String>,
+    status_index: usize,
+    first_user_seen: bool,
+    checkpoints: u64,
+    rotated: Option<String>,
+    skipped: u64,
+}
+#[derive(serde::Deserialize)]
+struct ContextCheckpoint {
+    primary: PathBuf,
+    segments: Vec<PathBuf>,
+    flavor: [bool; 4],
+    ctx: ContextState,
+}
+
+fn stream_context(
+    mut s: Session,
+    segments: &[PathBuf],
+    enrich: &WireEnrich,
+    opts: &ParseOptions,
+    mut ctx: ContextState,
+    at: Option<u64>,
+    capture: bool,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    let mut pending: Option<Message> = None;
+    let mut stopped = false;
+    let prior_skipped = ctx.skipped;
+    let skipped = for_each_segment_record_at(segments, at, |v, starts, position, skipped| {
+        if let Some(name) = starts {
+            ctx.rotated = Some(name.into());
+        }
+        let checkpoint_record = u64::from(v.get("role").and_then(Value::as_str) == Some("_checkpoint"));
+        ctx.checkpoints += checkpoint_record;
+        if v.get("role").and_then(Value::as_str) == Some("_usage") {
+            if let Some(p) = pending.as_mut() {
+                fold_usage_record(p, &v);
+            }
+            return Flow::Continue;
+        }
+        // Interpret without applying the current record's call-name/positional state. The anchor
+        // below replays this record and must retain only the immutable prefix's state.
+        let Some(mut m) = context_message_inner(&v, enrich, opts.complete, &ctx.call_names) else {
+            return Flow::Continue;
+        };
+        if let Some(prev) = pending.take() {
+            if sink.message(prev) == Flow::Stop {
+                stopped = true;
+                return Flow::Stop;
+            }
+            if let Some(offset) = position.filter(|_| capture) {
+                if sink.wants_checkpoint(offset) {
+                    #[derive(serde::Serialize)]
+                    struct State<'a> {
+                        primary: &'a Path,
+                        segments: &'a [PathBuf],
+                        flavor: [bool; 4],
+                        ctx: &'a ContextState,
+                    }
+                    // The current checkpoint carrier is not part of the prefix yet.
+                    ctx.checkpoints -= checkpoint_record;
+                    ctx.skipped = prior_skipped + skipped;
+                    let mut cp = Checkpoint::new(offset);
+                    cp.put(
+                        crate::stream::ADAPTER_LAYER,
+                        &State {
+                            primary: segments.last().unwrap(),
+                            segments,
+                            flavor: context_flavor(opts),
+                            ctx: &ctx,
+                        },
+                    );
+                    sink.checkpoint(&mut cp);
+                    ctx.checkpoints += checkpoint_record;
+                }
+            }
+        }
+        note_call_names(&m, &mut ctx.call_names);
+        match m.role {
+            Role::Assistant => {
+                if let Some(st) = enrich.statuses.get(ctx.status_index) {
+                    if m.usage.is_none() {
+                        m.usage = st.usage.clone();
+                    }
+                    if m.id.is_none() {
+                        m.id = st.message_id.clone();
+                    }
+                }
+                ctx.status_index += 1;
+            }
+            Role::User if !ctx.first_user_seen => {
+                ctx.first_user_seen = true;
+                if m.timestamp.is_none() {
+                    m.timestamp = enrich.first_timestamp;
+                }
+            }
+            _ => {}
+        }
+        if m.kind == MessageKind::CompactionSummary && sink.message(compaction_boundary(m.timestamp)) == Flow::Stop {
+            stopped = true;
+            return Flow::Stop;
+        }
+        if let Some(segment) = ctx.rotated.take() {
+            if m.kind != MessageKind::CompactionSummary
+                && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
+            {
+                stopped = true;
+                return Flow::Stop;
+            }
+        }
+        pending = Some(m);
+        Flow::Continue
+    });
+    if !stopped {
+        if let Some(last) = pending {
+            sink.message(last);
+        }
+    }
+    if ctx.checkpoints > 0 {
+        crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), ctx.checkpoints, []);
+    }
+    super::note_skipped_lines(&mut s, prior_skipped + skipped);
+    s
+}
+
+#[cfg(test)]
+fn old_context_pass(
+    mut s: Session,
+    segments: &[PathBuf],
+    enrich: &WireEnrich,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    // Stream the segments line-by-line (a single session can be large; `read_to_string` would
+    // resident-spike the whole file). Each record becomes at most one Message, emitted to `sink`
+    // and dropped before the next line, so peak memory is O(largest message).
+    if !segments.iter().any(|p| p.exists()) {
+        return s;
+    }
+    // Positional wire enrichment, streamed: one StatusUpdate per assistant step (in wire
+    // order) and the first wire timestamp for the first user turn. Forward-only, O(1) state.
+    let mut statuses = enrich.statuses.iter();
+    let first_wire_ts = enrich.first_timestamp;
+    let mut first_user_seen = false;
+    // `tool_call_id` → tool name from the assistant's `tool_calls`, so a result names its tool.
+    let mut call_names: HashMap<String, String> = HashMap::new();
+    let complete = opts.complete;
+    // One-message lookahead: a `_usage` record describes the message BEFORE it, so each message
+    // waits here until the next record shows what follows. Peak memory stays O(one message).
+    let mut pending: Option<Message> = None;
+    let mut stopped = false;
+    // Set at the first new record of a rotated-in segment: unless that record is the
+    // compaction summary (which gets its own boundary), the rotation was a `/clear` or a
+    // rewind, and what follows does not continue what precedes.
+    let mut rotated: Option<String> = None;
+    // `_checkpoint` records (rewind targets), tallied for the session's affordances.
+    let mut checkpoints = 0u64;
+    let skipped = old_for_each_segment_record(segments, |v, starts| {
+        if let Some(name) = starts {
+            rotated = Some(name.to_string());
+        }
+        checkpoints += u64::from(v.get("role").and_then(Value::as_str) == Some("_checkpoint"));
+        if v.get("role").and_then(Value::as_str) == Some("_usage") {
+            if let Some(p) = pending.as_mut() {
+                fold_usage_record(p, &v);
+            }
+            return Flow::Continue;
+        }
+        let Some(mut m) = context_message(&v, &enrich, complete, &mut call_names) else {
+            return Flow::Continue;
+        };
+        match m.role {
+            Role::Assistant => {
+                if let Some(st) = statuses.next() {
+                    if m.usage.is_none() {
+                        m.usage = st.usage.clone();
+                    }
+                    if m.id.is_none() {
+                        m.id = st.message_id.clone();
+                    }
+                }
+            }
+            Role::User if !first_user_seen => {
+                first_user_seen = true;
+                if m.timestamp.is_none() {
+                    m.timestamp = first_wire_ts;
+                }
+            }
+            _ => {}
+        }
+        if let Some(prev) = pending.take() {
+            if sink.message(prev) == Flow::Stop {
+                stopped = true;
+                return Flow::Stop;
+            }
+        }
+        // The compaction summary seeds a rotated segment; the boundary itself is the rotation,
+        // which leaves no record — synthesize it so the compaction detector can pair the two.
+        if m.kind == MessageKind::CompactionSummary && sink.message(compaction_boundary(m.timestamp)) == Flow::Stop {
+            stopped = true;
+            return Flow::Stop;
+        }
+        if let Some(segment) = rotated.take() {
+            if m.kind != MessageKind::CompactionSummary
+                && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
+            {
+                stopped = true;
+                return Flow::Stop;
+            }
+        }
+        pending = Some(m);
+        Flow::Continue
+    });
+    if !stopped {
+        if let Some(last) = pending.take() {
+            sink.message(last);
+        }
+    }
+    if checkpoints > 0 {
+        crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), checkpoints, []);
+    }
+    super::note_skipped_lines(&mut s, skipped);
+
+    s
 }
 
 /// The approval mode `state.json` records (`approval{yolo, afk, auto_approve_actions}`): `yolo`
@@ -564,7 +788,8 @@ fn transcript_segments(dir: &Path, transcript: &Path) -> Vec<PathBuf> {
 /// lines a segment shares with the one before it are the same records and are not repeated. The
 /// callback's second argument names the segment at its first new record (never for the first
 /// segment). Returns the count of malformed lines.
-fn for_each_segment_record(segments: &[PathBuf], mut f: impl FnMut(Value, Option<&str>) -> Flow) -> u64 {
+#[cfg(test)]
+fn old_for_each_segment_record(segments: &[PathBuf], mut f: impl FnMut(Value, Option<&str>) -> Flow) -> u64 {
     use std::hash::{Hash, Hasher};
     use std::io::BufRead;
     let line_hash = |l: &str| {
@@ -603,6 +828,90 @@ fn for_each_segment_record(segments: &[PathBuf], mut f: impl FnMut(Value, Option
                 }
                 Flow::Continue
             });
+            if stop {
+                return skipped;
+            }
+        }
+        prev = cur;
+    }
+    skipped
+}
+
+fn for_each_segment_record(segments: &[PathBuf], mut f: impl FnMut(Value, Option<&str>) -> Flow) -> u64 {
+    for_each_segment_record_at(segments, None, |value, starts, _, _| f(value, starts))
+}
+
+fn for_each_segment_record_at(
+    segments: &[PathBuf],
+    at: Option<u64>,
+    mut f: impl FnMut(Value, Option<&str>, Option<u64>, u64) -> Flow,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::io::BufRead;
+    let mut skipped = 0;
+    let mut prev: Vec<u64> = Vec::new();
+    for (i, path) in segments.iter().enumerate() {
+        let live = i + 1 == segments.len();
+        if at.is_some() && !live {
+            continue;
+        }
+        let Ok(mut file) = fs::File::open(path) else { continue };
+        let mut offset = if live { at.unwrap_or(0) } else { 0 };
+        if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
+            continue;
+        }
+        let mut reader = BufReader::new(file);
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let mut cur = Vec::new();
+        let mut line_index = 0;
+        let mut shared = at.is_none() && i > 0;
+        let mut announce = shared;
+        let mut known = true;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let start = offset;
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(n) => offset += n as u64,
+                Err(_) => {
+                    skipped += 1;
+                    known = false;
+                    continue;
+                }
+            }
+            let Ok(text) = std::str::from_utf8(&line) else {
+                skipped += 1;
+                continue;
+            };
+            let text = text.trim();
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hash);
+            let hash = hash.finish();
+            // The final segment has no successor needing its prefix fingerprints.
+            if !live {
+                cur.push(hash);
+            }
+            let matches = shared && prev.get(line_index) == Some(&hash);
+            line_index += 1;
+            if matches {
+                continue;
+            }
+            shared = false;
+            let mut stop = false;
+            let line_skipped = super::for_each_json_line_str(text, |v| {
+                let starts = if announce { Some(name) } else { None };
+                announce = false;
+                // Only live-file anchors whose byte accounting is certain, after a complete
+                // record, are offered. A trailing partial record is replayed from an older anchor.
+                let position = (live && known && line.last() == Some(&b'\n')).then_some(start);
+                if f(v, starts, position, skipped) == Flow::Stop {
+                    stop = true;
+                    return Flow::Stop;
+                }
+                Flow::Continue
+            });
+            skipped += line_skipped;
             if stop {
                 return skipped;
             }
@@ -718,11 +1027,33 @@ fn peek_system_prompt(transcript: &Path) -> Option<String> {
 /// `context_N.jsonl`) — so a checkpoint still present in the live transcript is one that was never
 /// reverted to. Bookkeeping: a `Carrier` under `complete`, dropped otherwise; not a `Branch`, not a
 /// `CompactionBoundary` (see the module doc for where those come from).
+fn note_call_names(message: &Message, names: &mut HashMap<String, String>) {
+    for block in &message.content {
+        if let Block::ToolUse { id, name, .. } = block {
+            if !id.is_empty() && !name.is_empty() {
+                names.insert(id.clone(), name.clone());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 fn context_message(
     v: &Value,
     enrich: &WireEnrich,
     complete: bool,
     call_names: &mut HashMap<String, String>,
+) -> Option<Message> {
+    let message = context_message_inner(v, enrich, complete, call_names)?;
+    note_call_names(&message, call_names);
+    Some(message)
+}
+
+fn context_message_inner(
+    v: &Value,
+    enrich: &WireEnrich,
+    complete: bool,
+    call_names: &HashMap<String, String>,
 ) -> Option<Message> {
     let role = v.get("role").and_then(Value::as_str)?;
     match role {
@@ -755,11 +1086,6 @@ fn context_message(
             if let Some(calls) = v.get("tool_calls").and_then(Value::as_array) {
                 for c in calls {
                     let call = openai::tool_call(c);
-                    if let Block::ToolUse { id, name, .. } = &call {
-                        if !id.is_empty() && !name.is_empty() {
-                            call_names.insert(id.clone(), name.clone());
-                        }
-                    }
                     m.content.push(call);
                 }
             }
@@ -1170,6 +1496,258 @@ fn md5_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[derive(Default)]
+    struct ResumeKeep {
+        messages: Vec<Message>,
+        checkpoints: Vec<(usize, Checkpoint)>,
+    }
+    impl MessageSink for ResumeKeep {
+        fn message(&mut self, message: Message) -> Flow {
+            self.messages.push(message);
+            Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, cp: &mut Checkpoint) {
+            self.checkpoints.push((self.messages.len(), cp.clone()));
+        }
+    }
+    fn old_context_oracle(adapter: &Kimi, r: &SessionRef, opts: &ParseOptions) -> Session {
+        let (transcript, wire) = locate_transcript(&r.path, &r.id);
+        let segments = transcript_segments(&r.path, &transcript);
+        let (s, enrich) = session_header(adapter, r, opts, &segments, wire.as_deref());
+        let mut kept = ResumeKeep::default();
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Kimi, &mut kept);
+        let mut s = old_context_pass(s, &segments, &enrich, opts, &mut spawns);
+        s.messages = kept.messages;
+        s.materialize().unwrap();
+        s
+    }
+    fn materialized(messages: &[Message], r: &SessionRef) -> Value {
+        let resolver = crate::Resolver::new(Some(r.path.clone()));
+        let mut messages = messages.to_vec();
+        for message in &mut messages {
+            message.materialize(&resolver).unwrap();
+        }
+        serde_json::to_value(messages).unwrap()
+    }
+
+    #[test]
+    fn resume_corpus_replays_usage_rotation_prefixes_and_exact_suffixes() {
+        let world = cv_testkit::World::in_process("kimi_resume_corpus");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/kimi");
+        let mut files = 0;
+        let mut resumes = 0;
+        for file in walkdir::WalkDir::new(root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if file.file_name() != "context.jsonl" {
+                continue;
+            }
+            let dir = file.path().parent().unwrap();
+            let id = dir.file_name().unwrap().to_str().unwrap();
+            let r = SessionRef::new(id, Harness::Kimi, dir);
+            let home = dir
+                .ancestors()
+                .find(|p| p.file_name().is_some_and(|n| n == ".kimi"))
+                .unwrap();
+            let adapter = Kimi::with_home(home);
+            assert_eq!(adapter.resume_source(&r), file.path());
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::full(),
+                ParseOptions::complete(),
+            ] {
+                let old = old_context_oracle(&adapter, &r, &opts);
+                let mut full = ResumeKeep::default();
+                let mut shell = adapter.try_stream(&r, &opts, &mut full).unwrap();
+                shell.messages = full.messages.clone();
+                shell.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(&shell).unwrap(),
+                    serde_json::to_value(&old).unwrap(),
+                    "{} old full collector",
+                    file.path().display()
+                );
+                shell.messages.clear();
+                let stride = (full.checkpoints.len() / 12).max(1);
+                for (i, (count, cp)) in full.checkpoints.iter().enumerate().step_by(stride) {
+                    let mut rest = ResumeKeep::default();
+                    let suffix = adapter.try_resume(&r, &opts, &mut rest, cp).unwrap().unwrap();
+                    assert_eq!(
+                        serde_json::to_value(suffix).unwrap(),
+                        serde_json::to_value(&shell).unwrap(),
+                        "{} @{} metadata",
+                        file.path().display(),
+                        cp.offset
+                    );
+                    assert_eq!(
+                        materialized(&rest.messages, &r),
+                        materialized(&full.messages[*count..], &r),
+                        "{} @{} suffix",
+                        file.path().display(),
+                        cp.offset
+                    );
+                    assert_eq!(
+                        rest.checkpoints.iter().map(|(_, cp)| cp).collect::<Vec<_>>(),
+                        full.checkpoints[i + 1..].iter().map(|(_, cp)| cp).collect::<Vec<_>>()
+                    );
+                    resumes += 1;
+                }
+            }
+            files += 1;
+        }
+        assert!(
+            files >= 4 && resumes >= 20,
+            "native files={files} suffix resumes={resumes}"
+        );
+        drop(world);
+        eprintln!("kimi native files={files} exact live-file suffix resumes={resumes}");
+    }
+
+    #[test]
+    fn resume_anchors_replay_large_pending_messages_and_usage_without_payload_state() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("kimi_pending_anchor");
+        let home = world.home.join(".kimi");
+        let dir = home.join("sessions/hash/session");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(home.join("config.toml"), "default_model = \"kimi-test\"\n").unwrap();
+        let line = "{\"role\":\"user\",\"content\":\"hello\"}\n";
+        let giant = serde_json::json!({"role":"assistant","content":"pending-giant-reply".repeat(100_000),"tool_calls":[{"id":"call","type":"function","function":{"name":"Read","arguments":"{}"}}]});
+        let body = format!(
+            "{}bad json\n{}\n{{\"role\":\"_usage\",\"token_count\":77}}",
+            line.repeat(20_000),
+            giant
+        );
+        fs::write(dir.join("context.jsonl"), &body).unwrap();
+        let mut r = SessionRef::new("session", Harness::Kimi, &dir);
+        let adapter = Kimi::with_home(&home);
+        let opts = ParseOptions::lazy();
+        let mut first = ResumeKeep::default();
+        adapter.try_stream(&r, &opts, &mut first).unwrap();
+        let (count, cp) = first.checkpoints.last().unwrap();
+        assert_eq!(*count, 20_000);
+        assert_eq!(cp.offset as usize, line.len() * 20_000 + "bad json\n".len());
+        let state = serde_json::to_string(cp).unwrap();
+        assert!(state.len() < 1024 && !state.contains("pending-giant-reply"));
+        assert_eq!(
+            first.messages.last().unwrap().usage.as_ref().unwrap().input_tokens,
+            Some(77)
+        );
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(adapter.resume_source(&r))
+            .unwrap();
+        writeln!(file).unwrap();
+        file.write_all(line.repeat(200).as_bytes()).unwrap();
+        drop(file);
+        r.title = Some("new catalog title".into());
+        let mut suffix = ResumeKeep::default();
+        let mut shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        assert_eq!(suffix.messages.len(), 201);
+        assert_eq!(shell.title, r.title);
+        assert_eq!(shell.model.as_deref(), Some("kimi-test"));
+        shell.messages = first.messages[..*count]
+            .iter()
+            .cloned()
+            .chain(suffix.messages)
+            .collect();
+        shell.materialize().unwrap();
+        assert_eq!(
+            serde_json::to_value(shell).unwrap(),
+            serde_json::to_value(old_context_oracle(&adapter, &r, &opts)).unwrap()
+        );
+        // Adding a rotation changes the dedup/branch context and declines before callbacks.
+        fs::write(dir.join("context_1.jsonl"), line).unwrap();
+        let mut none = ResumeKeep::default();
+        assert!(adapter.try_resume(&r, &opts, &mut none, cp).unwrap().is_none());
+        assert!(none.messages.is_empty());
+        eprintln!(
+            "kimi stable_prefix=20000 appended_callbacks=201 whole_callbacks=20201 checkpoint_bytes={}",
+            state.len()
+        );
+    }
+
+    #[test]
+    fn resume_rotated_prefix_branch_and_partial_eof_match_old_acceptance() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("kimi_rotated_anchor");
+        let home = world.home.join(".kimi");
+        let dir = home.join("sessions/hash/session");
+        fs::create_dir_all(&dir).unwrap();
+        let old = concat!(
+            "{\"role\":\"_system_prompt\",\"content\":\"system\"}\n",
+            "{\"role\":\"user\",\"content\":\"old\"}\n",
+            "{\"role\":\"_usage\",\"token_count\":1}\n"
+        );
+        fs::write(dir.join("context_1.jsonl"), old).unwrap();
+        let body = format!("{old}{{\"role\":\"user\",\"content\":\"new\"}}\r\n{{\"role\":\"_checkpoint\",\"id\":\"point\"}}\n{{\"role\":\"assistant\",\"content\":\"answer\"}}\n{{\"role\":\"_usage\",\"token_count\":9");
+        fs::write(dir.join("context.jsonl"), body).unwrap();
+        let r = SessionRef::new("session", Harness::Kimi, &dir);
+        let adapter = Kimi::with_home(&home);
+        for opts in [ParseOptions::lazy(), ParseOptions::complete()] {
+            let mut first = ResumeKeep::default();
+            let mut full = adapter.try_stream(&r, &opts, &mut first).unwrap();
+            full.messages = first.messages.clone();
+            full.materialize().unwrap();
+            assert_eq!(
+                serde_json::to_value(&full).unwrap(),
+                serde_json::to_value(old_context_oracle(&adapter, &r, &opts)).unwrap()
+            );
+            for (count, cp) in &first.checkpoints {
+                let mut suffix = ResumeKeep::default();
+                let shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+                full.messages.clear();
+                assert_eq!(
+                    serde_json::to_value(shell).unwrap(),
+                    serde_json::to_value(&full).unwrap()
+                );
+                assert_eq!(
+                    materialized(&suffix.messages, &r),
+                    materialized(&first.messages[*count..], &r)
+                );
+            }
+        }
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(adapter.resume_source(&r))
+                .unwrap(),
+            "}}"
+        )
+        .unwrap();
+        let mut bytes = fs::read(adapter.resume_source(&r)).unwrap();
+        bytes.extend_from_slice(b"\xff\n{\"role\":\"user\",\"content\":\"tail\"}\n");
+        fs::write(adapter.resume_source(&r), bytes).unwrap();
+        let opts = ParseOptions::complete();
+        let mut kept = ResumeKeep::default();
+        let mut shell = adapter.try_stream(&r, &opts, &mut kept).unwrap();
+        shell.messages = kept.messages;
+        shell.materialize().unwrap();
+        assert_eq!(
+            serde_json::to_value(shell).unwrap(),
+            serde_json::to_value(old_context_oracle(&adapter, &r, &opts)).unwrap()
+        );
+        // Unsupported non-native layout still reads faithfully but never offers a wrong-file mark.
+        let flat = home.join("sessions/legacy");
+        fs::create_dir_all(&flat).unwrap();
+        fs::write(
+            flat.join("id.jsonl"),
+            "{\"role\":\"user\",\"content\":\"one\"}\n{\"role\":\"user\",\"content\":\"two\"}\n",
+        )
+        .unwrap();
+        let legacy = SessionRef::new("id", Harness::Kimi, &flat);
+        let mut kept = ResumeKeep::default();
+        adapter.try_stream(&legacy, &opts, &mut kept).unwrap();
+        assert!(!kept.checkpoints.is_empty());
+        assert_eq!(adapter.resume_source(&legacy), flat.join("id.jsonl"));
+    }
 
     #[test]
     fn plain_wire_output_span_borrows_without_decoding() {
