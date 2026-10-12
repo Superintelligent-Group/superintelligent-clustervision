@@ -198,9 +198,11 @@ pub(super) fn ingest(
         return None;
     }
     let record: Record<'_> = serde_json::from_slice(slice).ok()?;
-    std::str::from_utf8(slice).ok()?;
-    validate_value_numbers_and_depth(slice)?;
-    validate_unicode(slice)?;
+    // This is eligibility for the borrowed projection, not a new rejection policy. A failed
+    // check retries the existing lean codec, including its permissive ignored-sidecar behavior.
+    if !super::super::store::json::value_compatible(slice) {
+        return None;
+    }
     let role = match record.kind.0.as_ref() {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -551,88 +553,6 @@ fn decoded_len(body: &str) -> Option<usize> {
         }
     }
     Some(len + bytes.len() - at)
-}
-
-/// IgnoredAny and RawValue need not decode Unicode escapes. Match the owned parser's rejection
-/// of unpaired surrogates even in fields the lean record does not otherwise inspect.
-fn validate_unicode(bytes: &[u8]) -> Option<()> {
-    let mut at = 0;
-    while let Some(next) = memchr::memmem::find(&bytes[at..], b"\\u") {
-        let escape = at + next;
-        at = escape + 2;
-        // The slash in a literal \\u is itself escaped; only odd slash runs introduce Unicode.
-        let mut run = escape;
-        while run > 0 && bytes[run - 1] == b'\\' {
-            run -= 1;
-        }
-        if (escape - run) % 2 == 1 {
-            continue;
-        }
-        let hex =
-            |offset: usize| u32::from_str_radix(std::str::from_utf8(bytes.get(offset..offset + 4)?).ok()?, 16).ok();
-        let code = hex(at)?;
-        at += 4;
-        if (0xd800..=0xdbff).contains(&code) {
-            if bytes.get(at..at + 2)? != b"\\u" {
-                return None;
-            }
-            let low = hex(at + 2)?;
-            if !(0xdc00..=0xdfff).contains(&low) {
-                return None;
-            }
-            at += 6;
-        } else if (0xdc00..=0xdfff).contains(&code) {
-            return None;
-        }
-    }
-    Some(())
-}
-
-/// RawValue/ignored fields bypass Value's finite-number and container-depth checks. Validate
-/// only those properties here: the typed deserializer already validates JSON syntax. Quoted
-/// payload runs are skipped with memchr, never decoded or allocated.
-fn validate_value_numbers_and_depth(bytes: &[u8]) -> Option<()> {
-    let mut at = 0;
-    let mut depth = 0usize;
-    while at < bytes.len() {
-        match bytes[at] {
-            b'"' => {
-                at += 1;
-                loop {
-                    at += memchr::memchr2(b'"', b'\\', &bytes[at..])?;
-                    if bytes[at] == b'"' {
-                        at += 1;
-                        break;
-                    }
-                    at += 2;
-                    if at > bytes.len() {
-                        return None;
-                    }
-                }
-            }
-            b'{' | b'[' => {
-                depth += 1;
-                if depth >= 128 {
-                    return None;
-                }
-                at += 1;
-            }
-            b'}' | b']' => {
-                depth = depth.checked_sub(1)?;
-                at += 1;
-            }
-            b'-' | b'0'..=b'9' => {
-                let start = at;
-                while at < bytes.len() && matches!(bytes[at], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
-                    at += 1;
-                }
-                let token = &bytes[start..at];
-                serde_json::from_slice::<serde_json::Number>(token).ok()?;
-            }
-            _ => at += 1,
-        }
-    }
-    Some(())
 }
 
 /// User classification normally needs only a short trimmed prefix. A harness task notification
