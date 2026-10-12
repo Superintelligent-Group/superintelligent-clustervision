@@ -14,17 +14,22 @@
 //! Unrecognized tools degrade to `kind='tool'` rather than being dropped.
 //!
 //! Memory discipline (the project's core value): the sink owns only the small classified rows.
-//! Tool *inputs* are already-small `serde_json::Value`s; tool *result* content is never
+//! Tool arguments are projected from owned or validated source-backed JSON; only selected paths,
+//! command prefixes and actual patch target lines are retained. Tool result content is never
 //! materialized — under [`ParseOptions::lazy()`](crate::stream::ParseOptions::lazy) a large result
 //! is an unresolved [`Span`](crate::lazy::Span) and the error `detail` is simply skipped for it.
 //! Like [`crate::catalog`], the persistence side is best-effort: SQLite errors degrade to empty
 //! results / no-ops, never failing the caller.
 
 use crate::ir::{truncate, Block, Message, Session, SessionRef};
+use crate::json::{Json, JsonView};
 use crate::stream::{Checkpoint, Flow, MessageSink};
+use anyhow::Result;
+#[cfg(test)]
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+mod arguments;
 mod spool;
 pub use spool::{EventSpool, SpoolingSink};
 
@@ -78,6 +83,8 @@ pub struct EventSink {
     events: Vec<Event>,
     dependencies: crate::source::ReadSet,
     capture_events: bool,
+    error: Option<anyhow::Error>,
+    failed: bool,
 }
 
 impl EventSink {
@@ -90,6 +97,8 @@ impl EventSink {
             events: Vec::new(),
             dependencies: Default::default(),
             capture_events: true,
+            error: None,
+            failed: false,
         }
     }
 
@@ -109,8 +118,11 @@ impl EventSink {
         &self.events
     }
 
-    pub fn into_events(self) -> Vec<Event> {
-        self.events
+    pub fn into_events(mut self) -> Result<Vec<Event>> {
+        if let Some(error) = self.take_error() {
+            return Err(error);
+        }
+        Ok(self.events)
     }
 
     /// The sink a checkpoint kept (see [`MessageSink::checkpoint`]), continuing with the message
@@ -124,6 +136,8 @@ impl EventSink {
             events: Vec::new(),
             dependencies: st.dependencies,
             capture_events: true,
+            error: None,
+            failed: false,
         })
     }
 }
@@ -142,27 +156,46 @@ struct EventState {
 
 impl MessageSink for EventSink {
     fn dependency(&mut self, path: &std::path::Path) {
-        self.dependencies.record(path);
+        if !self.failed {
+            self.dependencies.record(path);
+        }
     }
     fn meta(&mut self, s: &Session) {
-        if self.cwd.is_none() {
+        if !self.failed && self.cwd.is_none() {
             self.cwd = s.cwd.clone();
         }
     }
 
     fn message(&mut self, m: Message) -> Flow {
+        if self.failed {
+            return Flow::Stop;
+        }
         if self.capture_events {
-            extract_into(&m, self.msg_idx, self.cwd.as_deref(), &mut self.events);
+            if let Err(error) = extract_into(&m, self.msg_idx, self.cwd.as_deref(), &mut self.events) {
+                self.error = Some(error);
+                self.failed = true;
+                return Flow::Stop;
+            }
         }
         self.msg_idx += 1;
         Flow::Continue
     }
 
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error.take().or_else(|| {
+            self.failed
+                .then(|| anyhow::anyhow!("event consumer has already failed"))
+        })
+    }
+
     fn wants_checkpoint(&mut self, _offset: u64) -> bool {
-        true
+        !self.failed
     }
 
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
+        if self.failed {
+            return;
+        }
         cp.put(
             EVENTS_LAYER,
             &EventState {
@@ -177,19 +210,24 @@ impl MessageSink for EventSink {
 /// Classify one message's tool blocks into events. `msg_idx` is its index in the transcript;
 /// relative file targets resolve against `cwd`. The standalone form of what [`EventSink`] does
 /// per streamed message.
-pub fn extract(m: &Message, msg_idx: usize, cwd: Option<&Path>) -> Vec<Event> {
+pub fn extract(m: &Message, msg_idx: usize, cwd: Option<&Path>) -> Result<Vec<Event>> {
     let mut out = Vec::new();
-    extract_into(m, msg_idx, cwd, &mut out);
-    out
+    extract_into(m, msg_idx, cwd, &mut out)?;
+    Ok(out)
 }
 
-pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) {
+pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out: &mut Vec<Event>) -> Result<()> {
+    let mut staged = Vec::new();
     let ts = m.timestamp.map(|t| t.timestamp());
     for b in &m.content {
         match b {
             Block::ToolUse { name, input, .. } => {
-                for (i, (kind, target)) in classify_tool(name, input, cwd).into_iter().enumerate() {
-                    out.push(Event {
+                for (i, (kind, target)) in input
+                    .with_view(|view| classify_tool_view(name, view, cwd))?
+                    .into_iter()
+                    .enumerate()
+                {
+                    staged.push(Event {
                         msg_idx,
                         ts,
                         kind,
@@ -213,7 +251,7 @@ pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out:
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(|s| truncate(s, DETAIL_MAX));
-                out.push(Event {
+                staged.push(Event {
                     msg_idx,
                     ts,
                     kind: "error",
@@ -226,98 +264,60 @@ pub(crate) fn extract_into(m: &Message, msg_idx: usize, cwd: Option<&Path>, out:
             _ => {}
         }
     }
+    out.extend(staged);
+    Ok(())
 }
 
 /// Heuristic cross-harness classification of one tool invocation into `(kind, target)` rows.
 /// Usually one row; an `apply_patch` body yields one `file_edit` per patched file.
-fn classify_tool(name: &str, input: &Value, cwd: Option<&Path>) -> Vec<(&'static str, Option<String>)> {
+fn classify_tool_view(
+    name: &str,
+    input: JsonView<'_>,
+    cwd: Option<&Path>,
+) -> Result<Vec<(&'static str, Option<String>)>> {
     let lname = name.to_ascii_lowercase();
-
-    // apply_patch-style tools: the input *is* (or carries) a patch body whose per-file headers
-    // are the real targets — much higher value for blame than the opaque tool row.
     if lname.contains("patch") {
-        if let Some(body) = patch_body(input) {
-            let files = patch_targets(body);
-            if !files.is_empty() {
-                return files
-                    .into_iter()
-                    .map(|f| ("file_edit", Some(absolutize(&f, cwd))))
-                    .collect();
-            }
+        let files = arguments::patch_rows(input)?;
+        if !files.is_empty() {
+            return Ok(files
+                .into_iter()
+                .map(|file| ("file_edit", Some(absolutize(&file, cwd))))
+                .collect());
         }
     }
-
-    // A file-path key in the input: read/write flavor comes from the tool name; an ambiguous
-    // name still records the touch as kind 'tool' with the path as target.
-    if let Some(p) = file_key(input) {
-        let kind = if WRITE_HINTS.iter().any(|h| lname.contains(h)) {
+    if let Some(path) = arguments::file_key(input, FILE_KEYS)? {
+        let kind = if WRITE_HINTS.iter().any(|hint| lname.contains(hint)) {
             "file_edit"
-        } else if READ_HINTS.iter().any(|h| lname.contains(h)) {
+        } else if READ_HINTS.iter().any(|hint| lname.contains(hint)) {
             "file_read"
         } else {
             "tool"
         };
-        return vec![(kind, Some(absolutize(p, cwd)))];
+        return Ok(vec![(kind, Some(absolutize(&path, cwd)))]);
     }
-
-    // A command key (claude Bash `command`, codex shell `command: [argv…]`, local_shell
-    // `action.command`, gemini run_shell_command `command`, …).
-    if let Some(cmd) = command_of(input) {
-        let mut rows = vec![("command", Some(truncate(&cmd, TARGET_MAX)))];
-        // codex commonly routes apply_patch *through* the shell tool; mine the patch body riding
-        // in the command string so the per-file edits aren't lost behind a 'command' row.
-        if cmd.contains("*** Begin Patch") || cmd.trim_start().starts_with("apply_patch") {
-            rows.extend(
-                patch_targets(&cmd)
-                    .into_iter()
-                    .map(|f| ("file_edit", Some(absolutize(&f, cwd)))),
-            );
-        }
-        return rows;
+    if let Some((prefix, files)) = arguments::command_rows(input, TARGET_MAX)? {
+        let mut rows = vec![("command", Some(prefix))];
+        rows.extend(
+            files
+                .into_iter()
+                .map(|file| ("file_edit", Some(absolutize(&file, cwd)))),
+        );
+        return Ok(rows);
     }
-
-    vec![("tool", None)]
+    Ok(vec![("tool", None)])
 }
 
-/// The first file-path-like string in the tool input, by key precedence.
-fn file_key(input: &Value) -> Option<&str> {
-    FILE_KEYS
-        .iter()
-        .find_map(|k| input.get(k).and_then(Value::as_str))
-        .filter(|s| !s.is_empty())
-}
-
-/// The command string of a shell-ish tool input: a plain string, an argv array joined with
-/// spaces, or codex local_shell's nested `action.command`.
-pub(crate) fn command_of(input: &Value) -> Option<String> {
-    let v = input
-        .get("command")
-        .or_else(|| input.get("cmd"))
-        .or_else(|| input.get("script"))
-        .or_else(|| input.get("action").and_then(|a| a.get("command")))?;
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(parts) => {
-            let joined: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
-            (!joined.is_empty()).then(|| joined.join(" "))
-        }
-        _ => None,
-    }
-}
-
-/// The patch text of an apply_patch-style input: the input itself when it's a plain string
-/// (codex `custom_tool_call`), or an obvious carrier field.
-fn patch_body(input: &Value) -> Option<&str> {
-    input
-        .as_str()
-        .or_else(|| input.get("input").and_then(Value::as_str))
-        .or_else(|| input.get("patch").and_then(Value::as_str))
+/// Full command projection for consumers whose required output is the complete command.
+/// Event classification uses a bounded prefix and streaming patch reducer instead.
+pub(crate) fn command_of_json(input: &Json) -> Result<Option<String>> {
+    input.with_view(arguments::command_string)
 }
 
 /// File paths named by a patch body. Primary: codex apply_patch headers
 /// (`*** Update File: <path>` / `*** Add File:` / `*** Delete File:` / `*** Move to:`).
 /// Fallback: unified-diff `+++ <path>` headers — but only when `--- ` headers are present too,
 /// so an *added line* whose content begins with `++ ` can't fake a target.
+#[cfg(test)]
 fn patch_targets(patch: &str) -> Vec<String> {
     fn push(out: &mut Vec<String>, f: &str) {
         let f = f.trim();
@@ -1317,9 +1317,111 @@ mod tests {
         Block::ToolUse {
             id: "t1".into(),
             name: name.into(),
-            input,
+            input: input.into(),
             namespace: None,
         }
+    }
+
+    #[test]
+    fn source_tool_projection_preserves_precedence_and_checked_failure() {
+        let path = std::env::temp_dir().join(format!("cv-event-input-{}", uuid::Uuid::new_v4()));
+        let cases = [
+            (
+                "Bash",
+                r#"{"command":null,"cmd":"masked","ignored":"large"}"#,
+                vec![("tool", None)],
+            ),
+            (
+                "Edit",
+                r#"{"file_path":"","path":"masked","command":["",false,"echo","",null]}"#,
+                vec![("command", Some(" echo ".to_string()))],
+            ),
+            (
+                "apply_patch",
+                r#"{"input":null,"patch":"*** Update File: first\n*** Move to: second\n"}"#,
+                vec![
+                    ("file_edit", Some("/w/first".to_string())),
+                    ("file_edit", Some("/w/second".to_string())),
+                ],
+            ),
+            (
+                "Bash",
+                r#"{"command":"masked","command":["apply_patch","*** Begin Patch\n*** Add File: late\n*** End Patch"]}"#,
+                vec![
+                    (
+                        "command",
+                        Some("apply_patch *** Begin Patch\n*** Add File: late\n*** End Patch".to_string()),
+                    ),
+                    ("file_edit", Some("/w/late".to_string())),
+                ],
+            ),
+        ];
+        for (name, raw, expected) in cases {
+            std::fs::write(&path, raw).unwrap();
+            let source = Json::source(&path, 0, raw.len() as u64).unwrap();
+            let owned: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                source
+                    .with_view(|view| classify_tool_view(name, view, Some(Path::new("/w"))))
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                classify_tool_view(name, JsonView::from(&owned), Some(Path::new("/w"))).unwrap(),
+                expected
+            );
+            let mut message = msg(vec![
+                tool_use("Read", json!({"path":"before"})),
+                Block::ToolUse {
+                    id: "lazy".into(),
+                    name: name.into(),
+                    namespace: None,
+                    input: source,
+                },
+            ]);
+            std::fs::remove_file(&path).unwrap();
+            let mut rows = vec![];
+            assert!(extract_into(&message, 0, None, &mut rows).is_err());
+            assert!(rows.is_empty(), "the first valid call must not partially publish");
+            let mut sink = EventSink::new(None);
+            assert_eq!(sink.message(message.clone()), Flow::Stop);
+            assert!(sink.take_error().is_some());
+            message.content.clear();
+            assert_eq!(sink.message(message), Flow::Stop);
+            assert!(!sink.wants_checkpoint(0));
+            assert!(
+                sink.into_events().is_err(),
+                "draining error cannot authorize partial publication"
+            );
+        }
+    }
+
+    #[test]
+    fn source_giant_command_and_patch_match_owned_rows() {
+        let path = std::env::temp_dir().join(format!("cv-event-giant-{}", uuid::Uuid::new_v4()));
+        for name in ["Bash", "apply_patch"] {
+            let text = format!(
+                "apply_patch *** Begin Patch\n+{}\n*** Add File: late.rs\n*** End Patch",
+                "λ\n".repeat(300_000)
+            );
+            let value = if name == "Bash" {
+                json!({"command":text,"irrelevant":"x".repeat(1_000_000)})
+            } else {
+                json!(text)
+            };
+            let raw = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &raw).unwrap();
+            let source = Json::source(&path, 0, raw.len() as u64).unwrap();
+            let expected = classify_tool_view(name, JsonView::from(&value), None).unwrap();
+            assert_eq!(
+                source.with_view(|view| classify_tool_view(name, view, None)).unwrap(),
+                expected
+            );
+            assert!(expected
+                .iter()
+                .any(|(kind, path)| *kind == "file_edit" && path.as_deref() == Some("late.rs")));
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1334,7 +1436,7 @@ mod tests {
             tool_use("Bash", json!({"command": "cargo test -p cv-core"})),
             tool_use("Glob", json!({"pattern": "**/*.rs", "path": "crates"})),
         ]);
-        let ev = extract(&m, 7, Some(cwd));
+        let ev = extract(&m, 7, Some(cwd)).unwrap();
         assert_eq!(ev.len(), 4);
         assert_eq!(
             (ev[0].kind, ev[0].target.as_deref()),
@@ -1357,7 +1459,7 @@ mod tests {
     fn codex_style_shell_and_local_shell_become_commands() {
         // codex `shell`: argv array.
         let m = msg(vec![tool_use("shell", json!({"command": ["bash", "-lc", "ls -la"]}))]);
-        let ev = extract(&m, 0, None);
+        let ev = extract(&m, 0, None).unwrap();
         assert_eq!(
             (ev[0].kind, ev[0].target.as_deref()),
             ("command", Some("bash -lc ls -la"))
@@ -1368,7 +1470,7 @@ mod tests {
             "local_shell",
             json!({"action": {"type": "exec", "command": ["echo", "hi"]}, "status": "completed"}),
         )]);
-        let ev = extract(&m, 0, None);
+        let ev = extract(&m, 0, None).unwrap();
         assert_eq!((ev[0].kind, ev[0].target.as_deref()), ("command", Some("echo hi")));
     }
 
@@ -1382,7 +1484,7 @@ mod tests {
                      *** End Patch";
         // Plain-string input (codex custom_tool_call).
         let m = msg(vec![tool_use("apply_patch", json!(patch))]);
-        let ev = extract(&m, 0, Some(Path::new("/repo")));
+        let ev = extract(&m, 0, Some(Path::new("/repo"))).unwrap();
         assert_eq!(ev.len(), 2);
         assert_eq!(
             (ev[0].kind, ev[0].target.as_deref()),
@@ -1395,7 +1497,7 @@ mod tests {
 
         // The same patch routed through the shell tool: command row + per-file edits.
         let m = msg(vec![tool_use("shell", json!({"command": ["apply_patch", patch]}))]);
-        let ev = extract(&m, 0, Some(Path::new("/repo")));
+        let ev = extract(&m, 0, Some(Path::new("/repo"))).unwrap();
         assert_eq!(ev[0].kind, "command");
         let edits: Vec<_> = ev.iter().filter(|e| e.kind == "file_edit").collect();
         assert_eq!(edits.len(), 2);
@@ -1417,11 +1519,11 @@ mod tests {
     fn ambiguous_file_tool_and_unknown_tool_degrade_gracefully() {
         // File key but a name that hints neither read nor write → 'tool' with the path target.
         let m = msg(vec![tool_use("Mystery", json!({"path": "x.txt"}))]);
-        let ev = extract(&m, 0, Some(Path::new("/w")));
+        let ev = extract(&m, 0, Some(Path::new("/w"))).unwrap();
         assert_eq!((ev[0].kind, ev[0].target.as_deref()), ("tool", Some("/w/x.txt")));
         // No file key, no command → bare 'tool' row.
         let m = msg(vec![tool_use("web_search", json!({"query": "rust"}))]);
-        let ev = extract(&m, 0, None);
+        let ev = extract(&m, 0, None).unwrap();
         assert_eq!((ev[0].kind, ev[0].target.as_deref()), ("tool", None));
     }
 
@@ -1436,7 +1538,7 @@ mod tests {
                 json!({"file_path": "/g/edit.txt", "old_string": "a", "new_string": "b"}),
             ),
         ]);
-        let ev = extract(&m, 0, Some(Path::new("/g")));
+        let ev = extract(&m, 0, Some(Path::new("/g"))).unwrap();
         assert_eq!((ev[0].kind, ev[0].target.as_deref()), ("file_edit", Some("/g/out.txt")));
         assert_eq!((ev[1].kind, ev[1].target.as_deref()), ("file_read", Some("/g/in.txt")));
         assert_eq!((ev[2].kind, ev[2].target.as_deref()), ("command", Some("make build")));
@@ -1482,7 +1584,7 @@ mod tests {
                 details: None,
             },
         ];
-        let ev = extract(&m, 3, None);
+        let ev = extract(&m, 3, None).unwrap();
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].kind, "error");
         assert_eq!(ev[0].detail.as_deref(), Some("command failed: no such file"));
@@ -1495,7 +1597,7 @@ mod tests {
     fn long_commands_and_details_are_capped() {
         let long_cmd = "x".repeat(1000);
         let m = msg(vec![tool_use("Bash", json!({"command": long_cmd}))]);
-        let ev = extract(&m, 0, None);
+        let ev = extract(&m, 0, None).unwrap();
         assert!(ev[0].target.as_ref().unwrap().chars().count() <= TARGET_MAX);
 
         let mut m = Message::new(Role::Tool);
@@ -1507,7 +1609,7 @@ mod tests {
             status: None,
             details: None,
         }];
-        let ev = extract(&m, 0, None);
+        let ev = extract(&m, 0, None).unwrap();
         assert!(ev[0].detail.as_ref().unwrap().chars().count() <= DETAIL_MAX);
     }
 
