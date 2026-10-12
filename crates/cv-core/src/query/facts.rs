@@ -209,13 +209,21 @@ pub fn matches_full(query: &SessionQuery, r: &SessionRef, session: &Session, tex
     })
 }
 
-/// The resolver a sweep evaluates each ref with before deciding to parse it: `has:<affordance>`
-/// from the catalog's fresh counts (definite), everything else `Unknown`.
-struct CountedFacts(Option<crate::affordance::Counts>);
+/// Facts available before parsing: indexed text membership and fresh catalog affordance counts.
+/// Other external predicates stay `Unknown`, preserving the query's three-valued evaluation.
+struct RefFacts<'a> {
+    id: &'a str,
+    text_sets: &'a TextSets,
+    counts: Option<crate::affordance::Counts>,
+}
 
-impl ExtFacts for CountedFacts {
+impl ExtFacts for RefFacts<'_> {
+    fn text(&self, needle: &str) -> Tri {
+        Tri::of(self.text_sets.contains(needle, self.id))
+    }
+
     fn has(&self, flag: &str) -> Tri {
-        match (crate::affordance::Kind::parse(flag), &self.0) {
+        match (crate::affordance::Kind::parse(flag), &self.counts) {
             (Some(k), Some(counts)) => Tri::of(counts.get(&k).is_some_and(|n| *n > 0)),
             _ => Tri::Unknown,
         }
@@ -224,9 +232,9 @@ impl ExtFacts for CountedFacts {
 
 /// Apply a parsed query to a ref list in place: prune with the catalog-cheap prefilter, then — if
 /// the query has any parse/index/events/forest/counted term — evaluate each survivor against the
-/// catalog's affordance counts, keeping a definite match and dropping a definite miss without a
-/// parse, and parse only what is still undecided. `cv ls`/`stats` and `cv serve`'s
-/// `/api/stats?q=` all go through here, so `-q` means the same thing on every door.
+/// indexed text membership and catalog's affordance counts, keeping a definite match and dropping
+/// a definite miss without a parse, and parse only what is still undecided. `cv ls`/`stats` and
+/// `cv serve`'s `/api/stats?q=` all go through here, so `-q` means the same thing on every door.
 pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) {
     refs.retain(|r| query.prefilter(r));
     let heavy = query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest();
@@ -235,11 +243,15 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
     }
     let table = query.needs_counted().then(crate::catalog::AffordanceTable::load);
     refs.retain(|r| {
-        let counted = CountedFacts(table.as_ref().and_then(|t| t.counts(r)));
+        let cheap_facts = RefFacts {
+            id: &r.id,
+            text_sets,
+            counts: table.as_ref().and_then(|t| t.counts(r)),
+        };
         let cheap = query.eval(&Facts {
             r,
             session: None,
-            ext: &counted,
+            ext: &cheap_facts,
         });
         match cheap {
             Tri::True => true,
@@ -250,4 +262,88 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
                 .is_some_and(|s| matches_full(query, r, &s, text_sets)),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn missing_source() -> SessionRef {
+        SessionRef {
+            id: "indexed-session".into(),
+            harness: crate::Harness::Claude,
+            path: std::env::temp_dir().join(format!("cv-query-missing-{}.jsonl", uuid::Uuid::new_v4())),
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        }
+    }
+
+    fn text_sets(query: &SessionQuery, r: &SessionRef) -> TextSets {
+        TextSets::resolve(query, |needle| {
+            if needle == "hit" {
+                HashSet::from([r.id.clone()])
+            } else {
+                HashSet::new()
+            }
+        })
+    }
+
+    #[test]
+    fn indexed_text_queries_filter_without_readable_source() {
+        let r = missing_source();
+        assert!(!r.path.exists());
+        for (source, matches) in [
+            ("text:hit", true),
+            ("text:miss", false),
+            ("NOT text:miss", true),
+            ("NOT text:hit", false),
+            ("text:hit OR tool:bash", true),
+            ("tool:bash OR text:hit", true),
+            ("text:miss AND tool:bash", false),
+            ("tool:bash AND text:miss", false),
+            ("NOT (text:miss AND tool:bash)", true),
+        ] {
+            let query = SessionQuery::parse(source).unwrap();
+            let texts = text_sets(&query, &r);
+            let mut refs = vec![r.clone()];
+            filter_refs(&mut refs, &query, &texts);
+            assert_eq!(refs.len(), usize::from(matches), "{source}");
+        }
+    }
+
+    #[test]
+    fn indexed_membership_preserves_unknown_boolean_branches() {
+        let r = missing_source();
+        for (source, expected) in [
+            ("text:miss AND tool:bash", Tri::False),
+            ("tool:bash AND text:miss", Tri::False),
+            ("text:hit AND tool:bash", Tri::Unknown),
+            ("text:hit OR tool:bash", Tri::True),
+            ("text:miss OR tool:bash", Tri::Unknown),
+            ("NOT (text:hit AND tool:bash)", Tri::Unknown),
+            ("NOT (text:miss OR tool:bash)", Tri::Unknown),
+            ("NOT text:hit OR tool:bash", Tri::Unknown),
+            ("NOT text:miss AND tool:bash", Tri::Unknown),
+        ] {
+            let query = SessionQuery::parse(source).unwrap();
+            let texts = text_sets(&query, &r);
+            let ext = RefFacts {
+                id: &r.id,
+                text_sets: &texts,
+                counts: None,
+            };
+            assert_eq!(
+                query.eval(&Facts {
+                    r: &r,
+                    session: None,
+                    ext: &ext
+                }),
+                expected,
+                "{source}"
+            );
+        }
+    }
 }
