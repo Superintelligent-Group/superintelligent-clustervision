@@ -72,6 +72,12 @@ impl Zed {
     pub fn detect() -> Self {
         Zed { db: threads_db() }
     }
+
+    /// Read an explicit directory holding `threads.db`, without changing process discovery.
+    pub fn with_root(root: &Path) -> Self {
+        let path = root.join("threads.db");
+        Zed { db: path.is_file().then_some(path) }
+    }
 }
 
 /// Resolve `…/Zed/threads/threads.db` across platforms. Returns it only if it exists, so discovery
