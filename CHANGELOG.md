@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `cv index` parses on every core: a full counts recount of a 95 GB fleet went from 329 s to 61-68 s.
+- `cv search` ranks equal scores by session id, whatever order the index was written in.
 - `cv index` rebuilds the full-text index once after upgrading; afterwards a grown Claude or Codex transcript is read only from where the last pass stopped.
 
 ## 0.16.1 — 2026-10-12 — approvals, checkpoints, and the side files
