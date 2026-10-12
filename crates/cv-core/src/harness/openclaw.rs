@@ -1444,51 +1444,7 @@ fn navigation_line(text: &str) -> Option<Value> {
 }
 
 #[cfg(feature = "sqlite")]
-struct DiscardValue;
-
-#[cfg(feature = "sqlite")]
-impl<'de> serde::Deserialize<'de> for DiscardValue {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
-        struct Discard;
-        impl<'de> serde::de::Visitor<'de> for Discard {
-            type Value = DiscardValue;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a JSON value")
-            }
-
-            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
-                Ok(DiscardValue)
-            }
-            fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
-                Ok(DiscardValue)
-            }
-            fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
-                Ok(DiscardValue)
-            }
-            fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
-                Ok(DiscardValue)
-            }
-            fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<Self::Value, E> {
-                Ok(DiscardValue)
-            }
-            fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<Self::Value, E> {
-                Ok(DiscardValue)
-            }
-            fn visit_seq<S: serde::de::SeqAccess<'de>>(self, mut seq: S) -> std::result::Result<Self::Value, S::Error> {
-                while seq.next_element::<DiscardValue>()?.is_some() {}
-                Ok(DiscardValue)
-            }
-            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> std::result::Result<Self::Value, M::Error> {
-                while map.next_key::<DiscardValue>()?.is_some() {
-                    map.next_value::<DiscardValue>()?;
-                }
-                Ok(DiscardValue)
-            }
-        }
-        de.deserialize_any(Discard)
-    }
-}
+use super::store::DiscardValue;
 
 /// A SQLite cursor whose decoded payload is dropped before the next row. Keep SQL errors apart
 /// from unreadable payloads: the latter are tolerated, while callers must check `finish` even if
