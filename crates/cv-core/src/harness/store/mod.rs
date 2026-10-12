@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod bytes;
 pub(crate) mod document;
 pub(crate) mod json;
 pub(crate) mod jsonl;
