@@ -590,7 +590,10 @@ fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str
 
 /// Decode complete JSON-body windows through serde's optimized string parser. At most one
 /// incomplete escape or UTF-8 scalar carries into the next fixed-size source window.
-fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) -> Result<bool, ()> {
+/// Returns whether the valid body contained an escape. Callbacks may run before a later malformed
+/// window or read error returns `Err`: callers must discard or reset their accumulated result on
+/// failure. This primitive does not publish transactional output or stop before validating EOF.
+pub(crate) fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) -> Result<bool, ()> {
     const WINDOW: usize = 64 * 1024;
     let mut raw = Vec::with_capacity(WINDOW);
     let mut quoted = Vec::with_capacity(WINDOW + 2);
