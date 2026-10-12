@@ -101,8 +101,8 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Semantic indexing | Shares discovery inventory; source/model identity enables unchanged-vector reuse and deferred model load; atomic streamed save | Fallible lazy text projections and final end-to-end cost proof; vector store still grows with session count |
 | API pagination | Bounded source-verified page checkpoints and head metadata cache; no messages cached | Safe continuation formats only; source/dependency changes and oversized state fall back |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
-| Archive | Skip verified unchanged artifacts before parsing; safe append reuses source suffixes | Prior archive JSON prefix is still materialized and canonical output rewritten; full fallback remains owned |
-| Dataset | Current lazy message vector, writer resolves output; streamed output/filter staging in an active lane | Preserve selection/error atomicity; selected output remains output-sized |
+| Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
+| Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Matched-query spool CPU cost and demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold bounded per-message event scratch; pack excerpts use a ring | Stats usage aggregation and repeated passes; preserve duplicate precedence and float addition order |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
@@ -382,11 +382,14 @@ publication does not advance the source stamp and retry repairs missing catalog 
 
 The focused 8,192-message Claude fixture plus four messages interprets 699 messages / 243,650
 logical primary suffix bytes instead of 8,196 / 2,865,380 on append. Four cold unchanged archive
-polls interpret zero messages, reading a 1,720-byte state file plus metadata probes on Unix. A
+polls interpret zero messages, reading a roughly 2 KB state file plus metadata probes on Unix. A
 one-message pending poll interprets two callbacks rather than the whole 8,192-message source,
-with exact EOF metadata/count. Archive append still reads 3,766,301 prior JSON bytes and writes
-3,767,141 canonical JSON bytes; these are logical file-byte costs, not physical disk or whole-fleet
-throughput measurements. Full serialized output matches the original parser for Claude/Codex
+with exact EOF metadata/count. Bounded archive history (`7f40ac6`) spools serialized messages in
+shared private storage (1 MiB memory cap), then copies the guarded canonical stable prefix without
+loading or parsing the prior archive. The same append copies 3,446,394 stable JSON bytes, spools
+286,289 suffix message bytes and writes 3,767,141 final JSON bytes. These are logical byte costs;
+large spools spill to temporary storage and physical I/O depends on the OS cache. Complete output
+still requires O(archive bytes) publication, preserving the existing atomic replacement contract. Full serialized output matches the original parser for Claude/Codex
 fixtures, native/legacy Qwen and Gemini/OpenClaw/LM Studio/Cline/Roo cases. Narrow tests cover
 cursor partial consumption, held EOF usage, artifact repair, source invalidation and publication
 failure/retry. The later current-source oracle establishes exact materialized Claude parity with
@@ -411,6 +414,28 @@ A tiny selected version beside one 16/64 MiB escaped unused version takes 2,003/
 versus the old 33,556,049/134,219,345. These bounds exclude demanded owned output, Harmony decoding,
 source mappings and native allocations. Eighteen scoped LM Studio tests cover both configurations,
 including envelope rejection, variant output, escaped spans, decoder-boundary markers and mutation.
+
+The isolated opt-in archive probe (`79a1e8d`, feature `probe-heap`) records only the requested Rust
+heap during the operation, excluding fixture generation and report serialization. On controlled
+20,002 / 200,002-message Claude histories, full archive peak falls from 32.5 / 306.3 MB to
+1,125,572 / 1,125,584 bytes. Verified append peaks are 352,466 / 216,630 bytes versus the prior
+28.3 / 250.3 MB; suffix callbacks are 1,030 / 69, stable-prefix copy is 5.23 / 55.56 MB and final
+artifact write is 5.52 / 55.58 MB. Cold unchanged polls use about 12.7 KB peak with zero callbacks,
+spool bytes or prefix/output writes. Debug elapsed full operations are 0.52 / 5.08 s and appends
+0.034 / 0.033 s; these controlled values are not fleet throughput claims.
+
+Checked complete-message JSON output (`3a9b15c`, consuming `1e96a86` and `58f42dd`) eliminates
+selected payload materialization as well. Real Claude Edit argument fixtures of 25 / 100 MB archive
+at 200,762 / 200,770 bytes peak versus the original 58.3 / 233.3 MB. Complete pretty archive hashes
+match the saved original full-parse output. Watch with no selected messages drops the same inputs
+at 15,376 / 15,385 bytes. Nine archive tests cover derived serializer field/indentation parity,
+Unicode and escaped frame delimiters, relocated prefix ranges, first-empty-user labels, held EOF
+usage and failed source/catalog publication. Failed demanded source reads leave the artifact,
+catalog and source stamp unchanged. Artifact identity is checked before and after prefix copying;
+missing legacy prefix ranges degrade to a whole checked read. Owned metadata width and producers
+which still emit owned selected payloads remain separate limits. First-user label extraction also
+scans that user's text to preserve the existing whitespace/label semantics.
+
 
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
@@ -441,8 +466,9 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Devin compact forest metadata and Hermes exact-key prompt spill, with measured native/Rust bounds and output parity.
 - [ ] Hermes shared portable exact-set CPU proof; Kimi Code logical-step/selected payloads, Cursor inline composers and OpenCode many-part records.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
-- [x] Verified watch tail and archive suffix reuse with strict source/dependency identity and demanded-error propagation.
-- [ ] Other format-safe continuation and bounded archive prefix/output retention costs.
+- [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
+- [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
+- [ ] Continue safe append checkpoints to the remaining formats; directory and portable producers are active lanes.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [x] Byte-capacity document admission held through Tantivy consumption, including release/error behavior and mixed-sweep negative control.
 - [x] Composed giant plain/escaped canonical index-body parity and live-heap proof at production chunk settings.
