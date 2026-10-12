@@ -1051,65 +1051,72 @@ pub fn of_session(s: &Session) -> Vec<Affordance> {
     let resolver = s.resolver();
     let mut out = session_rows(s);
     for (i, m) in s.messages.iter().enumerate() {
-        for hit in hits(s.harness, m, &resolver) {
-            out.push(match hit {
-                Hit::Call {
+        out.extend(message_rows(s.harness, m, i, &resolver));
+    }
+    out
+}
+
+/// Render one message's hits identically for whole-session and streamed views.
+fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy::Resolver) -> Vec<Affordance> {
+    let mut out = Vec::new();
+    for hit in hits(harness, m, resolver) {
+        out.push(match hit {
+            Hit::Call {
+                kind,
+                action,
+                id,
+                name,
+                input,
+            } => {
+                let items = if matches!(kind, Kind::Plan | Kind::Goal) {
+                    items_of(input)
+                } else {
+                    Vec::new()
+                };
+                Affordance {
                     kind,
                     action,
-                    id,
-                    name,
-                    input,
-                } => {
-                    let items = if matches!(kind, Kind::Plan | Kind::Goal) {
-                        items_of(input)
-                    } else {
-                        Vec::new()
-                    };
-                    Affordance {
-                        kind,
-                        action,
-                        index: Some(i),
-                        timestamp: m.timestamp,
-                        tool: Some(name.to_string()),
-                        tool_use_id: Some(id.to_string()),
-                        summary: call_summary(kind, input, &items),
-                        items,
-                        source: Source::ToolCall,
-                    }
+                    index: Some(i),
+                    timestamp: m.timestamp,
+                    tool: Some(name.to_string()),
+                    tool_use_id: Some(id.to_string()),
+                    summary: call_summary(kind, input, &items),
+                    items,
+                    source: Source::ToolCall,
                 }
-                Hit::Message { kind, action, tool } => Affordance {
-                    kind,
-                    action,
-                    index: Some(i),
-                    timestamp: m.timestamp,
-                    tool: tool.map(str::to_string),
-                    tool_use_id: None,
-                    summary: match (kind, &m.model) {
-                        (Kind::ModelChange, Some(model)) => model.clone(),
-                        _ => text_head(m, &resolver),
-                    },
-                    items: Vec::new(),
-                    source: Source::Message,
+            }
+            Hit::Message { kind, action, tool } => Affordance {
+                kind,
+                action,
+                index: Some(i),
+                timestamp: m.timestamp,
+                tool: tool.map(str::to_string),
+                tool_use_id: None,
+                summary: match (kind, &m.model) {
+                    (Kind::ModelChange, Some(model)) => model.clone(),
+                    _ => text_head(m, resolver),
                 },
-                Hit::Detail {
-                    kind,
-                    action,
-                    tool,
-                    tool_use_id,
-                    summary,
-                } => Affordance {
-                    kind,
-                    action,
-                    index: Some(i),
-                    timestamp: m.timestamp,
-                    tool: tool.map(str::to_string),
-                    tool_use_id: tool_use_id.map(str::to_string),
-                    summary,
-                    items: Vec::new(),
-                    source: Source::Message,
-                },
-            });
-        }
+                items: Vec::new(),
+                source: Source::Message,
+            },
+            Hit::Detail {
+                kind,
+                action,
+                tool,
+                tool_use_id,
+                summary,
+            } => Affordance {
+                kind,
+                action,
+                index: Some(i),
+                timestamp: m.timestamp,
+                tool: tool.map(str::to_string),
+                tool_use_id: tool_use_id.map(str::to_string),
+                summary,
+                items: Vec::new(),
+                source: Source::Message,
+            },
+        });
     }
     out
 }
@@ -1168,8 +1175,25 @@ impl Counter {
 
 /// The transcript rows plus the adapter's side-store rows, for one session ref.
 pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) -> anyhow::Result<Vec<Affordance>> {
-    let s = adapter.parse(r)?;
-    let mut rows = of_session(&s);
+    let resolver = crate::lazy::Resolver::new(Some(r.path.clone()));
+    let mut messages = Vec::new();
+    let mut index = 0;
+    // Full fidelity preserves the old parse's details and text summaries. Keep only the rows,
+    // dropping each message before the next; a whole Session need never exist for this view.
+    let s = crate::stream::stream_counted(
+        adapter,
+        r,
+        &crate::stream::ParseOptions::full(),
+        &mut |mut m: Message| {
+            m.materialize(&resolver);
+            messages.extend(message_rows(r.harness, &m, index, &resolver));
+            index += 1;
+            Flow::Continue
+        },
+    )?;
+    // Session facts can arrive at EOF; they still precede message rows, exactly as of_session.
+    let mut rows = session_rows(&s);
+    rows.extend(messages);
     rows.extend(adapter.store_affordances(r));
     Ok(rows)
 }
@@ -1192,6 +1216,86 @@ pub fn parse_kinds(words: &[&str]) -> Option<HashSet<Kind>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The old whole-session oracle includes EOF session facts, inline summaries beyond the lazy
+    /// prefix, result details and side-store rows. Streaming must preserve all of those in order.
+    #[test]
+    fn streamed_read_matches_full_session_and_side_store() {
+        struct Fixture;
+        impl crate::harness::Adapter for Fixture {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> anyhow::Result<Vec<crate::SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &crate::SessionRef,
+                opts: &crate::ParseOptions,
+                sink: &mut dyn MessageSink,
+            ) -> anyhow::Result<Session> {
+                assert!(opts.extra && !opts.spans, "the view must preserve full fidelity");
+                let mut s = Session::new(r.id.clone(), r.harness);
+                sink.meta(&s);
+                // Many large irrelevant outputs must be dropped; only affordance rows survive.
+                for i in 0..16 {
+                    if sink.message(result(&format!("large-{i}"), &"x".repeat(256 * 1024), false, None)) == Flow::Stop {
+                        return Ok(s);
+                    }
+                }
+                let mut call = Message::new(Role::Assistant);
+                call.content.push(Block::ToolUse {
+                    id: "plan".into(),
+                    name: "TodoWrite".into(),
+                    namespace: None,
+                    input: json!({"todos":[{"content":"preserve fidelity", "status":"pending"}]}),
+                });
+                sink.message(call);
+                let mut hook = Message::new(Role::System);
+                hook.origin = Origin::Hook;
+                hook.content.push(Block::Text {
+                    text: format!("<summary>{}late closing tag</summary>", " ".repeat(8192)).into(),
+                });
+                sink.message(hook);
+                sink.message(result("denied", "Permission to use Bash has been denied", true, None));
+                sink.message(result(
+                    "checkpoint",
+                    "output",
+                    false,
+                    Some(json!({"restorable":["/tmp/result.txt"]})),
+                ));
+                s.lineage.forked_from = Some("parent-late".into());
+                note_mode(s.harness_extra_mut(Harness::Claude), "plan");
+                sink.meta(&s);
+                Ok(s)
+            }
+            fn store_affordances(&self, _: &crate::SessionRef) -> Vec<Affordance> {
+                vec![Affordance::store(Kind::Plan, "todo.json", "side store", Vec::new())]
+            }
+        }
+        let r = crate::SessionRef::new(
+            "affordance-stream",
+            Harness::Claude,
+            "/nonexistent/affordance-stream.jsonl",
+        );
+        let adapter: &dyn crate::harness::Adapter = &Fixture;
+        let full = adapter.parse(&r).unwrap();
+        let mut expected = of_session(&full);
+        expected.extend(adapter.store_affordances(&r));
+        let actual = read(adapter, &r).unwrap();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(actual.first().unwrap().kind, Kind::Fork);
+        assert_eq!(actual.last().unwrap().source, Source::Store);
+        assert!(actual.iter().any(|a| a.summary == "late closing tag"));
+        assert!(actual.iter().any(|a| a.kind == Kind::Checkpoint));
+    }
 
     #[test]
     fn every_todo_shape_normalizes_to_items() {
