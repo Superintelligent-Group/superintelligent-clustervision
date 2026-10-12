@@ -1,21 +1,29 @@
 //! Full-text search via tantivy.
 //!
+//! A session is one **meta** doc plus its **body** docs (`kind`), all sharing its `id`. The meta doc
+//! owns what describes the session as a whole — the freshness signature, the label, the dates, the
+//! preview — and is rewritten on every pass; the body docs hold the searchable text in chunks, each
+//! stamped with the index of its first message (`first_msg`), so a pass that resumes at message
+//! `n` of a grown transcript replaces only the body docs from `n` on (see [`sweep`]).
+//!
 //! Schema fields:
 //! - `id`         STRING | STORED  — exact session id (the delete key on reindex)
+//! - `kind`       STRING | STORED  — `meta` or `body`
 //! - `harness`    STRING | STORED  — fielded filter, e.g. `harness:claude`
 //! - `cwd`        TEXT   | STORED  — tokenized so path fragments are searchable
-//! - `title`      TEXT   | STORED
-//! - `body`       TEXT             — the big searchable blob; **indexed but not stored**
+//! - `title`      TEXT   | STORED  — on the meta doc the current label; on a body doc the label
+//!   when it was written (so a title term still matches a conjunctive query on that chunk)
+//! - `body`       TEXT             — the big searchable blob, body docs only; **indexed but not stored**
+//! - `first_msg`  i64 INDEXED | STORED — body docs: the index of the first message they hold
 //! - `path`       STRING | STORED  — source file, so a hit can be snippeted by re-reading just
 //!   that one session live (no full stored body — keeps the index lean)
-//! - `preview`    STORED (only)    — ~240-char whitespace-collapsed head of the body, written on
-//!   the session's **first** chunk doc only (~240 bytes/session): the snippet fallback when the
-//!   source file has moved/changed
+//! - `preview`    STORED (only)    — meta doc: ~240-char whitespace-collapsed head of the body
+//!   (~240 bytes/session), the snippet fallback when the source file has moved/changed
 //! - `created_at`/`updated_at` i64 INDEXED | STORED — returned on hits + future sort/filter
-//! - `mtime`      i64 STORED       — file mtime, still used for non-append transcript stores
-//! - `size`       i64 STORED       — file size: the primary incremental-index key for append-only
-//!   session logs, which can skip on unchanged size even when mtime was spuriously bumped (touch,
-//!   rsync, restore); non-append stores require both size and mtime to match.
+//! - `mtime`      i64 STORED       — meta doc: file mtime, still used for non-append transcript stores
+//! - `size`       i64 STORED       — meta doc: file size, the primary incremental-index key for
+//!   append-only session logs, which can skip on unchanged size even when mtime was spuriously
+//!   bumped (touch, rsync, restore); non-append stores require both size and mtime to match.
 //!
 //! Indexing is **incremental** by default: only sessions whose file signature changed (plus new ones)
 //! are (re)written, and sessions whose files vanished are deleted. A full rebuild is `rebuild=true`.
@@ -34,6 +42,8 @@ use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
 struct Fields {
     id: Field,
+    kind: Field,
+    first_msg: Field,
     harness: Field,
     cwd: Field,
     title: Field,
@@ -56,6 +66,8 @@ struct Fields {
 fn build_schema() -> Schema {
     let mut b = Schema::builder();
     b.add_text_field("id", STRING | STORED);
+    b.add_text_field("kind", STRING | STORED);
+    b.add_i64_field("first_msg", INDEXED | STORED);
     b.add_text_field("harness", STRING | STORED);
     b.add_text_field("cwd", TEXT | STORED);
     b.add_text_field("title", TEXT | STORED);
@@ -76,6 +88,8 @@ fn fields_of(schema: &Schema) -> Result<Fields> {
     let get = |name: &str| schema.get_field(name);
     Ok(Fields {
         id: get("id")?,
+        kind: get("kind")?,
+        first_msg: get("first_msg")?,
         harness: get("harness")?,
         cwd: get("cwd")?,
         title: get("title")?,
@@ -93,12 +107,22 @@ fn fields_of(schema: &Schema) -> Result<Fields> {
 }
 
 /// Whether an on-disk index carries every field of the current schema. A miss means it was built
-/// by an older `cv` (pre-`path`/`mtime`/`preview`, pre-subagent-provenance, or pre-`size`) and
-/// must be rebuilt fresh — one-time on upgrade, from the indexing path only.
+/// by an older `cv` (pre-`path`/`mtime`/`preview`, pre-subagent-provenance, pre-`size`, or one doc
+/// kind for everything) and must be rebuilt fresh — one-time on upgrade, from the indexing path only.
 fn schema_current(schema: &Schema) -> bool {
-    ["path", "mtime", "preview", "parent_id", "agent_id", "workflow", "size"]
-        .iter()
-        .all(|f| schema.get_field(f).is_ok())
+    [
+        "kind",
+        "first_msg",
+        "path",
+        "mtime",
+        "preview",
+        "parent_id",
+        "agent_id",
+        "workflow",
+        "size",
+    ]
+    .iter()
+    .all(|f| schema.get_field(f).is_ok())
 }
 
 /// Open the index at `dir` for **indexing**: created when absent, and an existing index with a
@@ -722,8 +746,13 @@ fn reap_missing(
     removed
 }
 
-/// Streams one session's messages into bounded-size tantivy docs (all sharing the session id), so a
-/// large session never materializes its whole body in the index.
+/// The two kinds of doc a session is indexed as (the `kind` field).
+const KIND_META: &str = "meta";
+const KIND_BODY: &str = "body";
+
+/// Streams one session's messages into bounded-size body docs (all sharing the session id), so a
+/// large session never materializes its whole body in the index, then writes the session's meta
+/// doc.
 struct ChunkSink<'w> {
     out: &'w mut DocOut<'w>,
     f: &'w Fields,
@@ -738,13 +767,18 @@ struct ChunkSink<'w> {
     disc_title: Option<String>,
     meta_title: Option<String>,
     meta_received: bool,
+    /// The head of the first user text (the title fallback), at most [`FIRST_USER_CHARS`].
     first_user: Option<String>,
     /// Sub-agent attribution stamped on every doc of a folded-in forest transcript; empty
     /// (all-`None`) for a top-level session, leaving its docs unchanged.
     prov: cv_core::events::Provenance,
     resolver: cv_core::Resolver,
     buf: String,
-    /// Whitespace-collapsed head of the body, capped at [`PREVIEW_CHARS`]; stored on the first doc.
+    /// Messages seen so far: the index of the message being appended.
+    msgs: usize,
+    /// The index of the message that put the first byte into `buf`.
+    buf_first: usize,
+    /// Whitespace-collapsed head of the body, capped at [`PREVIEW_CHARS`]; stored on the meta doc.
     preview: String,
     docs: usize,
     err: Option<anyhow::Error>,
@@ -753,6 +787,9 @@ struct ChunkSink<'w> {
 /// Length cap (chars) of the stored head-of-body preview — the snippet fallback when a hit's
 /// source file is gone at query time. ~240 bytes/session keeps the index lean.
 const PREVIEW_CHARS: usize = 240;
+
+/// How much of the first user text the sink keeps: [`cv_core::label_from`] reads 72 chars of it.
+const FIRST_USER_CHARS: usize = 512;
 
 impl<'w> ChunkSink<'w> {
     fn new(
@@ -781,6 +818,8 @@ impl<'w> ChunkSink<'w> {
             prov,
             resolver: cv_core::Resolver::new(Some(r.path.clone())),
             buf: String::new(),
+            msgs: 0,
+            buf_first: 0,
             preview: String::new(),
             docs: 0,
             err: None,
@@ -798,36 +837,24 @@ impl<'w> ChunkSink<'w> {
         cv_core::label_from(primary, self.first_user.as_deref())
     }
 
-    /// Flush the current buffer as one document. `force` emits even an empty buffer (so a session with
-    /// no body still gets a doc — needed for incremental mtime tracking).
-    fn flush(&mut self, force: bool) {
-        if self.err.is_some() || (self.buf.is_empty() && !force) {
-            return;
-        }
+    /// The fields every doc of the session carries.
+    fn doc(&self, kind: &str) -> TantivyDocument {
         let mut doc = TantivyDocument::default();
         doc.add_text(self.f.id, &self.id);
+        doc.add_text(self.f.kind, kind);
         doc.add_text(self.f.harness, &self.harness);
         if let Some(cwd) = &self.cwd {
             doc.add_text(self.f.cwd, cwd);
         }
         doc.add_text(self.f.title, self.title());
-        doc.add_text(self.f.body, &self.buf);
         doc.add_text(self.f.path, &self.path);
-        // The preview rides only the session's first doc — one copy per session, not per chunk.
-        if self.docs == 0 && !self.preview.is_empty() {
-            doc.add_text(self.f.preview, &self.preview);
-        }
         if let Some(t) = self.created_at {
             doc.add_i64(self.f.created_at, t);
         }
         if let Some(t) = self.updated_at {
             doc.add_i64(self.f.updated_at, t);
         }
-        doc.add_i64(self.f.mtime, self.mtime);
-        // `size` is the primary incremental freshness key for append-only transcript logs.
-        doc.add_i64(self.f.size, self.size);
-        // Provenance rides every doc of a folded-in sub-agent; top-level docs add nothing here, so
-        // they stay byte-for-byte as before.
+        // Provenance rides every doc of a folded-in sub-agent; top-level docs add nothing here.
         if let Some(p) = &self.prov.parent_id {
             doc.add_text(self.f.parent_id, p);
         }
@@ -837,16 +864,42 @@ impl<'w> ChunkSink<'w> {
         if let Some(w) = &self.prov.workflow {
             doc.add_text(self.f.workflow, w);
         }
+        doc
+    }
+
+    fn emit(&mut self, doc: TantivyDocument) {
         if let Err(e) = (self.out)(doc) {
             self.err = Some(e);
         }
-        self.buf.clear();
         self.docs += 1;
     }
 
-    /// Flush the trailing buffer (always emits ≥1 doc for the session), propagating any deferred error.
+    /// Flush the current buffer as one body doc (nothing when it is empty).
+    fn flush(&mut self) {
+        if self.err.is_some() || self.buf.is_empty() {
+            return;
+        }
+        let mut doc = self.doc(KIND_BODY);
+        doc.add_text(self.f.body, &self.buf);
+        doc.add_i64(self.f.first_msg, self.buf_first as i64);
+        self.emit(doc);
+        self.buf.clear();
+    }
+
+    /// Flush the trailing buffer, then write the meta doc — the session's freshness signature,
+    /// current label and preview, one per session — propagating any deferred error.
     fn finish(&mut self) -> Result<()> {
-        self.flush(self.docs == 0);
+        self.flush();
+        if self.err.is_none() {
+            let mut doc = self.doc(KIND_META);
+            if !self.preview.is_empty() {
+                doc.add_text(self.f.preview, &self.preview);
+            }
+            doc.add_i64(self.f.mtime, self.mtime);
+            // `size` is the primary incremental freshness key for append-only transcript logs.
+            doc.add_i64(self.f.size, self.size);
+            self.emit(doc);
+        }
         if let Some(e) = self.err.take() {
             return Err(e);
         }
@@ -858,9 +911,12 @@ impl<'w> ChunkSink<'w> {
     /// Append `s` to the buffer, flushing a doc whenever it reaches a chunk.
     fn push_chunk(&mut self, s: &str) {
         self.extend_preview(s);
+        if self.buf.is_empty() {
+            self.buf_first = self.msgs;
+        }
         self.buf.push_str(s);
         if self.buf.len() >= CHUNK_BYTES {
-            self.flush(false);
+            self.flush();
         }
     }
 
@@ -972,7 +1028,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
                     };
                     let t = s.trim();
                     if !t.is_empty() {
-                        self.first_user = Some(t.to_string());
+                        self.first_user = Some(t.chars().take(FIRST_USER_CHARS).collect());
                         break;
                     }
                 }
@@ -982,6 +1038,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
             self.append_block(&r, b);
         }
         self.resolver = r;
+        self.msgs += 1;
         cv_core::Flow::Continue
     }
 }
@@ -1008,32 +1065,57 @@ fn fts_is_fresh(r: &cv_core::SessionRef, stored: Option<&(i64, i64)>, mtime: i64
 /// must leave alone.
 type IndexedSigs = (HashMap<String, (i64, i64)>, HashSet<String>);
 
-/// Read the [`IndexedSigs`] off every live document in the index. Stored fields are tiny (no body
-/// is stored), so scanning them all is cheap.
+/// Read the [`IndexedSigs`] off every live meta doc in the index (one per session; stored fields
+/// are tiny, so this is cheap).
 fn read_indexed_sigs(index: &Index, f: &Fields) -> Result<IndexedSigs> {
+    use tantivy::collector::DocSetCollector;
     let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
     let mut out = HashMap::new();
     let mut folded = HashSet::new();
-    for seg in searcher.segment_readers() {
-        let store = seg.get_store_reader(0).context("opening store reader")?;
-        for doc_id in seg.doc_ids_alive() {
-            let doc: TantivyDocument = match store.get(doc_id) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let id = doc.get_first(f.id).and_then(|v| v.as_str()).map(str::to_string);
-            let mt = doc.get_first(f.mtime).and_then(|v| v.as_i64());
-            let sz = doc.get_first(f.size).and_then(|v| v.as_i64());
-            if let (Some(id), Some(mt), Some(sz)) = (id, mt, sz) {
-                if doc.get_first(f.parent_id).is_some() {
-                    folded.insert(id.clone());
-                }
-                out.insert(id, (mt, sz));
+    let metas = searcher
+        .search(&kind_query(f, KIND_META), &DocSetCollector)
+        .context("listing meta docs")?;
+    for addr in metas {
+        let Ok(doc) = searcher.doc::<TantivyDocument>(addr) else {
+            continue;
+        };
+        let id = doc.get_first(f.id).and_then(|v| v.as_str()).map(str::to_string);
+        let mt = doc.get_first(f.mtime).and_then(|v| v.as_i64());
+        let sz = doc.get_first(f.size).and_then(|v| v.as_i64());
+        if let (Some(id), Some(mt), Some(sz)) = (id, mt, sz) {
+            if doc.get_first(f.parent_id).is_some() {
+                folded.insert(id.clone());
             }
+            out.insert(id, (mt, sz));
         }
     }
     Ok((out, folded))
+}
+
+/// Matches the docs of one `kind`.
+fn kind_query(f: &Fields, kind: &str) -> tantivy::query::TermQuery {
+    tantivy::query::TermQuery::new(
+        Term::from_field_text(f.kind, kind),
+        tantivy::schema::IndexRecordOption::Basic,
+    )
+}
+
+/// Session `id`'s meta doc.
+fn meta_doc(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Option<TantivyDocument> {
+    use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+    use tantivy::schema::IndexRecordOption;
+    let id_q: Box<dyn Query> = Box::new(TermQuery::new(
+        Term::from_field_text(f.id, id),
+        IndexRecordOption::Basic,
+    ));
+    let q = BooleanQuery::new(vec![
+        (Occur::Must, id_q),
+        (Occur::Must, Box::new(kind_query(f, KIND_META))),
+    ]);
+    let top = searcher.search(&q, &TopDocs::with_limit(1).order_by_score()).ok()?;
+    let (_, addr) = top.into_iter().next()?;
+    searcher.doc(addr).ok()
 }
 
 /// The newest file mtime (ns) stamped on any indexed doc — how far the index has caught up. `None`
@@ -1178,15 +1260,23 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
 
     let mut hits = Vec::with_capacity(limit);
     let mut seen: HashSet<String> = HashSet::new();
-    for (score, id, doc) in ranked {
+    for (score, id, hit_doc) in ranked {
         if hits.len() >= limit {
             break;
         }
-        let get_str =
-            |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
         if !seen.insert(id.clone()) {
             continue; // another chunk of a session we already have
         }
+        // What describes the session — its current label, dates, preview — is on its meta doc; a
+        // body doc carries the label it was written under.
+        let is_meta = hit_doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);
+        let doc = if is_meta {
+            hit_doc
+        } else {
+            meta_doc(&searcher, &f, &id).unwrap_or(hit_doc)
+        };
+        let get_str =
+            |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
         let harness = get_str(f.harness).unwrap_or_default();
         let path = get_str(f.path);
         let snippet = match path
@@ -1196,13 +1286,9 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
         {
             Some(s) => s,
             // The source file is unreadable (moved/changed) or yielded nothing — fall back to the
-            // preview stored at index time. It rides the session's *first* chunk doc, which may
-            // not be the doc that scored this hit, hence the by-id lookup.
+            // preview stored at index time on the meta doc.
             None => {
-                let preview = get_str(f.preview)
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| stored_preview(&searcher, &f, &id))
-                    .unwrap_or_default();
+                let preview = get_str(f.preview).unwrap_or_default();
                 let gone = path.as_deref().is_none_or(|p| !Path::new(p).exists());
                 match (gone, preview.is_empty()) {
                     (true, true) => "(source file moved)".to_string(),
@@ -1227,30 +1313,6 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
         });
     }
     Ok(hits)
-}
-
-/// Fetch the stored head-of-body preview for session `id`. The preview lives only on the session's
-/// **first** chunk doc, which for a multi-chunk session is usually not the doc that produced the
-/// hit — so look it up across all of the id's docs. Only runs on the fallback path (live snippet
-/// already failed), so the extra term query costs nothing in the common case.
-fn stored_preview(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Option<String> {
-    use tantivy::collector::DocSetCollector;
-    use tantivy::query::TermQuery;
-    use tantivy::schema::IndexRecordOption;
-    let q = TermQuery::new(Term::from_field_text(f.id, id), IndexRecordOption::Basic);
-    let docs = searcher.search(&q, &DocSetCollector).ok()?;
-    for addr in docs {
-        let doc: TantivyDocument = match searcher.doc(addr) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        if let Some(p) = doc.get_first(f.preview).and_then(|v| v.as_str()) {
-            if !p.is_empty() {
-                return Some(p.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// Most text we'll scan from a session to find a snippet window. Matches are almost always early;
@@ -2107,8 +2169,8 @@ mod tests {
         assert_eq!(docs(&seq), docs(&par));
         assert_eq!(
             docs(&par).0,
-            41,
-            "both files under s0 keep their docs, as the sequential path leaves them"
+            2 * 41,
+            "a body and a meta doc per file: both files under s0 keep theirs, as the sequential path leaves them"
         );
         for q in (0..40)
             .map(|i| format!("zqword{i}"))
@@ -2286,7 +2348,7 @@ mod tests {
         assert_eq!(hits[0].id, "bigone");
         assert!(
             hits[0].snippet.starts_with("padding padding"),
-            "preview from the first chunk doc expected: {:?}",
+            "the preview the meta doc stores expected: {:?}",
             hits[0].snippet
         );
         assert!(hits[0].snippet.ends_with("(source file moved)"));
@@ -2294,6 +2356,24 @@ mod tests {
         let stored = hits[0].snippet.trim_end_matches(" (source file moved)").chars().count();
         assert!(stored <= PREVIEW_CHARS, "preview over cap: {stored} chars");
 
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    /// A hit shows the session's current label, from its meta doc, even when the body doc that
+    /// scored was written before the label was known (here a chunk flushed before the first user
+    /// message, the label's source, arrived).
+    #[test]
+    fn a_hit_is_labelled_by_the_meta_doc_not_by_the_chunk_that_scored() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        // The marker opens the first 4 MB chunk, flushed before the user message arrives.
+        let early = format!("zqearly {}", "padding ".repeat(700_000));
+        let p = write_claude_msgs(&sdir, "late", &[("assistant", &early), ("user", "zqlabel hello")]);
+        index_refs(&dir, &[sref_untitled("late", p)], false).unwrap();
+        let hits = text_search(&dir, "zqearly", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title.as_deref(), Some("zqlabel hello"));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&sdir).ok();
     }

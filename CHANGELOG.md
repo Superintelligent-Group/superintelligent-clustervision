@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The first `cv index` after upgrading rebuilds the full-text index once: each session is now one metadata doc plus body chunks.
+
 ## 0.16.1 — 2026-10-12 — approvals, checkpoints, and the side files
 
 Two new affordance kinds, `approval` (asks, denials, the approval mode in force) and `checkpoint`
