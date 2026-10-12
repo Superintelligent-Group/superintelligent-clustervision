@@ -1007,24 +1007,14 @@ fn index_session_clean(
     r: &cv_core::SessionRef,
     mtime: i64,
     size: i64,
-    events: Option<&mut cv_core::events::EventSink>,
+    events: Option<&mut dyn cv_core::MessageSink>,
     prov: cv_core::events::Provenance,
 ) -> Result<(usize, cv_core::source::ReadSet)> {
     let source = cv_core::source::Probe::default().snapshot(r);
     let result = {
         let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()).map_err(Into::into) };
-        index_session(
-            &mut add,
-            f,
-            adapter,
-            r,
-            mtime,
-            size,
-            events.map(|s| s as &mut dyn cv_core::MessageSink),
-            prov,
-            None,
-        )
-        .and_then(|done| done.context("a whole pass never declines"))
+        index_session(&mut add, f, adapter, r, mtime, size, events, prov, None)
+            .and_then(|done| done.context("a whole pass never declines"))
     };
     match result {
         Ok((docs, done, reads)) => {
@@ -1697,7 +1687,7 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
             r,
             mtime,
             size,
-            es.as_mut(),
+            es.as_mut().map(|s| s as &mut dyn cv_core::MessageSink),
             cv_core::events::Provenance::default(),
         )
         .with_context(|| format!("indexing {}", r.id))?;
@@ -3109,6 +3099,112 @@ mod tests {
     /// the truncated head into the index. [`index_session_clean`] (the path both `index_all` and
     /// the sub-agent fold drive) deletes the partial docs on error, dropping the id from the
     /// skip-set so the session is retried next run.
+    #[test]
+    fn consumer_error_discards_flushed_docs_and_never_publishes_counts_events_or_mark() {
+        use cv_core::{Flow, MessageSink};
+        let home = IsolatedHome::new();
+        let dir = tmpdir();
+        let path = home.home.join("consumer.jsonl");
+        std::fs::write(&path, "scratch primary").unwrap();
+        let r = sref("consumer", "failure", path.to_string_lossy().into_owned());
+        struct ProducesChunks;
+        impl cv_core::Adapter for ProducesChunks {
+            fn harness(&self) -> cv_core::Harness {
+                cv_core::Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &cv_core::SessionRef,
+                _: &cv_core::ParseOptions,
+                sink: &mut dyn MessageSink,
+            ) -> Result<cv_core::Session> {
+                for n in 0..6 {
+                    let mut m = cv_core::Message::new(cv_core::Role::Assistant);
+                    m.content.push(cv_core::Block::ToolUse {
+                        id: format!("call{n}"),
+                        name: "Edit".into(),
+                        namespace: None,
+                        input: serde_json::json!({"file_path":"/scratch/file.rs","new_string":"updated"}).into(),
+                    });
+                    m.content.push(cv_core::Block::Text {
+                        text: "zqconsumer ".repeat(2 * CHUNK_BYTES).into(),
+                    });
+                    sink.message(m); // Ignore Stop deliberately: guard must suppress late output.
+                    if sink.wants_checkpoint(n + 1) {
+                        sink.checkpoint(&mut cv_core::stream::Checkpoint::new(n + 1));
+                    }
+                }
+                sink.meta(&cv_core::Session::new(&r.id, r.harness));
+                Ok(cv_core::Session::new(&r.id, r.harness))
+            }
+        }
+        struct FailsAfterPrefix {
+            inner: cv_core::events::EventSink,
+            seen: usize,
+            error: Option<anyhow::Error>,
+        }
+        impl MessageSink for FailsAfterPrefix {
+            fn message(&mut self, m: cv_core::Message) -> Flow {
+                self.inner.message(m);
+                self.seen += 1;
+                if self.seen == 3 {
+                    self.error = Some(anyhow::anyhow!("consulted Json source changed"));
+                }
+                Flow::Continue
+            }
+            fn take_error(&mut self) -> Option<anyhow::Error> {
+                self.error.take().or_else(|| self.inner.take_error())
+            }
+            fn wants_checkpoint(&mut self, _: u64) -> bool {
+                true
+            }
+            fn checkpoint(&mut self, cp: &mut cv_core::stream::Checkpoint) {
+                self.inner.checkpoint(cp);
+            }
+        }
+        let mut events = FailsAfterPrefix {
+            inner: cv_core::events::EventSink::new(None),
+            seen: 0,
+            error: None,
+        };
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer: IndexWriter = index.writer(50_000_000).unwrap();
+        let error = index_session_clean(
+            &mut writer,
+            &f,
+            &ProducesChunks,
+            &r,
+            111,
+            4096,
+            Some(&mut events),
+            Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "consulted Json source changed");
+        assert_eq!(events.seen, 3);
+        assert!(
+            !events.inner.into_events().is_empty(),
+            "fixture must stage event rows before failure"
+        );
+        writer.commit().unwrap();
+        assert!(text_search(&dir, "zqconsumer", 10).unwrap().is_empty());
+        assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
+        assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
+        assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
+        assert!(cv_core::events::needs_ingest(
+            &r,
+            cv_core::events::file_mtime_ns(&r.path)
+        ));
+        assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn failed_parse_leaves_no_partial_docs_behind() {
         let _home = IsolatedHome::new();
