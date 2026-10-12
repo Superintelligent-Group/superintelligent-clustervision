@@ -415,6 +415,11 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
             text: "a\n\"é😀".repeat(8192).into(),
         },
     );
+    for block in original.messages.iter_mut().flat_map(|m| &mut m.content) {
+        if let Block::ToolUse { input, .. } = block {
+            *input = json!({"payload":"雪\n\"".repeat(8192),"small":1}).into();
+        }
+    }
     let mut written = serde_json::to_value(document(&original)).unwrap();
     let ignored = "ignored\n\"😀".repeat(8192);
     written["unknown"] = json!(ignored);
@@ -431,6 +436,9 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
         let mut sink = CollectSink::default();
         let mut actual = stream_document(&path, &opts, &mut sink).unwrap();
         actual.messages = sink.messages;
+        assert_eq!(actual.messages.iter().flat_map(|m| &m.content).any(|block| {
+            matches!(block, Block::ToolUse { input: crate::json::Json::Source(_), .. })
+        }), opts.spans);
         actual.materialize().unwrap();
         assert_eq!(
             serde_json::to_string(&actual).unwrap(),

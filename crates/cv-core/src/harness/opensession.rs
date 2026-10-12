@@ -26,9 +26,10 @@
 //! than a parse failure — the document is still a session, it just came from somewhere cv cannot
 //! name.
 
-use super::store::document::{accepts_value, array_iter, Raw, Record, Source};
+use super::store::document::Fields;
 use super::{ts_from_value, Adapter};
 use crate::ir::*;
+use crate::json::{JsonSource, JsonView};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -221,41 +222,38 @@ fn is_document_file(p: &Path) -> bool {
 /// (user + assistant, the cross-harness contract) straight off the raw records. A document with
 /// no `id` is not a session cv can name, so it is not discovered.
 fn doc_ref(path: &Path) -> Option<SessionRef> {
-    let source = Source::open(path).ok()?;
-    let raw = source.raw().ok()?;
-    if !accepts_value(raw) {
-        return None;
-    }
-    let record = Record::parse(raw)?;
-    let o: serde_json::Map<String, Value> = ["id", "cwd", "title", "created_at", "updated_at"]
-        .into_iter()
-        .filter_map(|key| record.value(key).map(|v| (key.into(), v)))
-        .collect();
-    let string = |k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-    let message_count = record
-        .get("messages")
-        .and_then(array_iter)
-        .into_iter()
-        .flatten()
-        .filter(|raw| {
-            Record::parse(*raw)
-                .and_then(|r| r.string("role"))
-                .is_some_and(|role| matches!(role.as_str(), "user" | "assistant"))
+    JsonSource::capture(path)
+        .ok()?
+        .read_document(|view| {
+            let record = Fields::parse(view, &["id", "cwd", "title", "created_at", "updated_at", "messages"])?
+                .context("document object")?;
+            let o = record.project(&["id", "cwd", "title", "created_at", "updated_at"])?;
+            let string = |k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+            let mut message_count = 0;
+            if let Some(messages) = record.get("messages").map(JsonView::array).transpose()?.flatten() {
+                for message in messages {
+                    if let Some(message) = Fields::parse(message?, &["role"])? {
+                        if message
+                            .string("role")?
+                            .is_some_and(|role| matches!(role.as_str(), "user" | "assistant"))
+                        {
+                            message_count += 1;
+                        }
+                    }
+                }
+            }
+            Ok(SessionRef {
+                id: string("id").context("document id")?.to_owned(),
+                harness: Harness::OpenSession,
+                path: path.to_owned(),
+                cwd: string("cwd").map(PathBuf::from),
+                title: string("title").map(str::to_owned),
+                created_at: o.get("created_at").and_then(ts_from_value),
+                updated_at: o.get("updated_at").and_then(ts_from_value),
+                message_count,
+            })
         })
-        .count();
-    Some(SessionRef {
-        id: string("id")?.to_string(),
-        // The REF is tagged `opensession` because that is the adapter that reads this file; the
-        // parsed session keeps the harness the document names (`Session::harness`), which is the
-        // fact the document carries and the round trip must preserve.
-        harness: Harness::OpenSession,
-        path: path.to_path_buf(),
-        cwd: string("cwd").map(PathBuf::from),
-        title: string("title").map(str::to_string),
-        created_at: o.get("created_at").and_then(ts_from_value),
-        updated_at: o.get("updated_at").and_then(ts_from_value),
-        message_count,
-    })
+        .ok()
 }
 
 // ── Reading a document ────────────────────────────────────────────────────────
@@ -271,95 +269,139 @@ pub fn read_document(path: &Path) -> Result<Session> {
 /// Traverse the document's IR messages without retaining a complete Session. Shape validation
 /// finishes before the first callback, preserving the former all-or-error document boundary.
 fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-    let source = Source::open(path)?;
-    let raw = source.raw()?;
-    anyhow::ensure!(accepts_value(raw), "not JSON: invalid scalar or nesting depth");
-    let record = Record::parse(raw).context("an OpenSession document is a JSON object")?;
-    // Match the IR's ignored-field behavior without decoding unrecognized document payloads.
-    let mut meta = record.project(SESSION_FIELDS)?;
-    project_object(&record, &mut meta, "git", GIT_FIELDS)?;
-    project_object(&record, &mut meta, "lineage", LINEAGE_FIELDS)?;
-    meta.insert("messages".into(), Value::Array(Vec::new()));
-    let mut session = from_object(meta)?;
-    let messages = record
-        .get("messages")
-        .and_then(array_iter)
-        .context("not an OpenSession 0.3 document: messages must be an array")?;
-    session.source_path = Some(path.to_path_buf());
-    // Validate through the authoritative IR deserializer with actual Text spans. This never
-    // substitutes body text with a sentinel, and catches malformed later turns before emission.
-    for raw in messages {
-        ir_message(raw, &source, true)?;
-    }
-    sink.meta(&session);
-    for raw in messages {
-        if sink.message(ir_message(raw, &source, opts.spans)?) == Flow::Stop {
-            break;
+    let source = JsonSource::capture(path)?;
+    source.read_document(|view| {
+        let keys = SESSION_FIELDS
+            .iter()
+            .copied()
+            .chain(["git", "lineage", "messages"])
+            .collect::<Vec<_>>();
+        let record = Fields::parse(view, &keys)?.context("an OpenSession document is a JSON object")?;
+        let mut meta = record.project(SESSION_FIELDS)?;
+        project_object(&record, &mut meta, "git", GIT_FIELDS)?;
+        project_object(&record, &mut meta, "lineage", LINEAGE_FIELDS)?;
+        meta.insert("messages".into(), Value::Array(Vec::new()));
+        let mut session = from_object(meta)?;
+        let messages = record
+            .get("messages")
+            .context("not an OpenSession 0.3 document: messages must be an array")?;
+        anyhow::ensure!(
+            messages.is_array()?,
+            "not an OpenSession 0.3 document: messages must be an array"
+        );
+        session.source_path = Some(path.to_path_buf());
+        for view in messages.array()?.unwrap() {
+            ir_message(view?, true)?;
         }
-    }
-    Ok(session)
+        sink.meta(&session);
+        let mut has_sources = false;
+        for view in messages.array()?.unwrap() {
+            let message = ir_message(view?, opts.spans)?;
+            let sourced = message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    Block::ToolUse {
+                        input: crate::Json::Source(_),
+                        ..
+                    }
+                )
+            });
+            has_sources |= sourced;
+            if sourced {
+                source.check()?;
+            }
+            let flow = sink.try_message(message)?;
+            if sourced {
+                source.check()?;
+            }
+            if flow == Flow::Stop {
+                break;
+            }
+        }
+        if has_sources {
+            source.check()?;
+        }
+        Ok(session)
+    })
 }
 
-fn ir_message(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Message> {
-    let Some(record) = Record::parse(raw) else {
-        return serde_json::from_value(serde_json::from_str(raw.get())?).context("not an OpenSession message");
+fn ir_message(view: JsonView<'_>, spans: bool) -> Result<Message> {
+    let keys = MESSAGE_FIELDS
+        .iter()
+        .copied()
+        .chain(["usage", "content"])
+        .collect::<Vec<_>>();
+    let Some(record) = Fields::parse(view, &keys)? else {
+        return serde_json::from_value(view.resolve()?.into_owned()).context("not an OpenSession message");
     };
     let mut fields = record.project(MESSAGE_FIELDS)?;
     project_object(&record, &mut fields, "usage", USAGE_FIELDS)?;
-    if let Some(content) = record.get("content") {
-        let value = if let Some(blocks) = array_iter(content) {
-            Value::Array(
-                blocks
-                    .into_iter()
-                    .map(|raw| ir_block(raw, source, spans))
-                    .collect::<Result<_>>()?,
-            )
+    let content = if let Some(content) = record.get("content") {
+        if let Some(blocks) = content.array()? {
+            blocks.map(|view| ir_block(view?, spans)).collect::<Result<Vec<_>>>()?
         } else {
-            serde_json::from_str(content.get())?
-        };
-        fields.insert("content".into(), value);
-    }
-    serde_json::from_value(Value::Object(fields)).context("not an OpenSession message")
+            serde_json::from_value(content.resolve()?.into_owned())?
+        }
+    } else {
+        Vec::new()
+    };
+    let mut message: Message = serde_json::from_value(Value::Object(fields)).context("not an OpenSession message")?;
+    message.content = content;
+    Ok(message)
 }
 
-/// These typed IR metadata objects ignore unrecognized fields just like their deserializers.
-/// Preserve duplicate-key normalization and validate known values through the IR below.
 fn project_object(
-    record: &Record<'_>,
+    record: &Fields<'_>,
     fields: &mut serde_json::Map<String, Value>,
     key: &str,
-    keys: &[&str],
+    keys: &[&'static str],
 ) -> Result<()> {
-    if let Some(raw) = record.get(key) {
-        let value = if let Some(object) = Record::parse(raw) {
+    if let Some(view) = record.get(key) {
+        let value = if let Some(object) = Fields::parse(view, keys)? {
             Value::Object(object.project(keys)?)
         } else {
-            serde_json::from_str(raw.get())?
+            view.resolve()?.into_owned()
         };
         fields.insert(key.into(), value);
     }
     Ok(())
 }
 
-fn ir_block(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Value> {
-    let Some(record) = Record::parse(raw) else {
-        return Ok(serde_json::from_str(raw.get())?);
+fn ir_block(view: JsonView<'_>, spans: bool) -> Result<Block> {
+    let Some(head) = Fields::parse(view, &["type"])? else {
+        return serde_json::from_value(view.resolve()?.into_owned()).context("not an OpenSession block");
     };
-    let ty = record.string("type");
+    let ty = head.string("type")?;
     let (keys, text_key) = block_projection(ty.as_deref());
+    let selected = keys.iter().copied().chain(text_key).collect::<Vec<_>>();
+    let record = Fields::parse(view, &selected)?.unwrap();
+    if ty.as_deref() == Some("tool_use") {
+        // Every field is present in the constructor, so a new IR field requires an explicit
+        // reader decision. The schema roster gate also detects serde rename/alias changes.
+        return Ok(Block::ToolUse {
+            id: serde_json::from_value(record.value("id")?.context("missing field id")?)?,
+            name: serde_json::from_value(record.value("name")?.context("missing field name")?)?,
+            input: record.get("input").context("missing field input")?.argument(spans)?,
+            namespace: record
+                .value("namespace")?
+                .map(serde_json::from_value)
+                .transpose()?
+                .flatten(),
+        });
+    }
     let mut fields = record.project(keys)?;
     if let Some(key) = text_key {
-        if let Some(raw) = record.get(key) {
+        if let Some(view) = record.get(key) {
             fields.insert(
                 key.into(),
-                match source.text(raw, spans) {
+                match view.text(spans)? {
                     Some(text) => serde_json::to_value(text)?,
-                    None => serde_json::from_str(raw.get())?,
+                    None => view.resolve()?.into_owned(),
                 },
             );
         }
     }
-    Ok(Value::Object(fields))
+    serde_json::from_value(Value::Object(fields)).context("not an OpenSession block")
 }
 
 /// Read an OpenSession document from text: check and strip the version marker, then the IR's own
