@@ -222,3 +222,118 @@ fn real_downloads_exports_parse() {
     }
     std::env::remove_var("CV_EXPORTS");
 }
+
+#[test]
+fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
+    use crate::stream::{CollectSink, Flow, MessageSink, ParseOptions};
+    struct Stop;
+    impl MessageSink for Stop {
+        fn message(&mut self, _: Message) -> Flow {
+            Flow::Stop
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("cv-export-native-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("conversations.json");
+    let body = "a\n\"é😀".repeat(8192);
+    let conversations = [
+        (
+            Kind::Claude,
+            json!({"uuid":"claude", "name":"", "chat_messages":[
+                {"uuid":"u","sender":"human","content":[{"type":"text","text":body}]},
+                {"uuid":"a","parent_message_uuid":"u","sender":"assistant","content":[
+                    {"type":"thinking","thinking":"","text":body},
+                    {"type":"tool_use","id":"t","name":"read","input":{"a":1}},
+                    {"type":"tool_result","tool_use_id":"t","text":body},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":body}},
+                    {"type":"document","title":"a","source":{"type":"file","file_id":"file1"}}
+                ]}, {"sender":"human","text":"fallback"}, {"sender":"other","text":"system"}
+            ]}),
+        ),
+        (
+            Kind::ChatGpt,
+            json!({"conversation_id":"chatgpt", "mapping":{
+                "0":{"id":"u","parent":null,"message":{"author":{"role":"user"},"content":{"parts":[body]}}},
+                "1":{"id":"t","parent":"0","message":{"author":{"role":"assistant"},"recipient":"python","content":{"text":"print(1)"}}},
+                "2":{"id":"r","parent":"1","message":{"author":{"role":"tool","name":"python"},"content":{"text":body}}},
+                "3":{"id":"a","parent":"2","message":{"author":{"role":"assistant"},"content":{"parts":["","two",{"asset_pointer":"file-service://a"}]}}},
+                "4":{"id":"s","parent":"3","message":{"author":{"role":"system"},"content":{"text":"context"}}}
+            }}),
+        ),
+    ];
+    for (kind, conv) in conversations {
+        let prefix = match kind {
+            Kind::Claude => json!({"uuid":"unrelated","chat_messages":[],"unknown":body}),
+            Kind::ChatGpt => json!({"id":"unrelated","mapping":{},"unknown":body}),
+        };
+        std::fs::write(&path, serde_json::to_vec(&json!([prefix, conv])).unwrap()).unwrap();
+        let expected_ref = conv_ref(kind, &path, &conv).unwrap();
+        let refs = discover_kind_in(kind, vec![path.clone()]);
+        assert_eq!(
+            serde_json::to_value(refs.iter().find(|r| r.id == expected_ref.id).unwrap()).unwrap(),
+            serde_json::to_value(&expected_ref).unwrap()
+        );
+        let expected = parse_ref(kind, &expected_ref).unwrap();
+        for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+            let mut sink = CollectSink::default();
+            let mut actual = native::stream(kind, &expected_ref, &opts, &mut sink).unwrap();
+            actual.messages = sink.messages;
+            actual.materialize();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+        assert_eq!(
+            native::stream(kind, &expected_ref, &ParseOptions::lazy(), &mut Stop)
+                .unwrap()
+                .title,
+            expected.title
+        );
+        // A same-size replacement with a new inode must invalidate descriptors and metadata.
+        let changed = serde_json::to_string(&json!([conv]))
+            .unwrap()
+            .replace(&expected_ref.id, "changed");
+        let replacement = dir.join("replacement.json");
+        std::fs::write(&replacement, changed).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let fresh = discover_kind_in(kind, vec![path.clone()]);
+        assert_eq!(fresh[0].id, "changed");
+        assert!(native::stream(kind, &expected_ref, &ParseOptions::lazy(), &mut Stop).is_err());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn native_archive_matches_raw_value_acceptance_and_duplicate_precedence() {
+    use crate::stream::{CollectSink, ParseOptions};
+    let dir = std::env::temp_dir().join(format!("cv-export-validation-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("conversations.json");
+    let valid = r#"{"uuid":"same","chat_messages":[{"sender":"human","text":"ok"}]}"#;
+    for invalid in ["1e400", "\"\\ud800\""] {
+        let bad = format!("{{\"uuid\":\"same\",\"chat_messages\":[],\"unknown\":{invalid},\"unknown\":0}}");
+        std::fs::write(&path, format!("[{bad},{valid}]")).unwrap();
+        // Invalid first conversation prevents sniffed discovery; explicit reads skip it.
+        assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
+        let r = SessionRef::new("same", Harness::ClaudeExport, path.clone());
+        let expected = parse_ref(Kind::Claude, &r).unwrap();
+        let mut sink = CollectSink::default();
+        let mut actual = native::stream(Kind::Claude, &r, &ParseOptions::lazy(), &mut sink).unwrap();
+        actual.messages = sink.messages;
+        actual.materialize();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+    let duplicate = r#"[{"conversation_id":false,"uuid":"hidden","chat_messages":[]},{"uuid":"old","\u0075uid":"new","chat_messages":[]}]"#;
+    std::fs::write(&path, duplicate).unwrap();
+    let refs = discover_kind_in(Kind::Claude, vec![path.clone()]);
+    assert_eq!(refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["new"]);
+    std::fs::write(&path, "[]").unwrap();
+    assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
+    std::fs::write(&path, "").unwrap();
+    assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}

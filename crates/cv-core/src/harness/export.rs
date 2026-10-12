@@ -21,8 +21,13 @@ use super::{ts_from_value, Adapter};
 use crate::ir::*;
 use crate::stream::{MessageSink, ParseOptions};
 use anyhow::{Context, Result};
+#[cfg(test)]
 use serde_json::value::RawValue;
-use serde_json::{Map, Value};
+
+mod native;
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,8 +59,8 @@ impl Adapter for ChatGptExport {
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_kind(Kind::ChatGpt))
     }
-    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::replay(parse_ref(Kind::ChatGpt, r)?, sink)
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        native::stream(Kind::ChatGpt, r, opts, sink)
     }
 }
 
@@ -69,8 +74,8 @@ impl Adapter for ClaudeExport {
     fn discover(&self) -> Result<Vec<SessionRef>> {
         Ok(discover_kind(Kind::Claude))
     }
-    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::replay(parse_ref(Kind::Claude, r)?, sink)
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        native::stream(Kind::Claude, r, opts, sink)
     }
 }
 
@@ -109,8 +114,8 @@ impl Adapter for RootedExport {
             files_under(self.roots.clone(), is_conversations_file),
         ))
     }
-    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        crate::stream::replay(parse_ref(self.kind, r)?, sink)
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        native::stream(self.kind, r, opts, sink)
     }
 }
 
@@ -178,6 +183,7 @@ fn is_conversations_file(p: &Path) -> bool {
 
 /// Read a file's top-level conversation array as borrowed raw slices (no per-conversation
 /// materialization until we pick one).
+#[cfg(test)]
 fn read_array(path: &Path) -> Result<(String, Vec<Box<RawValue>>)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading export {}", path.display()))?;
     // Tolerate either a bare array or a single object; non-arrays yield nothing.
@@ -194,35 +200,11 @@ fn discover_kind(kind: Kind) -> Vec<SessionRef> {
 }
 
 fn discover_kind_in(kind: Kind, paths: Vec<PathBuf>) -> Vec<SessionRef> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for path in paths {
-        let Ok((_text, arr)) = read_array(&path) else { continue };
-        let is_kind = arr
-            .first()
-            .and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok())
-            .is_some_and(|v| match kind {
-                Kind::ChatGpt => v.get("mapping").is_some(),
-                Kind::Claude => v.get("chat_messages").is_some(),
-            });
-        if !is_kind {
-            continue;
-        }
-        for raw in &arr {
-            let Ok(v) = serde_json::from_str::<Value>(raw.get()) else {
-                continue;
-            };
-            if let Some(r) = conv_ref(kind, &path, &v) {
-                if seen.insert(r.id.clone()) {
-                    out.push(r);
-                }
-            }
-        }
-    }
-    out
+    native::discover(kind, paths)
 }
 
 /// Build a [`SessionRef`] for one conversation `v` (metadata only — counts message turns cheaply).
+#[cfg(test)]
 fn conv_ref(kind: Kind, path: &Path, v: &Value) -> Option<SessionRef> {
     let id = conv_id(v)?;
     let title = match kind {
@@ -263,6 +245,7 @@ fn conv_ref(kind: Kind, path: &Path, v: &Value) -> Option<SessionRef> {
     })
 }
 
+#[cfg(test)]
 fn conv_id(v: &Value) -> Option<String> {
     v.get("conversation_id")
         .or_else(|| v.get("id"))
@@ -273,6 +256,7 @@ fn conv_id(v: &Value) -> Option<String> {
 
 // ── Parse one conversation ──────────────────────────────────────────────────
 
+#[cfg(test)]
 fn parse_ref(kind: Kind, r: &SessionRef) -> Result<Session> {
     let (_text, arr) = read_array(&r.path)?;
     let conv = arr
@@ -311,6 +295,7 @@ fn parse_ref(kind: Kind, r: &SessionRef) -> Result<Session> {
 /// The active branch (root → `current_node`) of a ChatGPT conversation's `mapping` DAG, root-first.
 /// Falls back to mapping order when `current_node` is absent. Shared by message-building and the
 /// metadata count so they agree (dead/regenerated branches are excluded).
+#[cfg(test)]
 fn chatgpt_active_chain(conv: &Value) -> Vec<&Value> {
     let Some(mapping) = conv.get("mapping").and_then(Value::as_object) else {
         return vec![];
@@ -337,6 +322,7 @@ fn chatgpt_active_chain(conv: &Value) -> Vec<&Value> {
 /// ChatGPT: walk the active branch of the `mapping` DAG into ordered turns. Stateful, because tool
 /// calls and their results are separate turns linked only by tool *name* + order (ChatGPT carries no
 /// explicit `tool_use_id`): we remember the last call per tool name and wire each result back to it.
+#[cfg(test)]
 fn chatgpt_messages(conv: &Value) -> Vec<Message> {
     let mut out = Vec::new();
     let mut last_call: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -409,6 +395,7 @@ fn chatgpt_messages(conv: &Value) -> Vec<Message> {
 }
 
 /// Role of a ChatGPT mapping node's `message` (None if no message / unknown author).
+#[cfg(test)]
 fn convo_role(msg: Option<&Value>) -> Option<Role> {
     let role = msg?.get("author")?.get("role")?.as_str()?;
     Some(role_from_str(role))
@@ -424,6 +411,7 @@ fn role_from_str(s: &str) -> Role {
 }
 
 /// Flatten a ChatGPT `content` object's text (parts joined; `text` for code/exec; ignores image parts).
+#[cfg(test)]
 fn chatgpt_content_text(content: Option<&Value>) -> String {
     let Some(c) = content else { return String::new() };
     if let Some(parts) = c.get("parts").and_then(Value::as_array) {
@@ -435,6 +423,7 @@ fn chatgpt_content_text(content: Option<&Value>) -> String {
 
 /// Image asset pointers in a ChatGPT `multimodal_text` content (`{content_type:image_asset_pointer,
 /// asset_pointer:"file-service://…"}` parts).
+#[cfg(test)]
 fn chatgpt_image_pointers(content: Option<&Value>) -> Vec<String> {
     let Some(parts) = content.and_then(|c| c.get("parts")).and_then(Value::as_array) else {
         return vec![];
@@ -447,6 +436,7 @@ fn chatgpt_image_pointers(content: Option<&Value>) -> Vec<String> {
 }
 
 /// Claude.ai export: `chat_messages[]` (already in order) → IR turns.
+#[cfg(test)]
 fn claude_messages(conv: &Value) -> Vec<Message> {
     let Some(msgs) = conv.get("chat_messages").and_then(Value::as_array) else {
         return vec![];
@@ -474,6 +464,7 @@ fn claude_messages(conv: &Value) -> Vec<Message> {
 /// A Claude.ai message's `content[]` blocks → IR blocks (the Anthropic shape, empty text dropped;
 /// a `tool_result` may carry its text under `text`), with the flat `text` field as a fallback when
 /// there are no structured blocks.
+#[cfg(test)]
 fn claude_content_blocks(m: &Value) -> Vec<Block> {
     let mut out: Vec<Block> = m
         .get("content")
