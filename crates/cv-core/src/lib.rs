@@ -6,10 +6,10 @@
 //! Every harness has an [`Adapter`](harness::Adapter) that *discovers* sessions on disk and *parses*
 //! them into the common [`Session`] IR. Cross-harness porting is then `parse(A) -> IR -> emit(B)`.
 
+pub mod affordance;
 // The read API every door maps onto (`cv serve`, the desktop app). Native only: it reads the
 // catalog and the event store, neither of which exists on wasm32.
 #[cfg(feature = "sqlite")]
-pub mod affordance;
 pub mod api;
 pub mod catalog;
 pub mod compaction;
