@@ -3126,6 +3126,42 @@ mod tests {
     }
 
     #[test]
+    fn native_json_inputs_keep_owned_fallback_last_wins_and_invalid_tail() {
+        let world = cv_testkit::World::in_process("claude-json-input-fallback");
+        let path = world.proj.join("source.jsonl");
+        let text = concat!(
+            r#"{"type":"assistant","uuid":"duplicate","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"custom_tool","input":{"old":1},"input":{"winner":2}}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bad","message":{"role":"assistant","content":[{"type":"tool_use","id":"bad","name":"custom_tool","input":{"bad":"\ud800"}}]}}"#,
+            "\n",
+        );
+        fs::write(&path, text).unwrap();
+        let adapter = Claude::with_config_dir(&world.proj);
+        let reference = SessionRef::new("source", Harness::Claude, path.clone());
+        for opts in [ParseOptions::lazy(), ParseOptions::lazy_extra()] {
+            let mut sink = CollectSink::default();
+            let mut actual = adapter.stream(&reference, &opts, &mut sink).unwrap();
+            actual.messages = sink.messages;
+            let mut expected_sink = CollectSink::default();
+            let mut expected = stream_str("source", text, Some(path.clone()), &opts, &mut expected_sink);
+            expected.messages = expected_sink.messages;
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+            assert_eq!(actual.messages.len(), 1);
+            let Block::ToolUse {
+                input: Json::Owned(value),
+                ..
+            } = &actual.messages[0].content[0]
+            else {
+                panic!("duplicate item must retain owned fallback")
+            };
+            assert_eq!(value, &serde_json::json!({"winner": 2}));
+        }
+    }
+
+    #[test]
     fn native_json_inputs_reject_changed_source_and_resume_exact_ranges() {
         let world = cv_testkit::World::in_process("claude-json-input-errors");
         let path = world.proj.join("source.jsonl");
@@ -3156,21 +3192,40 @@ mod tests {
         assert_eq!(Json::Source(range.clone()).resolve().unwrap()["id"], "second");
         // Deleting the path keeps an existing Unix mmap readable but invalidates its captured
         // identity. The operation must stop before another callback and return the source error.
-        let mut calls = 0;
-        let mut captured = None;
-        let mut deleting = |message: Message| {
-            calls += 1;
-            if let Block::ToolUse { input, .. } = &message.content[0] {
-                captured = Some(input.clone());
+        struct Deleting {
+            path: PathBuf,
+            calls: usize,
+            checkpoints: usize,
+            captured: Option<Json>,
+        }
+        impl MessageSink for Deleting {
+            fn message(&mut self, message: Message) -> Flow {
+                self.calls += 1;
+                if let Block::ToolUse { input, .. } = &message.content[0] {
+                    self.captured = Some(input.clone());
+                }
+                fs::remove_file(&self.path).unwrap();
+                Flow::Continue
             }
-            fs::remove_file(&path).unwrap();
-            Flow::Continue
+            fn wants_checkpoint(&mut self, _offset: u64) -> bool {
+                true
+            }
+            fn checkpoint(&mut self, _checkpoint: &mut Checkpoint) {
+                self.checkpoints += 1;
+            }
+        }
+        let mut deleting = Deleting {
+            path: path.clone(),
+            calls: 0,
+            checkpoints: 0,
+            captured: None,
         };
         assert!(adapter
             .stream(&reference, &ParseOptions::lazy(), &mut deleting)
             .is_err());
-        assert_eq!(calls, 1);
-        assert!(captured.unwrap().resolve().is_err());
+        assert_eq!(deleting.calls, 1);
+        assert_eq!(deleting.checkpoints, 0);
+        assert!(deleting.captured.unwrap().resolve().is_err());
     }
 
     #[test]
