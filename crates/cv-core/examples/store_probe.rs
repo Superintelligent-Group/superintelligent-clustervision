@@ -134,7 +134,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|events|events-collected|chunks|resolve\n\
+                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -440,8 +440,10 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail["metadata"] = serde_json::to_value(&s)?;
             }
         }
-        "chunks" | "resolve" => {
-            let (offset, len) = a.span.context("chunks/resolve requires --span OFFSET:LENGTH")?;
+        "chunks" | "resolve" | "resolved-len" => {
+            let (offset, len) = a
+                .span
+                .context("chunks/resolve/resolved-len requires --span OFFSET:LENGTH")?;
             if offset
                 .checked_add(len)
                 .is_none_or(|end| end > std::fs::metadata(&r.path).map_or(0, |m| m.len()))
@@ -455,6 +457,10 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 escaped: a.escaped,
             };
             let resolver = cv_core::Resolver::new(Some(r.path.clone()));
+            if a.operation == "resolved-len" {
+                out.detail = json!({ "decoded_bytes": resolver.resolved_len(&span) });
+                return Ok(out);
+            }
             if a.operation == "resolve" {
                 let text = resolver.resolve(&span).into_owned();
                 out.detail = json!({ "decoded_bytes": text.len() });
@@ -519,11 +525,11 @@ fn main() -> Result<()> {
             "effective_mode": match a.operation.as_str() {
                 "affordances" => "full",
                 "affordance-read" => "production-defined",
-                "baseline" | "discover" | "chunks" | "resolve" => "not-applicable",
+                "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" => "not-applicable",
                 _ => &a.mode,
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }
-                           else { json!(a.materialize || matches!(a.operation.as_str(), "affordances" | "hash")) },
+                           else { json!(a.materialize || matches!(a.operation.as_str(), "affordances" | "hash" | "resolve")) },
             "physical_input_bytes": physical_bytes, "traversed_bytes": null,
             "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
             "hash_output": a.hash_output,
