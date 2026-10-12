@@ -361,7 +361,7 @@ fn every_corpus_version_reads_as_its_golden_summary() {
 /// Doctor needs rich metadata but only decoded byte counts from text. Check every actual
 /// adapter's lazy-extra interpretation against its full reader, including child sessions.
 #[test]
-fn doctor_lazy_report_matches_full_corpus() {
+fn doctor_lazy_report_matches_full_corpus() -> anyhow::Result<()> {
     let _world = World::in_process("corpus-doctor");
     let mut checked = 0;
     for harness in HARNESSES {
@@ -372,16 +372,16 @@ fn doctor_lazy_report_matches_full_corpus() {
                 refs.extend(refs.clone().iter().flat_map(children));
             }
             for session in refs {
-                let report = |options: &cv_core::ParseOptions| {
+                let report = |options: &cv_core::ParseOptions| -> anyhow::Result<Value> {
                     let mut report = cv_core::doctor::Report::default();
                     let mut pass = report.session(Some(session.path.clone()));
-                    adapter.stream(&session, options, &mut pass).unwrap();
-                    pass.finish();
-                    report.to_json()
+                    adapter.try_stream(&session, options, &mut pass)?;
+                    pass.finish()?;
+                    Ok(report.to_json())
                 };
                 assert_eq!(
-                    report(&cv_core::ParseOptions::lazy_extra()),
-                    report(&cv_core::ParseOptions::full()),
+                    report(&cv_core::ParseOptions::lazy_extra())?,
+                    report(&cv_core::ParseOptions::full())?,
                     "doctor changed for {}:{} ({})",
                     harness.name,
                     session.id,
@@ -392,6 +392,7 @@ fn doctor_lazy_report_matches_full_corpus() {
         }
     }
     assert!(checked > 20, "doctor corpus unexpectedly empty: {checked}");
+    Ok(())
 }
 
 /// Nothing secret or personal in any committed corpus file: GitHub push protection rejects

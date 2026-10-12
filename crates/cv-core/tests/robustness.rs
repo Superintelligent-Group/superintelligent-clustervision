@@ -55,7 +55,7 @@ fn sample_session(harness: Harness) -> Session {
     asst.content.push(Block::ToolUse {
         id: "call_1".into(),
         name: "run_shell".into(),
-        input: serde_json::json!({ "cmd": "ls" }),
+        input: serde_json::json!({ "cmd": "ls" }).into(),
         namespace: None,
     });
 
