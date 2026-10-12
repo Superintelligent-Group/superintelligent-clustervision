@@ -797,6 +797,126 @@ mod tests {
         assert!(resumed > 200, "only {resumed} resumes");
     }
 
+    /// Native Qwen records finalize their own messages, but emission needs prefix call/model
+    /// state. Compression and rewind remain IR markers; legacy Gemini replay declines resume.
+    #[test]
+    fn qwen_record_checkpoints_preserve_state_and_partial_eof_records() {
+        let w = cv_testkit::World::in_process("qwen-record-resume");
+        let dir = w.base.join("projects/group/chats");
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = transcript(crate::Harness::Qwen, dir.join("s1.jsonl"));
+        let rec = |id: &str, body: serde_json::Value| {
+            let mut v = serde_json::json!({"uuid":id,"sessionId":"s1","cwd":"/scratch",
+                "version":"0.25.1","timestamp":"2026-10-11T00:00:01Z"});
+            v.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+            v.to_string()
+        };
+        let lines = [
+            rec(
+                "u1",
+                serde_json::json!({"type":"user","provenance":"real_user","message":{"role":"user",
+                "parts":[{"text":"first prompt"},{"text":"<qwen:user-prompt-submit-context>\nhook\n</qwen:user-prompt-submit-context>"}]}}),
+            ),
+            rec(
+                "a1",
+                serde_json::json!({"type":"assistant","model":"first-model","message":{"role":"model",
+                "parts":[{"functionCall":{"id":"c1","name":"tool_call","args":{"name":"agent","arguments":{"prompt":"investigate"}}}}]},
+                "usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":3}}),
+            ),
+            "invalid json".into(),
+            rec(
+                "r1",
+                serde_json::json!({"type":"tool_result","message":{"role":"user","parts":[
+                {"functionResponse":{"id":"c1","name":"tool_call","response":{"output":"returned"}}}]},
+                "toolCallResult":{"callId":"c1","status":"success"}}),
+            ),
+            rec(
+                "c1",
+                serde_json::json!({"type":"system","subtype":"chat_compression","systemPayload":{
+                "info":{"originalTokenCount":9,"newTokenCount":7},"compressedHistory":[{"role":"user","parts":[{"text":"summary"}]}]}}),
+            ),
+            rec(
+                "b1",
+                serde_json::json!({"type":"system","subtype":"rewind","systemPayload":{"targetMessageUuid":"u1"}}),
+            ),
+            rec(
+                "t1",
+                serde_json::json!({"type":"system","subtype":"custom_title","systemPayload":{"title":"late title"}}),
+            ),
+            rec(
+                "a2",
+                serde_json::json!({"type":"assistant","model":"next-model","gitBranch":"other",
+                "message":{"role":"model","parts":[{"text":"tail answer"}]}}),
+            ),
+        ];
+        let bytes = lines.join("\n"); // A valid final EOF record, deliberately without newline.
+        std::fs::write(&r.path, &bytes).unwrap();
+        let (full, session, counted) = pass(&r, None);
+        assert_eq!(full.cps.len(), lines.len() - 1);
+        assert!(full.cps.last().unwrap().offset < bytes.len() as u64);
+        for (i, cp) in full.cps.iter().enumerate() {
+            let (rest, s, c) = pass(&r, Some(cp));
+            assert_eq!(rest.msgs, full.msgs[cp.messages().unwrap()..]);
+            assert_eq!(s, session, "checkpoint {i}: metadata");
+            assert_eq!((c.turns, c.counts), (counted.turns, counted.counts.clone()));
+            assert_eq!(rest.cps, full.cps[i + 1..]);
+        }
+        let cp = full.cps.last().unwrap();
+        let grown = format!(
+            "{bytes}\n{}\n",
+            rec(
+                "u2",
+                serde_json::json!({"type":"user","message":{"role":"user","parts":[{"text":"appended"}]}})
+            )
+        );
+        std::fs::write(&r.path, &grown).unwrap();
+        let (whole, expected, counts) = pass(&r, None);
+        let (rest, got, c) = pass(&r, Some(cp));
+        assert_eq!(rest.msgs, whole.msgs[cp.messages().unwrap()..]);
+        assert_eq!(got, expected);
+        assert_eq!((c.turns, c.counts), (counts.turns, counts.counts));
+
+        // Every physical byte prefix counts exactly what the full parser saw at that baseline.
+        let before = dir.join("prefix.jsonl");
+        for cut in (0..grown.len()).step_by(17).chain([grown.len()]) {
+            std::fs::write(&before, &grown.as_bytes()[..cut]).unwrap();
+            let mut count = 0;
+            let mut sink = |_: Message| {
+                count += 1;
+                Flow::Continue
+            };
+            crate::harness::for_harness(crate::Harness::Qwen)
+                .unwrap()
+                .stream(
+                    &transcript(crate::Harness::Qwen, before.clone()),
+                    &ParseOptions::full(),
+                    &mut sink,
+                )
+                .unwrap();
+            assert_eq!(
+                crate::watch::resolve(&r, crate::watch::Mark::Bytes(cut as u64)),
+                Some(count),
+                "cut {cut}"
+            );
+        }
+        assert_eq!(
+            crate::watch::baseline(&r),
+            Some(crate::watch::Mark::Bytes(grown.len() as u64))
+        );
+
+        let legacy = transcript(crate::Harness::Qwen, w.base.join("tmp/hash/chats/session.jsonl"));
+        let adapter = crate::harness::for_harness(crate::Harness::Qwen).unwrap();
+        let mut keep = Keep::default();
+        assert!(adapter
+            .resume(&legacy, &ParseOptions::lazy(), &mut keep, cp)
+            .unwrap()
+            .is_none());
+        assert!(
+            keep.msgs.is_empty() && keep.cps.is_empty(),
+            "decline must touch nothing"
+        );
+    }
+
     /// The append case: a pass over a file whose writer stopped mid-line takes its last checkpoint
     /// before that line; once the line and more are appended, resuming there gives what a whole
     /// pass over the grown file gives.

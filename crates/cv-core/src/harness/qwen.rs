@@ -18,11 +18,12 @@
 
 use super::{parse_ts, Adapter};
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions, ADAPTER_LAYER};
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
-use std::io::BufReader;
+use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -111,6 +112,34 @@ impl Adapter for Qwen {
         // The gemini-cli shape: the streaming machinery (mmap + RawValue for legacy whole-file
         // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
         crate::harness::gemini::stream_for(Harness::Qwen, r, opts, sink)
+    }
+
+    /// Project ChatRecords are chronological: each complete physical record finalizes all its
+    /// emitted messages, including rewind/compression markers. Legacy Gemini replay is excluded.
+    fn resume_format(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn resume(
+        &self,
+        r: &SessionRef,
+        _opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        from: &Checkpoint,
+    ) -> Result<Option<Session>> {
+        if !is_session_jsonl(&r.path) {
+            return Ok(None);
+        }
+        let Some(state) = from.get::<ReplayCheckpoint>(ADAPTER_LAYER) else {
+            return Ok(None);
+        };
+        let mut file = std::fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+        if from.offset > file.metadata()?.len() {
+            return Ok(None);
+        }
+        file.seek(SeekFrom::Start(from.offset))
+            .with_context(|| format!("seeking {}", r.path.display()))?;
+        stream_reader_at(state.session, state.replay, BufReader::new(file), from.offset, sink).map(Some)
     }
 
     /// The cron jobs `cron_create` persists per project in `tmp/<sha256(cwd)>/scheduled_tasks.json`
@@ -204,7 +233,7 @@ fn is_session_file(path: &Path) -> bool {
 
 /// Whether `path` is a session JSONL under `projects/`: `<cwd>/chats/<id>.jsonl` or
 /// `<cwd>/subagents/<parent>/agent-<id>.jsonl`.
-fn is_session_jsonl(path: &Path) -> bool {
+pub(crate) fn is_session_jsonl(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
         return false;
     }
@@ -257,28 +286,36 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
 }
 
 /// Cross-record state of one session file's emission.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct ReplayState {
     session_model: Option<String>,
     first_prompt: Option<String>,
     title: Option<String>,
     /// `functionCall` ids of `agent` calls: their `tool_result` is a sub-agent's return.
-    spawn_calls: HashSet<String>,
+    spawn_calls: BTreeSet<String>,
     /// `functionCall` id → the tool's name (unwrapped from `tool_call`), for the results.
     call_names: std::collections::HashMap<String, String>,
+    skipped: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReplayCheckpoint<S = Session, R = ReplayState> {
+    session: S,
+    replay: R,
 }
 
 /// Stream one session JSONL into `sink`, returning the session's metadata.
-fn stream_session_jsonl(path: &Path, sink: &mut dyn MessageSink) -> Result<Session> {
-    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+fn session_shell(path: &Path, sink: &mut dyn MessageSink) -> Session {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
     let parent = subagent_parent(path);
-    let mut s = Session::new(stem.clone(), Harness::Qwen);
+    let mut s = Session::new(stem, Harness::Qwen);
     s.source_path = Some(path.to_path_buf());
     s.lineage.parent = parent.clone();
     if parent.is_some() {
-        // The `agent-<id>.meta.json` sidecar: the spawning call and the agent type.
-        let meta = std::fs::read_to_string(path.with_extension("meta.json"))
+        // The spawning call/type may change independently of the transcript, including absence.
+        let path = path.with_extension("meta.json");
+        sink.dependency(&path);
+        let meta = std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok());
         if let Some(meta) = meta {
@@ -287,22 +324,103 @@ fn stream_session_jsonl(path: &Path, sink: &mut dyn MessageSink) -> Result<Sessi
             s.lineage.agent_path = get("subagentName").or_else(|| get("agentType"));
         }
     }
-    let mut st = ReplayState::default();
-    let mut stopped = false;
-    let skipped = super::for_each_json_line(BufReader::new(file), |rec| {
-        let Value::Object(rec) = rec else { return Flow::Continue };
-        session_facts(&mut s, &rec, parent.is_some());
-        if stopped {
-            return Flow::Continue; // keep reading metadata (titles, last timestamp) after a Stop
-        }
-        if emit_record(&rec, &mut s, &mut st, sink) == Flow::Stop {
-            stopped = true;
-        }
+    s
+}
+
+/// Stream one session JSONL into `sink`, returning the session's metadata.
+fn stream_session_jsonl(path: &Path, sink: &mut dyn MessageSink) -> Result<Session> {
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    stream_reader_at(
+        session_shell(path, sink),
+        ReplayState::default(),
+        BufReader::new(file),
+        0,
+        sink,
+    )
+}
+
+/// The message count an append-only project transcript had at a byte baseline, including an
+/// incomplete final physical record exactly as the whole parser would have accepted it then.
+/// Legacy Gemini shapes cannot pin old logical output with a physical byte prefix.
+pub(crate) fn count_prefix(r: &SessionRef, len: u64) -> Result<usize> {
+    anyhow::ensure!(
+        is_session_jsonl(&r.path),
+        "Qwen recording is not chronological project JSONL"
+    );
+    let file = std::fs::File::open(&r.path)?;
+    let mut count = 0;
+    let mut sink = |_: Message| {
+        count += 1;
         Flow::Continue
-    });
+    };
+    stream_reader_at(
+        session_shell(&r.path, &mut sink),
+        ReplayState::default(),
+        BufReader::new(file.take(len)),
+        0,
+        &mut sink,
+    )?;
+    Ok(count)
+}
+
+/// A complete ChatRecord never changes an earlier message. Offer checkpoints only after its
+/// newline: a valid but unfinished EOF record is replayed from the previous boundary on append.
+fn stream_reader_at(
+    mut s: Session,
+    mut st: ReplayState,
+    mut reader: impl BufRead,
+    mut offset: u64,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    let parent = s.lineage.parent.is_some();
+    let mut stopped = false;
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        // Hard I/O failure cannot establish a completed pass/cache baseline. Bad JSON and
+        // UTF-8 remain tolerant, matching the shared JSONL reader's skipped-line policy.
+        let n = reader.read_until(b'\n', &mut bytes)?;
+        if n == 0 {
+            break;
+        }
+        offset += n as u64;
+        match std::str::from_utf8(&bytes) {
+            Err(_) => st.skipped += 1,
+            Ok(line) => {
+                let mut skipped = 0;
+                super::each_json_line_inner(
+                    line,
+                    &mut skipped,
+                    &mut |line| serde_json::from_str(line).ok(),
+                    &mut |rec| {
+                        let Value::Object(rec) = rec else {
+                            return Flow::Continue;
+                        };
+                        session_facts(&mut s, &rec, parent);
+                        if !stopped && emit_record(&rec, &mut s, &mut st, sink) == Flow::Stop {
+                            stopped = true;
+                        }
+                        Flow::Continue
+                    },
+                );
+                st.skipped += skipped;
+            }
+        }
+        if !stopped && bytes.last() == Some(&b'\n') && sink.wants_checkpoint(offset) {
+            let mut cp = Checkpoint::new(offset);
+            cp.put(
+                ADAPTER_LAYER,
+                &ReplayCheckpoint {
+                    session: &s,
+                    replay: &st,
+                },
+            );
+            sink.checkpoint(&mut cp);
+        }
+    }
     s.model = st.session_model.take();
     s.title = st.title.take().or(st.first_prompt.take());
-    super::note_skipped_lines(&mut s, skipped);
+    super::note_skipped_lines(&mut s, st.skipped);
     Ok(s)
 }
 

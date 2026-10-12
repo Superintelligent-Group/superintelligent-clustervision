@@ -73,9 +73,11 @@ pub enum Mark {
 }
 
 /// Transcripts that only ever grow by appending lines, so a byte length pins a past state: Claude
-/// and plain Codex `.jsonl` (not `.jsonl.zst`, whose byte prefix is not a transcript prefix).
+/// and plain Codex `.jsonl`, plus Qwen's chronological `projects/...` ChatRecords. Compressed
+/// Codex and Qwen's legacy Gemini replay are excluded: their byte prefix is not a logical prefix.
 fn append_only(r: &SessionRef) -> bool {
-    matches!(r.harness, Harness::Claude | Harness::Codex) && r.path.extension().is_some_and(|e| e == "jsonl")
+    (matches!(r.harness, Harness::Claude | Harness::Codex) && r.path.extension().is_some_and(|e| e == "jsonl"))
+        || (r.harness == Harness::Qwen && harness::qwen::is_session_jsonl(&r.path))
 }
 
 /// Record where `r` stands now, as cheaply as possible: one `stat` for an append-only transcript,
@@ -137,6 +139,7 @@ pub fn resolve(r: &SessionRef, mark: Mark) -> Option<usize> {
         Mark::Bytes(len) => match r.harness {
             Harness::Claude => harness::claude::count_prefix(r, len).ok(),
             Harness::Codex => harness::codex::count_prefix(r, len).ok(),
+            Harness::Qwen => harness::qwen::count_prefix(r, len).ok(),
             _ => None,
         },
     }
