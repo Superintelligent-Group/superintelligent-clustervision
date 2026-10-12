@@ -52,7 +52,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -214,12 +214,12 @@ impl Adapter for Codex {
                         #[cfg(unix)]
                         let _ = map.advise(memmap2::Advice::Sequential);
                         let has_events = detect_has_events_bytes(&map);
-                        return Ok(stream_jsonl_spans(
+                        return Ok(stream_jsonl_spans_with_options(
                             &r.id,
                             &map,
                             Some(r.path.clone()),
                             has_events,
-                            opts.offsets,
+                            opts,
                             sink,
                         ));
                     }
@@ -241,10 +241,9 @@ impl Adapter for Codex {
         Some(RESUME_FORMAT)
     }
 
-    /// Only the span path of a plain `.jsonl` rollout takes checkpoints, so only it resumes: the
-    /// mmap from `from.offset` on, with the session and [`CodexCtx`] the checkpoint kept.
-    /// `has_events` is decided again from the head (it never changes once the head is written);
-    /// a different verdict declines.
+    /// Plain JSONL resumes from a physical record boundary using the same parser transport and
+    /// option flavor as its checkpoint. Compressed and legacy documents have no physical JSONL
+    /// seek position. The whole-file `has_events` decision is revalidated before any callbacks.
     fn resume(
         &self,
         r: &SessionRef,
@@ -253,14 +252,37 @@ impl Adapter for Codex {
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
-            #[cfg(feature = "mmap")]
+            if is_zst_path(&r.path) || !is_jsonl_path(&r.path) {
+                return Ok(None);
+            }
+            let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
+                return Ok(None);
+            };
+            if state.reading.flavor != Flavor::of(opts)
+                || state.session.source_path.as_deref() != Some(r.path.as_path())
             {
-                if !opts.spans || is_zst_path(&r.path) || !is_jsonl_path(&r.path) {
+                return Ok(None);
+            }
+            if state.reading.buffered {
+                let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+                if file.metadata()?.len() < from.offset || detect_has_events(open_rollout(&r.path)?) != state.has_events
+                {
                     return Ok(None);
                 }
-                let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
+                file.seek(SeekFrom::Start(from.offset))?;
+                return Ok(Some(stream_jsonl_at(
+                    &r.id,
+                    BufReader::new(file),
+                    state,
+                    from.offset,
+                    sink,
+                )));
+            }
+            #[cfg(feature = "mmap")]
+            {
+                if !opts.spans {
                     return Ok(None);
-                };
+                }
                 let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
                 let map =
                     unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mapping {}", r.path.display()))?;
@@ -292,10 +314,9 @@ impl Adapter for Codex {
 
 /// What a checkpoint's adapter state means: bump when [`ResumeState`], [`CodexCtx`], or what a
 /// record parses to, changes.
-const RESUME_FORMAT: u32 = 1;
+const RESUME_FORMAT: u32 = 2;
 
-/// The span path's whole state between records, when nothing is held back.
-#[cfg(feature = "mmap")]
+/// Whole state between records, when no message awaits a following usage record.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ResumeState {
     session: Session,
@@ -303,6 +324,55 @@ struct ResumeState {
     has_events: bool,
     meta_sent: bool,
     skipped: u64,
+    reading: Reading,
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct Flavor {
+    extra: bool,
+    spans: bool,
+    offsets: bool,
+    complete: bool,
+}
+
+impl Flavor {
+    fn of(opts: &ParseOptions) -> Self {
+        Self {
+            extra: opts.extra,
+            spans: opts.spans,
+            offsets: opts.offsets,
+            complete: opts.complete,
+        }
+    }
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct Reading {
+    buffered: bool,
+    flavor: Flavor,
+}
+
+impl ResumeState {
+    fn new(source_path: Option<PathBuf>, has_events: bool, opts: &ParseOptions, buffered: bool) -> Self {
+        Self {
+            session: Session {
+                source_path,
+                ..Session::new(String::new(), Harness::Codex)
+            },
+            ctx: if buffered {
+                CodexCtx::for_opts(opts)
+            } else {
+                CodexCtx::default()
+            },
+            has_events,
+            meta_sent: false,
+            skipped: 0,
+            reading: Reading {
+                buffered,
+                flavor: Flavor::of(opts),
+            },
+        }
+    }
 }
 
 /// A `rollout-*.jsonl.zst`: Codex's in-place compression of cold rollouts (readable only with the
@@ -670,13 +740,30 @@ pub fn stream_jsonl<R: BufRead>(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    let mut s = Session {
-        source_path,
-        ..Session::new(String::new(), Harness::Codex)
-    };
+    let state = ResumeState::new(source_path, has_events, opts, true);
+    stream_jsonl_at(id, reader, state, 0, sink)
+}
+
+fn stream_jsonl_at<R: BufRead>(
+    id: &str,
+    reader: R,
+    state: ResumeState,
+    at: u64,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    let ResumeState {
+        session: mut s,
+        mut ctx,
+        has_events,
+        mut meta_sent,
+        skipped: prior_skipped,
+        reading,
+    } = state;
+    let capture = s
+        .source_path
+        .as_ref()
+        .is_some_and(|path| is_jsonl_path(path) && !is_zst_path(path));
     let mut scratch: Vec<Message> = Vec::new();
-    let mut ctx = CodexCtx::for_opts(opts);
-    let mut meta_sent = false;
     let mut stopped = false;
     let complete = ctx.complete;
     let parse = |line: &str| -> Option<Value> {
@@ -687,7 +774,7 @@ pub fn stream_jsonl<R: BufRead>(
         }
         serde_json::from_str(line).ok()
     };
-    let skipped = super::for_each_json_line_with(reader, parse, |v| {
+    let skipped = super::for_each_json_line_at_with(reader, at, parse, |v, off, complete, skipped| {
         dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx);
         // Hand the session metadata to the sink as soon as the model is known (session_meta /
         // turn_context land in the first records, before any message), so header-rendering sinks
@@ -698,9 +785,25 @@ pub fn stream_jsonl<R: BufRead>(
         }
         let flow = flush_all_but_held(&mut scratch, sink);
         stopped = flow == Flow::Stop;
+        // A trailing assistant is provisional until its usage arrives; a partial EOF record is
+        // provisional until a newline arrives. Neither belongs in a reusable immutable prefix.
+        if !stopped && capture && scratch.is_empty() && complete && sink.wants_checkpoint(off) {
+            checkpoint_at(
+                off,
+                StateRef {
+                    session: &s,
+                    ctx: &ctx,
+                    has_events,
+                    meta_sent,
+                    skipped: prior_skipped + skipped,
+                    reading,
+                },
+                sink,
+            );
+        }
         flow
     });
-    super::note_skipped_lines(&mut s, skipped);
+    super::note_skipped_lines(&mut s, prior_skipped + skipped);
     if !stopped {
         // EOF: emit the held trailing message, if any (no token_count followed it).
         for m in scratch.drain(..) {
@@ -732,18 +835,24 @@ pub fn stream_jsonl_spans(
     stamp_offsets: bool,
     sink: &mut dyn MessageSink,
 ) -> Session {
-    let state = ResumeState {
-        session: Session {
-            source_path,
-            ..Session::new(String::new(), Harness::Codex)
-        },
-        // The span path is the lazy (never format-complete) path, so inherited prefixes are skipped.
-        ctx: CodexCtx::default(),
-        has_events,
-        meta_sent: false,
-        skipped: 0,
+    let opts = ParseOptions {
+        offsets: stamp_offsets,
+        ..ParseOptions::lazy()
     };
-    stream_jsonl_spans_at(id, data, state, 0, stamp_offsets, sink)
+    stream_jsonl_spans_with_options(id, data, source_path, has_events, &opts, sink)
+}
+
+#[cfg(feature = "mmap")]
+fn stream_jsonl_spans_with_options(
+    id: &str,
+    data: &[u8],
+    source_path: Option<PathBuf>,
+    has_events: bool,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    let state = ResumeState::new(source_path, has_events, opts, false);
+    stream_jsonl_spans_at(id, data, state, 0, opts.offsets, sink)
 }
 
 /// [`stream_jsonl_spans`] from byte `at` of `data` with `state` (a checkpoint's, or a fresh one at
@@ -763,6 +872,7 @@ fn stream_jsonl_spans_at(
         has_events,
         mut meta_sent,
         mut skipped,
+        reading,
     } = state;
     let mut scratch: Vec<Message> = Vec::new();
     let mut off = at;
@@ -839,7 +949,18 @@ fn stream_jsonl_spans_at(
         // Quiescent: nothing held back, and the line was finished (a partial last line is read
         // again, whole, by whoever resumes here).
         if scratch.is_empty() && end < data.len() && sink.wants_checkpoint(off) {
-            checkpoint_at(off, &s, &ctx, has_events, meta_sent, skipped, sink);
+            checkpoint_at(
+                off,
+                StateRef {
+                    session: &s,
+                    ctx: &ctx,
+                    has_events,
+                    meta_sent,
+                    skipped,
+                    reading,
+                },
+                sink,
+            );
         }
     }
     // EOF: emit the held trailing message, if any (no token_count followed it).
@@ -858,36 +979,20 @@ fn stream_jsonl_spans_at(
     s
 }
 
-/// Offer `sink` the checkpoint after the line ending at `off`.
-#[cfg(feature = "mmap")]
-fn checkpoint_at(
-    off: u64,
-    s: &Session,
-    ctx: &CodexCtx,
+#[derive(serde::Serialize)]
+struct StateRef<'a> {
+    session: &'a Session,
+    ctx: &'a CodexCtx,
     has_events: bool,
     meta_sent: bool,
     skipped: u64,
-    sink: &mut dyn MessageSink,
-) {
-    #[derive(serde::Serialize)]
-    struct StateRef<'a> {
-        session: &'a Session,
-        ctx: &'a CodexCtx,
-        has_events: bool,
-        meta_sent: bool,
-        skipped: u64,
-    }
+    reading: Reading,
+}
+
+/// Offer `sink` the checkpoint after the line ending at `off`.
+fn checkpoint_at(off: u64, state: StateRef<'_>, sink: &mut dyn MessageSink) {
     let mut cp = Checkpoint::new(off);
-    cp.put(
-        crate::stream::ADAPTER_LAYER,
-        &StateRef {
-            session: s,
-            ctx,
-            has_events,
-            meta_sent,
-            skipped,
-        },
-    );
+    cp.put(crate::stream::ADAPTER_LAYER, &state);
     sink.checkpoint(&mut cp);
 }
 
@@ -2253,6 +2358,273 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[derive(Default)]
+    struct BufferedKept {
+        messages: Vec<Message>,
+        checkpoints: Vec<(usize, Checkpoint)>,
+        metadata: usize,
+        dependencies: usize,
+    }
+
+    impl MessageSink for BufferedKept {
+        fn message(&mut self, m: Message) -> Flow {
+            self.messages.push(m);
+            Flow::Continue
+        }
+        fn meta(&mut self, _: &Session) {
+            self.metadata += 1;
+        }
+        fn dependency(&mut self, _: &Path) {
+            self.dependencies += 1;
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, cp: &mut Checkpoint) {
+            self.checkpoints.push((self.messages.len(), cp.clone()));
+        }
+    }
+
+    fn buffered_pass(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Session {
+        stream_jsonl(
+            &r.id,
+            open_rollout(&r.path).unwrap(),
+            Some(r.path.clone()),
+            detect_has_events(open_rollout(&r.path).unwrap()),
+            opts,
+            sink,
+        )
+    }
+
+    // Independent old buffered transport/collector: preserve .lines(), trim, lean/full fallback,
+    // held-message EOF handling, and corruption counts while the production driver tracks bytes.
+    fn old_buffered_oracle(r: &SessionRef, opts: &ParseOptions) -> Session {
+        let mut s = Session {
+            source_path: Some(r.path.clone()),
+            ..Session::new(String::new(), Harness::Codex)
+        };
+        let mut ctx = CodexCtx::for_opts(opts);
+        let mut scratch = Vec::new();
+        let mut sink = crate::stream::CollectSink::default();
+        let mut skipped = 0;
+        let has_events = detect_has_events(open_rollout(&r.path).unwrap());
+        for line in open_rollout(&r.path).unwrap().lines() {
+            let Ok(line) = line else {
+                skipped += 1;
+                continue;
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v = if !opts.complete {
+                lean::parse(line.as_bytes(), false).map(|l| l.v).ok()
+            } else {
+                None
+            }
+            .or_else(|| serde_json::from_str(line).ok());
+            let Some(v) = v else {
+                skipped += 1;
+                continue;
+            };
+            dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx);
+            flush_all_but_held(&mut scratch, &mut sink);
+        }
+        for m in scratch {
+            sink.message(m);
+        }
+        super::super::note_skipped_lines(&mut s, skipped);
+        if s.id.is_empty() {
+            s.id.clone_from(&r.id);
+        }
+        s.messages = sink.messages;
+        s
+    }
+
+    #[test]
+    fn buffered_resume_native_corpus_and_options_match_old_exact_suffixes() {
+        let world = cv_testkit::World::in_process("codex_buffered_resume_corpus");
+        let adapter = Codex::with_home(&world.home.join(".codex"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/codex");
+        let mut files = 0;
+        let mut resumes = 0;
+        for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            files += 1;
+            let r = SessionRef::new("oracle", Harness::Codex, entry.path().to_path_buf());
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::full(),
+                ParseOptions::bulk(),
+                ParseOptions::complete(),
+            ] {
+                let expected = old_buffered_oracle(&r, &opts);
+                let mut full = BufferedKept::default();
+                let mut shell = buffered_pass(&r, &opts, &mut full);
+                shell.messages = full.messages.clone();
+                assert_eq!(
+                    serde_json::to_value(&shell).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+                for (index, (count, cp)) in full.checkpoints.iter().enumerate() {
+                    let mut suffix = BufferedKept::default();
+                    let mut resumed = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+                    assert_eq!(
+                        serde_json::to_value(&suffix.messages).unwrap(),
+                        serde_json::to_value(&full.messages[*count..]).unwrap()
+                    );
+                    resumed.messages = full.messages[..*count].iter().cloned().chain(suffix.messages).collect();
+                    assert_eq!(
+                        serde_json::to_value(resumed).unwrap(),
+                        serde_json::to_value(&shell).unwrap()
+                    );
+                    assert_eq!(
+                        suffix.checkpoints,
+                        full.checkpoints[index + 1..]
+                            .iter()
+                            .map(|(n, cp)| (n - count, cp.clone()))
+                            .collect::<Vec<_>>()
+                    );
+                    resumes += 1;
+                }
+            }
+        }
+        eprintln!("codex buffered native files={files} exact suffix resumes={resumes}");
+        assert!(files >= 16 && resumes > 100);
+    }
+
+    #[test]
+    fn buffered_resume_replays_pending_usage_partial_eof_and_declines_before_callbacks() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("codex_buffered_resume_pending");
+        let path = world.base.join("rollout-pending.jsonl");
+        let prefix = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"model\":\"test\"}}\r\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+            "bad json\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"held\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{"
+        );
+        let prefix = prefix.replace("\"held\"", &format!("\"{}\"", "held_sentinel".repeat(100_000)));
+        fs::write(&path, &prefix).unwrap();
+        let r = SessionRef::new("fallback", Harness::Codex, path);
+        let adapter = Codex::with_home(&world.home.join(".codex"));
+        let opts = ParseOptions::full();
+        let mut first = BufferedKept::default();
+        buffered_pass(&r, &opts, &mut first);
+        let (count, cp) = first.checkpoints.last().unwrap();
+        assert_eq!(*count, 1, "held EOF reply is not part of the immutable prefix");
+        assert_eq!(cp.offset as usize, prefix.find("bad json").unwrap());
+        let state = serde_json::to_string(cp).unwrap();
+        assert!(state.len() < 2048 && !state.contains("held_sentinel"));
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&r.path).unwrap(),
+            "\"total_token_usage\":{{\"input_tokens\":9,\"output_tokens\":3}},\"last_token_usage\":{{\"input_tokens\":9,\"output_tokens\":3}}}}}}}}"
+        )
+        .unwrap();
+        let mut bytes = fs::read(&r.path).unwrap();
+        bytes.extend_from_slice(b"\xff\n\n");
+        bytes.extend_from_slice("\u{2003}{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"escaped \\\" \\u263a\"}}\u{2003}\r\n".as_bytes());
+        fs::write(&r.path, bytes).unwrap();
+        let mut suffix = BufferedKept::default();
+        let mut resumed = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        resumed.messages = first.messages[..*count]
+            .iter()
+            .cloned()
+            .chain(suffix.messages)
+            .collect();
+        assert_eq!(resumed.messages[1].usage.as_ref().unwrap().input_tokens, Some(9));
+        assert_eq!(
+            serde_json::to_value(resumed).unwrap(),
+            serde_json::to_value(old_buffered_oracle(&r, &opts)).unwrap()
+        );
+
+        let mut untouched = BufferedKept::default();
+        assert!(adapter
+            .try_resume(&r, &ParseOptions::complete(), &mut untouched, cp)
+            .unwrap()
+            .is_none());
+        let mut elsewhere = r.clone();
+        elsewhere.path = world.base.join("rollout-other.jsonl");
+        assert!(adapter
+            .try_resume(&elsewhere, &opts, &mut untouched, cp)
+            .unwrap()
+            .is_none());
+        elsewhere.path = world.base.join("rollout.json");
+        assert!(adapter
+            .try_resume(&elsewhere, &opts, &mut untouched, cp)
+            .unwrap()
+            .is_none());
+        elsewhere.path = world.base.join("rollout.jsonl.zst");
+        assert!(adapter
+            .try_resume(&elsewhere, &opts, &mut untouched, cp)
+            .unwrap()
+            .is_none());
+        fs::write(&r.path, b"").unwrap();
+        assert!(adapter.try_resume(&r, &opts, &mut untouched, cp).unwrap().is_none());
+        assert!(untouched.messages.is_empty() && untouched.checkpoints.is_empty());
+        assert_eq!((untouched.metadata, untouched.dependencies), (0, 0));
+    }
+
+    #[test]
+    fn buffered_resume_append_work_excludes_stable_prefix_and_revalidates_detector() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("codex_buffered_resume_append");
+        let path = world.base.join("rollout-append.jsonl");
+        let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n";
+        fs::write(&path, line.repeat(20_000)).unwrap();
+        let r = SessionRef::new("fallback", Harness::Codex, path);
+        let adapter = Codex::with_home(&world.home.join(".codex"));
+        let opts = ParseOptions::full();
+        let mut first = BufferedKept::default();
+        buffered_pass(&r, &opts, &mut first);
+        let (count, cp) = first.checkpoints.last().unwrap();
+        assert_eq!(*count, 20_000);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&r.path)
+            .unwrap()
+            .write_all(line.repeat(200).as_bytes())
+            .unwrap();
+        let mut suffix = BufferedKept::default();
+        let resumed = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        let mut whole = old_buffered_oracle(&r, &opts);
+        assert_eq!(
+            serde_json::to_value(&suffix.messages).unwrap(),
+            serde_json::to_value(&whole.messages[*count..]).unwrap()
+        );
+        whole.messages.clear();
+        assert_eq!(
+            serde_json::to_value(resumed).unwrap(),
+            serde_json::to_value(whole).unwrap()
+        );
+        assert_eq!(suffix.messages.len(), 200);
+        let bytes = serde_json::to_vec(cp).unwrap().len();
+        eprintln!(
+            "codex buffered stable_prefix=20000 appended_callbacks=200 whole_callbacks=20200 checkpoint_bytes={bytes}"
+        );
+        assert!(bytes < 2048);
+
+        let old = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"old\"}]}}\n";
+        fs::write(&r.path, old).unwrap();
+        let mut first = BufferedKept::default();
+        buffered_pass(&r, &opts, &mut first);
+        let cp = &first.checkpoints.last().unwrap().1;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&r.path)
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+        let mut untouched = BufferedKept::default();
+        assert!(adapter.try_resume(&r, &opts, &mut untouched, cp).unwrap().is_none());
+        assert!(untouched.messages.is_empty() && untouched.checkpoints.is_empty());
+        assert_eq!((untouched.metadata, untouched.dependencies), (0, 0));
+    }
 
     /// A fixture under `tests/fixtures/codex/`, without its final newline (the text the old
     /// inline `lines.join("\n")` built).
