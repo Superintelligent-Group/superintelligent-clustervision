@@ -59,6 +59,7 @@ pub struct SessionFacts<'a> {
     tree: OnceCell<Vec<crate::SubagentInfo>>,
     workflows: OnceCell<Vec<crate::Workflow>>,
     compactions: OnceCell<usize>,
+    affordances: OnceCell<HashSet<crate::affordance::Kind>>,
 }
 
 impl<'a> SessionFacts<'a> {
@@ -72,6 +73,7 @@ impl<'a> SessionFacts<'a> {
             tree: OnceCell::new(),
             workflows: OnceCell::new(),
             compactions: OnceCell::new(),
+            affordances: OnceCell::new(),
         }
     }
 
@@ -100,6 +102,17 @@ impl<'a> SessionFacts<'a> {
 
     fn workflows(&self) -> &[crate::Workflow] {
         self.workflows.get_or_init(|| crate::workflows_of(self.r))
+    }
+
+    /// The affordance kinds this session shows, transcript and side store.
+    fn affordance_kinds(&self) -> &HashSet<crate::affordance::Kind> {
+        self.affordances.get_or_init(|| {
+            let mut rows = crate::affordance::of_session(self.session);
+            if let Some(a) = crate::harness::for_harness(self.r.harness) {
+                rows.extend(a.store_affordances(self.r));
+            }
+            rows.into_iter().map(|a| a.kind).collect()
+        })
     }
 
     fn compaction_count(&self) -> usize {
@@ -150,7 +163,7 @@ impl ExtFacts for SessionFacts<'_> {
             }
             "compacted" => self.compaction_count() > 0,
             "workflows" => !self.workflows().is_empty(),
-            _ => false,
+            other => crate::affordance::Kind::parse(other).is_some_and(|k| self.affordance_kinds().contains(&k)),
         })
     }
 

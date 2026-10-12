@@ -380,3 +380,26 @@ fn sess(primary: Option<&str>, turn_models: &[Option<&str>]) -> Session {
         lineage: crate::ir::Lineage::default(),
     }
 }
+
+/// `has:<affordance>` reads the affordance view of the parsed session: a Codex `update_plan` call
+/// is a plan whatever the harness calls it, and a session with none is not one.
+#[test]
+fn has_an_affordance_reads_the_view() {
+    use crate::ir::Block;
+    let r = refx("a", Harness::Codex, None, None, 1);
+    let mut reply = Message::new(Role::Assistant);
+    reply.content.push(Block::ToolUse {
+        id: "c1".into(),
+        name: "update_plan".into(),
+        input: serde_json::json!({"plan": [{"step": "x", "status": "pending"}]}),
+        namespace: None,
+    });
+    let s = Session {
+        messages: vec![reply],
+        ..Session::new("a", Harness::Codex)
+    };
+    let none = facts::TextSets::empty();
+    assert!(facts::matches_full(&q("has:plan"), &r, &s, &none));
+    assert!(!facts::matches_full(&q("has:schedule"), &r, &s, &none));
+    assert!(SessionQuery::parse("has:nonsense").is_err());
+}

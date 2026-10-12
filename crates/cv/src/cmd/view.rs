@@ -36,27 +36,101 @@ enum KindView {
     /// `compaction_boundary` / `compaction_summary`: the compaction seams, each boundary paired
     /// with its summary (`compaction::print_compactions`).
     Compactions,
+    /// `plan`, `schedule`, `background_job`, … (or `affordances`, all of them): the affordance rows
+    /// (`cv_core::affordance`, `docs/design/AFFORDANCES.md`).
+    Affordances(std::collections::HashSet<cv_core::affordance::Kind>),
 }
 
 fn parse_kinds(spec: &str) -> Result<KindView> {
     const SAID: [&str; 2] = ["prompt", "answer"];
     const SEAMS: [&str; 2] = ["compaction_boundary", "compaction_summary"];
     let kinds: Vec<&str> = spec.split(',').map(str::trim).filter(|k| !k.is_empty()).collect();
-    let accepted = "`--kind` takes `prompt,answer` (what the person said) or \
-                    `compaction_boundary,compaction_summary` (the compaction seams)";
-    if let Some(k) = kinds.iter().find(|k| !SAID.contains(k) && !SEAMS.contains(k)) {
+    let words: Vec<&str> = cv_core::affordance::Kind::ALL.iter().map(|k| k.as_str()).collect();
+    let accepted = format!(
+        "`--kind` takes `prompt,answer` (what the person said), \
+         `compaction_boundary,compaction_summary` (the compaction seams), or affordances: {} (`affordances` is all of them)",
+        words.join(",")
+    );
+    let family = |k: &str| {
+        if SAID.contains(&k) {
+            Some(0)
+        } else if SEAMS.contains(&k) {
+            Some(1)
+        } else if k == "affordances" || cv_core::affordance::Kind::parse(k).is_some() {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    if let Some(k) = kinds.iter().find(|k| family(k).is_none()) {
         return usage(format!("no `--kind` view for {k:?} — {accepted}"));
     }
-    let said = kinds.iter().filter(|k| SAID.contains(k)).count();
-    match (said, kinds.len() - said) {
-        (0, 0) => usage(format!("`--kind` is empty — {accepted}")),
-        (_, 0) => Ok(KindView::Said {
+    let families: std::collections::BTreeSet<u8> = kinds.iter().filter_map(|k| family(k)).collect();
+    match families.iter().copied().collect::<Vec<_>>().as_slice() {
+        [] => usage(format!("`--kind` is empty — {accepted}")),
+        [0] => Ok(KindView::Said {
             prompts: kinds.contains(&"prompt"),
             answers: kinds.contains(&"answer"),
         }),
-        (0, _) => Ok(KindView::Compactions),
+        [1] => Ok(KindView::Compactions),
+        [2] => Ok(KindView::Affordances(
+            cv_core::affordance::parse_kinds(&kinds).expect("every word checked above"),
+        )),
         _ => usage(format!("`--kind {spec}` mixes two views — {accepted}")),
     }
+}
+
+/// `show --kind plan,schedule,…`: the affordance rows of one session, transcript rows in message
+/// order then the side store's. A window narrows the transcript rows; store rows always print.
+fn print_affordances(
+    r: &SessionRef,
+    adapter: &dyn Adapter,
+    kinds: &std::collections::HashSet<cv_core::affordance::Kind>,
+    range: Option<(usize, Option<usize>)>,
+    json: bool,
+) -> Result<()> {
+    use cv_core::sanitize::sanitize_line;
+    let mut rows = cv_core::affordance::read(adapter, r)?;
+    rows.retain(|a| {
+        kinds.contains(&a.kind)
+            && match (a.index, range) {
+                (Some(i), Some((start, end))) => i >= start && end.is_none_or(|e| i < e),
+                _ => true,
+            }
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    println!("# affordances of {} — {} row(s)\n", short_id(&r.id), rows.len());
+    for a in &rows {
+        let at = match (a.index, a.source) {
+            (Some(i), _) => format!("[{i}]"),
+            (None, cv_core::affordance::Source::Store) => "store".to_string(),
+            (None, _) => "session".to_string(),
+        };
+        let ts = a
+            .timestamp
+            .map(|t| crate::util::fmt_local(t, "%Y-%m-%d %H:%M"))
+            .unwrap_or_else(|| "----------------".into());
+        let tool = a.tool.as_deref().map(|t| format!("  {t}")).unwrap_or_default();
+        println!(
+            "{at} {ts}  {}/{}{}  {}",
+            a.kind.as_str(),
+            a.action,
+            sanitize_line(&tool),
+            sanitize_line(&a.summary)
+        );
+        for it in &a.items {
+            let st = it.status.as_deref().unwrap_or("-");
+            println!(
+                "      [{}] {}",
+                sanitize_line(st),
+                sanitize_line(&truncate(&it.content, 160))
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn cmd_show(
@@ -94,6 +168,15 @@ pub(crate) fn cmd_show(
                     .map(|w| w.bounds(|| count_messages(adapter.as_ref(), &r)))
                     .transpose()?;
                 crate::cmd::orchestrate::print_prompts(&r, adapter.as_ref(), range, prompts, answers, json)
+            }
+            KindView::Affordances(kinds) => {
+                if window.max_bytes.is_some() {
+                    return usage("`--max-bytes` cuts a transcript; the affordance rows are printed whole");
+                }
+                let range = show_range(&r, window, pre_compaction)?
+                    .map(|w| w.bounds(|| count_messages(adapter.as_ref(), &r)))
+                    .transpose()?;
+                print_affordances(&r, adapter.as_ref(), &kinds, range, json)
             }
             KindView::Compactions => {
                 if selector.is_some() || window.max_bytes.is_some() || pre_compaction.is_some() {
@@ -1181,6 +1264,34 @@ fn md_message(m: &Message) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--kind` picks one view family: what the person said, the compaction seams, or the
+    /// affordance rows (`affordances` meaning all of them); mixing families or an unknown word is a
+    /// usage error naming every accepted word.
+    #[test]
+    fn kind_words_pick_one_view_family() {
+        use cv_core::affordance::Kind;
+        assert!(matches!(
+            parse_kinds("prompt,answer"),
+            Ok(KindView::Said {
+                prompts: true,
+                answers: true
+            })
+        ));
+        assert!(matches!(parse_kinds("compaction_summary"), Ok(KindView::Compactions)));
+        match parse_kinds("plan,schedule") {
+            Ok(KindView::Affordances(k)) => assert_eq!(k, [Kind::Plan, Kind::Schedule].into_iter().collect()),
+            _ => panic!("plan,schedule is the affordance view"),
+        }
+        match parse_kinds("affordances") {
+            Ok(KindView::Affordances(k)) => assert_eq!(k.len(), Kind::ALL.len()),
+            _ => panic!("affordances is every kind"),
+        }
+        let err = parse_kinds("plan,prompt").err().expect("mixed families").to_string();
+        assert!(err.contains("mixes two views"), "{err}");
+        let err = parse_kinds("todo").err().expect("unknown word").to_string();
+        assert!(err.contains("background_job"), "{err}");
+    }
 
     fn temp_home(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("cv-view-render-{tag}-{}", std::process::id()));

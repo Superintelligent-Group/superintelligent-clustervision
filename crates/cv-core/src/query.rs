@@ -106,6 +106,19 @@ pub const HAS_FLAGS: &[(&str, &str)] = &[
     ("images", "contains an image block"),
     ("compacted", "context was compacted at least once"),
     ("workflows", "ran at least one Workflow-tool run"),
+    // The affordance vocabulary (`crate::affordance::Kind`, `docs/design/AFFORDANCES.md`).
+    ("plan", "wrote or holds a todo list / plan, or switched plan mode"),
+    ("goal", "set or holds a standing goal"),
+    ("schedule", "created, holds or was fired by a cron job, wakeup or loop"),
+    ("background_job", "started, polled or was notified of a background job"),
+    ("subagent_spawn", "spawned a sub-agent (any harness)"),
+    ("subagent_return", "received a sub-agent's return"),
+    ("skill", "loaded or managed a skill"),
+    ("hook", "a user hook's output reached the model"),
+    ("question", "asked the person a question"),
+    ("branch", "rewound, undid, reset or cleared"),
+    ("fork", "was forked from another session"),
+    ("model_change", "switched model mid-session"),
 ];
 
 /// The language. One row per field; everything else is generated from this.
@@ -136,7 +149,7 @@ pub const FIELDS: &[FieldDef] = &[
     FieldDef { id: FieldId::Touched, name: "touched", aliases: &["file"], kind: Kind::Path, cost: Cost::Events,
         desc: "Read or edited a file at this path (events catalog).", example: "touched:src/ir.rs" },
     FieldDef { id: FieldId::Has, name: "has", aliases: &[], kind: Kind::Flag, cost: Cost::Events,
-        desc: "A capability flag (subagents, errors, tools, images, compacted, workflows).", example: "has:subagents" },
+        desc: "A capability flag (subagents, errors, tools, images, compacted, workflows) or an affordance (plan, schedule, background_job, …).", example: "has:plan" },
     FieldDef { id: FieldId::Subtool, name: "subtool", aliases: &[], kind: Kind::Str, cost: Cost::Forest,
         desc: "A tool used by a *sub-agent* (not the orchestrator). Walks the forest.", example: "subtool:Bash" },
     FieldDef { id: FieldId::Agent, name: "agent", aliases: &["subagent"], kind: Kind::Str, cost: Cost::Forest,

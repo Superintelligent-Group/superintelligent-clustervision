@@ -698,7 +698,9 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
             format!(
                 "context compacted{what}. `cv show {id} --kind compaction_boundary,compaction_summary` lists this session's \
                  boundaries with their message indexes; `cv show {id} --pre-compaction N` reads what the Nth discarded (`cv show \
-                 {id} --kind prompt,answer --pre-compaction N` just its prompts); `cv rewind {id} --at <msg>` resumes the agent as of a message."
+                 {id} --kind prompt,answer --pre-compaction N` just its prompts); `cv rewind {id} --at <msg>` resumes the agent as of a message. \
+                 {AFFORDANCE_POINTER}",
+                AFFORDANCE_POINTER = affordance_pointer(&id)
             ),
         )));
     }
@@ -725,7 +727,15 @@ fn hook_compact(input: &Input) -> Result<Option<Value>> {
     } else {
         text.push('.');
     }
+    text.push(' ');
+    text.push_str(&affordance_pointer(&id));
     Ok(Some(context("SessionStart", text)))
+}
+
+/// The one command that reads back what a compaction summary tends to flatten: the session's plan
+/// (with the task list beside the transcript), its schedules and its background jobs.
+fn affordance_pointer(id: &str) -> String {
+    format!("`cv show {id} --kind plan,schedule,background_job` lists the plan, schedules and background jobs this session holds.")
 }
 
 /// The last `[branch sha] subject` a transcript's tail recorded (a `git commit` result), reading at
