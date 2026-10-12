@@ -52,7 +52,7 @@ mod probe {
             sink.message(message.clone());
             let spool = sink.into_spool()?;
             let mut counter = cv_core::affordance::Counter::new(&r);
-            counter.note(&message);
+            counter.note(&message)?;
             let counted = cv_core::stream::Counted {
                 turns: 1,
                 counts: counter.finish(&session, &[]),

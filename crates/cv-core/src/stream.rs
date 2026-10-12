@@ -330,6 +330,44 @@ impl<F: FnMut(Message) -> Flow> MessageSink for F {
     }
 }
 
+/// An ad-hoc fallible message callback. Existing `FnMut(Message) -> Flow` sinks stay infallible;
+/// this wrapper latches a `Result` error, stops future delivery and exposes it to checked passes.
+pub struct TryFnSink<F> {
+    callback: F,
+    error: Option<anyhow::Error>,
+    failed: bool,
+}
+impl<F: FnMut(Message) -> Result<Flow>> TryFnSink<F> {
+    pub fn new(callback: F) -> Self {
+        Self {
+            callback,
+            error: None,
+            failed: false,
+        }
+    }
+}
+impl<F: FnMut(Message) -> Result<Flow>> MessageSink for TryFnSink<F> {
+    fn message(&mut self, message: Message) -> Flow {
+        if self.failed {
+            return Flow::Stop;
+        }
+        match (self.callback)(message) {
+            Ok(flow) => flow,
+            Err(error) => {
+                self.failed = true;
+                self.error = Some(error);
+                Flow::Stop
+            }
+        }
+    }
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error.take().or_else(|| {
+            self.failed
+                .then(|| anyhow::anyhow!("message callback has already failed"))
+        })
+    }
+}
+
 /// Fans one adapter pass into two sinks, so a single read of a transcript feeds multiple consumers
 /// — e.g. `cv index` driving the FTS [`ChunkSink`] and the event-catalog
 /// [`EventSink`](crate::events::EventSink) off the same `stream()`. Each message is cloned once
@@ -665,6 +703,8 @@ struct Counting<'a> {
     affordances: crate::affordance::Counter,
     dependencies: crate::source::ReadSet,
     stopped: bool,
+    failed: bool,
+    error: Option<anyhow::Error>,
     /// Take a checkpoint every this many bytes (`None`: never).
     every: Option<u64>,
     last_offset: u64,
@@ -680,6 +720,8 @@ impl<'a> Counting<'a> {
             affordances: crate::affordance::Counter::new(r),
             dependencies: Default::default(),
             stopped: false,
+            failed: false,
+            error: None,
             every,
             last_offset: 0,
             last: None,
@@ -702,19 +744,38 @@ impl<'a> Counting<'a> {
 
 impl MessageSink for Counting<'_> {
     fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.inner.take_error()
+        let error = self.error.take().or_else(|| self.inner.take_error());
+        self.failed |= error.is_some();
+        self.stopped |= self.failed;
+        error.or_else(|| {
+            self.failed
+                .then(|| anyhow::anyhow!("counting stream has already failed"))
+        })
     }
     fn dependency(&mut self, path: &std::path::Path) {
+        if self.failed {
+            return;
+        }
         self.dependencies.record(path);
         self.inner.dependency(path);
     }
     fn meta(&mut self, s: &Session) {
-        self.inner.meta(s);
+        if !self.failed {
+            self.inner.meta(s);
+        }
     }
     fn message(&mut self, m: Message) -> Flow {
+        if self.failed {
+            return Flow::Stop;
+        }
         self.messages += 1;
         self.turns += usize::from(m.is_turn());
-        self.affordances.note(&m);
+        if let Err(error) = self.affordances.note(&m) {
+            self.error = Some(error);
+            self.failed = true;
+            self.stopped = true;
+            return Flow::Stop;
+        }
         let flow = self.inner.message(m);
         self.stopped |= flow == Flow::Stop;
         flow
@@ -725,6 +786,9 @@ impl MessageSink for Counting<'_> {
             && self.inner.wants_checkpoint(offset)
     }
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
+        if self.failed {
+            return;
+        }
         let counts = self
             .affordances
             .counts()
@@ -882,6 +946,31 @@ mod tests {
             &r,
             &base.with_reads(events_resumed.dependencies())
         ));
+    }
+
+    #[test]
+    fn try_fn_sink_distinguishes_stops_and_latches_errors_after_drain() {
+        let mut stop = TryFnSink::new(|_: Message| Ok(Flow::Stop));
+        assert_eq!(stop.try_message(text_msg("enough")).unwrap(), Flow::Stop);
+        assert!(stop.take_error().is_none());
+        let calls = std::cell::Cell::new(0);
+        let mut sink = TryFnSink::new(|_: Message| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Ok(Flow::Continue)
+            } else {
+                anyhow::bail!("selected source changed")
+            }
+        });
+        assert_eq!(sink.try_message(text_msg("first")).unwrap(), Flow::Continue);
+        assert_eq!(sink.message(text_msg("second")), Flow::Stop);
+        assert_eq!(sink.take_error().unwrap().to_string(), "selected source changed");
+        assert_eq!(sink.message(text_msg("ignored")), Flow::Stop);
+        assert_eq!(calls.get(), 2);
+        assert!(
+            checked(&mut sink, |_sink| Ok(())).is_err(),
+            "drained sink remains failed"
+        );
     }
 
     #[derive(Clone, Copy, Debug)]

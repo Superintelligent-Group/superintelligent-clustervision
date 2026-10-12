@@ -335,7 +335,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             };
             let (events, temporary_bytes) = if a.operation == "events" {
                 let mut sink = cv_core::events::SpoolingSink::new(r.cwd.clone());
-                adapter.stream(r, &opts, &mut cv_core::TeeSink::new(&mut count, &mut sink))?;
+                adapter.try_stream(r, &opts, &mut cv_core::TeeSink::new(&mut count, &mut sink))?;
                 let source = source.with_reads(sink.inner().dependencies());
                 let spool = sink.into_spool()?;
                 let events = spool.len();
@@ -344,7 +344,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 (events, temporary_bytes)
             } else {
                 let mut sink = cv_core::events::EventSink::new(r.cwd.clone());
-                adapter.stream(r, &opts, &mut cv_core::TeeSink::new(&mut count, &mut sink))?;
+                adapter.try_stream(r, &opts, &mut cv_core::TeeSink::new(&mut count, &mut sink))?;
                 let source = source.with_reads(sink.dependencies());
                 let events = sink.into_events();
                 cv_core::events::record_from_with_source(r, 0, &events, &source, &Default::default());
@@ -387,14 +387,14 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         }
         "discard" | "count" => {
             let mut counter = cv_core::affordance::Counter::new(r);
-            let mut sink = |m: Message| {
+            let mut sink = cv_core::stream::TryFnSink::new(|m: Message| {
                 out.messages += 1;
                 if a.operation == "count" {
-                    counter.note(&m);
+                    counter.note(&m)?;
                 }
-                Flow::Continue
-            };
-            let s = adapter.stream(r, &opts, &mut sink)?;
+                Ok(Flow::Continue)
+            });
+            let s = adapter.try_stream(r, &opts, &mut sink)?;
             if a.operation == "count" {
                 out.detail = serde_json::to_value(counter.finish(&s, &adapter.store_affordances(r)))?;
             }
@@ -406,7 +406,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 // The production path before histogram reduction: includes EventSink's unused
                 // per-record checkpoints, because the forest reader requested them too.
                 let mut sink = cv_core::events::EventSink::new(r.cwd.clone());
-                adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+                adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
                 cv_core::tools::ToolHistogram::from_events(sink.events())
             };
             out.detail = serde_json::to_value(histogram)?;
@@ -414,7 +414,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         "doctor" => {
             let mut report = cv_core::doctor::Report::default();
             let mut pass = report.session(Some(r.path.clone()));
-            adapter.stream(r, &opts, &mut pass)?;
+            adapter.try_stream(r, &opts, &mut pass)?;
             pass.finish();
             out.messages = report.messages as usize;
             out.detail = report.to_json();
@@ -443,7 +443,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 opts
             };
             let mut sink = cv_core::CollectSink::default();
-            let mut s = adapter.stream(r, &opts, &mut sink)?;
+            let mut s = adapter.try_stream(r, &opts, &mut sink)?;
             s.messages = sink.messages;
             if a.materialize || a.operation == "affordances" {
                 s.materialize();
@@ -468,7 +468,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 }
                 Flow::Continue
             };
-            let mut s = adapter.stream(r, &opts, &mut sink)?;
+            let mut s = adapter.try_stream(r, &opts, &mut sink)?;
             s.messages = last.into_iter().collect();
             if a.materialize {
                 s.materialize();
@@ -507,7 +507,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 }
                 Flow::Continue
             };
-            let mut s = adapter.stream(r, &opts, &mut sink)?;
+            let mut s = adapter.try_stream(r, &opts, &mut sink)?;
             if let Some(e) = error {
                 return Err(e.into());
             }
