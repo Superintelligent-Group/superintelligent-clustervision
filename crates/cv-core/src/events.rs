@@ -1350,7 +1350,7 @@ mod tests {
                 vec![
                     (
                         "command",
-                        Some("apply_patch *** Begin Patch\n*** Add File: late\n*** End Patch".to_string()),
+                        Some("apply_patch *** Begin Patch *** Add File: late *** End Patch".to_string()),
                     ),
                     ("file_edit", Some("/w/late".to_string())),
                 ],
@@ -1613,19 +1613,13 @@ mod tests {
         assert!(ev[0].detail.as_ref().unwrap().chars().count() <= DETAIL_MAX);
     }
 
-    /// `CLUSTERVISION_HOME` is process-global state — the temp-home tests serialize on this.
-    #[cfg(feature = "sqlite")]
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// End-to-end against a real temp catalog db: stream a claude JSONL fixture through
     /// `ingest_ref`, then read events back with `events_for` and `sessions_touching`.
     #[cfg(feature = "sqlite")]
     #[test]
     fn ingest_and_query_roundtrip_in_temp_catalog() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = std::env::temp_dir().join(format!("cv-events-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).unwrap();
-        std::env::set_var("CLUSTERVISION_HOME", &home);
+        let world = cv_testkit::World::in_process("events-roundtrip");
+        let home = &world.cv_home;
 
         let sdir = home.join("sessions");
         std::fs::create_dir_all(&sdir).unwrap();
@@ -1757,9 +1751,6 @@ mod tests {
         let edits = edits_touching_file("/elsewhere/src/parser.rs", "src/parser.rs");
         assert_eq!(edits.len(), 1);
         assert!(edits_touching_file("/repo/src/other.rs", "src/other.rs").is_empty());
-
-        std::env::remove_var("CLUSTERVISION_HOME");
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// Migration e2e: a v1-shaped (0.9.10) catalog opened by v2 code is dropped wholesale —
@@ -1769,10 +1760,8 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn v1_catalog_migrates_by_drop_and_lazy_reingest() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = std::env::temp_dir().join(format!("cv-events-mig-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).unwrap();
-        std::env::set_var("CLUSTERVISION_HOME", &home);
+        let world = cv_testkit::World::in_process("events-migration");
+        let home = &world.cv_home;
 
         const V1_DDL: &str = "CREATE TABLE events(
                  harness    TEXT NOT NULL,
@@ -1864,8 +1853,5 @@ mod tests {
         assert!(needs_ingest(&r, mtime));
         ingest_ref(&r).unwrap();
         assert_eq!(events_for("claude", "mig-e2e", None).len(), 1);
-
-        std::env::remove_var("CLUSTERVISION_HOME");
-        std::fs::remove_dir_all(&home).ok();
     }
 }
