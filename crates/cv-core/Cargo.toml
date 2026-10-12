@@ -66,6 +66,8 @@ sqlite = ["dep:rusqlite", "dep:ruzstd"]
 # `parallel` fans discovery across adapters/files with rayon. Off for wasm32 (no threads); the code
 # has a sequential fallback so behavior is identical, just slower.
 parallel = ["dep:rayon"]
+# Diagnostic example only: count requested Rust allocations separately from clean timing runs.
+probe-heap = []
 
 [dev-dependencies]
 cv-testkit = { path = "../cv-testkit" }
