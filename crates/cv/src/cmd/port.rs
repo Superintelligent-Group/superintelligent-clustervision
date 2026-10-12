@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 fn parse_for_emit(adapter: &dyn Adapter, r: &SessionRef, to_h: Harness) -> Result<Session> {
     if r.harness == to_h {
         let mut s = cv_core::stream::collect_with(adapter, r, &ParseOptions::complete())?;
-        s.materialize();
+        s.materialize()?;
         Ok(s)
     } else {
         adapter.parse(r)

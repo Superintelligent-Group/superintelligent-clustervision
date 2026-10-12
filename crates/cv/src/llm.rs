@@ -53,7 +53,7 @@ pub(crate) fn digest(session: &cv_core::Session, opts: &DigestOptions) -> Result
              to enable the digest"
         )
     })?;
-    let prompt = build_prompt(session, opts);
+    let prompt = build_prompt(session, opts)?;
     let model = opts
         .model
         .clone()
@@ -142,8 +142,8 @@ fn provider_from_env() -> Option<Provider> {
 }
 
 /// Build the user prompt: the (possibly truncated) rendered transcript plus instructions.
-fn build_prompt(session: &cv_core::Session, opts: &DigestOptions) -> String {
-    let rendered = cv_core::render::to_markdown(session);
+fn build_prompt(session: &cv_core::Session, opts: &DigestOptions) -> Result<String> {
+    let rendered = cv_core::render::to_markdown(session)?;
     let (transcript, truncated) = budget(&rendered, TRANSCRIPT_BUDGET);
 
     let scope = if opts.project {
@@ -165,7 +165,7 @@ fn build_prompt(session: &cv_core::Session, opts: &DigestOptions) -> String {
     prompt.push_str("<transcript>\n");
     prompt.push_str(&transcript);
     prompt.push_str("\n</transcript>\n");
-    prompt
+    Ok(prompt)
 }
 
 /// Truncate `s` to roughly `budget` chars, keeping a head and a tail with an elision marker in the
@@ -329,7 +329,7 @@ pub(crate) fn generate(session: &cv_core::Session, opts: &GenerateOptions) -> Re
         .model
         .clone()
         .unwrap_or_else(|| provider.default_model().to_string());
-    let messages = to_chat_messages(session);
+    let messages = to_chat_messages(session)?;
     if messages.is_empty() {
         bail!("nothing to continue from: the session has no renderable messages");
     }
@@ -344,7 +344,7 @@ pub(crate) fn generate(session: &cv_core::Session, opts: &GenerateOptions) -> Re
 
 /// Flatten a session's IR messages into provider chat messages (`{role, content}`), collapsing
 /// content blocks to text (tool calls/results become readable notes).
-fn to_chat_messages(session: &cv_core::Session) -> Vec<Value> {
+fn to_chat_messages(session: &cv_core::Session) -> Result<Vec<Value>> {
     use cv_core::ir::{Block, Role};
     let mut out = Vec::new();
     for m in &session.messages {
@@ -362,7 +362,9 @@ fn to_chat_messages(session: &cv_core::Session) -> Vec<Value> {
                     text.push('\n');
                 }
                 Block::ToolUse { name, input, .. } => {
-                    text.push_str(&format!("[tool call: {name} {input}]\n"));
+                    text.push_str(&format!("[tool call: {name} "));
+                    cv_core::projection::append_json(&mut text, input)?;
+                    text.push_str("]\n");
                 }
                 Block::ToolResult { content, .. } => {
                     text.push_str(&format!("[tool result] {content}\n"));
@@ -376,7 +378,7 @@ fn to_chat_messages(session: &cv_core::Session) -> Vec<Value> {
         }
         out.push(json!({ "role": role, "content": text }));
     }
-    out
+    Ok(out)
 }
 
 /// Call a provider with a full chat message list, returning the assistant text.
@@ -520,7 +522,7 @@ mod tests {
     fn prompt_contains_transcript_and_instructions() {
         let s = sample_session();
         let opts = DigestOptions::default();
-        let prompt = build_prompt(&s, &opts);
+        let prompt = build_prompt(&s, &opts).unwrap();
 
         // Transcript content is present.
         assert!(prompt.contains("How do I fix the build?"));
@@ -540,7 +542,7 @@ mod tests {
             project: true,
             ..Default::default()
         };
-        let prompt = build_prompt(&s, &opts);
+        let prompt = build_prompt(&s, &opts).unwrap();
         assert!(prompt.contains("PROJECT memory"));
     }
 
@@ -606,7 +608,7 @@ mod tests {
         });
         s.messages.push(asst);
 
-        let msgs = to_chat_messages(&s);
+        let msgs = to_chat_messages(&s).unwrap();
         let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
         // system, user, assistant, tool→user, (empty dropped), assistant(tool_use note)
         assert_eq!(roles, ["system", "user", "assistant", "user", "assistant"]);

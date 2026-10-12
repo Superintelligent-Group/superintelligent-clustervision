@@ -414,7 +414,9 @@ fn stats(query: &str) -> (u16, Value) {
     };
     let mut refs = cv_core::sessions();
     if let Some(q) = &q {
-        cv_core::query::filter_refs(&mut refs, q, &crate::cmd::query::text_sets(q));
+        if let Err(error) = cv_core::query::filter_refs(&mut refs, q, &crate::cmd::query::text_sets(q)) {
+            return err(500, &format!("{error:#}"));
+        }
     }
     ok(cv_core::stats::CorpusStats::compute(&refs).to_json())
 }

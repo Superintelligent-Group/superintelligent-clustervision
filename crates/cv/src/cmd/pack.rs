@@ -256,11 +256,9 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
         }
         for r in adapter.discover()? {
             let mut sink = CapSink::new(&r.path);
-            let meta = match adapter.stream(&r, &ParseOptions::lazy(), &mut sink) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let low = sink.hay.to_lowercase();
+            let meta = adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink)
+                .with_context(|| format!("scanning {}:{} for pack", r.harness, r.id))?;
+            let low = sink.hay.as_str().to_lowercase();
             let mut score = words.iter().filter(|w| low.contains(**w)).count() as i64;
             if low.contains(&needle) {
                 score += 5;
@@ -270,9 +268,9 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
             }
             // Snippet around the first matched word, from the original-case haystack.
             let pos = words.iter().filter_map(|w| low.find(*w)).min().unwrap_or(0);
-            let lo = floor_char(&sink.hay, pos.saturating_sub(40));
-            let hi = ceil_char(&sink.hay, (pos + 120).min(sink.hay.len()));
-            let snippet = sink.hay[lo..hi].replace('\n', " ").trim().to_string();
+            let lo = floor_char(sink.hay.as_str(), pos.saturating_sub(40));
+            let hi = ceil_char(sink.hay.as_str(), (pos + 120).min(sink.hay.len()));
+            let snippet = sink.hay.as_str()[lo..hi].replace('\n', " ").trim().to_string();
             let title = cv_core::label_from(meta.title.as_deref(), sink.first_user.as_deref());
             scored.push((
                 score,

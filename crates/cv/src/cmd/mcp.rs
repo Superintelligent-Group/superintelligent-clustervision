@@ -42,7 +42,7 @@ use super::mcp_tools::CliTools;
 use anyhow::Context as _;
 use cv_core::scan::{ceil_char, floor_char};
 use cv_core::watch::{Cursor, Filter, Watcher};
-use cv_core::{Block, Harness};
+use cv_core::Harness;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::mpsc;
@@ -387,7 +387,7 @@ fn await_omen(args: &Value) -> anyhow::Result<String> {
     loop {
         for ev in watcher.poll() {
             for m in &ev.new_messages {
-                let text = message_text(m);
+                let text = message_text(m)?;
                 if let Some(hit) = re.find(&text) {
                     let snippet_start = hit.start().saturating_sub(80);
                     let snippet_end = (hit.end() + 80).min(text.len());
@@ -441,12 +441,22 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
 
     let mut out_msgs: Vec<Value> = Vec::new();
     let mut chars_used = 0usize;
+    let mut projection_error = None;
     let more_pending = !baseline
         && watcher.poll_bounded(max_messages, |ev| {
+            if projection_error.is_some() {
+                return 0;
+            }
             let r = &ev.reference;
             let mut taken = 0;
             for m in &ev.new_messages {
-                let text = message_text(m);
+                let text = match message_text(m) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        projection_error = Some(error);
+                        break;
+                    }
+                };
                 let room = char_cap.saturating_sub(chars_used);
                 if room == 0 {
                     break;
@@ -469,6 +479,9 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
             }
             taken
         });
+    if let Some(error) = projection_error {
+        return Err(error);
+    }
 
     Ok(serde_json::to_string_pretty(&json!({
         "baseline": baseline,
@@ -480,34 +493,10 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
 }
 
 /// All matchable text in a message: text + thinking + tool-result content.
-fn message_text(m: &cv_core::Message) -> String {
-    let mut out = String::new();
-    for b in &m.content {
-        match b {
-            Block::Text { text } | Block::Thinking { text, .. } => {
-                out.push_str(text);
-                out.push('\n');
-            }
-            Block::ToolResult { content, .. } => {
-                out.push_str(content);
-                out.push('\n');
-            }
-            Block::ToolUse { name, input, .. } => {
-                out.push_str(name);
-                out.push(' ');
-                out.push_str(&input.to_string());
-                out.push('\n');
-            }
-            Block::File { path, source, .. } => {
-                if let Some(p) = path.as_deref().or(source.as_deref()) {
-                    out.push_str(p);
-                    out.push('\n');
-                }
-            }
-            Block::Image { .. } => {}
-        }
-    }
-    out
+fn message_text(m: &cv_core::Message) -> anyhow::Result<String> {
+    let mut output = String::new();
+    m.append_searchable(&mut output)?;
+    Ok(output)
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {

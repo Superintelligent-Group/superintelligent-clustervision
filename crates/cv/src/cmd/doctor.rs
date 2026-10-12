@@ -55,7 +55,7 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
         // Count decoded text in bounded chunks; attribution still needs rich record metadata.
         let mut pass = rep.session(Some(rr.path.clone()));
         cv_core::stream::stream_counted(adapter.as_ref(), &rr, &cv_core::ParseOptions::lazy_extra(), &mut pass)?;
-        pass.finish();
+        pass.finish()?;
         if label.is_empty() {
             label = crate::short_id(&rr.id);
         }

@@ -435,7 +435,7 @@ pub fn cmd_blame(file: &str, lines: Option<&str>, show: bool) -> Result<()> {
     }
 
     // The exact tier: candidate sessions whose own tool output shows one of these commits made.
-    let exact = exact_matches(&commits, &edits);
+    let exact = exact_matches(&commits, &edits)?;
 
     // Newest first: each commit, with its best-matched sessions.
     let mut matched_commits = 0usize;
@@ -560,9 +560,9 @@ pub(crate) fn candidate_ids(edits: &[EditEvent]) -> Vec<(String, String)> {
 /// The exact tier for `commits` (see the module docs): candidates are the sessions with an edit on
 /// the file plus the parents of sub-agents among them, kept only if their transcript was written
 /// to after the earliest commit landed; each is scanned for tool output naming a commit's sha.
-fn exact_matches(commits: &[CommitInfo], edits: &[EditEvent]) -> Vec<ExactMatch> {
+fn exact_matches(commits: &[CommitInfo], edits: &[EditEvent]) -> Result<Vec<ExactMatch>> {
     let Some(earliest) = commits.iter().map(|c| c.time).min() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let ids = candidate_ids(edits);
     let mut titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -586,7 +586,7 @@ fn exact_matches(commits: &[CommitInfo], edits: &[EditEvent]) -> Vec<ExactMatch>
         .collect();
     let shas: Vec<String> = commits.iter().map(|c| c.sha.clone()).collect();
     let mut out = Vec::new();
-    for (r, found) in cv_core::rewind::commit_evidence_many(refs, &shas) {
+    for (r, found) in cv_core::rewind::commit_evidence_many(refs, &shas)? {
         for sha in &shas {
             if let Some(ev) = CommitEvidenceSink::best(&found, &sha.to_ascii_lowercase()) {
                 out.push(ExactMatch {
@@ -598,7 +598,7 @@ fn exact_matches(commits: &[CommitInfo], edits: &[EditEvent]) -> Vec<ExactMatch>
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// `--show`: render the conversation window around the best match's edit, through the exact

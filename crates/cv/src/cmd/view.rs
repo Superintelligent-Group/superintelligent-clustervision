@@ -290,14 +290,17 @@ fn session_json_window(
         max_bytes: Option<usize>,
         bytes: usize,
         next: Option<usize>,
-        error: Option<serde_json::Error>,
+        error: Option<anyhow::Error>,
     }
     impl Selection {
         fn keep(&mut self, mut m: Message, index: usize) {
             if self.next.is_some() || self.error.is_some() {
                 return;
             }
-            m.materialize(&self.resolver);
+            if let Err(error) = m.materialize(&self.resolver) {
+                self.error = Some(error);
+                return;
+            }
             if let Some(budget) = self.max_bytes {
                 match serde_json::to_vec(&m) {
                     Ok(v) => {
@@ -308,7 +311,7 @@ fn session_json_window(
                         self.bytes += v.len();
                     }
                     Err(e) => {
-                        self.error = Some(e);
+                        self.error = Some(e.into());
                         return;
                     }
                 }
@@ -365,10 +368,9 @@ fn session_json_window(
         }
     }
     if let Some(e) = sink.error {
-        return Err(e.into());
+        return Err(e);
     }
     session.messages = sink.messages.into_iter().collect();
-    session.materialize();
     Ok((session, sink.next))
 }
 
@@ -394,7 +396,7 @@ fn print_session_json(
         eprintln!("{}", continue_hint(next));
     }
     if let Some(opts) = redact {
-        let (clean, st) = cv_core::redact::redact_with(&session, opts);
+        let (clean, st) = cv_core::redact::redact_with(&session, opts)?;
         session = clean;
         stats = st;
     }
@@ -716,7 +718,7 @@ pub(crate) fn cmd_export(
                         return md_message(m);
                     }
                     let mut m = m.clone();
-                    redact_message(&mut m, &opts, &mut stats.borrow_mut());
+                    redact_message(&mut m, &opts, &mut stats.borrow_mut())?;
                     md_message(&m)
                 },
                 RenderOpts {
@@ -983,7 +985,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
     r: &SessionRef,
     out: &mut W,
     header: impl Fn(&HeaderInfo) -> String,
-    render_msg: impl Fn(&Message) -> String,
+    render_msg: impl Fn(&Message) -> Result<String>,
     opts: RenderOpts,
 ) -> Result<RenderOutcome> {
     use cv_core::{Flow, MessageSink, ParseOptions};
@@ -1036,7 +1038,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
         next: Option<usize>,
         tail: Option<Tail>,
     }
-    impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> String> Sink<'_, W, H, R> {
+    impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> Result<String>> Sink<'_, W, H, R> {
         fn apply_meta(&mut self, s: Meta) {
             self.title = s.title;
             if self.model.is_none() {
@@ -1107,7 +1109,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
             self.printed = true;
         }
     }
-    impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> String> MessageSink for Sink<'_, W, H, R> {
+    impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> Result<String>> MessageSink for Sink<'_, W, H, R> {
         fn take_error(&mut self) -> Option<anyhow::Error> {
             if self.result.is_err() {
                 std::mem::replace(
@@ -1182,7 +1184,7 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
 
             // In-window: resolve this message's lazy content spans (peak = one message) and render.
             let mut m = m;
-            m.materialize(&self.resolver);
+            m.materialize_text(&self.resolver);
             if self.first_user.is_none() && m.role == Role::User {
                 if let Some(t) = m.text() {
                     if !t.trim().is_empty() {
@@ -1190,7 +1192,13 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
                     }
                 }
             }
-            let rendered = (self.render_msg)(&m);
+            let rendered = match (self.render_msg)(&m) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    self.result = Err(std::io::Error::other(error));
+                    return Flow::Stop;
+                }
+            };
             drop(m);
             // The byte budget: stop BEFORE the message that would overflow it — unless it is the
             // first in-window message, which always renders so a window never comes back empty.
@@ -1288,7 +1296,7 @@ pub(crate) fn show_header(h: &HeaderInfo) -> String {
 }
 
 /// One rendered `cv show` message block (the String form of the old `print_message`).
-pub(crate) fn show_message(m: &Message) -> String {
+pub(crate) fn show_message(m: &Message) -> Result<String> {
     let mut s = format!("── {} ──\n", turn_label(m));
     for b in &m.content {
         match b {
@@ -1299,7 +1307,7 @@ pub(crate) fn show_message(m: &Message) -> String {
             Block::Thinking { text, .. } => s.push_str(&format!("[thinking] {}\n", truncate(text, 200))),
             Block::ToolUse { id, name, input, .. } => s.push_str(&format!(
                 "[tool_use {name} {id}] {}\n",
-                truncate(&input.to_string(), 200)
+                truncate(&input.canonical_prefix(4 * 201)?.0, 200)
             )),
             Block::ToolResult {
                 tool_use_id,
@@ -1327,7 +1335,7 @@ pub(crate) fn show_message(m: &Message) -> String {
         }
     }
     s.push('\n');
-    s
+    Ok(s)
 }
 
 /// Where a persisted (too-large) tool output lives on disk, when the adapter recorded it — the
@@ -1349,10 +1357,10 @@ fn md_header(h: &HeaderInfo) -> String {
 }
 
 /// One `cv export md` section: [`cv_core::render::md_message`] as a `String`.
-fn md_message(m: &Message) -> String {
+fn md_message(m: &Message) -> Result<String> {
     let mut out = String::new();
-    cv_core::render::md_message(m, &mut out);
-    out
+    cv_core::render::md_message(m, &mut out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1615,7 +1623,7 @@ mod tests {
         let mut all = cv_core::CollectSink::default();
         adapter.stream(r, &cv_core::ParseOptions::bulk(), &mut all).unwrap();
         let end = range.1.unwrap_or(usize::MAX).min(all.messages.len());
-        let want: String = all.messages[range.0..end].iter().map(show_message).collect();
+        let want: String = all.messages[range.0..end].iter().map(|m| show_message(m).unwrap()).collect();
         let windowed = render(r, Some(range));
         let body_at = windowed.find("── ").unwrap_or(windowed.len());
         assert_eq!(
@@ -1882,12 +1890,12 @@ mod tests {
         ] {
             assert_eq!(turn_label(m), label);
             let text = m.text().unwrap();
-            let shown = show_message(m);
+            let shown = show_message(m).unwrap();
             assert!(
                 shown.starts_with(&format!("── {label} ──\n")) && shown.contains(&text),
                 "{shown}"
             );
-            let md = md_message(m);
+            let md = md_message(m).unwrap();
             assert!(md.starts_with(&format!("## {label}\n\n")) && md.contains(&text), "{md}");
             let mut html = String::new();
             cv_core::html::share_message(m, 0, &mut html);

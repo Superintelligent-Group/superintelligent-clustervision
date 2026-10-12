@@ -111,7 +111,10 @@ fn api_lanes(q: &Query) -> (u16, Value) {
         Ok(x) => x,
         Err(e) => return (404, json!({"error": e.to_string()})),
     };
-    let mut lanes = cv_core::lanes::lanes_of(&r);
+    let mut lanes = match cv_core::lanes::lanes_of(&r) {
+        Ok(lanes) => lanes,
+        Err(error) => return (500, json!({"error": format!("{error:#}")})),
+    };
     // Each lane joined to the tasks its endpoint holds (the page shows the task + last note).
     if let Ok(outcome) = task::replay() {
         cv_core::lanes::attach_tasks(&mut lanes, &outcome.model);

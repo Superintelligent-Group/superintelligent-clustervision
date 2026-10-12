@@ -75,7 +75,7 @@ pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, Pat
         resolve(spec, harness)?
     };
     let mut s = adapter.parse(&r)?;
-    s.materialize();
+    s.materialize()?;
     // A sub-agent transcript read by path: its label lives in the sibling `<stem>.meta.json`
     // (the resolver path reads it through the parent's sub-agent tree instead).
     if p.is_file() {
@@ -303,10 +303,10 @@ pub(crate) fn cmd_distill(
         }
         s.messages.truncate(n);
     }
-    let mut d = distill(&s, &opts);
+    let mut d = distill(&s, &opts)?;
     for other in with {
         let (o, _) = load(other, None)?;
-        d.head_md.push_str(&findings(&o, &opts));
+        d.head_md.push_str(&findings(&o, &opts)?);
         d.head_md.push('\n');
     }
     if !with.is_empty() {
@@ -324,7 +324,7 @@ pub(crate) fn cmd_distill(
     let emitted = match &target {
         Target::PackOnly => Emitted::default(),
         _ => {
-            let ir = resumable_session(&s, &d, &opts);
+            let ir = resumable_session(&s, &d, &opts)?;
             emit_to(&ir, &target, &d.elided, &src_path, &description)?
         }
     };

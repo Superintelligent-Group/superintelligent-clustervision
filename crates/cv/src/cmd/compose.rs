@@ -525,7 +525,7 @@ fn finish_composed(
             println!("\n(use --export md|json to print it, or --harness <harness> [--out <dir>] to emit it)");
         }
         Some("json") => println!("{}", serde_json::to_string_pretty(&session)?),
-        Some("md") | Some("markdown") => print!("{}", cv_core::render::to_markdown(&session)),
+        Some("md") | Some("markdown") => print!("{}", cv_core::render::to_markdown(&session)?),
         Some(other) => bail!("unknown export format {other:?} (use md or json)"),
     }
     Ok(())
@@ -672,7 +672,7 @@ impl EmitCtx<'_> {
         // Full evaluation now that we have the parsed session (resolves model/git/text/tool/… that
         // the catalog-cheap prefilter left as Unknown).
         if let Some(q) = self.query {
-            if !crate::cmd::query::matches_full(q, r, &session, self.text_sets) {
+            if !crate::cmd::query::matches_full(q, r, &session, self.text_sets)? {
                 *self.skipped += 1;
                 return Ok(Flow::Continue);
             }

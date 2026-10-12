@@ -179,9 +179,14 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
         if self.result.is_err() {
             return Flow::Stop;
         }
-        m.materialize(&self.resolver);
-        if self.redact {
-            redact_message(&mut m, &self.opts, &mut self.stats);
+        if let Err(error) = m.materialize(&self.resolver).and_then(|()| {
+            if self.redact {
+                redact_message(&mut m, &self.opts, &mut self.stats)?;
+            }
+            Ok(())
+        }) {
+            self.result = Err(std::io::Error::other(error));
+            return Flow::Stop;
         }
         if self.model.is_none() {
             if let Some(md) = &m.model {
@@ -197,7 +202,10 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
             }
         }
         let mut rendered = String::new();
-        html::share_message(&m, self.count, &mut rendered);
+        if let Err(error) = html::share_message(&m, self.count, &mut rendered) {
+            self.result = Err(std::io::Error::other(error));
+            return Flow::Stop;
+        }
         drop(m);
         self.count += 1;
 

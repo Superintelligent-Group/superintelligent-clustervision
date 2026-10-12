@@ -109,7 +109,7 @@ fn subagent_events(
             continue;
         }
         let evs: Vec<_> = sink
-            .into_events()
+            .into_events()?
             .into_iter()
             .filter(|e| kind.is_none_or(|k| e.kind == k))
             .collect();

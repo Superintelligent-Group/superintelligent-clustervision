@@ -308,7 +308,7 @@ pub(crate) fn cmd_lanes(
     let mut parent_of: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
     let mut all: Vec<Lane> = Vec::new();
     for r in &sessions {
-        for l in cv_core::lanes::lanes_of(r) {
+        for l in cv_core::lanes::lanes_of(r)? {
             if since.is_none_or(|t| l.active_since(t)) {
                 parent_of.insert(l.path.clone(), r.id.clone());
                 all.push(l);
