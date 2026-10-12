@@ -9,8 +9,8 @@ use crate::{
     lazy::{Resolver, Text},
 };
 use serde::{
-    Serialize, Serializer,
     ser::{Impossible, SerializeStruct},
+    Serialize, Serializer,
 };
 use std::io::{self, Write};
 
@@ -354,21 +354,29 @@ impl<W: Write> Write for PrettyJson<'_, W> {
         let mut i = 0;
         while i < bytes.len() {
             if self.string {
-                if self.escape {
-                    self.escape = false;
-                    i += 1;
-                    continue;
-                }
-                let Some(offset) = memchr::memchr2(b'"', b'\\', &bytes[i..]) else {
+                // Only quotes can end a string. Other escapes need no interpretation here.
+                // Keep trailing backslash parity across writes, including tiny serializer writes.
+                let Some(offset) = memchr::memchr(b'"', &bytes[i..]) else {
+                    let mut tail = bytes.len();
+                    while tail > i && bytes[tail - 1] == b'\\' {
+                        tail -= 1;
+                    }
+                    self.escape = if tail == i {
+                        self.escape ^ ((bytes.len() - tail) % 2 != 0)
+                    } else {
+                        (bytes.len() - tail) % 2 != 0
+                    };
                     break;
                 };
-                i += offset;
-                if bytes[i] == b'\\' {
-                    self.escape = true;
-                } else {
-                    self.string = false;
+                let quote = i + offset;
+                let mut tail = quote;
+                while tail > i && bytes[tail - 1] == b'\\' {
+                    tail -= 1;
                 }
-                i += 1;
+                let escaped = ((quote - tail) % 2 != 0) ^ (tail == i && self.escape);
+                self.escape = false;
+                self.string = escaped;
+                i = quote + 1;
                 continue;
             }
             self.writer.write_all(&bytes[start..i])?;
@@ -554,6 +562,30 @@ mod tests {
                 writer.write_all(bytes).unwrap();
             }
             assert_eq!(output, serde_json::to_vec_pretty(&value).unwrap(), "chunk={chunk}");
+        }
+    }
+    #[test]
+    fn ir_json_pretty_string_escape_parity_across_writes() {
+        for slashes in 0..12 {
+            let value = json!({"s": format!("{}\"\n{}", "\\".repeat(slashes), "\\".repeat(slashes))});
+            let canonical = serde_json::to_vec(&value).unwrap();
+            for cut in 0..=canonical.len() {
+                let mut output = Vec::new();
+                let mut writer = PrettyJson {
+                    writer: &mut output,
+                    base: 0,
+                    stack: Vec::new(),
+                    string: false,
+                    escape: false,
+                };
+                writer.write_all(&canonical[..cut]).unwrap();
+                writer.write_all(&canonical[cut..]).unwrap();
+                assert_eq!(
+                    output,
+                    serde_json::to_vec_pretty(&value).unwrap(),
+                    "slashes={slashes}, cut={cut}"
+                );
+            }
         }
     }
     #[test]
