@@ -36,12 +36,15 @@
 //! Missing index → glob `*.json` (minus `sessions.json`). Missing fields → skip. `content` as
 //! string or array both work. `dateCreated` ms-epoch or ISO both work. Never panics.
 
+use super::store::DiscardValue;
 use super::wire::{openai, text_parts};
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -95,7 +98,11 @@ impl Adapter for Continue {
                 continue;
             }
             seen.insert(meta.session_id.clone());
-            out.push(ref_from(meta, &path));
+            out.push(ref_from(
+                meta,
+                &path,
+                scan_session(&path).map_or(0, |s| s.message_count),
+            ));
         }
 
         // Fold in any `<id>.json` on disk that the index didn't mention (tolerant of a missing or
@@ -113,8 +120,14 @@ impl Adapter for Continue {
                 if seen.contains(&id) {
                     continue;
                 }
-                let meta = peek_session(&p, &id);
-                out.push(ref_from(&meta, &p));
+                let scan = scan_session(&p).unwrap_or_default();
+                let meta = IndexMeta {
+                    session_id: id,
+                    title: scan.title,
+                    cwd: scan.cwd,
+                    created_at: None,
+                };
+                out.push(ref_from(&meta, &p, scan.message_count));
             }
         }
 
@@ -530,7 +543,7 @@ fn read_index(path: &Path) -> Vec<IndexMeta> {
 }
 
 /// Build a `SessionRef` from index metadata + the on-disk transcript path.
-fn ref_from(meta: &IndexMeta, path: &Path) -> SessionRef {
+fn ref_from(meta: &IndexMeta, path: &Path, message_count: usize) -> SessionRef {
     let updated = mtime(path);
     SessionRef {
         id: meta.session_id.clone(),
@@ -540,46 +553,112 @@ fn ref_from(meta: &IndexMeta, path: &Path) -> SessionRef {
         title: meta.title.clone(),
         created_at: meta.created_at.or(updated),
         updated_at: updated,
-        message_count: count_history(path),
+        message_count,
     }
 }
 
-/// Peek a `<id>.json` for title/cwd when there's no index row for it.
-fn peek_session(path: &Path, id: &str) -> IndexMeta {
-    let mut meta = IndexMeta {
-        session_id: id.to_string(),
-        title: None,
-        cwd: None,
-        created_at: None,
-    };
-    let Ok(text) = fs::read_to_string(path) else {
-        return meta;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return meta;
-    };
-    meta.title = v
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|t| !t.trim().is_empty())
-        .map(|t| crate::ir::truncate(t, 80));
-    meta.cwd = v
-        .get("workspaceDirectory")
-        .and_then(Value::as_str)
-        .filter(|p| !p.is_empty())
-        .map(workspace_to_path);
-    meta
+/// Discovery keeps metadata and a count, never a whole history. Validate each discarded item
+/// before dropping it: IgnoredAny would accept malformed Unicode that the old Value rejected.
+/// Duplicate fields retain their last value, including null/wrong-type replacements.
+#[derive(Default)]
+struct Scan {
+    title: Option<String>,
+    cwd: Option<PathBuf>,
+    message_count: usize,
 }
 
-/// Length of the `history` array, for `message_count`. 0 on any error.
-fn count_history(path: &Path) -> usize {
-    let Ok(text) = fs::read_to_string(path) else {
-        return 0;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return 0;
-    };
-    v.get("history").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0)
+impl<'de> Deserialize<'de> for Scan {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Fields;
+        impl<'de> Visitor<'de> for Fields {
+            type Value = Scan;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a Continue session object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Scan, A::Error> {
+                let mut scan = Scan::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "history" {
+                        scan.message_count = map.next_value::<HistoryCount>()?.0;
+                    } else {
+                        match key.as_str() {
+                            "title" => {
+                                let v: Value = map.next_value()?;
+                                scan.title = v
+                                    .as_str()
+                                    .filter(|t| !t.trim().is_empty())
+                                    .map(|t| crate::ir::truncate(t, 80));
+                            }
+                            "workspaceDirectory" => {
+                                let v: Value = map.next_value()?;
+                                scan.cwd = v.as_str().filter(|p| !p.is_empty()).map(workspace_to_path);
+                            }
+                            _ => {
+                                map.next_value::<DiscardValue>()?;
+                            }
+                        }
+                    }
+                }
+                Ok(scan)
+            }
+        }
+        d.deserialize_map(Fields)
+    }
+}
+
+struct HistoryCount(usize);
+
+impl<'de> Deserialize<'de> for HistoryCount {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Count;
+        impl<'de> Visitor<'de> for Count {
+            type Value = HistoryCount;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<HistoryCount, A::Error> {
+                let mut count = 0;
+                while seq.next_element::<DiscardValue>()?.is_some() {
+                    count += 1;
+                }
+                Ok(HistoryCount(count))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<HistoryCount, A::Error> {
+                DiscardValue::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(HistoryCount(0))
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<HistoryCount, E> {
+                Ok(HistoryCount(0))
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<HistoryCount, E> {
+                Ok(HistoryCount(0))
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<HistoryCount, E> {
+                Ok(HistoryCount(0))
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<HistoryCount, E> {
+                Ok(HistoryCount(0))
+            }
+            fn visit_str<E>(self, _: &str) -> Result<HistoryCount, E> {
+                Ok(HistoryCount(0))
+            }
+            fn visit_unit<E>(self) -> Result<HistoryCount, E> {
+                Ok(HistoryCount(0))
+            }
+        }
+        d.deserialize_any(Count)
+    }
+}
+
+fn scan_session(path: &Path) -> Option<Scan> {
+    let bytes = read_bytes(path)?;
+    let bytes = bytes.as_ref();
+    // Non-object JSON used to yield empty metadata, rather than a parse error.
+    if bytes.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+        serde_json::from_slice::<DiscardValue>(bytes).ok()?;
+        return Some(Scan::default());
+    }
+    serde_json::from_slice(bytes).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,5 +1228,110 @@ mod tests {
         assert_eq!(s.cwd.as_deref(), Some(Path::new("/w")));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_scan_matches_whole_value_metadata() {
+        let _world = cv_testkit::World::in_process("continue-scan");
+        let dir = std::env::temp_dir().join(format!("cv-continue-scan-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.json");
+        let mut cases = vec![
+            r#"{"title":"escaped\n\uD834\uDD1E","workspaceDirectory":"file:///p","history":[null,{},42,{"message":{"role":"tool"}}]}"#.to_owned(),
+            r#"{"title":"old","title":null,"workspaceDirectory":"/old","workspaceDirectory":42,"history":[1,2],"history":false}"#.to_owned(),
+            r#"{"title":42,"title":"new","history":null,"history":[1,2,3]}"#.to_owned(),
+            r#"{"history":{"nested":[1,2]},"title":"   "}"#.to_owned(),
+            "[1,2,3]".to_owned(), "null".to_owned(), "42".to_owned(),
+            r#"{"title":"early","history":[1,{"content":"bad\uD800"}]}"#.to_owned(),
+            r#"{"history":[1],"ignored":"bad\uDC00"}"#.to_owned(),
+            r#"{"history":[1e999]}"#.to_owned(),
+            r#"{"history":[1],"history":[2,}"#.to_owned(),
+            r#"{"history":[1]} trailing"#.to_owned(),
+        ];
+        for depth in 123..131 {
+            cases.push(format!(
+                r#"{{"history":[{}0{}]}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            ));
+        }
+        // Large discarded bodies and nested context are validated, not retained in a history tree.
+        cases.push(
+            serde_json::json!({
+                "title": "metadata", "history": (0..24).map(|_| serde_json::json!({
+                    "message": { "content": "payload\\\n".repeat(16_384) },
+                    "contextItems": [{"content": "unused".repeat(4096)}],
+                })).collect::<Vec<_>>()
+            })
+            .to_string(),
+        );
+        for text in cases {
+            fs::write(&path, &text).unwrap();
+            let expected = serde_json::from_str::<Value>(&text).ok().map(|v| {
+                let title = v
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|t| !t.trim().is_empty())
+                    .map(|t| crate::ir::truncate(t, 80));
+                let cwd = v
+                    .get("workspaceDirectory")
+                    .and_then(Value::as_str)
+                    .filter(|p| !p.is_empty())
+                    .map(workspace_to_path);
+                let count = v.get("history").and_then(Value::as_array).map_or(0, Vec::len);
+                (title, cwd, count)
+            });
+            let actual = scan_session(&path).map(|s| (s.title, s.cwd, s.message_count));
+            assert_eq!(actual, expected, "case prefix: {:?}", &text[..text.len().min(120)]);
+        }
+        fs::write(&path, b"{\"history\":[\"\xff\"]}").unwrap();
+        assert!(scan_session(&path).is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn discovery_scan_preserves_index_precedence_and_unindexed_fallback() {
+        let _world = cv_testkit::World::in_process("continue-scan-index");
+        let dir = std::env::temp_dir().join(format!("cv-continue-index-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("sessions.json"),
+            r#"[
+            {"sessionId":"indexed","title":"index title","workspaceDirectory":"/index","dateCreated":"1700000000000"},
+            {"sessionId":"missing","title":"missing"}
+        ]"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("indexed.json"),
+            r#"{"title":"file title","workspaceDirectory":"/file","history":[1,2]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("extra.json"),
+            r#"{"title":"extra title","workspaceDirectory":"file:///extra","history":[1,null,{}]}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("broken.json"), r#"{"title":"partial","history":[1,}"#).unwrap();
+        let refs = Continue {
+            sessions: Some(dir.clone()),
+        }
+        .discover()
+        .unwrap();
+        assert_eq!(refs.len(), 3);
+        let indexed = refs.iter().find(|r| r.id == "indexed").unwrap();
+        assert_eq!(indexed.title.as_deref(), Some("index title"));
+        assert_eq!(indexed.cwd.as_deref(), Some(Path::new("/index")));
+        assert_eq!(indexed.created_at.unwrap().timestamp_millis(), 1700000000000);
+        assert_eq!(indexed.message_count, 2);
+        let extra = refs.iter().find(|r| r.id == "extra").unwrap();
+        assert_eq!(extra.title.as_deref(), Some("extra title"));
+        assert_eq!(extra.cwd.as_deref(), Some(Path::new("/extra")));
+        assert_eq!(extra.created_at, extra.updated_at);
+        assert_eq!(extra.message_count, 3);
+        let broken = refs.iter().find(|r| r.id == "broken").unwrap();
+        assert!(broken.title.is_none());
+        assert_eq!(broken.message_count, 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
