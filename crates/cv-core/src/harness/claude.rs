@@ -13,6 +13,7 @@ use super::{parse_ts, Adapter};
 pub mod adopt;
 pub(crate) mod emit;
 mod fork;
+mod lean;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
@@ -350,7 +351,10 @@ fn ingest_bytes(
         return Flow::Continue;
     }
     let slice = &buf[lead..end];
-    let v: Value = match serde_json::from_slice(slice) {
+    let lean = (!opts.extra && !opts.complete)
+        .then(|| lean::parse(slice).ok())
+        .flatten();
+    let v: Value = match lean.map_or_else(|| serde_json::from_slice(slice), Ok) {
         Ok(v) => v,
         Err(_) => return Flow::Continue,
     };
