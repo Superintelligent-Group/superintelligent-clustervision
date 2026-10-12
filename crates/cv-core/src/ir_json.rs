@@ -14,7 +14,42 @@ use serde::{
 };
 use std::io::{self, Write};
 
-type Result<T> = std::result::Result<T, serde_json::Error>;
+type Result<T> = std::result::Result<T, OutputError>;
+
+// Keep source and I/O errors intact through serde's visitor interface. A display-only
+// serde_json::Error::custom conversion would lose their original error chain and I/O kind.
+#[derive(Debug)]
+struct OutputError(anyhow::Error);
+impl std::fmt::Display for OutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for OutputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+impl serde::ser::Error for OutputError {
+    fn custom<T: std::fmt::Display>(message: T) -> Self {
+        Self(anyhow::Error::msg(message.to_string()))
+    }
+}
+impl From<io::Error> for OutputError {
+    fn from(error: io::Error) -> Self {
+        Self(error.into())
+    }
+}
+impl From<serde_json::Error> for OutputError {
+    fn from(error: serde_json::Error) -> Self {
+        Self(error.into())
+    }
+}
+impl From<anyhow::Error> for OutputError {
+    fn from(error: anyhow::Error) -> Self {
+        Self(error)
+    }
+}
 
 impl Message {
     /// Write complete IR JSON with bounded scratch space for source-backed text and arguments.
@@ -54,7 +89,7 @@ struct Fields<'a, W> {
     first: bool,
     context: Context<'a>,
 }
-fn error(error: impl std::fmt::Display) -> serde_json::Error {
+fn error(error: impl std::fmt::Display) -> OutputError {
     serde::ser::Error::custom(error)
 }
 fn indent(writer: &mut impl Write, depth: usize) -> io::Result<()> {
@@ -73,17 +108,18 @@ impl<W: Write> Fields<'_, W> {
                 },
                 value,
             )
+            .map_err(Into::into)
         } else {
-            serde_json::to_writer(&mut *self.writer, value)
+            serde_json::to_writer(&mut *self.writer, value).map_err(Into::into)
         }
     }
     fn text(&mut self, text: &Text) -> Result<()> {
         if let Text::Inline(text) = text {
             // A string's compact and pretty representations are identical.
-            return serde_json::to_writer(&mut *self.writer, text);
+            return serde_json::to_writer(&mut *self.writer, text).map_err(Into::into);
         }
         let Text::Span(span) = text else { unreachable!() };
-        self.writer.write_all(b"\"").map_err(error)?;
+        self.writer.write_all(b"\"").map_err(OutputError::from)?;
         let mut escaped = Vec::new();
         self.resolver
             .try_for_each_chunk(span, 64 * 1024, |chunk| {
@@ -92,8 +128,8 @@ impl<W: Write> Fields<'_, W> {
                 self.writer.write_all(&escaped[1..escaped.len() - 1])?;
                 Ok(())
             })
-            .map_err(error)?;
-        self.writer.write_all(b"\"").map_err(error)
+            .map_err(OutputError::from)?;
+        self.writer.write_all(b"\"").map_err(OutputError::from)
     }
     fn json(&mut self, value: &Json) -> Result<()> {
         if self.pretty {
@@ -105,20 +141,20 @@ impl<W: Write> Fields<'_, W> {
                     string: false,
                     escape: false,
                 })
-                .map_err(error)
+                .map_err(OutputError::from)
         } else {
-            value.write_canonical(self.writer).map_err(error)
+            value.write_canonical(self.writer).map_err(OutputError::from)
         }
     }
     fn content(&mut self, blocks: &[Block]) -> Result<()> {
-        self.writer.write_all(b"[").map_err(error)?;
+        self.writer.write_all(b"[").map_err(OutputError::from)?;
         for (i, block) in blocks.iter().enumerate() {
             if i != 0 {
-                self.writer.write_all(b",").map_err(error)?;
+                self.writer.write_all(b",").map_err(OutputError::from)?;
             }
             if self.pretty {
-                self.writer.write_all(b"\n").map_err(error)?;
-                indent(self.writer, self.depth + 2).map_err(error)?;
+                self.writer.write_all(b"\n").map_err(OutputError::from)?;
+                indent(self.writer, self.depth + 2).map_err(OutputError::from)?;
             }
             block.serialize(Fields {
                 writer: &mut *self.writer,
@@ -130,28 +166,28 @@ impl<W: Write> Fields<'_, W> {
             })?;
         }
         if self.pretty && !blocks.is_empty() {
-            self.writer.write_all(b"\n").map_err(error)?;
-            indent(self.writer, self.depth + 1).map_err(error)?;
+            self.writer.write_all(b"\n").map_err(OutputError::from)?;
+            indent(self.writer, self.depth + 1).map_err(OutputError::from)?;
         }
-        self.writer.write_all(b"]").map_err(error)
+        self.writer.write_all(b"]").map_err(OutputError::from)
     }
 }
 impl<W: Write> SerializeStruct for Fields<'_, W> {
     type Ok = ();
-    type Error = serde_json::Error;
+    type Error = OutputError;
     fn serialize_field<T: ?Sized + Serialize>(&mut self, key: &'static str, value: &T) -> Result<()> {
         if !self.first {
-            self.writer.write_all(b",").map_err(error)?;
+            self.writer.write_all(b",").map_err(OutputError::from)?;
         }
         self.first = false;
         if self.pretty {
-            self.writer.write_all(b"\n").map_err(error)?;
-            indent(self.writer, self.depth + 1).map_err(error)?;
+            self.writer.write_all(b"\n").map_err(OutputError::from)?;
+            indent(self.writer, self.depth + 1).map_err(OutputError::from)?;
         }
         serde_json::to_writer(&mut *self.writer, key)?;
         self.writer
             .write_all(if self.pretty { b": " } else { b":" })
-            .map_err(error)?;
+            .map_err(OutputError::from)?;
         match (self.context, key) {
             (Context::Message(message), "content") => self.content(&message.content),
             (Context::Block(block), _) => match block {
@@ -183,10 +219,10 @@ impl<W: Write> SerializeStruct for Fields<'_, W> {
     }
     fn end(self) -> Result<()> {
         if self.pretty && !self.first {
-            self.writer.write_all(b"\n").map_err(error)?;
-            indent(self.writer, self.depth).map_err(error)?;
+            self.writer.write_all(b"\n").map_err(OutputError::from)?;
+            indent(self.writer, self.depth).map_err(OutputError::from)?;
         }
-        self.writer.write_all(b"}").map_err(error)
+        self.writer.write_all(b"}").map_err(OutputError::from)
     }
 }
 macro_rules! unsupported {
@@ -198,7 +234,7 @@ macro_rules! unsupported {
 }
 impl<W: Write> Serializer for Fields<'_, W> {
     type Ok = ();
-    type Error = serde_json::Error;
+    type Error = OutputError;
     type SerializeSeq = Impossible<(), Self::Error>;
     type SerializeTuple = Impossible<(), Self::Error>;
     type SerializeTupleStruct = Impossible<(), Self::Error>;
@@ -207,7 +243,7 @@ impl<W: Write> Serializer for Fields<'_, W> {
     type SerializeStruct = Self;
     type SerializeStructVariant = Impossible<(), Self::Error>;
     fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self> {
-        self.writer.write_all(b"{").map_err(error)?;
+        self.writer.write_all(b"{").map_err(OutputError::from)?;
         Ok(self)
     }
     unsupported! {
