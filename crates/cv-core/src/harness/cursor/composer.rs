@@ -1,8 +1,8 @@
 //! Strict serde projection and selected array replay for immutable Cursor composer cells.
 use super::*;
-use crate::harness::store::{DiscardValue, bytes::ByteSource};
-use serde::Deserialize;
+use crate::harness::store::{bytes::ByteSource, DiscardValue};
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
 
 #[derive(Default)]
 pub(super) struct Composer {

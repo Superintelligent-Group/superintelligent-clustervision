@@ -1,9 +1,9 @@
 //! Workspace chat tabs share the same strict array projection and immutable staged bytes.
-use super::composer::{Array, scalars};
+use super::composer::{scalars, Array};
 use super::*;
-use crate::harness::store::{DiscardValue, bytes::ByteSource};
-use serde::Deserialize;
+use crate::harness::store::{bytes::ByteSource, DiscardValue};
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
 
 #[derive(Default)]
 pub(super) struct Legacy {

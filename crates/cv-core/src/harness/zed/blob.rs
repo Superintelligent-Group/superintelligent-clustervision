@@ -2,11 +2,11 @@
 //! bounded memory or a private spill; compressed offsets never become transcript spans.
 
 use super::{legacy_message, modern_message};
-use crate::harness::store::{DiscardValue, bytes::ByteSource};
+use crate::harness::store::{bytes::ByteSource, DiscardValue};
 use crate::ir::{Message, Role};
 use crate::stream::Flow;
-use serde::Deserialize;
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 

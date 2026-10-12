@@ -137,10 +137,9 @@ mod tests {
             conn.execute("INSERT INTO cursorDiskKV VALUES('text',?1)", ["{\"conversation\":[]}"])
                 .unwrap();
             if rowid {
-                assert!(
-                    conn.blob_open(rusqlite::DatabaseName::Main, "cursorDiskKV", "value", 2, true)
-                        .is_ok()
-                );
+                assert!(conn
+                    .blob_open(rusqlite::DatabaseName::Main, "cursorDiskKV", "value", 2, true)
+                    .is_ok());
             }
             for key in ["blob", "text"] {
                 let source = cell(&conn, "cursorDiskKV", key).unwrap();
