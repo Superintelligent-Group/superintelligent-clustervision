@@ -20,6 +20,8 @@ use std::time::Duration;
 
 use crate::util::{parse_harness, short_id};
 
+mod reuse;
+
 /// One row of the catalog (`catalog.jsonl`). Cheap metadata for listings/search; the full
 /// transcript lives in the per-session JSON under `archive/<harness>/<id>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,34 +131,9 @@ impl Archive {
     /// Persist a session to `archive/<harness>/<id>.json` and update the catalog. Idempotent:
     /// if the serialized bytes are byte-identical to what's already on disk, returns `Skipped`
     /// without rewriting anything.
+    #[cfg(test)]
     pub fn store(&self, session: &Session) -> Result<StoreOutcome> {
-        let json = serde_json::to_vec_pretty(session).with_context(|| format!("serializing session {}", session.id))?;
-
-        let dest = self.session_path(session.harness, &session.id);
-        if let Ok(existing) = fs::read(&dest) {
-            if existing == json {
-                return Ok(StoreOutcome::Skipped);
-            }
-        }
-
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
-        fs::write(&dest, &json).with_context(|| format!("writing {}", dest.display()))?;
-
-        let entry = CatalogEntry {
-            harness: session.harness.as_str().to_string(),
-            id: session.id.clone(),
-            cwd: session.cwd.clone(),
-            title: session.title.clone().or_else(|| Some(session.label())),
-            message_count: session.messages.len(),
-            created_at: session.created_at,
-            updated_at: session.updated_at,
-            archived_at: Utc::now(),
-            path: Self::rel_session_path(session.harness, &session.id),
-        };
-        self.upsert_catalog(entry)?;
-        Ok(StoreOutcome::Archived)
+        self.store_streaming(session)
     }
 
     /// Read the catalog, deduped by (harness, id) with the newest `archived_at` winning.
@@ -201,6 +178,10 @@ impl Archive {
         // Held across the append *and* the possible compaction: a compactor's read-rewrite-rename
         // would otherwise silently drop a line another process appended in between.
         let _lock = self.lock_catalog()?;
+        self.upsert_catalog_locked(entry)
+    }
+
+    fn upsert_catalog_locked(&self, entry: CatalogEntry) -> Result<()> {
         let path = self.catalog_path();
         let line = serde_json::to_string(&entry)?;
         {
@@ -295,18 +276,14 @@ pub(crate) fn cmd_sync(archive: &Archive) -> Result<()> {
         let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
             continue;
         };
-        match adapter.parse(&r) {
-            Ok(session) => match archive.store(&session) {
-                Ok(StoreOutcome::Archived) => archived += 1,
-                Ok(StoreOutcome::Skipped) => skipped += 1,
-                Err(e) => {
-                    failed += 1;
-                    eprintln!("cv archive: failed to archive {} {}: {e:#}", r.harness, r.id);
-                }
+        match archive.store_ref(adapter.as_ref(), &r) {
+            Ok(pass) => match pass.outcome {
+                StoreOutcome::Archived => archived += 1,
+                StoreOutcome::Skipped => skipped += 1,
             },
             Err(e) => {
                 failed += 1;
-                eprintln!("cv archive: failed to parse {} {}: {e:#}", r.harness, r.id);
+                eprintln!("cv archive: failed to archive {} {}: {e:#}", r.harness, r.id);
             }
         }
     }
@@ -339,41 +316,43 @@ pub(crate) fn cmd_watch(archive: &Archive, interval: u64, harness: Option<String
     // Not `Watcher::run` (which never returns and takes the closure by value): a manual loop keeps
     // ownership of `archive` and reads identically.
     loop {
-        for ev in watcher.poll() {
-            archive_event(archive, &ev.reference, ev.kind, ev.new_messages.len());
-        }
+        watcher.poll_sources(|kind, r, previous| archive_event(archive, r, kind, previous));
         std::thread::sleep(interval);
     }
 }
 
-/// Re-parse and archive the session behind an event, logging the outcome to stderr.
-fn archive_event(archive: &Archive, r: &SessionRef, kind: EventKind, delta: usize) {
-    let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
-        return;
-    };
-    let session = match adapter.parse(r) {
-        Ok(s) => s,
+/// Archive in one consumer read; failure leaves the watcher's source position retryable.
+fn archive_event(
+    archive: &Archive,
+    r: &SessionRef,
+    kind: EventKind,
+    previous: usize,
+) -> Option<(usize, cv_core::watch::ReadState)> {
+    let adapter = cv_core::harness::for_harness(r.harness)?;
+    let pass = match archive.store_ref(adapter.as_ref(), r) {
+        Ok(pass) => pass,
         Err(e) => {
-            eprintln!("[parse-fail] {} {}: {e:#}", r.harness, short_id(&r.id));
-            return;
+            eprintln!("[archive-fail] {} {}: {e:#}", r.harness, short_id(&r.id));
+            return None;
         }
     };
-    match archive.store(&session) {
-        Ok(StoreOutcome::Archived) => {
+    match pass.outcome {
+        StoreOutcome::Archived => {
             let verb = match kind {
                 EventKind::New => "new",
                 EventKind::Updated => "archived",
             };
             eprintln!(
-                "[{verb}] {} {}  +{delta} msgs  {}",
+                "[{verb}] {} {}  +{} msgs  {}",
                 r.harness,
                 short_id(&r.id),
+                pass.total.saturating_sub(previous),
                 pretty_cwd(r.cwd.as_deref())
             );
         }
-        Ok(StoreOutcome::Skipped) => {}
-        Err(e) => eprintln!("[store-fail] {} {}: {e:#}", r.harness, short_id(&r.id)),
+        StoreOutcome::Skipped => {}
     }
+    Some((pass.total, pass.read))
 }
 
 /// `cv archive ls`: what's in the archive, newest activity first.
