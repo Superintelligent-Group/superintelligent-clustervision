@@ -10,6 +10,16 @@ const CHECKPOINT_EVERY: u64 = 256 * 1024;
 const ANCHOR_BYTES: usize = 64 * 1024;
 const METADATA_BYTES: usize = 16 * 1024;
 
+fn state_version(adapter: &dyn Adapter) -> String {
+    crate::resume::version(adapter, CONSUMER).unwrap_or_else(|| {
+        format!(
+            "{STATE_VERSION}/view{}/{}",
+            crate::affordance::VIEW_VERSION,
+            adapter.harness().as_str()
+        )
+    })
+}
+
 fn fits(value: &impl Serialize, limit: usize) -> bool {
     struct Limited(usize);
     impl std::io::Write for Limited {
@@ -59,7 +69,8 @@ pub struct ReadState {
 impl ReadState {
     pub(crate) fn baseline(r: &SessionRef) -> Self {
         Self {
-            version: STATE_VERSION.into(),
+            version: crate::harness::for_harness(r.harness)
+                .map_or_else(String::new, |adapter| state_version(adapter.as_ref())),
             path: r.path.clone(),
             source: source::Probe::default().snapshot(r),
             anchor: None,
@@ -70,19 +81,21 @@ impl ReadState {
 
     /// Fully completed consumer read still describes this source, including dynamic dependencies.
     pub fn fresh(&self, r: &SessionRef) -> bool {
-        self.version == STATE_VERSION
+        crate::harness::for_harness(r.harness).is_some_and(|adapter| self.fresh_with(adapter.as_ref(), r))
+    }
+
+    /// Freshness against the same concrete adapter that will perform the next read.
+    pub fn fresh_with(&self, adapter: &dyn Adapter, r: &SessionRef) -> bool {
+        let mut probe = source::Probe::default();
+        let now = probe.snapshot(r);
+        self.version == state_version(adapter)
             && self.path == r.path
-            && self
-                .identity
-                .as_ref()
-                .is_some_and(|guard| guard.fresh(&mut source::Probe::default()))
-            && self
-                .source
-                .fresh(&source::Probe::default().snapshot(r), &mut source::Probe::default())
+            && self.identity.as_ref().is_some_and(|guard| guard.fresh(&mut probe))
+            && self.source.fresh(&now, &mut probe)
     }
 
     pub(crate) fn baseline_unchanged(&self, r: &SessionRef) -> bool {
-        self.version == STATE_VERSION
+        crate::harness::for_harness(r.harness).is_some_and(|adapter| self.version == state_version(adapter.as_ref()))
             && self.path == r.path
             && source::unchanged(r, &self.source)
             && self
@@ -104,10 +117,18 @@ impl ReadState {
         current: &source::Snapshot,
         skip: usize,
     ) -> Option<&'a stream::Checkpoint> {
-        if self.version != STATE_VERSION || self.path != r.path || current.primary.1 < self.source.primary.1 {
+        if self.version != state_version(adapter) || self.path != r.path || current.primary.1 < self.source.primary.1 {
             return None;
         }
         let same = current.primary == self.source.primary;
+        if same
+            && !self
+                .identity
+                .as_ref()
+                .is_some_and(|guard| guard.fresh(&mut source::Probe::default()))
+        {
+            return None;
+        }
         if !same && current.primary.1 <= self.source.primary.1 {
             return None;
         }
@@ -124,6 +145,7 @@ impl ReadState {
 /// EOF metadata and selected full messages, plus positions that can be accepted after a bounded
 /// callback reports how much it consumed. Never checkpoint past that accepted message position.
 pub struct ReadPass {
+    version: String,
     pub session: Session,
     pub messages: Vec<Message>,
     pub total: usize,
@@ -156,7 +178,7 @@ impl ReadPass {
             })
             .cloned();
         ReadState {
-            version: STATE_VERSION.into(),
+            version: self.version.clone(),
             path: self.path.clone(),
             source: self.source.clone(),
             anchor,
@@ -236,7 +258,7 @@ fn read_inner(
 ) -> Result<ReadPass> {
     let captured = source::Probe::default().snapshot(r);
     let cached = previous
-        .filter(|state| !session_output && state.fresh(r))
+        .filter(|state| !session_output && state.fresh_with(adapter, r))
         .and_then(|state| state.completed.as_ref());
     let stop_after_selection = cached.is_some_and(|complete| skip.saturating_add(keep) < complete.total);
     let mut primary_reads = source::ReadSet::default();
@@ -299,6 +321,15 @@ fn read_inner(
     let resolver = done.session.resolver();
     for message in &mut sink.messages {
         for block in &message.content {
+            if let crate::Block::ToolUse {
+                input: crate::Json::Source(range),
+                ..
+            } = block
+            {
+                if range.path() != r.path {
+                    reads.record(range.path());
+                }
+            }
             let span = match block {
                 crate::Block::Text { text } | crate::Block::Thinking { text, .. } => text.as_span(),
                 crate::Block::ToolResult { content, .. } => content.as_span(),
@@ -311,7 +342,7 @@ fn read_inner(
                 reads.record(path);
             }
         }
-        message.materialize(&resolver);
+        message.materialize(&resolver)?;
     }
     let source = captured.with_reads(&reads);
     let version = crate::resume::version(adapter, CONSUMER);
@@ -362,6 +393,7 @@ fn read_inner(
         (cached.session.clone(), cached.total, Some(cached.clone()))
     };
     Ok(ReadPass {
+        version: state_version(adapter),
         session,
         total,
         parsed_messages: sink.total - first,
@@ -386,6 +418,48 @@ fn read_inner(
 mod tests {
     use super::*;
     use crate::harness;
+
+    #[test]
+    fn failed_materialization_never_establishes_a_completed_read() {
+        struct RemovesInput(PathBuf);
+        impl Adapter for RemovesInput {
+            fn harness(&self) -> Harness {
+                Harness::Codex
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                _: &stream::ParseOptions,
+                sink: &mut dyn stream::MessageSink,
+            ) -> Result<Session> {
+                let mut message = Message::new(crate::Role::Assistant);
+                message.content.push(crate::Block::ToolUse {
+                    id: "call".into(),
+                    name: "opaque".into(),
+                    namespace: None,
+                    input: crate::Json::source(&self.0, 0, 2)?,
+                });
+                sink.try_message(message)?;
+                std::fs::remove_file(&self.0)?;
+                Ok(Session::new(&r.id, r.harness))
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("cv-watch-read-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("primary.jsonl");
+        let external = dir.join("input.json");
+        std::fs::write(&path, "primary").unwrap();
+        std::fs::write(&external, "{}").unwrap();
+        let r = SessionRef::new("read", Harness::Codex, path);
+        assert!(read_session(&RemovesInput(external), &r, None, 0).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn followed_full_messages_and_eof_metadata_equal_the_original_parse() {
@@ -471,6 +545,14 @@ mod tests {
         assert_eq!(first.total, 8192);
         let offered = read(adapter.as_ref(), &r, None, 0, 1).unwrap();
         let pending_state = offered.accepted(1);
+        let mut old_version = pending_state.clone();
+        old_version.version.push_str("/old");
+        assert_eq!(
+            read(adapter.as_ref(), &r, Some(&old_version), 1, 1)
+                .unwrap()
+                .parsed_messages,
+            8192
+        );
         let pending = read(adapter.as_ref(), &r, Some(&pending_state), 1, 1).unwrap();
         assert_eq!(pending.total, 8192);
         assert_eq!(pending.parsed_messages, 2);
@@ -523,6 +605,30 @@ mod tests {
         assert_eq!(
             serde_json::to_value(got).unwrap(),
             serde_json::to_value(expected).unwrap()
+        );
+        // Preserve size+mtime and the sampled bytes, but rewrite an unsampled prefix record.
+        // Its changed ctime must decline both unchanged EOF reuse and checkpoint admission.
+        let complete = next.accepted(next.total);
+        let modified = std::fs::metadata(&r.path).unwrap().modified().unwrap();
+        let middle = body.len() / 2;
+        let changed = middle + body[middle..].find("xxx").unwrap();
+        assert!(changed > 4096 && changed + 4096 < complete.anchor.as_ref().unwrap().checkpoint.offset as usize);
+        body.replace_range(changed..changed + 1, "y");
+        std::fs::write(&r.path, &body).unwrap();
+        std::fs::File::open(&r.path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(source::Probe::default().snapshot(&r).primary, complete.source.primary);
+        let anchor = complete.anchor.as_ref().unwrap();
+        assert!(anchor.head.holds(&r.path, body.len() as u64, &anchor.head.version));
+        assert!(!complete.fresh_with(adapter.as_ref(), &r));
+        let mut rewritten = read_session(adapter.as_ref(), &r, Some(&complete), next.total).unwrap();
+        assert!(!rewritten.resumed);
+        rewritten.session.messages = rewritten.messages;
+        assert_eq!(
+            serde_json::to_value(rewritten.session).unwrap(),
+            serde_json::to_value(adapter.parse(&r).unwrap()).unwrap()
         );
         eprintln!(
             "watch prefix 8192: initial {}, append {}, pending {} messages interpreted",

@@ -205,7 +205,7 @@ impl Archive {
     /// after the checkpoint, preserving held EOF messages and exact final session metadata.
     pub(super) fn store_ref(&self, adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Result<StoredPass> {
         let previous = self.stored(r);
-        if let Some(stored) = previous.as_ref().filter(|stored| stored.read.fresh(r)) {
+        if let Some(stored) = previous.as_ref().filter(|stored| stored.read.fresh_with(adapter, r)) {
             return Ok(StoredPass {
                 outcome: StoreOutcome::Skipped,
                 total: stored.total,
@@ -264,7 +264,7 @@ impl Archive {
             "archive prefix length does not match the completed read"
         );
         let (outcome, artifact) = self.store_artifact(&session, previous.is_none())?;
-        if read.fits_cache(STATE_BYTES as usize - 1024) && read.fresh(r) {
+        if read.fits_cache(STATE_BYTES as usize - 1024) && read.fresh_with(adapter, r) {
             let stored = Stored {
                 version: STATE_VERSION.into(),
                 total,
@@ -275,7 +275,7 @@ impl Archive {
             let mut temporary = Temporary::new(&dest)?;
             temporary.write_json(&stored, false)?;
             let _lock = self.lock_catalog()?;
-            if stored.artifact.matches(&self.session_path(r.harness, &r.id)) && read.fresh(r) {
+            if stored.artifact.matches(&self.session_path(r.harness, &r.id)) && read.fresh_with(adapter, r) {
                 temporary.publish(&dest)?;
             }
         }
@@ -388,7 +388,12 @@ mod tests {
         assert!(!a.store_ref(adapter.as_ref(), &r).unwrap().resumed);
         exact(&a, adapter.as_ref(), &r);
         let replacement = r.path.with_extension("new");
+        let old_modified = fs::metadata(&r.path).unwrap().modified().unwrap();
         fs::write(&replacement, &body).unwrap();
+        fs::File::open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old_modified))
+            .unwrap();
         fs::rename(replacement, &r.path).unwrap();
         assert!(!a.store_ref(adapter.as_ref(), &r).unwrap().resumed);
         exact(&a, adapter.as_ref(), &r);

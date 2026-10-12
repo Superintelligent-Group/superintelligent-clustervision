@@ -125,12 +125,12 @@ pub fn tail(r: &SessionRef, skip: usize, keep: usize) -> Option<(usize, Vec<Mess
         crate::stream::Flow::Continue
     };
     let session = adapter
-        .stream(r, &crate::stream::ParseOptions::full(), &mut sink)
+        .try_stream(r, &crate::stream::ParseOptions::full(), &mut sink)
         .ok()?;
     // As `stream::collect` does: own any lazy content (full-fidelity streams rarely produce any).
     let resolver = session.resolver();
     for m in &mut kept {
-        m.materialize(&resolver);
+        m.materialize(&resolver).ok()?;
     }
     Some((total, kept))
 }
@@ -366,6 +366,26 @@ impl Watcher {
     /// leaves (and every message past the budget) stays pending: the next poll re-reads that
     /// session even if its cheap trigger has not moved. Returns whether anything is pending.
     pub fn poll_bounded(&mut self, max_messages: usize, mut take: impl FnMut(SessionEvent) -> usize) -> bool {
+        self.poll_bounded_inner(max_messages, &mut take, false).unwrap_or(false)
+    }
+
+    /// A demanded bounded read: source/materialization failures are errors, so callers cannot
+    /// return a successful cursor for output that could not be read. The legacy polling API
+    /// remains best effort and leaves unreadable sessions retryable.
+    pub fn try_poll_bounded(
+        &mut self,
+        max_messages: usize,
+        mut take: impl FnMut(SessionEvent) -> usize,
+    ) -> anyhow::Result<bool> {
+        self.poll_bounded_inner(max_messages, &mut take, true)
+    }
+
+    fn poll_bounded_inner(
+        &mut self,
+        max_messages: usize,
+        take: &mut impl FnMut(SessionEvent) -> usize,
+        strict: bool,
+    ) -> anyhow::Result<bool> {
         let refs = self.discover();
         // Prune entries for sessions that vanished from discovery (deleted/pruned transcripts),
         // so a long-lived watcher (`cv watch`) doesn't grow `seen` without bound. The size check skips
@@ -392,6 +412,13 @@ impl Watcher {
                             }) =>
                 {
                     let Some(prev_len) = resolve(&r, state.mark) else {
+                        if strict {
+                            anyhow::bail!(
+                                "could not resolve prior watch position: {} {}",
+                                r.harness,
+                                r.path.display()
+                            );
+                        }
                         continue; // unreadable right now: keep the position, a transient failure is not a skip
                     };
                     (EventKind::Updated, prev_len)
@@ -403,8 +430,12 @@ impl Watcher {
                 continue;
             };
             let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
-            let Ok(mut pass) = read_tail(adapter.as_ref(), &r, previous, prev_len, room) else {
-                continue;
+            let mut pass = match read_tail(adapter.as_ref(), &r, previous, prev_len, room) {
+                Ok(pass) => pass,
+                Err(error) if strict => {
+                    return Err(error.context(format!("reading watched {} session {}", r.harness, r.path.display())))
+                }
+                Err(_) => continue,
             };
             let total = pass.total;
             let new_messages = std::mem::take(&mut pass.messages);
@@ -435,7 +466,7 @@ impl Watcher {
                 },
             );
         }
-        pending
+        Ok(pending)
     }
 
     /// Observe sources on the same discovery/filter loop without first reading their message
@@ -836,5 +867,22 @@ mod tests {
             }),
             1
         );
+    }
+
+    #[test]
+    fn demanded_poll_surfaces_read_failure_without_a_success_position() {
+        fn discover() -> Vec<SessionRef> {
+            vec![sref(
+                Harness::Claude,
+                std::path::PathBuf::from("/absent/cv-failed-watch-read.jsonl"),
+            )]
+        }
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+        assert!(watcher
+            .try_poll_bounded(1, |_| panic!("failed source emitted a message"))
+            .is_err());
+        assert!(watcher.to_cursor().is_empty());
+        assert!(!watcher.poll_bounded(1, |_| panic!("failed source emitted a message")));
+        assert!(watcher.to_cursor().is_empty());
     }
 }

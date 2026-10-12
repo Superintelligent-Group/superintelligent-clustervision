@@ -174,6 +174,7 @@ impl Archive {
     /// catalog every time (which made N archives O(N²)). `load_catalog` already dedups by key with
     /// the newest `archived_at` winning, so superseded lines are harmless until we compact. When the
     /// raw line count grows well past the number of unique entries, rewrite once to reclaim space.
+    #[cfg(test)]
     fn upsert_catalog(&self, entry: CatalogEntry) -> Result<()> {
         // Held across the append *and* the possible compaction: a compactor's read-rewrite-rename
         // would otherwise silently drop a line another process appended in between.
