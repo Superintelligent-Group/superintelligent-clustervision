@@ -106,7 +106,7 @@ impl Adapter for Cline {
         let mut spawns = crate::affordance::AffordanceSink::new(Harness::Cline, sink);
         let sink: &mut dyn MessageSink = &mut spawns;
         if super::cline_sdk::is_sdk_path(&r.path) {
-            return super::cline_sdk::stream(&r.path, &r.id, sink);
+            return super::cline_sdk::stream_with_options(&r.path, &r.id, opts, sink);
         }
         stream_task_dir(&r.path, &r.id, Harness::Cline, opts, sink)
     }

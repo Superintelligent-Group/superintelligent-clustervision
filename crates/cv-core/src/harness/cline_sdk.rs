@@ -52,10 +52,12 @@
 //! `metadata {displayOnly: true, displayRole: "error"}` is a run error shown to the user, never
 //! sent to the model ([`MessageKind::Error`]).
 
-use super::wire::{anthropic, coerce_text, text_parts};
+use super::store::document::text_summary;
+use super::store::document::{accepts_value, array, Raw, Record, Source};
+use super::wire::{anthropic, coerce_text};
 use super::{parse_ts, ts_from_epoch};
 use crate::ir::*;
-use crate::stream::{Flow, MessageSink};
+use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -154,8 +156,19 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 }
 
 fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
-    let doc: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
-    let msgs = doc.get("messages")?.as_array()?;
+    let source = Source::open(path).ok()?;
+    let raw = source.raw().ok()?;
+    if !accepts_value(raw) {
+        return None;
+    }
+    let record = Record::parse(raw)?;
+    let msgs = array(record.get("messages")?)?;
+    let doc = Value::Object(
+        ["updated_at"]
+            .into_iter()
+            .filter_map(|key| record.value(key).map(|v| (key.into(), v)))
+            .collect(),
+    );
     let id = ref_id(path, sid)?;
     let lead = id == sid;
     let row = if lead { manifest(path.parent()?, sid) } else { None };
@@ -171,7 +184,7 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         .and_then(|m| m.pointer("/metadata/title"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| first_user_text(msgs))
+        .or_else(|| first_raw_user_text(&msgs, &source, path))
         .map(|t| truncate(&t, 80));
     r.created_at = row
         .as_ref()
@@ -180,8 +193,9 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
         .and_then(parse_ts)
         .or_else(|| {
             msgs.first()
-                .and_then(|m| m.get("ts"))
-                .and_then(Value::as_i64)
+                .and_then(|m| Record::parse(*m))
+                .and_then(|m| m.value("ts"))
+                .and_then(|v| v.as_i64())
                 .and_then(ts_from_epoch)
         });
     r.updated_at = doc
@@ -193,17 +207,66 @@ fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
     Some(r)
 }
 
-fn first_user_text(msgs: &[Value]) -> Option<String> {
-    msgs.iter()
-        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
-        .map(|m| text_parts(m.get("content")))
-        .filter(|t| !t.trim().is_empty())
+fn first_raw_user_text(msgs: &[Raw<'_>], source: &Source, path: &Path) -> Option<String> {
+    let message = msgs
+        .iter()
+        .filter_map(|raw| Record::parse(*raw))
+        .find(|m| m.string("role").as_deref() == Some("user"))?;
+    let content = message.get("content")?;
+    let texts = if let Some(text) = source.text(content, true) {
+        vec![text]
+    } else {
+        array(content)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(Record::parse)
+            .filter_map(|part| part.get("text").and_then(|raw| source.text(raw, true)))
+            .collect()
+    };
+    text_summary(
+        texts.iter(),
+        &crate::lazy::Resolver::new(Some(path.to_path_buf())),
+        true,
+    )
 }
 
 /// Read one messages file into `sink`, returning the session with empty `messages`.
 pub fn stream(path: &Path, id: &str, sink: &mut dyn MessageSink) -> Result<Session> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let doc: Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    stream_with_options(path, id, &ParseOptions::full(), sink)
+}
+
+pub(crate) fn stream_with_options(
+    path: &Path,
+    id: &str,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    let source = Source::open(path)?;
+    let raw = source.raw().with_context(|| format!("parsing {}", path.display()))?;
+    anyhow::ensure!(
+        accepts_value(raw),
+        "invalid JSON scalar or nesting depth in {}",
+        path.display()
+    );
+    let record = Record::parse(raw);
+    let doc = Value::Object(
+        [
+            "agent",
+            "taskType",
+            "sessionId",
+            "origin",
+            "updated_at",
+            "system_prompt",
+        ]
+        .into_iter()
+        .filter_map(|key| record.as_ref()?.value(key).map(|v| (key.into(), v)))
+        .collect(),
+    );
+    let msgs = record
+        .as_ref()
+        .and_then(|r| r.get("messages"))
+        .and_then(array)
+        .unwrap_or_default();
     let mut s = Session::new(id.to_string(), Harness::Cline);
     s.source_path = Some(path.to_path_buf());
     let sid = id.split('/').next().unwrap_or(id);
@@ -277,11 +340,10 @@ pub fn stream(path: &Path, id: &str, sink: &mut dyn MessageSink) -> Result<Sessi
     s.system_prompt = doc.get("system_prompt").and_then(Value::as_str).map(str::to_string);
     sink.meta(&s);
 
-    let empty = Vec::new();
-    let msgs = doc.get("messages").and_then(Value::as_array).unwrap_or(&empty);
     let mut prompted = false;
-    for v in msgs {
-        let Some(m) = message(v, lead, &mut prompted) else {
+    let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
+    for raw in msgs {
+        let Some(m) = raw_message(raw, &source, opts.spans, lead, &mut prompted) else {
             continue;
         };
         if s.created_at.is_none() {
@@ -291,7 +353,13 @@ pub fn stream(path: &Path, id: &str, sink: &mut dyn MessageSink) -> Result<Sessi
             s.model.clone_from(&m.model);
         }
         if s.title.is_none() && m.kind == MessageKind::Prompt {
-            s.title = m.text().map(|t| truncate(&t, 80));
+            s.title = text_summary(
+                m.content
+                    .iter()
+                    .filter_map(|b| if let Block::Text { text } = b { Some(text) } else { None }),
+                &resolver,
+                false,
+            );
         }
         if sink.message(m) == Flow::Stop {
             break;
@@ -312,8 +380,50 @@ fn result_text(c: Option<&Value>) -> String {
     }
 }
 
+fn raw_message(raw: Raw<'_>, source: &Source, spans: bool, lead: bool, prompted: &mut bool) -> Option<Message> {
+    if !spans {
+        return serde_json::from_str::<Value>(raw.get())
+            .ok()
+            .and_then(|v| message(&v, lead, prompted));
+    }
+    let record = Record::parse(raw)?;
+    let meta = Value::Object(
+        ["id", "role", "ts", "modelInfo", "metrics", "metadata"]
+            .into_iter()
+            .filter_map(|key| record.value(key).map(|v| (key.into(), v)))
+            .collect(),
+    );
+    let mut blocks = Vec::new();
+    if let Some(content) = record.get("content") {
+        if let Some(text) = source.text(content, true) {
+            blocks.push(Block::Text { text });
+        } else if let Some(items) = array(content) {
+            for raw in items {
+                let part = Record::parse(raw);
+                if part.as_ref().and_then(|r| r.string("type")).as_deref() == Some("tool_result") {
+                    let part = part?;
+                    let content = part
+                        .get("content")
+                        .and_then(|raw| source.text(raw, true))
+                        .unwrap_or_else(|| result_text(part.value("content").as_ref()).into());
+                    blocks.push(Block::ToolResult {
+                        tool_use_id: part.string("tool_use_id").unwrap_or_default(),
+                        content,
+                        is_error: part.value("is_error").and_then(|v| v.as_bool()).unwrap_or(false),
+                        tool_name: part.string("name"),
+                        status: None,
+                        details: None,
+                    });
+                } else if let Some(block) = anthropic::block_from_raw(raw, source, &anthropic::ANTHROPIC, true) {
+                    blocks.push(block);
+                }
+            }
+        }
+    }
+    message_with_blocks(&meta, blocks, lead, prompted)
+}
+
 fn message(v: &Value, lead: bool, prompted: &mut bool) -> Option<Message> {
-    let role = v.get("role").and_then(Value::as_str)?;
     let mut blocks = Vec::new();
     match v.get("content") {
         Some(Value::String(s)) => blocks.push(Block::Text { text: s.clone().into() }),
@@ -335,6 +445,11 @@ fn message(v: &Value, lead: bool, prompted: &mut bool) -> Option<Message> {
         }
         _ => {}
     }
+    message_with_blocks(v, blocks, lead, prompted)
+}
+
+fn message_with_blocks(v: &Value, blocks: Vec<Block>, lead: bool, prompted: &mut bool) -> Option<Message> {
+    let role = v.get("role").and_then(Value::as_str)?;
     let meta = v.get("metadata");
     let display_error = meta.and_then(|m| m.get("displayOnly")).and_then(Value::as_bool) == Some(true)
         && meta.and_then(|m| m.get("displayRole")).and_then(Value::as_str) == Some("error");
@@ -652,6 +767,46 @@ mod tests {
         assert_eq!(child.lineage.agent_path.as_deref(), Some("agent_x"));
         assert_eq!(child.messages[0].origin, Origin::Subagent);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn native_raw_messages_preserve_full_codec_and_wrapper_validation() {
+        let dir = std::env::temp_dir().join(format!("cv-sdk-raw-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sdk.messages.json");
+        let body = "a\n\"é😀".repeat(8192);
+        let doc = json!({"messages":[
+            {"id":"u", "role":"user", "content":[{"type":"text","text":body}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":body,"signature":"s"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":body}},
+                {"type":"tool_use","id":"t","name":"read","input":{"path":"a"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":body}]}
+        ]});
+        fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        let mut expected = None;
+        for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+            let mut sink = CollectSink::default();
+            let mut actual = stream_with_options(&path, "sdk", &opts, &mut sink).unwrap();
+            actual.messages = sink.messages;
+            actual.materialize();
+            let actual = serde_json::to_value(actual).unwrap();
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+        }
+        for scalar in ["1e400", "\"\\ud800\""] {
+            fs::write(
+                &path,
+                format!("{{\"messages\":[{{\"role\":\"user\",\"content\":\"ok\"}}],\"unknown\":{scalar}}}"),
+            )
+            .unwrap();
+            let mut sink = CollectSink::default();
+            assert!(stream_with_options(&path, "sdk", &ParseOptions::lazy(), &mut sink).is_err());
+            assert!(sink.messages.is_empty());
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// The corpus run made no schedule, so the fire path is proven on the documented DDL
