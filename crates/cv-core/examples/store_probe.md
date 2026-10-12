@@ -130,7 +130,7 @@ collection, deliberately owned tool arguments and native SQLite heap are outside
 `--only stores` / `--only chunks` supports a scoped local check. CI's exact build commands are in
 `.github/workflows/ci.yml`; the driver always uses a temporary catalog and deletes only its own inputs.
 
-Opt-in `--only active` extends the same 8 MiB absolute / 2 MiB growth budgets to discarded
+CI's separate native `--only active` pass extends the same 8 MiB absolute / 2 MiB growth budgets to discarded
 fixed-size Cline SDK/OpenSession history, account archives' unrelated conversations, and unmatched
 Kimi wire bodies. Every 16/64 MiB discovery probe gets a fresh catalog, preventing cache hits from
 masking scan work. `--format FORMAT` narrows this campaign; `--baseline-probe HEAP_PROBE` also checks
@@ -138,6 +138,9 @@ small resolved-message/metadata and fresh discovery digests in separate fidelity
 giant outputs and whole selected ChatGPT mappings are not included in these bounded claims.
 `--only doctor` checks giant Claude/Codex/Gemini decoded attribution in lazy-extra mode against
 separate full-mode processes, optionally using the supplied old baseline. Default CI's suite
-remains stores/chunks; opt-in checks require the respective reader improvements to pass.
+includes stores/chunks and the five native active formats. Doctor remains an opt-in check until
+the rich Claude parser satisfies the same limits. Portable resolver promises are checked
+separately; cold no-mmap document readers may still own the source bytes and are not admitted
+to the native adapter limits.
 `--only active --format zed` explicitly opts into compressed-thread discovery/streaming with
 fixed-size messages, retaining the same budgets; native SQLite allocations remain excluded.
