@@ -435,17 +435,19 @@ fn stream_legacy_json_recording(path: &Path, harness: Harness, sink: &mut dyn Me
     #[derive(Deserialize)]
     struct Wrapper<'a> {
         #[serde(rename = "sessionId", borrow, default)]
-        session_id: Option<&'a str>,
+        session_id: Option<std::borrow::Cow<'a, str>>,
         #[serde(rename = "startTime", borrow, default)]
-        start_time: Option<&'a str>,
+        start_time: Option<std::borrow::Cow<'a, str>>,
         #[serde(rename = "lastUpdated", borrow, default)]
-        last_updated: Option<&'a str>,
+        last_updated: Option<std::borrow::Cow<'a, str>>,
         #[serde(borrow, default)]
-        summary: Option<&'a str>,
+        summary: Option<std::borrow::Cow<'a, str>>,
         #[serde(borrow, default)]
-        directories: Option<Vec<&'a str>>,
+        directories: Option<Vec<std::borrow::Cow<'a, str>>>,
         #[serde(borrow, default)]
         messages: Option<Vec<&'a RawValue>>,
+        #[serde(borrow, default)]
+        kind: Option<std::borrow::Cow<'a, str>>,
     }
 
     let bytes = map_file(path)?;
@@ -454,7 +456,7 @@ fn stream_legacy_json_recording(path: &Path, harness: Harness, sink: &mut dyn Me
     let Ok(w) = serde_json::from_slice::<Wrapper>(&bytes) else {
         return Ok(None);
     };
-    let (Some(_sid), Some(raw_msgs)) = (w.session_id, &w.messages) else {
+    let (Some(_sid), Some(raw_msgs)) = (&w.session_id, &w.messages) else {
         return Ok(None);
     };
 
@@ -477,6 +479,10 @@ fn stream_legacy_json_recording(path: &Path, harness: Harness, sink: &mut dyn Me
             "directories".into(),
             Value::Array(dirs.iter().map(|d| Value::String(d.to_string())).collect()),
         );
+    }
+
+    if let Some(kind) = w.kind {
+        meta.insert("kind".into(), Value::String(kind.into_owned()));
     }
 
     let mut session = record_metadata(&meta, harness, Some(path.to_path_buf()));
@@ -1861,6 +1867,24 @@ mod tests {
     fn streams_legacy_json_recording_on_disk() {
         // The mmap + RawValue single-document path.
         assert_stream_matches_pure("session_legacy.json");
+    }
+
+    #[test]
+    fn legacy_stream_preserves_escaped_metadata_and_kind() {
+        let (dir, file) = chats_fixture("session_legacy.json");
+        let text = r#"{"sessionId":"escaped\"id","startTime":"2026-01-01T00:00:00Z","summary":"line one\nline two","directories":["/tmp/quoted\"path"],"kind":"subagent","messages":[{"type":"user","id":"u","content":"hello"}]}"#;
+        fs::write(&file, text).unwrap();
+        let mut sink = CollectSink::default();
+        // Call this path directly: a fallback would hide the borrowing failure.
+        let mut streamed = stream_legacy_json_recording(&file, Harness::Gemini, &mut sink)
+            .unwrap()
+            .expect("escaped strings are a legacy recording");
+        streamed.messages = sink.messages;
+        assert_eq!(
+            as_json(&streamed),
+            as_json(&parse_all_str(text, Some(file.clone())).remove(0))
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
