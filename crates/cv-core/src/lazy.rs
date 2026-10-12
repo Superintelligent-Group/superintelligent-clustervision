@@ -32,6 +32,29 @@ pub fn read_head(path: &Path, max_bytes: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Read an optional persisted output head. Only an absent source is optional; other source/read
+/// failures are errors. Identity is captured for this demand, without a historical source stamp.
+pub fn read_head_checked(path: &Path, max_bytes: usize) -> anyhow::Result<Option<String>> {
+    use std::io::Read;
+    let source = match CheckedSource::open(path) {
+        Ok(source) => source,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let len = usize::try_from(source.len.min(u64::try_from(max_bytes).unwrap_or(u64::MAX)))?;
+    let mut bytes = vec![0; len];
+    let result = source.file.try_clone()?.read_exact(&mut bytes);
+    source.check()?;
+    result?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 /// Content at or below this many bytes is stored inline; larger content becomes a lazy [`Span`].
 /// Small on purpose: most messages are well under it, so typical sessions are untouched and only
 /// genuinely large fields (file dumps, pasted blobs, base64) go lazy.
@@ -86,6 +109,22 @@ impl Text {
         match self {
             Text::Inline(s) => Cow::Borrowed(s),
             Text::Span(sp) => resolver.resolve(sp),
+        }
+    }
+
+    /// Resolve demanded text, reporting unavailable, changed or unreadable sources.
+    pub fn try_resolve<'a>(&'a self, resolver: &'a Resolver) -> anyhow::Result<Cow<'a, str>> {
+        match self {
+            Text::Inline(s) => Ok(Cow::Borrowed(s)),
+            Text::Span(sp) => resolver.try_resolve(sp),
+        }
+    }
+
+    /// Checked counterpart of `resolve_prefix`, with the same raw-byte selection policy.
+    pub fn try_resolve_prefix<'a>(&'a self, resolver: &'a Resolver, max_raw: u64) -> anyhow::Result<Cow<'a, str>> {
+        match self {
+            Text::Inline(s) => Ok(Cow::Borrowed(s)),
+            Text::Span(sp) => resolver.try_resolve_prefix(sp, max_raw),
         }
     }
 
@@ -207,6 +246,144 @@ pub struct Resolver {
     primary: Option<PathBuf>,
     #[cfg(feature = "mmap")]
     maps: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<memmap2::Mmap>>>,
+    #[cfg(feature = "mmap")]
+    checked_maps: std::cell::RefCell<std::collections::HashMap<PathBuf, CheckedMap>>,
+}
+
+/// A capture at demand time, not a stamp from when a Span was originally parsed.
+struct CheckedSource {
+    captured: crate::json::JsonSource,
+    path: PathBuf,
+    file: std::fs::File,
+    len: u64,
+}
+impl CheckedSource {
+    fn open(path: &Path) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        let path = std::path::absolute(path)?;
+        let captured = crate::json::JsonSource::capture(&path)?;
+        let file = std::fs::File::open(&path).with_context(|| format!("opening Text source {}", path.display()))?;
+        let metadata = file.metadata()?;
+        let len = metadata.len();
+        captured.check_metadata(metadata)?;
+        captured.check()?;
+        Ok(Self {
+            captured,
+            path,
+            file,
+            len,
+        })
+    }
+    fn check(&self) -> anyhow::Result<()> {
+        self.captured.check_metadata(self.file.metadata()?)?;
+        self.captured.check()
+    }
+    fn bounds(&self, span: &Span) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            span.offset.checked_add(span.len).is_some_and(|end| end <= self.len),
+            "Text span is outside source {}",
+            self.path.display()
+        );
+        Ok(())
+    }
+    #[cfg(not(feature = "mmap"))]
+    fn reader(&self, offset: u64) -> anyhow::Result<std::io::BufReader<std::fs::File>> {
+        use std::io::Seek;
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, self.file.try_clone()?);
+        reader.seek(std::io::SeekFrom::Start(offset))?;
+        Ok(reader)
+    }
+}
+
+#[cfg(feature = "mmap")]
+struct CheckedMap {
+    captured: crate::json::JsonSource,
+    file: std::fs::File,
+    map: memmap2::Mmap,
+}
+
+#[derive(Default)]
+struct DemandState {
+    error: std::cell::RefCell<Option<anyhow::Error>>,
+}
+impl DemandState {
+    fn fail(&self, error: anyhow::Error) {
+        let mut first = self.error.borrow_mut();
+        if first.is_none() {
+            *first = Some(error);
+        }
+    }
+    fn failed(&self) -> bool {
+        self.error.borrow().is_some()
+    }
+    fn finish(&self, source: &CheckedSource) -> anyhow::Result<()> {
+        // A callback's early error must never hide source mutation.
+        source.check()?;
+        self.error.borrow_mut().take().map_or(Ok(()), Err)
+    }
+}
+
+/// Existing lossy/JSON helpers distinguish malformed bytes from failure through this tracker.
+/// Periodic checks bound unchecked source progress; callbacks check immediately on return.
+struct DemandReader<'a, R> {
+    inner: R,
+    source: &'a CheckedSource,
+    state: &'a DemandState,
+    since_check: usize,
+}
+impl<R> DemandReader<'_, R> {
+    fn before_read(&mut self) -> std::io::Result<()> {
+        if !self.state.failed() && self.since_check >= 64 * 1024 {
+            if let Err(error) = self.source.check() {
+                self.state.fail(error);
+            }
+            self.since_check = 0;
+        }
+        if self.state.failed() {
+            Err(std::io::Error::other("Text demand failed"))
+        } else {
+            Ok(())
+        }
+    }
+    fn io_error(&self, error: std::io::Error) -> std::io::Error {
+        let kind = error.kind();
+        self.state.fail(error.into());
+        std::io::Error::new(kind, "reading Text source")
+    }
+}
+impl<R: std::io::BufRead> std::io::BufRead for DemandReader<'_, R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.before_read()?;
+        match self.inner.fill_buf() {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => {
+                let kind = error.kind();
+                self.state.fail(error.into());
+                Err(std::io::Error::new(kind, "reading Text source"))
+            }
+        }
+    }
+    fn consume(&mut self, n: usize) {
+        self.since_check = self.since_check.saturating_add(n);
+        self.inner.consume(n);
+    }
+}
+impl<R: std::io::BufRead> std::io::Read for DemandReader<'_, R> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::BufRead;
+        let bytes = self.fill_buf()?;
+        let n = bytes.len().min(output.len());
+        output[..n].copy_from_slice(&bytes[..n]);
+        self.consume(n);
+        Ok(n)
+    }
+}
+impl<R: std::io::Seek> std::io::Seek for DemandReader<'_, R> {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.before_read()?;
+        self.since_check = 0;
+        self.inner.seek(position).map_err(|e| self.io_error(e))
+    }
 }
 
 impl Resolver {
@@ -216,11 +393,194 @@ impl Resolver {
             primary,
             #[cfg(feature = "mmap")]
             maps: std::cell::RefCell::new(std::collections::HashMap::new()),
+            #[cfg(feature = "mmap")]
+            checked_maps: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
     fn path_for<'a>(&'a self, sp: &'a Span) -> Option<&'a Path> {
         sp.source.as_deref().or(self.primary.as_deref())
+    }
+
+    fn checked_source(&self, sp: &Span) -> anyhow::Result<CheckedSource> {
+        use anyhow::Context;
+        let source = CheckedSource::open(self.path_for(sp).context("Text span has no source path")?)?;
+        source.bounds(sp)?;
+        Ok(source)
+    }
+
+    #[cfg(feature = "mmap")]
+    fn checked_bytes<'a>(&'a self, sp: &Span, source: &CheckedSource) -> anyhow::Result<&'a [u8]> {
+        if sp.len == 0 {
+            return Ok(&[]);
+        }
+        let mut maps = self.checked_maps.borrow_mut();
+        if !maps.contains_key(&source.path) {
+            let file = source.file.try_clone()?;
+            let map = unsafe { memmap2::Mmap::map(&file)? };
+            maps.insert(
+                source.path.clone(),
+                CheckedMap {
+                    captured: source.captured.clone(),
+                    file,
+                    map,
+                },
+            );
+        }
+        let cached = maps.get(&source.path).unwrap();
+        // A Resolver remembers its first checked demand. Span itself carries no historical stamp.
+        cached.captured.check_metadata(source.file.metadata()?)?;
+        source.captured.check_metadata(cached.file.metadata()?)?;
+        source.check()?;
+        let start = usize::try_from(sp.offset)?;
+        let len = usize::try_from(sp.len)?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| anyhow::anyhow!("Text span overflows address space"))?;
+        anyhow::ensure!(end <= cached.map.len(), "Text span is outside mapped source");
+        let slice = &cached.map[start..end];
+        // SAFETY: checked mappings are never replaced/removed while this Resolver lives.
+        // File identity guards detect ordinary changes around each demand, not atomic snapshots.
+        Ok(unsafe { std::mem::transmute::<&[u8], &'a [u8]>(slice) })
+    }
+
+    /// Checked text materialization. Inline/native unescaped text can borrow; escaped output
+    /// retains the historical raw lossy fallback for malformed JSON escapes.
+    /// Source identity is captured at first demand, not when an old Span was parsed.
+    pub fn try_resolve<'a>(&'a self, sp: &Span) -> anyhow::Result<Cow<'a, str>> {
+        let source = self.checked_source(sp)?;
+        let state = DemandState::default();
+        #[cfg(feature = "mmap")]
+        let output = {
+            let bytes = self.checked_bytes(sp, &source)?;
+            if !sp.escaped {
+                String::from_utf8_lossy(bytes)
+            } else if sp.len <= 64 * 1024 {
+                Cow::Owned(unescape_json_body(bytes))
+            } else {
+                let mut reader = DemandReader {
+                    inner: std::io::Cursor::new(bytes),
+                    source: &source,
+                    state: &state,
+                    since_check: 0,
+                };
+                Cow::Owned(fold_body(
+                    &mut reader,
+                    0,
+                    sp.len,
+                    true,
+                    String::new(),
+                    append_materialized,
+                    String::clear,
+                ))
+            }
+        };
+        #[cfg(not(feature = "mmap"))]
+        let output = {
+            let mut reader = DemandReader {
+                inner: source.reader(sp.offset)?,
+                source: &source,
+                state: &state,
+                since_check: 0,
+            };
+            Cow::Owned(fold_body(
+                &mut reader,
+                sp.offset,
+                sp.len,
+                sp.escaped,
+                String::new(),
+                append_materialized,
+                String::clear,
+            ))
+        };
+        state.finish(&source)?;
+        Ok(output)
+    }
+
+    /// Checked raw-budget prefix, preserving resolve_prefix's escape and UTF-8 cut policy.
+    /// The complete original span must fit its source even when only a prefix is demanded.
+    pub fn try_resolve_prefix<'a>(&'a self, sp: &Span, max_raw: u64) -> anyhow::Result<Cow<'a, str>> {
+        if sp.len <= max_raw {
+            return self.try_resolve(sp);
+        }
+        let source = self.checked_source(sp)?;
+        let len = max_raw.saturating_add(3).min(sp.len);
+        #[cfg(feature = "mmap")]
+        let bytes = Cow::Borrowed(self.checked_bytes(&Span { len, ..sp.clone() }, &source)?);
+        #[cfg(not(feature = "mmap"))]
+        let bytes = {
+            use std::io::Read;
+            let mut bytes = vec![0; usize::try_from(len)?];
+            let result = source.reader(sp.offset)?.read_exact(&mut bytes);
+            source.check()?;
+            result?;
+            Cow::Owned(bytes)
+        };
+        let end = complete_utf8_prefix(&bytes, usize::try_from(max_raw)?);
+        let output = if sp.escaped {
+            Cow::Owned(unescape_json_body(&bytes[..complete_escape_prefix(&bytes[..end])]))
+        } else {
+            match bytes {
+                Cow::Borrowed(bytes) => String::from_utf8_lossy(&bytes[..end]),
+                Cow::Owned(bytes) => Cow::Owned(String::from_utf8_lossy(&bytes[..end]).into_owned()),
+            }
+        };
+        source.check()?;
+        Ok(output)
+    }
+
+    /// Checked bounded callbacks. Each callback borrows stable owned scratch, so it may fail
+    /// or change the source without invalidating its current text argument. An error can follow
+    /// earlier callbacks: discard staged output and never publish successful freshness on Err.
+    pub fn try_for_each_chunk(
+        &self,
+        sp: &Span,
+        chunk: usize,
+        mut f: impl FnMut(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let source = self.checked_source(sp)?;
+        let state = DemandState::default();
+        let mut callback = |text: &str| {
+            if state.failed() {
+                return false;
+            }
+            let result = f(text);
+            if let Err(error) = source.check() {
+                state.fail(error);
+            } else if let Err(error) = result {
+                state.fail(error);
+            }
+            !state.failed()
+        };
+        #[cfg(feature = "mmap")]
+        {
+            let mut reader = DemandReader {
+                inner: std::io::Cursor::new(self.checked_bytes(sp, &source)?),
+                source: &source,
+                state: &state,
+                since_check: 0,
+            };
+            if stream_body_checked(&mut reader, 0, sp.len, sp.escaped, chunk.max(1), &mut callback).is_err()
+                && !state.failed()
+            {
+                state.fail(anyhow::anyhow!("Text source changed while decoding"));
+            }
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            let mut reader = DemandReader {
+                inner: source.reader(sp.offset)?,
+                source: &source,
+                state: &state,
+                since_check: 0,
+            };
+            if stream_body_checked(&mut reader, sp.offset, sp.len, sp.escaped, chunk.max(1), &mut callback).is_err()
+                && !state.failed()
+            {
+                state.fail(anyhow::anyhow!("Text source changed while decoding"));
+            }
+        }
+        state.finish(&source)
     }
 
     /// Resolve a span to its text. Borrows the mapped bytes for unescaped spans; allocates only to
@@ -537,6 +897,66 @@ fn stream_body<R: std::io::BufRead + std::io::Seek>(
     output.flush();
 }
 
+fn stream_body_checked<R: std::io::BufRead + std::io::Seek>(
+    reader: &mut R,
+    start: u64,
+    len: u64,
+    escaped: bool,
+    chunk: usize,
+    f: &mut impl FnMut(&str) -> bool,
+) -> Result<(), ()> {
+    use std::io::{Read, SeekFrom};
+    let decode = escaped && decode_json_body(&mut reader.by_ref().take(len), &mut |_| {}).unwrap_or(false);
+    reader.seek(SeekFrom::Start(start)).map_err(|_| ())?;
+    let mut output = CheckedChunkOutput {
+        text: String::with_capacity(
+            chunk
+                .saturating_add(3)
+                .min(usize::try_from(len).unwrap_or(usize::MAX).saturating_mul(3)),
+        ),
+        chunk,
+        f,
+    };
+    let mut body = reader.by_ref().take(len);
+    if decode {
+        decode_json_body_control(&mut body, &mut |text| output.push(text))?;
+    } else {
+        stream_lossy_utf8_until(&mut body, &mut |text| output.push(text));
+    }
+    output.flush();
+    Ok(())
+}
+
+struct CheckedChunkOutput<'a, F> {
+    text: String,
+    chunk: usize,
+    f: &'a mut F,
+}
+impl<F: FnMut(&str) -> bool> CheckedChunkOutput<'_, F> {
+    fn push(&mut self, mut text: &str) -> bool {
+        while !text.is_empty() {
+            let mut end = (self.chunk - self.text.len()).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            self.text.push_str(&text[..end]);
+            if self.text.len() >= self.chunk && !self.flush() {
+                return false;
+            }
+            text = &text[end..];
+        }
+        true
+    }
+    fn flush(&mut self) -> bool {
+        if self.text.is_empty() {
+            return true;
+        }
+        let keep_going = (self.f)(&self.text);
+        self.text.clear();
+        keep_going
+    }
+}
+
 struct ChunkOutput<'a, F> {
     text: String,
     chunk: usize,
@@ -598,6 +1018,13 @@ fn read_scalar(reader: &mut impl std::io::BufRead) -> Result<char, ()> {
 }
 
 fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) {
+    stream_lossy_utf8_until(reader, &mut |text| {
+        f(text);
+        true
+    });
+}
+
+fn stream_lossy_utf8_until(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str) -> bool) {
     loop {
         let Ok(bytes) = reader.fill_buf() else { return };
         if bytes.is_empty() {
@@ -605,20 +1032,26 @@ fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str
         }
         let valid = match std::str::from_utf8(bytes) {
             Ok(s) => {
-                f(s);
+                if !f(s) {
+                    return;
+                }
                 s.len()
             }
             Err(e) => {
                 let valid = e.valid_up_to();
                 // SAFETY: `valid_up_to` is the validated UTF-8 prefix.
-                f(unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) });
+                if !f(unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) }) {
+                    return;
+                }
                 valid
             }
         };
         reader.consume(valid);
         if valid == 0 {
             let scalar = read_scalar(reader).unwrap_or('\u{fffd}');
-            f(scalar.encode_utf8(&mut [0; 4]));
+            if !f(scalar.encode_utf8(&mut [0; 4])) {
+                return;
+            }
         }
     }
 }
@@ -798,6 +1231,157 @@ fn unescape_json_body(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CheckedTestDir(PathBuf);
+    impl CheckedTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("cv-checked-text-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for CheckedTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn checked_demands_reject_missing_truncated_and_overflowing_sources() {
+        let dir = CheckedTestDir::new();
+        let path = dir.path().join("text");
+        let resolver = Resolver::new(Some(path.clone()));
+        let mut span = Span {
+            offset: 0,
+            len: 5,
+            escaped: false,
+            source: None,
+        };
+        assert!(resolver.try_resolve(&span).is_err());
+        assert!(resolver.try_resolve_prefix(&span, 1).is_err());
+        assert!(resolver.try_for_each_chunk(&span, 2, |_| Ok(())).is_err());
+        std::fs::write(&path, b"abc").unwrap();
+        assert!(resolver.try_resolve(&span).is_err());
+        assert!(resolver.try_resolve_prefix(&span, 0).is_err());
+        assert!(resolver.try_for_each_chunk(&span, 2, |_| Ok(())).is_err());
+        span.offset = u64::MAX;
+        span.len = 1;
+        assert!(resolver.try_resolve(&span).is_err());
+        assert!(Resolver::new(None).try_resolve(&span).is_err());
+        std::fs::write(&path, b"").unwrap();
+        span.offset = 0;
+        span.len = 0;
+        assert_eq!(resolver.try_resolve(&span).unwrap(), "");
+        assert_eq!(resolver.try_resolve_prefix(&span, 0).unwrap(), "");
+        let mut calls = 0;
+        resolver
+            .try_for_each_chunk(&span, 1, |_| {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn checked_callbacks_keep_owned_text_and_reject_mutation_before_more_reads() {
+        for escaped in [false, true] {
+            let dir = CheckedTestDir::new();
+            let path = dir.path().join("text");
+            let raw = if escaped {
+                "body\\n".repeat(40_000)
+            } else {
+                "body\n".repeat(40_000)
+            };
+            std::fs::write(&path, &raw).unwrap();
+            let resolver = Resolver::new(Some(path.clone()));
+            let span = Span {
+                offset: 0,
+                len: raw.len() as u64,
+                escaped,
+                source: None,
+            };
+            let mut calls = 0;
+            let error = resolver
+                .try_for_each_chunk(&span, 4096, |text| {
+                    calls += 1;
+                    std::fs::write(&path, b"changed").unwrap();
+                    // The current callback remains readable after its mapped file is truncated.
+                    assert_eq!(text.as_bytes().iter().filter(|&&b| b == b'\n').count(), 819);
+                    anyhow::bail!("callback sentinel")
+                })
+                .unwrap_err();
+            assert_eq!(calls, 1);
+            assert!(!error.to_string().contains("callback sentinel"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn checked_chunks_preserve_decode_fallback_and_callback_errors() {
+        let cases: &[(&[u8], bool)] = &[
+            (b"plain", false),
+            (b"a\\n\\ud83c\\udf19\\\"b", true),
+            (b"a\\n\\ud83c", true),
+            (b"a\\nb\\q", true),
+            (b"a\xffb\xe2\x80", false),
+            (b"a\\n\xffb", true),
+        ];
+        for &(raw, escaped) in cases {
+            let dir = CheckedTestDir::new();
+            let path = dir.path().join("text");
+            std::fs::write(&path, raw).unwrap();
+            let resolver = Resolver::new(Some(path));
+            let span = Span {
+                offset: 0,
+                len: raw.len() as u64,
+                escaped,
+                source: None,
+            };
+            let expected = resolver.resolve(&span);
+            assert_eq!(resolver.try_resolve(&span).unwrap(), expected);
+            for cap in 0..=raw.len() + 1 {
+                assert_eq!(
+                    resolver.try_resolve_prefix(&span, cap as u64).unwrap(),
+                    resolver.resolve_prefix(&span, cap as u64)
+                );
+            }
+            for chunk in [0, 1, 2, 7, 65536] {
+                let mut text = String::new();
+                resolver
+                    .try_for_each_chunk(&span, chunk, |part| {
+                        assert!(part.len() <= chunk.max(1) + 3);
+                        text.push_str(part);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(text, expected);
+            }
+            let mut calls = 0;
+            let error = resolver
+                .try_for_each_chunk(&span, 1, |_| {
+                    calls += 1;
+                    anyhow::bail!("callback sentinel")
+                })
+                .unwrap_err();
+            assert_eq!(calls, 1);
+            assert_eq!(error.to_string(), "callback sentinel");
+        }
+    }
+
+    #[test]
+    fn checked_optional_head_distinguishes_absence_from_read_failure() {
+        let dir = CheckedTestDir::new();
+        let path = dir.path().join("text");
+        assert_eq!(read_head_checked(&path, 8).unwrap(), None);
+        assert!(read_head_checked(dir.path(), 8).is_err());
+        std::fs::write(&path, b"a\xffb").unwrap();
+        for cap in 0..5 {
+            assert_eq!(read_head_checked(&path, cap).unwrap(), read_head(&path, cap));
+        }
+    }
 
     fn chunked_body(raw: &[u8], escaped: bool, input_window: usize, chunk: usize) -> String {
         let mut reader = std::io::BufReader::with_capacity(input_window, std::io::Cursor::new(raw));

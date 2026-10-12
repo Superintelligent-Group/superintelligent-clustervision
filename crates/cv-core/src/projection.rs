@@ -65,6 +65,15 @@ impl Head {
         let prefix = text.resolve_prefix(resolver, self.remaining() as u64);
         self.push(&prefix);
     }
+    /// Checked text demand with the same raw-prefix selection as push_text. Decoded UTF-8
+    /// shares the remaining byte budget; selected raw prefixes keep their existing behavior.
+    pub fn try_push_text(&mut self, text: &Text, resolver: &Resolver) -> anyhow::Result<()> {
+        if !self.full() {
+            let prefix = text.try_resolve_prefix(resolver, self.remaining() as u64)?;
+            self.push(&prefix);
+        }
+        Ok(())
+    }
     pub fn push_json(&mut self, json: &crate::json::Json) -> anyhow::Result<()> {
         if !self.full() {
             let (prefix, truncated) = json.canonical_prefix(self.remaining())?;
@@ -93,6 +102,26 @@ impl Head {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_text_head_propagates_selected_source_failure() {
+        let resolver = Resolver::new(None);
+        let text = Text::Span(crate::lazy::Span {
+            source: None,
+            offset: 0,
+            len: 20,
+            escaped: false,
+        });
+        let mut head = Head::new(8);
+        assert!(head.try_push_text(&text, &resolver).is_err());
+        assert!(head.is_empty());
+        let mut full = Head::new(0);
+        full.try_push_text(&text, &resolver).unwrap();
+        let mut inline = Head::new(3);
+        inline.try_push_text(&Text::from("abé"), &resolver).unwrap();
+        inline.push("z");
+        assert_eq!(inline.as_str(), "ab");
+    }
 
     #[test]
     fn prefix_cannot_skip_a_scalar_that_does_not_fit() {
