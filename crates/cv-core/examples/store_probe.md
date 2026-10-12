@@ -144,3 +144,11 @@ separately; cold no-mmap document readers may still own the source bytes and are
 to the native adapter limits.
 `--only active --format zed` explicitly opts into compressed-thread discovery/streaming with
 fixed-size messages, retaining the same budgets; native SQLite allocations remain excluded.
+
+`query --query EXPR` invokes the production predicate reducer; `query-collect --query EXPR`
+uses the independent lazy collector followed by `matches_full`. Both require a scratch catalog,
+report the same boolean result, and force lazy parsing. The collected session stays alive through
+the heap snapshot. Use rich tool arguments and repeated events to measure retained history;
+large text spans alone do not exercise that distinction. Callback counts are not observed by
+these composed APIs. Compaction predicates have a separate validation pass and should be
+measured separately from ordinary tool/model/path queries.

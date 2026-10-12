@@ -107,6 +107,7 @@ struct Args {
     hash_output: bool,
     hash_detail: bool,
     warm_discover: bool,
+    query: Option<String>,
 }
 
 fn args() -> Result<Args> {
@@ -118,6 +119,7 @@ fn args() -> Result<Args> {
     let mut hash_output = false;
     let mut hash_detail = false;
     let mut warm_discover = false;
+    let mut query = None;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
@@ -126,6 +128,7 @@ fn args() -> Result<Args> {
             "--hash-output" => hash_output = true,
             "--hash-detail" => hash_detail = true,
             "--warm-discover" => warm_discover = true,
+            "--query" => query = Some(argv.next().context("--query needs an expression")?),
             "--span" => {
                 let range = argv.next().context("--span needs OFFSET:LENGTH")?;
                 let (off, len) = range.split_once(':').context("--span needs OFFSET:LENGTH")?;
@@ -136,9 +139,9 @@ fn args() -> Result<Args> {
             "--last" => last = argv.next().context("--last needs an integer")?.parse()?,
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
-                 [--materialize] [--hash-output] [--hash-detail] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
-                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
+                 [--materialize] [--hash-output] [--hash-detail] [--warm-discover] [--query EXPR] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
+                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
+                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ => positional.push(arg),
@@ -174,6 +177,7 @@ fn args() -> Result<Args> {
         hash_output,
         hash_detail,
         warm_discover,
+        query,
     })
 }
 
@@ -359,6 +363,23 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             out.messages = report.messages as usize;
             out.detail = report.to_json();
         }
+        "query" | "query-collect" => {
+            let expression = a
+                .query
+                .as_deref()
+                .context("query/query-collect requires --query EXPR")?;
+            let query = cv_core::query::SessionQuery::parse(expression).map_err(anyhow::Error::msg)?;
+            let texts = cv_core::query::TextSets::default();
+            let matched = if a.operation == "query" {
+                cv_core::query::matches_streamed(&query, adapter, r, &texts)?
+            } else {
+                let session = cv_core::stream::collect_with(adapter, r, &ParseOptions::lazy())?;
+                let matched = cv_core::query::matches_full(&query, r, &session, &texts);
+                out.session = Some(session);
+                matched
+            };
+            out.detail = json!({ "matches": matched, "message_callbacks": "not observed" });
+        }
         "collect" | "affordances" => {
             let opts = if a.operation == "affordances" {
                 ParseOptions::full()
@@ -499,7 +520,7 @@ fn main() -> Result<()> {
     if a.warm_discover
         || matches!(
             a.operation.as_str(),
-            "affordance-read" | "discover" | "events" | "events-collected"
+            "affordance-read" | "discover" | "events" | "events-collected" | "query" | "query-collect"
         )
     {
         let home = std::fs::canonicalize(
@@ -541,6 +562,7 @@ fn main() -> Result<()> {
             "effective_mode": match a.operation.as_str() {
                 "affordances" => "full",
                 "affordance-read" => "production-defined",
+                "query" | "query-collect" => "lazy",
                 "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" => "not-applicable",
                 _ => &a.mode,
             },
