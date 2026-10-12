@@ -12,6 +12,7 @@ use super::{parse_ts, Adapter};
 /// surgery on this store's layout, so it lives beside the adapter that knows it.
 pub mod adopt;
 pub(crate) mod emit;
+mod fork;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
@@ -220,13 +221,12 @@ impl Adapter for Claude {
         // 1.35 GB polyana transcript). `BufReader::lines()` keeps peak at O(largest line); handing
         // each message to `sink` (instead of accumulating a `Vec`) keeps it at O(largest message).
         let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
-        Ok(stream_reader(
-            &r.id,
-            BufReader::new(file),
-            Some(r.path.clone()),
-            opts,
-            sink,
-        ))
+        let mut s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
+        // A `--fork-session` copy names no source; the records it shares with one do ([`fork`]).
+        if s.lineage.parent.is_none() && s.lineage.forked_from.is_none() {
+            s.lineage.forked_from = fork::source(&r.path);
+        }
+        Ok(s)
     }
 
     /// The task list (`TaskCreate`/`TaskUpdate`) Claude Code keeps beside the transcripts:

@@ -12,7 +12,7 @@ The IR column is how cv reads it today (`MessageKind`/`Block`/`extra["claude"]`/
 | prompt, reply | `user` / `assistant` | transcript lines (one per content block, shared `message.id`) | yes | `Prompt`/`Human`; `Reply` with `Text` |
 | thinking | `thinking` block | assistant line; `thinkingDisplay`, `thinkingDurationMs` | yes (GLM thinks every turn) | `Block::Thinking` |
 | resume | `--resume` | appended to the same file; `queue-operation` enqueue/dequeue | yes | same session; queue carried |
-| fork a session | `--resume --fork-session` | a new file, every record re-stamped with the new `sessionId`, no back pointer | yes | separate session, `lineage` empty (shared `uuid`s are the only link) |
+| fork a session | `--resume --fork-session` | a new file, every record re-stamped with the new `sessionId`, no back pointer | yes | `lineage.forked_from`, inferred: the fork's head is copied history (older than the record before it, or a `compact_boundary`), and a sibling transcript holds that `uuid` |
 | session name | `-n` | `custom-title`, `agent-name` | yes | session title; `extra.claude.agent_name` |
 | model switch | `--model` on resume | `attachment.model`, `message.model` changes | yes | `InjectedContext` + per-message `model`; no `ModelChange` |
 | compaction | `/compact` | `system.compact_boundary` + `isCompactSummary` user turn + slash-command rows | yes | `CompactionBoundary`, `CompactionSummary`, `Notice` |

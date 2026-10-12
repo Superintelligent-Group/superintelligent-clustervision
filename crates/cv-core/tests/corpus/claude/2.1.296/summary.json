@@ -765,9 +765,12 @@
       "subagent_returns": 0,
       "affordances": {
         "approval/state": 1,
+        "fork/fork": 1,
         "hook/output": 3
       },
-      "lineage": {},
+      "lineage": {
+        "forked_from": "e3418e9d-2035-4c08-b449-b31d2831ca4e"
+      },
       "model": "glm-5.3",
       "skipped_lines": 0,
       "children": []
