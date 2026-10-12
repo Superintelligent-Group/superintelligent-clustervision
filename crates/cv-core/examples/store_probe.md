@@ -80,7 +80,7 @@ alongside allocation growth; output hashing is a different experiment.
 
 CI's live Rust heap gate is `tools/check-heap-budget.py MMAP_HEAP_PROBE --no-mmap-probe RANGED_HEAP_PROBE`.
 It validates the binaries' reported build features and rejects missing allocation counters. The
-16/64 MiB scratch cases check lazy Gemini giant fields, Claude stores with fixed-size records,
+16/64 MiB scratch cases check lazy Gemini giant fields, Claude/Codex stores with fixed-size records,
 and valid/malformed escaped spans with both mmap and positioned reads. It checks expected message
 or decoded byte counts, absolute heap ceilings and growth, without a wall-time threshold. Full
 collection, deliberately owned tool arguments and native SQLite heap are outside these promises.

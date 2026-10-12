@@ -46,13 +46,13 @@ def bound(peaks, ceiling, growth, case):
 
 def stores(binary, root, env):
     generator = Path(__file__).with_name("perf-fixture.py")
-    for harness in ("gemini", "claude"):
+    for harness in ("gemini", "claude", "codex"):
         for escaped in (False, True):
             peaks = []
             for size in SIZES:
-                # Claude still reads raw lines: hold record size fixed while growing the store.
+                # JSONL adapters still read raw lines: hold record size fixed while growing the store.
                 # Gemini's lazy record spans should handle genuinely giant individual fields.
-                records = size // (256 << 10) if harness == "claude" else 4
+                records = 4 if harness == "gemini" else size // (256 << 10)
                 out = root / f"{harness}-{size}-{escaped}"
                 command = [sys.executable, str(generator), harness, str(out), "--payload-bytes", str(size), "--records", str(records)]
                 if escaped:
