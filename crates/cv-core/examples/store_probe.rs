@@ -103,6 +103,7 @@ struct Args {
     span: Option<(u64, u64)>,
     escaped: bool,
     chunk_bytes: usize,
+    prefix_bytes: usize,
     last: usize,
     hash_output: bool,
     hash_detail: bool,
@@ -117,6 +118,7 @@ fn args() -> Result<Args> {
     let mut positional = Vec::new();
     let (mut root, mut mode, mut materialize) = (None, "lazy".to_string(), false);
     let (mut span, mut escaped, mut chunk_bytes) = (None, false, 64 << 10);
+    let mut prefix_bytes = 64 << 10;
     let mut last = 20;
     let mut hash_output = false;
     let mut hash_detail = false;
@@ -130,6 +132,7 @@ fn args() -> Result<Args> {
             "--mode" => mode = argv.next().context("--mode needs lazy|lazy-extra|bulk|full|complete")?,
             "--materialize" => materialize = true,
             "--hash-output" => hash_output = true,
+            "--prefix-bytes" => prefix_bytes = argv.next().context("--prefix-bytes needs a byte budget")?.parse()?,
             "--hash-detail" => hash_detail = true,
             "--warm-discover" => warm_discover = true,
             "--query" => query = Some(argv.next().context("--query needs an expression")?),
@@ -145,8 +148,8 @@ fn args() -> Result<Args> {
             "--resume-from" => resume_from = Some(PathBuf::from(argv.next().context("--resume-from needs a checkpoint JSON file")?)),
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
-                 [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len|json-len|json-write\n\
+                 [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
+                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len|json-len|json-write|json-prefix\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -182,6 +185,7 @@ fn args() -> Result<Args> {
         span,
         escaped,
         chunk_bytes,
+        prefix_bytes,
         last,
         hash_output,
         hash_detail,
@@ -541,12 +545,24 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail["metadata"] = serde_json::to_value(&s)?;
             }
         }
-        "json-len" | "json-write" => {
-            let (offset, len) = a.span.context("json-len/json-write requires --span OFFSET:LENGTH")?;
+        "json-len" | "json-write" | "json-prefix" => {
+            let (offset, len) = a
+                .span
+                .context("json-len/json-write/json-prefix requires --span OFFSET:LENGTH")?;
             // Unlike text spans, this range contains a complete JSON value, including quotes
             // or containers. Construction and strict validation are part of the stage.
             let value = cv_core::Json::source(&r.path, offset, len)?;
-            if a.operation == "json-len" {
+            if a.operation == "json-prefix" {
+                let (prefix, truncated) = value.canonical_prefix(a.prefix_bytes)?;
+                out.detail = json!({ "prefix_bytes": prefix.len(), "prefix_budget_bytes": a.prefix_bytes,
+                                     "truncated": truncated });
+                if a.hash_output {
+                    let mut digest = DigestWriter::default();
+                    digest.write_all(prefix.as_bytes())?;
+                    out.detail["prefix_sha256"] = json!(digest.digest.finish_hex());
+                }
+                out.resolved = Some(prefix);
+            } else if a.operation == "json-len" {
                 out.detail = json!({ "canonical_bytes": value.canonical_len()? });
             } else if a.hash_output {
                 let mut digest = DigestWriter::default();
@@ -666,7 +682,7 @@ fn main() -> Result<()> {
                 "affordances" => "full",
                 "affordance-read" => "production-defined",
                 "query" | "query-collect" | "tools" | "tools-collect" => "lazy",
-                "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" | "json-len" | "json-write" => "not-applicable",
+                "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
                 _ => &a.mode,
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }

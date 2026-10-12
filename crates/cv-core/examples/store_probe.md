@@ -72,12 +72,14 @@ For `resolve`, `--hash-output` adds a SHA-256 digest of the decoded UTF-8 bytes;
 reports only decoded length. The owned result remains live through the heap snapshot, so its
 requested output size is part of the measured heap and is not subject to the chunk scratch bound.
 
-`json-len` and `json-write` exercise source-backed `Json` directly with `--span OFFSET:LENGTH`.
+`json-len`, `json-write` and `json-prefix` exercise source-backed `Json` directly with `--span OFFSET:LENGTH`.
 The range contains one complete JSON value, including string quotes or container delimiters;
-`--escaped` is unused. Both include source construction and strict validation in the measured
+`--escaped` is unused. All include source construction and strict validation in the measured
 stage. `json-len` reports the canonical encoded byte count; `json-write` writes canonical bytes
 to a counting discard sink, or with `--hash-output` to a streaming SHA-256 sink. Neither retains
-an owned output or invokes the adapter. Compare hashes in separate fidelity runs so hashing
+an owned output or invokes the adapter. `json-prefix --prefix-bytes N` retains a canonical prefix
+through the heap snapshot, reporting its byte count and truncation; the default budget is 64 KiB
+and zero is allowed. `--hash-output` additionally hashes only the retained prefix. Compare hashes in separate fidelity runs so hashing
 does not affect ordinary CPU or heap measurements.
 
 `hash` emits independent SHA-256 digests of newline-delimited canonical message JSON and final
