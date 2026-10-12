@@ -140,7 +140,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     let cols = columns(conn, "threads");
     let has = |c: &str| cols.contains(c);
     let sql = format!(
-        "SELECT id, summary, updated_at, {created}, {folders}, {order}, data_type, {rowid} \
+        "SELECT id, summary, updated_at, {created}, {folders}, {order}, data_type, {rowid}, typeof(data) \
          FROM threads ORDER BY updated_at DESC",
         rowid = if rowid { "_rowid_" } else { "NULL" },
         created = if has("created_at") { "created_at" } else { "NULL" },
@@ -168,7 +168,10 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         // sorter. Native rowid stores can read the payload in fixed-size pages; older or
         // WITHOUT ROWID stores retain a point-lookup borrowed-cell fallback.
         let rowid = row.get::<_, Option<i64>>(7).ok().flatten();
-        let thread = thread_header(conn, &id, rowid, data_type.as_deref(), true);
+        let is_blob = row.get::<_, String>(8).is_ok_and(|kind| kind == "blob");
+        let thread = is_blob
+            .then(|| thread_header(conn, &id, rowid, data_type.as_deref(), true))
+            .flatten();
         let count = thread.as_ref().map(|t| t.message_count).unwrap_or(0);
         let cwd = thread.as_ref().and_then(|t| snapshot_cwd(&t.metadata));
         let cwd = cwd.or_else(|| first_folder_path(folders.as_deref(), order.as_deref()));
@@ -195,7 +198,7 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     let has = |c: &str| cols.contains(c);
     let sql = format!(
         "SELECT summary, updated_at, {created}, {parent}, {folders}, {order}, data_type, {rowid}, \
-         CASE WHEN typeof(data) = 'blob' THEN length(data) ELSE 0 END FROM threads WHERE id = ?1",
+         CASE WHEN typeof(data) = 'blob' THEN length(data) ELSE 0 END, typeof(data) FROM threads WHERE id = ?1",
         rowid = if rowid { "_rowid_" } else { "NULL" },
         created = if has("created_at") { "created_at" } else { "NULL" },
         parent = if has("parent_id") { "parent_id" } else { "NULL" },
@@ -220,7 +223,10 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     let data_len = row.get::<_, i64>(8).unwrap_or(0);
     // Both passes read the same SQLite cell under one read snapshot. Validate the complete
     // document before emitting any message, including malformed ignored fields.
-    let mut thread = thread_header(conn, &r.id, rowid, data_type.as_deref(), false);
+    let is_blob = row.get::<_, String>(9).is_ok_and(|kind| kind == "blob");
+    let mut thread = is_blob
+        .then(|| thread_header(conn, &r.id, rowid, data_type.as_deref(), false))
+        .flatten();
 
     let mut zed = serde_json::Map::new();
     let mut model = None;
@@ -1162,11 +1168,32 @@ mod tests {
                 assert_eq!(r.message_count, 3);
                 assert_eq!(parse_thread(&c, &r).unwrap().messages.len(), 4);
             }
-            c.execute("UPDATE threads SET data = 'not a blob' WHERE id = 'a'", [])
+            for text in [
+                "not a blob".to_string(),
+                serde_json::to_string(&legacy_thread()).unwrap(),
+            ] {
+                c.execute(
+                    "UPDATE threads SET data = ?1, data_type = 'json' WHERE id = 'a'",
+                    [&text],
+                )
                 .unwrap();
-            let unreadable = parse_thread(&c, &sref("a")).unwrap();
-            assert!(unreadable.messages.is_empty());
-            assert!(unreadable.harness_extra(Harness::Zed).is_none());
+                assert_eq!(
+                    c.query_row("SELECT typeof(data) FROM threads WHERE id = 'a'", [], |row| row
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "text"
+                );
+                let unreadable = parse_thread(&c, &sref("a")).unwrap();
+                assert!(unreadable.messages.is_empty());
+                assert!(unreadable.harness_extra(Harness::Zed).is_none());
+                let listed = discover_db(&c, Path::new(":memory:"))
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| r.id == "a")
+                    .unwrap();
+                assert_eq!(listed.message_count, 0);
+                assert_eq!(listed.cwd, None);
+            }
         }
     }
 
