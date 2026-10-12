@@ -11,7 +11,7 @@
 //! CLI is a silent wrong answer, not a missing feature.
 
 use crate::events::{self, Event};
-use crate::ir::{Block, Session, SessionRef};
+use crate::ir::{Block, Message, Role, Session, SessionRef};
 use crate::query::{ExtFacts, Facts, FieldId, SessionQuery, Tri};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
@@ -60,6 +60,7 @@ pub struct SessionFacts<'a> {
     workflows: OnceCell<Vec<crate::Workflow>>,
     compactions: OnceCell<usize>,
     affordances: OnceCell<HashSet<crate::affordance::Kind>>,
+    reduced: Option<&'a ReducedFacts>,
 }
 
 impl<'a> SessionFacts<'a> {
@@ -74,6 +75,7 @@ impl<'a> SessionFacts<'a> {
             workflows: OnceCell::new(),
             compactions: OnceCell::new(),
             affordances: OnceCell::new(),
+            reduced: None,
         }
     }
 
@@ -116,6 +118,8 @@ impl<'a> SessionFacts<'a> {
     }
 
     fn compaction_count(&self) -> usize {
+        // Keep the detector's extra-enabled read: some legacy lean readers tolerate malformed
+        // ignored sidecars that this pass rejects. Counting lazy IR kinds changes those results.
         *self
             .compactions
             .get_or_init(|| crate::compaction::detect(self.r, false).map(|c| c.len()).unwrap_or(0))
@@ -130,6 +134,9 @@ impl ExtFacts for SessionFacts<'_> {
     }
 
     fn tool(&self, name: &str) -> Tri {
+        if let Some(facts) = self.reduced {
+            return Tri::of(facts.tools.iter().any(|t| t.contains(name)));
+        }
         Tri::of(
             self.events()
                 .iter()
@@ -138,6 +145,9 @@ impl ExtFacts for SessionFacts<'_> {
     }
 
     fn touched(&self, path: &str) -> Tri {
+        if let Some(facts) = self.reduced {
+            return Tri::of(facts.targets.iter().any(|t| t.contains(path)));
+        }
         Tri::of(self.events().iter().any(|e| {
             matches!(e.kind, "file_edit" | "file_read")
                 && e.target.as_deref().is_some_and(|t| t.to_lowercase().contains(path))
@@ -146,13 +156,21 @@ impl ExtFacts for SessionFacts<'_> {
 
     fn has(&self, flag: &str) -> Tri {
         Tri::of(match flag {
-            "errors" => self.events().iter().any(|e| e.kind == "error"),
-            "tools" => self.events().iter().any(|e| e.tool.is_some()),
-            "images" => self
-                .session
-                .messages
-                .iter()
-                .any(|m| m.content.iter().any(|b| matches!(b, Block::Image { .. }))),
+            "errors" => self
+                .reduced
+                .map_or_else(|| self.events().iter().any(|e| e.kind == "error"), |f| f.errors),
+            "tools" => self
+                .reduced
+                .map_or_else(|| self.events().iter().any(|e| e.tool.is_some()), |f| f.has_tools),
+            "images" => self.reduced.map_or_else(
+                || {
+                    self.session
+                        .messages
+                        .iter()
+                        .any(|m| m.content.iter().any(|b| matches!(b, Block::Image { .. })))
+                },
+                |f| f.images,
+            ),
             "subagents" => {
                 self.session.harness == crate::ir::Harness::Claude
                     && self
@@ -163,7 +181,16 @@ impl ExtFacts for SessionFacts<'_> {
             }
             "compacted" => self.compaction_count() > 0,
             "workflows" => !self.workflows().is_empty(),
-            other => crate::affordance::Kind::parse(other).is_some_and(|k| self.affordance_kinds().contains(&k)),
+            other => crate::affordance::Kind::parse(other).is_some_and(|k| {
+                self.reduced.map_or_else(
+                    || self.affordance_kinds().contains(&k),
+                    |f| {
+                        f.counts
+                            .as_ref()
+                            .is_some_and(|counts| counts.get(&k).is_some_and(|n| *n > 0))
+                    },
+                )
+            }),
         })
     }
 
@@ -207,6 +234,137 @@ pub fn matches_full(query: &SessionQuery, r: &SessionRef, session: &Session, tex
         session: Some(session),
         ext: &facts,
     })
+}
+
+/// The transcript facts the query actually consults. Repeated calls and rich payloads contribute
+/// no retained messages or event rows. Relative file targets remain distinct until EOF because
+/// the whole-session evaluator resolves every target against the final (possibly late) cwd.
+#[derive(Default)]
+struct ReducedFacts {
+    models: HashSet<String>,
+    tools: HashSet<String>,
+    targets: HashSet<String>,
+    errors: bool,
+    has_tools: bool,
+    images: bool,
+    counts: Option<crate::affordance::Counts>,
+}
+
+struct FactSink {
+    facts: ReducedFacts,
+    models: bool,
+    tools: bool,
+    targets: bool,
+    events: bool,
+}
+
+impl FactSink {
+    fn new(query: &SessionQuery) -> Self {
+        let tools = !query.needles(FieldId::Tool).is_empty();
+        let targets = !query.needles(FieldId::Touched).is_empty();
+        let flags = query.needles(FieldId::Has);
+        Self {
+            facts: ReducedFacts::default(),
+            models: !query.needles(FieldId::Model).is_empty(),
+            tools,
+            targets,
+            events: tools || targets || flags.iter().any(|f| matches!(f.as_str(), "errors" | "tools")),
+        }
+    }
+
+    fn finish(mut self, session: &mut Session) -> ReducedFacts {
+        self.facts.targets = self
+            .facts
+            .targets
+            .into_iter()
+            .map(|p| {
+                let path = std::path::Path::new(&p);
+                match session.cwd.as_deref().filter(|_| !path.is_absolute()) {
+                    Some(cwd) => cwd.join(path).to_string_lossy().to_lowercase(),
+                    None => p.to_lowercase(),
+                }
+            })
+            .collect();
+        // Only model IDs are projected into the evaluator's existing Session input. These are
+        // private query facts, not an IR transcript or a serialized read result.
+        session.messages = self
+            .facts
+            .models
+            .drain()
+            .map(|model| {
+                let mut m = Message::new(Role::Assistant);
+                m.model = Some(model);
+                m
+            })
+            .collect();
+        self.facts
+    }
+}
+
+impl crate::MessageSink for FactSink {
+    fn message(&mut self, mut m: Message) -> crate::Flow {
+        if self.models {
+            if let Some(model) = m.model.take() {
+                self.facts.models.insert(model);
+            }
+        }
+        self.facts.images |= m.content.iter().any(|b| matches!(b, Block::Image { .. }));
+        if self.events {
+            for e in events::extract(&m, 0, None) {
+                self.facts.errors |= e.kind == "error";
+                self.facts.has_tools |= e.tool.is_some();
+                if self.tools {
+                    if let Some(tool) = e.tool {
+                        self.facts.tools.insert(tool.to_lowercase());
+                    }
+                }
+                if self.targets && matches!(e.kind, "file_edit" | "file_read") {
+                    self.facts.targets.extend(e.target);
+                }
+            }
+        }
+        crate::Flow::Continue
+    }
+}
+
+/// Evaluate a query in one lazy, counted pass, retaining only metadata and distinct predicate
+/// facts. The parsed-session convenience [`matches_full`] remains available to callers that
+/// already own a transcript. Forest/workflow/compaction walks remain memoized and evaluated on
+/// demand; compaction detection keeps its separate extra-enabled pass for validation compatibility.
+pub fn matches_streamed(
+    query: &SessionQuery,
+    adapter: &dyn crate::harness::Adapter,
+    r: &SessionRef,
+    text_sets: &TextSets,
+) -> anyhow::Result<bool> {
+    let mut sink = FactSink::new(query);
+    let affordances = query
+        .needles(FieldId::Has)
+        .iter()
+        .any(|flag| crate::affordance::Kind::parse(flag).is_some());
+    let mut session = if affordances {
+        // Reuse the counted pass's classifier and side-store rows instead of extracting a second
+        // set of affordance rows merely to ask which kinds occurred.
+        let source = crate::source::Probe::default().snapshot(r);
+        let (session, counted) = crate::stream::stream_counting(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?;
+        if let Some(counted) = counted {
+            sink.facts.counts = Some(counted.counts.clone());
+            counted.record_with_source(r, &source);
+        }
+        session
+    } else {
+        crate::stream::stream_counted(adapter, r, &crate::ParseOptions::lazy(), &mut sink)?
+    };
+    let reduced = sink.finish(&mut session);
+    let facts = SessionFacts {
+        reduced: Some(&reduced),
+        ..SessionFacts::new(r, &session, text_sets)
+    };
+    Ok(query.matches(&Facts {
+        r,
+        session: Some(&session),
+        ext: &facts,
+    }))
 }
 
 /// Facts available before parsing: indexed text membership and fresh catalog affordance counts.
@@ -256,10 +414,9 @@ pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: 
         match cheap {
             Tri::True => true,
             Tri::False => false,
-            // Undecided: parse it (which also records its counts for the next query).
+            // Undecided: reduce it (which also records its counts for the next query).
             Tri::Unknown => crate::harness::for_harness(r.harness)
-                .and_then(|a| crate::stream::collect_with(a.as_ref(), r, &crate::ParseOptions::lazy()).ok())
-                .is_some_and(|s| matches_full(query, r, &s, text_sets)),
+                .is_some_and(|a| matches_streamed(query, a.as_ref(), r, text_sets).unwrap_or(false)),
         }
     });
 }
@@ -345,5 +502,165 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn streamed_facts_match_collection_with_late_metadata_and_boolean_queries() {
+        let world = cv_testkit::World::in_process("streamed_query_facts");
+        let payload = "rich escaped\n\"🌙\"".repeat(400);
+        let path = world.write_session("facts", &[
+            serde_json::json!({"type":"assistant","uuid":"early","message":{"role":"assistant", "model":"EarlyModel",
+                "content":[{"type":"tool_use","id":"e","name":"Edit","input":{"file_path":"./src/A.rs","rich":payload}},
+                    {"type":"tool_use","id":"r","name":"Read","input":{"file_path":"../other.rs"}},
+                    {"type":"tool_use","id":"a","name":"Read","input":{"file_path":"/Absolute/Λ.rs"}},
+                    {"type":"tool_use","id":"b","name":"Bash","input":{"command":"git status"}}]}}),
+            serde_json::json!({"type":"user","uuid":"image","message":{"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":payload}},
+                {"type":"tool_result","tool_use_id":"e","is_error":true,"content":"permission denied"}]}}),
+            serde_json::json!({"type":"system","uuid":"boundary","subtype":"compact_boundary",
+                "compactMetadata":{"trigger":"auto","preTokens":1000}}),
+            serde_json::json!({"type":"user","uuid":"summary","parentUuid":"boundary","isCompactSummary":true,
+                "message":{"role":"user","content":payload}}),
+            serde_json::json!({"type":"assistant","uuid":"late","cwd":"/Late/Work","permissionMode":"plan",
+                "gitBranch":"FeatureBranch","message":{"role":"assistant","model":"LateModel","content":[
+                    {"type":"tool_use","id":"e2","name":"Edit","input":{"file_path":"./src/A.rs","rich":payload}},
+                    {"type":"text","text":"done"}]}}),
+            serde_json::json!({"type":"ai-title","aiTitle":"final title"}),
+        ]);
+        let tasks = world.home.join(".claude/tasks/facts");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::write(
+            tasks.join("1.json"),
+            r#"{"id":"1","subject":"side-store plan","status":"pending"}"#,
+        )
+        .unwrap();
+        let mut r = SessionRef::new("facts", crate::Harness::Claude, path);
+        r.cwd = Some("/Stale/Discovery".into());
+        r.title = Some("discovery title".into());
+        let adapter = crate::harness::for_harness(r.harness).unwrap();
+        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::ParseOptions::lazy()).unwrap();
+        assert_eq!(full.cwd.as_deref(), Some(std::path::Path::new("/Late/Work")));
+        for required in [
+            "model=earlymodel AND model=latemodel",
+            "tool:edit AND tool:bash",
+            "touched:/late/work/src/a.rs AND has:images AND has:errors",
+            "has:plan",
+            "compactions=1",
+        ] {
+            assert!(
+                matches_full(&SessionQuery::parse(required).unwrap(), &r, &full, &TextSets::default()),
+                "{required}"
+            );
+        }
+        for source in [
+            "model:early",
+            "model=earlymodel",
+            "model=early",
+            "model:late",
+            "model:absent",
+            "model:early AND model:late",
+            "NOT model:early",
+            "NOT model:absent",
+            "git:feature",
+            "git:absent",
+            "tool:edit",
+            "tool:bash",
+            "tool:absent",
+            "touched:/late/work/src/a.rs",
+            "touched:/late/work/../other.rs",
+            "touched:/absolute/λ.rs",
+            "touched:/stale/discovery",
+            "has:errors",
+            "has:tools",
+            "has:images",
+            "has:compacted",
+            "has:plan",
+            "has:approval",
+            "NOT has:goal",
+            "compactions=1",
+            "compactions>1",
+            "agents=0",
+            "workflows=0",
+            "NOT has:subagents",
+            "NOT has:workflows",
+            "text:hit AND tool:edit",
+            "text:miss OR model:late",
+            "NOT (text:hit AND tool:absent)",
+            "(model:absent OR touched:/late/work/src/a.rs) AND NOT has:goal",
+            "has:plan AND model:early AND NOT (tool:absent OR has:goal)",
+            "title:discovery AND model:late",
+            "title:final OR model:absent",
+        ] {
+            let query = SessionQuery::parse(source).unwrap();
+            let texts = TextSets::resolve(&query, |n| {
+                if n == "hit" {
+                    HashSet::from([r.id.clone()])
+                } else {
+                    HashSet::new()
+                }
+            });
+            let expected = matches_full(&query, &r, &full, &texts);
+            assert_eq!(
+                matches_streamed(&query, adapter.as_ref(), &r, &texts).unwrap(),
+                expected,
+                "{source}"
+            );
+            let mut refs = vec![r.clone()];
+            filter_refs(&mut refs, &query, &texts);
+            assert_eq!(!refs.is_empty(), expected, "filter: {source}");
+        }
+    }
+
+    #[test]
+    fn fact_reducer_retains_distinct_facts_without_payloads_or_event_rows() {
+        let query = SessionQuery::parse("model:early AND tool:edit AND touched:a.rs AND has:images").unwrap();
+        let mut sink = FactSink::new(&query);
+        let mut m = Message::new(Role::Assistant);
+        m.model = Some("EarlyModel".into());
+        m.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "Edit".into(),
+            namespace: None,
+            input: serde_json::json!({"file_path":"./a.rs","rich":"discarded rich argument".repeat(8192)}),
+        });
+        m.content.push(Block::Image {
+            media_type: None,
+            data_ref: Some("discarded image reference".repeat(8192)),
+        });
+        for _ in 0..1000 {
+            assert_eq!(crate::MessageSink::message(&mut sink, m.clone()), crate::Flow::Continue);
+        }
+        assert_eq!(sink.facts.models.len(), 1);
+        assert_eq!(sink.facts.tools.len(), 1);
+        assert_eq!(sink.facts.targets.len(), 1);
+        assert!(sink.facts.images);
+        let mut shell = Session::new("facts", crate::Harness::Claude);
+        shell.cwd = Some("/late".into());
+        let facts = sink.finish(&mut shell);
+        assert_eq!(facts.targets, HashSet::from(["/late/a.rs".into()]));
+        assert_eq!(shell.messages.len(), 1);
+        assert!(shell.messages[0].content.is_empty());
+        assert!(shell.messages[0].extra.is_empty());
+    }
+
+    #[test]
+    fn streamed_compaction_facts_preserve_full_detector_validation() {
+        let world = cv_testkit::World::in_process("streamed_compaction_validation");
+        let path = world.transcript("invalid-sidecar");
+        // The legacy lean reader tolerates overflow inside this ignored sidecar. The extra-enabled
+        // compaction detector rejects the record, so its count differs from the lazy IR's kinds.
+        std::fs::write(
+            &path,
+            r#"{"type":"system","subtype":"compact_boundary","toolUseResult":{"ignored":1e400}}"#,
+        )
+        .unwrap();
+        let r = SessionRef::new("invalid-sidecar", crate::Harness::Claude, path);
+        let adapter = crate::harness::for_harness(r.harness).unwrap();
+        let full = crate::stream::collect_with(adapter.as_ref(), &r, &crate::ParseOptions::lazy()).unwrap();
+        let query = SessionQuery::parse("compactions=0").unwrap();
+        let texts = TextSets::default();
+        assert_eq!(full.messages.len(), 1);
+        assert!(matches_full(&query, &r, &full, &texts));
+        assert!(matches_streamed(&query, adapter.as_ref(), &r, &texts).unwrap());
     }
 }
