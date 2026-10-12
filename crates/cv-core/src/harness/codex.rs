@@ -621,7 +621,11 @@ pub fn stream_jsonl_spans(
     let mut meta_sent = false;
     let mut skipped = 0u64;
     let mut off = 0u64;
-    'outer: for raw_line in data.split(|&b| b == b'\n') {
+    let mut start = 0usize;
+    'outer: while start < data.len() {
+        let end = memchr::memchr(b'\n', &data[start..]).map_or(data.len(), |i| start + i);
+        let raw_line = &data[start..end];
+        start = end + 1;
         let line_off = off;
         off += raw_line.len() as u64 + 1; // +1 for the consumed '\n'
         let lead = raw_line.iter().take_while(|b| b.is_ascii_whitespace()).count();

@@ -35,6 +35,9 @@ dirs.workspace = true
 uuid.workspace = true
 regex.workspace = true
 toml.workspace = true
+# Line splitting on the parse paths (a byte loop was a quarter of a codex parse). Already in the
+# tree through regex.
+memchr = "2"
 # Floor at 0.9.11 — RUSTSEC-2026-0186 patched there (advisory against 0.9.10).
 memmap2 = { version = ">=0.9.11, <0.10", optional = true }
 

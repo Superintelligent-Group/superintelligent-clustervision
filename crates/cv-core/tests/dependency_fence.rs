@@ -30,6 +30,7 @@ const DEPENDENCY_ALLOWLIST: &[&str] = &[
     "chrono",
     "dirs",
     "fs4",
+    "memchr",
     "memmap2",
     "percent-encoding",
     "rayon",
