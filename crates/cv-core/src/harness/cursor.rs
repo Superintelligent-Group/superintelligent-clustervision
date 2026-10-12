@@ -31,7 +31,7 @@ use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, Statement};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -189,17 +189,13 @@ fn item_table_get(conn: &Connection, key: &str) -> Option<String> {
 }
 
 /// Read a cursorDiskKV value as a UTF-8 string.
-fn disk_kv_get(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM cursorDiskKV WHERE key = ?1",
-        [key],
-        |row| match row.get::<_, String>(0) {
-            Ok(s) => Ok(s),
-            Err(_) => row
-                .get::<_, Vec<u8>>(0)
-                .map(|b| String::from_utf8_lossy(&b).into_owned()),
-        },
-    )
+fn disk_kv_get(stmt: &mut Statement<'_>, key: &str) -> Option<String> {
+    stmt.query_row([key], |row| match row.get::<_, String>(0) {
+        Ok(s) => Ok(s),
+        Err(_) => row
+            .get::<_, Vec<u8>>(0)
+            .map(|b| String::from_utf8_lossy(&b).into_owned()),
+    })
     .ok()
 }
 
@@ -250,9 +246,19 @@ fn percent_decode(s: &str) -> String {
 // Global (cursorDiskKV) format
 // ---------------------------------------------------------------------------
 
+// LIKE is case-insensitive by default and cannot use Cursor's binary key index. Bound the
+// exact prefix instead, and keep the table-scan row order so timestamp ties remain stable.
+const COMPOSER_ROWS: &str = "SELECT key, value FROM cursorDiskKV \
+    WHERE key >= 'composerData:' AND key < 'composerData;' ORDER BY rowid";
+const COMPOSER_ROWS_WITHOUT_ROWID: &str = "SELECT key, value FROM cursorDiskKV \
+    WHERE key >= 'composerData:' AND key < 'composerData;'";
+
 fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathBuf>, out: &mut Vec<SessionRef>) {
     // Bail quietly if this DB has no cursorDiskKV table (older layout).
-    let mut stmt = match conn.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'") {
+    let mut stmt = match conn
+        .prepare(COMPOSER_ROWS)
+        .or_else(|_| conn.prepare(COMPOSER_ROWS_WITHOUT_ROWID))
+    {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -313,8 +319,9 @@ fn conversation_len(d: &Value) -> usize {
 }
 
 fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
+    let mut lookup = conn.prepare("SELECT value FROM cursorDiskKV WHERE key = ?1")?;
     let key = format!("composerData:{}", r.id);
-    let raw = disk_kv_get(conn, &key).with_context(|| format!("composerData:{} not found", r.id))?;
+    let raw = disk_kv_get(&mut lookup, &key).with_context(|| format!("composerData:{} not found", r.id))?;
     let d: Value = serde_json::from_str(&raw).context("composerData JSON")?;
 
     let created = d.get("createdAt").and_then(Value::as_i64);
@@ -384,7 +391,7 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
                 continue;
             };
             let bkey = format!("bubbleId:{}:{}", r.id, bubble_id);
-            let Some(braw) = disk_kv_get(conn, &bkey) else {
+            let Some(braw) = disk_kv_get(&mut lookup, &bkey) else {
                 continue;
             };
             let Ok(bv) = serde_json::from_str::<Value>(&braw) else {
@@ -728,6 +735,62 @@ mod tests {
 
     fn sref(id: &str) -> SessionRef {
         SessionRef::new(id, Harness::Cursor, PathBuf::from(":memory:"))
+    }
+
+    #[test]
+    fn composer_prefix_uses_key_index_and_preserves_discovery_order() {
+        use rusqlite::StatementStatus;
+        let mut conn = mk_global();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO cursorDiskKV VALUES (?1, ?2)").unwrap();
+            for i in 0..20_000 {
+                insert
+                    .execute(rusqlite::params![format!("bubbleId:c:{i}"), "{}"])
+                    .unwrap();
+            }
+            // Insertion order differs from key order; preserve the old table scan's ordering.
+            for key in ["composerData:z", "composerData:a", "composerData:m"] {
+                insert.execute(rusqlite::params![key, "{}"]).unwrap();
+            }
+            for key in ["composerData", "composerData;later", "ComposerData:wrong-case"] {
+                insert.execute(rusqlite::params![key, "{}"]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let mut old = conn
+            .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
+            .unwrap();
+        let old_keys: Vec<String> = old
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .filter(|k: &String| k.starts_with("composerData:"))
+            .collect();
+        let mut bounded = conn.prepare(COMPOSER_ROWS).unwrap();
+        let keys: Vec<String> = bounded.query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert_eq!(keys, old_keys);
+        assert_eq!(bounded.get_status(StatementStatus::FullscanStep), 0);
+        assert!(bounded.get_status(StatementStatus::VmStep) * 100 < old.get_status(StatementStatus::VmStep));
+        let plans: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {COMPOSER_ROWS}"))
+            .unwrap()
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(
+            plans
+                .iter()
+                .any(|p| p.contains("SEARCH cursorDiskKV") && p.contains("key>?") && p.contains("key<?")),
+            "{plans:?}"
+        );
+        eprintln!(
+            "cursor prefix: SQLite {}, old VM steps {}, bounded {}, plans {plans:?}",
+            rusqlite::version(),
+            old.get_status(StatementStatus::VmStep),
+            bounded.get_status(StatementStatus::VmStep),
+        );
     }
 
     #[test]
