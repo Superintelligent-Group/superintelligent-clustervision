@@ -8,6 +8,7 @@
 - Devin edit results carry `details.restorable`, the files `/revert` can restore.
 - Catalog affordance counts from 0.16.0 are recounted on the next full read, so `has:approval` / `has:checkpoint` never answer from stale counts.
 - Side stores read: Qwen `scheduled_tasks.json`, OpenClaw cron and sub-agent registries, Cline schedule runs and `teams.db`, Kimi `state.json` todos, Grok hook runs.
+- Catalog affordance counts are recounted once more, to include these side stores and forks.
 - Claude `--fork-session` and Goose `--fork` sessions name their source in `lineage.forked_from`, inferred from the records the fork copied.
 
 ## 0.16.0 — 2026-10-12 — every harness, every version, every affordance
