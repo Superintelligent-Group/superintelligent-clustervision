@@ -14,9 +14,10 @@ Current open work: `docs/design/DATAPATHS.md` (audited data paths, design and pe
 - Toolchain is pinned to 1.99.0 (`rust-toolchain.toml`); CI runs fmt, clippy `-D warnings`, the
   workspace build and tests, the no-default-features and wasm32 builds of cv-core, `cargo package`
   of the published crates, the manual build and its names check, the corpus tools test and the web
-  selftest. Run them before pushing (the exact list is in PERF-HANDOFF.md "Gates").
+  selftest. Run them before pushing (the complete list is in `.github/workflows/ci.yml`).
 - Never write to ember's real stores: `~/.clustervision` (copy it and set `CLUSTERVISION_HOME`),
-  `~/.claude`, `~/.codex`, and every other harness home. Transcripts are read-only.
+  `~/.claude`, `~/.codex`, and every other harness home. Transcripts are read-only. Set a scratch
+  `CLUSTERVISION_HOME` for cargo tests too: adapter parse helpers can update the counts catalog.
 - Work in your own git worktree with your own `CARGO_TARGET_DIR`; two worktrees sharing a target
   dir corrupt each other's builds. Never `git stash`. Never kill processes by pattern; stop only
   PIDs you started.

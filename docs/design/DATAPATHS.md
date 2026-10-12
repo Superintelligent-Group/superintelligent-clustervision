@@ -1,7 +1,7 @@
 # Store performance: the system we are optimizing
 
-Source audit: `c0f0044`, 2026-10-12. This is the working model and tracker for the next
-performance pass. Measurements in `PERF.md` remain historical observations; their causal
+Source audit: `c0f0044`, 2026-10-12; updated as changes land on `perf/store-datapaths`.
+This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
 ## What cv does
@@ -58,7 +58,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
 | Claude JSONL | Parallel cached discovery; native stream; lazy content; checkpoints | Discovery parses all records; lazy records still build content Values before extracting spans; extras/fork side reads |
-| Codex JSONL | mmap line scan; selective records; giant output spans; checkpoints | Repeated JSON scans; verify giant shortcut metadata/inherited-history equivalence |
+| Codex JSONL | mmap line scan; selective records; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; inherited-prefix and metadata parity now covered by regressions |
 | Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
 | Gemini legacy JSON | mmap, vector of borrowed raw messages, one owned record at a time | Giant single records; discovery collects whole sessions; escaped wrapper metadata falls back |
 | Gemini JSONL | Replays all records into order + owned body map | Entire retained history payload; `$set`/rewind changes old logical messages |
@@ -71,7 +71,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Continue | mmap raw history items; tool-answer dedup | Full Value discovery count, sometimes twice; mutable snapshots |
 | OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
-| Cursor SQLite | Key/value session blobs and bubbles | Prefix LIKE scan; composed sessions/blobs; global/workspace dependencies |
+| Cursor SQLite | Indexed composer key range; prepared bubble lookups | Composed sessions/blobs; global/workspace dependencies |
 | Devin SQLite | Session forest, node metadata and selected chain, then rows | Structural prepass over all branches; bodies already streamed |
 | Hermes SQLite | Indexed message rows + generation dedup/trailing user texts | Pathological trailing prompts; shared DB invalidation |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
@@ -92,12 +92,12 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter | Preserve cheap path; measure discovery separately |
 | Full discovery | Scans + cache persistence + catalog replacement/watch construction | Metadata reducers instead of collect-to-count; dependency-aware caching |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
-| JSON show / MCP show | Full parse, then window | Keep selected messages and final metadata, decode selected content only |
-| Affordance view | Full parse, then classify | Stream rows, preserve session/transcript/side-store ordering and extras |
+| JSON show / MCP show | Full-fidelity stream into selected window; EOF metadata retained | Largest incoming decoded message/extras; selected-message serialization for byte budgets |
+| Affordance view | Full-fidelity stream into classified rows; final metadata and side stores retained | Largest incoming decoded message/extras and result rows |
 | Doctor | Full-fidelity messages streamed, attribution state | Largest decoded record/extras dominate; decoded-length reducer may help |
-| Query text predicate | Ranked search plus live snippets, then discard all but IDs | Index-only matching IDs; no source reads |
+| Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Lazy whole-session collection for unknown facts | Small streaming fact reducers; preserve tri-state semantics |
-| FTS | Chunked text, event vector, counts, checkpoint state | Bound escaped decoding, inline payloads, queued bytes and event retention |
+| FTS | Chunked text, event vector, counts, checkpoint state | Escaped decoding now bounded; inline payloads, queued bytes and event retention remain |
 | Semantic indexing | Second discovery, full rebuild of capped session heads | Reuse discovery and unchanged vectors; only after measuring importance |
 | API pagination | Each page starts source traversal at zero; head reads whole source | Verified anchors or cache; head need not block first page rendering |
 | Watch | Discovery, full parse/count of changed session; old prefix parse on first append | Reuse safe stable cursors; logical edits must invalidate old output |
@@ -117,17 +117,18 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
    reasoning can revise the last pending message. Checkpoint only finalized output/state.
 2. Identity includes dependencies: SQLite WAL, directory children, side metadata, rotation
    manifests and sidecar output. Existing freshness policies disagree about these dependencies.
-   Catalog DB watches currently omit WAL; FTS/events stat the primary path and may use size-only
-   freshness for JSONL, unlike stricter affordance counts.
+   Catalog DB watches now include WAL appearance, modification and disappearance. FTS/events
+   require primary-path mtime and size, as counts already did; complete dependency stamps remain work.
 3. Current resume marks sample the first 4 KiB and the 4 KiB preceding the mark. This is not a
-   proof that the entire prefix is unchanged. A same-size rewrite elsewhere can escape detection.
+   proof that the entire prefix is unchanged. FTS now requires growth before using a mark, so
+   same-size rewrites take a whole pass; a rewrite followed by growth can still escape the samples.
    Unconditional detection of arbitrary prefix edits requires reading that prefix or a trusted
    writer/filesystem change signal; do not promise both zero prefix reads and such detection.
 4. Lazy/full equivalence must compare **resolved content** and metadata. The existing stream dump
    serializes span descriptors, not their resolved text. Span layout changes are not output changes.
-5. Existing format bugs must be isolated and tested as correctness changes. Examples to refute:
-   Codex's giant-output shortcut drops metadata preserved by its ordinary branch; Gemini's native
-   wrapper omits metadata fields and rejects escaped borrowed strings.
+5. Existing format bugs must be isolated and tested as correctness changes. Fixed separately:
+   Codex's giant-output shortcut dropped metadata preserved by its ordinary branch; Gemini's native
+   wrapper omitted metadata fields and rejected escaped borrowed strings.
 6. Exact final metadata can require EOF, even when a window needs only early messages. Separate
    payload retention from metadata traversal rather than silently returning incomplete metadata.
 
@@ -166,16 +167,32 @@ means which cache is cold, not an unsupported claim that the OS page cache was e
 Historical baseline confirmation: a release direct lazy count on the frozen 313.8 MB Gemini
 recording emitted 199 messages at best-of-three 0.944 s (332 MB/s). The process also performed
 three whole-file read baselines and reached 1.77 GB RSS / 1.45 GB footprint; those process peaks
-are **not isolated adapter heap**. The forthcoming allocation probe must attribute the lifetime.
+are **not isolated adapter heap**.
+
+The isolated `store_probe` baseline attributes Gemini's direct lazy count to 841,082,713 bytes
+of peak live Rust allocations (847 MB process footprint). The corresponding Codex read has
+25.7 MB live Rust allocations and 47.5 MB footprint despite 761 MB RSS: most resident pages are
+file-backed. These measurements distinguish private allocation from mapped input.
+
+The probe measures direct adapter behavior. Its window operation demonstrates retention shape;
+production JSON show additionally counts, serializes selected messages for budgets and handles
+continuation. It is not an end-to-end show benchmark. Hash runs resolve spans and canonicalize
+message and metadata maps; they are separate from timing and allocation runs. The heap feature
+counts requested Rust allocations, excluding SQLite/native allocation and allocator fragmentation.
+
+Completed Cursor discovery query check: with 20,000 unrelated bubble rows and three composers,
+SQLite VM steps fell from 80,043 to 52 and full-scan steps to zero. The binary prefix range keeps
+the former row order and has a fallback for tables without rowids.
 
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
 - [x] Source map: readers, consumers, caches, index, follow/archive, write paths and gates.
 - [x] Correct the handoff's assumptions about existing streaming, parallelism and admission.
-- [ ] Independent allocation/throughput/equivalence probes and valid scale fixtures.
-- [ ] Streaming affordance and full-fidelity JSON-window consumers.
-- [ ] Index-only text matching and deferred snippets.
-- [ ] Bounded escaped-string chunk decoding, with and without mmap.
+- [x] Independent allocation/throughput/equivalence probes and initial valid scale fixtures.
+- [x] Streaming affordance and full-fidelity JSON-window consumers.
+- [x] Index-only text matching and deferred snippets.
+- [x] Bounded escaped-string chunk decoding, with and without mmap (CPU optimization in progress).
+- [ ] Automated heap gates and fixtures for the remaining store formats.
 - [ ] Gemini metadata/discovery, lazy records and replay payload retention.
 - [ ] Claude typed borrowed hot records and metadata scan; Codex fast-path semantic parity.
 - [ ] SQLite/dependency freshness, including WAL and sidecar-only changes.
