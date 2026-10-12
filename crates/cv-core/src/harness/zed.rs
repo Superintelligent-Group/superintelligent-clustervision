@@ -52,6 +52,8 @@
 //!   `cumulative_token_usage` is kept (in `extra["zed"]`). A subagent's `parent_thread_id` is
 //!   first-class [`Lineage::parent`]; the `Compaction` summary becomes a `CompactionSummary` turn.
 
+mod blob;
+
 use super::store::sqlite::{columns, open_ro};
 use super::wire::anthropic;
 use super::Adapter;
@@ -76,7 +78,9 @@ impl Zed {
     /// Read an explicit directory holding `threads.db`, without changing process discovery.
     pub fn with_root(root: &Path) -> Self {
         let path = root.join("threads.db");
-        Zed { db: path.is_file().then_some(path) }
+        Zed {
+            db: path.is_file().then_some(path),
+        }
     }
 }
 
@@ -145,38 +149,25 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         },
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1).ok().flatten(),
-            row.get::<_, Option<String>>(2).ok().flatten(),
-            row.get::<_, Option<String>>(3).ok().flatten(),
-            row.get::<_, Option<String>>(4).ok().flatten(),
-            row.get::<_, Option<String>>(5).ok().flatten(),
-            row.get::<_, Option<String>>(6).ok().flatten(),
-            row.get::<_, Option<Vec<u8>>>(7).ok().flatten().unwrap_or_default(),
-        ))
-    })?;
+    let mut rows = stmt.query([])?;
     let mut out = Vec::new();
-    for row in rows {
-        // One unreadable row never fails the harness.
-        let Ok((id, summary, updated, created, folders, order, data_type, data)) = row else {
-            continue;
+    while let Some(row) = rows.next()? {
+        // One unreadable row never fails the harness. Borrow the SQLite cell only while its
+        // row is current; no Rust copy of the complete compressed source is needed.
+        let Ok(id) = row.get::<_, String>(0) else { continue };
+        let summary = row.get::<_, Option<String>>(1).ok().flatten();
+        let updated = row.get::<_, Option<String>>(2).ok().flatten();
+        let created = row.get::<_, Option<String>>(3).ok().flatten();
+        let folders = row.get::<_, Option<String>>(4).ok().flatten();
+        let order = row.get::<_, Option<String>>(5).ok().flatten();
+        let data_type = row.get::<_, Option<String>>(6).ok().flatten();
+        let data = match row.get_ref(7) {
+            Ok(rusqlite::types::ValueRef::Blob(data)) => data,
+            _ => &[],
         };
-        // Decode the blob once per thread for the user+assistant count (Zed has no message table
-        // to COUNT from) and the snapshot cwd. A corrupt blob degrades to count 0, never an error.
-        let thread = decode_blob(data_type.as_deref(), &data);
-        let mut count = 0usize;
-        let mut cwd = None;
-        if let Some(t) = &thread {
-            each_ir_message(t, &mut |m| {
-                if matches!(m.role, Role::User | Role::Assistant) {
-                    count += 1;
-                }
-                Flow::Continue
-            });
-            cwd = snapshot_cwd(t);
-        }
+        let thread = blob::header(data_type.as_deref(), data, true);
+        let count = thread.as_ref().map(|t| t.message_count).unwrap_or(0);
+        let cwd = thread.as_ref().and_then(|t| snapshot_cwd(&t.metadata));
         let cwd = cwd.or_else(|| first_folder_path(folders.as_deref(), order.as_deref()));
         out.push(SessionRef {
             id,
@@ -209,33 +200,23 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
             "NULL"
         },
     );
-    /// One optional value per column the metadata SELECT reads (the blob last).
-    type Row = (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Vec<u8>,
-    );
-    let (summary, updated, created, parent, folders, order, data_type, data): Row = conn
-        .query_row(&sql, [&r.id], |row| {
-            Ok((
-                row.get(0).ok().flatten(),
-                row.get(1).ok().flatten(),
-                row.get(2).ok().flatten(),
-                row.get(3).ok().flatten(),
-                row.get(4).ok().flatten(),
-                row.get(5).ok().flatten(),
-                row.get(6).ok().flatten(),
-                row.get::<_, Option<Vec<u8>>>(7).ok().flatten().unwrap_or_default(),
-            ))
-        })
-        .with_context(|| format!("zed thread {} not found", r.id))?;
-
-    let thread = decode_blob(data_type.as_deref(), &data);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([&r.id])?;
+    let row = rows.next()?.with_context(|| format!("zed thread {} not found", r.id))?;
+    let summary = row.get::<_, Option<String>>(0).ok().flatten();
+    let updated = row.get::<_, Option<String>>(1).ok().flatten();
+    let created = row.get::<_, Option<String>>(2).ok().flatten();
+    let parent = row.get::<_, Option<String>>(3).ok().flatten();
+    let folders = row.get::<_, Option<String>>(4).ok().flatten();
+    let order = row.get::<_, Option<String>>(5).ok().flatten();
+    let data_type = row.get::<_, Option<String>>(6).ok().flatten();
+    let data = match row.get_ref(7) {
+        Ok(rusqlite::types::ValueRef::Blob(data)) => data,
+        _ => &[],
+    };
+    // Both passes borrow the same cell under the same active read statement. Validate the
+    // complete document before emitting any message, including malformed ignored fields.
+    let thread = blob::header(data_type.as_deref(), data, false);
 
     let mut zed = serde_json::Map::new();
     let mut model = None;
@@ -246,7 +227,8 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     // The parent thread of a subagent: from the 0.3.0 blob's `subagent_context`, overridden by the
     // `parent_id` column when both name one. First-class [`Lineage`], not an extra key.
     let mut parent_thread_id: Option<String> = None;
-    if let Some(t) = &thread {
+    if let Some(header) = &thread {
+        let t = &header.metadata;
         // `title` (0.3.0) / `summary` (legacy) — same meaning, renamed across generations.
         blob_title = t
             .get("title")
@@ -302,7 +284,7 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     sink.meta(&s);
 
     if let Some(t) = &thread {
-        each_ir_message(t, &mut |m| sink.message(m));
+        blob::replay(data_type.as_deref(), data, t, &mut |m| sink.message(m));
     }
     Ok(s)
 }
@@ -310,30 +292,6 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
 // ---------------------------------------------------------------------------
 // Blob decoding
 // ---------------------------------------------------------------------------
-
-/// Decompress + parse one thread blob. `data_type` is `"zstd"` or `"json"`; unknown/absent values
-/// are sniffed (zstd magic `28 B5 2F FD`). Any failure → `None` (tolerated by every caller).
-fn decode_blob(data_type: Option<&str>, data: &[u8]) -> Option<Value> {
-    let is_zstd = match data_type {
-        Some("zstd") => true,
-        Some("json") => false,
-        _ => data.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]),
-    };
-    let json: std::borrow::Cow<'_, [u8]> = if is_zstd {
-        std::borrow::Cow::Owned(decompress_zstd(data)?)
-    } else {
-        std::borrow::Cow::Borrowed(data)
-    };
-    serde_json::from_slice(&json).ok()
-}
-
-fn decompress_zstd(data: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Read as _;
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(data).ok()?;
-    let mut out = Vec::new();
-    decoder.read_to_end(&mut out).ok()?;
-    Some(out)
-}
 
 // ---------------------------------------------------------------------------
 // Thread-level metadata
@@ -443,6 +401,7 @@ fn thread_extras(t: &Value, extra: &mut serde_json::Map<String, Value>, parent: 
 /// Convert every thread message to IR and feed it to `f`, stopping on [`Flow::Stop`]. This is the
 /// single conversion both `discover` (counting) and `stream` (emitting) run, so the
 /// `message_count` contract holds by construction.
+#[cfg(test)]
 fn each_ir_message(t: &Value, f: &mut dyn FnMut(Message) -> Flow) {
     let Some(messages) = t.get("messages").and_then(Value::as_array) else {
         return;
@@ -796,7 +755,7 @@ mod tests {
 
     /// A representative legacy (0.2.0) thread: user text, assistant thinking+text+tool call with
     /// its result on the same message, project snapshot, model, profile.
-    fn legacy_thread() -> Value {
+    pub(super) fn legacy_thread() -> Value {
         serde_json::json!({
             "version": "0.2.0",
             "summary": "Fix the flaky test",
@@ -853,7 +812,7 @@ mod tests {
 
     /// A representative modern (0.3.0) thread: tagged-enum messages, Mention, tool_results map,
     /// Resume marker, subagent_context.
-    fn modern_thread() -> Value {
+    pub(super) fn modern_thread() -> Value {
         serde_json::json!({
             "version": "0.3.0",
             "title": "Refactor the parser",
@@ -1271,6 +1230,7 @@ mod tests {
 
     #[test]
     fn stream_equals_parse_on_synthetic_db() {
+        let _world = cv_testkit::World::in_process("zed-stream-parse");
         // The corpus-wide invariant, asserted here on a fixture so it runs without real data:
         // parse() and collect(stream()) are the same bytes.
         let dir = std::env::temp_dir().join(format!("cv-zed-test-{}", uuid::Uuid::new_v4()));
