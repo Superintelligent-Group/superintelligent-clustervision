@@ -128,6 +128,14 @@ Claude lazy count CPU medians (three interleaved pairs): frozen 0.307 → 0.273 
 0.0856 → 0.0417 s. Typed borrowed records avoid the old Value tree, and mmap line traversal
 removes the giant-line buffer. Rich extras and uncommon fallback shapes remain owned.
 
+Codex's event-authority prepass now combines syntax checking and discriminator projection, then
+checks strict Value-compatible acceptance. On generated 64 MiB tool-only inputs, three paired
+clean runs give median child CPU 0.0706 → 0.0508 s plain and 0.3487 → 0.3354 s escaped.
+Retired instructions fall from 624.6M → 559.5M plain and 3.414B → 2.497B escaped. Load was
+67–71 with integration builds running; caches were warm/uncontrolled, and an escaped wall-time
+outlier remains in the raw results. The earlier redundant-scan prototype's slowdown is eliminated;
+escaped CPU is best described as approximately unchanged, with constant heap at both input sizes.
+
 Gemini lazy count CPU medians (three final interleaved pairs): 1.05 → 0.72 s, about 31% less
 CPU; source-stage wall medians 1.124 → 0.813 s. The baseline's first 3.567 s outlier is retained
 in the raw results; OS caches were not controlled. Production affordance reading on the same
