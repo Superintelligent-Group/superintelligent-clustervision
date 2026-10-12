@@ -425,15 +425,7 @@ pub fn tool_summary(name: &str, input: &crate::json::Json) -> Result<String> {
             "skill",
         ] {
             let Some(value) = view.get(key)? else { continue };
-            let mut head = String::new();
-            let mut left = 81;
-            if value.for_each_str_chunk(|chunk| {
-                for ch in chunk.chars().take(left) {
-                    head.push(ch);
-                    left -= 1;
-                }
-                Ok(())
-            })? {
+            if let Some(head) = crate::projection::string_prefix(value, 81)? {
                 return Ok(head);
             }
         }
@@ -459,7 +451,7 @@ fn endpoint_from(view: crate::json::JsonView<'_>) -> Result<Option<String>> {
     let mut end = 0;
     let mut pos = 0;
     let mut found = None;
-    let string = view.for_each_str_chunk(|chunk| {
+    let string = crate::projection::string_until(view, |chunk| {
         for &byte in chunk.as_bytes() {
             if found.is_some() {
                 break;
@@ -496,7 +488,7 @@ fn endpoint_from(view: crate::json::JsonView<'_>) -> Result<Option<String>> {
             }
             pos += 1;
         }
-        Ok(())
+        found.is_some()
     })?;
     if !string {
         return Ok(None);
@@ -507,14 +499,14 @@ fn endpoint_from(view: crate::json::JsonView<'_>) -> Result<Option<String>> {
     let Some((start, end)) = found else { return Ok(None) };
     let mut output = String::with_capacity(end - start);
     let mut offset = 0;
-    view.for_each_str_chunk(|chunk| {
+    crate::projection::string_until(view, |chunk| {
         let a = start.saturating_sub(offset).min(chunk.len());
         let b = end.saturating_sub(offset).min(chunk.len());
         if a < b {
             output.push_str(&chunk[a..b]);
         }
         offset += chunk.len();
-        Ok(())
+        offset >= end
     })?;
     Ok(Some(output))
 }
@@ -540,14 +532,13 @@ fn pass(r: &SessionRef) -> Result<Pass> {
     let mut p = Pass::default();
     let mut seen = std::collections::HashSet::new();
     // Keep rich usage metadata and source-backed arguments. Only text is materialized for the
-    // demanded last report; tool summaries and endpoints project their own bounded facts.
+    // demanded assistant report; tool summaries and endpoints project their own bounded facts.
     let opts = ParseOptions::lazy_extra();
     let resolver = crate::lazy::Resolver::new(Some(r.path.clone()));
     let session = adapter.try_stream(
         r,
         &opts,
-        &mut crate::stream::TryFnSink::new(|mut m: Message| {
-            m.materialize_text(&resolver);
+        &mut crate::stream::TryFnSink::new(|m: Message| {
             if m.is_model_visible() && matches!(m.role, Role::User | Role::Assistant) {
                 p.messages += 1;
             }
@@ -556,7 +547,21 @@ fn pass(r: &SessionRef) -> Result<Pass> {
             }
             if m.role == Role::Assistant {
                 let calls_a_tool = m.content.iter().any(|b| matches!(b, Block::ToolUse { .. }));
-                let has_text = m.kind == MessageKind::Reply && m.text().is_some_and(|t| !t.trim().is_empty());
+                let report = (m.kind == MessageKind::Reply)
+                    .then(|| {
+                        let mut output = String::new();
+                        for block in &m.content {
+                            if let Block::Text { text } = block {
+                                if !output.is_empty() {
+                                    output.push('\n');
+                                }
+                                output.push_str(&text.resolve(&resolver));
+                            }
+                        }
+                        output
+                    })
+                    .filter(|text| !text.trim().is_empty());
+                let has_text = report.is_some();
                 if calls_a_tool {
                     p.ends_in_report = false;
                 } else if has_text {
@@ -571,10 +576,8 @@ fn pass(r: &SessionRef) -> Result<Pass> {
                         p.tokens.add(u);
                     }
                 }
-                if m.kind == MessageKind::Reply {
-                    if let Some(t) = m.text().filter(|t| !t.trim().is_empty()) {
-                        p.last_text = Some(t);
-                    }
+                if let Some(report) = report {
+                    p.last_text = Some(report);
                 }
                 for b in &m.content {
                     if let Block::ToolUse { name, input, .. } = b {
@@ -764,6 +767,50 @@ mod tests {
             assert_eq!(source.with_view(endpoint_from).unwrap(), expected);
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lane_pass_preserves_full_report_while_skipping_unrelated_large_content() {
+        let world = cv_testkit::World::in_process("lane-pass-projections");
+        let path = world.proj.join("lane.jsonl");
+        let giant = "unneeded λ\n".repeat(10_000);
+        let records = [
+            serde_json::json!({"type":"user","uuid":"u","message":{"role":"user","content":giant}}),
+            serde_json::json!({"type":"assistant","uuid":"a","message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":giant},
+                {"type":"tool_use","id":"t","name":"Bash","input":{"command":"CV_ENDPOINT=lane:test; echo ready"}}
+            ]}}),
+            serde_json::json!({"type":"user","uuid":"r","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t","content":giant}
+            ]}}),
+            serde_json::json!({"type":"assistant","uuid":"done","message":{"role":"assistant","content":[
+                {"type":"text","text":""},{"type":"text","text":"ready λ"},
+                {"type":"text","text":""},{"type":"text","text":"last line"}
+            ]}}),
+        ];
+        let text = records.iter().map(|record| format!("{record}\n")).collect::<String>();
+        std::fs::write(&path, text).unwrap();
+        let reference = SessionRef {
+            id: "lane".into(),
+            harness: crate::Harness::Claude,
+            path,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 0,
+        };
+        let adapter = crate::harness::for_harness(reference.harness).unwrap();
+        let whole = crate::stream::collect(adapter.as_ref(), &reference).unwrap();
+        let summary = pass(&reference).unwrap();
+        assert_eq!(summary.last_text, whole.messages.last().unwrap().text());
+        assert!(summary.ends_in_report);
+        assert_eq!(summary.tool_calls, 1);
+        assert_eq!(summary.endpoint.as_deref(), Some("lane:test"));
+        assert_eq!(
+            summary.last_tool.as_deref(),
+            Some("Bash · CV_ENDPOINT=lane:test; echo ready")
+        );
     }
 
     #[test]
