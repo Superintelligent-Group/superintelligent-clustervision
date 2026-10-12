@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- JSON show windows retain selected messages; affordance views classify streamed messages instead of collecting the transcript first.
+- Text predicates match directly against the index; search snippets read source transcripts only after result filtering and limits.
+- Escaped lazy text is decoded in bounded chunks, including builds without memory mapping.
+- Cursor discovery uses indexed composer key ranges and reuses prepared bubble lookups.
+- OpenClaw SQLite reads retain navigation and selected payloads; discovery and side registries release unrelated bodies row by row.
+- Qwen discovery counts streamed turns without retaining their messages.
+- Giant Codex tool outputs preserve tool names, namespaces, timestamps and inherited-history filtering through the ordinary dispatch path.
+- Gemini accepts escaped wrapper metadata and preserves saved-chat message classification.
+- Same-size transcript edits invalidate search and event caches; checkpoint reuse requires source growth.
+- Catalog watches detect SQLite WAL changes, including WAL creation and removal.
+- Archive catalog cleanup scans grow geometrically instead of rereading the entire catalog after every stored session.
 - `cv index` parses on every core: a full counts recount of a 95 GB fleet went from 329 s to 61-68 s.
 - `cv search` ranks equal scores by session id, whatever order the index was written in.
 - `cv index` rebuilds the full-text index once after upgrading; afterwards a grown Claude or Codex transcript is read only from where the last pass stopped.
