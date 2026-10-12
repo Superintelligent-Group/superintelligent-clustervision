@@ -1383,6 +1383,152 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checked_demands_match_independent_large_string_oracle_and_source_overrides() {
+        let dir = CheckedTestDir::new();
+        let path = dir.path().join("text");
+        let content = "é🌙 quote\" slash\\ newline\n\u{2003}".repeat(4000);
+        let quoted = serde_json::to_string(&content).unwrap();
+        let raw = &quoted.as_bytes()[1..quoted.len() - 1];
+        let mut file = b"prefix!".to_vec();
+        file.extend_from_slice(raw);
+        file.extend_from_slice(b"suffix!");
+        std::fs::write(&path, &file).unwrap();
+        let span = Span {
+            source: Some(path.clone()),
+            offset: 7,
+            len: raw.len() as u64,
+            escaped: true,
+        };
+        let resolver = Resolver::new(Some(dir.path().join("wrong-primary")));
+        assert_eq!(resolver.try_resolve(&span).unwrap(), content);
+        for chunk in [1, 2, 13, 65536] {
+            let mut output = String::new();
+            resolver
+                .try_for_each_chunk(&span, chunk, |part| {
+                    assert!(part.len() <= chunk + 3);
+                    output.push_str(part);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(output, content);
+        }
+        // A malformed tail after valid decoder windows must retract the entire decoded prefix.
+        let late_path = dir.path().join("late");
+        let mut malformed = raw.to_vec();
+        malformed.extend_from_slice(b"\\ud83c");
+        std::fs::write(&late_path, &malformed).unwrap();
+        let span = Span {
+            source: Some(late_path),
+            offset: 0,
+            len: malformed.len() as u64,
+            escaped: true,
+        };
+        assert_eq!(
+            resolver.try_resolve(&span).unwrap(),
+            String::from_utf8_lossy(&malformed)
+        );
+        let mut output = String::new();
+        resolver
+            .try_for_each_chunk(&span, 8192, |part| {
+                output.push_str(part);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(output, String::from_utf8_lossy(&malformed));
+        // Literal Unicode whitespace cut mid-scalar must remain whitespace, including portable.
+        let whitespace_path = dir.path().join("whitespace");
+        let whitespace = format!("{}wanted", "\u{2003}".repeat(10_000));
+        std::fs::write(&whitespace_path, &whitespace).unwrap();
+        let span = Span {
+            source: Some(whitespace_path),
+            offset: 0,
+            len: whitespace.len() as u64,
+            escaped: false,
+        };
+        let prefix = resolver.try_resolve_prefix(&span, 1024).unwrap();
+        assert_eq!(prefix.len(), 1023);
+        assert!(prefix.chars().all(char::is_whitespace));
+        #[cfg(feature = "mmap")]
+        assert!(matches!(resolver.try_resolve(&span).unwrap(), Cow::Borrowed(_)));
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn checked_mapping_rejects_replaced_path_after_first_demand() {
+        let dir = CheckedTestDir::new();
+        let path = dir.path().join("text");
+        std::fs::write(&path, b"before").unwrap();
+        let resolver = Resolver::new(Some(path.clone()));
+        let span = Span {
+            source: None,
+            offset: 0,
+            len: 6,
+            escaped: false,
+        };
+        assert_eq!(resolver.try_resolve(&span).unwrap(), "before");
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"after!").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(resolver.try_resolve(&span).is_err());
+        assert!(resolver.try_resolve_prefix(&span, 2).is_err());
+        assert!(resolver.try_for_each_chunk(&span, 2, |_| Ok(())).is_err());
+        assert_eq!(Resolver::new(Some(path)).try_resolve(&span).unwrap(), "after!");
+    }
+
+    #[test]
+    fn checked_reader_error_cannot_become_malformed_raw_fallback() {
+        use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
+        struct FailAfterWindow(Cursor<Vec<u8>>);
+        impl BufRead for FailAfterWindow {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.0.position() >= 65536 {
+                    Err(std::io::Error::other("injected Text read failure"))
+                } else {
+                    let available = 65536 - self.0.position() as usize;
+                    let bytes = self.0.fill_buf()?;
+                    Ok(&bytes[..bytes.len().min(available)])
+                }
+            }
+            fn consume(&mut self, n: usize) {
+                self.0.consume(n);
+            }
+        }
+        impl Read for FailAfterWindow {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(bytes)
+            }
+        }
+        impl Seek for FailAfterWindow {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(position)
+            }
+        }
+        let dir = CheckedTestDir::new();
+        let path = dir.path().join("text");
+        let body = "body\\n".repeat(40_000).into_bytes();
+        std::fs::write(&path, &body).unwrap();
+        let source = CheckedSource::open(&path).unwrap();
+        let state = DemandState::default();
+        let mut reader = DemandReader {
+            inner: FailAfterWindow(Cursor::new(body.clone())),
+            source: &source,
+            state: &state,
+            since_check: 0,
+        };
+        let mut calls = 0;
+        assert!(
+            stream_body_checked(&mut reader, 0, body.len() as u64, true, 8192, &mut |_| {
+                calls += 1;
+                true
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 0);
+        let error = state.finish(&source).unwrap_err();
+        assert_eq!(error.to_string(), "injected Text read failure");
+    }
+
     fn chunked_body(raw: &[u8], escaped: bool, input_window: usize, chunk: usize) -> String {
         let mut reader = std::io::BufReader::with_capacity(input_window, std::io::Cursor::new(raw));
         let mut result = String::new();
