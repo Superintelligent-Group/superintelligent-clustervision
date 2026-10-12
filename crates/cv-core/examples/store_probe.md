@@ -201,3 +201,9 @@ checks temporary-file cleanup and I/O accounting, and bounds Rust heap at 1 MiB 
 The retained `events-collected` oracle must produce identical rows and demonstrate growing heap.
 The focused event case uses only the mmap binary. Native SQLite memory, giant tool arguments and
 crash cleanup remain outside this heap guarantee.
+
+`hash --raw-order` resolves content but preserves IR map insertion order in message and metadata
+digests. It detects serialization-order drift that the default canonical digest deliberately
+normalizes. It does not compare original harness JSON bytes or whitespace. The report marks
+canonical JSON version as null and serialization order as preserved; ordinary hash output stays
+compatible with canonical version 1. Use the same switch on both compared binaries.

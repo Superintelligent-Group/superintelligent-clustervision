@@ -109,6 +109,7 @@ struct Args {
     warm_discover: bool,
     query: Option<String>,
     resume_from: Option<PathBuf>,
+    raw_order: bool,
 }
 
 fn args() -> Result<Args> {
@@ -122,6 +123,7 @@ fn args() -> Result<Args> {
     let mut warm_discover = false;
     let mut query = None;
     let mut resume_from = None;
+    let mut raw_order = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
@@ -131,6 +133,7 @@ fn args() -> Result<Args> {
             "--hash-detail" => hash_detail = true,
             "--warm-discover" => warm_discover = true,
             "--query" => query = Some(argv.next().context("--query needs an expression")?),
+            "--raw-order" => raw_order = true,
             "--span" => {
                 let range = argv.next().context("--span needs OFFSET:LENGTH")?;
                 let (off, len) = range.split_once(':').context("--span needs OFFSET:LENGTH")?;
@@ -142,7 +145,7 @@ fn args() -> Result<Args> {
             "--resume-from" => resume_from = Some(PathBuf::from(argv.next().context("--resume-from needs a checkpoint JSON file")?)),
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
-                 [--materialize] [--hash-output] [--hash-detail] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
+                 [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
                  OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
@@ -165,6 +168,9 @@ fn args() -> Result<Args> {
     if hash_detail && positional[0] != "hash" {
         bail!("--hash-detail applies only to the hash operation");
     }
+    if raw_order && positional[0] != "hash" {
+        bail!("--raw-order applies only to the hash operation");
+    }
     Ok(Args {
         operation: positional[0].clone(),
         harness: Harness::parse(&positional[1]).context("unknown harness")?,
@@ -182,6 +188,7 @@ fn args() -> Result<Args> {
         warm_discover,
         query,
         resume_from,
+        raw_order,
     })
 }
 
@@ -481,7 +488,11 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             let mut fingerprints = Vec::new();
             let mut sink = |mut m: Message| {
                 out.messages += 1;
-                canonical_message(&mut m, &resolver);
+                if a.raw_order {
+                    m.materialize(&resolver);
+                } else {
+                    canonical_message(&mut m, &resolver);
+                }
                 if let Err(e) = serde_json::to_writer(&mut messages, &m) {
                     error = Some(e);
                     return Flow::Stop;
@@ -502,7 +513,9 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             }
             s.messages.clear();
             s.source_path = None; // Transport location, not interpreted session content.
-            sort_map(&mut s.extra);
+            if !a.raw_order {
+                sort_map(&mut s.extra);
+            }
             let mut meta = DigestWriter::default();
             serde_json::to_writer(&mut meta, &s)?;
             out.detail = json!({
@@ -511,6 +524,10 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 "metadata_sha256": meta.digest.finish_hex(),
                 "serialized_message_bytes": messages.bytes,
             });
+            if a.raw_order {
+                out.detail["canonical_json_version"] = Value::Null;
+                out.detail["serialization_order"] = json!("preserved");
+            }
             if a.hash_detail {
                 out.detail["message_fingerprints"] = json!(fingerprints);
                 out.detail["metadata"] = serde_json::to_value(&s)?;
@@ -621,6 +638,7 @@ fn main() -> Result<()> {
             "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
             "hash_output": a.hash_output,
             "hash_detail": a.hash_detail,
+            "raw_order": a.raw_order,
             "warm_discover": a.warm_discover,
             "setup_discovered_sessions": setup_discovered_sessions,
             "wall_seconds": seconds, "messages": out.messages,
