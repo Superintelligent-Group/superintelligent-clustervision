@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 chrono.workspace = true
+uuid.workspace = true
 
 # Full-text: pure-Rust Lucene-like engine. Always on.
 tantivy = "0.26"
@@ -25,16 +26,15 @@ tantivy = "0.26"
 # `tokenizers` + `safetensors` + `ndarray`. `hf-hub` lets us fetch + cache a small model
 # (e.g. potion-base-8M, ~30MB) on first use. Gated so a minimal FTS-only build is possible
 # via `--no-default-features`.
+hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"], optional = true }
 model2vec-rs = { version = "0.2", default-features = false, features = ["onig", "hf-hub"], optional = true }
 
 [features]
 default = ["semantic"]
-semantic = ["dep:model2vec-rs"]
+semantic = ["dep:model2vec-rs", "dep:hf-hub"]
 # Isolated ignored sweep oracle: requested Rust heap and production document chunk size.
 probe-heap = []
 
 [dev-dependencies]
 cv-testkit = { path = "../cv-testkit" }
 rusqlite.workspace = true
-# Tests name their scratch dirs with a fresh UUID.
-uuid.workspace = true

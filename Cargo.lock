@@ -449,6 +449,7 @@ dependencies = [
  "clustervision-core",
  "cv-testkit",
  "dirs 5.0.1",
+ "hf-hub",
  "model2vec-rs",
  "rusqlite",
  "serde",

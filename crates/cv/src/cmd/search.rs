@@ -213,7 +213,8 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Resul
         if rebuild { "rebuilding" } else { "updating" },
         if subagents { " (+ sub-agent forest)" } else { "" }
     );
-    let n = cv_search::index_all(None, rebuild, subagents)?;
+    let refs = cv_core::discover_all();
+    let n = cv_search::index_sessions(None, refs.clone(), rebuild, subagents)?;
     println!(
         "indexed {n} top-level session(s) → {}{}",
         cv_search::default_tantivy_dir().display(),
@@ -224,8 +225,8 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Resul
         }
     );
     if semantic {
-        eprintln!("✦ embedding sessions (downloads a small model on first use)…");
-        let e = cv_search::embed_all(None)?;
+        eprintln!("✦ refreshing semantic vectors (downloads a small model on first use)…");
+        let e = cv_search::embed_sessions(None, &refs)?;
         println!(
             "embedded {e} session(s) → {}",
             cv_search::default_embeddings_path().display()

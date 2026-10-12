@@ -38,6 +38,7 @@ impl UserLabel {
 pub(super) struct DocSink {
     pub(super) body: Head,
     pub(super) first_user_text: Option<String>,
+    pub(super) reads: cv_core::source::ReadSet,
     resolver: Resolver,
     error: Option<anyhow::Error>,
     failed: bool,
@@ -47,9 +48,17 @@ impl DocSink {
         Self {
             body: Head::new(EMBED_HEAD_BYTES),
             first_user_text: None,
+            reads: Default::default(),
             resolver,
             error: None,
             failed: false,
+        }
+    }
+    fn read_text(&mut self, text: &cv_core::Text) {
+        if let cv_core::Text::Span(span) = text {
+            if let Some(path) = &span.source {
+                self.reads.record(path);
+            }
         }
     }
     /// Message::append_searchable's projection, plus persisted-output heads, within one budget.
@@ -60,6 +69,7 @@ impl DocSink {
             }
             match block {
                 Block::Text { text } | Block::Thinking { text, .. } => {
+                    self.read_text(text);
                     self.body.push_text(text, &self.resolver);
                     self.body.push("\n");
                 }
@@ -67,6 +77,9 @@ impl DocSink {
                     self.body.push(name);
                     self.body.push(" ");
                     if !self.body.full() {
+                        if let cv_core::json::Json::Source(range) = input {
+                            self.reads.record(range.path());
+                        }
                         if let Err(error) = self.body.push_json(input) {
                             self.error = Some(error);
                             return;
@@ -75,10 +88,12 @@ impl DocSink {
                     self.body.push("\n");
                 }
                 Block::ToolResult { content, .. } => {
+                    self.read_text(content);
                     self.body.push_text(content, &self.resolver);
                     self.body.push("\n");
                     if !self.body.full() {
                         if let Some(path) = block.persisted_output_path() {
+                            self.reads.record(std::path::Path::new(path));
                             if let Some(text) =
                                 cv_core::lazy::read_head(std::path::Path::new(path), self.body.remaining())
                             {
@@ -100,6 +115,9 @@ impl DocSink {
     }
 }
 impl MessageSink for DocSink {
+    fn dependency(&mut self, path: &std::path::Path) {
+        self.reads.record(path);
+    }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.failed |= self.error.is_some();
         self.error.take().or_else(|| {
@@ -116,6 +134,7 @@ impl MessageSink for DocSink {
             let mut label = UserLabel::default();
             for block in &message.content {
                 if let Block::Text { text } = block {
+                    self.read_text(text);
                     label.push(&text.resolve_prefix(&self.resolver, FIRST_USER_RAW_HEAD));
                 }
             }
@@ -164,6 +183,55 @@ mod tests {
             end -= 1;
         }
         &text[..end]
+    }
+
+    #[test]
+    fn semantic_projection_tracks_selected_json_text_and_absent_outputs() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-reads-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let json_path = dir.join("input.json");
+        let text_path = dir.join("text");
+        let sidecar = dir.join("missing");
+        std::fs::write(&json_path, "{\"arg\":true}").unwrap();
+        std::fs::write(&text_path, "label").unwrap();
+        let mut m = message(
+            Role::User,
+            vec![
+                Block::Text {
+                    text: Text::Span(cv_core::Span {
+                        source: Some(text_path.clone()),
+                        offset: 0,
+                        len: 5,
+                        escaped: false,
+                    }),
+                },
+                tool(json!(null)),
+                Block::ToolResult {
+                    tool_use_id: "call".into(),
+                    content: "stub".into(),
+                    is_error: false,
+                    tool_name: None,
+                    status: None,
+                    details: Some(json!({"persistedOutput": {"path": sidecar}})),
+                },
+            ],
+        );
+        if let Block::ToolUse { input, .. } = &mut m.content[1] {
+            *input = cv_core::json::Json::source(&json_path, 0, 12).unwrap();
+        }
+        let mut sink = sink();
+        sink.message(m);
+        assert!(sink.take_error().is_none());
+        assert!(sink.reads.fresh(&mut cv_core::source::Probe::default()));
+        std::fs::write(&sidecar, "adopted output").unwrap();
+        assert!(!sink.reads.fresh(&mut cv_core::source::Probe::default()));
+        std::fs::remove_file(&sidecar).unwrap();
+        // Each dependency is captured before its read, including the external label span.
+        std::fs::write(&text_path, "new label").unwrap();
+        assert!(!sink.reads.fresh(&mut cv_core::source::Probe::default()));
+        std::fs::write(&json_path, "null").unwrap();
+        assert!(!sink.reads.fresh(&mut cv_core::source::Probe::default()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

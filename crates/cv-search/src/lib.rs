@@ -103,6 +103,21 @@ pub fn index_all(dir: impl Into<Option<PathBuf>>, rebuild: bool, subagents: bool
     fts::index_all(&dir, rebuild, subagents)
 }
 
+/// Update the index using an already discovered session inventory.
+pub fn index_sessions(
+    dir: impl Into<Option<PathBuf>>,
+    refs: Vec<cv_core::SessionRef>,
+    rebuild: bool,
+    subagents: bool,
+) -> Result<usize> {
+    fts::index_sessions(
+        &dir.into().unwrap_or_else(default_tantivy_dir),
+        refs,
+        rebuild,
+        subagents,
+    )
+}
+
 /// Run a full-text query against the index at its default location.
 pub fn text_search(dir: impl Into<Option<PathBuf>>, query: &str, limit: usize) -> Result<Vec<Hit>> {
     let dir = dir.into().unwrap_or_else(default_tantivy_dir);
@@ -131,6 +146,12 @@ pub fn embed_all(path: impl Into<Option<PathBuf>>) -> Result<usize> {
     semantic::embed_all(&path)
 }
 
+/// Refresh semantic vectors using the same inventory as the full-text pass.
+#[cfg(feature = "semantic")]
+pub fn embed_sessions(path: impl Into<Option<PathBuf>>, refs: &[cv_core::SessionRef]) -> Result<usize> {
+    semantic::embed_sessions(&path.into().unwrap_or_else(default_embeddings_path), refs)
+}
+
 /// Embed the query and rank stored session vectors by cosine similarity (default store).
 #[cfg(feature = "semantic")]
 pub fn semantic_search(path: impl Into<Option<PathBuf>>, query: &str, k: usize) -> Result<Vec<Hit>> {
@@ -138,31 +159,16 @@ pub fn semantic_search(path: impl Into<Option<PathBuf>>, query: &str, k: usize) 
     semantic::semantic_search(&path, query, k)
 }
 
-/// Stream the `(id, harness, cwd, title, body-head)` corpus by discovering + streaming every
-/// session, invoking `f` once per session and **dropping the `Doc` immediately after**.
-///
-/// Retained body and label memory is bounded per session; parser-owned IR (including structured
-/// tool arguments and metadata) has separate costs. History: `build_corpus() -> Vec<Doc>`
-/// held every session's full searchable body (~35 GB) and the semantic path `.clone()`d them all
-/// again — ~65 GB RSS, OOM-killed. The streaming driver fixed the corpus dimension; the head cap
-/// (`semantic_corpus::EMBED_HEAD_BYTES`) fixed the per-session one, since the only consumer left is the
-/// embedder and model2vec reads ≤512 tokens anyway. (The FTS indexer doesn't use this — it
-/// streams chunk-wise into `fts::ChunkSink`.)
+/// Read only the semantic projection demanded for one discovered session.
 #[cfg(feature = "semantic")]
-pub(crate) fn stream_corpus(mut f: impl FnMut(Doc) -> Result<()>) -> Result<usize> {
-    use cv_core::ParseOptions;
-    use semantic_corpus::DocSink;
-
-    let mut n = 0usize;
-    for r in cv_core::discover_all() {
-        let Some(adapter) = cv_core::harness::for_harness(r.harness) else {
-            continue;
-        };
-        let mut sink = DocSink::new(cv_core::Resolver::new(Some(r.path.clone())));
-        let meta = cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), &mut sink)
-            .with_context(|| format!("reading semantic corpus session {} ({})", r.id, r.harness))?;
-        let title = cv_core::label_from(meta.title.as_deref(), sink.first_user_text.as_deref());
-        let doc = Doc {
+pub(crate) fn read_corpus_doc(r: &cv_core::SessionRef) -> Result<(Doc, cv_core::source::ReadSet)> {
+    let adapter = cv_core::harness::for_harness(r.harness).with_context(|| format!("no adapter for {}", r.harness))?;
+    let mut sink = semantic_corpus::DocSink::new(cv_core::Resolver::new(Some(r.path.clone())));
+    let meta = cv_core::stream::stream_counted(&*adapter, r, &cv_core::ParseOptions::lazy(), &mut sink)
+        .with_context(|| format!("reading semantic corpus session {} ({})", r.id, r.harness))?;
+    let title = cv_core::label_from(meta.title.as_deref(), sink.first_user_text.as_deref());
+    Ok((
+        Doc {
             id: r.id.clone(),
             harness: r.harness.as_str().to_string(),
             cwd: r.cwd.as_ref().map(|p| p.display().to_string()),
@@ -170,11 +176,9 @@ pub(crate) fn stream_corpus(mut f: impl FnMut(Doc) -> Result<()>) -> Result<usiz
             body: sink.body.into_string(),
             created_at: r.created_at.map(|t| t.timestamp()),
             updated_at: r.updated_at.map(|t| t.timestamp()),
-        };
-        f(doc)?;
-        n += 1;
-    }
-    Ok(n)
+        },
+        sink.reads,
+    ))
 }
 
 /// One indexable document distilled from a parsed [`cv_core::Session`], for the **semantic** path

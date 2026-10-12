@@ -8,6 +8,7 @@
 - API pagination reuses bounded, source-verified continuations and head summaries, avoiding repeated scans of earlier messages.
 - Lane summaries resolve assistant reports and bounded tool arguments without decoding unrelated message bodies.
 - Large Zed threads decode once into bounded temporary storage, avoiding repeated decompression while retaining exact replay.
+- Semantic indexing reuses unchanged vectors, tracks demanded source dependencies, and loads the embedding model only when sessions need refreshing.
 
 - Native Qwen JSONL resumes at finalized record boundaries; changed metadata and legacy replay formats still trigger whole reads.
 - Full-text indexing streams structured tool arguments into bounded documents without an extra serialized string.
