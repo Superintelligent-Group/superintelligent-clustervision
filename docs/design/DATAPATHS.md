@@ -249,6 +249,13 @@ footprint fell from 503,857,920 B to 203,571,752 B; RSS fell from 614,481,920 B 
 These debug-stage process measurements include mapped/native memory. Owned JSON input and the
 tee clone remain proportional to input size; this is not a universal index heap bound.
 
+The opt-in `check-heap-budget.py --only events` gate covers ordered extraction through SQL
+publication at 20,000/200,000 fixed-size records, compares every persisted row with the retained
+collector, and verifies source stamps, spool I/O and normal cleanup. Live Rust peaks are
+352,006/352,009 B versus 7,073,127/57,619,016 B for the collector. Its fixed 1 MiB ceiling and
+256 KiB growth allowance exclude giant individual inputs and native SQLite memory; it is not
+enabled in the default CI pass.
+
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
 - [x] Source map: readers, consumers, caches, index, follow/archive, write paths and gates.

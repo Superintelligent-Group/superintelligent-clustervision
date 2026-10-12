@@ -6,10 +6,12 @@ Only generated scratch inputs are read, and every subprocess uses an isolated cv
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 
@@ -193,6 +195,57 @@ def queries(binary, root, env):
             bound(peaks, STORE_CEILING, STORE_GROWTH, f"query {harness} escaped={escaped}")
 
 
+def events(binary, root, env):
+    """Bound extraction through transactional publication, including a retained negative control."""
+    peaks = {"events": [], "events-collected": []}
+    for records in (20_000, 200_000):
+        fixture = root / f"events-{records}"
+        fixture.mkdir()
+        source = fixture / "events.jsonl"
+        with source.open("w") as out:
+            for i in range(records):
+                row = {"type": "assistant", "sessionId": "events", "uuid": f"event-{i}",
+                       "message": {"role": "assistant", "content": [
+                           {"type": "tool_use", "id": f"call-{i}", "name": "Edit",
+                            "input": {"file_path": f"/repo/file-{i}.rs", "old_string": "a", "new_string": "b"}}]}}
+                if i:
+                    row["parentUuid"] = f"event-{i - 1}"
+                out.write(json.dumps(row, separators=(",", ":")) + "\n")
+        digests = []
+        for operation in peaks:
+            catalog = root / f"catalog-{operation}-{records}"
+            temporary = root / f"spools-{operation}-{records}"
+            catalog.mkdir()
+            temporary.mkdir()
+            case_env = dict(env, CLUSTERVISION_HOME=str(catalog), TMPDIR=str(temporary))
+            row, peak = probe(binary, [operation, "claude", "events", source, "--root", fixture], case_env, True)
+            assert row["messages"] == records and row["detail"]["events"] == records, "events truncated or skipped"
+            # Count persisted rows and compare exact ordering/targets outside the measured Rust
+            # process; extraction success alone cannot conceal a failed best-effort SQL write.
+            with sqlite3.connect(f"file:{catalog / 'catalog.db'}?mode=ro", uri=True) as conn:
+                assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == records, "event publication incomplete"
+                assert conn.execute("SELECT count(*) FROM event_sync").fetchone()[0] == 1, "event stamp missing"
+                assert conn.execute("SELECT count(*) FROM source_dependencies WHERE consumer='events'").fetchone()[0] == 1, "source baseline missing"
+                digest = hashlib.sha256()
+                query = "SELECT e.msg_idx,e.kind,t.target FROM events e LEFT JOIN event_targets t ON t.id=e.target_id ORDER BY e.msg_idx"
+                for i, (msg_idx, kind, target) in enumerate(conn.execute(query)):
+                    assert (msg_idx, kind, target) == (i, "file_edit", f"/repo/file-{i}.rs"), "event ordering or target changed"
+                    digest.update(json.dumps([msg_idx, kind, target]).encode())
+                digests.append(digest.digest())
+            assert not list(temporary.iterdir()), "completed publication leaked its owned spool"
+            written = row["detail"]["temporary_bytes_written"]
+            read = row["detail"]["temporary_bytes_read"]
+            assert written == read and (written > 0 if operation == "events" else written == 0), "spool I/O accounting changed"
+            peaks[operation].append(peak)
+            print(json.dumps({"case": operation, "records": records, "physical_input_bytes": source.stat().st_size,
+                              "persisted_events": records, "peak_live_rust_bytes": peak,
+                              "temporary_bytes_written": written, "temporary_bytes_read": read}), flush=True)
+        assert digests[0] == digests[1], "bounded publication differs from the collector"
+    bound(peaks["events"], MIB, MIB // 4, "events extraction/publication")
+    assert peaks["events-collected"][1] > 32 * MIB, "retained control no longer demonstrates the old memory cost"
+    assert peaks["events-collected"][1] > peaks["events-collected"][0] + 16 * MIB, "retained control must grow with history"
+
+
 def raw_body(path, repeats, malformed):
     block_repeats = 16 << 10
     block = b"x\\n" * block_repeats
@@ -227,7 +280,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "doctor", "query"), help="focused local check; default pass runs stores and chunks")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "doctor", "query", "events"), help="focused local check; default pass runs stores and chunks")
     parser.add_argument("--baseline-probe", type=Path, help="with active/doctor, separately check baseline behavior parity")
     parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
                         help="repeat to focus --only active on selected native formats")
@@ -245,6 +298,8 @@ def main():
             doctors(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
         elif args.only == "query":
             queries(args.probe.resolve(), root, env)
+        elif args.only == "events":
+            events(args.probe.resolve(), root, env)
         elif args.only == "active":
             active_formats(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None, args.format)
         elif args.only != "chunks":
