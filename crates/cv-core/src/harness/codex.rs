@@ -438,6 +438,19 @@ fn is_nl_event(v: &Value) -> bool {
 /// → `agent_message` pairing, the inherited-prefix cutoff, the thread's `agent_path`) lives in
 /// [`CodexCtx`], which both paths carry.
 fn dispatch_line(s: &mut Session, scratch: &mut Vec<Message>, v: &Value, has_events: bool, ctx: &mut CodexCtx) {
+    dispatch_line_with_output(s, scratch, v, has_events, ctx, None);
+}
+
+/// Dispatch with an already-parsed tool output. The span reader changes only body storage;
+/// record metadata, inherited-history filtering and tool-result classification stay shared.
+fn dispatch_line_with_output(
+    s: &mut Session,
+    scratch: &mut Vec<Message>,
+    v: &Value,
+    has_events: bool,
+    ctx: &mut CodexCtx,
+    output: Option<(Text, bool)>,
+) {
     if let Some(ts) = top_ts(v) {
         s.created_at.get_or_insert(ts);
         s.updated_at = Some(ts);
@@ -469,7 +482,7 @@ fn dispatch_line(s: &mut Session, scratch: &mut Vec<Message>, v: &Value, has_eve
             }
         }
         Some("response_item") => {
-            if !handle_item(v.get("payload"), has_events, ts, scratch, ctx) && ctx.complete {
+            if !handle_item_with_output(v.get("payload"), has_events, ts, scratch, ctx, output) && ctx.complete {
                 carry_record(v, ts, scratch);
             }
         }
@@ -741,8 +754,17 @@ fn stream_jsonl_spans_at(
         let giant = slice.len() > crate::lazy::INLINE_MAX;
         match lean::parse(slice, giant) {
             Ok(lean::LeanLine { mut v, output }) => match output {
-                Some(raw) => match giant_fco_span(&v, raw, slice, base_off, &mut s) {
-                    Some(msg) => scratch.push(msg),
+                Some(raw) => match giant_fco_span(&v, raw, slice, base_off) {
+                    Some((span, is_error)) => {
+                        dispatch_line_with_output(
+                            &mut s,
+                            &mut scratch,
+                            &v,
+                            has_events,
+                            &mut ctx,
+                            Some((Text::Span(span), is_error)),
+                        );
+                    }
                     None => {
                         // Not the span case after all: build the output in its place.
                         if let Some(slot) = v.get_mut("payload").and_then(|p| p.get_mut("output")) {
@@ -835,22 +857,14 @@ fn checkpoint_at(
 
 /// If a giant line (`v`, parsed by [`lean::parse`] with its `output` captured `raw`) is a
 /// `function_call_output`/`custom_tool_call_output` whose `output` is a plain JSON string, emit a
-/// Tool message whose content is a lazy [`Span`](crate::lazy::Span) of that string — without
-/// materializing it. Updates `s` timestamps as `dispatch_line` would. `None` ⇒ the caller builds
-/// the output and dispatches the record normally (other types, non-string outputs).
+/// lazy span and its error bit without materializing it. The caller supplies this body projection
+/// to the shared dispatcher. `None` ⇒ build the output
+/// and dispatch normally (other types, non-string outputs).
 #[cfg(feature = "mmap")]
-fn giant_fco_span(v: &Value, raw: &RawValue, slice: &[u8], base_off: u64, s: &mut Session) -> Option<Message> {
-    let str_field = |o: &Value, k: &str| -> Option<Option<String>> {
-        match o.get(k) {
-            None | Some(Value::Null) => Some(None),
-            Some(Value::String(t)) => Some(Some(t.clone())),
-            Some(_) => None,
-        }
-    };
+fn giant_fco_span(v: &Value, raw: &RawValue, slice: &[u8], base_off: u64) -> Option<(crate::lazy::Span, bool)> {
     if v.get("type").and_then(Value::as_str) != Some("response_item") {
         return None;
     }
-    let timestamp = str_field(v, "timestamp")?;
     let payload = v.get("payload")?;
     if !matches!(
         payload.get("type").and_then(Value::as_str),
@@ -858,33 +872,41 @@ fn giant_fco_span(v: &Value, raw: &RawValue, slice: &[u8], base_off: u64, s: &mu
     ) {
         return None;
     }
-    let call_id = str_field(payload, "call_id")?;
     let mut span = json_string_span(raw, slice, base_off)?;
     // cv's own emitter writes a failed result as the string "[error] <content>" (Codex never
     // persists an error bit) — same convention as the materializing path: strip it, flag it. The
-    // prefix has no escapes, so the raw span can simply be advanced past it.
-    let lo = (span.offset - base_off) as usize;
-    let is_error = slice[lo..lo + (span.len as usize).min(slice.len() - lo)].starts_with(ERROR_PREFIX.as_bytes());
-    if is_error {
-        span.offset += ERROR_PREFIX.len() as u64;
-        span.len -= ERROR_PREFIX.len() as u64;
+    // prefix may itself be escaped: advance by its raw length, not its decoded length.
+    let prefix = json_ascii_prefix(&raw.get().as_bytes()[1..raw.get().len() - 1], ERROR_PREFIX.as_bytes());
+    if let Some(n) = prefix {
+        span.offset += n as u64;
+        span.len -= n as u64;
     }
-    let ts = timestamp.as_deref().and_then(parse_ts);
-    if let Some(ts) = ts {
-        s.created_at.get_or_insert(ts);
-        s.updated_at = Some(ts);
+    Some((span, prefix.is_some()))
+}
+
+/// Raw byte length of an ASCII prefix in a validated JSON string body. ASCII characters can
+/// be literal or `\u00xx`; no whole-output decoding is needed to recognize our error marker.
+#[cfg(feature = "mmap")]
+fn json_ascii_prefix(raw: &[u8], prefix: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    for &expected in prefix {
+        if raw.get(at) == Some(&b'\\') {
+            if raw.get(at + 1) != Some(&b'u') {
+                return None;
+            }
+            let hex = std::str::from_utf8(raw.get(at + 2..at + 6)?).ok()?;
+            if u16::from_str_radix(hex, 16).ok()? != u16::from(expected) {
+                return None;
+            }
+            at += 6;
+        } else {
+            if raw.get(at) != Some(&expected) {
+                return None;
+            }
+            at += 1;
+        }
     }
-    let mut m = Message::new(Role::Tool);
-    m.timestamp = ts;
-    m.content.push(Block::ToolResult {
-        tool_use_id: call_id.unwrap_or_default(),
-        content: Text::Span(span),
-        is_error,
-        tool_name: None,
-        status: Some(if is_error { "error" } else { "completed" }.into()),
-        details: None,
-    });
-    Some(m)
+    Some(at)
 }
 
 /// `session_meta` fields with no first-class IR home, stashed verbatim (wire names) into
@@ -1566,6 +1588,17 @@ fn handle_item(
     out: &mut Vec<Message>,
     ctx: &mut CodexCtx,
 ) -> bool {
+    handle_item_with_output(payload, has_events, ts, out, ctx, None)
+}
+
+fn handle_item_with_output(
+    payload: Option<&Value>,
+    has_events: bool,
+    ts: Option<DateTime<Utc>>,
+    out: &mut Vec<Message>,
+    ctx: &mut CodexCtx,
+    output: Option<(Text, bool)>,
+) -> bool {
     let Some(p) = payload else { return false };
     let ty = p.get("type").and_then(Value::as_str).unwrap_or("");
     let str_field = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -1725,16 +1758,23 @@ fn handle_item(
         }
         "function_call_output" | "custom_tool_call_output" => {
             let call_id = str_field("call_id");
-            let (mut content, images) = coerce_output(p.get("output"));
             // Error-ness: cv's own `[error] ` string convention (see [`ERROR_PREFIX`]), or the
             // legacy object form `{success:false}` / `{metadata:{exit_code≠0}}` some older
             // recorders wrote. Real Codex 0.147+ files carry neither — a failed command's exit code
             // lives only in the `item_completed CommandExecution` note.
-            let prefixed = matches!(p.get("output"), Some(Value::String(_))) && content.starts_with(ERROR_PREFIX);
-            if prefixed {
-                content.drain(..ERROR_PREFIX.len());
-            }
-            let is_error = prefixed || output_is_error(p.get("output"));
+            let (content, images, is_error) = match output {
+                Some((content, is_error)) => (content, Vec::new(), is_error),
+                None => {
+                    let (mut content, images) = coerce_output(p.get("output"));
+                    let prefixed =
+                        matches!(p.get("output"), Some(Value::String(_))) && content.starts_with(ERROR_PREFIX);
+                    if prefixed {
+                        content.drain(..ERROR_PREFIX.len());
+                    }
+                    let is_error = prefixed || output_is_error(p.get("output"));
+                    (Text::Inline(content), images, is_error)
+                }
+            };
             let mut m = Message::new(Role::Tool);
             m.timestamp = ts;
             // 0.147+ outputs name their tool (`name`, `namespace`; models.rs:1113-1131).
@@ -1744,7 +1784,7 @@ fn handle_item(
             }
             m.content.push(Block::ToolResult {
                 tool_use_id: call_id,
-                content: content.into(),
+                content,
                 is_error,
                 tool_name,
                 status: Some(if is_error { "error" } else { "completed" }.into()),
@@ -2412,6 +2452,60 @@ mod tests {
             .expect("inline tool result");
         assert_eq!(inline_c, body.as_str());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(feature = "mmap")]
+    fn assert_giant_modes_match(text: &str) {
+        let dir = std::env::temp_dir().join(format!("cv-codex-giant-parity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout-parity.jsonl");
+        std::fs::write(&path, text).unwrap();
+        let mut sink = crate::stream::CollectSink::default();
+        let mut lazy = stream_jsonl_spans("fallback", text.as_bytes(), Some(path.clone()), false, false, &mut sink);
+        lazy.messages = sink.messages;
+        lazy.materialize();
+        let full = parse_str("fallback", text, true, Some(path));
+        assert_eq!(serde_json::to_value(lazy).unwrap(), serde_json::to_value(full).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn giant_output_preserves_metadata_and_inherited_filtering() {
+        for kind in ["function_call_output", "custom_tool_call_output"] {
+            for ordinal in [2, 12] {
+                let meta = serde_json::json!({
+                    "type": "session_meta", "payload": {
+                        "id": "child", "subagent_history_start_ordinal": 10,
+                    }
+                });
+                let result = serde_json::json!({
+                    "type": "response_item", "ordinal": ordinal,
+                    "timestamp": "2026-01-02T00:00:00Z",
+                    "payload": {
+                        "type": kind, "call_id": "call", "output": "result\n".repeat(1000),
+                        "name": "wait", "namespace": "collaboration",
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn", "create_time": 1767225600.0,
+                        },
+                    }
+                });
+                assert_giant_modes_match(&format!("{meta}\n{result}\n"));
+            }
+        }
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn giant_output_strips_json_escaped_error_prefix() {
+        let result = serde_json::json!({
+            "type": "response_item", "payload": {
+                "type": "function_call_output", "call_id": "call",
+                "output": format!("[error] {}", "failure\n".repeat(1000)),
+            }
+        });
+        let text = result.to_string().replace("[error] ", r"\u005berror\u005d\u0020");
+        assert_giant_modes_match(&format!("{text}\n"));
     }
 
     /// The span path under offset-stamping marks every message with the byte offset of the record
@@ -3130,6 +3224,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn zstd_compressed_rollouts_are_discovered_scanned_and_parsed() {
+        let _world = cv_testkit::World::in_process("codex-zstd");
         let lines = fixture_lines("zstd_compressed_rollouts_are_discovered_scanned_and_parsed.jsonl");
         let raw = lines.join("\n") + "\n";
         let zst = ruzstd::encoding::compress_to_vec(raw.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
