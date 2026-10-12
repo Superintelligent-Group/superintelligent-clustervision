@@ -127,6 +127,50 @@ pub(crate) fn for_each_json_line_with<R: BufRead>(
     skipped
 }
 
+/// The same tolerant record contract with absolute consumed positions for append checkpoints.
+/// `complete` is true only after a newline and known byte accounting; a partial EOF record is
+/// emitted but must be replayed on growth. JSON/UTF-8 failures remain per-line skips.
+pub(crate) fn for_each_json_line_at<R: BufRead>(
+    mut reader: R,
+    mut offset: u64,
+    mut f: impl FnMut(Value, u64, bool, u64) -> Flow,
+) -> u64 {
+    let mut skipped = 0;
+    let mut line = Vec::new();
+    let mut known_offset = true;
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(n) => offset += n as u64,
+            Err(_) => {
+                skipped += 1;
+                // A read error can consume bytes before failing. Continue tolerantly, but offer
+                // no more positions whose absolute provenance is uncertain.
+                known_offset = false;
+                continue;
+            }
+        }
+        let complete = known_offset && line.last() == Some(&b'\n');
+        let Ok(text) = std::str::from_utf8(&line) else {
+            skipped += 1;
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str(text) else {
+            skipped += 1;
+            continue;
+        };
+        if f(value, offset, complete, skipped) == Flow::Stop {
+            break;
+        }
+    }
+    skipped
+}
+
 /// [`for_each_json_line`] over already-read text (no per-line allocation). Returns the skip count.
 pub(crate) fn for_each_json_line_str(text: &str, mut f: impl FnMut(Value) -> Flow) -> u64 {
     let mut skipped = 0u64;

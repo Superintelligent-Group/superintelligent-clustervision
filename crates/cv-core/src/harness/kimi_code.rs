@@ -95,13 +95,13 @@ use super::Adapter;
 use crate::harness::claude::CARRIER_KEY;
 use crate::ir::*;
 use crate::lazy::Text;
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::BufReader;
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub struct KimiCode {
@@ -192,123 +192,246 @@ impl Adapter for KimiCode {
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
-            // The ref points at the session dir (the `main` agent) or, from [`subagent_refs`], at one
-            // sub-agent's dir (`…/agents/agent-N`); the state file is the session's either way.
-            let (session_dir, agent_id) = split_agent_path(&r.path);
-            let state = read_state(session_dir);
-            let wire = agent_wire(session_dir, agent_id);
-
-            let mut s = Session {
-                id: r.id.clone(),
-                harness: Harness::KimiCode,
-                system_prompt: None,
-                lineage: crate::ir::Lineage::default(),
-                cwd: r
-                    .cwd
-                    .clone()
-                    .or_else(|| state.get("cwd").and_then(Value::as_str).map(PathBuf::from)),
-                title: r.title.clone(),
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-                // The model is bound by the 2nd record (`profile.bind`); peek at the head so the sink's
-                // header knows it before the body streams.
-                model: peek_model(&wire),
-                git: None,
-                messages: Vec::new(),
-                source_path: Some(r.path.clone()),
-                extra: Map::new(),
-            };
-            // The system prompt is bound by the head of the wire (`profile.bind`); peek so the
-            // session-level copy is known before the body streams (INTERFACE-V2 §4).
-            s.system_prompt = peek_system_prompt(&wire);
-            if agent_id == "main" {
-                // Session facts live in the harness bag, `extra["kimi-code"]`, never at the top level.
-                let bag = s.harness_extra_mut(Harness::KimiCode);
-                if let Some(native) = state.get("id").and_then(Value::as_str) {
-                    // The id as Kimi Code writes it (`session_<uuid>`); cv keys the session by the bare uuid.
-                    bag.insert("native_id".into(), Value::String(native.to_string()));
-                }
-                for key in [
-                    "archived",
-                    "lastTurnReason",
-                    "titleKind",
-                    "isCustomTitle",
-                    "lastPrompt",
-                    "forkedFrom",
-                ] {
-                    if let Some(v) = state.get(key).filter(|v| !v.is_null()) {
-                        bag.insert(key.to_string(), v.clone());
-                    }
-                }
-                // Sub-agents (`Agent` tool): everything in `state.json.agents` but `main`.
-                if let Some(agents) = state.get("agents").and_then(Value::as_object) {
-                    let subs: Map<String, Value> = agents
-                        .iter()
-                        .filter(|(k, _)| k.as_str() != "main")
-                        .map(|(k, v)| {
-                            let mut a = Map::new();
-                            for key in ["type", "parentAgentId", "labels"] {
-                                if let Some(x) = v.get(key) {
-                                    a.insert(key.to_string(), x.clone());
-                                }
-                            }
-                            (k.clone(), Value::Object(a))
-                        })
-                        .collect();
-                    if !subs.is_empty() {
-                        bag.insert("agents".into(), Value::Object(subs));
-                    }
-                }
-                // `kimi fork` (2.x): `state.json.forkedFrom` names the source (`session_<uuid>`).
-                s.lineage.forked_from = state
-                    .get("forkedFrom")
-                    .and_then(Value::as_str)
-                    .map(|f| f.strip_prefix("session_").unwrap_or(f).to_string());
-            } else {
-                // A sub-agent's own session: the parent is the session it lives in (its uuid), the
-                // nickname is the agent dir. `parentAgentId` says which agent spawned it (`main`, or
-                // another sub-agent for nested spawns); the `Agent` tool call that did so is not
-                // recorded on the child's side, so `spawned_by_tool_use` stays unknown.
-                s.lineage.parent = Some(session_uuid(session_dir).to_string());
-                s.lineage.agent_path = Some(agent_id.to_string());
-                let bag = s.harness_extra_mut(Harness::KimiCode);
-                bag.insert("agent_id".into(), Value::String(agent_id.to_string()));
-                if let Some(a) = state.pointer(&format!("/agents/{agent_id}")) {
-                    for key in ["parentAgentId", "labels"] {
-                        if let Some(x) = a.get(key).filter(|x| !x.is_null()) {
-                            bag.insert(key.to_string(), x.clone());
-                        }
-                    }
-                }
-            }
-
+            let (s, wire) = session_header(r);
             sink.meta(&s);
-
-            let Ok(file) = fs::File::open(&wire) else {
-                return Ok(s);
-            };
-            let mut ctx = Ctx {
-                opts,
-                step: None,
-                call_names: HashMap::new(),
-                seen_prompts: HashSet::new(),
-                protocol_version: None,
-                facts: Map::new(),
-                stopped: false,
-            };
-            let skipped = super::for_each_json_line(BufReader::new(file), |v| ctx.record(&v, sink));
-            if !ctx.stopped {
-                ctx.flush_step(sink);
-            }
-            s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
-            if let Some(pv) = ctx.protocol_version.take() {
-                s.harness_extra_mut(Harness::KimiCode)
-                    .insert("protocol_version".into(), Value::String(pv));
-            }
-            super::note_skipped_lines(&mut s, skipped);
-            Ok(s)
+            let Ok(file) = fs::File::open(&wire) else { return Ok(s) };
+            Ok(stream_wire(BufReader::new(file), &wire, 0, s, Ctx::new(opts), 0, sink))
         })
     }
+
+    fn resume_format(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn resume_source(&self, r: &SessionRef) -> PathBuf {
+        let (session, agent) = split_agent_path(&r.path);
+        agent_wire(session, agent)
+    }
+
+    fn resume(
+        &self,
+        r: &SessionRef,
+        opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        from: &Checkpoint,
+    ) -> Result<Option<Session>> {
+        crate::stream::checked(sink, |sink| {
+            let Some(state) = from.get::<ResumeState>(crate::stream::ADAPTER_LAYER) else {
+                return Ok(None);
+            };
+            let wire = self.resume_source(r);
+            if state.wire != wire || state.flavor != Flavor::of(opts) {
+                return Ok(None);
+            }
+            let mut file = fs::File::open(&wire)?;
+            if file.metadata()?.len() < from.offset {
+                return Ok(None);
+            }
+            file.seek(SeekFrom::Start(from.offset))?;
+            // Catalog fallbacks and static sidecar metadata are refreshed rather than retained in
+            // the checkpoint. The caller verifies those dependencies before accepting the suffix.
+            let (s, _) = session_header(r);
+            sink.meta(&s);
+            Ok(Some(stream_wire(
+                BufReader::new(file),
+                &wire,
+                from.offset,
+                s,
+                state.ctx.restore(opts),
+                state.skipped,
+                sink,
+            )))
+        })
+    }
+}
+
+/// Shared header for whole and suffix reads. No message payload is retained here.
+fn session_header(r: &SessionRef) -> (Session, PathBuf) {
+    // The ref points at the session dir (the `main` agent) or, from [`subagent_refs`], at one
+    // sub-agent's dir (`…/agents/agent-N`); the state file is the session's either way.
+    let (session_dir, agent_id) = split_agent_path(&r.path);
+    let state = read_state(session_dir);
+    let wire = agent_wire(session_dir, agent_id);
+
+    let mut s = Session {
+        id: r.id.clone(),
+        harness: Harness::KimiCode,
+        system_prompt: None,
+        lineage: crate::ir::Lineage::default(),
+        cwd: r
+            .cwd
+            .clone()
+            .or_else(|| state.get("cwd").and_then(Value::as_str).map(PathBuf::from)),
+        title: r.title.clone(),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        // The model is bound by the 2nd record (`profile.bind`); peek at the head so the sink's
+        // header knows it before the body streams.
+        model: peek_model(&wire),
+        git: None,
+        messages: Vec::new(),
+        source_path: Some(r.path.clone()),
+        extra: Map::new(),
+    };
+    // The system prompt is bound by the head of the wire (`profile.bind`); peek so the
+    // session-level copy is known before the body streams (INTERFACE-V2 §4).
+    s.system_prompt = peek_system_prompt(&wire);
+    if agent_id == "main" {
+        // Session facts live in the harness bag, `extra["kimi-code"]`, never at the top level.
+        let bag = s.harness_extra_mut(Harness::KimiCode);
+        if let Some(native) = state.get("id").and_then(Value::as_str) {
+            // The id as Kimi Code writes it (`session_<uuid>`); cv keys the session by the bare uuid.
+            bag.insert("native_id".into(), Value::String(native.to_string()));
+        }
+        for key in [
+            "archived",
+            "lastTurnReason",
+            "titleKind",
+            "isCustomTitle",
+            "lastPrompt",
+            "forkedFrom",
+        ] {
+            if let Some(v) = state.get(key).filter(|v| !v.is_null()) {
+                bag.insert(key.to_string(), v.clone());
+            }
+        }
+        // Sub-agents (`Agent` tool): everything in `state.json.agents` but `main`.
+        if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+            let subs: Map<String, Value> = agents
+                .iter()
+                .filter(|(k, _)| k.as_str() != "main")
+                .map(|(k, v)| {
+                    let mut a = Map::new();
+                    for key in ["type", "parentAgentId", "labels"] {
+                        if let Some(x) = v.get(key) {
+                            a.insert(key.to_string(), x.clone());
+                        }
+                    }
+                    (k.clone(), Value::Object(a))
+                })
+                .collect();
+            if !subs.is_empty() {
+                bag.insert("agents".into(), Value::Object(subs));
+            }
+        }
+        // `kimi fork` (2.x): `state.json.forkedFrom` names the source (`session_<uuid>`).
+        s.lineage.forked_from = state
+            .get("forkedFrom")
+            .and_then(Value::as_str)
+            .map(|f| f.strip_prefix("session_").unwrap_or(f).to_string());
+    } else {
+        // A sub-agent's own session: the parent is the session it lives in (its uuid), the
+        // nickname is the agent dir. `parentAgentId` says which agent spawned it (`main`, or
+        // another sub-agent for nested spawns); the `Agent` tool call that did so is not
+        // recorded on the child's side, so `spawned_by_tool_use` stays unknown.
+        s.lineage.parent = Some(session_uuid(session_dir).to_string());
+        s.lineage.agent_path = Some(agent_id.to_string());
+        let bag = s.harness_extra_mut(Harness::KimiCode);
+        bag.insert("agent_id".into(), Value::String(agent_id.to_string()));
+        if let Some(a) = state.pointer(&format!("/agents/{agent_id}")) {
+            for key in ["parentAgentId", "labels"] {
+                if let Some(x) = a.get(key).filter(|x| !x.is_null()) {
+                    bag.insert(key.to_string(), x.clone());
+                }
+            }
+        }
+    }
+
+    (s, wire)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct Flavor {
+    extra: bool,
+    spans: bool,
+    offsets: bool,
+    complete: bool,
+}
+impl Flavor {
+    fn of(opts: &ParseOptions) -> Self {
+        Self {
+            extra: opts.extra,
+            spans: opts.spans,
+            offsets: opts.offsets,
+            complete: opts.complete,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ResumeState {
+    wire: PathBuf,
+    flavor: Flavor,
+    ctx: SavedCtx,
+    skipped: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct SavedCtx {
+    call_names: HashMap<String, String>,
+    seen_prompts: std::collections::BTreeSet<u64>,
+    protocol_version: Option<String>,
+    facts: Map<String, Value>,
+}
+impl SavedCtx {
+    fn restore(self, opts: &ParseOptions) -> Ctx<'_> {
+        Ctx {
+            opts,
+            step: None,
+            call_names: self.call_names,
+            seen_prompts: self.seen_prompts,
+            protocol_version: self.protocol_version,
+            facts: self.facts,
+            stopped: false,
+        }
+    }
+}
+
+fn stream_wire(
+    reader: impl std::io::BufRead,
+    wire: &Path,
+    at: u64,
+    mut s: Session,
+    mut ctx: Ctx<'_>,
+    prior_skipped: u64,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    let skipped = super::for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
+        let flow = ctx.record(&v, sink);
+        // Pending steps are amended by subsequent parts/results/usage; EOF flush is provisional.
+        // Only a complete record with no held step can preserve an immutable emitted prefix.
+        if flow != Flow::Stop && complete && ctx.step.is_none() && sink.wants_checkpoint(offset) {
+            #[derive(serde::Serialize)]
+            struct State<'a, 'b> {
+                wire: &'a Path,
+                flavor: Flavor,
+                ctx: &'a Ctx<'b>,
+                skipped: u64,
+            }
+            let mut checkpoint = Checkpoint::new(offset);
+            checkpoint.put(
+                crate::stream::ADAPTER_LAYER,
+                &State {
+                    wire,
+                    flavor: Flavor::of(ctx.opts),
+                    ctx: &ctx,
+                    skipped: prior_skipped + skipped,
+                },
+            );
+            sink.checkpoint(&mut checkpoint);
+        }
+        flow
+    });
+    if !ctx.stopped {
+        ctx.flush_step(sink);
+    }
+    s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
+    if let Some(pv) = ctx.protocol_version.take() {
+        s.harness_extra_mut(Harness::KimiCode)
+            .insert("protocol_version".into(), Value::String(pv));
+    }
+    super::note_skipped_lines(&mut s, prior_skipped + skipped);
+    s
 }
 
 /// The session's own transcript: the `main` agent's wire log.
@@ -599,21 +722,37 @@ struct StepBuf {
     results: Vec<Message>,
 }
 
+#[derive(serde::Serialize)]
 struct Ctx<'a> {
+    #[serde(skip)]
     opts: &'a ParseOptions,
+    #[serde(skip)]
     step: Option<StepBuf>,
     /// `toolCallId` → tool name, so a result can name its tool (`Block::ToolResult::tool_name`).
     call_names: HashMap<String, String>,
     /// Hashes of system prompts already surfaced (a re-bind with the same prompt is bookkeeping).
-    seen_prompts: HashSet<u64>,
+    /// Ordered so later checkpoints remain identical after restoring this state.
+    seen_prompts: std::collections::BTreeSet<u64>,
     protocol_version: Option<String>,
     /// Session-level affordance facts read off bookkeeping records: the approval modes
     /// (`permission.set_mode`) and the file-history checkpoints (`file_history.checkpoint`).
     facts: Map<String, Value>,
+    #[serde(skip)]
     stopped: bool,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
+    fn new(opts: &'a ParseOptions) -> Self {
+        Self {
+            opts,
+            step: None,
+            call_names: HashMap::new(),
+            seen_prompts: std::collections::BTreeSet::new(),
+            protocol_version: None,
+            facts: Map::new(),
+            stopped: false,
+        }
+    }
     fn record(&mut self, v: &Value, sink: &mut dyn MessageSink) -> Flow {
         let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
         let ts = v.get("time").and_then(super::ts_from_value);
@@ -1118,6 +1257,222 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[derive(Default)]
+    struct Kept {
+        messages: Vec<Message>,
+        checkpoints: Vec<(usize, Checkpoint)>,
+    }
+    impl MessageSink for Kept {
+        fn message(&mut self, message: Message) -> Flow {
+            self.messages.push(message);
+            Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, cp: &mut Checkpoint) {
+            self.checkpoints.push((self.messages.len(), cp.clone()));
+        }
+    }
+
+    // Independent old scanner/collector: validates that offset tracking did not change tolerated
+    // records, step ordering, diagnostics, or metadata before checking suffix equivalence.
+    fn old_wire_oracle(r: &SessionRef, opts: &ParseOptions) -> Session {
+        let (mut shell, wire) = session_header(r);
+        let mut ctx = Ctx::new(opts);
+        let mut kept = Kept::default();
+        let skipped = super::super::for_each_json_line(BufReader::new(fs::File::open(wire).unwrap()), |v| {
+            ctx.record(&v, &mut kept)
+        });
+        if !ctx.stopped {
+            ctx.flush_step(&mut kept);
+        }
+        shell.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
+        if let Some(pv) = ctx.protocol_version {
+            shell
+                .harness_extra_mut(Harness::KimiCode)
+                .insert("protocol_version".into(), pv.into());
+        }
+        super::super::note_skipped_lines(&mut shell, skipped);
+        shell.messages = kept.messages;
+        shell
+    }
+
+    #[test]
+    fn resume_checkpoints_match_old_corpus_and_every_selected_suffix() {
+        let world = cv_testkit::World::in_process("kimi_code_resume_corpus");
+        let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/kimi-code");
+        let mut files = 0;
+        let mut resumes = 0;
+        for file in walkdir::WalkDir::new(root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if file.file_name() != "wire.jsonl" {
+                continue;
+            }
+            let agent = file.path().parent().unwrap();
+            let session = agent.parent().unwrap().parent().unwrap();
+            let path = if agent.file_name().unwrap() == "main" {
+                session
+            } else {
+                agent
+            };
+            let r = SessionRef::new("corpus", Harness::KimiCode, path);
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::full(),
+                ParseOptions::complete(),
+            ] {
+                let expected = old_wire_oracle(&r, &opts);
+                let mut full = Kept::default();
+                let mut shell = adapter.try_stream(&r, &opts, &mut full).unwrap();
+                shell.messages = full.messages.clone();
+                assert_eq!(
+                    serde_json::to_value(&shell).unwrap(),
+                    serde_json::to_value(expected).unwrap(),
+                    "{} old collector",
+                    file.path().display()
+                );
+                let stride = (full.checkpoints.len() / 12).max(1);
+                for (i, (count, cp)) in full.checkpoints.iter().enumerate().step_by(stride) {
+                    let mut rest = Kept::default();
+                    let suffix = adapter.try_resume(&r, &opts, &mut rest, cp).unwrap().unwrap();
+                    shell.messages.clear();
+                    assert_eq!(
+                        serde_json::to_value(suffix).unwrap(),
+                        serde_json::to_value(&shell).unwrap(),
+                        "{} @{} metadata",
+                        file.path().display(),
+                        cp.offset
+                    );
+                    assert_eq!(
+                        serde_json::to_value(&rest.messages).unwrap(),
+                        serde_json::to_value(&full.messages[*count..]).unwrap(),
+                        "{} @{} suffix",
+                        file.path().display(),
+                        cp.offset
+                    );
+                    assert_eq!(
+                        rest.checkpoints.iter().map(|(_, cp)| cp).collect::<Vec<_>>(),
+                        full.checkpoints[i + 1..].iter().map(|(_, cp)| cp).collect::<Vec<_>>()
+                    );
+                    resumes += 1;
+                }
+            }
+            files += 1;
+        }
+        assert!(files >= 10, "frozen native wire fixtures missing: {files}");
+        assert!(resumes >= 100, "only {resumes} resumable corpus boundaries");
+        eprintln!("kimi-code native files={files} exact suffix resumes={resumes}");
+    }
+
+    fn resume_fixture(world: &cv_testkit::World, body: &[u8]) -> SessionRef {
+        let dir = world.home.join(".kimi-code/sessions/wd_test/session_resume");
+        fs::create_dir_all(dir.join("agents/main")).unwrap();
+        fs::write(dir.join("state.json"), r#"{"id":"session_resume","cwd":"/project"}"#).unwrap();
+        fs::write(dir.join("agents/main/wire.jsonl"), body).unwrap();
+        SessionRef::new("resume", Harness::KimiCode, dir)
+    }
+
+    #[test]
+    fn resume_replays_partial_records_and_unfinished_steps_with_exact_diagnostics() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("kimi_code_partial_resume");
+        let prefix = concat!(
+            "{\"type\":\"metadata\",\"protocol_version\":\"2\"}\n",
+            "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\r\n",
+            "bad json\n",
+            "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"step.begin\",\"uuid\":\"s\"}}\n",
+            "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"content.part\",\"stepUuid\":\"s\",\"part\":{\"type\":\"text\",\"text\":\"unfinished\"}}}\n",
+            "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"step.end\",\"uuid\":\"s\",\"usage\":{"
+        );
+        let r = resume_fixture(&world, prefix.as_bytes());
+        let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
+        let opts = ParseOptions::lazy_extra();
+        let mut first = Kept::default();
+        adapter.try_stream(&r, &opts, &mut first).unwrap();
+        let (count, cp) = first.checkpoints.last().unwrap();
+        assert!((cp.offset as usize) < prefix.find("step.begin").unwrap());
+        // The EOF-flushed provisional reply must not be included in the immutable prefix.
+        assert_eq!(*count, 1);
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(adapter.resume_source(&r))
+                .unwrap(),
+            "\"output\":3}}}}"
+        )
+        .unwrap();
+        let mut suffix = Kept::default();
+        let mut shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        shell.messages = first.messages[..*count]
+            .iter()
+            .cloned()
+            .chain(suffix.messages)
+            .collect();
+        assert_eq!(
+            serde_json::to_value(shell).unwrap(),
+            serde_json::to_value(old_wire_oracle(&r, &opts)).unwrap()
+        );
+        // Wrong option flavor and a different agent's path decline before metadata/callbacks.
+        let mut none = Kept::default();
+        assert!(adapter
+            .try_resume(&r, &ParseOptions::complete(), &mut none, cp)
+            .unwrap()
+            .is_none());
+        let mut other = r.clone();
+        other.path = other.path.join("agents/agent-0");
+        assert!(adapter.try_resume(&other, &opts, &mut none, cp).unwrap().is_none());
+        assert!(none.messages.is_empty() && none.checkpoints.is_empty());
+        // Invalid UTF-8 is counted per record, as the old tolerant .lines scanner did.
+        let mut bytes = fs::read(adapter.resume_source(&r)).unwrap();
+        bytes.extend_from_slice(b"\xff\n");
+        bytes.extend_from_slice(b"{\"type\":\"context.clear\"}\n");
+        fs::write(adapter.resume_source(&r), bytes).unwrap();
+        let mut all = Kept::default();
+        let mut shell = adapter.try_stream(&r, &opts, &mut all).unwrap();
+        shell.messages = all.messages;
+        assert_eq!(
+            serde_json::to_value(shell).unwrap(),
+            serde_json::to_value(old_wire_oracle(&r, &opts)).unwrap()
+        );
+    }
+
+    #[test]
+    fn resume_append_reads_only_new_callbacks_and_keeps_catalog_fallbacks_current() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("kimi_code_append_read_work");
+        let line = "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n";
+        let mut r = resume_fixture(&world, line.repeat(20_000).as_bytes());
+        let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
+        let opts = ParseOptions::lazy();
+        let mut first = Kept::default();
+        adapter.try_stream(&r, &opts, &mut first).unwrap();
+        let (count, cp) = first.checkpoints.last().unwrap();
+        assert_eq!(*count, 20_000);
+        assert!(serde_json::to_vec(cp).unwrap().len() < 1024);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(adapter.resume_source(&r))
+            .unwrap()
+            .write_all(line.repeat(200).as_bytes())
+            .unwrap();
+        r.title = Some("new catalog title".into());
+        let mut suffix = Kept::default();
+        let shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        assert_eq!(suffix.messages.len(), 200);
+        assert_eq!(shell.title, r.title);
+        assert_eq!(suffix.messages.len() + count, old_wire_oracle(&r, &opts).messages.len());
+        eprintln!(
+            "kimi-code initial_callbacks=20000 appended_callbacks=200 whole_callbacks=20200 checkpoint_bytes={}",
+            serde_json::to_vec(cp).unwrap().len()
+        );
+    }
 
     const SID: &str = "66732eb8-2935-40cf-bcad-c0bcd204e2fb";
 
