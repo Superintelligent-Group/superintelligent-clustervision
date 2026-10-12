@@ -23,6 +23,18 @@ impl<'a> Raw<'a> {
     }
 }
 
+pub(super) fn accepts_value(raw: Raw<'_>) -> bool {
+    let b = raw.get().as_bytes();
+    super::super::store::json::value_compatible_with(b, |start, end| {
+        if end - start > INLINE_MAX {
+            raw.1
+                 .0
+                .borrow_mut()
+                .insert(b.as_ptr() as usize + start, b.as_ptr() as usize + end);
+        }
+    })
+}
+
 pub(super) struct Record<'a> {
     pub fields: BTreeMap<String, Raw<'a>>,
 }
@@ -95,30 +107,16 @@ fn whitespace(b: &[u8], i: &mut usize) {
         *i += 1;
     }
 }
-fn string_end(b: &[u8], mut i: usize, index: &Index) -> Option<usize> {
-    if b.get(i) != Some(&b'"') {
-        return None;
-    }
-    let start = i;
-    let key = b.as_ptr() as usize + start;
+fn string_end(b: &[u8], i: usize, index: &Index) -> Option<usize> {
+    let key = b.as_ptr() as usize + i;
     if let Some(end) = index.0.borrow().get(&key) {
         return Some(*end - b.as_ptr() as usize);
     }
-    i += 1;
-    loop {
-        i += memchr::memchr(b'"', b.get(i..)?)?;
-        let mut slash = i;
-        while slash > 0 && b[slash - 1] == b'\\' {
-            slash -= 1;
-        }
-        if (i - slash).is_multiple_of(2) {
-            if i - start > INLINE_MAX {
-                index.0.borrow_mut().insert(key, b.as_ptr() as usize + i + 1);
-            }
-            return Some(i + 1);
-        }
-        i += 1;
+    let end = super::super::store::json::string_end(b, i)?;
+    if end - i > INLINE_MAX {
+        index.0.borrow_mut().insert(key, b.as_ptr() as usize + end);
     }
+    Some(end)
 }
 fn value_end(b: &[u8], mut i: usize, index: &Index) -> Option<usize> {
     match b.get(i)? {

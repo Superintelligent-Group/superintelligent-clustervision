@@ -507,15 +507,11 @@ fn stream_legacy_json_recording(
     let index = lean::Index::default();
     for item in raw_msgs {
         if opts.spans {
-            if lean::emit(
-                lean::Raw::new(item.get(), &index),
-                &bytes,
-                harness,
-                &mut st,
-                &resolver,
-                sink,
-            ) == Flow::Stop
-            {
+            let raw = lean::Raw::new(item.get(), &index);
+            if !lean::accepts_value(raw) {
+                continue;
+            }
+            if lean::emit(raw, &bytes, harness, &mut st, &resolver, sink) == Flow::Stop {
                 break;
             }
             continue;
@@ -580,6 +576,7 @@ impl std::ops::Deref for FileBytes {
 ///
 /// Returns `Ok(None)` if the file is not a recording (no metadata line and no message records), so
 /// the caller can fall back.
+#[cfg(feature = "mmap")]
 fn stream_jsonl_recording(
     path: &Path,
     harness: Harness,
@@ -593,7 +590,10 @@ fn stream_jsonl_recording(
         let Ok(raw) = serde_json::from_slice::<&crate::lazy::RawValue>(line) else {
             continue;
         };
-        replay.ingest_raw(lean::Raw::new(raw.get(), &index));
+        let raw = lean::Raw::new(raw.get(), &index);
+        if lean::accepts_value(raw) {
+            replay.ingest_raw(raw);
+        }
     }
     if !replay.saw_meta && replay.msgs.is_empty() {
         return Ok(None);
@@ -624,8 +624,48 @@ fn stream_jsonl_recording(
     Ok(Some(session))
 }
 
+// Keep the original buffered replay when mapping is unavailable: a long historical file can
+// rewind to a tiny active history, so reading the entire source would increase its heap cost.
+#[cfg(not(feature = "mmap"))]
+fn stream_jsonl_recording(
+    path: &Path,
+    harness: Harness,
+    _opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<Option<Session>> {
+    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+
+    let mut replay = RecordingReplay::default();
+    super::for_each_json_line(std::io::BufReader::new(file), |rec| {
+        replay.ingest(rec);
+        Flow::Continue
+    });
+    if !replay.saw_meta && replay.msgs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut session = record_metadata(&replay.metadata, harness, Some(path.to_path_buf()));
+    let summary = session.title.take();
+    let mut st = EmitState::default();
+
+    // Emit retained messages in order, dropping each raw Value as we go (so we never hold the
+    // reassembled array and the IR messages at the same time).
+    for id in &replay.order {
+        let Some(rm) = replay.msgs.remove(id) else { continue };
+        let Some(obj) = rm.as_object() else { continue };
+        if emit_record_message(harness, obj, &mut st, sink) == Flow::Stop {
+            break;
+        }
+    }
+
+    session.model = st.session_model;
+    session.title = summary.or(st.title);
+    Ok(Some(session))
+}
+
 /// Effective messages point into the mapped source. Navigation retains small keys/ranges,
 /// never the content of an inactive or superseded message.
+#[cfg(feature = "mmap")]
 enum ReplayBody<'a> {
     Raw(lean::Raw<'a>),
     Marker(Value),
@@ -697,6 +737,7 @@ impl<T> RecordingReplay<T> {
     }
 }
 
+#[cfg(feature = "mmap")]
 impl<'a> RecordingReplay<ReplayBody<'a>> {
     fn ingest_raw(&mut self, raw: lean::Raw<'a>) {
         let Some(rec) = lean::Record::parse(raw) else {
@@ -745,6 +786,7 @@ impl<'a> RecordingReplay<ReplayBody<'a>> {
     }
 }
 
+#[cfg(feature = "mmap")]
 fn raw_replay_key(rec: &lean::Record<'_>) -> Option<String> {
     Some(format!(
         "{}\u{1f}{}",
@@ -2121,6 +2163,54 @@ mod tests {
                     .count()
             );
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn raw_replay_rejects_invalid_values_before_navigation() {
+        let (dir, file) = chats_fixture("session_modern.jsonl");
+        let deep = format!("{}0{}", "[".repeat(127), "]".repeat(127));
+        for unknown in ["1e400", r#""\ud800""#, r#""\udc00""#, &deep] {
+            let text = format!(
+                "{{\"sessionId\":\"validation\",\"projectHash\":\"x\"}}\n\
+                 {{\"type\":\"user\",\"id\":\"u\",\"content\":\"keep\"}}\n\
+                 {{\"type\":\"gemini\",\"id\":\"a\",\"content\":\"keep suffix\"}}\n\
+                 {{\"type\":\"user\",\"id\":\"u\",\"content\":\"poison\",\"unknown\":{unknown},\"unknown\":0}}\n\
+                 {{\"$rewindTo\":\"u\",\"unknown\":{unknown}}}\n\
+                 {{\"$set\":{{\"messages\":[]}},\"unknown\":{unknown}}}"
+            );
+            fs::write(&file, &text).unwrap();
+            let reference = parse_all_str(&text, Some(file.clone())).remove(0);
+            assert_eq!(reference.messages.len(), 2);
+            for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+                let mut sink = CollectSink::default();
+                let mut streamed = stream_jsonl_recording(&file, Harness::Gemini, &opts, &mut sink)
+                    .unwrap()
+                    .unwrap();
+                streamed.messages = sink.messages;
+                streamed.materialize();
+                assert_eq!(as_json(&streamed), as_json(&reference), "invalid field {unknown}");
+            }
+        }
+        // Legacy streaming has always rejected individual invalid records, independently of
+        // the whole-file wrapper's depth. The lazy path must match that full native path.
+        let text = format!(
+            r#"{{"sessionId":"validation","messages":[{{"type":"user","id":"u","content":"keep"}},{{"type":"user","id":"bad","content":"{}\ud800"}}]}}"#,
+            "x".repeat(9000)
+        );
+        fs::write(&file, text).unwrap();
+        let mut sessions = Vec::new();
+        for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+            let mut sink = CollectSink::default();
+            let mut streamed = stream_legacy_json_recording(&file, Harness::Gemini, &opts, &mut sink)
+                .unwrap()
+                .unwrap();
+            streamed.messages = sink.messages;
+            streamed.materialize();
+            assert_eq!(streamed.messages.len(), 1);
+            sessions.push(as_json(&streamed));
+        }
+        assert!(sessions.windows(2).all(|s| s[0] == s[1]));
         fs::remove_dir_all(dir).unwrap();
     }
 
