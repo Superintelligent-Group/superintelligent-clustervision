@@ -2,7 +2,7 @@
 
 This diagnostic example performs one read-only operation per process on an explicit source.
 It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok, Qwen,
-OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Devin/Zed through explicit-root constructors. It does not
+OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Cursor, OpenCode, Devin, Hermes, Goose and Zed through explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
 The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
 scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
@@ -226,3 +226,14 @@ canonical JSON version as null and serialization order as preserved; ordinary ha
 compatible with canonical version 1. Use the same switch on both compared binaries.
 
 CI also runs `--only active --format zed` with zstd installed for generated compressed rowid fixtures. This caps requested Rust heap; separate process-footprint measurements cover SQLite native memory.
+
+SQLite synthetic scale inputs are available through `tools/perf-fixture.py`: `devin`
+(history, metadata, unselected branches), `hermes` (history, prompt-only), `goose`
+(history), `opencode` (history, many parts in one message), and `cursor` (external
+bubbles or inline conversation). These write a new explicit directory and preserve
+existing corpus versions. `--records` controls row count separately from total
+`--payload-bytes`; manifests report both logical payload and physical database size.
+Devin metadata cases isolate session-wide navigation retention, while prompt-only
+Hermes inputs exercise replay dedup without an assistant clearing the look-back.
+Cursor inline and OpenCode parts intentionally exercise a single large native record
+or logical message: report these separately from row-count scaling.

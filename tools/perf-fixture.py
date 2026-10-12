@@ -10,17 +10,18 @@ import json
 from pathlib import Path
 from perf_fixtures import FORMATS, generate
 from perf_fixture_zed import generate_zed
+from perf_fixture_sqlite import FORMATS as SQLITE_FORMATS, generate_sqlite
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("harness", choices=["claude", "codex", "gemini", "continue", "lmstudio", "zed", *FORMATS])
+    parser.add_argument("harness", choices=["claude", "codex", "gemini", "continue", "lmstudio", "zed", *FORMATS, *SQLITE_FORMATS])
     parser.add_argument("out", type=Path)
     parser.add_argument("--payload-bytes", type=int, default=100_000_000)
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
     parser.add_argument("--entropy", action="store_true", help="Zed only: deterministic low-compressibility payloads")
-    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments"], default="history")
+    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "parts"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
@@ -28,11 +29,13 @@ def main():
         parser.error("--entropy applies only to Zed compressed fixtures")
     args.out.mkdir(parents=True, exist_ok=False)
     root = args.out.resolve()
-    if args.harness in (*FORMATS, "zed"):
+    if args.harness in (*FORMATS, *SQLITE_FORMATS, "zed"):
         if args.harness == "zed":
             if args.shape != "history":
                 parser.error("Zed supports only --shape history")
             manifest = generate_zed(root, args.payload_bytes, args.records, args.escaped, args.entropy)
+        elif args.harness in SQLITE_FORMATS:
+            manifest = generate_sqlite(args.harness, root, args.payload_bytes, args.records, args.escaped, args.shape)
         else:
             manifest = generate(args.harness, root, args.payload_bytes, args.records, args.escaped, args.shape)
         (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

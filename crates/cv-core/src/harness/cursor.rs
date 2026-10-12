@@ -27,7 +27,7 @@
 //! panics and never fails the whole session.
 
 use super::store::sqlite::open_ro;
-use super::{ts_from_epoch, Adapter};
+use super::{Adapter, ts_from_epoch};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
@@ -49,6 +49,13 @@ impl Cursor {
             .or_else(default_user_dir)
             .filter(|p| p.exists());
         Cursor { user_dir }
+    }
+
+    /// Use an explicit Cursor/User directory without consulting installed homes.
+    pub fn with_user_dir(dir: &Path) -> Self {
+        Self {
+            user_dir: Some(dir.to_path_buf()).filter(|p| p.exists()),
+        }
     }
 
     fn global_db(&self) -> Option<PathBuf> {
@@ -838,10 +845,11 @@ mod tests {
         let a = &s.messages[1];
         assert_eq!(a.role, Role::Assistant);
         // thinking block present
-        assert!(a
-            .content
-            .iter()
-            .any(|b| matches!(b, Block::Thinking { text, .. } if text == "let me think")));
+        assert!(
+            a.content
+                .iter()
+                .any(|b| matches!(b, Block::Thinking { text, .. } if text == "let me think"))
+        );
         // text block present
         assert_eq!(a.text().as_deref(), Some("Here is how."));
         // tool use + result
@@ -856,11 +864,12 @@ mod tests {
             input.resolve().unwrap().get("command").and_then(Value::as_str),
             Some("cargo test")
         );
-        assert!(a
-            .content
-            .iter()
-            .any(|b| matches!(b, Block::ToolResult { tool_use_id, content, is_error, .. }
-            if tool_use_id == "t1" && content.contains("ok") && !is_error)));
+        assert!(
+            a.content
+                .iter()
+                .any(|b| matches!(b, Block::ToolResult { tool_use_id, content, is_error, .. }
+            if tool_use_id == "t1" && content.contains("ok") && !is_error))
+        );
         // usage mapped
         assert_eq!(a.usage.as_ref().unwrap().input_tokens, Some(10));
         assert_eq!(a.usage.as_ref().unwrap().output_tokens, Some(5));
@@ -889,9 +898,11 @@ mod tests {
             Some("chat"),
             "the bubble's own mode overrides for that message"
         );
-        assert!(s.messages[0]
-            .harness_extra(Harness::Cursor)
-            .is_none_or(|b| !b.contains_key("unified_mode")));
+        assert!(
+            s.messages[0]
+                .harness_extra(Harness::Cursor)
+                .is_none_or(|b| !b.contains_key("unified_mode"))
+        );
         // No flat keys survive anywhere: every top-level key is a namespace (the harness bag, cv's
         // own `cv` bag, or the `_record` carrier). See `docs/INTERFACE-V2.md` §4.
         assert!(

@@ -1,8 +1,8 @@
 //! One explicitly rooted, read-only operation per process. See examples/store_probe.md.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use cv_core::{Adapter, Block, Flow, Harness, Message, ParseOptions, Session, SessionRef};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -67,7 +67,11 @@ fn args() -> Result<Args> {
             "--escaped" => escaped = true,
             "--chunk-bytes" => chunk_bytes = argv.next().context("--chunk-bytes needs an integer")?.parse()?,
             "--last" => last = argv.next().context("--last needs an integer")?.parse()?,
-            "--resume-from" => resume_from = Some(PathBuf::from(argv.next().context("--resume-from needs a checkpoint JSON file")?)),
+            "--resume-from" => {
+                resume_from = Some(PathBuf::from(
+                    argv.next().context("--resume-from needs a checkpoint JSON file")?,
+                ))
+            }
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
@@ -140,14 +144,22 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
         Harness::Kimi => Box::new(cv_core::harness::kimi::Kimi::with_home(&a.root)),
         Harness::KimiCode => Box::new(cv_core::harness::kimi_code::KimiCode::with_home(&a.root)),
         Harness::Grok => Box::new(cv_core::harness::grok::Grok::with_home(&a.root)),
-        Harness::OpenSession => Box::new(cv_core::harness::opensession::OpenSession::with_roots(vec![a
-            .root
-            .clone()])),
-        Harness::ChatGptExport => Box::new(cv_core::harness::export::ChatGptExport::with_roots(vec![a
-            .root
-            .clone()])),
+        Harness::OpenSession => Box::new(cv_core::harness::opensession::OpenSession::with_roots(vec![
+            a.root.clone(),
+        ])),
+        Harness::ChatGptExport => Box::new(cv_core::harness::export::ChatGptExport::with_roots(vec![
+            a.root.clone(),
+        ])),
         Harness::ClaudeExport => Box::new(cv_core::harness::export::ClaudeExport::with_roots(vec![a.root.clone()])),
         Harness::Qwen => Box::new(cv_core::harness::qwen::Qwen::with_home(&a.root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Cursor => Box::new(cv_core::harness::cursor::Cursor::with_user_dir(&a.root)),
+        #[cfg(feature = "sqlite")]
+        Harness::OpenCode => Box::new(cv_core::harness::opencode::OpenCode::with_data_dir(&a.root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Hermes => Box::new(cv_core::harness::hermes::Hermes::with_home(&a.root)),
+        #[cfg(feature = "sqlite")]
+        Harness::Goose => Box::new(cv_core::harness::goose::Goose::with_sessions_dir(&a.root)),
         #[cfg(feature = "sqlite")]
         Harness::Devin => Box::new(cv_core::harness::devin::Devin::with_root(&a.root)),
         #[cfg(feature = "sqlite")]
