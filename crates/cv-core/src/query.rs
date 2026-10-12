@@ -1171,7 +1171,7 @@ pub fn schema_json() -> serde_json::Value {
 }
 
 pub mod facts;
-pub use facts::{filter_refs, matches_full, matches_streamed, SessionFacts, TextSets};
+pub use facts::{filter_refs, matches_full, matches_streamed, QueryReducer, SessionFacts, TextSets};
 
 #[cfg(test)]
 mod tests;

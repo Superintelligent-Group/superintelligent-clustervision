@@ -237,8 +237,8 @@ pub fn matches_full(
 
 /// The transcript facts the query actually consults. Repeated calls and rich payloads contribute
 /// no retained messages or event rows. Model/tool and matched-path state scale with query needles.
-/// Unmatched relative paths still scale with distinct source targets until EOF because the
-/// whole-session evaluator resolves every target against the final (possibly late) cwd.
+/// Unmatched relative paths use bounded private staging until EOF because the whole-session
+/// evaluator resolves every target against the final (possibly late) cwd.
 #[derive(Default)]
 struct ReducedFacts {
     models: HashMap<String, ModelMatch>,
@@ -268,11 +268,32 @@ impl ReducedFacts {
     }
 }
 
+struct PendingTarget(String);
+impl crate::spill::Record for PendingTarget {
+    type ReadState = ();
+    fn heap_bytes(&self) -> usize {
+        self.0.capacity()
+    }
+    fn write(&self, writer: &mut impl std::io::Write) -> anyhow::Result<()> {
+        writer.write_all(&(self.0.len() as u64).to_le_bytes())?;
+        writer.write_all(self.0.as_bytes())?;
+        Ok(())
+    }
+    fn read(reader: &mut impl std::io::BufRead, _: &mut ()) -> anyhow::Result<Self> {
+        let mut len = [0; 8];
+        reader.read_exact(&mut len)?;
+        let len = usize::try_from(u64::from_le_bytes(len))?;
+        let mut bytes = vec![0; len];
+        reader.read_exact(&mut bytes)?;
+        Ok(Self(String::from_utf8(bytes)?))
+    }
+}
+
 struct FactSink {
     facts: ReducedFacts,
     tools: Vec<String>,
     targets: Vec<String>,
-    pending_targets: HashSet<String>,
+    pending_targets: crate::spill::Ordered<PendingTarget>,
     events: bool,
     fail: Option<anyhow::Error>,
 }
@@ -296,14 +317,14 @@ impl FactSink {
                 || flags.iter().any(|f| matches!(f.as_str(), "errors" | "tools")),
             tools,
             targets,
-            pending_targets: HashSet::new(),
+            pending_targets: Default::default(),
             fail: None,
         }
     }
 
-    fn note_target(&mut self, target: String) {
+    fn note_target(&mut self, target: String) -> anyhow::Result<()> {
         if self.facts.targets.len() == self.targets.len() {
-            return;
+            return Ok(());
         }
         // A match inside the target survives a later cwd prefix. Absolute paths are already final;
         // only unmatched relative paths can acquire a new match when the final cwd arrives.
@@ -314,14 +335,16 @@ impl FactSink {
             }
         }
         if self.facts.targets.len() == self.targets.len() {
-            self.pending_targets.clear();
+            self.pending_targets = Default::default();
         } else if !std::path::Path::new(&target).is_absolute() {
-            self.pending_targets.insert(target);
+            self.pending_targets.push(PendingTarget(target))?;
         }
+        Ok(())
     }
 
-    fn finish(mut self, session: &Session) -> ReducedFacts {
-        for p in self.pending_targets.drain() {
+    fn finish(mut self, session: &Session) -> anyhow::Result<ReducedFacts> {
+        for row in self.pending_targets.rows()? {
+            let PendingTarget(p) = row?;
             let path = std::path::Path::new(&p);
             let resolved = match session.cwd.as_deref() {
                 Some(cwd) => cwd.join(path).to_string_lossy().to_lowercase(),
@@ -336,28 +359,18 @@ impl FactSink {
         if let Some(model) = session.model.as_deref() {
             self.facts.note_model(model);
         }
-        self.facts
+        Ok(self.facts)
     }
 }
 
-impl crate::MessageSink for FactSink {
-    fn take_error(&mut self) -> Option<anyhow::Error> {
-        self.fail.take()
-    }
-
-    fn message(&mut self, m: Message) -> crate::Flow {
+impl FactSink {
+    fn observe(&mut self, m: &Message) -> anyhow::Result<()> {
         if let Some(model) = m.model.as_deref() {
             self.facts.note_model(model);
         }
         self.facts.images |= m.content.iter().any(|b| matches!(b, Block::Image { .. }));
         if self.events {
-            let rows = match events::extract(&m, 0, None) {
-                Ok(rows) => rows,
-                Err(error) => {
-                    self.fail = Some(error);
-                    return crate::Flow::Stop;
-                }
-            };
+            let rows = events::extract(m, 0, None)?;
             for e in rows {
                 self.facts.errors |= e.kind == "error";
                 self.facts.has_tools |= e.tool.is_some();
@@ -373,12 +386,73 @@ impl crate::MessageSink for FactSink {
                 }
                 if !self.targets.is_empty() && matches!(e.kind, "file_edit" | "file_read") {
                     if let Some(target) = e.target {
-                        self.note_target(target);
+                        self.note_target(target)?;
                     }
                 }
             }
         }
-        crate::Flow::Continue
+        Ok(())
+    }
+}
+
+impl crate::MessageSink for FactSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.fail.take()
+    }
+
+    fn message(&mut self, m: Message) -> crate::Flow {
+        match self.observe(&m) {
+            Ok(()) => crate::Flow::Continue,
+            Err(error) => {
+                self.fail = Some(error);
+                crate::Flow::Stop
+            }
+        }
+    }
+}
+
+/// Query facts accumulated alongside another streaming consumer. Retains predicate state rather
+/// than transcript messages. The same query used at construction is evaluated against the final
+/// metadata shell; counted affordance facts may come from the enclosing counted stream.
+pub struct QueryReducer<'a> {
+    query: &'a SessionQuery,
+    sink: FactSink,
+}
+
+impl<'a> QueryReducer<'a> {
+    pub fn new(query: &'a SessionQuery) -> Self {
+        Self {
+            query,
+            sink: FactSink::new(query),
+        }
+    }
+
+    /// Inspect a borrowed message before its consumer drops it. Projection failures abort the
+    /// pass, rather than becoming false query matches.
+    pub fn observe(&mut self, message: &Message) -> anyhow::Result<()> {
+        self.sink.observe(message)
+    }
+
+    /// Evaluate after successful EOF using final model/cwd/git and optional counted affordances.
+    /// Forest/workflow/compaction predicates retain their established on-demand reads.
+    pub fn matches(
+        mut self,
+        r: &SessionRef,
+        session: &Session,
+        text_sets: &TextSets,
+        counts: Option<crate::affordance::Counts>,
+    ) -> anyhow::Result<bool> {
+        self.sink.facts.counts = counts;
+        let reduced = self.sink.finish(session)?;
+        let facts = SessionFacts {
+            reduced: Some(&reduced),
+            ..SessionFacts::new(r, session, text_sets)
+        };
+        self.query.matches(&Facts {
+            r,
+            session: Some(session),
+            ext: &facts,
+        })
     }
 }
 
@@ -423,7 +497,7 @@ fn matches_streamed_with_probe(
         let source = probe.snapshot(r);
         crate::stream::stream_counted_with_source(adapter, r, &crate::ParseOptions::lazy(), &mut sink, &source)?
     };
-    let reduced = sink.finish(&session);
+    let reduced = sink.finish(&session)?;
     let facts = SessionFacts {
         reduced: Some(&reduced),
         ..SessionFacts::new(r, &session, text_sets)
@@ -722,10 +796,10 @@ mod tests {
         assert_eq!(sink.facts.tools.len(), 1);
         assert_eq!(sink.facts.targets.len(), 1);
         assert!(sink.facts.images);
-        assert!(sink.pending_targets.is_empty());
+        assert_eq!(sink.pending_targets.len(), 0);
         let mut shell = Session::new("facts", crate::Harness::Claude);
         shell.cwd = Some("/late".into());
-        let facts = sink.finish(&shell);
+        let facts = sink.finish(&shell).unwrap();
         assert_eq!(facts.targets, HashSet::from(["a.rs".into()]));
 
         assert!(facts.models["early"].contains);
@@ -738,20 +812,35 @@ mod tests {
         let query = SessionQuery::parse("touched:/late/work/a.rs AND touched:/absolute/wanted.rs").unwrap();
         let mut sink = FactSink::new(&query);
         for i in 0..1000 {
-            sink.note_target(format!("/absolute/unmatched-{i}.rs"));
+            sink.note_target(format!("/absolute/unmatched-{i}.rs")).unwrap();
         }
-        assert!(sink.pending_targets.is_empty());
+        assert_eq!(sink.pending_targets.len(), 0);
         assert!(sink.facts.targets.is_empty());
-        sink.note_target("a.rs".into());
-        sink.note_target("/absolute/wanted.rs".into());
-        assert_eq!(sink.pending_targets, HashSet::from(["a.rs".into()]));
+        sink.note_target("a.rs".into()).unwrap();
+        sink.note_target("/absolute/wanted.rs".into()).unwrap();
+        assert_eq!(sink.pending_targets.len(), 1);
         assert_eq!(sink.facts.targets, HashSet::from(["/absolute/wanted.rs".into()]));
         let mut shell = Session::new("facts", crate::Harness::Claude);
         shell.cwd = Some("/late/work".into());
         assert_eq!(
-            sink.finish(&shell).targets,
+            sink.finish(&shell).unwrap().targets,
             HashSet::from(["/late/work/a.rs".into(), "/absolute/wanted.rs".into()])
         );
+    }
+
+    #[test]
+    fn touched_relative_history_spills_and_resolves_against_late_cwd() {
+        let query = SessionQuery::parse("touched:/late/work/missing.rs").unwrap();
+        let mut sink = FactSink::new(&query);
+        for i in 0..20_000 {
+            sink.note_target(format!("relative-{i}.rs")).unwrap();
+        }
+        sink.note_target("missing.rs".into()).unwrap();
+        assert!(sink.pending_targets.temporary_bytes().unwrap() > 0);
+        let mut shell = Session::new("facts", crate::Harness::Claude);
+        shell.cwd = Some("/late/work".into());
+        let facts = sink.finish(&shell).unwrap();
+        assert_eq!(facts.targets, HashSet::from(["/late/work/missing.rs".into()]));
     }
 
     #[test]
