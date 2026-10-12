@@ -3338,6 +3338,41 @@ mod tests {
     }
 
     #[test]
+    fn native_json_inputs_feed_events_and_affordances_like_owned_inputs() {
+        let world = cv_testkit::World::in_process("claude-json-input-consumers");
+        let path = world.proj.join("source.jsonl");
+        let tools = [
+            ("Read", serde_json::json!({"file_path": "/tmp/a.rs"})),
+            ("Bash", serde_json::json!({"command": "echo hello"})),
+            (
+                "AskUserQuestion",
+                serde_json::json!({"questions": [{"question": "Ship?", "options": [{"label": "yes"}]}]}),
+            ),
+        ];
+        let text = tools.into_iter().enumerate().map(|(i, (name, mut input))| {
+            input.as_object_mut().unwrap().insert("ignored_payload".into(), Value::String("x\nβ".repeat(INLINE_MAX)));
+            serde_json::json!({"type": "assistant", "uuid": i.to_string(), "message": {"role": "assistant", "content": [{"type": "tool_use", "id": i.to_string(), "name": name, "input": input}]}}).to_string() + "\n"
+        }).collect::<String>();
+        fs::write(&path, text).unwrap();
+        let reference = SessionRef::new("source", Harness::Claude, path.clone());
+        let adapter = Claude::with_config_dir(&world.proj);
+        let full = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full()).unwrap();
+        let mut expected = crate::events::EventSink::new(None);
+        for message in &full.messages {
+            expected.try_message(message.clone()).unwrap();
+        }
+        let mut actual = crate::events::EventSink::new(None);
+        adapter.stream(&reference, &ParseOptions::lazy(), &mut actual).unwrap();
+        assert_eq!(actual.into_events().unwrap(), expected.into_events().unwrap());
+        let expected = crate::affordance::of_session(&full).unwrap();
+        let actual = crate::affordance::read(&adapter, &reference).unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
     fn lazy_spans_resolve_to_same_text() {
         // A record with content well over INLINE_MAX: the lazy path must produce a Span whose
         // resolved text equals the inline parse, byte-for-byte (incl. escapes).
