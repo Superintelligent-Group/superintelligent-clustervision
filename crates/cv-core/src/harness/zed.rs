@@ -216,7 +216,7 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     };
     // Both passes borrow the same cell under the same active read statement. Validate the
     // complete document before emitting any message, including malformed ignored fields.
-    let thread = blob::header(data_type.as_deref(), data, false);
+    let mut thread = blob::header(data_type.as_deref(), data, false);
 
     let mut zed = serde_json::Map::new();
     let mut model = None;
@@ -227,8 +227,10 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     // The parent thread of a subagent: from the 0.3.0 blob's `subagent_context`, overridden by the
     // `parent_id` column when both name one. First-class [`Lineage`], not an extra key.
     let mut parent_thread_id: Option<String> = None;
-    if let Some(header) = &thread {
-        let t = &header.metadata;
+    if let Some(header) = &mut thread {
+        // Release parsed metadata before body replay; only the final messages-member ordinal
+        // survives once these session facts have been extracted.
+        let t = std::mem::take(&mut header.metadata);
         // `title` (0.3.0) / `summary` (legacy) — same meaning, renamed across generations.
         blob_title = t
             .get("title")
@@ -237,10 +239,10 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
             .filter(|s| !s.trim().is_empty())
             .map(str::to_string);
         blob_updated = t.get("updated_at").and_then(super::ts_from_value);
-        cwd = snapshot_cwd(t);
-        git = snapshot_git(t);
+        cwd = snapshot_cwd(&t);
+        git = snapshot_git(&t);
         model = t.get("model").and_then(model_string);
-        thread_extras(t, &mut zed, &mut parent_thread_id);
+        thread_extras(&t, &mut zed, &mut parent_thread_id);
     } else if !data.is_empty() {
         // The row exists but its blob wouldn't decode — surface that instead of erroring, so one
         // corrupt thread never breaks listings or bulk exports.
