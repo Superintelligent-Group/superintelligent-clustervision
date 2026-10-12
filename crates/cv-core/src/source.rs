@@ -129,6 +129,15 @@ impl ReadSet {
             self.entries.entry(path.clone()).or_insert_with(|| entry.clone());
         }
     }
+
+    /// Revalidate exactly the paths captured by this consumer, including absence and identity.
+    pub fn fresh(&self, probe: &mut Probe) -> bool {
+        self.known
+            && self
+                .entries
+                .values()
+                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+    }
 }
 
 /// A source pass's captured primary signature and auxiliary dependencies.
