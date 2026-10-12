@@ -448,12 +448,19 @@ mod tests {
         let world = cv_testkit::World::in_process("api_native_windows");
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
         let mut checked = 0;
-        for harness in [Harness::Claude, Harness::Codex, Harness::KimiCode, Harness::Grok] {
+        for harness in [
+            Harness::Claude,
+            Harness::Codex,
+            Harness::KimiCode,
+            Harness::Grok,
+            Harness::Kimi,
+        ] {
             let adapter: Box<dyn Adapter> = match harness {
                 Harness::Claude => Box::new(crate::harness::claude::Claude::with_config_dir(
                     &world.home.join(".claude"),
                 )),
                 Harness::Codex => Box::new(crate::harness::codex::Codex::with_home(&world.home.join(".codex"))),
+                Harness::Kimi => Box::new(crate::harness::kimi::Kimi::with_home(&world.home.join(".kimi"))),
                 Harness::Grok => Box::new(crate::harness::grok::Grok::with_home(&world.home.join(".grok"))),
                 _ => Box::new(crate::harness::kimi_code::KimiCode::with_home(
                     &world.home.join(".kimi-code"),
@@ -476,6 +483,11 @@ mod tests {
                     } else {
                         agent
                     }
+                } else if harness == Harness::Kimi {
+                    if file.file_name() != "context.jsonl" {
+                        continue;
+                    }
+                    file.path().parent().unwrap()
                 } else if harness == Harness::Grok {
                     if file.file_name() != "chat_history.jsonl" {
                         continue;
