@@ -53,10 +53,11 @@
 //! sent to the model ([`MessageKind::Error`]).
 
 use super::store::document::text_summary;
-use super::store::document::{accepts_value, array_iter, ArrayIter, Raw, Record, Source};
+use super::store::document::Fields;
 use super::wire::{anthropic, coerce_text};
 use super::{parse_ts, ts_from_epoch};
 use crate::ir::*;
+use crate::json::{JsonSource, JsonView};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -156,78 +157,95 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 }
 
 fn scan(path: &Path, sid: &str) -> Option<SessionRef> {
-    let source = Source::open(path).ok()?;
-    let raw = source.raw().ok()?;
-    if !accepts_value(raw) {
-        return None;
-    }
-    let record = Record::parse(raw)?;
-    let msgs = array_iter(record.get("messages")?)?;
-    let doc = Value::Object(
-        ["updated_at"]
-            .into_iter()
-            .filter_map(|key| record.value(key).map(|v| (key.into(), v)))
-            .collect(),
-    );
-    let id = ref_id(path, sid)?;
-    let lead = id == sid;
-    let row = if lead { manifest(path.parent()?, sid) } else { None };
-    let mut r = SessionRef::new(&id, Harness::Cline, path.to_path_buf());
-    r.message_count = msgs.count();
-    r.cwd = row
-        .as_ref()
-        .and_then(|m| m.get("cwd"))
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    r.title = row
-        .as_ref()
-        .and_then(|m| m.pointer("/metadata/title"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| first_raw_user_text(msgs, &source, path))
-        .map(|t| truncate(&t, 80));
-    r.created_at = row
-        .as_ref()
-        .and_then(|m| m.get("started_at"))
-        .and_then(Value::as_str)
-        .and_then(parse_ts)
-        .or_else(|| {
-            msgs.take(1)
-                .next()
-                .and_then(Record::parse)
-                .and_then(|m| m.value("ts"))
-                .and_then(|v| v.as_i64())
-                .and_then(ts_from_epoch)
-        });
-    r.updated_at = doc
-        .get("updated_at")
-        .and_then(Value::as_str)
-        .and_then(parse_ts)
-        .or_else(|| mtime(path))
-        .or(r.created_at);
-    Some(r)
+    JsonSource::capture(path)
+        .ok()?
+        .read_document(|view| {
+            let record = Fields::parse(view, &["messages", "updated_at"])?.context("SDK document object")?;
+            let messages = record.get("messages").context("SDK messages")?;
+            let id = ref_id(path, sid).context("SDK id")?;
+            let lead = id == sid;
+            let row = if lead {
+                path.parent().and_then(|dir| manifest(dir, sid))
+            } else {
+                None
+            };
+            let mut r = SessionRef::new(&id, Harness::Cline, path.to_path_buf());
+            r.cwd = row
+                .as_ref()
+                .and_then(|m| m.get("cwd"))
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            r.title = row
+                .as_ref()
+                .and_then(|m| m.pointer("/metadata/title"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            r.created_at = row
+                .as_ref()
+                .and_then(|m| m.get("started_at"))
+                .and_then(Value::as_str)
+                .and_then(parse_ts);
+            let mut first = true;
+            let mut first_user = false;
+            for message in messages.array()?.context("SDK messages array")? {
+                r.message_count += 1;
+                let message = message?;
+                if let Some(record) = Fields::parse(message, &["ts", "role", "content"])? {
+                    if first && r.created_at.is_none() {
+                        r.created_at = record.value("ts")?.and_then(|v| v.as_i64()).and_then(ts_from_epoch);
+                    }
+                    if !first_user && record.string("role")?.as_deref() == Some("user") {
+                        first_user = true;
+                        if r.title.is_none() {
+                            r.title = first_view_text(record.get("content"), path)?;
+                        }
+                    }
+                }
+                first = false;
+            }
+            r.title = r.title.map(|t| truncate(&t, 80));
+            r.updated_at = record
+                .string("updated_at")?
+                .as_deref()
+                .and_then(parse_ts)
+                .or_else(|| mtime(path))
+                .or(r.created_at);
+            Ok(r)
+        })
+        .ok()
 }
-
-fn first_raw_user_text(msgs: ArrayIter<'_>, source: &Source, path: &Path) -> Option<String> {
-    let message = msgs
-        .filter_map(Record::parse)
-        .find(|m| m.string("role").as_deref() == Some("user"))?;
-    let content = message.get("content")?;
-    let texts = if let Some(text) = source.text(content, true) {
-        vec![text]
-    } else {
-        array_iter(content)
-            .into_iter()
-            .flatten()
-            .filter_map(Record::parse)
-            .filter_map(|part| part.get("text").and_then(|raw| source.text(raw, true)))
-            .collect()
+fn first_view_text(content: Option<JsonView<'_>>, path: &Path) -> Result<Option<String>> {
+    let Some(content) = content else { return Ok(None) };
+    let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
+    if let Some(text) = content.text(true)? {
+        return Ok(text_summary(std::iter::once(text), &resolver, true));
+    }
+    let Some(mut parts) = content.array()? else {
+        return Ok(None);
     };
-    text_summary(
-        texts.iter(),
-        &crate::lazy::Resolver::new(Some(path.to_path_buf())),
-        true,
-    )
+    let mut error = None;
+    let texts = std::iter::from_fn(|| loop {
+        let next = parts.next()?;
+        match next.and_then(|v| Fields::parse(v, &["text"])).and_then(|record| {
+            record
+                .and_then(|r| r.get("text"))
+                .map(|v| v.text(true))
+                .transpose()
+                .map(Option::flatten)
+        }) {
+            Ok(Some(text)) => return Some(text),
+            Ok(None) => {}
+            Err(e) => {
+                error = Some(e);
+                return None;
+            }
+        }
+    });
+    let title = text_summary(texts, &resolver, true);
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok(title)
 }
 
 /// Read one messages file into `sink`, returning the session with empty `messages`.
@@ -241,135 +259,162 @@ pub(crate) fn stream_with_options(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    let source = Source::open(path)?;
-    let raw = source.raw().with_context(|| format!("parsing {}", path.display()))?;
-    anyhow::ensure!(
-        accepts_value(raw),
-        "invalid JSON scalar or nesting depth in {}",
-        path.display()
-    );
-    let record = Record::parse(raw);
-    let doc = Value::Object(
-        [
+    let source = JsonSource::capture(path)?;
+    source.read_document(|view| {
+        let keys = [
             "agent",
             "taskType",
             "sessionId",
             "origin",
             "updated_at",
             "system_prompt",
-        ]
-        .into_iter()
-        .filter_map(|key| record.as_ref()?.value(key).map(|v| (key.into(), v)))
-        .collect(),
-    );
-    let msgs = record
-        .as_ref()
-        .and_then(|r| r.get("messages"))
-        .and_then(array_iter)
-        .into_iter()
-        .flatten();
-    let mut s = Session::new(id.to_string(), Harness::Cline);
-    s.source_path = Some(path.to_path_buf());
-    let sid = id.split('/').next().unwrap_or(id);
-    let lead = sid == id;
-    let row = path.parent().and_then(|d| manifest(d, sid));
-    let origin = doc.get("origin");
-    {
-        let bag = s.harness_extra_mut(Harness::Cline);
-        bag.insert("store".into(), json!("sdk"));
-        for (k, key) in [
-            ("agent", "agent"),
-            ("task_type", "taskType"),
-            ("sdk_session_id", "sessionId"),
-        ] {
-            if let Some(v) = doc.get(key) {
-                bag.insert(k.into(), v.clone());
-            }
+            "messages",
+        ];
+        let record = Fields::parse(view, &keys)?;
+        let doc = Value::Object(
+            record
+                .as_ref()
+                .map(|r| r.project(&keys[..keys.len() - 1]))
+                .transpose()?
+                .unwrap_or_default(),
+        );
+        let messages = record.as_ref().and_then(|r| r.get("messages"));
+        let mut s = Session::new(id.to_string(), Harness::Cline);
+        s.source_path = Some(path.to_path_buf());
+        let sid = id.split('/').next().unwrap_or(id);
+        let lead = sid == id;
+        if let Some(dir) = path.parent() {
+            sink.dependency(&dir.join(format!("{sid}.json")));
         }
-        if let Some(o) = origin {
-            bag.insert("origin".into(), o.clone());
+        if let Some(error) = sink.take_error() {
+            return Err(error);
         }
-        if let Some(row) = row.as_ref().filter(|_| lead) {
-            for k in [
-                "source",
-                "status",
-                "exit_code",
-                "provider",
-                "team_name",
-                "workspace_root",
-                "interactive",
+        let row = path.parent().and_then(|d| manifest(d, sid));
+        let origin = doc.get("origin");
+        {
+            let bag = s.harness_extra_mut(Harness::Cline);
+            bag.insert("store".into(), json!("sdk"));
+            for (k, key) in [
+                ("agent", "agent"),
+                ("task_type", "taskType"),
+                ("sdk_session_id", "sessionId"),
             ] {
-                if let Some(v) = row.get(k).filter(|v| !v.is_null()) {
+                if let Some(v) = doc.get(key) {
                     bag.insert(k.into(), v.clone());
                 }
             }
+            if let Some(o) = origin {
+                bag.insert("origin".into(), o.clone());
+            }
+            if let Some(row) = row.as_ref().filter(|_| lead) {
+                for k in [
+                    "source",
+                    "status",
+                    "exit_code",
+                    "provider",
+                    "team_name",
+                    "workspace_root",
+                    "interactive",
+                ] {
+                    if let Some(v) = row.get(k).filter(|v| !v.is_null()) {
+                        bag.insert(k.into(), v.clone());
+                    }
+                }
+            }
         }
-    }
-    if !lead {
-        s.lineage.parent = origin
-            .and_then(|o| o.get("parentThreadId"))
+        if !lead {
+            s.lineage.parent = origin
+                .and_then(|o| o.get("parentThreadId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some(sid.to_string()));
+            s.lineage.agent_path = origin
+                .and_then(|o| o.get("subagent"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        let row = row.filter(|_| lead);
+        s.cwd = row
+            .as_ref()
+            .and_then(|m| m.get("cwd"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| Some(sid.to_string()));
-        s.lineage.agent_path = origin
-            .and_then(|o| o.get("subagent"))
+            .map(PathBuf::from);
+        s.model = row
+            .as_ref()
+            .and_then(|m| m.get("model"))
             .and_then(Value::as_str)
             .map(str::to_string);
-    }
-    let row = row.filter(|_| lead);
-    s.cwd = row
-        .as_ref()
-        .and_then(|m| m.get("cwd"))
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    s.model = row
-        .as_ref()
-        .and_then(|m| m.get("model"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    s.title = row
-        .as_ref()
-        .and_then(|m| m.pointer("/metadata/title"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    s.created_at = row
-        .as_ref()
-        .and_then(|m| m.get("started_at"))
-        .and_then(Value::as_str)
-        .and_then(parse_ts);
-    s.updated_at = doc.get("updated_at").and_then(Value::as_str).and_then(parse_ts);
-    s.system_prompt = doc.get("system_prompt").and_then(Value::as_str).map(str::to_string);
-    sink.meta(&s);
+        s.title = row
+            .as_ref()
+            .and_then(|m| m.pointer("/metadata/title"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        s.created_at = row
+            .as_ref()
+            .and_then(|m| m.get("started_at"))
+            .and_then(Value::as_str)
+            .and_then(parse_ts);
+        s.updated_at = doc.get("updated_at").and_then(Value::as_str).and_then(parse_ts);
+        s.system_prompt = doc.get("system_prompt").and_then(Value::as_str).map(str::to_string);
+        sink.meta(&s);
 
-    let mut prompted = false;
-    let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
-    for raw in msgs {
-        let Some(m) = raw_message(raw, &source, opts.spans, lead, &mut prompted) else {
-            continue;
-        };
-        if s.created_at.is_none() {
-            s.created_at = m.timestamp;
+        let mut prompted = false;
+        let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
+        let mut has_sources = false;
+        for view in messages
+            .map(JsonView::array)
+            .transpose()?
+            .flatten()
+            .into_iter()
+            .flatten()
+        {
+            let Some(m) = view_message(view?, opts.spans, lead, &mut prompted)? else {
+                continue;
+            };
+            if s.created_at.is_none() {
+                s.created_at = m.timestamp;
+            }
+            if s.model.is_none() {
+                s.model.clone_from(&m.model);
+            }
+            if s.title.is_none() && m.kind == MessageKind::Prompt {
+                s.title = text_summary(
+                    m.content
+                        .iter()
+                        .filter_map(|b| if let Block::Text { text } = b { Some(text) } else { None }),
+                    &resolver,
+                    false,
+                );
+            }
+            let sourced = m.content.iter().any(|block| {
+                matches!(
+                    block,
+                    Block::ToolUse {
+                        input: crate::Json::Source(_),
+                        ..
+                    }
+                )
+            });
+            has_sources |= sourced;
+            if sourced {
+                source.check()?;
+            }
+            let flow = sink.try_message(m)?;
+            if sourced {
+                source.check()?;
+            }
+            if flow == Flow::Stop {
+                break;
+            }
         }
-        if s.model.is_none() {
-            s.model.clone_from(&m.model);
+        if s.updated_at.is_none() {
+            s.updated_at = mtime(path).or(s.created_at);
         }
-        if s.title.is_none() && m.kind == MessageKind::Prompt {
-            s.title = text_summary(
-                m.content
-                    .iter()
-                    .filter_map(|b| if let Block::Text { text } = b { Some(text) } else { None }),
-                &resolver,
-                false,
-            );
+        if has_sources {
+            source.check()?;
         }
-        if sink.message(m) == Flow::Stop {
-            break;
-        }
-    }
-    if s.updated_at.is_none() {
-        s.updated_at = mtime(path).or(s.created_at);
-    }
-    Ok(s)
+        Ok(s)
+    })
 }
 
 fn result_text(c: Option<&Value>) -> String {
@@ -381,47 +426,53 @@ fn result_text(c: Option<&Value>) -> String {
     }
 }
 
-fn raw_message(raw: Raw<'_>, source: &Source, spans: bool, lead: bool, prompted: &mut bool) -> Option<Message> {
+fn view_message(view: JsonView<'_>, spans: bool, lead: bool, prompted: &mut bool) -> Result<Option<Message>> {
     if !spans {
-        return serde_json::from_str::<Value>(raw.get())
-            .ok()
-            .and_then(|v| message(&v, lead, prompted));
+        return Ok(message(view.resolve()?.as_ref(), lead, prompted));
     }
-    let record = Record::parse(raw)?;
-    let meta = Value::Object(
-        ["id", "role", "ts", "modelInfo", "metrics", "metadata"]
-            .into_iter()
-            .filter_map(|key| record.value(key).map(|v| (key.into(), v)))
-            .collect(),
-    );
+    let keys = ["id", "role", "ts", "modelInfo", "metrics", "metadata", "content"];
+    let Some(record) = Fields::parse(view, &keys)? else {
+        return Ok(None);
+    };
+    let meta = Value::Object(record.project(&keys[..keys.len() - 1])?);
     let mut blocks = Vec::new();
     if let Some(content) = record.get("content") {
-        if let Some(text) = source.text(content, true) {
+        if let Some(text) = content.text(true)? {
             blocks.push(Block::Text { text });
-        } else if let Some(items) = array_iter(content) {
-            for raw in items {
-                let part = Record::parse(raw);
-                if part.as_ref().and_then(|r| r.string("type")).as_deref() == Some("tool_result") {
-                    let part = part?;
-                    let content = part
-                        .get("content")
-                        .and_then(|raw| source.text(raw, true))
-                        .unwrap_or_else(|| result_text(part.value("content").as_ref()).into());
+        } else if let Some(items) = content.array()? {
+            for view in items {
+                let view = view?;
+                let part = Fields::parse(view, &["type", "tool_use_id", "content", "is_error", "name"])?;
+                if part
+                    .as_ref()
+                    .map(|r| r.string("type"))
+                    .transpose()?
+                    .flatten()
+                    .as_deref()
+                    == Some("tool_result")
+                {
+                    let part = part.unwrap();
+                    let text = part.get("content").map(|v| v.text(true)).transpose()?.flatten();
+                    let content = if let Some(text) = text {
+                        text
+                    } else {
+                        result_text(part.value("content")?.as_ref()).into()
+                    };
                     blocks.push(Block::ToolResult {
-                        tool_use_id: part.string("tool_use_id").unwrap_or_default(),
+                        tool_use_id: part.string("tool_use_id")?.unwrap_or_default(),
                         content,
-                        is_error: part.value("is_error").and_then(|v| v.as_bool()).unwrap_or(false),
-                        tool_name: part.string("name"),
+                        is_error: part.value("is_error")?.and_then(|v| v.as_bool()).unwrap_or(false),
+                        tool_name: part.string("name")?,
                         status: None,
                         details: None,
                     });
-                } else if let Some(block) = anthropic::block_from_raw(raw, source, &anthropic::ANTHROPIC, true) {
+                } else if let Some(block) = anthropic::block_from_view(view, &anthropic::ANTHROPIC, true)? {
                     blocks.push(block);
                 }
             }
         }
     }
-    message_with_blocks(&meta, blocks, lead, prompted)
+    Ok(message_with_blocks(&meta, blocks, lead, prompted))
 }
 
 fn message(v: &Value, lead: bool, prompted: &mut bool) -> Option<Message> {
@@ -780,7 +831,7 @@ mod tests {
             {"id":"u", "role":"user", "content":[{"type":"text","text":body}]},
             {"role":"assistant","content":[{"type":"thinking","thinking":body,"signature":"s"},
                 {"type":"image","source":{"type":"base64","media_type":"image/png","data":body}},
-                {"type":"tool_use","id":"t","name":"read","input":{"path":"a"}}]},
+                {"type":"tool_use","id":"t","name":"read","input":{"path":"a","payload":body}}]},
             {"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":body}]}
         ]});
         fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
@@ -789,6 +840,9 @@ mod tests {
             let mut sink = CollectSink::default();
             let mut actual = stream_with_options(&path, "sdk", &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
+            assert_eq!(actual.messages.iter().flat_map(|m| &m.content).any(|block| {
+                matches!(block, Block::ToolUse { input: crate::json::Json::Source(_), .. })
+            }), opts.spans);
             actual.materialize().unwrap();
             let actual = serde_json::to_string(&actual).unwrap();
             if let Some(expected) = &expected {
