@@ -70,7 +70,10 @@ impl DocSink {
             match block {
                 Block::Text { text } | Block::Thinking { text, .. } => {
                     self.read_text(text);
-                    self.body.push_text(text, &self.resolver);
+                    if let Err(error) = self.body.try_push_text(text, &self.resolver) {
+                        self.error = Some(error);
+                        return;
+                    }
                     self.body.push("\n");
                 }
                 Block::ToolUse { name, input, .. } => {
@@ -89,16 +92,24 @@ impl DocSink {
                 }
                 Block::ToolResult { content, .. } => {
                     self.read_text(content);
-                    self.body.push_text(content, &self.resolver);
+                    if let Err(error) = self.body.try_push_text(content, &self.resolver) {
+                        self.error = Some(error);
+                        return;
+                    }
                     self.body.push("\n");
                     if !self.body.full() {
                         if let Some(path) = block.persisted_output_path() {
                             self.reads.record(std::path::Path::new(path));
-                            if let Some(text) =
-                                cv_core::lazy::read_head(std::path::Path::new(path), self.body.remaining())
-                            {
-                                self.body.push(&text);
-                                self.body.push("\n");
+                            match cv_core::lazy::read_head_checked(std::path::Path::new(path), self.body.remaining()) {
+                                Ok(Some(text)) => {
+                                    self.body.push(&text);
+                                    self.body.push("\n");
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.error = Some(error);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -135,7 +146,13 @@ impl MessageSink for DocSink {
             for block in &message.content {
                 if let Block::Text { text } = block {
                     self.read_text(text);
-                    label.push(&text.resolve_prefix(&self.resolver, FIRST_USER_RAW_HEAD));
+                    match text.try_resolve_prefix(&self.resolver, FIRST_USER_RAW_HEAD) {
+                        Ok(text) => label.push(&text),
+                        Err(error) => {
+                            self.error = Some(error);
+                            return Flow::Stop;
+                        }
+                    }
                 }
             }
             if label.meaningful {
@@ -183,6 +200,68 @@ mod tests {
             end -= 1;
         }
         &text[..end]
+    }
+
+    #[test]
+    fn semantic_demanded_text_missing_or_truncated_failure_stays_latched() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-text-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("span");
+        for role in [Role::User, Role::Assistant] {
+            for truncated in [false, true] {
+                if truncated {
+                    std::fs::write(&path, "short").unwrap();
+                }
+                let mut sink = sink();
+                let text = Text::Span(cv_core::Span {
+                    source: Some(path.clone()),
+                    offset: 0,
+                    len: 8192,
+                    escaped: false,
+                });
+                assert!(matches!(
+                    sink.message(message(role, vec![Block::Text { text }])),
+                    Flow::Stop
+                ));
+                assert!(sink.take_error().is_some());
+                let saved = sink.body.as_str().to_owned();
+                assert!(matches!(
+                    sink.message(message(Role::User, vec![super::tests::text("later")])),
+                    Flow::Stop
+                ));
+                assert_eq!(sink.body.as_str(), saved);
+                assert!(sink.take_error().is_some());
+                if truncated {
+                    std::fs::remove_file(&path).unwrap();
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_optional_output_absence_is_allowed_but_present_read_failure_is_not() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-output-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let block = |path: &std::path::Path| Block::ToolResult {
+            tool_use_id: "call".into(),
+            content: "stub".into(),
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: Some(json!({"persistedOutput": {"path": path}})),
+        };
+        let mut absent = sink();
+        absent.message(message(Role::Assistant, vec![block(&dir.join("missing"))]));
+        assert!(absent.take_error().is_none());
+        assert_eq!(absent.body.as_str(), "stub\n");
+        let mut unreadable = sink();
+        assert!(matches!(
+            unreadable.message(message(Role::Assistant, vec![block(&dir)])),
+            Flow::Stop
+        ));
+        assert!(unreadable.take_error().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

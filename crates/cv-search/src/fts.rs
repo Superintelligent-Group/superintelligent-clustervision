@@ -1471,15 +1471,30 @@ impl<'w> ChunkSink<'w> {
         }
     }
 
+    fn record_span(&mut self, sp: &cv_core::Span) {
+        if let Some(path) = sp
+            .source
+            .as_ref()
+            .filter(|path| path.as_path() != self.primary_path)
+        {
+            self.dependencies.record(path);
+        }
+    }
     /// Append a content `Text`: chunk-resolved from the source for a span (never owned whole), or the
     /// inline string. `r` is the session resolver (moved out of `self` to avoid a borrow conflict with
     /// the chunk callback, which mutates `self`).
     fn append_text(&mut self, r: &cv_core::Resolver, text: &cv_core::Text) {
         if let Some(sp) = text.as_span() {
-            if let Some(path) = sp.source.as_ref().filter(|path| path.as_path() != self.primary_path) {
-                self.dependencies.record(path);
+            self.record_span(sp);
+            if let Err(error) = r.try_for_each_chunk(sp, CHUNK_BYTES, |s| {
+                self.push_chunk(s);
+                anyhow::ensure!(!self.failed && self.err.is_none(), "search document output failed");
+                Ok(())
+            }) {
+                if !self.failed && self.err.is_none() {
+                    self.err = Some(error.context("resolving search text"));
+                }
             }
-            r.for_each_chunk(sp, CHUNK_BYTES, |s| self.push_chunk(s));
         } else if let Some(s) = text.inline_str() {
             self.push_chunk(s);
         }
@@ -1489,6 +1504,9 @@ impl<'w> ChunkSink<'w> {
     /// [`cv_core::ir::Message::append_searchable`], but chunk-resolving span content.
     fn append_block(&mut self, r: &cv_core::Resolver, b: &cv_core::Block) {
         use cv_core::Block;
+        if self.failed || self.err.is_some() {
+            return;
+        }
         match b {
             Block::Text { text } | Block::Thinking { text, .. } => {
                 self.append_text(r, text);
@@ -1512,17 +1530,28 @@ impl<'w> ChunkSink<'w> {
             }
             Block::ToolResult { content, .. } => {
                 self.append_text(r, content);
+                if self.failed || self.err.is_some() {
+                    return;
+                }
                 self.push_chunk("\n");
                 // A persisted-output stub (Claude Code parked the real output in
                 // `<session>/tool-results/<id>.txt`): index the file's head too, so the text the tool
                 // produced is findable even though the transcript holds only the pointer.
                 if let Some(p) = b.persisted_output_path() {
                     self.dependencies.record(Path::new(p));
-                    if let Some(t) = cv_core::lazy::read_head(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
-                        for piece in t.as_bytes().chunks(CHUNK_BYTES) {
-                            self.push_chunk(&String::from_utf8_lossy(piece));
+                    match cv_core::lazy::read_head_checked(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
+                        Ok(Some(t)) => {
+                            for piece in t.as_bytes().chunks(CHUNK_BYTES) {
+                                self.push_chunk(&String::from_utf8_lossy(piece));
+                            }
+                            self.push_chunk("\n");
                         }
-                        self.push_chunk("\n");
+                        Ok(None) => {}
+                        Err(error) => {
+                            if !self.failed && self.err.is_none() {
+                                self.err = Some(error.context("reading persisted search output"));
+                            }
+                        }
                     }
                 }
             }
@@ -1655,7 +1684,16 @@ impl cv_core::MessageSink for ChunkSink<'_> {
             for b in &m.content {
                 if let Block::Text { text } = b {
                     let s = match text.as_span() {
-                        Some(sp) => r.resolve_prefix(sp, 512),
+                        Some(sp) => {
+                            self.record_span(sp);
+                            match r.try_resolve_prefix(sp, 512) {
+                                Ok(text) => text,
+                                Err(error) => {
+                                    self.err = Some(error.context("reading search label"));
+                                    break;
+                                }
+                            }
+                        }
                         None => text.resolve(&r),
                     };
                     let t = s.trim();
@@ -1674,7 +1712,11 @@ impl cv_core::MessageSink for ChunkSink<'_> {
         if self.buf.len() >= CHUNK_BYTES {
             self.flush_chunk();
         }
-        cv_core::Flow::Continue
+        if self.failed || self.err.is_some() {
+            cv_core::Flow::Stop
+        } else {
+            cv_core::Flow::Continue
+        }
     }
 }
 
@@ -2054,7 +2096,10 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
                 }
                 match b {
                     Block::Text { text } | Block::Thinking { text, .. } => {
-                        self.head.push_text(text, &self.resolver);
+                        if let Err(error) = self.head.try_push_text(text, &self.resolver) {
+                            self.error = Some(error);
+                            return Flow::Stop;
+                        }
                         self.head.push("\n");
                     }
                     Block::ToolUse { name, input, .. } => {
@@ -2067,14 +2112,24 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
                         self.head.push("\n");
                     }
                     Block::ToolResult { content, .. } => {
-                        self.head.push_text(content, &self.resolver);
+                        if let Err(error) = self.head.try_push_text(content, &self.resolver) {
+                            self.error = Some(error);
+                            return Flow::Stop;
+                        }
                         self.head.push("\n");
                         if let Some(p) = b.persisted_output_path() {
                             let remaining = self.head.remaining();
                             if remaining > 0 {
-                                if let Some(t) = cv_core::lazy::read_head(std::path::Path::new(p), remaining) {
-                                    self.head.push(&t);
-                                    self.head.push("\n");
+                                match cv_core::lazy::read_head_checked(std::path::Path::new(p), remaining) {
+                                    Ok(Some(t)) => {
+                                        self.head.push(&t);
+                                        self.head.push("\n");
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        self.error = Some(error);
+                                        return Flow::Stop;
+                                    }
                                 }
                             }
                         }
@@ -2437,6 +2492,81 @@ mod tests {
         drop(sink);
         assert!(bodies.len() > 1);
         assert_eq!(bodies.concat(), expected);
+    }
+
+    #[test]
+    fn demanded_text_source_mutation_latches_failure_after_bounded_flush() {
+        use cv_core::MessageSink;
+        let dir = tmpdir();
+        let path = dir.join("text");
+        let text = "zqtextmutation ".repeat(2 * CHUNK_BYTES);
+        let mut source = " ".repeat(8192);
+        source.push_str(&text);
+        std::fs::write(&path, &source).unwrap();
+        let f = fields_of(&build_schema()).unwrap();
+        let r = cv_core::SessionRef::new("text", cv_core::Harness::Claude, dir.join("primary.jsonl"));
+        let mut emitted = 0;
+        let mut out = |doc: TantivyDocument| -> Result<()> {
+            emitted += 1;
+            assert!(doc
+                .get_first(f.body)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.len() <= 2 * CHUNK_BYTES));
+            std::fs::write(&path, "changed during flush")?;
+            Ok(())
+        };
+        let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
+        sink.push_chunk("prefix\n");
+        sink.append_text(
+            &cv_core::Resolver::new(None),
+            &cv_core::Text::Span(cv_core::Span {
+                source: Some(path.clone()),
+                offset: 8192,
+                len: text.len() as u64,
+                escaped: false,
+            }),
+        );
+        assert!(sink.take_error().is_some());
+        let mut later = cv_core::Message::new(cv_core::Role::User);
+        later.content.push(cv_core::Block::Text { text: "later".into() });
+        assert!(matches!(sink.message(later), cv_core::Flow::Stop));
+        assert!(sink.finish().is_err());
+        drop(sink);
+        assert!(emitted > 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn demanded_text_malformed_escape_fallback_matches_existing_body_and_bounds() {
+        let dir = tmpdir();
+        let path = dir.join("text");
+        let raw = "before\\q\\uD800after ".repeat(CHUNK_BYTES);
+        std::fs::write(&path, &raw).unwrap();
+        let span = cv_core::Span {
+            source: Some(path),
+            offset: 0,
+            len: raw.len() as u64,
+            escaped: true,
+        };
+        let resolver = cv_core::Resolver::new(None);
+        let expected = resolver.resolve(&span).into_owned();
+        let f = fields_of(&build_schema()).unwrap();
+        let r = cv_core::SessionRef::new("fallback", cv_core::Harness::Claude, dir.join("primary.jsonl"));
+        let mut bodies = Vec::new();
+        let mut out = |doc: TantivyDocument| -> Result<()> {
+            if let Some(body) = doc.get_first(f.body).and_then(|v| v.as_str()) {
+                assert!(body.len() <= 2 * CHUNK_BYTES);
+                bodies.push(body.to_owned());
+            }
+            Ok(())
+        };
+        let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
+        sink.append_text(&resolver, &cv_core::Text::Span(span));
+        assert!(sink.buf.capacity() <= 2 * CHUNK_BYTES);
+        sink.finish().unwrap();
+        drop(sink);
+        assert_eq!(bodies.concat(), expected);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3531,6 +3661,99 @@ mod tests {
     /// the truncated head into the index. [`index_session_clean`] (the path both `index_all` and
     /// the sub-agent fold drive) deletes the partial docs on error, dropping the id from the
     /// skip-set so the session is retried next run.
+    #[test]
+    fn demanded_text_missing_or_truncated_source_discards_partial_publication() {
+        let home = IsolatedHome::new();
+        struct SpanFailure {
+            span: cv_core::Span,
+        }
+        impl cv_core::Adapter for SpanFailure {
+            fn harness(&self) -> cv_core::Harness {
+                cv_core::Harness::Claude
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                vec![]
+            }
+            fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
+                Ok(vec![])
+            }
+            fn stream(
+                &self,
+                r: &cv_core::SessionRef,
+                _: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<cv_core::Session> {
+                let mut first = cv_core::Message::new(cv_core::Role::User);
+                first.content.push(cv_core::Block::Text {
+                    text: "zqspanpartial ".repeat(CHUNK_BYTES).into(),
+                });
+                first.content.push(cv_core::Block::ToolUse {
+                    id: "call".into(),
+                    name: "Edit".into(),
+                    input: serde_json::json!({"file_path":"/span.rs","content":"staged"}).into(),
+                    namespace: None,
+                });
+                let _ = sink.message(first);
+                let mut broken = cv_core::Message::new(cv_core::Role::Assistant);
+                broken.content.push(cv_core::Block::Text {
+                    text: cv_core::Text::Span(self.span.clone()),
+                });
+                let _ = sink.message(broken);
+                let mut late = cv_core::Message::new(cv_core::Role::User);
+                late.content.push(cv_core::Block::Text { text: "late".into() });
+                let _ = sink.message(late);
+                Ok(cv_core::Session::new(&r.id, r.harness))
+            }
+        }
+        for truncated in [false, true] {
+            let dir = tmpdir();
+            let primary = home.home.join(format!("text-{truncated}.jsonl"));
+            std::fs::write(&primary, "scratch primary").unwrap();
+            let external = dir.join("span");
+            if truncated {
+                std::fs::write(&external, "short").unwrap();
+            }
+            let r = cv_core::SessionRef::new(format!("text-{truncated}"), cv_core::Harness::Claude, primary);
+            let adapter = SpanFailure {
+                span: cv_core::Span {
+                    source: Some(external),
+                    offset: 0,
+                    len: 8192,
+                    escaped: false,
+                },
+            };
+            let (index, f) = open_or_create(&dir).unwrap();
+            let mut writer = open_writer(&index, 50_000_000).unwrap();
+            let mut events = cv_core::events::EventSink::new(None);
+            assert!(index_session_clean(
+                &mut writer,
+                &f,
+                &adapter,
+                &r,
+                1,
+                1,
+                Some(&mut events),
+                Default::default()
+            )
+            .is_err());
+            assert!(
+                !events.into_events().unwrap().is_empty(),
+                "fixture stages events before failed demand"
+            );
+            writer.commit().unwrap();
+            assert!(text_search(&dir, "zqspanpartial", 10).unwrap().is_empty());
+            assert!(!read_indexed_sigs(&index, &f).unwrap().0.contains_key(&r.id));
+            assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
+            assert!(cv_core::events::events_for(r.harness.as_str(), &r.id, None).is_empty());
+            assert!(cv_core::events::needs_ingest(
+                &r,
+                cv_core::events::file_mtime_ns(&r.path)
+            ));
+            assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     #[test]
     fn consumer_error_discards_flushed_docs_and_never_publishes_counts_events_or_mark() {
         use cv_core::{Flow, MessageSink};

@@ -1047,6 +1047,21 @@ mod tests {
         )
         .unwrap();
         let initial = std::fs::read(&path).unwrap();
+        let moved = dir.join("saved-input.jsonl");
+        std::fs::rename(&input, &moved).unwrap();
+        assert!(refresh(
+            &path,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            |_| panic!("missing selected source must not encode"),
+            |_, _| panic!("missing selected source must not save")
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), initial);
+        std::fs::rename(&moved, &input).unwrap();
         std::fs::write(&input, "changed").unwrap();
         assert!(refresh(
             &path,
