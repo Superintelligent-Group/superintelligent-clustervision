@@ -147,11 +147,20 @@ impl JsonSource {
         self.range(0, self.0.identity.len)?
             .with_validation(Validation::Value, f)
     }
+    /// Validate whole-source JSON grammar and UTF-8 without imposing Value's scalar/depth
+    /// policy on ignored fields. Typed document consumers enforce their known-field schema
+    /// and use accepted_array for records whose Value budget resets independently.
+    pub(crate) fn read_syntax<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+        if self.0.identity.len == 0 {
+            return Err(InvalidJson.into());
+        }
+        self.range(0, self.0.identity.len)?
+            .with_validation(Validation::Syntax, f)
+    }
     /// Archive grammar and UTF-8 are whole-source; each child resets Value's depth budget.
     /// Invalid children remain None so a consumer can preserve first-record shape semantics.
     pub(crate) fn read_archive<T>(&self, f: impl for<'a> FnOnce(Option<AcceptedArray<'a>>) -> Result<T>) -> Result<T> {
-        self.range(0, self.0.identity.len)?
-            .with_validation(Validation::Archive, |view| f(view.array()?.map(AcceptedArray)))
+        self.read_syntax(|view| f(view.accepted_array()?))
     }
     pub(crate) fn metadata_bytes(&self) -> usize {
         std::mem::size_of::<CapturedSource>() + 2 * std::mem::size_of::<usize>() + self.0.path.capacity()
@@ -218,7 +227,9 @@ impl JsonRange {
                     let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).map_err(|_| InvalidJson)?;
                     let checked = Raw::new(syntax.get(), &index);
                     if matches!(validation, Validation::Value) {
-                        anyhow::ensure!(document::accepts_value(checked), "invalid JSON scalar or nesting depth");
+                        if !document::accepts_value(checked) {
+                            return Err(InvalidJson.into());
+                        }
                     }
                     checked
                 };
@@ -235,7 +246,7 @@ impl JsonRange {
             let result = (|| {
                 let value = match validation {
                     Validation::Cached => requested,
-                    Validation::Value | Validation::Archive => {
+                    Validation::Value | Validation::Syntax => {
                         let valid = if matches!(validation, Validation::Value) {
                             source.validate(requested)?
                         } else {
@@ -263,7 +274,7 @@ impl JsonRange {
 enum Validation {
     Cached,
     Value,
-    Archive,
+    Syntax,
 }
 
 pub(crate) struct AcceptedArray<'a>(JsonArray<'a>);
@@ -422,6 +433,10 @@ impl<'a> From<&'a Value> for JsonView<'a> {
     }
 }
 impl<'a> JsonView<'a> {
+    /// Child records retain their original independent Value-compatible acceptance boundary.
+    pub(crate) fn accepted_array(self) -> Result<Option<AcceptedArray<'a>>> {
+        Ok(self.array()?.map(AcceptedArray))
+    }
     pub(crate) fn accepts_value(self) -> Result<bool> {
         match self.0 {
             View::Owned(_) => Ok(true),
@@ -1035,6 +1050,15 @@ mod tests {
         );
         let source = JsonSource::capture(&fixture.path).unwrap();
         assert!(source.read_document(|_| Ok(())).is_err());
+        let syntax = source
+            .read_syntax(|view| {
+                view.accepted_array()?
+                    .unwrap()
+                    .map(|v| v.map(|v| v.is_some()))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(syntax, [false, false, true, true]);
         let accepted = source
             .read_archive(|array| {
                 array
