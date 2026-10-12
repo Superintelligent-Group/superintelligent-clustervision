@@ -537,7 +537,7 @@ mod db {
     /// * `idx_events_session` serves [`events_for`] and `record`'s delete; `idx_events_target`
     ///   joins event rows back from a matched target. v1's `idx_events_kind_ts` indexed
     ///   `(kind, ts)` which no query ever drove with a kind-prefix lookup — dropped.
-    fn open() -> Option<Connection> {
+    pub(crate) fn open() -> Option<Connection> {
         let conn = crate::catalog::open_db()?;
         migrate(&conn)?;
         conn.execute_batch(
@@ -777,9 +777,30 @@ mod db {
         source: &crate::source::Snapshot,
         prov: &Provenance,
     ) -> Result<()> {
+        let mut conn = open().ok_or_else(|| anyhow::anyhow!("event catalog unavailable"))?;
+        record_spooled_in(&mut conn, r, from, events, source, prov)
+    }
+
+    pub(crate) fn record_spooled_in(
+        conn: &mut Connection,
+        r: &SessionRef,
+        from: usize,
+        events: EventSpool,
+        source: &crate::source::Snapshot,
+        prov: &Provenance,
+    ) -> Result<()> {
         let rows = events.rows()?;
-        record_from_inner(r, from, rows, true, source.primary.0, source.primary.1, prov, source)
-            .ok_or_else(|| anyhow::anyhow!("event catalog publication failed"))
+        record_from_in(
+            conn,
+            r,
+            from,
+            rows,
+            true,
+            source.primary.0,
+            source.primary.1,
+            prov,
+            source,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -794,55 +815,59 @@ mod db {
         source: &crate::source::Snapshot,
     ) -> Option<()> {
         let mut conn = open()?;
-        let Ok(tx) = conn.transaction() else { return None };
+        record_from_in(&mut conn, r, from, events, ordered, mtime_ns, size, prov, source).ok()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_from_in<E: std::borrow::Borrow<Event>>(
+        conn: &mut Connection,
+        r: &SessionRef,
+        from: usize,
+        events: impl IntoIterator<Item = Result<E>>,
+        ordered: bool,
+        mtime_ns: i64,
+        size: i64,
+        prov: &Provenance,
+        source: &crate::source::Snapshot,
+    ) -> Result<()> {
+        let tx = conn.transaction()?;
         let harness = r.harness.as_str();
         tx.execute(
             "INSERT OR IGNORE INTO event_sessions(harness, session_id) VALUES(?1,?2)",
             params![harness, r.id],
-        )
-        .ok()?;
+        )?;
         // Stamp provenance on every record (idempotent re-ingest keeps it current); top-level
         // sessions write NULLs, which leaves the existing top-level rows exactly as before.
         tx.execute(
             "UPDATE event_sessions SET parent_id=?3, agent_id=?4, workflow=?5
              WHERE harness=?1 AND session_id=?2",
             params![harness, r.id, prov.parent_id, prov.agent_id, prov.workflow],
-        )
-        .ok()?;
-        let Ok(session) = tx.query_row(
+        )?;
+        let session = tx.query_row(
             "SELECT id FROM event_sessions WHERE harness=?1 AND session_id=?2",
             params![harness, r.id],
             |row| row.get::<_, i64>(0),
-        ) else {
-            return None;
-        };
+        )?;
         tx.execute(
             "DELETE FROM events WHERE session=?1 AND msg_idx>=?2",
             params![session, from as i64],
-        )
-        .ok()?;
+        )?;
         {
-            let Ok(mut intern) = tx.prepare("INSERT OR IGNORE INTO event_targets(target) VALUES(?1)") else {
-                return None;
-            };
-            let Ok(mut intern_id) = tx.prepare("SELECT id FROM event_targets WHERE target=?1") else {
-                return None;
-            };
-            let Ok(mut insert) = tx.prepare(
+            let mut intern = tx.prepare_cached("INSERT OR IGNORE INTO event_targets(target) VALUES(?1)")?;
+            let mut intern_id = tx.prepare_cached("SELECT id FROM event_targets WHERE target=?1")?;
+            let mut insert = tx.prepare_cached(
                 "INSERT INTO events(session,msg_idx,ts,kind,tool,target_id,detail)
                  VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            ) else {
-                return None;
-            };
+            )?;
             let mut seen: std::collections::HashSet<(usize, &'static str, String)> = std::collections::HashSet::new();
             let mut targets: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
             let mut previous = None;
             for e in events {
-                let item = e.ok()?;
+                let item = e?;
                 let e = item.borrow();
                 if ordered {
                     if e.msg_idx < from || previous.is_some_and(|idx| e.msg_idx < idx) {
-                        return None;
+                        anyhow::bail!("event batch is not ordered from the resume index");
                     }
                     if previous != Some(e.msg_idx) {
                         // Stream extraction emits consecutive rows for each message. Dedup keys
@@ -859,10 +884,8 @@ mod db {
                     Some(t) => match targets.get(t) {
                         Some(&id) => Some(id),
                         None => {
-                            intern.execute(params![t]).ok()?;
-                            let Ok(id) = intern_id.query_row(params![t], |row| row.get(0)) else {
-                                return None;
-                            };
+                            intern.execute(params![t])?;
+                            let id = intern_id.query_row(params![t], |row| row.get(0))?;
                             // Repeated targets benefit from interning without retaining every
                             // distinct file in a session-sized map.
                             if targets.len() >= 256 {
@@ -873,26 +896,25 @@ mod db {
                         }
                     },
                 };
-                insert
-                    .execute(params![
-                        session,
-                        e.msg_idx as i64,
-                        e.ts,
-                        e.kind,
-                        e.tool,
-                        target_id,
-                        e.detail,
-                    ])
-                    .ok()?;
+                insert.execute(params![
+                    session,
+                    e.msg_idx as i64,
+                    e.ts,
+                    e.kind,
+                    e.tool,
+                    target_id,
+                    e.detail,
+                ])?;
             }
         }
         tx.execute(
             "INSERT OR REPLACE INTO event_sync(harness,id,path,mtime_ns,size) VALUES(?1,?2,?3,?4,?5)",
             params![harness, r.id, r.path.to_string_lossy(), mtime_ns, size],
-        )
-        .ok()?;
-        crate::source::publish_in(&tx, "events", r, source)?;
-        tx.commit().ok()
+        )?;
+        crate::source::publish_in(&tx, "events", r, source)
+            .ok_or_else(|| anyhow::anyhow!("event source baseline publication failed"))?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// (Re)ingest events for one session: stream it (lazily — large content stays on disk) through
@@ -1172,6 +1194,9 @@ pub use db::{
 
 /// No-op fallbacks without sqlite: extraction still works (the sink is pure), persistence and
 /// queries degrade to nothing — mirroring [`crate::catalog`].
+#[cfg(feature = "sqlite")]
+pub(crate) use db::{open as writer_connection, record_spooled_in};
+
 #[cfg(not(feature = "sqlite"))]
 mod db_stub {
     use super::*;

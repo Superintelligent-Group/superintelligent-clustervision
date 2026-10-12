@@ -283,7 +283,8 @@ const CHUNK_BYTES: usize = if cfg!(test) { 2048 } else { 4 * 1024 * 1024 };
 /// [`cv_core::TeeSink`]. Events keep their own `(mtime, size)` skip-table (`event_sync`), so an FTS-only
 /// `--rebuild` doesn't force an event re-ingest and a tantivy-fresh session whose events are
 /// missing gets an events-only catch-up pass; when both are stale the session is read exactly once.
-/// Event persistence is best-effort (sqlite errors never fail indexing).
+/// Failed parses or event publications keep successful independent work, clear unsafe resume
+/// marks, and report an incomplete index after the sweep finishes.
 ///
 /// **Sub-agent forest (`subagents`):** after each top-level claude session, also walk its
 /// `cv_core::subagent_tree_of` forest and index/ingest every Task/Workflow agent transcript, tagged
@@ -295,13 +296,20 @@ pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
     let swept = sweep(dir, refs, rebuild, subagents)?;
     if !rebuild {
         eprintln!(
-            "  ↳ index: {} changed/new ({} read from where the last pass stopped), {} removed, {} unchanged",
+            "  ↳ index: {} changed/new ({} read from where the last pass stopped), {} removed, {} unchanged, {} errors",
             swept.changed,
             swept.resumed,
             swept.removed,
-            swept.total.saturating_sub(swept.changed)
+            swept.total.saturating_sub(swept.changed),
+            swept.errors
         );
     }
+    anyhow::ensure!(
+        swept.errors == 0,
+        "index incomplete: {} session(s) failed: {}; retry cv index",
+        swept.errors,
+        swept.first_error.as_deref().unwrap_or("unknown error")
+    );
     Ok(swept.total)
 }
 
@@ -311,6 +319,9 @@ pub(crate) struct Swept {
     pub total: usize,
     /// Sessions (top-level or folded sub-agents) whose FTS docs were (re)written.
     pub changed: usize,
+    /// Sessions whose parse or event publication failed (successful independent work is kept).
+    pub errors: usize,
+    first_error: Option<String>,
     /// Sessions reaped because their files are gone.
     pub removed: usize,
     /// Sessions read only from their mark on.
@@ -525,6 +536,8 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         changed: ran.changed,
         removed,
         resumed: ran.resumed,
+        errors: ran.errors,
+        first_error: ran.first_error,
     })
 }
 
@@ -552,6 +565,8 @@ fn job_cost(group: &[Job]) -> u64 {
 /// What [`run_jobs`] did.
 #[derive(Default)]
 struct Ran {
+    errors: usize,
+    first_error: Option<String>,
     /// Sessions whose FTS docs were rewritten.
     changed: usize,
     /// Sessions read from their mark on.
@@ -629,6 +644,7 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
         }
         drop(tx);
 
+        let mut catalog = cv_core::catalog::Writer::open();
         let mut open: HashSet<String> = HashSet::new();
         let mut since_commit = 0usize;
         let mut ran = Ran::default();
@@ -672,13 +688,40 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
                         .map_or_else(|| job.source.clone(), |c| job.source.with_reads(&c.dependencies));
                     let events_published = match events {
                         Some((from, events)) => {
-                            cv_core::events::record_spooled_with_source(&job.r, from, events, &source, &job.prov)
-                                .is_ok()
+                            let result = match catalog.as_mut() {
+                                Some(catalog) => catalog.record_events(&job.r, from, events, &source, &job.prov),
+                                None => cv_core::events::record_spooled_with_source(
+                                    &job.r, from, events, &source, &job.prov,
+                                ),
+                            };
+                            match result {
+                                Ok(()) => true,
+                                Err(err) => {
+                                    ran.errors += 1;
+                                    ran.first_error.get_or_insert_with(|| {
+                                        cv_core::ir::truncate(
+                                            &format!(
+                                                "event publication failed for {} ({}): {err:#}",
+                                                job.r.id, job.r.harness
+                                            ),
+                                            512,
+                                        )
+                                    });
+                                    eprintln!(
+                                        "cv-search: event publication failed for {} ({}): {err:#}",
+                                        job.r.id, job.r.harness
+                                    );
+                                    false
+                                }
+                            }
                         }
                         None => true,
                     };
                     if let Some(c) = counted {
-                        c.record_with_source(&job.r, &job.source);
+                        match catalog.as_mut() {
+                            Some(catalog) => catalog.record_counted(&job.r, &job.source, c),
+                            None => c.record_with_source(&job.r, &job.source),
+                        }
                     }
                     if mark.is_some() || job.mark.is_some() {
                         // A mark must describe persisted event rows as well as FTS docs. If the
@@ -696,6 +739,13 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>, consumer: &str
                     }
                 }
                 Out::Failed { job, err } => {
+                    ran.errors += 1;
+                    ran.first_error.get_or_insert_with(|| {
+                        cv_core::ir::truncate(
+                            &format!("parse failed for {} ({}): {err:#}", job.r.id, job.r.harness),
+                            512,
+                        )
+                    });
                     // The session drops out of the index (and its skip-set entry) until a later
                     // run parses it whole — never frozen in as a truncated body stamped fresh.
                     if job.fts {
@@ -3372,6 +3422,16 @@ mod tests {
         write_heads(&fleet, 1, 1);
         let grown = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(grown.resumed, refs.len());
+        assert_eq!(grown.errors, refs.len(), "publication failures must be reported");
+        assert!(grown
+            .first_error
+            .as_deref()
+            .unwrap()
+            .contains("event publication failed"));
+        assert!(
+            grown.first_error.as_deref().unwrap().contains("test"),
+            "retain the SQLite error reason"
+        );
         // FTS commits successfully, but the event suffix transaction rolls back and its mark
         // must be removed. An events-only retry over an unchanged source must read whole.
         for (r, expected) in refs.iter().zip(&before) {
@@ -3384,10 +3444,17 @@ mod tests {
                 cv_core::events::file_mtime_ns(&r.path)
             ));
             assert!(cv_core::resume::MarkTable::load().get(r).is_none());
+            let source = cv_core::source::Probe::default().snapshot(r);
+            assert!(
+                cv_core::catalog::AffordanceTable::load()
+                    .counts_with_source(r, &source)
+                    .is_some(),
+                "event rollback must not prevent independent counts publication on the reused connection"
+            );
         }
         conn.execute_batch("DROP TRIGGER reject_event;").unwrap();
         let retry = sweep(&dir, refs.clone(), false, false).unwrap();
-        assert_eq!(retry.resumed, 0);
+        assert_eq!((retry.resumed, retry.errors), (0, 0));
         for r in &refs {
             assert!(!cv_core::events::needs_ingest(
                 r,

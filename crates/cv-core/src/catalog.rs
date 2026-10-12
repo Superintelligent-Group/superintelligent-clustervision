@@ -24,8 +24,11 @@
 //! Behind the `sqlite` feature (default-on); no-op fallbacks keep the scan path working without it.
 
 use crate::ir::{Harness, SessionRef};
+
+mod writer;
 #[cfg(feature = "sqlite")]
 use std::path::{Path, PathBuf};
+pub use writer::Writer;
 
 #[cfg(feature = "sqlite")]
 mod imp {
@@ -510,13 +513,17 @@ mod imp {
             return;
         }
         let Some(conn) = open() else { return };
+        fill_count_in(&conn, r, n);
+    }
+
+    pub(crate) fn fill_count_in(conn: &Connection, r: &SessionRef, n: usize) {
         let path = r.path.to_string_lossy();
         let _ = conn.execute(
             "UPDATE sessions SET message_count=?1
              WHERE harness=?2 AND id=?3 AND path=?4 AND message_count=0",
             params![n as i64, r.harness.as_str(), r.id, path],
         );
-        crate::discover_cache::fill_count(&conn, &r.path, r.harness, &r.id, n);
+        crate::discover_cache::fill_count(conn, &r.path, r.harness, &r.id, n);
     }
 
     /// `(harness, id, path)` → the captured primary source tuple and counts a full read recorded.
@@ -604,11 +611,22 @@ mod imp {
         if !crate::source::unchanged(r, source) {
             return;
         }
-        let (a, b) = source.primary;
-        if a == 0 {
+        if source.primary.0 == 0 {
             return;
         }
         let Some(mut conn) = open() else { return };
+        note_affordances_in(&mut conn, r, source, counts);
+    }
+
+    /// The caller verified the captured source before publishing on this existing connection.
+    /// The output and its independent freshness baseline still commit in one transaction.
+    pub(crate) fn note_affordances_in(
+        conn: &mut Connection,
+        r: &SessionRef,
+        source: &crate::source::Snapshot,
+        counts: impl FnOnce() -> crate::affordance::Counts,
+    ) {
+        let (a, b) = source.primary;
         let path = r.path.to_string_lossy();
         let stored: Option<(i64, i64, String)> = conn
             .query_row(
@@ -618,7 +636,7 @@ mod imp {
             )
             .ok();
         if stored.is_some_and(|(sa, sb, text)| (sa, sb) == (a, b) && counts_of(&text).is_some())
-            && crate::source::fresh_in(&conn, "counts", r, source.primary, &source.dependencies)
+            && crate::source::fresh_in(conn, "counts", r, source.primary, &source.dependencies)
         {
             return;
         }
