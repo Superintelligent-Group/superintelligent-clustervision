@@ -43,6 +43,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, Schema, Value, INDEXED, STORED, STRING, TEXT};
 use tantivy::{Index, TantivyDocument, Term};
 
+#[derive(Clone)]
 struct Fields {
     id: Field,
     kind: Field,
@@ -1472,11 +1473,7 @@ impl<'w> ChunkSink<'w> {
     }
 
     fn record_span(&mut self, sp: &cv_core::Span) {
-        if let Some(path) = sp
-            .source
-            .as_ref()
-            .filter(|path| path.as_path() != self.primary_path)
-        {
+        if let Some(path) = sp.source.as_ref().filter(|path| path.as_path() != self.primary_path) {
             self.dependencies.record(path);
         }
     }
@@ -1912,22 +1909,13 @@ fn parse_text_query(index: &Index, f: &Fields, query: &str) -> Result<Box<dyn ta
 /// no ranking cap, snippet generation, discovery or transcript access. Chunk documents deduplicate
 /// into their session ID, with the same query syntax and conjunction default as ranked search.
 pub fn text_search_ids(dir: &Path, query: &str) -> Result<HashSet<String>> {
-    use tantivy::collector::DocSetCollector;
     let (index, f) = open_existing(dir)?;
     let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
     let parsed = parse_text_query(&index, &f, query)?;
-    let docs = searcher
-        .search(&parsed, &DocSetCollector)
-        .context("matching session IDs")?;
-    let mut ids = HashSet::new();
-    for addr in docs {
-        let doc: TantivyDocument = searcher.doc(addr).context("loading matched ID")?;
-        if let Some(id) = doc.get_first(f.id).and_then(|v| v.as_str()) {
-            ids.insert(id.to_string());
-        }
-    }
-    Ok(ids)
+    searcher
+        .search(&parsed, &crate::session_collector::SessionIds(f.id))
+        .context("matching session IDs")
 }
 
 /// Add live snippets to selected ranked hits. Only these source transcripts are read; unavailable
@@ -1975,6 +1963,16 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
 /// Rank indexed sessions using their stored previews, without reading source transcripts.
 /// Call [`enrich_text_snippets`] after filtering and truncating the displayed hits.
 pub fn text_search_indexed(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
+    text_search_indexed_filtered(dir, query, limit, crate::SearchFilter::default())
+}
+
+/// Apply session metadata filters before selecting the best ranked sessions.
+pub fn text_search_indexed_filtered(
+    dir: &Path,
+    query: &str,
+    limit: usize,
+    filter: crate::SearchFilter<'_>,
+) -> Result<Vec<Hit>> {
     if !dir.join("meta.json").exists() {
         anyhow::bail!("no full-text index at {} — run `index_all` first", dir.display());
     }
@@ -1985,36 +1983,35 @@ pub fn text_search_indexed(dir: &Path, query: &str, limit: usize) -> Result<Vec<
 
     let parsed = parse_text_query(&index, &f, query)?;
 
-    // A session is several docs (body chunks) sharing one id, so over-fetch and dedup to one row per
-    // id, keeping the best-scoring doc (TopDocs is score-ordered, so the first id occurrence wins).
-    let fetch = (limit.saturating_mul(4)).max(64);
-    let top = searcher
-        .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
-        .context("running search")?;
-
-    // Equal scores rank by session id, not by where a doc happens to sit in the segments (which
-    // depends on how, and in what order, the index was written).
-    let mut ranked = Vec::with_capacity(top.len());
-    for (score, addr) in top {
-        let doc: TantivyDocument = searcher.doc(addr).context("loading stored doc")?;
-        let id = doc
-            .get_first(f.id)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        ranked.push((score, id, doc));
+    // Collect sessions rather than chunks. Each segment's top `limit` sessions contains every
+    // possible global winner, even when one session has arbitrarily many matching chunks.
+    let mut collector = crate::session_collector::TopSessions::new(f.id, limit);
+    if filter.harness.is_some() || filter.cwd.is_some() {
+        let harness = filter.harness.map(str::to_owned);
+        let cwd = filter.cwd.map(str::to_owned);
+        let fields = f.clone();
+        let reader = searcher.clone();
+        collector.filter = Some(std::sync::Arc::new(move |id, fallback| {
+            // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
+            // describes the returned hit, falling back only for legacy body-only documents.
+            let meta = meta_doc(&reader, &fields, id);
+            let doc = meta.as_ref().unwrap_or(fallback);
+            harness
+                .as_ref()
+                .is_none_or(|wanted| doc.get_first(fields.harness).and_then(|v| v.as_str()) == Some(wanted.as_str()))
+                && cwd.as_ref().is_none_or(|needle| {
+                    doc.get_first(fields.cwd)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|value| value.contains(needle))
+                })
+        }));
     }
-    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let ranked = searcher.search(&parsed, &collector).context("running search")?;
 
-    let mut hits = Vec::with_capacity(limit);
-    let mut seen: HashSet<String> = HashSet::new();
-    for (score, id, hit_doc) in ranked {
-        if hits.len() >= limit {
-            break;
-        }
-        if !seen.insert(id.clone()) {
-            continue; // another chunk of a session we already have
-        }
+    let mut hits = Vec::with_capacity(ranked.len());
+    for candidate in ranked {
+        let (score, id) = (candidate.score, candidate.id);
+        let hit_doc: TantivyDocument = searcher.doc(candidate.addr).context("loading stored doc")?;
         // What describes the session — its current label, dates, preview — is on its meta doc; a
         // body doc carries the label it was written under.
         let is_meta = hit_doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);
@@ -2829,8 +2826,7 @@ mod tests {
         assert!(text_search_ids(&dir, "harness:codex alpha").unwrap().is_empty());
         assert!(text_search_ids(&dir, "\"").is_err());
 
-        // More matching chunks than ranked search's overfetch, and more unique sessions than its
-        // minimum fetch: membership must enumerate the actual match set without either cap.
+        // Many matching chunks and unique sessions: membership enumerates the entire match set.
         let (index, f) = open_existing(&dir).unwrap();
         let mut writer = open_writer(&index, 15_000_000).unwrap();
         for _ in 0..300 {
@@ -2853,6 +2849,116 @@ mod tests {
         drop(writer);
         std::fs::remove_dir_all(dir).ok();
         std::fs::remove_dir_all(sdir).ok();
+    }
+
+    #[test]
+    fn ranked_sessions_survive_dominant_chunks_and_cutoff_ties() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        // A hundred best-scoring chunks from one session used to fill the whole fetch window.
+        for _ in 0..100 {
+            writer.add_document(tantivy::doc!(f.id => "dominant", f.body => "needle needle needle", f.preview => "dominant preview")).unwrap();
+        }
+        // Reverse id order exercises equal-score cutoff selection beyond the former 64 docs.
+        for i in (0..100).rev() {
+            writer.add_document(tantivy::doc!(f.id => format!("other-{i:03}"), f.body => "needle padding padding padding", f.preview => "other preview")).unwrap();
+        }
+        writer.commit().unwrap();
+        // The same sessions span another segment, including a better chunk of other-099.
+        writer
+            .add_document(tantivy::doc!(f.id => "other-099", f.body => "needle needle needle needle"))
+            .unwrap();
+        writer
+            .add_document(tantivy::doc!(f.id => "dominant", f.body => "needle padding padding padding"))
+            .unwrap();
+        writer.commit().unwrap();
+        writer.delete_term(Term::from_field_text(f.id, "other-050"));
+        writer.commit().unwrap();
+        drop(writer);
+
+        // Exhaustive chunk oracle establishes both scores and best-document selection without
+        // sharing the bounded collector implementation.
+        let searcher = index.reader().unwrap().searcher();
+        let query = parse_text_query(&index, &f, "needle").unwrap();
+        let mut all: Vec<_> = searcher
+            .search(
+                &query,
+                &TopDocs::with_limit(searcher.num_docs() as usize).order_by_score(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(score, addr)| {
+                let doc: TantivyDocument = searcher.doc(addr).unwrap();
+                (score, doc.get_first(f.id).unwrap().as_str().unwrap().to_owned())
+            })
+            .collect();
+        all.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut seen = HashSet::new();
+        all.retain(|(_, id)| seen.insert(id.clone()));
+        for limit in [0, 1, 2, 3, 10, 65, 100, 500] {
+            let hits = text_search_indexed(&dir, "needle", limit).unwrap();
+            let actual: Vec<_> = hits.into_iter().map(|h| (h.score, h.id)).collect();
+            assert_eq!(
+                actual,
+                all.iter().take(limit).cloned().collect::<Vec<_>>(),
+                "limit={limit}"
+            );
+        }
+        assert_eq!(
+            text_search_indexed(&dir, "needle", 3).unwrap()[1].snippet,
+            "dominant preview"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn ranked_sessions_filter_before_cutoff_using_current_metadata() {
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        for i in 0..100 {
+            writer.add_document(tantivy::doc!(f.id => format!("unwanted-{i}"), f.body => "needle needle needle", f.harness => "claude", f.cwd => "/outside/project")).unwrap();
+        }
+        writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_BODY, f.body => "needle padding padding", f.harness => "codex", f.cwd => "/stale/path")).unwrap();
+        writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_META, f.harness => "codex", f.cwd => "/repo/mixed.Path/project", f.preview => "current preview")).unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+        for filter in [
+            crate::SearchFilter {
+                harness: Some("codex"),
+                cwd: None,
+            },
+            crate::SearchFilter {
+                harness: None,
+                cwd: Some("mixed.Path/proj"),
+            },
+            crate::SearchFilter {
+                harness: Some("codex"),
+                cwd: Some("mixed.Path/proj"),
+            },
+        ] {
+            let hits = text_search_indexed_filtered(&dir, "needle", 1, filter).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].id, "wanted");
+            assert_eq!(hits[0].snippet, "current preview");
+        }
+        for cwd in ["MIXED", "/stale/path"] {
+            assert!(text_search_indexed_filtered(
+                &dir,
+                "needle",
+                1,
+                crate::SearchFilter {
+                    harness: None,
+                    cwd: Some(cwd)
+                }
+            )
+            .unwrap()
+            .is_empty());
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

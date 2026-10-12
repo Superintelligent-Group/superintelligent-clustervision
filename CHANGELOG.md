@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Codex discovery counts logical turns consistently with parsing and streaming, excluding duplicated event echoes, injected instructions and inherited history.
+- Search fills requested session limits despite dominant matching chunks or rare harness/cwd filters; full-text score ties remain deterministic.
 
 - LM Studio partial reads keep selected text in source spans and stream regenerated variants without materializing complete turns.
 - Dataset export streams messages into bounded private staging, preserving filters and exact training formats without retaining transcript history.

@@ -17,8 +17,16 @@ pub(crate) fn cmd_search(
 
     // Semantic search: embed the query and rank stored vectors. Requires `cv index --semantic`.
     if semantic {
-        let hits = cv_search::semantic_search(None, query, limit.saturating_mul(4))
-            .context("semantic search failed (run `cv index --semantic` first?)")?;
+        let hits = cv_search::semantic_search_filtered(
+            None,
+            query,
+            limit,
+            cv_search::SearchFilter {
+                harness: want.map(|h| h.as_str()),
+                cwd: None,
+            },
+        )
+        .context("semantic search failed (run `cv index --semantic` first?)")?;
         render_search_hits(&hits, want, limit, query, "semantic", json)?;
         return Ok(());
     }
@@ -37,7 +45,15 @@ pub(crate) fn cmd_search(
     // Preferred path: the tantivy full-text index (real tokenization + BM25). Authoritative when
     // present — an empty result means "no match", not "fall back to a live scan".
     if cv_search::default_tantivy_dir().exists() {
-        match cv_search::text_search_indexed(None, query, limit.saturating_mul(4)) {
+        match cv_search::text_search_indexed_filtered(
+            None,
+            query,
+            limit,
+            cv_search::SearchFilter {
+                harness: want.map(|h| h.as_str()),
+                cwd: None,
+            },
+        ) {
             Ok(hits) => {
                 render_search_hits(&hits, want, limit, query, "index", json)?;
                 return Ok(());

@@ -28,6 +28,7 @@ mod ingest;
 pub mod semantic;
 #[cfg(feature = "semantic")]
 mod semantic_corpus;
+mod session_collector;
 
 /// A single search result, shared by full-text and semantic search.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -134,6 +135,23 @@ pub fn text_search_indexed(dir: impl Into<Option<PathBuf>>, query: &str, limit: 
     fts::text_search_indexed(&dir.into().unwrap_or_else(default_tantivy_dir), query, limit)
 }
 
+/// Filters evaluated before ranking sessions. Cwd matching is a case-sensitive substring.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SearchFilter<'a> {
+    pub harness: Option<&'a str>,
+    pub cwd: Option<&'a str>,
+}
+
+/// Rank the requested number of matching sessions, applying filters before the ranking cutoff.
+pub fn text_search_indexed_filtered(
+    dir: impl Into<Option<PathBuf>>,
+    query: &str,
+    limit: usize,
+    filter: SearchFilter<'_>,
+) -> Result<Vec<Hit>> {
+    fts::text_search_indexed_filtered(&dir.into().unwrap_or_else(default_tantivy_dir), query, limit, filter)
+}
+
 /// Generate live snippets for only the selected displayed hits.
 pub fn enrich_text_snippets(dir: impl Into<Option<PathBuf>>, query: &str, hits: &mut [Hit]) -> Result<()> {
     fts::enrich_text_snippets(&dir.into().unwrap_or_else(default_tantivy_dir), query, hits)
@@ -157,6 +175,17 @@ pub fn embed_sessions(path: impl Into<Option<PathBuf>>, refs: &[cv_core::Session
 pub fn semantic_search(path: impl Into<Option<PathBuf>>, query: &str, k: usize) -> Result<Vec<Hit>> {
     let path = path.into().unwrap_or_else(default_embeddings_path);
     semantic::semantic_search(&path, query, k)
+}
+
+/// Apply session metadata filters before the semantic ranking cutoff.
+#[cfg(feature = "semantic")]
+pub fn semantic_search_filtered(
+    path: impl Into<Option<PathBuf>>,
+    query: &str,
+    k: usize,
+    filter: SearchFilter<'_>,
+) -> Result<Vec<Hit>> {
+    semantic::semantic_search_filtered(&path.into().unwrap_or_else(default_embeddings_path), query, k, filter)
 }
 
 /// Read only the semantic projection demanded for one discovered session.

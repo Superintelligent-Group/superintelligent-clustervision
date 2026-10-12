@@ -594,6 +594,16 @@ fn encode_batch(
 /// cosine across different embedding spaces is noise, so a mismatch is an error with a re-embed
 /// hint rather than silently garbage rankings.
 pub fn semantic_search(path: &Path, query: &str, k: usize) -> Result<Vec<Hit>> {
+    semantic_search_filtered(path, query, k, crate::SearchFilter::default())
+}
+
+/// Filter stored session metadata before selecting the top semantic results.
+pub fn semantic_search_filtered(
+    path: &Path,
+    query: &str,
+    k: usize,
+    filter: crate::SearchFilter<'_>,
+) -> Result<Vec<Hit>> {
     migrate_legacy_sibling(path);
     let store = load_store(path)?;
     if store.meta.is_empty() {
@@ -629,7 +639,7 @@ pub fn semantic_search(path: &Path, query: &str, k: usize) -> Result<Vec<Hit>> {
             store.dim
         );
     }
-    Ok(rank(&store, &q, k))
+    Ok(rank_filtered(&store, &q, k, filter))
 }
 
 /// One-time upgrade: when `path` is absent but the old default `embeddings.json` exists alongside
@@ -657,8 +667,22 @@ fn migrate_legacy_sibling(path: &Path) {
 /// Brute-force cosine ranking of the store against an already-embedded query, mapping the top-`k`
 /// records to [`Hit`]s. Split from [`semantic_search`] so the record→hit projection (dates,
 /// preview-as-snippet) is testable without loading the embedding model.
+#[cfg(test)]
 fn rank(store: &Store, q: &[f32], k: usize) -> Vec<Hit> {
-    let mut scored: Vec<(f32, usize)> = (0..store.meta.len()).map(|i| (cosine(q, store.vector(i)), i)).collect();
+    rank_filtered(store, q, k, crate::SearchFilter::default())
+}
+
+fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter<'_>) -> Vec<Hit> {
+    let mut scored: Vec<(f32, usize)> = (0..store.meta.len())
+        .filter(|&i| {
+            let record = &store.meta[i];
+            filter.harness.is_none_or(|h| record.harness == h)
+                && filter
+                    .cwd
+                    .is_none_or(|needle| record.cwd.as_ref().is_some_and(|cwd| cwd.contains(needle)))
+        })
+        .map(|i| (cosine(q, store.vector(i)), i))
+        .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
     scored.truncate(k);
 
@@ -1293,6 +1317,48 @@ mod tests {
             s.meta.push(m);
         }
         s
+    }
+
+    #[test]
+    fn rank_filtered_selects_rare_metadata_before_limit() {
+        let mut records: Vec<_> = (0..100)
+            .map(|i| (meta(&format!("other-{i}"), None), vec![1.0, 0.0]))
+            .collect();
+        let mut wanted = meta("wanted", None);
+        wanted.harness = "codex".into();
+        wanted.cwd = Some("/repo/mixed.Path/project".into());
+        records.push((wanted, vec![0.5, 0.5]));
+        let store = store(records);
+        for filter in [
+            crate::SearchFilter {
+                harness: Some("codex"),
+                cwd: None,
+            },
+            crate::SearchFilter {
+                harness: None,
+                cwd: Some("mixed.Path/proj"),
+            },
+            crate::SearchFilter {
+                harness: Some("codex"),
+                cwd: Some("mixed.Path/proj"),
+            },
+        ] {
+            let hits = rank_filtered(&store, &[1.0, 0.0], 1, filter);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].id, "wanted");
+            assert_eq!(hits[0].snippet, "preview-wanted");
+        }
+        assert!(rank_filtered(
+            &store,
+            &[1.0, 0.0],
+            1,
+            crate::SearchFilter {
+                harness: None,
+                cwd: Some("MIXED")
+            }
+        )
+        .is_empty());
+        assert!(rank_filtered(&store, &[1.0, 0.0], 0, crate::SearchFilter::default()).is_empty());
     }
 
     /// Dates stored on a record surface on its hit; records embedded without dates stay `None`.

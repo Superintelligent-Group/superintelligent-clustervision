@@ -464,11 +464,16 @@ fn search(query: &str) -> Reply {
         .get("semantic")
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
-    // Same fetch-then-filter shape as `cv search`: ask the index for 4× the wanted rows so the
-    // harness filter has something to cut into, then take `limit`.
-    let fetch = limit.saturating_mul(4);
     let (mut hits, source, mut note) = if semantic {
-        match cv_search::semantic_search(None, &q, fetch) {
+        match cv_search::semantic_search_filtered(
+            None,
+            &q,
+            limit,
+            cv_search::SearchFilter {
+                harness: want.map(|h| h.as_str()),
+                cwd: cwd.as_deref(),
+            },
+        ) {
             Ok(hits) => (hits, "semantic", None),
             Err(e) => {
                 // A live scan cannot stand in for semantic ranking, so this is an error, exactly
@@ -483,7 +488,15 @@ fn search(query: &str) -> Reply {
     } else if cv_search::default_tantivy_dir().exists() {
         // The index is authoritative when present — an empty result means "no match", never
         // "fall back to a live scan".
-        match cv_search::text_search_indexed(None, &q, fetch) {
+        match cv_search::text_search_indexed_filtered(
+            None,
+            &q,
+            limit,
+            cv_search::SearchFilter {
+                harness: want.map(|h| h.as_str()),
+                cwd: cwd.as_deref(),
+            },
+        ) {
             Ok(hits) => (hits, "index", None),
             Err(e) => (
                 Vec::new(),
