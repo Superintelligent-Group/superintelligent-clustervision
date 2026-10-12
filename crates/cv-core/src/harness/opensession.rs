@@ -90,21 +90,48 @@ impl Adapter for OpenSession {
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        let mut out: Vec<SessionRef> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for path in document_files() {
-            if let Some(r) = doc_ref(&path) {
-                if seen.insert(r.id.clone()) {
-                    out.push(r);
-                }
-            }
-        }
-        Ok(out)
+        Ok(discover_documents(document_files()))
     }
 
     fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::replay(read_document(&r.path)?, sink)
     }
+}
+
+impl OpenSession {
+    /// Discover only the supplied export files/directories, without consulting configuration.
+    pub fn with_roots(roots: Vec<PathBuf>) -> impl Adapter {
+        RootedOpenSession { roots }
+    }
+}
+struct RootedOpenSession {
+    roots: Vec<PathBuf>,
+}
+impl Adapter for RootedOpenSession {
+    fn harness(&self) -> Harness {
+        Harness::OpenSession
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
+    }
+    fn discover(&self) -> Result<Vec<SessionRef>> {
+        Ok(discover_documents(super::export::files_under(
+            self.roots.clone(),
+            is_document_file,
+        )))
+    }
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        OpenSession.stream(r, opts, sink)
+    }
+}
+
+fn discover_documents(paths: Vec<PathBuf>) -> Vec<SessionRef> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter_map(|path| doc_ref(&path))
+        .filter(|r| seen.insert(r.id.clone()))
+        .collect()
 }
 
 // ── Discovery ─────────────────────────────────────────────────────────────────

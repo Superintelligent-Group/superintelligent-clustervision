@@ -74,6 +74,46 @@ impl Adapter for ClaudeExport {
     }
 }
 
+impl ChatGptExport {
+    /// Discover only supplied export files/directories, without consulting configuration.
+    pub fn with_roots(roots: Vec<PathBuf>) -> impl Adapter {
+        RootedExport {
+            kind: Kind::ChatGpt,
+            roots,
+        }
+    }
+}
+impl ClaudeExport {
+    /// Discover only supplied export files/directories, without consulting configuration.
+    pub fn with_roots(roots: Vec<PathBuf>) -> impl Adapter {
+        RootedExport {
+            kind: Kind::Claude,
+            roots,
+        }
+    }
+}
+struct RootedExport {
+    kind: Kind,
+    roots: Vec<PathBuf>,
+}
+impl Adapter for RootedExport {
+    fn harness(&self) -> Harness {
+        self.kind.harness()
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
+    }
+    fn discover(&self) -> Result<Vec<SessionRef>> {
+        Ok(discover_kind_in(
+            self.kind,
+            files_under(self.roots.clone(), is_conversations_file),
+        ))
+    }
+    fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        crate::stream::replay(parse_ref(self.kind, r)?, sink)
+    }
+}
+
 // ── Discovery ─────────────────────────────────────────────────────────────────
 
 /// Where to look for export archives — the registered sources from the config file
@@ -150,9 +190,13 @@ fn read_array(path: &Path) -> Result<(String, Vec<Box<RawValue>>)> {
 /// Dedups by conversation id (keeping the first) — overlapping exports (e.g. a loose
 /// `conversations-000.json` plus an extracted full archive) commonly repeat the same conversation.
 fn discover_kind(kind: Kind) -> Vec<SessionRef> {
+    discover_kind_in(kind, export_files())
+}
+
+fn discover_kind_in(kind: Kind, paths: Vec<PathBuf>) -> Vec<SessionRef> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for path in export_files() {
+    for path in paths {
         let Ok((_text, arr)) = read_array(&path) else { continue };
         let is_kind = arr
             .first()
