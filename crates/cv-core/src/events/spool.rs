@@ -235,10 +235,9 @@ impl SpoolingSink {
         &self.inner
     }
 
-    pub fn into_spool(self) -> Result<EventSpool> {
-        match self.error {
+    pub fn into_spool(mut self) -> Result<EventSpool> {
+        match self.take_error() {
             Some(error) => Err(error),
-            None if self.failed => anyhow::bail!("event spool has already failed"),
             None => Ok(self.spool),
         }
     }
@@ -266,7 +265,11 @@ impl MessageSink for SpoolingSink {
         if self.failed || self.error.is_some() {
             return Flow::Stop;
         }
-        self.inner.message(message);
+        if let Err(error) = self.inner.try_message(message) {
+            self.error = Some(error);
+            self.failed = true;
+            return Flow::Stop;
+        }
         for event in self.inner.events.drain(..) {
             if let Err(error) = self.spool.push(event) {
                 self.error = Some(error);
