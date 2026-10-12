@@ -536,3 +536,6 @@ fn ambiguous<'a>(id: &str, hits: impl Iterator<Item = &'a SessionRef>) -> anyhow
         ids.join(", ")
     )
 }
+
+/// Bounded text projections for API and search consumers.
+pub mod projection;
