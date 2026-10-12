@@ -290,8 +290,17 @@ baseline is 228,994,263 B versus 861,238,323 B in an otherwise identical unbound
 peak charged document capacity is 65,786,618 B versus 800,037,416 B. Writer arenas and extraction
 state coexist with those reservations, so this is not a 64 MiB total-process bound. The single
 samples exclude mmap, C/SQLite, stacks and allocator overhead; they make no throughput claim.
-Scoped fatal-writer, waiter wakeup, drop/commit release and unchanged-sweep checks pass. Exact
-plain/escaped canonical-body composition remains a separate pending campaign.
+Scoped fatal-writer, waiter wakeup, drop/commit release and unchanged-sweep checks pass. A
+separate composed sweep now verifies four 25/100 MB plain/escaped fixtures, each exposed as four
+logical giant sessions plus 32 small sessions (144 logical sessions total). Independent canonical
+body bytes/hashes, per-session search hits, events/count freshness, actual tokenization, commit
+and compact, and a strict unchanged second sweep all match; source hashes are unchanged. The
+production chunk setting is 4 MiB with an 8 MiB body buffer cap, while the largest charged
+compact document is approximately 16 MiB: 4 MiB is not an actual document capacity bound. In
+plain25/escaped25/plain100/escaped100 order, peak additional live Rust heap is
+201.76/163.03/218.39/162.87 MiB and charged queue capacity is 63.69/48.00/62.74/48.00 MiB,
+all below the 64 MiB admission budget. These separate samples include debug instrumentation and
+body hashing; they establish composition and allocation behavior, not CPU or wall throughput.
 
 Focused SQLite scale evidence removes payload retention without promising constant navigation
 state. Devin's compact forest projection reduces requested Rust heap from 8.22/32.52 MB to
@@ -385,7 +394,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Other format-safe continuation; full-compatible span extras and archive prefix/output retention costs.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [x] Byte-capacity document admission held through Tantivy consumption, including release/error behavior and mixed-sweep negative control.
-- [ ] Composed giant escaped/body index parity and heap proof; transaction batching, final Tantivy merge/query costs.
+- [x] Composed giant plain/escaped canonical index-body parity and live-heap proof at production chunk settings.
+- [ ] Transaction batching, final Tantivy merge/query costs and remaining search source activation.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
