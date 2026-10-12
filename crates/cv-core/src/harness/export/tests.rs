@@ -243,7 +243,7 @@ fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
                 {"uuid":"u","sender":"human","content":[{"type":"text","text":body}]},
                 {"uuid":"a","parent_message_uuid":"u","sender":"assistant","content":[
                     {"type":"thinking","thinking":"","text":body},
-                    {"type":"tool_use","id":"t","name":"read","input":{"a":1}},
+                    {"type":"tool_use","id":"t","name":"read","input":{"a":1,"payload":body}},
                     {"type":"tool_result","tool_use_id":"t","text":body},
                     {"type":"image","source":{"type":"base64","media_type":"image/png","data":body}},
                     {"type":"document","title":"a","source":{"type":"file","file_id":"file1"}}
@@ -254,7 +254,7 @@ fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
             Kind::ChatGpt,
             json!({"conversation_id":"chatgpt", "mapping":{
                 "0":{"id":"u","parent":null,"message":{"author":{"role":"user"},"content":{"parts":[body]}}},
-                "1":{"id":"t","parent":"0","message":{"author":{"role":"assistant"},"recipient":"python","content":{"text":"print(1)"}}},
+                "1":{"id":"t","parent":"0","message":{"author":{"role":"assistant"},"recipient":"python","content":{"text":body}}},
                 "2":{"id":"r","parent":"1","message":{"author":{"role":"tool","name":"python"},"content":{"text":body}}},
                 "3":{"id":"a","parent":"2","message":{"author":{"role":"assistant"},"content":{"parts":["","two",{"asset_pointer":"file-service://a"}]}}},
                 "4":{"id":"s","parent":"3","message":{"author":{"role":"system"},"content":{"text":"context"}}}
@@ -278,6 +278,9 @@ fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
             let mut sink = CollectSink::default();
             let mut actual = native::stream(kind, &expected_ref, &opts, &mut sink).unwrap();
             actual.messages = sink.messages;
+            assert_eq!(actual.messages.iter().flat_map(|m| &m.content).any(|block| {
+                matches!(block, Block::ToolUse { input: crate::json::Json::Source(_), .. })
+            }), opts.spans);
             actual.materialize().unwrap();
             assert_eq!(
                 serde_json::to_string(&actual).unwrap(),
