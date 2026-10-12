@@ -655,3 +655,21 @@ Cursor's installed IDE uses numeric modes; the adapter now preserves both the in
 and original value, including unknown enums. A genuine newer CLI capture exposed a separate
 blobs/meta store. Native capture and support are in progress; this is distinct from the IDE
 SQLite path and is not covered by the older corpus.
+### Encoded argument backing (2026-10-12, intermediate)
+
+Continue's lazy producer now decodes JSON-encoded argument strings above 4 KiB into private
+ByteSource backing and strictly validates the decoded object/array independently. Partial,
+invalid and scalar arguments retain their original string; blank arguments remain `{}`. Child
+ranges and dataset transport retain backing ownership and the original captured transcript
+identity. Demands check original provenance before and after callbacks, including failing callbacks.
+Private backing is separately identity checked, mode 0600, closed between demands, and removed
+when its last owner drops; ordinary ByteStage spills remain unlinked.
+
+Native allocation runs at 16/64 MiB plain arguments show discard and doctor fixed at 198,854
+additional requested bytes; staged ChatML output stays 2,298,501 bytes. Three thousand 8 KiB
+arguments pass actual dataset staging with FD limit 64: 1,307,768 bytes peak versus 5,214,256
+for collection, with identical 24,804,015 output bytes/SHA256. Source/decoded registry metadata
+and file count still grow per argument: this intermediate implementation does not bound arbitrary
+history retention. A shared decoded arena per captured original source is the next implementation
+step. These are debug allocation measurements, not clean throughput claims. Evidence is private
+under `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence`.

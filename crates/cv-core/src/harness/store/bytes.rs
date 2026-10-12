@@ -1,8 +1,32 @@
 //! Immutable operation-owned bytes, bounded in memory and spilled privately when necessary.
 pub(crate) const MEMORY_LIMIT: usize = 1024 * 1024;
+#[derive(Debug)]
 pub(crate) struct Spill {
     file: Option<std::fs::File>,
     path: std::path::PathBuf,
+}
+impl Spill {
+    fn create(unlink: bool) -> std::io::Result<Self> {
+        let path = std::env::temp_dir().join(format!("cv-byte-source-{}", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let spill = Self {
+            file: Some(options.open(&path)?),
+            path,
+        };
+        #[cfg(unix)]
+        if unlink {
+            std::fs::remove_file(&spill.path)?;
+        }
+        #[cfg(not(unix))]
+        let _ = unlink;
+        Ok(spill)
+    }
 }
 impl Drop for Spill {
     fn drop(&mut self) {
@@ -10,12 +34,18 @@ impl Drop for Spill {
         let _ = std::fs::remove_file(&self.path);
     }
 }
+#[derive(Debug)]
 pub struct ByteSource {
     bytes: Bytes,
 }
+#[derive(Debug)]
 enum Bytes {
     Memory(Vec<u8>),
     File(Spill),
+    Closed {
+        spill: Spill,
+        captured: crate::json::JsonSource,
+    },
 }
 
 /// Writable until finish, then immutable. Partial/failed operations own and remove their spill.
@@ -27,18 +57,7 @@ pub struct ByteStage {
 impl std::io::Write for ByteStage {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if self.spill.is_none() && self.memory.len().saturating_add(bytes.len()) > MEMORY_LIMIT {
-            let path = std::env::temp_dir().join(format!("cv-byte-source-{}", uuid::Uuid::new_v4()));
-            let mut options = std::fs::OpenOptions::new();
-            options.read(true).write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let file = options.open(&path)?;
-            self.spill = Some(Spill { file: Some(file), path });
-            #[cfg(unix)]
-            std::fs::remove_file(&self.spill.as_ref().unwrap().path)?;
+            self.spill = Some(Spill::create(true)?);
             self.spill
                 .as_mut()
                 .unwrap()
@@ -78,6 +97,23 @@ impl ByteStage {
     pub fn new() -> Self {
         Self::default()
     }
+    pub(crate) fn disk() -> std::io::Result<Self> {
+        Ok(Self {
+            memory: Vec::new(),
+            spill: Some(Spill::create(false)?),
+        })
+    }
+    /// Retain private backing by path so many decoded documents do not retain one FD each.
+    pub(crate) fn finish_closed(mut self) -> std::io::Result<ByteSource> {
+        use std::io::Write;
+        self.flush()?;
+        let mut spill = self.spill.take().expect("disk stage");
+        let captured = crate::json::JsonSource::capture(&spill.path).map_err(std::io::Error::other)?;
+        spill.file.take();
+        Ok(ByteSource {
+            bytes: Bytes::Closed { spill, captured },
+        })
+    }
     pub fn finish(mut self) -> std::io::Result<ByteSource> {
         use std::io::Write;
         self.flush()?;
@@ -90,6 +126,36 @@ impl ByteStage {
     }
 }
 impl ByteSource {
+    pub(crate) fn len(&self) -> std::io::Result<u64> {
+        match &self.bytes {
+            Bytes::Memory(bytes) => Ok(bytes.len() as u64),
+            Bytes::File(spill) => Ok(spill.file.as_ref().unwrap().metadata()?.len()),
+            Bytes::Closed { captured, .. } => Ok(captured.len()),
+        }
+    }
+
+    pub(crate) fn check(&self) -> anyhow::Result<()> {
+        if let Bytes::Closed { captured, .. } = &self.bytes {
+            captured.check()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn file(&self) -> std::io::Result<std::fs::File> {
+        match &self.bytes {
+            Bytes::File(spill) => spill.file.as_ref().unwrap().try_clone(),
+            Bytes::Closed { spill, captured } => {
+                captured.check().map_err(std::io::Error::other)?;
+                let file = std::fs::File::open(&spill.path)?;
+                captured
+                    .check_metadata(file.metadata()?)
+                    .map_err(std::io::Error::other)?;
+                Ok(file)
+            }
+            Bytes::Memory(_) => Err(std::io::Error::other("expected disk-backed bytes")),
+        }
+    }
+
     pub(crate) fn read(mut input: impl std::io::Read) -> std::io::Result<Self> {
         use std::io::Write;
         let mut stage = ByteStage::new();
@@ -107,6 +173,7 @@ impl ByteSource {
     pub(crate) fn with_bytes<T>(&self, f: impl FnOnce(&[u8]) -> T) -> std::io::Result<Option<T>> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(Some(f(bytes))),
+            Bytes::Closed { .. } => Ok(None),
             Bytes::File(spill) => {
                 #[cfg(feature = "mmap")]
                 {
@@ -129,6 +196,7 @@ impl ByteSource {
     pub fn reader(&self) -> std::io::Result<Box<dyn std::io::Read + '_>> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(Box::new(std::io::Cursor::new(bytes))),
+            Bytes::Closed { .. } => Ok(Box::new(std::io::BufReader::new(self.file()?))),
             Bytes::File(spill) => Ok(Box::new(std::io::BufReader::new(FileReader {
                 file: spill.file.as_ref().unwrap(),
                 position: 0,
@@ -143,7 +211,7 @@ impl ByteSource {
                 out.write_all(bytes)?;
                 Ok(bytes.len() as u64)
             }
-            Bytes::File(_) => std::io::copy(&mut self.reader()?, out),
+            Bytes::File(_) | Bytes::Closed { .. } => std::io::copy(&mut self.reader()?, out),
         }
     }
 }
@@ -177,6 +245,55 @@ impl std::io::Read for FileReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closed_backing_keeps_private_bytes_without_retaining_a_descriptor() {
+        use std::io::{Read, Write};
+        let mut stage = ByteStage::disk().unwrap();
+        stage.write_all(b"owned bytes").unwrap();
+        let source = stage.finish_closed().unwrap();
+        let Bytes::Closed { spill, .. } = &source.bytes else {
+            panic!("expected closed backing")
+        };
+        assert!(spill.file.is_none());
+        let path = spill.path.clone();
+        let mut output = String::new();
+        source.reader().unwrap().read_to_string(&mut output).unwrap();
+        assert_eq!(output, "owned bytes");
+        std::fs::write(&path, b"changed").unwrap();
+        assert!(source.reader().is_err());
+        drop(source);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn closed_backing_rejects_replacement_and_partial_stages_remove_their_files() {
+        use std::io::Write;
+        let mut stage = ByteStage::disk().unwrap();
+        stage.write_all(b"owned bytes").unwrap();
+        let source = stage.finish_closed().unwrap();
+        let Bytes::Closed { spill, .. } = &source.bytes else {
+            unreachable!()
+        };
+        let path = spill.path.clone();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, b"other bytes").unwrap();
+        std::fs::File::open(&replacement)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        #[cfg(unix)]
+        assert!(source.file().is_err());
+        drop(source);
+        assert!(!path.exists());
+        let mut stage = ByteStage::disk().unwrap();
+        let path = stage.spill.as_ref().unwrap().path.clone();
+        stage.write_all(b"partial bytes").unwrap();
+        drop(stage); // Producer or writer errors drop incomplete output through this same owner.
+        assert!(!path.exists());
+    }
+
     #[test]
     fn writer_capacity_and_independent_readers_preserve_bytes() {
         use std::io::{Read, Write};

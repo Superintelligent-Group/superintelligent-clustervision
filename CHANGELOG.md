@@ -13,6 +13,7 @@
 
 - Pretty JSON scans string boundaries without interpreting every escape, preserving exact formatted output.
 - JSON show and export stream selected payloads through bounded staging, preserving exact documents and publishing only after successful source reads.
+- Continue reads giant JSON-encoded tool arguments with bounded decoding and preserves transcript identity through staged datasets.
 
 - LM Studio partial reads keep selected text in source spans and stream regenerated variants without materializing complete turns.
 - Dataset export streams messages into bounded private staging, preserving filters and exact training formats without retaining transcript history.

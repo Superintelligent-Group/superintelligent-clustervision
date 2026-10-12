@@ -795,7 +795,7 @@ mod tests {
             {"message":{"role":"user","content":[{"text":""},{"type":"ignored","text":body},{"type":"imageUrl","imageUrl":{"url":"file:///image"}}]},
                 "contextItems":[{"name":"a","description":"file","content":body,"uri":{"type":"file","value":"a.rs"}}]},
             {"message":{"role":"assistant","content":body,
-                "toolCalls":[{"id":"a","function":{"name":"read","arguments":{"payload":body}}},{"id":"b","function":{"name":"edit","arguments":"{\"x\":1}"}}],
+                "toolCalls":[{"id":"a","function":{"name":"read","arguments":{"payload":body}}},{"id":"b","function":{"name":"edit","arguments":serde_json::to_string(&json!({"payload":body})).unwrap()}}],
                 "usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":40,"ignored":body},"model":"m","cost_cents":2,"ignored":body}},
                 "promptLogs":[{"modelTitle":null,"modelProvider":"suppressed","ignored":body}],
                 "toolCallStates":[{"toolCallId":"a","status":"errored","toolCall":{"function":{"name":"read"}},"output":[{"content":body,"ignored":body}]}]},

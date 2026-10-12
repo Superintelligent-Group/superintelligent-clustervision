@@ -3,7 +3,7 @@
 //! Generic Serde serialization always emits the actual value, resolving a selected source value
 //! when necessary. Consumers that only need projections or compact serialized length can use
 //! [`Json::with_view`], [`Json::canonical_len`] and [`Json::write_canonical`] without constructing
-//! a descendant value tree. This module does not yet change the IR or enable lazy producers.
+//! a descendant value tree. Encoded argument documents use operation-owned decoded backing.
 //!
 //! Native source views borrow mapped bytes. Without `mmap`, positioned reads retain only bounded
 //! input windows shared by all projections in an operation. The canonical walker bounds decoded
@@ -49,6 +49,7 @@ pub struct JsonRange {
     source: JsonSource,
     offset: u64,
     len: u64,
+    decoded: Option<Arc<crate::harness::store::bytes::ByteSource>>,
 }
 
 /// Distinguish invalid content (archives historically appear empty) from unavailable or changed
@@ -122,7 +123,6 @@ impl JsonSource {
     pub(crate) fn path(&self) -> &Path {
         &self.0.path
     }
-    #[cfg(any(not(feature = "mmap"), test))]
     pub(crate) fn len(&self) -> u64 {
         self.0.identity.len
     }
@@ -144,6 +144,7 @@ impl JsonSource {
             source: self.clone(),
             offset,
             len,
+            decoded: None,
         })
     }
     pub(crate) fn read_document<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
@@ -180,9 +181,34 @@ impl JsonSource {
     }
 }
 impl JsonRange {
+    fn check(&self) -> Result<()> {
+        self.source.check()?;
+        if let Some(bytes) = &self.decoded {
+            bytes.check()?;
+        }
+        Ok(())
+    }
+
+    fn child(&self, offset: u64, len: u64) -> Result<Self> {
+        anyhow::ensure!(
+            len != 0
+                && offset >= self.offset
+                && offset.checked_add(len).is_some_and(|end| end <= self.offset + self.len),
+            "JSON child out of bounds"
+        );
+        Ok(Self {
+            source: self.source.clone(),
+            offset,
+            len,
+            decoded: self.decoded.clone(),
+        })
+    }
+
+    /// Original transcript provenance; decoded argument ranges refer to private backing bytes.
     pub fn path(&self) -> &Path {
         &self.source.0.path
     }
+    /// Offset in the backing document (which may be a decoded argument document).
     pub fn offset(&self) -> u64 {
         self.offset
     }
@@ -194,11 +220,16 @@ impl JsonRange {
     }
     #[cfg(feature = "mmap")]
     fn with_raw<T>(&self, f: impl for<'a> FnOnce(Raw<'a>) -> Result<T>) -> Result<T> {
-        self.source.check()?;
-        let file = std::fs::File::open(self.path())?;
-        self.source.check_metadata(file.metadata()?)?;
+        self.check()?;
+        let file = match &self.decoded {
+            Some(bytes) => bytes.file()?,
+            None => std::fs::File::open(self.path())?,
+        };
+        if self.decoded.is_none() {
+            self.source.check_metadata(file.metadata()?)?;
+        }
         let source = Source::map_file(&file)?;
-        self.source.check()?;
+        self.check()?;
         // Even validated ranges keep the safe UTF-8 check on newly mapped/read external bytes.
         // No unchecked string cast is justified by metadata identity.
         let result = source
@@ -207,8 +238,10 @@ impl JsonRange {
             .and_then(f);
         // Check even after callback failure: an intentional staged-output cap must not hide
         // a source mutation. Source failure takes precedence over the callback error.
-        self.source.check_metadata(file.metadata()?)?;
-        self.source.check()?;
+        if self.decoded.is_none() {
+            self.source.check_metadata(file.metadata()?)?;
+        }
+        self.check()?;
         result
     }
     fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
@@ -229,10 +262,8 @@ impl JsonRange {
                 } else {
                     let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).map_err(|_| InvalidJson)?;
                     let checked = Raw::new(syntax.get(), &index);
-                    if matches!(validation, Validation::Value) {
-                        if !document::accepts_value(checked) {
-                            return Err(InvalidJson.into());
-                        }
+                    if matches!(validation, Validation::Value) && !document::accepts_value(checked) {
+                        return Err(InvalidJson.into());
                     }
                     checked
                 };
@@ -241,7 +272,10 @@ impl JsonRange {
         }
         #[cfg(not(feature = "mmap"))]
         {
-            let source = RangeSource::from_captured(self.source.clone())?;
+            let source = match &self.decoded {
+                Some(bytes) => RangeSource::decoded(self.source.clone(), bytes)?,
+                None => RangeSource::from_captured(self.source.clone())?,
+            };
             let requested = Range {
                 offset: self.offset,
                 len: self.len,
@@ -268,6 +302,7 @@ impl JsonRange {
                 })))
             })();
             source.check_identity()?;
+            self.check()?;
             result
         }
     }
@@ -519,7 +554,7 @@ impl<'a> JsonView<'a> {
                 if raw.first() != Some(&b'"') {
                     return Ok(None);
                 }
-                if spans && raw.len() - 2 > crate::lazy::INLINE_MAX {
+                if spans && source.range.decoded.is_none() && raw.len() - 2 > crate::lazy::INLINE_MAX {
                     let (offset, len) = self.source_range()?.context("JSON text source")?;
                     Ok(Some(crate::lazy::Text::Span(crate::lazy::Span {
                         source: None,
@@ -532,7 +567,9 @@ impl<'a> JsonView<'a> {
                 }
             }
             #[cfg(not(feature = "mmap"))]
-            View::Portable(source) => source.source.text(source.value, spans),
+            View::Portable(source) => source
+                .source
+                .text(source.value, spans && source.owner.decoded.is_none()),
         }
     }
     pub(crate) fn argument(self, spans: bool) -> Result<Json> {
@@ -544,6 +581,53 @@ impl<'a> JsonView<'a> {
             self.to_json()
         } else {
             Ok(Json::Owned(self.resolve()?.into_owned()))
+        }
+    }
+    /// Decode OpenAI's encoded argument document into a private bounded backing. Invalid,
+    /// partial and scalar arguments retain the original string representation.
+    pub(crate) fn encoded_argument(self) -> Result<Json> {
+        if !self
+            .source_range()?
+            .is_some_and(|(_, len)| len > crate::lazy::INLINE_MAX as u64)
+        {
+            return Ok(crate::harness::wire::openai::parse_arguments(Some(self.resolve()?.as_ref())).into());
+        }
+        let original = self.to_json()?;
+        let Json::Source(range) = &original else {
+            return Ok(crate::harness::wire::openai::parse_arguments(Some(self.resolve()?.as_ref())).into());
+        };
+        let mut stage = crate::harness::store::bytes::ByteStage::disk()?;
+        let mut blank = true;
+        self.for_each_str_chunk(|part| {
+            blank &= part.trim().is_empty();
+            stage.write_all(part.as_bytes())?;
+            Ok(())
+        })?;
+        if blank {
+            return Ok(serde_json::json!({}).into());
+        }
+        let bytes = Arc::new(stage.finish_closed()?);
+        let len = bytes.len()?;
+        if len == 0 {
+            return Ok(serde_json::json!({}).into());
+        }
+        let candidate = JsonRange {
+            source: range.source.clone(),
+            offset: 0,
+            len,
+            decoded: Some(bytes),
+        };
+        match candidate.with_validation(Validation::Value, |view| {
+            if view.is_object()? || view.is_array()? {
+                Ok(Some(view.to_json()?))
+            } else {
+                Ok(None)
+            }
+        }) {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => Ok(original),
+            Err(error) if error.downcast_ref::<InvalidJson>().is_some() => Ok(original),
+            Err(error) => Err(error),
         }
     }
     /// A nonobject or missing field is None; backing-source failures occur before this view exists.
@@ -731,7 +815,7 @@ impl<'a> JsonView<'a> {
             View::Owned(value) => Ok(Json::Owned(value.clone())),
             #[cfg(not(feature = "mmap"))]
             View::Portable(source) => Ok(Json::Source(Arc::new(
-                source.owner.source.range(source.value.offset, source.value.len)?,
+                source.owner.child(source.value.offset, source.value.len)?,
             ))),
             #[cfg(feature = "mmap")]
             View::Source(source) => {
@@ -746,7 +830,7 @@ impl<'a> JsonView<'a> {
                 // The containing scoped operation performs the final identity check; child
                 // descriptors do not need another stat for each field within that operation.
                 Ok(Json::Source(Arc::new(
-                    source.range.source.range(offset, source.raw.get().len() as u64)?,
+                    source.range.child(offset, source.raw.get().len() as u64)?,
                 )))
             }
         }
@@ -1490,6 +1574,53 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("JSON source changed"));
+    }
+
+    #[test]
+    fn encoded_arguments_keep_backing_children_transport_and_original_identity() {
+        let inner = format!(r#" {{"z":"{}","a":1,"z":"last"}} "#, "\\n".repeat(800_000));
+        let encoded = serde_json::to_vec(&inner).unwrap();
+        let fixture = Fixture::new(&encoded);
+        let value = fixture.value().with_view(|view| view.encoded_argument()).unwrap();
+        assert!(canonical(&value) == serde_json::to_vec(&serde_json::from_str::<Value>(&inner).unwrap()).unwrap());
+        let child = value.select("z").unwrap().unwrap();
+        let mut transported = value.clone();
+        let mut registry = SourceRegistry::default();
+        let descriptor = registry.detach(&mut transported).unwrap();
+        drop(value);
+        let restored = registry.restore(descriptor).unwrap();
+        assert_eq!(canonical(&restored), br#"{"z":"last","a":1}"#);
+        assert_eq!(canonical(&child), br#""last""#);
+        let error = restored
+            .with_view::<()>(|_| {
+                std::fs::File::open(&fixture.path)?.set_modified(SystemTime::UNIX_EPOCH)?;
+                anyhow::bail!("intentional callback stop")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("JSON source changed"));
+        std::fs::remove_file(&fixture.path).unwrap();
+        assert!(restored.resolve().is_err());
+        assert!(child.canonical_len().is_err());
+    }
+
+    #[test]
+    fn encoded_arguments_preserve_invalid_scalar_blank_and_strict_value_semantics() {
+        for inner in [
+            format!("{{\"x\":\"{}\"}}", "x".repeat(9000)),
+            format!("{}0{}{}", "[".repeat(130), "]".repeat(130), " ".repeat(9000)),
+            format!("{{\"x\":\"\\ud800\",\"p\":\"{}\"}}", "x".repeat(9000)),
+            format!("{{\"x\":1e999,\"p\":\"{}\"}}", "x".repeat(9000)),
+            format!("42{}", " ".repeat(9000)),
+            " ".repeat(9000),
+            format!("{{\"x\":\"{}", "x".repeat(9000)),
+        ] {
+            let fixture = Fixture::new(&serde_json::to_vec(&inner).unwrap());
+            let value = fixture.value().with_view(|view| view.encoded_argument()).unwrap();
+            assert_eq!(
+                canonical(&value),
+                serde_json::to_vec(&crate::harness::wire::openai::structured_arguments(&inner)).unwrap()
+            );
+        }
     }
 
     struct FailingWriter {

@@ -10,14 +10,18 @@ pub(crate) struct SourceDescriptor {
     source: usize,
     offset: u64,
     len: u64,
+    decoded: Option<usize>,
 }
 
-/// Structural state scales with distinct captured source paths/identities, not record count.
+/// Structural state scales with distinct captured source identities and decoded argument documents.
+/// Decoded backing is retained until the operation ends so restoration never outlives its bytes.
 /// Different captured identities of a single path are deliberately separate accepted sources.
 #[derive(Default)]
 pub(crate) struct SourceRegistry {
     ids: HashMap<JsonSource, usize>,
     sources: Vec<JsonSource>,
+    decoded_ids: HashMap<usize, usize>,
+    decoded: Vec<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
 }
 impl SourceRegistry {
     /// Replace a source value with an explicit transport placeholder without resolving its bytes.
@@ -29,10 +33,19 @@ impl SourceRegistry {
             self.sources.push(range.source.clone());
             id
         });
+        let decoded = range.decoded.as_ref().map(|bytes| {
+            let key = std::sync::Arc::as_ptr(bytes) as usize;
+            *self.decoded_ids.entry(key).or_insert_with(|| {
+                let id = self.decoded.len();
+                self.decoded.push(bytes.clone());
+                id
+            })
+        });
         let descriptor = SourceDescriptor {
             source,
             offset: range.offset,
             len: range.len,
+            decoded,
         };
         *value = Json::Owned(serde_json::Value::Null);
         Some(descriptor)
@@ -45,9 +58,28 @@ impl SourceRegistry {
             .sources
             .get(descriptor.source)
             .context("unknown staged JSON source")?;
-        Ok(Json::Source(std::sync::Arc::new(
-            source.range(descriptor.offset, descriptor.len)?,
-        )))
+        let range = match descriptor.decoded {
+            None => source.range(descriptor.offset, descriptor.len)?,
+            Some(id) => {
+                let bytes = self.decoded.get(id).context("unknown staged decoded JSON")?.clone();
+                let len = bytes.len()?;
+                anyhow::ensure!(
+                    descriptor.len != 0
+                        && descriptor
+                            .offset
+                            .checked_add(descriptor.len)
+                            .is_some_and(|end| end <= len),
+                    "staged decoded JSON out of bounds"
+                );
+                super::JsonRange {
+                    source: source.clone(),
+                    offset: descriptor.offset,
+                    len: descriptor.len,
+                    decoded: Some(bytes),
+                }
+            }
+        };
+        Ok(Json::Source(std::sync::Arc::new(range)))
     }
 }
 

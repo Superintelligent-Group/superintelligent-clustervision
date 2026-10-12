@@ -27,6 +27,7 @@ impl Range {
 pub(crate) struct RangeSource {
     file: File,
     captured: crate::json::JsonSource,
+    decoded_len: Option<u64>,
 }
 impl RangeSource {
     #[cfg(test)]
@@ -35,18 +36,39 @@ impl RangeSource {
     }
     pub fn from_captured(captured: crate::json::JsonSource) -> Result<Self> {
         let file = File::open(captured.path()).with_context(|| format!("opening {}", captured.path().display()))?;
-        let source = Self { file, captured };
+        let source = Self {
+            file,
+            captured,
+            decoded_len: None,
+        };
+        source.check_identity()?;
+        Ok(source)
+    }
+    #[cfg(not(feature = "mmap"))]
+    pub(crate) fn decoded(
+        captured: crate::json::JsonSource,
+        bytes: &crate::harness::store::bytes::ByteSource,
+    ) -> Result<Self> {
+        let file = bytes.file()?;
+        let decoded_len = Some(file.metadata()?.len());
+        let source = Self {
+            file,
+            captured,
+            decoded_len,
+        };
         source.check_identity()?;
         Ok(source)
     }
     pub fn range(&self) -> Range {
         Range {
             offset: 0,
-            len: self.captured.len(),
+            len: self.decoded_len.unwrap_or_else(|| self.captured.len()),
         }
     }
     pub fn check_identity(&self) -> Result<()> {
-        self.captured.check_metadata(self.file.metadata()?)?;
+        if self.decoded_len.is_none() {
+            self.captured.check_metadata(self.file.metadata()?)?;
+        }
         self.captured.check()
     }
     pub fn cursor(&self, range: Range) -> io::Result<Cursor<'_>> {
@@ -870,10 +892,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(source.select_unique_fields(source.range(), &["id", "body"]).is_err());
-        assert!(source
-            .select_unique_fields(source.range(), &["body"])
-            .unwrap()
-            .is_some());
+        assert!(
+            source
+                .select_unique_fields(source.range(), &["body"])
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(fields[0], fields[1]);
         assert!(fields[2].is_none());
         assert_eq!(source.materialize::<u64>(fields[0].unwrap()).unwrap(), 2);

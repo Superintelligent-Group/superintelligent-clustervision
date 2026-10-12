@@ -198,7 +198,7 @@ fn tool_call(call: JsonView<'_>) -> Result<Block> {
     }
     .unwrap_or_default();
     let input = match get("arguments") {
-        Some(value) if value.is_string()? => openai::parse_arguments(Some(value.resolve()?.as_ref())).into(),
+        Some(value) if value.is_string()? => value.encoded_argument()?,
         Some(value) if !value.is_null()? => value.argument(true)?,
         _ => json!({}).into(),
     };

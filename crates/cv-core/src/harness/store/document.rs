@@ -226,10 +226,8 @@ fn select_fields_with<'a>(raw: Raw<'a>, keys: &[&str], unique: bool) -> Result<O
         }
         let start = cursor;
         cursor = string_end(b, start, raw.1).context("invalid JSON key")?;
-        if unique {
-            if !super::json::value_compatible(&b[start..cursor]) {
-                return Err(InvalidStruct("invalid object key").into());
-            }
+        if unique && !super::json::value_compatible(&b[start..cursor]) {
+            return Err(InvalidStruct("invalid object key").into());
         }
         let key = if cursor - start <= key_limit {
             serde_json::from_str::<String>(&raw.get()[start..cursor]).ok()
