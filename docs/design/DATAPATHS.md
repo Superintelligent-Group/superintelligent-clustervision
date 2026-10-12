@@ -344,9 +344,13 @@ streamed canonical output. Plain 25/100 MB inputs use 1,908 B peak Rust allocati
 for length; escaped 16/64 MiB sources use 230,532 B, flat at both sizes. Separate writer/hash runs
 use 1,893 B / 230,517 B respectively and match independent Python canonical lengths and hashes.
 These establish the primitive's bounded payload working set, not adapter or end-to-end index
-bounds. The initial portable probe still owned the selected encoded range; the subsequently
-landed positioned-range bridge (`3c89ac5`) needs its own allocation proof before extending this
-native claim.
+bounds. The positioned-range portable bridge (`3c89ac5`) has now passed the same direct
+construction/length/writer campaign: peak above-baseline Rust heap is 328,535 B for plain
+25/100 MB length probes and 295,761 B for escaped 16/64 MiB probes, flat across each pair.
+Writer hashes and 28 bounded-prefix oracles match the independent expected output; retaining a
+64 KiB prefix peaks at 394,214 B plain / 361,440 B escaped. This establishes portable live-heap
+bounds for the primitive too. Cumulative allocation traffic still grows with escaped payload
+size; neither campaign measures activated adapters or clean throughput.
 
 Native Claude producer activation is integrated. Arguments with at most 4,096 encoded bytes
 remain owned; larger inputs use source ranges in lazy and lazy-extra modes. Full/bulk/complete
