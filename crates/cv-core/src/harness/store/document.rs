@@ -223,6 +223,13 @@ pub(crate) struct Record<'a> {
     pub fields: BTreeMap<String, Raw<'a>>,
 }
 impl<'a> Record<'a> {
+    /// Missing/nonobject nested fields behave as an empty object without allocating a Value.
+    pub fn empty(raw: Raw<'a>) -> Self {
+        Self {
+            raw,
+            fields: BTreeMap::new(),
+        }
+    }
     pub fn parse(raw: Raw<'a>) -> Option<Self> {
         if !raw.get().starts_with('{') {
             return None;
@@ -242,7 +249,7 @@ impl<'a> Record<'a> {
         ObjectIter {
             raw: self.raw,
             cursor: 1,
-            done: false,
+            done: self.fields.is_empty(),
         }
         .filter_map(move |(key, _)| seen.insert(key.clone()).then(|| self.get(&key)).flatten())
     }
@@ -362,8 +369,8 @@ fn value_end(b: &[u8], mut i: usize, index: &Index) -> Option<usize> {
 
 /// The same joined text/title as Message::text, retaining only the first 81 characters. When
 /// discovery filters whitespace-only text, scan any remaining whitespace with bounded state.
-pub(crate) fn text_summary<'a>(
-    texts: impl Iterator<Item = &'a crate::lazy::Text>,
+pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
+    texts: impl Iterator<Item = T>,
     resolver: &crate::lazy::Resolver,
     require_nonwhite: bool,
 ) -> Option<String> {
@@ -372,6 +379,7 @@ pub(crate) fn text_summary<'a>(
     let mut present = false;
     let mut nonwhite = false;
     for (index, text) in texts.enumerate() {
+        let text = text.borrow();
         if (present || (require_nonwhite && index > 0)) && chars < 81 {
             head.push('\n');
             chars += 1;
@@ -429,7 +437,11 @@ mod tests {
         }
         for input in ["null", "true", "123", "[]", "\"string\""] {
             let index = Index::default();
-            assert!(Record::parse(Raw::new(input, &index)).is_none());
+            let raw = Raw::new(input, &index);
+            assert!(Record::parse(raw).is_none());
+            let empty = Record::empty(raw);
+            assert!(empty.fields.is_empty());
+            assert_eq!(empty.values_in_order().count(), 0);
         }
     }
     #[test]

@@ -918,9 +918,7 @@ struct WireStatus {
 }
 
 fn wire_fields(raw: Raw<'_>) -> Record<'_> {
-    Record::parse(raw).unwrap_or(Record {
-        fields: Default::default(),
-    })
+    Record::parse(raw).unwrap_or_else(|| Record::empty(raw))
 }
 
 /// Index ToolResult fields by byte range, decoding only usage/identity metadata. A later result
@@ -945,9 +943,10 @@ fn read_wire_enrichment(wire: &Path, spans: bool) -> WireEnrich {
                 "ToolResult" => {
                     let id = p.string("tool_call_id").unwrap_or_default();
                     if !id.is_empty() {
-                        let rv = p.get("return_value").map(wire_fields).unwrap_or(Record {
-                            fields: Default::default(),
-                        });
+                        let rv = p
+                            .get("return_value")
+                            .map(wire_fields)
+                            .unwrap_or_else(|| Record::empty(raw));
                         let range = |r: Raw<'_>| WireRange {
                             offset: offset + (r.get().as_ptr() as usize - raw.get().as_ptr() as usize) as u64,
                             len: r.get().len(),

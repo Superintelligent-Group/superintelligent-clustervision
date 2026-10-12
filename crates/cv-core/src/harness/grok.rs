@@ -289,8 +289,8 @@ fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
         |l| l.contains("\"hook_execution\""),
         |raw, _| {
             let v = fields(raw);
-            let params = v.get("params").map(fields).unwrap_or_else(empty_fields);
-            let u = params.get("update").map(fields).unwrap_or_else(empty_fields);
+            let params = v.get("params").map(fields).unwrap_or_else(|| Record::empty(raw));
+            let u = params.get("update").map(fields).unwrap_or_else(|| Record::empty(raw));
             if u.string("sessionUpdate").as_deref() != Some("hook_execution") {
                 return;
             }
@@ -306,10 +306,10 @@ fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
                         .and_then(|v| v.as_i64())
                         .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
                 });
-            for run in u.get("runs").and_then(document::array).into_iter().flatten() {
+            for run in u.get("runs").and_then(document::array_iter).into_iter().flatten() {
                 let run = fields(run);
                 let name = run.string("name").unwrap_or_default();
-                let status = run.get("status").map(fields).unwrap_or_else(empty_fields);
+                let status = run.get("status").map(fields).unwrap_or_else(|| Record::empty(raw));
                 let mut summary = format!("{event}: {name} · {}", status.string("status").unwrap_or_default());
                 if let Some(ms) = status.value("elapsed_ms").and_then(|v| v.as_u64()) {
                     summary.push_str(&format!(" · {ms} ms"));
@@ -331,13 +331,8 @@ fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
     out
 }
 
-fn empty_fields<'a>() -> Record<'a> {
-    Record {
-        fields: Default::default(),
-    }
-}
 fn fields(raw: Raw<'_>) -> Record<'_> {
-    Record::parse(raw).unwrap_or_else(empty_fields)
+    Record::parse(raw).unwrap_or_else(|| Record::empty(raw))
 }
 
 /// Subagent nickname + Grok-specific session facts from `summary.json`: a subagent's `agent_name`
@@ -458,7 +453,7 @@ fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
         if let Some(k) = u.string("kind") {
             e.kind = Some(k);
         }
-        for l in u.get("locations").and_then(document::array).into_iter().flatten() {
+        for l in u.get("locations").and_then(document::array_iter).into_iter().flatten() {
             if let Some(p) = fields(l).string("path") {
                 if !e.locations.contains(&p) {
                     e.locations.push(p);
@@ -703,7 +698,7 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
         if title.is_none() && ty.as_deref() == Some("user") {
             if let Some(content) = v.get("content") {
                 let texts = title_parts(content, raw, offset);
-                title = document::text_summary(texts.iter(), &resolver, true);
+                title = document::text_summary(texts, &resolver, true);
             }
         }
     })
@@ -730,8 +725,8 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
 }
 
 /// wire::text_parts joins every string text field, including empty ones, in source order.
-fn title_parts(content: Raw<'_>, record: Raw<'_>, offset: u64) -> Vec<Text> {
-    let text = |raw: Raw<'_>| {
+fn title_parts<'a>(content: Raw<'a>, record: Raw<'a>, offset: u64) -> impl Iterator<Item = Text> + 'a {
+    let text = move |raw: Raw<'_>| {
         let b = raw.get().as_bytes();
         if b.first() != Some(&b'"') {
             return None;
@@ -747,14 +742,12 @@ fn title_parts(content: Raw<'_>, record: Raw<'_>, offset: u64) -> Vec<Text> {
             serde_json::from_str::<String>(raw.get()).ok().map(Text::Inline)
         }
     };
-    if content.get().starts_with('"') {
-        return text(content).into_iter().collect();
-    }
-    document::array(content)
-        .into_iter()
-        .flatten()
-        .filter_map(|p| fields(p).get("text").and_then(text))
-        .collect()
+    text(content).into_iter().chain(
+        document::array_iter(content)
+            .into_iter()
+            .flatten()
+            .filter_map(move |p| fields(p).get("text").and_then(text)),
+    )
 }
 
 #[cfg(test)]
@@ -782,6 +775,9 @@ mod tests {
             .into_iter()
             .map(|content| serde_json::json!({"type":"user", "content":content}).to_string())
             .collect();
+        let mut parts = vec![serde_json::json!({"text":""}); 4096];
+        parts.push(serde_json::json!({"text":"late"}));
+        cases.push(serde_json::json!({"type":"user","content":parts}).to_string());
         cases.extend([
             r#"{"type":"user","ty\u0070e":"assistant","content":"ignored user title"}"#.to_string(),
             r#"{"type":"user","content":[{"text":"old","te\u0078t":"last"}]}"#.to_string(),
