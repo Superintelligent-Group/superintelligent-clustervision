@@ -14,34 +14,56 @@ impl Composer {
     pub fn count(&self) -> usize {
         self.headers.or(self.conversation).map_or(0, |(_, count)| count)
     }
-    pub fn replay(&self, source: &ByteSource, f: &mut dyn FnMut(Value, bool) -> Flow) {
+    pub fn replay(&self, source: &ByteSource, f: &mut dyn FnMut(Value, bool) -> Flow) -> Result<()> {
         let Some((target, _)) = self.headers.or(self.conversation) else {
-            return;
+            return Ok(());
         };
         let headers = self.headers.is_some();
         // The first pass validated the whole immutable cell; intentional Stop unwinds replay.
-        let _ = pass(source, Some(target), &mut |value| f(value, headers));
+        pass(source, Some(target), &mut |value| f(value, headers))?;
+        Ok(())
     }
 }
 pub(super) fn header(source: &ByteSource) -> Option<Composer> {
-    pass(source, None, &mut |_| Flow::Continue)
+    pass(source, None, &mut |_| Flow::Continue).ok()
 }
-fn pass(source: &ByteSource, target: Option<usize>, f: &mut dyn FnMut(Value) -> Flow) -> Option<Composer> {
-    if let Some(out) = source
-        .with_bytes(|bytes| {
-            let mut de = serde_json::Deserializer::from_slice(bytes);
-            let out = Root { target, f }.deserialize(&mut de).ok()?;
-            de.end().ok()?;
-            Some(out)
-        })
-        .ok()?
-    {
-        return out;
+fn pass(source: &ByteSource, target: Option<usize>, f: &mut dyn FnMut(Value) -> Flow) -> Result<Composer> {
+    let mut stopped = false;
+    let mut callback = |value| {
+        let flow = f(value);
+        stopped = flow == Flow::Stop;
+        flow
+    };
+    let result = if let Some(result) = source.with_bytes(|bytes| -> Result<Composer> {
+        let mut de = serde_json::Deserializer::from_slice(bytes);
+        let out = Root {
+            target,
+            f: &mut callback,
+        }
+        .deserialize(&mut de)?;
+        de.end()?;
+        Ok(out)
+    })? {
+        result
+    } else {
+        parse_reader(source.reader()?, target, &mut callback)
+    };
+    // Only a callback's explicit Stop turns serde's intentional unwind into success.
+    if stopped {
+        Ok(Composer::default())
+    } else {
+        result
     }
-    let mut de = serde_json::Deserializer::from_reader(source.reader().ok()?);
-    let out = Root { target, f }.deserialize(&mut de).ok()?;
-    de.end().ok()?;
-    Some(out)
+}
+fn parse_reader(
+    input: impl std::io::Read,
+    target: Option<usize>,
+    f: &mut dyn FnMut(Value) -> Flow,
+) -> Result<Composer> {
+    let mut de = serde_json::Deserializer::from_reader(input);
+    let out = Root { target, f }.deserialize(&mut de)?;
+    de.end()?;
+    Ok(out)
 }
 macro_rules! scalars {
     () => {
@@ -163,6 +185,34 @@ impl<'de> Visitor<'de> for Array<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn replay_read_failure_after_prefix_is_an_error() {
+        struct Failure(std::io::Cursor<&'static [u8]>);
+        impl std::io::Read for Failure {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.position() == self.0.get_ref().len() as u64 {
+                    Err(std::io::Error::other("injected spill read failure"))
+                } else {
+                    self.0.read(bytes)
+                }
+            }
+        }
+        let mut callbacks = 0;
+        let result = parse_reader(
+            Failure(std::io::Cursor::new(b"{\"conversation\":[1,")),
+            Some(0),
+            &mut |_| {
+                callbacks += 1;
+                Flow::Continue
+            },
+        );
+        assert_eq!(callbacks, 1);
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("injected spill read failure"));
+    }
+    #[test]
     fn projection_and_replay_match_whole_value_strictly() {
         let mut cases = vec![
             r#"{"name":"n","conversation":[{"type":1,"text":"first"},{"type":2,"text":"last"}]}"#.to_string(),
@@ -194,17 +244,21 @@ mod tests {
             let expected = selected.cloned().unwrap_or_default();
             assert_eq!(header.count(), super::super::conversation_len(&old));
             let mut actual = Vec::new();
-            header.replay(&source, &mut |value, external| {
-                assert_eq!(external, headers.is_some());
-                actual.push(value);
-                Flow::Continue
-            });
+            header
+                .replay(&source, &mut |value, external| {
+                    assert_eq!(external, headers.is_some());
+                    actual.push(value);
+                    Flow::Continue
+                })
+                .unwrap();
             assert_eq!(actual, expected);
             let mut stopped = 0;
-            header.replay(&source, &mut |_, _| {
-                stopped += 1;
-                Flow::Stop
-            });
+            header
+                .replay(&source, &mut |_, _| {
+                    stopped += 1;
+                    Flow::Stop
+                })
+                .unwrap();
             assert_eq!(stopped, usize::from(!expected.is_empty()));
             for key in [
                 "name",

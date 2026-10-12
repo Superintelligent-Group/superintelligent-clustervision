@@ -15,35 +15,59 @@ pub(super) struct Tab {
     pub bubbles: Option<(usize, usize)>,
 }
 impl Legacy {
-    pub fn replay(&self, source: &ByteSource, tab: usize, f: &mut dyn FnMut(Value) -> Flow) {
-        let Some((root, tabs)) = &self.tabs else { return };
-        let Some((bubbles, _)) = tabs[tab].bubbles else { return };
-        let _ = pass(source, Some((*root, tab, bubbles)), f);
+    pub fn replay(&self, source: &ByteSource, tab: usize, f: &mut dyn FnMut(Value) -> Flow) -> Result<()> {
+        let Some((root, tabs)) = &self.tabs else { return Ok(()) };
+        let Some((bubbles, _)) = tabs[tab].bubbles else {
+            return Ok(());
+        };
+        pass(source, Some((*root, tab, bubbles)), f)?;
+        Ok(())
     }
 }
 pub(super) fn header(source: &ByteSource) -> Option<Legacy> {
-    pass(source, None, &mut |_| Flow::Continue)
+    pass(source, None, &mut |_| Flow::Continue).ok()
 }
 fn pass(
     source: &ByteSource,
     target: Option<(usize, usize, usize)>,
     f: &mut dyn FnMut(Value) -> Flow,
-) -> Option<Legacy> {
-    if let Some(out) = source
-        .with_bytes(|bytes| {
-            let mut de = serde_json::Deserializer::from_slice(bytes);
-            let out = Root { target, f }.deserialize(&mut de).ok()?;
-            de.end().ok()?;
-            Some(out)
-        })
-        .ok()?
-    {
-        return out;
+) -> Result<Legacy> {
+    let mut stopped = false;
+    let mut callback = |value| {
+        let flow = f(value);
+        stopped = flow == Flow::Stop;
+        flow
+    };
+    let result = if let Some(result) = source.with_bytes(|bytes| -> Result<Legacy> {
+        let mut de = serde_json::Deserializer::from_slice(bytes);
+        let out = Root {
+            target,
+            f: &mut callback,
+        }
+        .deserialize(&mut de)?;
+        de.end()?;
+        Ok(out)
+    })? {
+        result
+    } else {
+        parse_reader(source.reader()?, target, &mut callback)
+    };
+    // Only a callback's explicit Stop turns serde's intentional unwind into success.
+    if stopped {
+        Ok(Legacy::default())
+    } else {
+        result
     }
-    let mut de = serde_json::Deserializer::from_reader(source.reader().ok()?);
-    let out = Root { target, f }.deserialize(&mut de).ok()?;
-    de.end().ok()?;
-    Some(out)
+}
+fn parse_reader(
+    input: impl std::io::Read,
+    target: Option<(usize, usize, usize)>,
+    f: &mut dyn FnMut(Value) -> Flow,
+) -> Result<Legacy> {
+    let mut de = serde_json::Deserializer::from_reader(input);
+    let out = Root { target, f }.deserialize(&mut de)?;
+    de.end()?;
+    Ok(out)
 }
 struct Root<'a> {
     target: Option<(usize, usize, usize)>,
@@ -225,16 +249,20 @@ mod tests {
                         .cloned()
                         .unwrap_or_default();
                     let mut replayed = Vec::new();
-                    header.replay(&source, index, &mut |v| {
-                        replayed.push(v);
-                        Flow::Continue
-                    });
+                    header
+                        .replay(&source, index, &mut |v| {
+                            replayed.push(v);
+                            Flow::Continue
+                        })
+                        .unwrap();
                     assert_eq!(replayed, bubbles);
                     let mut stopped = 0;
-                    header.replay(&source, index, &mut |_| {
-                        stopped += 1;
-                        Flow::Stop
-                    });
+                    header
+                        .replay(&source, index, &mut |_| {
+                            stopped += 1;
+                            Flow::Stop
+                        })
+                        .unwrap();
                     assert_eq!(stopped, usize::from(!bubbles.is_empty()));
                 }
             }

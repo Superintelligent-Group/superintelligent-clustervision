@@ -415,7 +415,7 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
         } else {
             Flow::Continue
         }
-    });
+    })?;
 
     session.model = last_model.or_else(|| {
         d.pointer("/modelConfig/modelName")
@@ -669,7 +669,7 @@ fn stream_legacy(conn: &Connection, r: &SessionRef, tab_id: &str, sink: &mut dyn
         } else {
             Flow::Continue
         }
-    });
+    })?;
     Ok(session)
 }
 
