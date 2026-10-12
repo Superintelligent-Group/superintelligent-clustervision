@@ -201,7 +201,7 @@ fn usage_hits(r: &SessionRef) -> Option<Vec<UsageHit>> {
     // `lazy_extra`: content stays unread on disk, but the bag carrying Claude's `message.id` is
     // materialized.
     let session = adapter
-        .stream(r, &ParseOptions::lazy_extra(), &mut |m: Message| {
+        .try_stream(r, &ParseOptions::lazy_extra(), &mut |m: Message| {
             if let Some(u) = m
                 .usage
                 .as_ref()

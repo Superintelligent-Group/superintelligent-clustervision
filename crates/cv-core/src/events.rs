@@ -926,7 +926,7 @@ mod db {
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
         let source = crate::source::Probe::default().snapshot(r);
         let mut sink = SpoolingSink::new(r.cwd.clone());
-        adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
         let source = source.with_reads(sink.inner().dependencies());
         let events = sink.into_spool()?;
         let len = events.len();
@@ -942,7 +942,7 @@ mod db {
             crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
         let source = crate::source::Probe::default().snapshot(r);
         let mut sink = SpoolingSink::new(r.cwd.clone());
-        adapter.stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
+        adapter.try_stream(r, &crate::stream::ParseOptions::lazy(), &mut sink)?;
         let source = source.with_reads(sink.inner().dependencies());
         let events = sink.into_spool()?;
         let len = events.len();

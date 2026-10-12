@@ -183,7 +183,7 @@ pub fn detect(r: &SessionRef, keep_summaries: bool) -> anyhow::Result<Vec<Compac
     // `lazy_extra`: the boundary/summary `kind`s are always present, but the boundary's
     // `compactMetadata` (trigger, preTokens, duration) lives in `extra` — plain `lazy()` omits it.
     // Giant message bodies still stay lazy on disk.
-    adapter.stream(r, &crate::stream::ParseOptions::lazy_extra(), &mut sink)?;
+    adapter.try_stream(r, &crate::stream::ParseOptions::lazy_extra(), &mut sink)?;
     Ok(sink.into_boundaries())
 }
 

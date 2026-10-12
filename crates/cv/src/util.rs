@@ -252,7 +252,7 @@ pub(crate) fn count_messages(adapter: &dyn Adapter, r: &SessionRef) -> Result<us
         }
     }
     let mut c = Count(0);
-    adapter.stream(r, &ParseOptions::lazy(), &mut c)?;
+    adapter.try_stream(r, &ParseOptions::lazy(), &mut c)?;
     Ok(c.0)
 }
 

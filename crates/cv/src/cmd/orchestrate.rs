@@ -49,7 +49,7 @@ fn collect_prompts(
 ) -> Result<Vec<PromptRow>> {
     let mut rows = Vec::new();
     let mut idx = 0usize;
-    adapter.stream(r, &ParseOptions::default(), &mut |m: Message| {
+    adapter.try_stream(r, &ParseOptions::default(), &mut |m: Message| {
         let i = idx;
         idx += 1;
         if let Some((s, e)) = window {
@@ -821,7 +821,7 @@ fn collect_deferrals(
 ) -> Result<Vec<Deferral>> {
     let mut out = Vec::new();
     let mut idx = 0usize;
-    adapter.stream(r, &ParseOptions::default(), &mut |m: Message| {
+    adapter.try_stream(r, &ParseOptions::default(), &mut |m: Message| {
         let i = idx;
         idx += 1;
         if i < since || m.role != Role::Assistant || m.kind != MessageKind::Reply || m.origin != Origin::Model {
