@@ -460,6 +460,7 @@ dependencies = [
 name = "cv-testkit"
 version = "0.16.1"
 dependencies = [
+ "serde",
  "serde_json",
 ]
 
