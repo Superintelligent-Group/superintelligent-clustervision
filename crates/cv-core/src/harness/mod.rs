@@ -208,6 +208,14 @@ pub trait Adapter: Send + Sync {
     /// See [`claude`](crate::harness::claude) for the reference; a store that can only be read
     /// whole hands its parsed session to [`crate::stream::replay`].
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session>;
+
+    /// The affordances that live only in a side store beside the transcript (a todo file, a
+    /// table, a state row): the session's current plan, goals, schedules. Rows have no message
+    /// index (`docs/design/AFFORDANCES.md`). Default: the store keeps none. Unreadable side files
+    /// are skipped, never an error: the transcript is the session; this is a view over its store.
+    fn store_affordances(&self, _r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        Vec::new()
+    }
 }
 
 /// `parse` on a concrete adapter (`Claude::detect().parse(&r)`): the same

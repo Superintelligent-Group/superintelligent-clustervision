@@ -22,7 +22,7 @@ use crate::ir::{Block, Message, MessageKind, Role, Session};
 /// where the model saw it on the wire — while the system prompt and a compaction summary are
 /// `system`. `chat` picks the ChatML spelling, otherwise ShareGPT's.
 fn training_role(m: &Message, chat: bool) -> Option<&'static str> {
-    if !m.kind.is_model_visible() {
+    if !m.is_model_visible() {
         return None;
     }
     Some(match m.kind {
@@ -42,7 +42,8 @@ fn training_role(m: &Message, chat: bool) -> Option<&'static str> {
             }
         }
         MessageKind::ToolResult => "tool",
-        // is_model_visible() admits nothing else; fall back to the role for safety.
+        // A sub-agent spawn or return (the only other kinds `Message::is_model_visible` admits)
+        // trains as the role that carried it.
         _ => match m.role {
             Role::System => "system",
             Role::User => {

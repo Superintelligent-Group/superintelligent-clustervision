@@ -836,7 +836,8 @@ pub struct SessionRef {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
-    /// Number of conversational messages: **user + assistant turns only**.
+    /// Number of conversational messages: **user + assistant turns only** (a reply that spawned a
+    /// sub-agent is one).
     ///
     /// This is the contract every adapter must meet — do not count system/meta records, tool
     /// results, sidecar files, or directory entries. The number a person would call "how long is
@@ -853,8 +854,20 @@ impl Message {
     pub fn is_turn(&self) -> bool {
         matches!(
             (self.role, self.kind),
-            (Role::User, MessageKind::Prompt) | (Role::Assistant, MessageKind::Reply)
+            (Role::User, MessageKind::Prompt)
+                | (Role::Assistant, MessageKind::Reply)
+                | (Role::Assistant, MessageKind::SubagentSpawn)
         )
+    }
+
+    /// Whether the model saw or said this message: [`MessageKind::is_model_visible`], plus a
+    /// sub-agent spawn or return carried by a conversational role (the `Reply` that called the
+    /// spawn tool, the tool result or delivery that brought the answer back). A spawn/return that
+    /// is a harness's own System marker (Codex `SubAgentActivity`, Kimi Code `subagent.*`) is not.
+    pub fn is_model_visible(&self) -> bool {
+        self.kind.is_model_visible()
+            || (matches!(self.kind, MessageKind::SubagentSpawn | MessageKind::SubagentReturn)
+                && self.role != Role::System)
     }
 }
 

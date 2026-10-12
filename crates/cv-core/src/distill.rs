@@ -338,7 +338,7 @@ fn block_est(b: &Block) -> u64 {
 }
 
 fn message_est(m: &Message) -> u64 {
-    if !m.kind.is_model_visible() {
+    if !m.is_model_visible() {
         return 0;
     }
     m.content.iter().map(block_est).sum()

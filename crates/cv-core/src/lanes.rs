@@ -468,7 +468,7 @@ fn pass(r: &SessionRef) -> Option<Pass> {
     };
     let session = adapter
         .stream(r, &opts, &mut |m: Message| {
-            if m.kind.is_model_visible() && matches!(m.role, Role::User | Role::Assistant) {
+            if m.is_model_visible() && matches!(m.role, Role::User | Role::Assistant) {
                 p.messages += 1;
             }
             if m.role == Role::User && matches!(m.kind, MessageKind::Prompt | MessageKind::ToolResult) {
