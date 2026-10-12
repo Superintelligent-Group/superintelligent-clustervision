@@ -8,10 +8,10 @@
 //! "which tools did agent X use" (one histogram) and "which agents used tool T" (a scan across
 //! them). A flat [`ToolEvent`] timeline preserves call order for `--timeline`.
 //!
-//! Memory discipline: everything is built from the small [`crate::events::Event`] rows — tool
-//! *results* are never materialized (large outputs stay lazy on disk). One streamed pass per agent.
+//! Histograms fold each message's event rows immediately, retaining only per-tool counts. Tool
+//! results remain lazy on disk. Timelines retain the call rows their output requires.
 
-use crate::events::{self, Event, EventSink};
+use crate::events::{self, Event};
 use crate::ir::{Block, Message, SessionRef};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use std::collections::BTreeMap;
@@ -52,40 +52,58 @@ impl ToolHistogram {
     pub fn from_events(evs: &[Event]) -> Self {
         let mut h = ToolHistogram::default();
         for e in evs {
-            match e.kind {
-                "error" => {
-                    h.total_errors += 1;
-                    if let Some(t) = &e.tool {
-                        h.tools.entry(t.clone()).or_default().errors += 1;
-                    }
+            h.note(e);
+        }
+        h
+    }
+
+    fn note(&mut self, e: &Event) {
+        match e.kind {
+            "error" => {
+                self.total_errors += 1;
+                if let Some(t) = &e.tool {
+                    self.tools.entry(t.clone()).or_default().errors += 1;
                 }
-                kind => {
-                    let Some(name) = &e.tool else { continue };
-                    let c = h.tools.entry(name.clone()).or_default();
-                    if e.call {
-                        c.calls += 1;
-                        h.total_calls += 1;
-                    }
-                    match kind {
-                        "file_edit" => c.edits += 1,
-                        "file_read" => c.reads += 1,
-                        "command" => c.commands += 1,
-                        _ => {}
-                    }
+            }
+            kind => {
+                let Some(name) = &e.tool else { return };
+                let c = self.tools.entry(name.clone()).or_default();
+                if e.call {
+                    c.calls += 1;
+                    self.total_calls += 1;
                 }
+                match kind {
+                    "file_edit" => c.edits += 1,
+                    "file_read" => c.reads += 1,
+                    "command" => c.commands += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Build from already-parsed messages, dropping each message's extracted event rows after
+    /// tallying them. The caller's messages are borrowed; no transcript or event list is cloned.
+    pub fn from_messages<'a>(msgs: impl IntoIterator<Item = &'a Message>, cwd: Option<&std::path::Path>) -> Self {
+        let mut h = Self::default();
+        for (i, m) in msgs.into_iter().enumerate() {
+            for event in events::extract(m, i, cwd) {
+                h.note(&event);
             }
         }
         h
     }
 
-    /// Build directly from a session's already-parsed messages (the whole-session convenience over
-    /// a streamed [`EventSink`]). Used for the orchestrator's own tools and in tests.
-    pub fn from_messages<'a>(msgs: impl IntoIterator<Item = &'a Message>, cwd: Option<&std::path::Path>) -> Self {
-        let mut evs = Vec::new();
-        for (i, m) in msgs.into_iter().enumerate() {
-            evs.extend(events::extract(m, i, cwd));
-        }
-        Self::from_events(&evs)
+    /// Stream one transcript into its histogram, retaining only distinct tool counts. Unreadable
+    /// transcripts return an error, including after a partial read; no partial histogram escapes.
+    pub fn from_stream(adapter: &dyn crate::Adapter, r: &SessionRef) -> anyhow::Result<Self> {
+        let mut sink = HistogramSink {
+            cwd: r.cwd.clone(),
+            msg_idx: 0,
+            histogram: Self::default(),
+        };
+        adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+        Ok(sink.histogram)
     }
 
     /// Tools ranked by call count (descending; ties broken alphabetically) — the natural display
@@ -118,6 +136,29 @@ impl ToolHistogram {
         }
         self.total_calls += other.total_calls;
         self.total_errors += other.total_errors;
+    }
+}
+
+struct HistogramSink {
+    cwd: Option<std::path::PathBuf>,
+    msg_idx: usize,
+    histogram: ToolHistogram,
+}
+
+impl MessageSink for HistogramSink {
+    fn meta(&mut self, session: &crate::Session) {
+        // Match EventSink: a discovery cwd wins; otherwise the first available pushed cwd wins.
+        if self.cwd.is_none() {
+            self.cwd = session.cwd.clone();
+        }
+    }
+
+    fn message(&mut self, message: Message) -> Flow {
+        for event in events::extract(&message, self.msg_idx, self.cwd.as_deref()) {
+            self.histogram.note(&event);
+        }
+        self.msg_idx += 1;
+        Flow::Continue
     }
 }
 
@@ -295,24 +336,18 @@ pub fn forest_tools(r: &SessionRef) -> anyhow::Result<ForestTools> {
 
     // The orchestrator (the parent session) itself.
     {
-        let mut sink = EventSink::new(r.cwd.clone());
-        adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+        let histogram = ToolHistogram::from_stream(adapter.as_ref(), r)?;
         agents.push(AgentTools {
             agent: ORCHESTRATOR.to_string(),
             agent_type: "orchestrator".to_string(),
             workflow: None,
-            histogram: ToolHistogram::from_events(sink.events()),
+            histogram,
         });
     }
 
     // Every sub-agent in the forest (direct + workflow), each its own histogram.
     for s in crate::subagent_tree_of(r) {
-        let mut sink = EventSink::new(s.session.cwd.clone());
-        let hist = if adapter.stream(&s.session, &ParseOptions::lazy(), &mut sink).is_ok() {
-            ToolHistogram::from_events(sink.events())
-        } else {
-            ToolHistogram::default()
-        };
+        let hist = ToolHistogram::from_stream(adapter.as_ref(), &s.session).unwrap_or_default();
         agents.push(AgentTools {
             agent: s.agent_id().to_string(),
             agent_type: s.agent_type.clone().unwrap_or_else(|| "agent".to_string()),
@@ -379,6 +414,62 @@ mod tests {
             input,
             namespace: None,
         }
+    }
+
+    #[test]
+    fn histogram_stream_retains_only_distinct_tools_and_keeps_meta_cwd_rules() {
+        let mut sink = HistogramSink {
+            cwd: None,
+            msg_idx: 0,
+            histogram: ToolHistogram::default(),
+        };
+        let mut shell = crate::Session::new("histogram", crate::Harness::Claude);
+        shell.cwd = Some("/first".into());
+        sink.meta(&shell);
+        shell.cwd = Some("/later".into());
+        sink.meta(&shell);
+        assert_eq!(sink.cwd.as_deref(), Some(std::path::Path::new("/first")));
+        for i in 0..2000 {
+            let m = asst(vec![tool_use("Edit", json!({"file_path":format!("unique-{i}.rs")}))]);
+            sink.message(m);
+        }
+        assert_eq!(sink.histogram.distinct(), 1);
+        assert_eq!(sink.histogram.total_calls, 2000);
+        assert_eq!(sink.histogram.tools["Edit"].edits, 2000);
+        let mut discovered = HistogramSink {
+            cwd: Some("/discovery".into()),
+            msg_idx: 0,
+            histogram: ToolHistogram::default(),
+        };
+        discovered.meta(&shell);
+        assert_eq!(discovered.cwd.as_deref(), Some(std::path::Path::new("/discovery")));
+    }
+
+    #[test]
+    fn histogram_stream_returns_error_instead_of_partial_counts() {
+        struct Fails;
+        impl crate::Adapter for Fails {
+            fn harness(&self) -> crate::Harness {
+                crate::Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                vec![]
+            }
+            fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
+                Ok(vec![])
+            }
+            fn stream(
+                &self,
+                _r: &SessionRef,
+                _opts: &ParseOptions,
+                sink: &mut dyn MessageSink,
+            ) -> anyhow::Result<crate::Session> {
+                sink.message(asst(vec![tool_use("Read", json!({"file_path":"a.rs"}))]));
+                anyhow::bail!("fixture read error")
+            }
+        }
+        let r = SessionRef::new("failure", crate::Harness::Claude, "unused");
+        assert!(ToolHistogram::from_stream(&Fails, &r).is_err());
     }
 
     #[test]

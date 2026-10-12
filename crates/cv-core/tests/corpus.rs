@@ -771,6 +771,32 @@ fn query_facts_match_collected_corpus() {
         }
     }
 
+    // Frozen pre-reducer tally, independent of ToolHistogram's new shared per-event helper.
+    fn legacy_histogram(events: &[cv_core::events::Event]) -> cv_core::tools::ToolHistogram {
+        let mut h = cv_core::tools::ToolHistogram::default();
+        for e in events {
+            if e.kind == "error" {
+                h.total_errors += 1;
+                if let Some(t) = &e.tool {
+                    h.tools.entry(t.clone()).or_default().errors += 1;
+                }
+            } else if let Some(t) = &e.tool {
+                let c = h.tools.entry(t.clone()).or_default();
+                if e.call {
+                    c.calls += 1;
+                    h.total_calls += 1;
+                }
+                match e.kind {
+                    "file_edit" => c.edits += 1,
+                    "file_read" => c.reads += 1,
+                    "command" => c.commands += 1,
+                    _ => {}
+                }
+            }
+        }
+        h
+    }
+
     let world = World::in_process("query_corpus_oracle");
     let mut checked = HashMap::<&str, usize>::new();
     for harness in HARNESSES {
@@ -862,6 +888,33 @@ fn query_facts_match_collected_corpus() {
                         r.id
                     );
                 }
+                // Preserve the old stream's cwd/meta rules and tool-name pairing, separately
+                // from the whole-session convenience path (which resolves against final cwd).
+                let mut old_sink = cv_core::events::EventSink::new(r.cwd.clone());
+                adapter
+                    .stream(&r, &cv_core::ParseOptions::lazy(), &mut old_sink)
+                    .unwrap();
+                let expected = serde_json::to_value(legacy_histogram(old_sink.events())).unwrap();
+                let actual = cv_core::tools::ToolHistogram::from_stream(adapter.as_ref(), &r).unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    expected,
+                    "stream histogram: {} {} {}",
+                    harness.name,
+                    version.display(),
+                    r.id
+                );
+                let expected = serde_json::to_value(legacy_histogram(&events)).unwrap();
+                let actual = cv_core::tools::ToolHistogram::from_messages(full.messages.iter(), full.cwd.as_deref());
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    expected,
+                    "message histogram: {} {} {}",
+                    harness.name,
+                    version.display(),
+                    r.id
+                );
+
                 // Presence queries cannot reveal count inflation: compare the entire tiny counter
                 // against the old row collector, including this adapter's own side stores.
                 let mut discard = cv_core::stream::Discard;
