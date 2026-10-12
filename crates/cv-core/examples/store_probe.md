@@ -1,7 +1,7 @@
 # Store probe
 
 This diagnostic example performs one read-only operation per process on an explicit source.
-It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok
+It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok, Qwen,
 OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Devin/Zed through explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
 The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
@@ -37,6 +37,8 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `baseline` | Adapter/input setup has completed; empty stage |
 | `discard` | Direct stream, count callbacks, immediately discard every message |
 | `count` | Same stream plus transcript/session/store affordance counts |
+| `checkpoint` | Count through the resumable pipeline; return last checkpoint in `detail.checkpoint`, every `--chunk-bytes N` bytes |
+| `resume` | Continue fixture checkpoint from `--resume-from FILE`; report suffix callbacks and whole-session counts |
 | `doctor` | Production context attribution report, using the requested parse mode |
 | `collect` | Direct stream into a retained message vector; optional materialization |
 | `window` | Stream to EOF, retain only `--last N` messages (default 20), optionally materialize |
@@ -47,6 +49,15 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
 | `resolve` | Direct span materialization into a retained owned string; `--span OFFSET:LENGTH [--escaped]` |
 | `resolved-len` | Direct decoded byte counting without owning text; same span flags |
+
+For append diagnostics, save `checkpoint`'s `detail.checkpoint` as JSON, append to the same
+scratch transcript, then run `resume --resume-from FILE`. These operations never save marks or
+counts in the catalog. The diagnostic calls the adapter directly: **it does not validate inode,
+sampled prefix, prior consumer output or dependency freshness**. Use only an unchanged fixture
+prefix and matching parse mode. Production FTS performs those checks before reuse; the composed
+regression tests compare search documents, events and counts with a whole read. `messages` counts
+only callbacks in the resumed suffix, while `detail.turns` and `detail.counts` include the prefix.
+A partial EOF record is replayed from the last complete safe checkpoint.
 
 `--hash-output` explicitly enables consumer fidelity digests. Discovery hashes all returned
 `SessionRef` metadata, sorted by ID/path (paths included); both affordance operations hash their

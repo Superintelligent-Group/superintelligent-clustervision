@@ -108,6 +108,7 @@ struct Args {
     hash_detail: bool,
     warm_discover: bool,
     query: Option<String>,
+    resume_from: Option<PathBuf>,
 }
 
 fn args() -> Result<Args> {
@@ -120,6 +121,7 @@ fn args() -> Result<Args> {
     let mut hash_detail = false;
     let mut warm_discover = false;
     let mut query = None;
+    let mut resume_from = None;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
@@ -137,11 +139,12 @@ fn args() -> Result<Args> {
             "--escaped" => escaped = true,
             "--chunk-bytes" => chunk_bytes = argv.next().context("--chunk-bytes needs an integer")?.parse()?,
             "--last" => last = argv.next().context("--last needs an integer")?.parse()?,
+            "--resume-from" => resume_from = Some(PathBuf::from(argv.next().context("--resume-from needs a checkpoint JSON file")?)),
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
-                 [--materialize] [--hash-output] [--hash-detail] [--warm-discover] [--query EXPR] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
-                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
+                 [--materialize] [--hash-output] [--hash-detail] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
+                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
+                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ => positional.push(arg),
@@ -178,6 +181,7 @@ fn args() -> Result<Args> {
         hash_detail,
         warm_discover,
         query,
+        resume_from,
     })
 }
 
@@ -210,6 +214,7 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
             .root
             .clone()])),
         Harness::ClaudeExport => Box::new(cv_core::harness::export::ClaudeExport::with_roots(vec![a.root.clone()])),
+        Harness::Qwen => Box::new(cv_core::harness::qwen::Qwen::with_home(&a.root)),
         #[cfg(feature = "sqlite")]
         Harness::Devin => Box::new(cv_core::harness::devin::Devin::with_root(&a.root)),
         #[cfg(feature = "sqlite")]
@@ -340,6 +345,38 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
             };
             out.detail = json!({ "events": events, "temporary_bytes_written": temporary_bytes,
                                "temporary_bytes_read": temporary_bytes });
+        }
+        "checkpoint" | "resume" => {
+            // This is a fixture diagnostic, not a replacement for production MarkHead/source
+            // checks. The caller owns the append-only prefix contract and compatible sink state.
+            let from = match &a.resume_from {
+                Some(path) => Some(serde_json::from_slice::<cv_core::stream::Checkpoint>(
+                    &std::fs::read(path).context("reading fixture checkpoint")?,
+                )?),
+                None if a.operation == "resume" => bail!("resume needs --resume-from CHECKPOINT.json"),
+                None => None,
+            };
+            #[derive(Default)]
+            struct CheckpointSink {
+                messages: usize,
+            }
+            impl cv_core::MessageSink for CheckpointSink {
+                fn message(&mut self, _: Message) -> Flow {
+                    self.messages += 1;
+                    Flow::Continue
+                }
+                fn wants_checkpoint(&mut self, _: u64) -> bool {
+                    true
+                }
+            }
+            let mut sink = CheckpointSink::default();
+            let done =
+                cv_core::stream::stream_resumable(adapter, r, &opts, &mut sink, a.chunk_bytes as u64, from.as_ref())?
+                    .context("adapter declined this fixture checkpoint")?;
+            out.messages = sink.messages;
+            let counted = done.counted.context("whole diagnostic pass must count")?;
+            out.detail = json!({"checkpoint":done.last,"counts":counted.counts,"turns":counted.turns,
+                "from_offset":from.as_ref().map_or(0, |cp| cp.offset)});
         }
         "discard" | "count" => {
             let mut counter = cv_core::affordance::Counter::new(r);
