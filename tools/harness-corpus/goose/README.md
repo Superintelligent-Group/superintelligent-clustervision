@@ -20,9 +20,9 @@ too: skills and plugins are discovered under `~/.agents/`.
 
 ## The model path
 
-Goose speaks OpenAI chat completions, so `chat_shim.py` translates nothing. It forwards each request
+Goose speaks OpenAI chat completions, so `../key_proxy.py --translate chat` translates nothing. It forwards each request
 to Z.ai's coding endpoint with the key and GLM `thinking` added, and streams the bytes back. Goose's
-`openai` provider points at `127.0.0.1:$PORT` with a dummy key. The model is whatever Goose asked for
+`openai` provider points at `127.0.0.1:$PORT` with a dummy key. The model is pinned except the switch model (`--also`), so it is whatever Goose asked for
 (`glm-5.3-flash`, and `glm-4.7-flash` for the model-switch turn), so every `requestedModel` in the
 store is the model that answered. `MAX_CALLS` (default 60) caps the calls, and `calls.jsonl` records
 roles and tool names only.

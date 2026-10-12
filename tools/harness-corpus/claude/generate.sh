@@ -8,7 +8,7 @@
 # <out-dir> is normally crates/cv-core/tests/corpus/claude/<version>; it must not exist yet. Needs:
 # install.sh <version> run first, python3, git, uuidgen, ~/.zai-key. Env: ZAI_KEY_FILE (default
 # ~/.zai-key), CORPUS_MODEL (default glm-5.3-flash), CORPUS_MODEL_ALT (the model-switch target,
-# default glm-5.3), PORT (default: a free port), MAX_CALLS (default 80).
+# default glm-5.3), MAX_CALLS (default 80).
 #
 # Every scenario is listed in AFFORDANCES.md with the record it is meant to leave.
 set -euo pipefail
@@ -25,12 +25,11 @@ mkdir -p "$(dirname "$OUT")"; OUT="$(cd "$(dirname "$OUT")" && pwd -P)/$(basenam
 [ ! -e "$OUT" ] || { echo "refusing: $OUT exists (add a new version instead of regenerating)" >&2; exit 1; }
 BIN="${HARNESS_VERSIONS:-$HOME/tools/harness-versions}/claude/$V/node_modules/.bin/claude"
 [ -x "$BIN" ] || { echo "claude $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
-MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; ALT="${CORPUS_MODEL_ALT:-glm-5.3}"; PORT="${PORT:-$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
+MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; ALT="${CORPUS_MODEL_ALT:-glm-5.3}"; MAX_CALLS="${MAX_CALLS:-80}"
 UPSTREAM="https://api.z.ai/api/anthropic"
 
 corpus_work
-PROXY_PID=""
-cleanup() { [ -z "$PROXY_PID" ] || kill "$PROXY_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 export HOME="$CORPUS_HOME" CLAUDE_CONFIG_DIR="$CORPUS_HOME/.claude" TMPDIR="$WORK/tmp"
 mkdir -p "$TMPDIR" "$CLAUDE_CONFIG_DIR"
@@ -94,13 +93,7 @@ cat >"$WORK/mcp.json" <<JSON
 JSON
 
 # Only the proxy sees the real key; Claude Code gets a dummy token for 127.0.0.1.
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/../key_proxy.py" --port "$PORT" --upstream "$UPSTREAM" --auth bearer \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-80}" &
-PROXY_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-sleep 0.3; kill -0 "$PROXY_PID" 2>/dev/null || { echo "key_proxy.py did not start on port $PORT" >&2; exit 1; }
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" passthrough "$UPSTREAM"
 
 # Claude Code keeps background-task output and pasted images under $CLAUDE_CODE_TMPDIR (default
 # /tmp/claude-<uid>/, shared with every real session on the machine), so that goes in $WORK too.
@@ -249,7 +242,7 @@ if want interrupt; then # an interrupted turn: SIGINT while a tool is running
   SCEN+=("interrupt")
 fi
 
-CALLS="$(grep -c . "$WORK/calls.jsonl" || true)"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 
 # Copy what Claude Code wrote about the sessions: projects/ (transcripts, sub-agent transcripts,

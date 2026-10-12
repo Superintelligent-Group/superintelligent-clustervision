@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Generate the Codex corpus for one installed version: real rollouts Codex wrote itself, in a
-# throwaway home, driven by a cheap real model (Z.ai GLM through responses_shim.py).
+# throwaway home, driven by a cheap real model (Z.ai GLM through ../key_proxy.py --translate responses).
 #
 #   tools/harness-corpus/codex/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
 #
 # <out-dir> is normally crates/cv-core/tests/corpus/codex/<version>; it must not exist yet (a
 # committed version is never regenerated in place). Needs: install.sh <version> run first, python3,
 # git, ~/.zai-key. Env: ZAI_KEY_FILE (default ~/.zai-key), CORPUS_MODEL (default glm-5.3-flash),
-# PORT (default 18765), MAX_CALLS (default 40).
+# MAX_CALLS (default 40).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../lib.sh"
@@ -23,19 +23,21 @@ BIN="${HARNESS_VERSIONS:-$HOME/tools/harness-versions}/codex/$V/node_modules/.bi
 [ -x "$BIN" ] || { echo "codex $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
 MODEL="${CORPUS_MODEL:-glm-5.3-flash}"
 # The model slug Codex is TOLD, for its bundled metadata (freeform apply_patch, reasoning summaries,
-# responses-lite tool prefixes). The shim answers every request with $MODEL regardless.
-PROFILE="${CODEX_MODEL_PROFILE:-gpt-6-luna}"; PORT="${PORT:-18765}"
+# responses-lite tool prefixes). The proxy answers every request with $MODEL regardless.
+PROFILE="${CODEX_MODEL_PROFILE:-gpt-6-luna}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
 
 corpus_work
-SHIM_PID=""
-cleanup() { [ -z "$SHIM_PID" ] || kill "$SHIM_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 export HOME="$CORPUS_HOME" CODEX_HOME="$CORPUS_HOME/.codex" TMPDIR="$WORK/tmp"
 mkdir -p "$TMPDIR"
 unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME OPENAI_API_KEY OPENAI_BASE_URL
 corpus_guard HOME CODEX_HOME TMPDIR
 PROJECT="$CORPUS_HOME/project"
+# Only the proxy sees the real key; Codex gets a dummy one for its provider at $PORT.
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" responses "$UPSTREAM" --model "$MODEL"
+export CORPUS_SHIM_KEY="corpus-local-shim"
 
 # The scratch project: a git repo with a few small files.
 cd "$PROJECT"
@@ -76,15 +78,6 @@ default_tools_approval_mode = "approve"
 trust_level = "trusted"
 TOML
 
-# Only the shim sees the real key; Codex gets a dummy one for its provider.
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-export CORPUS_SHIM_KEY="corpus-local-shim"
-python3 -I "$HERE/responses_shim.py" --port "$PORT" --upstream "$UPSTREAM" --model "$MODEL" \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-40}" &
-SHIM_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-
 run() { echo "--- codex exec $*" | cut -c1-140; "$BIN" exec --skip-git-repo-check -C "$PROJECT" "$@" </dev/null >>"$WORK/exec.log" 2>&1 || echo "    (exit $?)"; }
 last_id() { ls -t "$CODEX_HOME"/sessions/*/*/*/rollout-*.jsonl | head -1 | sed -E 's/.*-([0-9a-f-]{36})\.jsonl$/\1/'; }
 want() { case " $ONLY " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
@@ -123,7 +116,7 @@ if want subagent; then # 7 sub-agents (multi_agent feature)
   SCEN+=("subagent")
 fi
 
-CALLS="$(wc -l <"$WORK/calls.jsonl" | tr -d ' ')"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 
 # Copy the store as Codex wrote it: the rollouts and the jsonl indexes. Not config, auth, logs or
@@ -137,7 +130,7 @@ done
 corpus_scrub "$OUT"
 corpus_manifest "$OUT" \
   "harness=\"codex\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL via Z.ai coding endpoint, through responses_shim.py\"" \
+  "model=\"$MODEL via Z.ai coding endpoint, through key_proxy.py --translate responses\"" \
   "codex_model_profile=\"$PROFILE (the slug Codex recorded; it picks Codex's tool set, not the model)\"" \
   "model_calls=$CALLS" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \

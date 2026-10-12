@@ -4,7 +4,13 @@
 #                                   throwaway $HOME; the project lives at $CORPUS_HOME/project)
 #   corpus_guard VAR...          -> refuse unless each named env var is set, non-empty, inside $WORK,
 #                                   and not ember's real home or anything under it
-#   corpus_load_key VAR FILE     -> export VAR from FILE without ever printing it
+#   corpus_proxy KEYFILE TRANSLATOR UPSTREAM [key_proxy.py args...]
+#                                -> starts key_proxy.py (which alone reads KEYFILE) on a free port with
+#                                   --max-calls $MAX_CALLS (default 40), logging to $CALLS_LOG (default
+#                                   $WORK/calls.jsonl); sets PORT, PROXY_URL (http://127.0.0.1:$PORT),
+#                                   PROXY_PID, and records KEYFILE for the scrub's literal-key check
+#   corpus_proxy_stop            -> stops it (safe to call twice; put it in the EXIT trap)
+#   corpus_calls                 -> the number of model calls the proxy forwarded
 #   corpus_scrub DIR [--also FROM=TO ...]
 #                                -> rewrite $WORK paths to /home/corpus in every file (sqlite too),
 #                                   then fail on anything that looks like a secret or a real path
@@ -39,15 +45,30 @@ corpus_guard() {
   done
 }
 
-corpus_load_key() {
-  local var="$1" file="$2" k
-  [ -r "$file" ] || { echo "no key file $file" >&2; exit 1; }
-  IFS= read -r k <"$file" || true
-  [ -n "$k" ] || { echo "key file $file is empty" >&2; exit 1; }
-  printf -v "$var" '%s' "$k"
-  export "${var?}"
-  CORPUS_KEY_FILES="${CORPUS_KEY_FILES:+$CORPUS_KEY_FILES:}$file"
-  export CORPUS_KEY_FILES
+corpus_proxy() {
+  local keyfile="$1" translator="$2" upstream="$3" _
+  shift 3
+  [ -r "$keyfile" ] && [ -s "$keyfile" ] || { echo "no key file $keyfile (or it is empty)" >&2; exit 1; }
+  CORPUS_KEY_FILES="${CORPUS_KEY_FILES:+$CORPUS_KEY_FILES:}$keyfile"
+  CALLS_LOG="${CALLS_LOG:-$WORK/calls.jsonl}"
+  rm -f "$WORK/proxy.port"
+  python3 -I "$CORPUS_LIB_DIR/key_proxy.py" --translate "$translator" --upstream "$upstream" --key-file "$keyfile" \
+    --log "$CALLS_LOG" --port-file "$WORK/proxy.port" --max-calls "${MAX_CALLS:-40}" "$@" &
+  PROXY_PID=$!
+  for _ in $(seq 100); do [ -s "$WORK/proxy.port" ] && break; kill -0 "$PROXY_PID" 2>/dev/null || break; sleep 0.05; done
+  [ -s "$WORK/proxy.port" ] || { echo "key_proxy.py ($translator) did not start" >&2; exit 1; }
+  PORT="$(cat "$WORK/proxy.port")"
+  PROXY_URL="http://127.0.0.1:$PORT"
+  export CORPUS_KEY_FILES CALLS_LOG PORT PROXY_URL
+}
+
+corpus_proxy_stop() {
+  [ -z "${PROXY_PID:-}" ] || kill "$PROXY_PID" 2>/dev/null || true
+  PROXY_PID=""
+}
+
+corpus_calls() {
+  if [ -f "${CALLS_LOG:-}" ]; then grep -c '"refused": false' "$CALLS_LOG" || true; else echo 0; fi
 }
 
 corpus_scrub() {

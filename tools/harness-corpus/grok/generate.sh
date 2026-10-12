@@ -7,8 +7,7 @@
 #
 # <out-dir> is normally crates/cv-core/tests/corpus/grok/<version>; it must not exist yet. Needs:
 # install.sh <version> run first, python3, git, uuidgen, ~/.zai-key. Env: ZAI_KEY_FILE,
-# CORPUS_MODEL (default glm-5.3-flash), CORPUS_MODEL_ALT (default glm-5.3), PORT (default: free),
-# MAX_CALLS (default 85). Set TMPDIR to your own scratch dir: the throwaway home goes there.
+# CORPUS_MODEL (default glm-5.3-flash), CORPUS_MODEL_ALT (default glm-5.3), MAX_CALLS (default 85). Set TMPDIR to your own scratch dir: the throwaway home goes there.
 #
 # Every scenario is listed in AFFORDANCES.md with the record it is meant to leave.
 set -euo pipefail
@@ -25,18 +24,18 @@ mkdir -p "$(dirname "$OUT")"; OUT="$(cd "$(dirname "$OUT")" && pwd -P)/$(basenam
 [ ! -e "$OUT" ] || { echo "refusing: $OUT exists (add a new version instead of regenerating)" >&2; exit 1; }
 BIN="${HARNESS_VERSIONS:-$HOME/tools/harness-versions}/grok/$V/grok"
 [ -x "$BIN" ] || { echo "grok $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
-MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; ALT="${CORPUS_MODEL_ALT:-glm-5.3}"
-PORT="${PORT:-$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
+MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; ALT="${CORPUS_MODEL_ALT:-glm-5.3}"; MAX_CALLS="${MAX_CALLS:-85}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
 
 corpus_work
-PROXY_PID=""
-cleanup() { [ -z "$PROXY_PID" ] || kill "$PROXY_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 export HOME="$CORPUS_HOME" GROK_HOME="$CORPUS_HOME/.grok" TMPDIR="$WORK/tmp"
 mkdir -p "$TMPDIR" "$GROK_HOME"
 corpus_guard HOME GROK_HOME TMPDIR
 PROJECT="$CORPUS_HOME/project"
+# Only the proxy sees the real key; Grok gets a dummy one for its BYOK models at $PORT.
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" passthrough "$UPSTREAM"
 
 # The scratch project: a git repo with a few small files, an AGENTS.md, a saved workflow.
 cd "$PROJECT"
@@ -118,15 +117,6 @@ description: Greet the user in exactly three words. Use when asked for a corpus 
 ---
 Reply with exactly three words of greeting and nothing else. Do not use any tools.
 MD
-
-# Only the proxy sees the real key; Grok gets a dummy one for its BYOK models.
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/../key_proxy.py" --port "$PORT" --upstream "$UPSTREAM" --auth bearer \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-85}" &
-PROXY_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-sleep 0.3; kill -0 "$PROXY_PID" 2>/dev/null || { echo "key_proxy.py did not start on port $PORT" >&2; exit 1; }
 
 GENV=(PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin HOME="$HOME" GROK_HOME="$GROK_HOME" TMPDIR="$TMPDIR"
   TERM=dumb LANG=en_US.UTF-8 TZ=UTC CORPUS_PROXY_KEY=corpus-local-proxy GROK_TELEMETRY_ENABLED=0 RUST_LOG=off
@@ -217,7 +207,7 @@ if want interrupt; then # SIGINT while a command is running
   SCEN+=("interrupt")
 fi
 
-CALLS="$(grep -c . "$WORK/calls.jsonl" || true)"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 
 # Copy the session tree Grok wrote: per-session dirs (chat_history, updates, events, summary,

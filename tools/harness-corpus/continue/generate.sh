@@ -33,7 +33,7 @@ corpus_guard HOME CONTINUE_GLOBAL_DIR TMPDIR
 PROJECT="$CORPUS_HOME/project"
 corpus_project
 
-corpus_proxy "https://api.z.ai/api/coding/paas/v4" bearer "$MODEL"
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" passthrough "https://api.z.ai/api/coding/paas/v4" --model "$MODEL"
 # The harness gets a dummy key for a provider at the local proxy; the proxy adds the real one.
 cat >"$CONTINUE_GLOBAL_DIR/config.yaml" <<YAML
 name: corpus

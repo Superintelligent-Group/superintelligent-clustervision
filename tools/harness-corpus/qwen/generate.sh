@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Generate the Qwen Code corpus for one installed version: real session JSONL Qwen Code wrote itself,
 # in a throwaway home, driven by a cheap real model (Z.ai GLM, OpenAI-compatible, through
-# chat_proxy.py so the key never reaches the harness).
+# ../key_proxy.py --translate chat, so the key never reaches the harness).
 #
 #   tools/harness-corpus/qwen/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
 #
 # <out-dir> is normally crates/cv-core/tests/corpus/qwen/<version>; it must not exist yet. Needs:
 # install.sh <version> run first, python3, git, ~/.zai-key. Env: ZAI_KEY_FILE, CORPUS_MODEL (default
-# glm-5.3-flash), PORT (default: a free one), MAX_CALLS (default 70).
+# glm-5.3-flash), MAX_CALLS (default 70).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../lib.sh"
@@ -24,12 +24,11 @@ BIN="${HARNESS_VERSIONS:-$HOME/tools/harness-versions}/qwen/$V/node_modules/.bin
 [ -x "$BIN" ] || { echo "qwen $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
 MODEL="${CORPUS_MODEL:-glm-5.3-flash}"
 ALT_MODEL="glm-4.7-flash" # the name Qwen Code is told for the model switch; the proxy still answers with $MODEL
-PORT="${PORT:-$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
+MAX_CALLS="${MAX_CALLS:-70}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
 
 corpus_work
-PROXY_PID=""
-cleanup() { [ -z "$PROXY_PID" ] || kill "$PROXY_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 export HOME="$CORPUS_HOME" QWEN_HOME="$CORPUS_HOME/.qwen" TMPDIR="$WORK/tmp"
 mkdir -p "$TMPDIR"
@@ -79,18 +78,12 @@ cat >"$QDIR/settings.json" <<JSON
 }
 JSON
 
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/chat_proxy.py" --port "$PORT" --upstream "$UPSTREAM" --model "$MODEL" \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-70}" &
-PROXY_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-kill -0 "$PROXY_PID" 2>/dev/null || { echo "the proxy did not start" >&2; exit 1; }
-touch "$WORK/calls.jsonl"
+# Thinking is left as Qwen Code asks for it (--thinking harness).
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" chat "$UPSTREAM" --model "$MODEL" --thinking harness
 # Background extras that each cost model calls (auto memory extraction and dreaming, follow-up
 # suggestions) are off in settings.json; auto titles are off except in the chat scenario.
 export QWEN_DISABLE_AUTO_TITLE=1
-export OPENAI_API_KEY="corpus-local-shim" OPENAI_BASE_URL="http://127.0.0.1:$PORT/v1" OPENAI_MODEL="$MODEL"
+export OPENAI_API_KEY="corpus-local-shim" OPENAI_BASE_URL="$PROXY_URL/v1" OPENAI_MODEL="$MODEL"
 
 # ws JSON: a workspace settings file for the next scenario only; ws with no argument removes it.
 ws() { if [ $# -gt 0 ]; then mkdir -p "$PROJECT/.qwen"; printf '%s\n' "$1" >"$PROJECT/.qwen/settings.json"; else rm -rf "$PROJECT/.qwen"; fi; }
@@ -193,7 +186,7 @@ if want goal; then   # /goal sets a session goal (goal_state records)
   SCEN+=("goal")
 fi
 
-CALLS="$(grep -c '"refused": false' "$WORK/calls.jsonl" || true)"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 
 # Copy the store as Qwen Code wrote it: projects/ (chats, subagents, per-project memory and meta) and
@@ -232,7 +225,7 @@ PY
 corpus_scrub "$OUT"
 corpus_manifest "$OUT" \
   "harness=\"qwen\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL via Z.ai coding endpoint, through chat_proxy.py (OpenAI-compatible auth)\"" \
+  "model=\"$MODEL via Z.ai coding endpoint, through key_proxy.py --translate chat (OpenAI-compatible auth)\"" \
   "model_switch_name=\"$ALT_MODEL (the name Qwen Code recorded for the switch; the proxy answered with $MODEL)\"" \
   "model_calls=$CALLS" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \

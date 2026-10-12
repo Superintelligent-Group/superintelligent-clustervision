@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generate the Gemini CLI corpus for one installed version: real chat recordings Gemini CLI wrote
-# itself, in a throwaway home, driven by a cheap real model (Z.ai GLM through generate_content_shim.py,
+# itself, in a throwaway home, driven by a cheap real model (Z.ai GLM through ../key_proxy.py --translate gemini,
 # reached with API-key auth and GOOGLE_GEMINI_BASE_URL).
 #
 #   tools/harness-corpus/gemini/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
@@ -8,7 +8,7 @@
 # <out-dir> is normally crates/cv-core/tests/corpus/gemini/<version>; it must not exist yet. Needs:
 # install.sh <version> run first, python3, git, ~/.zai-key. Env: ZAI_KEY_FILE, CORPUS_MODEL (default
 # glm-5.3-flash), GEMINI_MODEL_PROFILE (the model name Gemini CLI is told; default gemini-2.5-flash),
-# PORT (default: a free one), MAX_CALLS (default 70).
+# MAX_CALLS (default 70).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../lib.sh"
@@ -25,12 +25,11 @@ BIN="${HARNESS_VERSIONS:-$HOME/tools/harness-versions}/gemini/$V/node_modules/.b
 [ -x "$BIN" ] || { echo "gemini $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
 MODEL="${CORPUS_MODEL:-glm-5.3-flash}"
 PROFILE="${GEMINI_MODEL_PROFILE:-gemini-2.5-flash}"; ALT_PROFILE="gemini-2.5-flash-lite"
-PORT="${PORT:-$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
+MAX_CALLS="${MAX_CALLS:-70}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
 
 corpus_work
-SHIM_PID=""
-cleanup() { [ -z "$SHIM_PID" ] || kill "$SHIM_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 export HOME="$CORPUS_HOME" GEMINI_CLI_HOME="$CORPUS_HOME" TMPDIR="$WORK/tmp"
 mkdir -p "$TMPDIR"
@@ -85,16 +84,9 @@ cat >"$GDIR/settings.json" <<JSON
 }
 JSON
 
-# Only the shim sees the real key; Gemini CLI gets a dummy API key and a base URL pointing at the shim.
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/generate_content_shim.py" --port "$PORT" --upstream "$UPSTREAM" --model "$MODEL" \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-70}" &
-SHIM_PID=$!
-unset UPSTREAM_KEY
-export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:$PORT" GEMINI_API_KEY="corpus-local-shim"
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-kill -0 "$SHIM_PID" 2>/dev/null || { echo "the shim did not start" >&2; exit 1; }
-touch "$WORK/calls.jsonl"
+# Only the proxy sees the real key; Gemini CLI gets a dummy API key and a base URL pointing at it.
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" gemini "$UPSTREAM" --model "$MODEL"
+export GOOGLE_GEMINI_BASE_URL="$PROXY_URL" GEMINI_API_KEY="corpus-local-shim"
 
 # ws JSON: a workspace settings file for the next scenario only; ws with no argument removes it.
 ws() { if [ $# -gt 0 ]; then mkdir -p "$PROJECT/.gemini"; printf '%s\n' "$1" >"$PROJECT/.gemini/settings.json"; else rm -rf "$PROJECT/.gemini"; fi; }
@@ -161,7 +153,7 @@ if want hook; then   # a BeforeAgent hook's additionalContext (recorded as <hook
   CORPUS_HOOK=1 run -p "What is the magic word? One word."
   SCEN+=("hook")
 fi
-if want web; then    # web_fetch (the model answers through the shim; the call is what persists)
+if want web; then    # web_fetch (the model answers through the proxy; the call is what persists)
   run -y -p "Use web_fetch to fetch https://example.com and tell me its title in five words or fewer."
   run -y -p "Use google_web_search to search for: example domain. Then answer in five words."
   SCEN+=("web_fetch" "web_search")
@@ -189,7 +181,7 @@ if want chatsave; then # /chat save <tag> writes tmp/<project>/checkpoint-<tag>.
   SCEN+=("chat_save")
 fi
 
-CALLS="$(grep -c '"refused": false' "$WORK/calls.jsonl" || true)"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 
 # Copy the store as Gemini CLI wrote it: everything under tmp/ (recordings, checkpoints, logs,
@@ -208,7 +200,7 @@ fi
 corpus_scrub "$OUT"
 corpus_manifest "$OUT" \
   "harness=\"gemini\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL via Z.ai coding endpoint, through generate_content_shim.py (gemini-api-key auth with GOOGLE_GEMINI_BASE_URL)\"" \
+  "model=\"$MODEL via Z.ai coding endpoint, through key_proxy.py --translate gemini (gemini-api-key auth with GOOGLE_GEMINI_BASE_URL)\"" \
   "gemini_model_profile=\"$PROFILE (the model name Gemini CLI recorded; $ALT_PROFILE for the switch)\"" \
   "model_calls=$CALLS" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \

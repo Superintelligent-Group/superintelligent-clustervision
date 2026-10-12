@@ -10,7 +10,7 @@ CV_REGEN_CORPUS=1 cargo test -p clustervision-core --test corpus
 install; only the latest release is captured.
 
 `HOME` and `QWEN_HOME` point into the throwaway dir. Qwen Code speaks OpenAI chat completions natively, so
-`chat_proxy.py` translates nothing: it holds the key (Qwen Code gets `OPENAI_API_KEY=corpus-local-shim`
+`../key_proxy.py --translate chat --thinking harness` translates nothing: it holds the key (Qwen Code gets `OPENAI_API_KEY=corpus-local-shim`
 and `OPENAI_BASE_URL=http://127.0.0.1:<port>/v1`), rewrites `model` to `glm-5.3-flash`, counts calls
 against `MAX_CALLS` (default 70) and streams the answer back byte for byte.
 

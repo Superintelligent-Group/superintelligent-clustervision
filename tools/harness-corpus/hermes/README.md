@@ -28,9 +28,9 @@ and falls back to `~/.hermes`.
 
 ## The model path
 
-Hermes speaks chat completions natively. `chat_shim.py` is a pass-through on `127.0.0.1:$PORT` that
+Hermes speaks chat completions natively. `../key_proxy.py --translate chat` is a pass-through on `127.0.0.1:$PORT` that
 puts the real Z.ai key on each request, so Hermes's `config.yaml` only ever holds the dummy key
-`corpus-local-shim`. The shim also pins the model to `glm-5.3-flash` (one `--also` model,
+`corpus-local-shim`. The proxy also pins the model to `glm-5.3-flash` (one `--also` model,
 `glm-4.5-air`, passes through for the model-switch scenario), turns GLM thinking on, and swaps
 image parts for a text placeholder, because the model is text-only and Hermes still persists the
 image. It counts calls, refuses any past `MAX_CALLS` (default 95), and logs request shapes only.

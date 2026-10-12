@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Generate the OpenClaw corpus for one installed version: real sessions OpenClaw wrote itself, in a
-# throwaway home, driven by a cheap real model (Z.ai GLM through chat_shim.py), with a foreground
+# throwaway home, driven by a cheap real model (Z.ai GLM through ../key_proxy.py --translate chat), with a foreground
 # gateway in that home so sub-agents, cron and compaction run as they do for a user.
 #
 #   tools/harness-corpus/openclaw/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
 #
 # <out-dir> is normally crates/cv-core/tests/corpus/openclaw/<version>; it must not exist yet.
 # Needs: install.sh <version> run first, python3, git, sqlite3, ~/.zai-key. Env: ZAI_KEY_FILE,
-# CORPUS_MODEL (default glm-5.3-flash), PORT (shim, default 18821), GW_PORT (default 18947),
-# MAX_CALLS (default 60).
+# CORPUS_MODEL (default glm-5.3-flash), GW_PORT (default 18947), MAX_CALLS (default 60).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../lib.sh"
@@ -24,19 +23,17 @@ VERSIONS="${HARNESS_VERSIONS:-$REAL_HOME/tools/harness-versions}"
 BIN="$VERSIONS/openclaw/$V/node_modules/.bin/openclaw"
 [ -x "$BIN" ] || { echo "openclaw $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
 command -v sqlite3 >/dev/null || { echo "sqlite3 not on PATH" >&2; exit 1; }
-MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; PORT="${PORT:-18821}"; GW_PORT="${GW_PORT:-18947}"
+MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; GW_PORT="${GW_PORT:-18947}"; MAX_CALLS="${MAX_CALLS:-60}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
-# Ports must be free: a stale listener would answer for the shim or gateway and the store would
-# come out looking fine.
-for p in "$PORT" "$GW_PORT"; do
-  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then echo "refusing: something listens on $p" >&2; exit 1; fi
-done
+# The gateway port must be free: a stale listener would answer for the gateway and the store would
+# come out looking fine. (The proxy binds a free port of its own.)
+if (exec 3<>"/dev/tcp/127.0.0.1/$GW_PORT") 2>/dev/null; then echo "refusing: something listens on $GW_PORT" >&2; exit 1; fi
 
 corpus_work
-SHIM_PID=""; GW_PID=""
+GW_PID=""
 cleanup() {
   [ -z "$GW_PID" ] || kill "$GW_PID" 2>/dev/null || true
-  [ -z "$SHIM_PID" ] || kill "$SHIM_PID" 2>/dev/null || true
+  corpus_proxy_stop
   wait 2>/dev/null || true
   [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"
 }
@@ -49,6 +46,8 @@ unset CLAWDBOT_STATE_DIR CLAWDBOT_CONFIG_PATH MOLTBOT_STATE_DIR MOLTBOT_CONFIG_P
   XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME OPENAI_API_KEY ANTHROPIC_API_KEY ZAI_API_KEY Z_AI_API_KEY
 corpus_guard HOME OPENCLAW_STATE_DIR TMPDIR
 PROJECT="$CORPUS_HOME/project"
+# Only the proxy sees the real key; OpenClaw's provider gets a dummy one at $PORT.
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" chat "$UPSTREAM" --model "$MODEL"
 # A local, non-secret shared token for the loopback gateway in this throwaway home.
 export OPENCLAW_GATEWAY_TOKEN="corpus-local-gateway"
 export OPENCLAW_SKIP_CHANNELS=1 OPENCLAW_DISABLE_UPDATE_CHECK=1 OPENCLAW_NO_RESPAWN=1
@@ -75,7 +74,7 @@ m = lambda mid, name, ctx: {"id": mid, "name": name, "reasoning": True, "input":
 cfg = {
   "models": {"mode": "merge", "providers": {"corpus": {
     "baseUrl": f"http://127.0.0.1:{port}/v1", "apiKey": "corpus-local-shim", "api": "openai-completions",
-    # The second id is the same model behind the shim with OpenClaw's minimum context window, so a
+    # The second id is the same model behind the proxy with OpenClaw's minimum context window, so a
     # session switched to it compacts on its own.
     "models": [m(model, "GLM (corpus)", 128000), m(model + "-tiny", "GLM tiny window (corpus)", 16000)]}}},
   "agents": {"defaults": {"model": {"primary": f"corpus/{model}"}, "workspace": project, "skipBootstrap": True,
@@ -87,14 +86,6 @@ if mcp:
     cfg.update(json.loads("{" + mcp.lstrip(",") + "}"))
 json.dump(cfg, open(path, "w"), indent=1)
 PY
-
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/chat_shim.py" --port "$PORT" --upstream "$UPSTREAM" --model "$MODEL" \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-60}" &
-SHIM_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-: >"$WORK/calls.jsonl"
 
 # The gateway in the foreground (never `gateway install`: no launchd service).
 "$BIN" gateway run --port "$GW_PORT" --bind loopback --auth token --allow-unconfigured >"$WORK/gateway.log" 2>&1 &
@@ -234,7 +225,7 @@ fi
 if want memory; then    # memory tools over MEMORY.md, and web_fetch
   S="$(new_session)"
   ask "$S" "Search your memory for the project codename (memory_search, then memory_get if needed) and tell me what it is."
-  # web fetch, kept local: the shim answers GET /v1/models (OpenClaw may refuse a loopback URL; the
+  # web fetch, kept local: the proxy answers GET /v1/models (OpenClaw may refuse a loopback URL; the
   # refusal is a persisted tool error, which is fine)
   ask "$S" "Use the web_fetch tool to fetch http://127.0.0.1:$PORT/v1/models and tell me the model id it lists."
   SCEN+=("memory" "web_fetch")
@@ -271,7 +262,7 @@ if want chat; then
 fi
 [ -z "$MCP_SKIP" ] || SKIP+=("$MCP_SKIP")
 
-CALLS="$(wc -l <"$WORK/calls.jsonl" | tr -d ' ')"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 kill "$GW_PID" 2>/dev/null || true; wait "$GW_PID" 2>/dev/null || true; GW_PID=""
 
@@ -279,7 +270,7 @@ copy_store
 corpus_scrub "$OUT" --also "$VERSIONS/openclaw/$V=/opt/openclaw/$V"
 corpus_manifest "$OUT" \
   "harness=\"openclaw\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL via Z.ai coding endpoint, through chat_shim.py (OpenClaw provider corpus, api openai-completions)\"" \
+  "model=\"$MODEL via Z.ai coding endpoint, through key_proxy.py --translate chat (OpenClaw provider corpus, api openai-completions)\"" \
   "model_calls=$CALLS" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
   "skipped=[$( [ ${#SKIP[@]} -gt 0 ] && printf '"%s",' "${SKIP[@]}" | sed 's/,$//')]" \

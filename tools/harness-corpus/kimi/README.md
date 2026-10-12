@@ -17,7 +17,7 @@ writes sessions, so the corpus is 1.48.0 (what ember had installed) and 1.51.0.
 ## The model path
 
 A `config.toml` in the throwaway dir (outside `KIMI_SHARE_DIR`, so it is never copied) defines one
-`kimi` provider at `passthrough_proxy.py` with a dummy key, `default_thinking = true`,
+`kimi` provider at `../key_proxy.py` (passthrough) with a dummy key, `default_thinking = true`,
 `telemetry = false`, and two hooks. MCP comes from `--mcp-config-file`, the user skill from
 `$KIMI_SHARE_DIR/skills/greet/`.
 

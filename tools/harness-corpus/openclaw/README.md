@@ -7,9 +7,9 @@ CV_REGEN_CORPUS=1 cargo test -p clustervision-core --test corpus
 ```
 
 **Needs:** npm, python3 (3.14 or later when the store has zstd cells: `scrub.py` decompresses them to
-scrub inside), git, sqlite3, and `~/.zai-key` (override with `ZAI_KEY_FILE`). Free local ports:
-`PORT` (shim, default 18821) and `GW_PORT` (gateway, default 18947); the script refuses to start if
-either is taken.
+scrub inside), git, sqlite3, and `~/.zai-key` (override with `ZAI_KEY_FILE`). A free local port for
+the gateway, `GW_PORT` (default 18947); the script refuses to start if it is taken. The proxy binds a
+free port of its own.
 
 `install.sh` installs into `~/tools/harness-versions/openclaw/<v>/` with `npm --prefix`. The Homebrew
 `openclaw` and `~/.openclaw` are never read or written. `HOME`, `OPENCLAW_STATE_DIR`,
@@ -18,8 +18,8 @@ either is taken.
 
 ## The model path and the gateway
 
-OpenClaw speaks OpenAI chat completions natively (`api: "openai-completions"`), so `chat_shim.py` only
-forwards: OpenClaw sends to `127.0.0.1:$PORT` with a dummy key, the shim adds the Z.ai key and
+OpenClaw speaks OpenAI chat completions natively (`api: "openai-completions"`), so `../key_proxy.py --translate chat` only
+forwards: OpenClaw sends to `127.0.0.1:$PORT` with a dummy key, the proxy adds the Z.ai key and
 streams the reply back unchanged. It maps the `developer` role to `system` (Z.ai rejects it: 2026.1
 sends `developer` to reasoning models), drops OpenAI-only knobs, and answers both configured model
 ids (`glm-5.3-flash` and `glm-5.3-flash-tiny`, the same model under OpenClaw's minimum 16k context

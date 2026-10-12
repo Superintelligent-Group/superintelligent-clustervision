@@ -40,7 +40,7 @@ corpus_project
 
 # Roo's anthropic provider takes no base URL from the CLI, but the Anthropic SDK reads
 # ANTHROPIC_BASE_URL: point it at the proxy, which adds the real key for Z.ai.
-corpus_proxy "https://api.z.ai/api/anthropic" x-api-key "$MODEL"
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" passthrough "https://api.z.ai/api/anthropic" --auth x-api-key --model "$MODEL"
 export ANTHROPIC_BASE_URL="$PROXY_URL"
 
 # MCP: the extension reads globalStorage/settings/mcp_settings.json.

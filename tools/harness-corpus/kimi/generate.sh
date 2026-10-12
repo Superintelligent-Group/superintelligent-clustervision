@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generate the legacy kimi-cli corpus for one installed version: real sessions kimi-cli wrote itself,
-# in a throwaway KIMI_SHARE_DIR, driven by Kimi's coding model through passthrough_proxy.py.
+# in a throwaway KIMI_SHARE_DIR, driven by Kimi's coding model through ../key_proxy.py.
 #
 #   tools/harness-corpus/kimi/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
 #
@@ -27,8 +27,7 @@ MODEL="${CORPUS_MODEL:-kimi-for-coding}"
 UPSTREAM="https://api.kimi.com/coding/v1"
 
 corpus_work
-PROXY_PID=""
-cleanup() { [ -z "$PROXY_PID" ] || kill "$PROXY_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 export HOME="$CORPUS_HOME" KIMI_SHARE_DIR="$CORPUS_HOME/.kimi" TMPDIR="$WORK/tmp"
 mkdir -p "$TMPDIR" "$KIMI_SHARE_DIR"
@@ -44,13 +43,8 @@ printf '# Project notes\nThis is a tiny test repository. Keep answers short.\n' 
 git init -q -b main . && git -c user.name=corpus -c user.email=corpus@example.invalid add -A \
   && git -c user.name=corpus -c user.email=corpus@example.invalid commit -qm init
 
-corpus_load_key UPSTREAM_KEY "${KIMI_KEY_FILE:-$REAL_HOME/.kimikey}"
-python3 -I "$HERE/../passthrough_proxy.py" --port-file "$WORK/port" --upstream "$UPSTREAM" --strip-prefix /v1 \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-60}" &
-PROXY_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do [ -s "$WORK/port" ] && break; sleep 0.1; done
-PORT="$(cat "$WORK/port")"
+MAX_CALLS="${MAX_CALLS:-60}"
+corpus_proxy "${KIMI_KEY_FILE:-$REAL_HOME/.kimikey}" passthrough "$UPSTREAM"
 
 # Config and MCP config live in $WORK, outside the share dir: kimi-cli only gets a dummy key.
 cp "$HERE/../codex/mcp_server.py" "$WORK/mcp_server.py"
@@ -173,7 +167,7 @@ SKIP+=("approvals: --afk auto-approves every tool call"
   "web_search: SearchWeb needs the Moonshot search service (OAuth login)"
   "interrupt: print mode has no interrupt; the Kimi Code corpus covers it")
 
-CALLS="$(wc -l <"$WORK/calls.jsonl" | tr -d ' ')"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 
 # Copy what kimi-cli wrote: the session dirs (context*.jsonl, wire.jsonl, state.json, sidecars) and
@@ -184,7 +178,7 @@ cp -R "$KIMI_SHARE_DIR/sessions" "$OUT/.kimi/"
 corpus_scrub "$OUT"
 corpus_manifest "$OUT" \
   "harness=\"kimi\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL via api.kimi.com/coding/v1, through passthrough_proxy.py\"" \
+  "model=\"$MODEL via api.kimi.com/coding/v1, through key_proxy.py\"" \
   "model_calls=$CALLS" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
   "skipped=[$(printf '"%s",' "${SKIP[@]}" | sed 's/,$//')]" \

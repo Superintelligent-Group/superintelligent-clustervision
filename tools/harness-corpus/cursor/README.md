@@ -21,7 +21,9 @@ There is no `generate.sh`, because nothing can run a model turn without ember's 
 
 **What would unblock it:** a Cursor API key (Cursor dashboard → Integrations → API keys) in a key
 file such as `~/.cursor-key`. Both builds take `CURSOR_API_KEY` / `--api-key` and then read no
-keychain entry; `generate.sh` would load it with `corpus_load_key`, run `cursor-agent -p
+keychain entry. With no base URL to point at `key_proxy.py`, Cursor would be the one harness that
+holds its own key: `generate.sh` would export it as `CURSOR_API_KEY`, add the file to
+`CORPUS_KEY_FILES` so the scrub checks for it, run `cursor-agent -p
 --output-format json` in a throwaway `HOME` (and `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR`), and copy
 the store below. 2026.10 also accepts `CURSOR_AUTH_TOKEN`.
 

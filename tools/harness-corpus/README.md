@@ -17,7 +17,7 @@ the binding part.
   `--keep` leaves the temp dir for inspection.
 - `README.md`: what it needs, which scenarios it covers, which it cannot and why.
 
-## Shared pieces: `lib.sh` and `scrub.py`
+## Shared pieces: `lib.sh`, `key_proxy.py` and `scrub.py`
 
 Every `generate.sh` sources `lib.sh`:
 
@@ -25,7 +25,8 @@ Every `generate.sh` sources `lib.sh`:
 |---|---|
 | `corpus_work` | sets `WORK` (fresh temp dir) and `CORPUS_HOME=$WORK/home`, with the project at `$CORPUS_HOME/project` |
 | `corpus_guard VAR...` | exits unless each env var (`HOME`, `CODEX_HOME`, `TMPDIR`, ...) resolves inside `$WORK` |
-| `corpus_load_key VAR FILE` | exports `VAR` from a key file without printing it, and records the file so the scrub can check that literal key |
+| `corpus_proxy KEYFILE TRANSLATOR UPSTREAM [args...]` | starts `key_proxy.py` (below) on a free port, capped at `$MAX_CALLS` (default 40) and logging to `$CALLS_LOG` (default `$WORK/calls.jsonl`); sets `PORT`, `PROXY_URL`, `PROXY_PID`, and records the key file so the scrub can check that literal key |
+| `corpus_proxy_stop` / `corpus_calls` | stops the proxy (put it in the EXIT trap) / the number of model calls it forwarded |
 | `corpus_scrub DIR` | runs `scrub.py` (below) |
 | `corpus_size_check DIR` | warns over 300 KB and fails over 1 MB (file bytes, not `du` blocks) |
 | `corpus_manifest DIR k=v...` | writes `MANIFEST.toml` |
@@ -45,14 +46,18 @@ any of these is left anywhere:
 
 `corpus.rs` runs the same kind of check over every committed file.
 
-### `drive.sh`, `key_proxy.py`, `schema_snapshot.py`
+### `key_proxy.py`, `drive.sh`, `schema_snapshot.py`
 
-- `key_proxy.py` serves harnesses that already speak the provider's wire (chat completions, Anthropic
-  messages) and need only the key kept out of them. It forwards to Z.ai and adds the key, enforces
-  `MAX_CALLS`, and logs offered tool names, never content. `drive.sh` (sourced after `lib.sh`) starts
-  it on a free port (`corpus_proxy UPSTREAM bearer|x-api-key [MODEL]`, giving `PROXY_URL`), counts
-  calls (`corpus_calls`), sets up the shared scratch project (`corpus_project`), and writes manifest
-  lists (`toml_list`). Used by `cline/`, `continue/` and `roo/`; `claude/` and `grok/` start it themselves.
+- `key_proxy.py` is the only model endpoint a harness is ever given, and the only process that reads
+  the key (from its key file; never argv, env, a log or a reply). It binds a free port, counts calls
+  and answers past `--max-calls` with a 400, and logs request shapes (roles, item kinds, tool
+  names), never content. `--translate` picks the wire: `passthrough` (Anthropic messages, or chat
+  completions sent as is: claude, cline, continue, grok, kimi, kimi-code, roo), `chat` (chat
+  completions adapted for GLM: goose, hermes, openclaw, opencode, qwen), `responses` (codex) and
+  `gemini` (gemini). Its docstring lists each translator's edits and the injected provider errors.
+  A new wire is a new translator class there, not a new proxy file.
+- `drive.sh` (sourced after `lib.sh`) sets up the shared scratch project (`corpus_project`) and
+  writes manifest lists (`toml_list`).
 - `schema_snapshot.py` records a store's shape (DDL, merged JSON key paths and types) without its
   content. It is for desktop apps that cannot be driven headless (`zed/`, `lmstudio/`). Their
   `snapshot.sh` writes `tests/corpus/<h>/<app version>/` (`SNAPSHOT.toml` and no sessions), and
@@ -68,11 +73,11 @@ any of these is left anywhere:
 - **Throwaway home always.** Set `HOME` and the harness's own variable (`CODEX_HOME`, `GOOSE_PATH_ROOT`,
   `HERMES_HOME`, ...) and `TMPDIR` into `$WORK`, and run `corpus_guard` on all of them. Harnesses
   record `$TMPDIR` too: Codex lists it as a sandbox writable root.
-- **Keys stay out of the harness.** Load the key in the generator, hand it only to the process that
-  calls the model (for Codex, the local `responses_shim.py`), and `unset` it before the harness
-  starts. Never put a key in argv, a config file, or a log.
-- **Budget**: at most about 40 model calls per (harness, version). The Codex shim enforces
-  `MAX_CALLS` and records every call in `calls.jsonl`; `MANIFEST.toml` carries the count.
+- **Keys stay out of the harness.** The generator passes only the key file's path, to
+  `corpus_proxy`; the harness gets `$PROXY_URL` and a dummy key. Never read a key into the shell,
+  and never put one in argv, a config file, or a log.
+- **Budget**: at most about 40 model calls per (harness, version). `key_proxy.py` enforces
+  `MAX_CALLS` and records every call in `calls.jsonl`; `MANIFEST.toml` carries `corpus_calls`.
 - **Copy what the harness wrote, not what you configured.** Copy rollouts, databases, and indexes.
   Never copy auth, config, logs, or caches. Copy a live sqlite database with the backup API, not
   `cp`: WAL mode leaves the data in the `-wal` file.
@@ -88,3 +93,9 @@ any of these is left anywhere:
 3. Add a row to `HARNESSES` in `crates/cv-core/tests/corpus.rs` that roots the adapter at a version
    dir (give the adapter a `with_home`/`with_root` constructor if it lacks one; never use process env).
 4. Regenerate summaries, commit the corpus, summary, and manifest together.
+
+## Testing the shared tools
+
+`python3 -I tools/harness-corpus/test_tools.py` (CI runs it; no network, no model calls) drives every
+translator and every generator's own `corpus_proxy` line against a local mock upstream, and scrubs a
+synthetic jsonl, json and sqlite store, checking the placeholders and the secret refusals.

@@ -16,7 +16,7 @@ CV_REGEN_CORPUS=1 cargo test -p clustervision-core --test corpus
 
 ## The model path
 
-OpenCode speaks chat completions, so `chat_proxy.py` only holds the key: it forwards each request to
+OpenCode speaks chat completions, so `../key_proxy.py --translate chat` only holds the key: it forwards each request to
 Z.ai's coding endpoint (`glm-5.3-flash`, `thinking` on), counts it, and streams the answer back. The
 config names three models at the proxy: the real one, `glm-alt` (the same model under a second id, for
 the model-switch scenario) and `corpus-error` (answered by the proxy with a 400, for the

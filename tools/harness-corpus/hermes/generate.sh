@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Generate the Hermes corpus for one installed version: a real state.db Hermes wrote itself, in a
-# throwaway HERMES_HOME, driven by a cheap real model (Z.ai GLM through chat_shim.py).
+# throwaway HERMES_HOME, driven by a cheap real model (Z.ai GLM through ../key_proxy.py --translate chat).
 #
 #   tools/harness-corpus/hermes/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
 #
 # <out-dir> is normally crates/cv-core/tests/corpus/hermes/<version>; it must not exist yet. Needs:
 # install.sh <version> run first, python3, git, sqlite3, ~/.zai-key. Env: ZAI_KEY_FILE,
-# CORPUS_MODEL (default glm-5.3-flash), SWITCH_MODEL (default glm-4.5-air), PORT (default 18811),
+# CORPUS_MODEL (default glm-5.3-flash), SWITCH_MODEL (default glm-4.5-air),
 # MAX_CALLS (default 95).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,13 +24,11 @@ PREFIX="${HARNESS_VERSIONS:-$HOME/tools/harness-versions}/hermes/$V"
 BIN="$PREFIX/venv/bin/hermes"
 [ -x "$BIN" ] || { echo "hermes $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
 for t in python3 git sqlite3; do command -v "$t" >/dev/null || { echo "$t not on PATH" >&2; exit 1; }; done
-MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; SWITCH="${SWITCH_MODEL:-glm-4.5-air}"; PORT="${PORT:-18811}"
+MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; SWITCH="${SWITCH_MODEL:-glm-4.5-air}"; MAX_CALLS="${MAX_CALLS:-95}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
-(exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && { echo "port $PORT is taken; set PORT" >&2; exit 1; }
 
 corpus_work
-SHIM_PID=""
-cleanup() { [ -z "$SHIM_PID" ] || kill "$SHIM_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 # HERMES_HOME is the critical one: unset, Hermes warns and falls back to ~/.hermes.
 export HOME="$CORPUS_HOME" HERMES_HOME="$CORPUS_HOME/.hermes" TMPDIR="$WORK/tmp"
@@ -39,6 +37,9 @@ for v in XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME OPENAI_API_
   OPENROUTER_API_KEY ANTHROPIC_API_KEY GLM_API_KEY ZAI_API_KEY HERMES_PROFILE; do unset "$v"; done
 corpus_guard HOME HERMES_HOME TMPDIR
 PROJECT="$CORPUS_HOME/project"
+# Only the proxy sees the real key. The switch model passes unpinned; the proxy answers every GET
+# /v1/models locally, so context-length probes cost no call.
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" chat "$UPSTREAM" --model "$MODEL" --also "$SWITCH"
 # Helper scripts live inside $WORK so any path Hermes records scrubs to /home/corpus/.work.
 cp "$HERE/hook.py" "$HERE/../codex/mcp_server.py" "$WORK/bin/"
 
@@ -48,7 +49,7 @@ python3 -I -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode("iVBO
 git init -q -b main . && git -c user.name=corpus -c user.email=corpus@example.invalid add -A \
   && git -c user.name=corpus -c user.email=corpus@example.invalid commit -qm init
 
-# The dummy key is the shim's; the real one never reaches Hermes or its config.
+# The dummy key is the proxy's; the real one never reaches Hermes or its config.
 cat >"$HERMES_HOME/config.yaml" <<YAML
 model:
   provider: custom
@@ -96,14 +97,6 @@ p = sys.argv[1]; s = open(p).read()
 open(p + ".hooks", "w").write(s)
 open(p, "w").write(re.sub(r"hooks:\n(?:  .*\n|    .*\n|      .*\n)+", "", s))
 PY
-
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/chat_shim.py" --port "$PORT" --upstream "$UPSTREAM" --model "$MODEL" --also "$SWITCH" \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-95}" &
-SHIM_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-touch "$WORK/calls.jsonl"
 
 LAST=""
 # Every step must leave the throwaway tree intact; stop at the first one that does not.
@@ -169,12 +162,12 @@ if want delegate; then  # 7 sub-agents: a synchronous delegate_task (the backgro
   hq -q "Use delegate_task to give one subagent the goal 'reply with the word ok'. Then tell me what it said."
   SCEN+=("subagent")
 fi
-if want image; then     # 6 image input (image_url parts; the shim gives the model a placeholder), then 10 MCP
+if want image; then     # 6 image input (image_url parts; the proxy gives the model a placeholder), then 10 MCP
   hq --image "$PROJECT/dot.png" -q "An image is attached. Do not use any tools. Reply with the single word: received."
   hq --resume "$LAST" -q "Use the add tool from the corpus MCP server (find it with tool_search if it is not in your tool list) to add 2 and 3, then say the result."
   SCEN+=("image" "mcp")
 fi
-if want failure; then   # a provider error: the shim answers 500 to this prompt without calling upstream
+if want failure; then   # a provider error: the proxy answers 500 to this prompt without calling upstream
   hq -q "CORPUS-PROVIDER-ERROR: say ok."
   SCEN+=("provider_error")
 fi
@@ -221,10 +214,10 @@ if want manage; then    # store-side affordances with no model call
   [ -z "${TOOLS_ID:-}" ] || { hermes_cmd sessions rename "$TOOLS_ID" "corpus tools"; hermes_cmd sessions archive --title "corpus tools" --yes; }
   SCEN+=("pin" "rename" "archive")
 fi
-CALLS="$(grep -c '"refused": false' "$WORK/calls.jsonl" || true)"
+CALLS="$(corpus_calls)"
 INJECTED="$(grep -c '"injected": true' "$WORK/calls.jsonl" || true)"
 echo "model calls: $CALLS"
-grep -q '"refused": true' "$WORK/calls.jsonl" && echo "warning: the shim refused calls past MAX_CALLS" >&2
+grep -q '"refused": true' "$WORK/calls.jsonl" && echo "warning: the proxy refused calls past MAX_CALLS" >&2
 
 # Copy the store as Hermes wrote it: state.db through the backup API (WAL holds the recent rows).
 # Not config, .env, auth, logs, caches, cron/, memories/ or skills/ (cv reads none of them).
@@ -256,7 +249,7 @@ done
 COMMIT="$(cat "$PREFIX/COMMIT" 2>/dev/null || echo unknown)"
 corpus_manifest "$OUT" \
   "harness=\"hermes\"" "version=\"$V\"" "upstream_commit=\"$COMMIT\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL (switch: $SWITCH) via Z.ai coding endpoint, through chat_shim.py\"" \
+  "model=\"$MODEL (switch: $SWITCH) via Z.ai coding endpoint, through key_proxy.py --translate chat\"" \
   "model_calls=$CALLS" "injected_provider_errors=$INJECTED" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
   "skipped=[$( [ ${#SKIP[@]} -eq 0 ] || printf '"%s",' "${SKIP[@]}" | sed 's/,$//')]" \

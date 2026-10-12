@@ -17,7 +17,7 @@ the Homebrew `kimi-code` and `~/.kimi-code` are never touched.
 ## The model path
 
 Kimi Code takes a whole provider from `KIMI_MODEL_NAME` / `KIMI_MODEL_API_KEY` /
-`KIMI_MODEL_BASE_URL` and never writes it to config.toml. The base URL is `passthrough_proxy.py` on a
+`KIMI_MODEL_BASE_URL` and never writes it to config.toml. The base URL is `../key_proxy.py` (passthrough) on a
 free local port with a dummy key; the proxy alone holds the real key, forwards bytes to the coding
 endpoint, and stops at `MAX_CALLS` (default 60). So the model alias in the store is
 `__kimi_env_model__`, Kimi Code's name for an env-defined model; `llm.request.model` says

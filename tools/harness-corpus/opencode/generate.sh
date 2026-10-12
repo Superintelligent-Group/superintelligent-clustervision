@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Generate the OpenCode corpus for one installed version: a real opencode.db that OpenCode wrote
-# itself, in a throwaway home, driven by a cheap real model (Z.ai GLM through chat_proxy.py).
+# itself, in a throwaway home, driven by a cheap real model (Z.ai GLM through ../key_proxy.py --translate chat).
 #
 #   tools/harness-corpus/opencode/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
 #
 # <out-dir> is normally crates/cv-core/tests/corpus/opencode/<version>; it must not exist yet (a
 # committed version is never regenerated in place). Needs: install.sh <version> run first, python3,
 # sqlite3, curl, git, ~/.zai-key. Env: ZAI_KEY_FILE (default ~/.zai-key), CORPUS_MODEL (default
-# glm-5.3-flash), PORT (default 18766), MAX_CALLS (default 60).
+# glm-5.3-flash), MAX_CALLS (default 60).
 #
 # The store lands at <out-dir>/.local/share/opencode/opencode.db (OpenCode's own data-dir layout).
 set -euo pipefail
@@ -25,7 +25,7 @@ mkdir -p "$(dirname "$OUT")"; OUT="$(cd "$(dirname "$OUT")" && pwd -P)/$(basenam
 BIN="${HARNESS_VERSIONS:-$REAL_HOME/tools/harness-versions}/opencode/$V/node_modules/.bin/opencode"
 [ -x "$BIN" ] || { echo "opencode $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
 for t in sqlite3 curl; do command -v $t >/dev/null || { echo "$t not on PATH" >&2; exit 1; }; done
-MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; PORT="${PORT:-18766}"
+MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; MAX_CALLS="${MAX_CALLS:-60}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
 case "$V" in
   0.*|1.*) MAJOR=1; SESSION_TABLE=session ;;
@@ -33,11 +33,11 @@ case "$V" in
 esac
 
 corpus_work
-PROXY_PID=""; SERVE_PID=""
+SERVE_PID=""
 cleanup() {
   [ -z "$SERVE_PID" ] || kill "$SERVE_PID" 2>/dev/null || true
   [ -z "${apid:-}" ] || kill "$apid" 2>/dev/null || true
-  [ -z "$PROXY_PID" ] || kill "$PROXY_PID" 2>/dev/null || true
+  corpus_proxy_stop
   [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -50,6 +50,8 @@ export OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_SHARE=1
 corpus_guard HOME TMPDIR XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_CACHE_HOME
 PROJECT="$CORPUS_HOME/project"
 DB="$XDG_DATA_HOME/opencode/opencode.db"
+# Only the proxy sees the real key; OpenCode gets a dummy one for a provider at 127.0.0.1:$PORT.
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" chat "$UPSTREAM" --model "$MODEL"
 
 # The scratch project: a git repo with a few small files, a skill and a custom command.
 cd "$PROJECT"
@@ -100,18 +102,11 @@ cat >"$XDG_CONFIG_HOME/opencode/opencode.json" <<JSON
 }
 JSON
 
-# Only the proxy sees the real key; OpenCode gets a dummy one for a provider at 127.0.0.1:$PORT.
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/chat_proxy.py" --port "$PORT" --upstream "$UPSTREAM" --model "$MODEL" \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-60}" &
-PROXY_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-
 # One OpenCode server for the whole run; every `run` attaches to it, and the affordances `run` has no
 # flag for (compaction, a user shell command, revert, interrupt) go through its HTTP API. A server
 # that outlives each `run` is also what lets 2.x background work finish and report back.
-SPORT=$((PORT + 1)); URL="http://127.0.0.1:$SPORT"
+SPORT="$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+URL="http://127.0.0.1:$SPORT"
 AUTH=()
 if [ "$MAJOR" = 2 ]; then
   # A loopback-only password for this throwaway server (2.x requires one); not a credential.
@@ -280,7 +275,7 @@ elif want shell && [ "$MAJOR" = 2 ]; then user_shell
 fi
 
 kill "$SERVE_PID" 2>/dev/null || true; wait "$SERVE_PID" 2>/dev/null || true; SERVE_PID=""
-CALLS="$(wc -l <"$WORK/calls.jsonl" | tr -d ' ')"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 
 # Copy the store as OpenCode wrote it: opencode.db only (backup API, so the WAL is folded in). Not
@@ -293,7 +288,7 @@ python3 -I "$HERE/thin.py" "$DB" "$OUT/.local/share/opencode/opencode.db"
 corpus_scrub "$OUT"
 corpus_manifest "$OUT" \
   "harness=\"opencode\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL via Z.ai coding endpoint, through chat_proxy.py\"" \
+  "model=\"$MODEL via Z.ai coding endpoint, through key_proxy.py --translate chat\"" \
   "model_calls=$CALLS" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
   "skipped=[$( [ ${#SKIP[@]} -eq 0 ] || printf '"%s",' "${SKIP[@]}" | sed 's/,$//')]" \

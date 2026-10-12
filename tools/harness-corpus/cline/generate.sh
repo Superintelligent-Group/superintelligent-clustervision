@@ -39,7 +39,7 @@ PROJECT="$CORPUS_HOME/project"
 DATA="$CLINE_DIR/data"
 corpus_project
 
-corpus_proxy "https://api.z.ai/api/coding/paas/v4" bearer "$MODEL"
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" passthrough "https://api.z.ai/api/coding/paas/v4" --model "$MODEL"
 # The provider gets a dummy key and the proxy's URL; the proxy adds the real key.
 "$BIN" auth -p openai-compatible -k corpus-local-proxy -m "$MODEL" -b "$PROXY_URL/v1" >/dev/null
 mkdir -p "$DATA/settings"

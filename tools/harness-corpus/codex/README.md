@@ -15,10 +15,10 @@ CV_REGEN_CORPUS=1 cargo test -p clustervision-core --test corpus
 
 Codex 0.16x speaks only the Responses API (`wire_api = "responses"` is the only variant left).
 Z.ai does not serve `/responses`, and the OpenRouter dev key had expired on 2026-10-11. So
-`responses_shim.py` is a small local Responses endpoint that forwards each request to Z.ai's chat
+`../key_proxy.py --translate responses` is a local Responses endpoint that forwards each request to Z.ai's chat
 completions (`glm-5.3-flash`, `thinking` on) and streams the answer back as Responses SSE: a
 `reasoning` item from `reasoning_content`, then `message`, `function_call` or `custom_tool_call`
-items, and usage. Only the shim gets the key; Codex gets a dummy key for a provider at
+items, and usage. Only the proxy gets the key; Codex gets a dummy key for a provider at
 `127.0.0.1:$PORT`.
 
 Two things in the store come from this setup rather than from a real OpenAI backend:
@@ -54,6 +54,6 @@ after VACUUM. Config, `installation_id`, shell snapshots and locks are not copie
 
 ## Budget
 
-The shim refuses calls past `MAX_CALLS` (default 40) and logs every one to `$WORK/calls.jsonl`.
+The proxy refuses calls past `MAX_CALLS` (default 40) and logs every one to `$WORK/calls.jsonl`.
 That log holds only item and tool types, never content or headers. A full run takes 20 to 30
 calls, and the count goes into `MANIFEST.toml`.

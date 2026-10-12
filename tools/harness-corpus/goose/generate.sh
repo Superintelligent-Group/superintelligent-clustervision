@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Generate the Goose corpus for one installed version: a real sessions.db that Goose wrote itself,
-# in a throwaway GOOSE_PATH_ROOT, driven by a cheap real model (Z.ai GLM through chat_shim.py).
+# in a throwaway GOOSE_PATH_ROOT, driven by a cheap real model (Z.ai GLM through ../key_proxy.py --translate chat).
 #
 #   tools/harness-corpus/goose/generate.sh <version> <out-dir> [--keep] [--only "chat tools ..."]
 #
 # <out-dir> is normally crates/cv-core/tests/corpus/goose/<version>; it must not exist yet (a
 # committed version is never regenerated in place). Needs: install.sh <version> run first, python3,
 # sqlite3, git, ~/.zai-key. Env: ZAI_KEY_FILE (default ~/.zai-key), CORPUS_MODEL (default
-# glm-5.3-flash), SWITCH_MODEL (default glm-4.7-flash), PORT (default 18831), MAX_CALLS (default 60).
+# glm-5.3-flash), SWITCH_MODEL (default glm-4.7-flash), MAX_CALLS (default 60).
 # The scenario names are listed in AFFORDANCES.md, which says what each one leaves in the store.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,13 +24,11 @@ mkdir -p "$(dirname "$OUT")"; OUT="$(cd "$(dirname "$OUT")" && pwd -P)/$(basenam
 BIN="${HARNESS_VERSIONS:-$REAL_HOME/tools/harness-versions}/goose/$V/bin/goose"
 [ -x "$BIN" ] || { echo "goose $V not installed: run $HERE/install.sh $V" >&2; exit 1; }
 for t in python3 sqlite3 git; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done
-MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; SWITCH_MODEL="${SWITCH_MODEL:-glm-4.7-flash}"; PORT="${PORT:-18831}"
+MODEL="${CORPUS_MODEL:-glm-5.3-flash}"; SWITCH_MODEL="${SWITCH_MODEL:-glm-4.7-flash}"; MAX_CALLS="${MAX_CALLS:-60}"
 UPSTREAM="https://api.z.ai/api/coding/paas/v4"
-if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then echo "port $PORT is taken; set PORT" >&2; exit 1; fi
 
 corpus_work
-SHIM_PID=""
-cleanup() { [ -z "$SHIM_PID" ] || kill "$SHIM_PID" 2>/dev/null || true; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
+cleanup() { corpus_proxy_stop; [ "$KEEP" = 1 ] && echo "kept $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
 # GOOSE_PATH_ROOT relocates config, state and data together; HOME covers ~/.agents (skills, plugins).
 export HOME="$CORPUS_HOME" GOOSE_PATH_ROOT="$CORPUS_HOME/.goose" TMPDIR="$WORK/tmp"
@@ -77,15 +75,10 @@ YAML
 git init -q -b main . && git -c user.name=corpus -c user.email=corpus@example.invalid add -A \
   && git -c user.name=corpus -c user.email=corpus@example.invalid commit -qm init
 
-# Only the shim sees the real key; Goose gets a dummy one for an openai provider at the shim.
-corpus_load_key UPSTREAM_KEY "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}"
-python3 -I "$HERE/chat_shim.py" --port "$PORT" --upstream "$UPSTREAM" --model "$MODEL" \
-  --log "$WORK/calls.jsonl" --max-calls "${MAX_CALLS:-60}" &
-SHIM_PID=$!
-unset UPSTREAM_KEY
-for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.1; done
-touch "$WORK/calls.jsonl"
-export GOOSE_DISABLE_KEYRING=1 GOOSE_PROVIDER=openai GOOSE_MODEL="$MODEL" OPENAI_HOST="http://127.0.0.1:$PORT" \
+# Only the proxy sees the real key; Goose gets a dummy one for an openai provider at the proxy. The
+# switch model passes unpinned (--also), so a model switch in a session is a real one.
+corpus_proxy "${ZAI_KEY_FILE:-$REAL_HOME/.zai-key}" chat "$UPSTREAM" --model "$MODEL" --also "$SWITCH_MODEL"
+export GOOSE_DISABLE_KEYRING=1 GOOSE_PROVIDER=openai GOOSE_MODEL="$MODEL" OPENAI_HOST="$PROXY_URL" \
   OPENAI_API_KEY=corpus-local-shim GOOSE_MODE=auto GOOSE_TELEMETRY_ENABLED=false GOOSE_CLI_MIN_PRIORITY=0.0
 
 # g returns goose's exit status (a scenario whose command this version lacks goes to SKIPS); run
@@ -188,7 +181,7 @@ if want tools && [ -f "$DB" ]; then
     SKIPS+=("parallel_tools (asked for; the model made its calls one per turn)")
   fi
 fi
-CALLS="$(wc -l <"$WORK/calls.jsonl" | tr -d ' ')"
+CALLS="$(corpus_calls)"
 echo "model calls: $CALLS"
 [ -f "$DB" ] || { echo "goose wrote no store at $DB (see $WORK/run.log with --keep)" >&2; exit 1; }
 
@@ -199,7 +192,7 @@ sqlite3 "$DB" "VACUUM INTO '$OUT/sessions/sessions.db'"
 corpus_scrub "$OUT"
 corpus_manifest "$OUT" \
   "harness=\"goose\"" "version=\"$V\"" "generated=\"$(date -u +%Y-%m-%d)\"" \
-  "model=\"$MODEL via Z.ai coding endpoint, through chat_shim.py (switch scenario: $SWITCH_MODEL)\"" \
+  "model=\"$MODEL via Z.ai coding endpoint, through key_proxy.py --translate chat (switch scenario: $SWITCH_MODEL)\"" \
   "schema_version=$(sqlite3 "$OUT/sessions/sessions.db" 'SELECT MAX(version) FROM schema_version;')" \
   "model_calls=$CALLS" \
   "scenarios=[$(printf '"%s",' "${SCEN[@]}" | sed 's/,$//')]" \
