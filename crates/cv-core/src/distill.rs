@@ -1137,6 +1137,7 @@ fn render_tail(
     tail_start: usize,
     opts: &DistillOptions,
     retrieve_ref: &str,
+    resolver: &crate::Resolver,
 ) -> anyhow::Result<String> {
     let tail = resumable_tail(msgs, tail_start, opts, retrieve_ref, resolver)?;
     if tail.is_empty() {

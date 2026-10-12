@@ -321,7 +321,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 
     let mut history: Vec<Value> = Vec::new();
     for msg in &session.messages {
-        history.push(history_item(msg, session.model.as_deref()));
+        history.push(history_item(msg, session.model.as_deref())?);
     }
 
     let mut transcript = Map::new();
@@ -374,7 +374,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 }
 
 /// Build one `history` item (`{message, contextItems}`) from an IR message.
-fn history_item(msg: &Message, session_model: Option<&str>) -> Value {
+fn history_item(msg: &Message, session_model: Option<&str>) -> Result<Value> {
     let role_str = match msg.role {
         Role::System => "system",
         Role::Assistant => "assistant",
@@ -451,7 +451,7 @@ fn history_item(msg: &Message, session_model: Option<&str>) -> Value {
             item.insert("promptLogs".into(), json!([{ "modelTitle": model }]));
         }
     }
-    Value::Object(item)
+    Ok(Value::Object(item))
 }
 
 /// Map a `Block::File` to a Continue `contextItem` (`{name, description, uri:{type, value}}`) that

@@ -459,7 +459,7 @@ fn emit_content_parts(blocks: &[Block]) -> Result<Vec<Value>> {
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
 /// A `content[]` array holding a single `text` part.
