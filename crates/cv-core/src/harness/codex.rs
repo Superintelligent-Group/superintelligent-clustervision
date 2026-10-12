@@ -203,6 +203,14 @@ impl Adapter for Codex {
         if opts.spans && !is_zst_path(&r.path) {
             if let Ok(file) = fs::File::open(&r.path) {
                 if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+                    // One forward pass: tell the kernel, so it reads ahead in big runs instead of
+                    // faulting the file in a page at a time. Measured on a 12-thread recount of
+                    // 88 GB of rollouts: 41-44 s with this hint, 58-59 s without; our own read-ahead on
+                    // top (`madvise(WILLNEED)` or `F_RDADVISE`, 32 MB ahead of the parser) made it
+                    // 150-180 s, and `WILLNEED` on the whole file pages all of it in for a reader
+                    // that stops at the first hit.
+                    #[cfg(unix)]
+                    let _ = map.advise(memmap2::Advice::Sequential);
                     return Ok(stream_jsonl_spans(
                         &r.id,
                         &map,
