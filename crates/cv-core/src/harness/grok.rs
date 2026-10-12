@@ -41,12 +41,12 @@ use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
 use crate::lazy::{Span, Text, INLINE_MAX};
-use crate::stream::{Flow, MessageSink, ParseOptions};
+use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::BufReader;
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -104,103 +104,62 @@ impl Adapter for Grok {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
-            // r.path is the session directory. `summary.json` (small) carries all session-level
-            // metadata; the transcript is `chat_history.jsonl`, one record per line — streamed.
-            let dir = &r.path;
-            let summary: Value = fs::read_to_string(dir.join("summary.json"))
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or(Value::Null);
-
-            let mut s = Session {
-                id: r.id.clone(),
-                harness: Harness::Grok,
-                cwd: summary
-                    .pointer("/info/cwd")
-                    .and_then(Value::as_str)
-                    .map(PathBuf::from)
-                    .or_else(|| r.cwd.clone()),
-                title: r.title.clone(),
-                created_at: summary.get("created_at").and_then(Value::as_str).and_then(parse_ts),
-                updated_at: summary
-                    .get("updated_at")
-                    .and_then(Value::as_str)
-                    .and_then(parse_ts)
-                    .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
-                model: summary
-                    .get("current_model_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                git: grok_git(&summary),
-                messages: Vec::new(),
-                source_path: Some(dir.clone()),
-                extra: serde_json::Map::new(),
-                system_prompt: None,
-                lineage: crate::ir::Lineage::default(),
-            };
-
-            // Sidecar enrichment: tool_call / tool_call_update entries from the ACP update stream.
-            let enrich = read_update_enrichment(dir);
-
-            // Subagent / agent-name facts + lineage from summary.json (and a sub-agent's parent from the
-            // parent's `subagents/<id>/meta.json`).
-            grok_session_facts(&mut s, &summary);
-            grok_lineage(&mut s, &summary, dir);
-
-            // Grok persists the system prompt it sent as `system_prompt.txt` — byte-identical to the
-            // leading `system` transcript record. It is the session-level fact, never a message.
-            if let Ok(sp) = fs::read_to_string(dir.join("system_prompt.txt")) {
-                if !sp.trim().is_empty() {
-                    s.system_prompt = Some(sp);
-                }
-            }
-
-            // All session metadata comes from summary.json (already set above), so hand it to the sink
-            // before the body — header-rendering consumers (cv show) get the title/model/cwd up front.
+            let (s, enrich) = session_header(r);
             sink.meta(&s);
+            let file = fs::File::open(self.resume_source(r))
+                .with_context(|| format!("reading chat_history in {}", r.path.display()))?;
+            Ok(stream_history_at(
+                BufReader::new(file),
+                &self.resume_source(r),
+                0,
+                s,
+                &enrich,
+                0,
+                sink,
+            ))
+        })
+    }
 
-            // IR diet: a message names its model only when it differs from the session default.
-            let session_model = s.model.clone();
-            let file = fs::File::open(dir.join("chat_history.jsonl"))
-                .with_context(|| format!("reading chat_history in {}", dir.display()))?;
-            // A 1.0.5x `reasoning` record joins the assistant turn after it, so one model turn stays one
-            // message (and discover's user+assistant count still matches); reasoning with no assistant
-            // turn after it (an interrupted turn) is flushed as a message of its own.
-            let mut pending: Option<Message> = None;
-            let mut stopped = false;
-            let skipped = super::for_each_json_line(BufReader::new(file), |v| {
-                let is_reasoning = v.get("type").and_then(Value::as_str) == Some("reasoning");
-                let Some(mut m) = chat_message(&v, &enrich) else {
-                    return Flow::Continue;
-                };
-                if is_reasoning {
-                    match pending.as_mut() {
-                        Some(p) => p.content.append(&mut m.content),
-                        None => pending = Some(m),
-                    }
-                    return Flow::Continue;
-                }
-                if let Some(mut p) = pending.take() {
-                    if m.role == Role::Assistant {
-                        p.content.append(&mut m.content);
-                        m.content = p.content;
-                    } else if let Flow::Stop = sink.message(p) {
-                        stopped = true;
-                        return Flow::Stop;
-                    }
-                }
-                if m.model.is_some() && m.model == session_model {
-                    m.model = None;
-                }
-                let f = sink.message(m);
-                stopped = matches!(f, Flow::Stop);
-                f
-            });
-            if let (Some(p), false) = (pending, stopped) {
-                sink.message(p);
+    fn resume_format(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn resume_source(&self, r: &SessionRef) -> PathBuf {
+        r.path.join("chat_history.jsonl")
+    }
+
+    fn resume(
+        &self,
+        r: &SessionRef,
+        _opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        from: &Checkpoint,
+    ) -> Result<Option<Session>> {
+        crate::stream::checked(sink, |sink| {
+            let Some(state) = from.get::<HistoryCheckpoint>(crate::stream::ADAPTER_LAYER) else {
+                return Ok(None);
+            };
+            let wire = self.resume_source(r);
+            if state.wire != wire {
+                return Ok(None);
             }
-            super::note_skipped_lines(&mut s, skipped);
-            Ok(s)
+            let mut file = fs::File::open(&wire)?;
+            if file.metadata()?.len() < from.offset {
+                return Ok(None);
+            }
+            file.seek(SeekFrom::Start(from.offset))?;
+            let (s, enrich) = session_header(r);
+            let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
+            spawns.meta(&s);
+            Ok(Some(stream_history_at(
+                BufReader::new(file),
+                &wire,
+                from.offset,
+                s,
+                &enrich,
+                state.skipped,
+                &mut spawns,
+            )))
         })
     }
 
@@ -331,6 +290,134 @@ fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
         out.clear();
     }
     out
+}
+
+/// Static metadata/enrichment shared by whole and suffix passes. Mutable sidecars are verified
+/// by the consumer's source baseline; an enrichment edit can revise an earlier visible tool.
+fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
+    // r.path is the session directory. `summary.json` (small) carries all session-level
+    // metadata; the transcript is `chat_history.jsonl`, one record per line — streamed.
+    let dir = &r.path;
+    let summary: Value = fs::read_to_string(dir.join("summary.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+
+    let mut s = Session {
+        id: r.id.clone(),
+        harness: Harness::Grok,
+        cwd: summary
+            .pointer("/info/cwd")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .or_else(|| r.cwd.clone()),
+        title: r.title.clone(),
+        created_at: summary.get("created_at").and_then(Value::as_str).and_then(parse_ts),
+        updated_at: summary
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .and_then(parse_ts)
+            .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
+        model: summary
+            .get("current_model_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        git: grok_git(&summary),
+        messages: Vec::new(),
+        source_path: Some(dir.clone()),
+        extra: serde_json::Map::new(),
+        system_prompt: None,
+        lineage: crate::ir::Lineage::default(),
+    };
+
+    // Sidecar enrichment: tool_call / tool_call_update entries from the ACP update stream.
+    let enrich = read_update_enrichment(dir);
+
+    // Subagent / agent-name facts + lineage from summary.json (and a sub-agent's parent from the
+    // parent's `subagents/<id>/meta.json`).
+    grok_session_facts(&mut s, &summary);
+    grok_lineage(&mut s, &summary, dir);
+
+    // Grok persists the system prompt it sent as `system_prompt.txt` — byte-identical to the
+    // leading `system` transcript record. It is the session-level fact, never a message.
+    if let Ok(sp) = fs::read_to_string(dir.join("system_prompt.txt")) {
+        if !sp.trim().is_empty() {
+            s.system_prompt = Some(sp);
+        }
+    }
+
+    (s, enrich)
+}
+
+#[derive(serde::Deserialize)]
+struct HistoryCheckpoint {
+    wire: PathBuf,
+    skipped: u64,
+}
+
+fn stream_history_at(
+    reader: impl std::io::BufRead,
+    wire: &Path,
+    at: u64,
+    mut s: Session,
+    enrich: &HashMap<String, ToolEnrich>,
+    prior_skipped: u64,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    let session_model = s.model.clone();
+    let mut pending: Option<Message> = None;
+    let mut stopped = false;
+    let skipped = super::for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
+        let is_reasoning = v.get("type").and_then(Value::as_str) == Some("reasoning");
+        let Some(mut m) = chat_message(&v, enrich) else {
+            return Flow::Continue;
+        };
+        if is_reasoning {
+            match pending.as_mut() {
+                Some(p) => p.content.append(&mut m.content),
+                None => pending = Some(m),
+            }
+            return Flow::Continue;
+        }
+        if let Some(mut p) = pending.take() {
+            if m.role == Role::Assistant {
+                p.content.append(&mut m.content);
+                m.content = p.content;
+            } else if sink.message(p) == Flow::Stop {
+                stopped = true;
+                return Flow::Stop;
+            }
+        }
+        if m.model.is_some() && m.model == session_model {
+            m.model = None;
+        }
+        let flow = sink.message(m);
+        stopped = flow == Flow::Stop;
+        // Reasoning at EOF is provisional: only a finished record with no held reasoning can
+        // finalize the emitted prefix. AffordanceSink also excludes unresolved synchronous spawns.
+        if !stopped && complete && sink.wants_checkpoint(offset) {
+            #[derive(serde::Serialize)]
+            struct State<'a> {
+                wire: &'a Path,
+                skipped: u64,
+            }
+            let mut checkpoint = Checkpoint::new(offset);
+            checkpoint.put(
+                crate::stream::ADAPTER_LAYER,
+                &State {
+                    wire,
+                    skipped: prior_skipped + skipped,
+                },
+            );
+            sink.checkpoint(&mut checkpoint);
+        }
+        flow
+    });
+    if let (Some(p), false) = (pending, stopped) {
+        sink.message(p);
+    }
+    super::note_skipped_lines(&mut s, prior_skipped + skipped);
+    s
 }
 
 fn fields(raw: Raw<'_>) -> Record<'_> {
@@ -754,6 +841,191 @@ fn title_parts<'a>(content: Raw<'a>, record: Raw<'a>, offset: u64) -> impl Itera
 
 #[cfg(test)]
 mod tests {
+    #[derive(Default)]
+    struct ResumeKeep {
+        messages: Vec<Message>,
+        checkpoints: Vec<(usize, Checkpoint)>,
+    }
+    impl MessageSink for ResumeKeep {
+        fn message(&mut self, message: Message) -> Flow {
+            self.messages.push(message);
+            Flow::Continue
+        }
+        fn wants_checkpoint(&mut self, _: u64) -> bool {
+            true
+        }
+        fn checkpoint(&mut self, cp: &mut Checkpoint) {
+            self.checkpoints.push((self.messages.len(), cp.clone()));
+        }
+    }
+
+    fn old_history_oracle(r: &SessionRef) -> Session {
+        let (mut s, enrich) = session_header(r);
+        let model = s.model.clone();
+        let mut kept = ResumeKeep::default();
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, &mut kept);
+        let mut pending: Option<Message> = None;
+        let skipped = super::super::for_each_json_line(
+            BufReader::new(fs::File::open(r.path.join("chat_history.jsonl")).unwrap()),
+            |v| {
+                let reasoning = v.get("type").and_then(Value::as_str) == Some("reasoning");
+                let Some(mut m) = chat_message(&v, &enrich) else {
+                    return Flow::Continue;
+                };
+                if reasoning {
+                    match &mut pending {
+                        Some(p) => p.content.append(&mut m.content),
+                        None => pending = Some(m),
+                    }
+                    return Flow::Continue;
+                }
+                if let Some(mut p) = pending.take() {
+                    if m.role == Role::Assistant {
+                        p.content.append(&mut m.content);
+                        m.content = p.content;
+                    } else {
+                        spawns.message(p);
+                    }
+                }
+                if m.model.is_some() && m.model == model {
+                    m.model = None;
+                }
+                spawns.message(m)
+            },
+        );
+        if let Some(p) = pending {
+            spawns.message(p);
+        }
+        super::super::note_skipped_lines(&mut s, skipped);
+        s.messages = kept.messages;
+        s
+    }
+
+    #[test]
+    fn resume_corpus_keeps_grouping_enrichment_and_exact_suffixes() {
+        let world = cv_testkit::World::in_process("grok_resume_corpus");
+        let adapter = Grok::with_home(&world.home.join(".grok"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/grok");
+        let mut files = 0;
+        let mut resumes = 0;
+        for file in walkdir::WalkDir::new(root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if file.file_name() != "chat_history.jsonl" {
+                continue;
+            }
+            let r = SessionRef::new("corpus", Harness::Grok, file.path().parent().unwrap());
+            let old = old_history_oracle(&r);
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::full(),
+                ParseOptions::complete(),
+            ] {
+                let mut full = ResumeKeep::default();
+                let mut shell = adapter.try_stream(&r, &opts, &mut full).unwrap();
+                shell.messages = full.messages.clone();
+                assert_eq!(
+                    serde_json::to_value(&shell).unwrap(),
+                    serde_json::to_value(&old).unwrap(),
+                    "{} old collector",
+                    file.path().display()
+                );
+                shell.messages.clear();
+                let stride = (full.checkpoints.len() / 12).max(1);
+                for (i, (count, cp)) in full.checkpoints.iter().enumerate().step_by(stride) {
+                    let mut rest = ResumeKeep::default();
+                    let s = adapter.try_resume(&r, &opts, &mut rest, cp).unwrap().unwrap();
+                    assert_eq!(serde_json::to_value(s).unwrap(), serde_json::to_value(&shell).unwrap());
+                    assert_eq!(
+                        serde_json::to_value(&rest.messages).unwrap(),
+                        serde_json::to_value(&full.messages[*count..]).unwrap(),
+                        "{} @{} grouped suffix",
+                        file.path().display(),
+                        cp.offset
+                    );
+                    assert_eq!(
+                        rest.checkpoints.iter().map(|(_, cp)| cp).collect::<Vec<_>>(),
+                        full.checkpoints[i + 1..].iter().map(|(_, cp)| cp).collect::<Vec<_>>()
+                    );
+                    resumes += 1;
+                }
+            }
+            files += 1;
+        }
+        assert!(files >= 15 && resumes >= 100, "native files={files} resumes={resumes}");
+        eprintln!("grok native files={files} exact suffix resumes={resumes}");
+    }
+
+    #[test]
+    fn resume_replays_eof_reasoning_and_partial_records_and_reads_only_appends() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("grok_reasoning_resume");
+        let dir = world.home.join(".grok/sessions/group/session");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"session","cwd":"/old"},"current_model_id":"grok"}"#,
+        )
+        .unwrap();
+        let line = "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}\n";
+        let prefix = format!("{}bad json\n{{\"type\":\"reasoning\",\"summary\":[{{\"text\":\"thinking\"}}]}}\n{{\"type\":\"assistant\",\"model_id\":\"grok\",\"content\":", line.repeat(20_000));
+        fs::write(dir.join("chat_history.jsonl"), &prefix).unwrap();
+        let mut r = SessionRef::new("session", Harness::Grok, &dir);
+        let adapter = Grok::with_home(&world.home.join(".grok"));
+        let opts = ParseOptions::lazy();
+        let mut first = ResumeKeep::default();
+        adapter.try_stream(&r, &opts, &mut first).unwrap();
+        let (count, cp) = first.checkpoints.last().unwrap();
+        assert_eq!(*count, 20_000);
+        assert_eq!(first.messages.len(), count + 1); // Provisional EOF reasoning is replayed.
+        assert!(serde_json::to_vec(cp).unwrap().len() < 512);
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(adapter.resume_source(&r))
+            .unwrap();
+        writeln!(file, "\"answer\"}}").unwrap();
+        file.write_all(line.repeat(200).as_bytes()).unwrap();
+        drop(file);
+        r.title = Some("current catalog title".into());
+        let mut suffix = ResumeKeep::default();
+        let mut shell = adapter.try_resume(&r, &opts, &mut suffix, cp).unwrap().unwrap();
+        assert_eq!(suffix.messages.len(), 201);
+        assert_eq!(shell.title, r.title);
+        shell.messages = first.messages[..*count]
+            .iter()
+            .cloned()
+            .chain(suffix.messages)
+            .collect();
+        assert_eq!(
+            serde_json::to_value(shell).unwrap(),
+            serde_json::to_value(old_history_oracle(&r)).unwrap()
+        );
+        let mut other = r.clone();
+        other.path = dir.join("other");
+        let mut none = ResumeKeep::default();
+        assert!(adapter.try_resume(&other, &opts, &mut none, cp).unwrap().is_none());
+        assert!(none.messages.is_empty());
+        // A UTF-8 failure remains a tolerant skipped line rather than poisoning subsequent records.
+        let mut bytes = fs::read(adapter.resume_source(&r)).unwrap();
+        bytes.extend_from_slice(b"\xff\n");
+        bytes.extend_from_slice(line.as_bytes());
+        fs::write(adapter.resume_source(&r), bytes).unwrap();
+        let mut all = ResumeKeep::default();
+        let mut shell = adapter.try_stream(&r, &opts, &mut all).unwrap();
+        shell.messages = all.messages;
+        assert_eq!(
+            serde_json::to_value(shell).unwrap(),
+            serde_json::to_value(old_history_oracle(&r)).unwrap()
+        );
+        eprintln!(
+            "grok stable_prefix=20000 appended_callbacks=201 whole_callbacks=20201 checkpoint_bytes={}",
+            serde_json::to_vec(cp).unwrap().len()
+        );
+    }
+
     use super::*;
     use crate::harness::Parse;
 
