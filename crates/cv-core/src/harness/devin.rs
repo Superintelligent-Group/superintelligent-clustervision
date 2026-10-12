@@ -520,25 +520,34 @@ struct NodeFacts {
 }
 impl NodeFacts {
     fn parse(text: &str) -> Option<Self> {
-        use crate::harness::store::document::{Index, Raw, Record};
-        let raw = serde_json::from_str::<&serde_json::value::RawValue>(text).ok()?;
-        if !crate::harness::store::json::value_compatible(raw.get().as_bytes()) {
-            return None;
+        use serde::de::{MapAccess, Visitor};
+        struct Facts;
+        impl<'de> Visitor<'de> for Facts {
+            type Value = NodeFacts;
+            fn expecting(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                fmt.write_str("node metadata object")
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> std::result::Result<NodeFacts, M::Error> {
+                let mut facts = NodeFacts::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "summarized_from" => facts.summarized_from = map.next_value::<Value>()?.as_i64(),
+                        "num_tokens_preceding" => facts.num_tokens_preceding = map.next_value::<Value>()?.as_u64(),
+                        "is_system_prefix" => {
+                            facts.is_system_prefix = map.next_value::<Value>()?.as_bool().unwrap_or(false)
+                        }
+                        _ => {
+                            map.next_value::<crate::harness::store::DiscardValue>()?;
+                        }
+                    }
+                }
+                Ok(facts)
+            }
         }
-        let index = Index::default();
-        let record = Record::parse(Raw::new(raw.get(), &index))?;
-        Some(Self {
-            summarized_from: record
-                .get("summarized_from")
-                .and_then(|v| serde_json::from_str(v.get()).ok()),
-            num_tokens_preceding: record
-                .get("num_tokens_preceding")
-                .and_then(|v| serde_json::from_str(v.get()).ok()),
-            is_system_prefix: record
-                .get("is_system_prefix")
-                .and_then(|v| serde_json::from_str(v.get()).ok())
-                .unwrap_or(false),
-        })
+        let mut de = serde_json::Deserializer::from_str(text);
+        let facts = serde::Deserializer::deserialize_map(&mut de, Facts).ok()?;
+        de.end().ok()?;
+        Some(facts)
     }
 }
 
