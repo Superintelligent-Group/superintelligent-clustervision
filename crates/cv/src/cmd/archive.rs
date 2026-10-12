@@ -11,6 +11,7 @@ use cv_core::ir::{home_rel, truncate};
 use cv_core::watch::{EventKind, Filter, Watcher};
 use cv_core::{Harness, Session, SessionRef};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -55,6 +56,17 @@ pub(crate) enum StoreOutcome {
 /// Handle to the archive root (`$CLUSTERVISION_HOME` or `~/.clustervision`, overridable by `--home`).
 pub(crate) struct Archive {
     home: PathBuf,
+    /// Only schedules cleanup; never cached catalog contents. Another writer's compaction (a
+    /// size decrease) resets the schedule, and every pass reads the actual file under the lock.
+    compaction_check: Cell<CompactionCheck>,
+    #[cfg(test)]
+    catalog_bytes_scanned: Cell<u64>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CompactionCheck {
+    last_size: u64,
+    next_size: u64,
 }
 
 impl Archive {
@@ -68,7 +80,12 @@ impl Archive {
             let base = crate::util::dirs_home().context("could not determine home directory")?;
             base.join(".clustervision")
         };
-        Ok(Archive { home })
+        Ok(Archive {
+            home,
+            compaction_check: Cell::new(CompactionCheck::default()),
+            #[cfg(test)]
+            catalog_bytes_scanned: Cell::new(0),
+        })
     }
 
     pub fn home(&self) -> &Path {
@@ -145,12 +162,16 @@ impl Archive {
     /// Read the catalog, deduped by (harness, id) with the newest `archived_at` winning.
     pub fn load_catalog(&self) -> Result<Vec<CatalogEntry>> {
         let path = self.catalog_path();
-        let mut map: BTreeMap<(String, String), CatalogEntry> = BTreeMap::new();
         let raw = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
+        Ok(Self::catalog_entries(&raw))
+    }
+
+    fn catalog_entries(raw: &str) -> Vec<CatalogEntry> {
+        let mut map: BTreeMap<(String, String), CatalogEntry> = BTreeMap::new();
         for line in raw.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -169,7 +190,7 @@ impl Archive {
                 Err(e) => eprintln!("cv archive: skipping corrupt catalog line: {e}"),
             }
         }
-        Ok(map.into_values().collect())
+        map.into_values().collect()
     }
 
     /// Record an entry by **appending** one line — O(1) per archive instead of rewriting the whole
@@ -195,20 +216,38 @@ impl Archive {
         Ok(())
     }
 
-    /// Rewrite the catalog to one line per unique entry, but only when the on-disk line count has
-    /// drifted far enough past the unique count to be worth the full rewrite (amortizes to O(1)).
+    /// Check for dead catalog rows only after its bytes have doubled since the last check, or its
+    /// size fell (another writer compacted). This makes a growing sync's scans geometric in total
+    /// bytes instead of reading/parsing the whole catalog after each session. Content is always
+    /// read fresh; this schedule affects cleanup timing only. The first append in a new process
+    /// checks once, and a successful compaction starts the schedule from its smaller output.
     /// Caller must hold the catalog lock (see [`Self::lock_catalog`]).
     fn maybe_compact_catalog(&self) -> Result<()> {
         let path = self.catalog_path();
+        let size = fs::metadata(&path)
+            .with_context(|| format!("stat'ing {}", path.display()))?
+            .len();
+        let check = self.compaction_check.get();
+        if size >= check.last_size && size < check.next_size {
+            self.compaction_check.set(CompactionCheck {
+                last_size: size,
+                ..check
+            });
+            return Ok(());
+        }
         let raw = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
+        #[cfg(test)]
+        self.catalog_bytes_scanned
+            .set(self.catalog_bytes_scanned.get() + raw.len() as u64);
         let raw_lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
-        let entries = self.load_catalog()?;
+        let entries = Self::catalog_entries(&raw);
         // Compact only once we're carrying ~2x dead weight (and past a small floor).
         if raw_lines < 64 || raw_lines < entries.len() * 2 {
+            self.schedule_compaction_check(raw.len() as u64);
             return Ok(());
         }
         let tmp = path.with_extension(format!("{}.jsonl.tmp", std::process::id()));
@@ -220,7 +259,18 @@ impl Archive {
             f.flush()?;
         }
         fs::rename(&tmp, &path).with_context(|| format!("finalizing {}", path.display()))?;
+        let size = fs::metadata(&path)
+            .with_context(|| format!("stat'ing {}", path.display()))?
+            .len();
+        self.schedule_compaction_check(size);
         Ok(())
+    }
+
+    fn schedule_compaction_check(&self, size: u64) {
+        self.compaction_check.set(CompactionCheck {
+            last_size: size,
+            next_size: size.saturating_mul(2).max(1),
+        });
     }
 }
 
@@ -361,4 +411,96 @@ pub(crate) fn cmd_ls(archive: &Archive) -> Result<()> {
 pub(crate) fn cmd_path(archive: &Archive) -> Result<()> {
     println!("{}", archive.home().display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn archive() -> Archive {
+        let home = std::env::temp_dir().join(format!("cv-archive-test-{}", uuid::Uuid::new_v4()));
+        Archive::resolve(Some(home)).unwrap()
+    }
+
+    fn entry(id: &str, revision: i64) -> CatalogEntry {
+        CatalogEntry {
+            harness: "claude".into(),
+            id: id.into(),
+            cwd: None,
+            title: Some(format!("revision {revision}")),
+            message_count: 1,
+            created_at: None,
+            updated_at: None,
+            archived_at: DateTime::from_timestamp(revision, 0).unwrap(),
+            path: PathBuf::from(format!("archive/claude/{id}.json")),
+        }
+    }
+
+    #[test]
+    fn catalog_scan_bytes_grow_linearly_across_many_archives() {
+        let a = archive();
+        for i in 0..1024 {
+            a.upsert_catalog(entry(&format!("session-{i:04}"), i)).unwrap();
+        }
+        let size = fs::metadata(a.catalog_path()).unwrap().len();
+        let scanned = a.catalog_bytes_scanned.get();
+        eprintln!("1024 catalog appends: {scanned} scanned bytes, {size} final bytes");
+        assert!(scanned <= 4 * size, "scanned {scanned} bytes for a {size}-byte catalog");
+        assert_eq!(a.load_catalog().unwrap().len(), 1024);
+        // Every append remains visible immediately, even when no compaction check ran.
+        assert_eq!(fs::read_to_string(a.catalog_path()).unwrap().lines().count(), 1024);
+        fs::remove_dir_all(a.home()).unwrap();
+    }
+
+    #[test]
+    fn independent_catalog_writers_keep_each_others_updates() {
+        let a = archive();
+        let home = a.home().to_path_buf();
+        let writers: Vec<_> = (0..2)
+            .map(|writer| {
+                let home = home.clone();
+                std::thread::spawn(move || {
+                    let a = Archive::resolve(Some(home)).unwrap();
+                    for revision in 0..256 {
+                        let id = format!("writer-{writer}-{}", revision % 8);
+                        a.upsert_catalog(entry(&id, revision)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let entries = a.load_catalog().unwrap();
+        assert_eq!(entries.len(), 16);
+        for e in entries {
+            let slot: i64 = e.id.rsplit('-').next().unwrap().parse().unwrap();
+            assert_eq!(e.archived_at.timestamp(), 248 + slot);
+        }
+        // Repeated updates still reclaim dead rows as growth crosses a check boundary.
+        assert!(fs::read_to_string(a.catalog_path()).unwrap().lines().count() < 128);
+        fs::remove_dir_all(a.home()).unwrap();
+    }
+
+    #[test]
+    fn failed_compaction_keeps_the_append_and_retries_cleanup() {
+        let a = archive();
+        fs::create_dir_all(a.home()).unwrap();
+        let raw: String = (0..64)
+            .map(|i| format!("{}\n", serde_json::to_string(&entry("same", i)).unwrap()))
+            .collect();
+        fs::write(a.catalog_path(), raw).unwrap();
+        let tmp = a
+            .catalog_path()
+            .with_extension(format!("{}.jsonl.tmp", std::process::id()));
+        fs::create_dir(&tmp).unwrap();
+        assert!(a.upsert_catalog(entry("same", 64)).is_err());
+        assert_eq!(a.load_catalog().unwrap()[0].archived_at.timestamp(), 64);
+        assert_eq!(fs::read_to_string(a.catalog_path()).unwrap().lines().count(), 65);
+        fs::remove_dir(&tmp).unwrap();
+        a.upsert_catalog(entry("same", 65)).unwrap();
+        assert_eq!(a.load_catalog().unwrap()[0].archived_at.timestamp(), 65);
+        assert_eq!(fs::read_to_string(a.catalog_path()).unwrap().lines().count(), 1);
+        fs::remove_dir_all(a.home()).unwrap();
+    }
 }
