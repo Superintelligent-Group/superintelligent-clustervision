@@ -77,7 +77,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
-| LM Studio | Raw-turn mmap stream | Metadata-only discovery skips body trees; escaped scratch and first-title candidate remain owned |
+| LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Harmony decoding and demanded output/metadata remain owned; discovery still owns escaped scratch and first-title candidates |
 | ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text, selected owned output and sender/empty-archive compatibility edges |
 | OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |
 
@@ -395,6 +395,23 @@ prior assertion that full extras required another mode was unproven and is corre
 
 Lane-summary projection (`5ffbd10`) has eight scoped tests; it skips irrelevant bodies.
 
+LM Studio selected-record projection replaces the document's turn descriptor vector and each
+whole-turn Value with fixed schema rosters and chronological source cursors. The original derived
+envelope rules remain: duplicate known keys and wrong typed fields reject, positional struct arrays
+work, and each raw turn resets its Value scalar/depth budget before invalid turns are skipped.
+Unselected versions and internal steps are validated without owning their payloads; complete-mode
+variants are emitted individually. Ordinary lazy text/thinking stays in spans; Harmony keeps its
+existing owned decoder. Exact raw-order message and metadata hashes match the old native parser
+for sample, Harmony and a 16 MiB escaped fixture in lazy/full/complete modes.
+
+The diagnostic heap builds (debug candidate; no timing claim) discard two callbacks from generated
+16/64 MiB escaped bodies. Native peak requested Rust heap above setup falls from
+25,168,379/100,665,851 bytes to 197,997/197,997; positioned readers use 393,852/393,852.
+A tiny selected version beside one 16/64 MiB escaped unused version takes 2,003/2,003 native bytes
+versus the old 33,556,049/134,219,345. These bounds exclude demanded owned output, Harmony decoding,
+source mappings and native allocations. Eighteen scoped LM Studio tests cover both configurations,
+including envelope rejection, variant output, escaped spans, decoder-boundary markers and mutation.
+
 Tracker (keep unfinished work visible; measurements determine later ordering):
 
 - [x] Source map: readers, consumers, caches, index, follow/archive, write paths and gates.
@@ -416,7 +433,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
 - [x] Native SDK, exports and OpenSession source-backed readers; bounded export metadata cache.
 - [x] Shared positioned portable document views: 32 frozen count/discovery scale cases retain flat live Rust heap.
-- [ ] Portable giant full-output/compatibility completion; composite payloads and Continue/LM Studio selected records (LM Studio lane active).
+- [x] LM Studio selected records and variants use schema projections in native/portable readers; lazy ordinary text and thinking retain source spans.
+- [ ] Portable giant full-output/compatibility completion; composite payloads and Continue selected records.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.

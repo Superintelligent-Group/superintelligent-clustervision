@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- LM Studio partial reads keep selected text in source spans and stream regenerated variants without materializing complete turns.
+
 - Large Claude tool arguments stay source-backed in partial reads; changed sources fail explicitly instead of publishing incomplete results.
 - Portable structured-argument projections use bounded file windows instead of loading encoded values.
 - Watch and archive reuse verified record checkpoints; unchanged sources avoid reparsing, and modified archive files are repaired.

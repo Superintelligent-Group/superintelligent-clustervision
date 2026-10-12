@@ -34,16 +34,16 @@
 //!   skipped, a `content` that is a string OR an array of `{type,text}` parts both work, and a
 //!   missing `~/.lmstudio` dir yields an empty discover (never a panic).
 
-use super::store::DiscardValue;
+use super::store::{document::Fields, DiscardValue};
 use super::Adapter;
 use super::EmitResult;
 use crate::ir::*;
+use crate::json::{JsonSource, JsonView};
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -105,124 +105,436 @@ impl Adapter for LmStudio {
         Ok(out)
     }
 
-    /// Native streaming parse. An LM Studio conversation is a single JSON document
-    /// (`{name, createdAt, messages:[…], systemPrompt, perChatPredictionConfig, …}`), so rather than
-    /// building the whole-document `Value` (which owns every `messages[]` turn — including every
-    /// regenerated `versions[]` variant, easily gigabytes), we borrow-deserialize only the document
-    /// *structure*: the small session-level fields by value (createdAt, the system-prompt sources,
-    /// pinned) and `messages` as a `Vec<&RawValue>` slicing the mapped/owned bytes. Each turn is then
-    /// turned into one small `Value` ([`parse_message`]), emitted to `sink`, and dropped before the
-    /// next — so peak memory is O(largest turn) + the mmap (reclaimable) + the slice vec.
+    /// Walk the validated document and selected versions with scoped source views. Lazy text
+    /// keeps byte spans; unused versions, unknown fields and internal steps never become Values.
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
-            let bytes = read_bytes(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-            let doc: Doc =
-                serde_json::from_slice(bytes.as_ref()).with_context(|| format!("parsing {}", r.path.display()))?;
-
-            let created_at = doc.created_at.as_ref().and_then(super::ts_from_value);
-            let updated_at = file_mtime(&r.path).or(created_at);
-
-            // The per-chat / global system prompt is the session-level fact (never a message).
-            let system_prompt = doc.system_prompt().map(str::to_string).filter(|s| !s.trim().is_empty());
-            let pinned = doc.pinned == Some(true);
-
-            let mut s = Session {
-                id: r.id.clone(),
-                harness: Harness::LmStudio,
-                cwd: None, // LM Studio is a chat app: no working directory.
-                title: r.title.clone(),
-                created_at,
-                updated_at,
-                model: None,
-                git: None,
-                messages: Vec::new(),
-                source_path: Some(r.path.clone()),
-                extra: serde_json::Map::new(),
-                system_prompt,
-                lineage: crate::ir::Lineage::default(),
-            };
-            if pinned {
-                s.harness_extra_mut(Harness::LmStudio)
-                    .insert("pinned".into(), Value::Bool(true));
-            }
-
-            // `model` is backfilled from the first genInfo seen while iterating turns, so hand the
-            // metadata to the sink after the loop (the bridge sinks read it from the returned Session).
-            let mut session_model: Option<String> = None;
-            sink.meta(&s);
-            'outer: for raw in doc.messages {
-                // ONE small Value per turn — parsed, emitted, dropped before the next.
-                let Ok(v) = serde_json::from_str::<Value>(raw.get()) else {
-                    continue;
-                };
-                // The `currentlySelected` version is the conversation.
-                if let Some(m) = parse_message(&v, &mut session_model) {
-                    if sink.message(m) == Flow::Stop {
-                        break;
-                    }
-                }
-                // Under `complete`, the regenerated/edited `versions[]` alternates ride along as
-                // `Branch` turns, each tagged with its index in `extra["lmstudio"]["variant"]`.
-                if opts.complete {
-                    for m in parse_variants(&v) {
-                        if sink.message(m) == Flow::Stop {
-                            break 'outer;
+            let source = JsonSource::capture(&r.path)?;
+            source
+                .read_syntax(|view| {
+                    let doc = Fields::parse_struct(
+                        view,
+                        &[
+                            "createdAt",
+                            "systemPrompt",
+                            "perChatPredictionConfig",
+                            "pinned",
+                            "messages",
+                        ],
+                    )?
+                    .context("LM Studio conversation is not an object")?;
+                    // Match the original derived envelope: typed fields reject malformed/wrong
+                    // values before callbacks; ignored fields remain grammar-only. The root consumes
+                    // one recursion slot for its Value metadata, while each raw turn resets the budget.
+                    for key in ["createdAt", "perChatPredictionConfig"] {
+                        if let Some(value) = doc.get(key) {
+                            anyhow::ensure!(value.accepts_value_at_depth(1)?, "invalid LM Studio {key}");
                         }
                     }
-                }
-            }
-            s.model = session_model;
-
-            Ok(s)
+                    if let Some(value) = doc.get("systemPrompt") {
+                        anyhow::ensure!(
+                            (value.is_null()? || value.is_string()?) && value.accepts_value()?,
+                            "invalid LM Studio systemPrompt"
+                        );
+                    }
+                    if let Some(value) = doc.get("pinned") {
+                        anyhow::ensure!(
+                            value.is_null()? || value.as_bool()?.is_some(),
+                            "invalid LM Studio pinned"
+                        );
+                    }
+                    if let Some(value) = doc.get("messages") {
+                        anyhow::ensure!(value.is_array()?, "invalid LM Studio messages");
+                    }
+                    let created_at = if let Some(value) = doc.get("createdAt") {
+                        if value.is_string()? || value.as_number()?.is_some() {
+                            doc.value("createdAt")?.as_ref().and_then(super::ts_from_value)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let mut s = Session {
+                        cwd: None,
+                        title: r.title.clone(),
+                        created_at,
+                        updated_at: file_mtime(&r.path).or(created_at),
+                        source_path: Some(r.path.clone()),
+                        system_prompt: projected_system_prompt(&doc)?,
+                        ..Session::new(r.id.clone(), Harness::LmStudio)
+                    };
+                    if doc.get("pinned").map(JsonView::as_bool).transpose()?.flatten() == Some(true) {
+                        s.harness_extra_mut(Harness::LmStudio)
+                            .insert("pinned".into(), Value::Bool(true));
+                    }
+                    let mut session_model = None;
+                    sink.meta(&s);
+                    if let Some(messages) = doc.get("messages").map(JsonView::array).transpose()?.flatten() {
+                        'turns: for turn in messages {
+                            let turn = turn?;
+                            if !turn.accepts_value()? {
+                                continue;
+                            }
+                            let Some(fields) = Fields::parse(turn, &["versions", "currentlySelected"])? else {
+                                continue;
+                            };
+                            let Some(versions) = fields.get("versions") else {
+                                continue;
+                            };
+                            let Some((selected, version)) = projected_selected_version(&fields, versions)? else {
+                                continue;
+                            };
+                            if let Some(message) = projected_version(version, &mut session_model, opts)? {
+                                if sink.message(message) == Flow::Stop {
+                                    break;
+                                }
+                            }
+                            if opts.complete {
+                                let mut throwaway_model = None;
+                                if let Some(variants) = versions.array()? {
+                                    for (index, version) in variants.enumerate() {
+                                        let version = version?;
+                                        if index == selected {
+                                            continue;
+                                        }
+                                        if let Some(mut message) =
+                                            projected_version(version, &mut throwaway_model, opts)?
+                                        {
+                                            message.kind = MessageKind::Branch;
+                                            message
+                                                .harness_extra_mut(Harness::LmStudio)
+                                                .insert("variant".into(), Value::Number(index.into()));
+                                            if sink.message(message) == Flow::Stop {
+                                                break 'turns;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    s.model = session_model;
+                    Ok(s)
+                })
+                .with_context(|| format!("parsing {}", r.path.display()))
         })
     }
 }
 
-// ------------------------------------------------------------------------------------------------
-// Streaming document structure (borrows the mapped/owned bytes)
-// ------------------------------------------------------------------------------------------------
-
-/// The document *structure* of an LM Studio conversation, borrowed from the source bytes: the small
-/// session-level fields by value and `messages` as raw turn slices (NOT materialized into owned
-/// `Value`s). Borrowing avoids building the whole-document `Value` for [`LmStudio::stream`].
-#[derive(serde::Deserialize)]
-struct Doc<'a> {
-    #[serde(default, rename = "createdAt")]
-    created_at: Option<Value>,
-    #[serde(default, rename = "systemPrompt")]
-    system_prompt: Option<String>,
-    #[serde(default, rename = "perChatPredictionConfig")]
-    per_chat_prediction_config: Option<Value>,
-    #[serde(default)]
-    pinned: Option<bool>,
-    #[serde(default, borrow)]
-    messages: Vec<&'a RawValue>,
-}
-
-impl Doc<'_> {
-    /// The effective system prompt: the per-chat override
-    /// (`perChatPredictionConfig.fields[key==llm.prediction.systemPrompt]`) takes precedence over
-    /// the top-level `systemPrompt`. The borrowed counterpart of the test-only standalone
-    /// `system_prompt` helper that pins this precedence rule.
-    fn system_prompt(&self) -> Option<&str> {
-        if let Some(fields) = self
-            .per_chat_prediction_config
-            .as_ref()
-            .and_then(|c| c.pointer("/fields"))
-            .and_then(Value::as_array)
-        {
-            for f in fields {
-                if f.get("key").and_then(Value::as_str) == Some("llm.prediction.systemPrompt") {
-                    if let Some(val) = f.get("value").and_then(Value::as_str) {
-                        if !val.trim().is_empty() {
-                            return Some(val);
+/// Resolve only the effective system prompt, skipping unrelated prediction-config values.
+fn projected_system_prompt(doc: &Fields<'_>) -> Result<Option<String>> {
+    if let Some(config) = doc.get("perChatPredictionConfig") {
+        if let Some(config) = Fields::parse(config, &["fields"])? {
+            if let Some(fields) = config.get("fields").map(JsonView::array).transpose()?.flatten() {
+                for field in fields {
+                    let Some(field) = Fields::parse(field?, &["key", "value"])? else {
+                        continue;
+                    };
+                    if string_is(field.get("key"), "llm.prediction.systemPrompt")? {
+                        if let Some(value) = field.string("value")?.filter(|s| !s.trim().is_empty()) {
+                            return Ok(Some(value));
                         }
                     }
                 }
             }
         }
-        self.system_prompt.as_deref().filter(|s| !s.trim().is_empty())
     }
+    Ok(doc.string("systemPrompt")?.filter(|s| !s.trim().is_empty()))
+}
+
+/// Compare discriminators without owning an unknown, potentially enormous string.
+fn string_is(view: Option<JsonView<'_>>, expected: &str) -> Result<bool> {
+    let Some(view) = view else { return Ok(false) };
+    let mut bytes = 0usize;
+    let mut equal = true;
+    let string = view.for_each_str_chunk(|chunk| {
+        let end = bytes.saturating_add(chunk.len());
+        equal &= expected.as_bytes().get(bytes..end) == Some(chunk.as_bytes());
+        bytes = end;
+        Ok(())
+    })?;
+    Ok(string && equal && bytes == expected.len())
+}
+
+/// Find the selected or final version with one retained descriptor, irrespective of variant count.
+fn projected_selected_version<'a>(
+    fields: &Fields<'a>,
+    versions: JsonView<'a>,
+) -> Result<Option<(usize, JsonView<'a>)>> {
+    let wanted = fields
+        .get("currentlySelected")
+        .map(JsonView::as_number)
+        .transpose()?
+        .flatten()
+        .and_then(|n| n.as_u64())
+        .map(|i| i as usize);
+    let Some(versions) = versions.array()? else {
+        return Ok(None);
+    };
+    let mut selected = None;
+    let mut last = None;
+    for (index, version) in versions.enumerate() {
+        let version = version?;
+        if Some(index) == wanted {
+            selected = Some((index, version));
+        }
+        last = Some((index, version));
+    }
+    Ok(selected.or(last))
+}
+
+fn projected_version(
+    version: JsonView<'_>,
+    session_model: &mut Option<String>,
+    opts: &ParseOptions,
+) -> Result<Option<Message>> {
+    let Some(version) = Fields::parse(version, &["role", "type", "steps", "content"])? else {
+        return Ok(None);
+    };
+    let role = if string_is(version.get("role"), "user")? {
+        Role::User
+    } else if string_is(version.get("role"), "assistant")? {
+        Role::Assistant
+    } else if string_is(version.get("role"), "system")? {
+        Role::System
+    } else {
+        return Ok(None);
+    };
+    let mut message = Message::new(role);
+    if role == Role::System {
+        message.kind = MessageKind::SystemPrompt;
+    }
+    if string_is(version.get("type"), "multiStep")? {
+        if let Some(steps) = version.get("steps").map(JsonView::array).transpose()?.flatten() {
+            for step in steps {
+                projected_step(step?, &mut message, session_model, opts)?;
+            }
+        }
+    } else {
+        projected_content(version.get("content"), &mut message, false, opts)?;
+    }
+    Ok((!message.content.is_empty()).then_some(message))
+}
+
+fn projected_step(
+    step: JsonView<'_>,
+    message: &mut Message,
+    session_model: &mut Option<String>,
+    opts: &ParseOptions,
+) -> Result<()> {
+    let Some(step) = Fields::parse(step, &["type", "genInfo", "stepIdentifier", "style", "content"])? else {
+        return Ok(());
+    };
+    if !string_is(step.get("type"), "contentBlock")? {
+        return Ok(());
+    }
+    if let Some(gen) = step.get("genInfo") {
+        if let Some(gen) = Fields::parse(gen, &["indexedModelIdentifier", "identifier", "stats"])? {
+            // A present wrong-type indexed identifier must keep masking the fallback identifier.
+            let model = gen.get("indexedModelIdentifier").or_else(|| gen.get("identifier"));
+            if let Some(model) = model.map(|v| v.text(false)).transpose()?.flatten() {
+                let model = model.inline_str().expect("inline metadata");
+                match session_model {
+                    None => *session_model = Some(model.to_owned()),
+                    Some(current) if current != model && message.model.is_none() => {
+                        message.model = Some(model.to_owned())
+                    }
+                    _ => {}
+                }
+            }
+            if message.usage.is_none() {
+                if let Some(stats) = gen.get("stats") {
+                    if let Some(stats) = Fields::parse(stats, &["promptTokensCount", "predictedTokensCount"])? {
+                        let input = stats
+                            .get("promptTokensCount")
+                            .map(JsonView::as_number)
+                            .transpose()?
+                            .flatten()
+                            .and_then(|n| n.as_u64());
+                        let output = stats
+                            .get("predictedTokensCount")
+                            .map(JsonView::as_number)
+                            .transpose()?
+                            .flatten()
+                            .and_then(|n| n.as_u64());
+                        if input.is_some() || output.is_some() {
+                            message.usage = Some(Usage {
+                                input_tokens: input,
+                                output_tokens: output,
+                                ..Usage::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if message.timestamp.is_none() {
+        message.timestamp = projected_step_timestamp(step.get("stepIdentifier"))?;
+    }
+    let thinking = if let Some(style) = step.get("style") {
+        if let Some(style) = Fields::parse(style, &["type"])? {
+            string_is(style.get("type"), "thinking")?
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    projected_content(step.get("content"), message, thinking, opts)
+}
+
+/// Only the integer prefix is demanded from a step identifier. Its random suffix (or leading
+/// zeros in the prefix) may be enormous, so accumulate digits rather than owning the string.
+fn projected_step_timestamp(view: Option<JsonView<'_>>) -> Result<Option<DateTime<Utc>>> {
+    let Some(view) = view else { return Ok(None) };
+    let mut value = Some(0i64);
+    let mut first = true;
+    let mut digits = false;
+    let mut done = false;
+    let string = view.for_each_str_chunk(|chunk| {
+        if done {
+            return Ok(());
+        }
+        for byte in chunk.bytes() {
+            if byte == b'-' {
+                done = true;
+                break;
+            }
+            if first && byte == b'+' {
+                first = false;
+                continue;
+            }
+            first = false;
+            if byte.is_ascii_digit() {
+                digits = true;
+                value = value.and_then(|v| v.checked_mul(10)?.checked_add(i64::from(byte - b'0')));
+            } else {
+                value = None;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(if string && digits {
+        value
+            .filter(|ms| (1_200_000_000_000..=4_000_000_000_000).contains(ms))
+            .and_then(DateTime::from_timestamp_millis)
+    } else {
+        None
+    })
+}
+
+fn projected_content(
+    content: Option<JsonView<'_>>,
+    message: &mut Message,
+    thinking: bool,
+    opts: &ParseOptions,
+) -> Result<()> {
+    let Some(content) = content else { return Ok(()) };
+    if content.is_string()? {
+        return projected_text(content, message, thinking, opts);
+    }
+    if let Some(parts) = content.array()? {
+        for part in parts {
+            let Some(part) = Fields::parse(
+                part?,
+                &["type", "text", "fileIdentifier", "identifier", "name", "fileType"],
+            )?
+            else {
+                continue;
+            };
+            if string_is(part.get("type"), "text")? {
+                if let Some(text) = part.get("text") {
+                    projected_text(text, message, thinking, opts)?;
+                }
+            } else if string_is(part.get("type"), "file")? {
+                let data_ref = part
+                    .get("identifier")
+                    .or_else(|| part.get("fileIdentifier"))
+                    .map(|view| view.text(false))
+                    .transpose()?
+                    .flatten()
+                    .map(|text| text.inline_str().expect("inline metadata").to_owned());
+                let name = part.string("name")?;
+                if string_is(part.get("fileType"), "image")? {
+                    message.content.push(Block::Image {
+                        media_type: None,
+                        data_ref: data_ref.or(name),
+                    });
+                } else {
+                    message.content.push(Block::File {
+                        mime: part.string("fileType")?,
+                        path: name,
+                        source: data_ref,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opts: &ParseOptions) -> Result<()> {
+    let Some(text) = view.text(opts.spans)? else {
+        return Ok(());
+    };
+    if text.is_empty() {
+        return Ok(());
+    }
+    if thinking {
+        message.content.push(Block::Thinking {
+            text,
+            signature: None,
+            encrypted: None,
+            redacted: false,
+        });
+    } else {
+        let harmony = if let Some(text) = text.inline_str() {
+            super::harmony::looks_like_harmony(text)
+        } else {
+            projected_harmony(view)?
+        };
+        if harmony {
+            let inline = view.text(false)?.expect("string view");
+            message.content.extend(super::harmony::decode_content(
+                inline.inline_str().expect("inline decoding"),
+            ));
+        } else {
+            message.content.push(Block::Text { text });
+        }
+    }
+    Ok(())
+}
+
+/// Harmony markers may cross decoder chunks or be Unicode escaped on disk. Scan decoded bytes
+/// with only the longest marker's overlap; actual Harmony decoding retains its existing owned path.
+fn projected_harmony(view: JsonView<'_>) -> Result<bool> {
+    const MARKERS: [&[u8]; 3] = [b"<|channel|>", b"<|message|>", b"<|start|>assistant"];
+    const OVERLAP: usize = 17;
+    let mut tail = Vec::with_capacity(OVERLAP);
+    let mut found = false;
+    view.for_each_str_chunk(|chunk| {
+        if !found {
+            found = super::harmony::looks_like_harmony(chunk);
+            let mut boundary = [0u8; OVERLAP * 2];
+            boundary[..tail.len()].copy_from_slice(&tail);
+            let head = chunk.len().min(OVERLAP);
+            boundary[tail.len()..tail.len() + head].copy_from_slice(&chunk.as_bytes()[..head]);
+            found |= MARKERS
+                .iter()
+                .any(|marker| memchr::memmem::find(&boundary[..tail.len() + head], marker).is_some());
+            if chunk.len() >= OVERLAP {
+                tail.clear();
+            }
+            tail.extend_from_slice(&chunk.as_bytes()[chunk.len().saturating_sub(OVERLAP)..]);
+            if tail.len() > OVERLAP {
+                tail.drain(..tail.len() - OVERLAP);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(found)
 }
 
 /// Owns either an mmap of `path` or its bytes read into a `Vec`, exposing `.as_ref()` as `&[u8]`.
@@ -728,11 +1040,13 @@ fn selected_version(msg: &Value) -> Option<&Value> {
 
 /// Parse one message turn's visible (`currentlySelected`) version into an IR [`Message`]. Updates
 /// `session_model` with the first model seen.
+#[cfg(test)]
 fn parse_message(msg: &Value, session_model: &mut Option<String>) -> Option<Message> {
     parse_version(selected_version(msg)?, session_model)
 }
 
 /// Parse one specific `version` object into an IR [`Message`].
+#[cfg(test)]
 fn parse_version(version: &Value, session_model: &mut Option<String>) -> Option<Message> {
     let role = match version.get("role").and_then(Value::as_str) {
         Some("user") => Role::User,
@@ -771,6 +1085,7 @@ fn parse_version(version: &Value, session_model: &mut Option<String>) -> Option<
 /// and edits LM Studio keeps beside the visible one. Only emitted under [`ParseOptions::complete`];
 /// each carries its `versions[]` index in `extra["lmstudio"]["variant"]`. A throwaway model sink is
 /// used so an alternate never redefines the session model.
+#[cfg(test)]
 fn parse_variants(msg: &Value) -> Vec<Message> {
     let versions = match msg.get("versions").and_then(Value::as_array) {
         Some(v) if v.len() > 1 => v,
@@ -799,6 +1114,7 @@ fn parse_variants(msg: &Value) -> Vec<Message> {
 }
 
 /// Parse one assistant `step`. Only `contentBlock` carries content; others are app-internal.
+#[cfg(test)]
 fn parse_step(step: &Value, m: &mut Message, session_model: &mut Option<String>) {
     if step.get("type").and_then(Value::as_str) != Some("contentBlock") {
         return; // debugInfoBlock / status — nothing to render.
@@ -839,6 +1155,7 @@ fn parse_step(step: &Value, m: &mut Message, session_model: &mut Option<String>)
 
 /// Append text/file/image parts from a `content` array (or bare string) onto `m`.
 /// When `as_thinking`, text parts become [`Block::Thinking`] instead of [`Block::Text`].
+#[cfg(test)]
 fn push_content_parts(content: Option<&Value>, m: &mut Message, as_thinking: bool) {
     match content {
         Some(Value::String(s)) => {
@@ -865,6 +1182,7 @@ fn push_content_parts(content: Option<&Value>, m: &mut Message, as_thinking: boo
     }
 }
 
+#[cfg(test)]
 fn push_text(m: &mut Message, text: String, as_thinking: bool) {
     if as_thinking {
         // Explicit reasoning steps (`style.type=="thinking"`) stay a single Thinking block.
@@ -886,6 +1204,7 @@ fn push_text(m: &mut Message, text: String, as_thinking: bool) {
 
 /// A `{type:"file",...}` part. `fileType:"image"` → [`Block::Image`]; otherwise [`Block::File`].
 /// The reference is `identifier`/`fileIdentifier` (bytes live under `.lmstudio/.internal/files/`).
+#[cfg(test)]
 fn push_file(m: &mut Message, part: &Value) {
     let data_ref = part
         .get("identifier")
@@ -910,6 +1229,7 @@ fn push_file(m: &mut Message, part: &Value) {
 }
 
 /// Map LM Studio's `genInfo.stats` to IR [`Usage`].
+#[cfg(test)]
 fn parse_usage(stats: Option<&Value>) -> Option<Usage> {
     let stats = stats?;
     let input = stats.get("promptTokensCount").and_then(Value::as_u64);
@@ -925,6 +1245,7 @@ fn parse_usage(stats: Option<&Value>) -> Option<Usage> {
 }
 
 /// A `stepIdentifier` is `"<ms-epoch>-<rand>"`; mine its prefix as a timestamp.
+#[cfg(test)]
 fn step_id_ts(id: &str) -> Option<DateTime<Utc>> {
     let prefix = id.split('-').next()?;
     let ms: i64 = prefix.parse().ok()?;
@@ -949,6 +1270,220 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/lmstudio")
             .join(name)
+    }
+
+    /// The pre-projection borrowed envelope; pin its stricter top-level schema independently
+    /// from record Values, whose malformed scalar/depth fields are silently skipped.
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct PreviousDoc<'a> {
+        #[serde(default, rename = "createdAt")]
+        created_at: Option<Value>,
+        #[serde(default, rename = "systemPrompt")]
+        system_prompt: Option<String>,
+        #[serde(default, rename = "perChatPredictionConfig")]
+        config: Option<Value>,
+        #[serde(default)]
+        pinned: Option<bool>,
+        #[serde(default, borrow)]
+        messages: Vec<&'a serde_json::value::RawValue>,
+    }
+
+    #[test]
+    fn projection_matches_owned_turns_and_variants() {
+        let cases = [
+            r#"{"versions":[]}"#,
+            r#"{"currentlySelected":0,"currentlySelected":99,"versions":[{"role":"user","content":"old"},{"role":"user","content":"last"}]}"#,
+            r#"{"currentlySelected":1,"versions":[{"role":"system","content":"system"},{"role":"assistant","type":"multiStep","steps":[{"type":"debugInfoBlock","content":"ignored"},{"type":"contentBlock","genInfo":{"indexedModelIdentifier":42,"identifier":"masked","stats":{"promptTokensCount":12,"predictedTokensCount":13}},"style":{"type":"thinking"},"stepIdentifier":"1754425094719-1","content":[{"type":"text","text":"reason"},{"type":"file","fileType":"image","identifier":"image"}]},{"type":"contentBlock","genInfo":{"identifier":"test"},"content":"answer"}]}]}"#,
+            r#"{"versions":[{"role":"user","content":[{"type":"file","fileIdentifier":42,"identifier":"masked","name":"file","fileType":"text/plain"},{"type":"text","text":"first","text":"final"},{"type":"unknown","text":"ignored"}]}]}"#,
+            r#"{"versions":null,"versions":[{"role":"assistant","content":"<|channel|>final<|message|>answer<|end|>"}]}"#,
+            r#"{"currentlySelected":-1,"versions":[{"role":"user","content":null},{"role":"invalid","content":"ignored"}]}"#,
+            "null",
+        ];
+        for text in cases {
+            let value: Value = serde_json::from_str(text).unwrap();
+            let expected = parse_message(&value, &mut None);
+            let fields = Fields::parse(JsonView::from(&value), &["versions", "currentlySelected"]).unwrap();
+            let actual = if let Some(fields) = fields {
+                if let Some(versions) = fields.get("versions") {
+                    projected_selected_version(&fields, versions)
+                        .unwrap()
+                        .and_then(|(_, version)| projected_version(version, &mut None, &ParseOptions::full()).unwrap())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "{text}"
+            );
+            let expected = parse_variants(&value);
+            let mut actual = Vec::new();
+            if let Some(fields) = Fields::parse(JsonView::from(&value), &["versions", "currentlySelected"]).unwrap() {
+                if let Some(versions) = fields.get("versions") {
+                    if let Some((selected, _)) = projected_selected_version(&fields, versions).unwrap() {
+                        let mut model = None;
+                        for (index, version) in versions.array().unwrap().unwrap().enumerate() {
+                            if index != selected {
+                                if let Some(mut message) =
+                                    projected_version(version.unwrap(), &mut model, &ParseOptions::complete()).unwrap()
+                                {
+                                    message.kind = MessageKind::Branch;
+                                    message
+                                        .harness_extra_mut(Harness::LmStudio)
+                                        .insert("variant".into(), Value::Number(index.into()));
+                                    actual.push(message);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "variants {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_stream_preserves_document_schema_rejection() {
+        let dir = std::env::temp_dir().join(format!("cv-lmstudio-schema-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("schema.conversation.json");
+        let mut cases = vec![
+            r#"{"messages":[],"messages":[]}"#.to_owned(),
+            r#"{"messages":[],"\u006dessages":[]}"#.to_owned(),
+            r#"{"systemPrompt":"a","systemPrompt":null}"#.to_owned(),
+            r#"{"createdAt":null,"createdAt":1}"#.to_owned(),
+            r#"{"pinned":null,"pinned":null}"#.to_owned(),
+            r#"{"messages":null}"#.to_owned(),
+            r#"{"messages":false}"#.to_owned(),
+            r#"{"systemPrompt":42}"#.to_owned(),
+            r#"{"systemPrompt":"bad\uD800","perChatPredictionConfig":{"fields":[{"key":"llm.prediction.systemPrompt","value":"valid"}]}}"#.to_owned(),
+            r#"{"pinned":1}"#.to_owned(),
+            r#"{"createdAt":1e999}"#.to_owned(),
+            r#"{"perChatPredictionConfig":{"ignored":"bad\uD800"}}"#.to_owned(),
+            r#"{"ignored":"bad\uD800","ignored":1e999,"messages":[]}"#.to_owned(),
+            r#"{"ignored\uD800":1,"messages":[]}"#.to_owned(),
+            r#"{"messages":[{"versions":[{"role":"user","content":"a","ignored":"bad\uD800"}]},{"versions":[{"role":"user","content":"good"}]}]}"#.to_owned(),
+            "{}".to_owned(), "[]".to_owned(),
+            r#"[1754425094719,"prompt",null,true,[]]"#.to_owned(),
+            "[null,null,null,null,[],0]".to_owned(),
+            "[null,42]".to_owned(),
+        ];
+        for depth in 124..=130 {
+            cases.push(format!(
+                r#"{{"perChatPredictionConfig":{}0{}}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            ));
+            cases.push(format!(
+                r#"{{"ignored":{}0{},"messages":[]}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            ));
+        }
+        for text in cases {
+            fs::write(&path, &text).unwrap();
+            let expected = serde_json::from_str::<PreviousDoc>(&text);
+            let r = SessionRef::new("schema", Harness::LmStudio, path.clone());
+            let actual = crate::stream::collect_with(&LmStudio { root: None }, &r, &ParseOptions::full());
+            assert_eq!(actual.is_ok(), expected.is_ok(), "{text}");
+            if let Ok(doc) = expected {
+                let mut model = None;
+                let messages: Vec<_> = doc
+                    .messages
+                    .iter()
+                    .filter_map(|raw| serde_json::from_str::<Value>(raw.get()).ok())
+                    .filter_map(|value| parse_message(&value, &mut model))
+                    .collect();
+                assert_eq!(
+                    serde_json::to_value(&actual.unwrap().messages).unwrap(),
+                    serde_json::to_value(messages).unwrap(),
+                    "{text}"
+                );
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_mutation_during_stream_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("cv-lmstudio-identity-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.conversation.json");
+        fs::write(
+            &path,
+            r#"{"messages":[{"versions":[{"role":"user","content":"selected"}]}]}"#,
+        )
+        .unwrap();
+        let r = SessionRef::new("source", Harness::LmStudio, path.clone());
+        struct MutatingSink(PathBuf);
+        impl MessageSink for MutatingSink {
+            fn message(&mut self, _: Message) -> Flow {
+                fs::write(&self.0, r#"{"messages":[]}"#).unwrap();
+                Flow::Stop
+            }
+        }
+        let error = LmStudio { root: None }
+            .stream(&r, &ParseOptions::lazy(), &mut MutatingSink(path))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("source changed"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lazy_selected_text_and_thinking_remain_source_backed() {
+        let dir = std::env::temp_dir().join(format!("cv-lmstudio-lazy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lazy.conversation.json");
+        let text = "plain \"line\n 🌙".repeat(8192);
+        let thinking = "reason\n".repeat(8192);
+        let value = json!({"messages":[{"currentlySelected":1,"versions":[
+            {"role":"assistant","content":"unused".repeat(100_000)},
+            {"role":"assistant","type":"multiStep","steps":[
+                {"type":"contentBlock","style":{"type":"thinking"},"content":thinking},
+                {"type":"contentBlock","content":[{"type":"text","text":text}]}
+            ]}
+        ]}]});
+        fs::write(&path, value.to_string()).unwrap();
+        let r = SessionRef::new("lazy", Harness::LmStudio, path.clone());
+        let lazy = crate::stream::collect_with(&LmStudio { root: None }, &r, &ParseOptions::lazy()).unwrap();
+        assert_eq!(lazy.messages.len(), 1);
+        assert!(matches!(&lazy.messages[0].content[0], Block::Thinking { text, .. } if text.is_span()));
+        assert!(matches!(&lazy.messages[0].content[1], Block::Text { text } if text.is_span()));
+        let full = crate::stream::collect_with(&LmStudio { root: None }, &r, &ParseOptions::full()).unwrap();
+        let mut lazy = lazy;
+        lazy.materialize().unwrap();
+        assert_eq!(
+            serde_json::to_value(lazy.messages).unwrap(),
+            serde_json::to_value(full.messages).unwrap()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn harmony_marker_detection_crosses_decoded_chunks() {
+        for marker in [r"\u003c|channel|>", r"\u003c|message|>", r"\u003c|start|>assistant"] {
+            for padding in 65_510..65_542 {
+                let plain = format!("{}{marker}final", "x".repeat(padding));
+                let dir = std::env::temp_dir().join(format!("cv-lmstudio-harmony-{}", uuid::Uuid::new_v4()));
+                fs::create_dir_all(&dir).unwrap();
+                let path = dir.join("text.json");
+                fs::write(&path, format!("\"{plain}\"")).unwrap();
+                let source = JsonSource::capture(&path).unwrap();
+                assert!(
+                    source.read_document(projected_harmony).unwrap(),
+                    "{marker} at {padding}"
+                );
+                fs::remove_dir_all(dir).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -1092,6 +1627,28 @@ mod tests {
     fn missing_dir_discovers_empty() {
         let a = LmStudio { root: None };
         assert!(a.discover().unwrap().is_empty());
+    }
+
+    #[test]
+    fn projected_timestamp_matches_integer_prefix_parser() {
+        let mut cases = vec![
+            "1754425094719-1".to_owned(),
+            "+1754425094719-x".to_owned(),
+            "1754425094719".to_owned(),
+            "-1754425094719-x".to_owned(),
+            "++1754425094719-x".to_owned(),
+            "1754425094719🌙-x".to_owned(),
+            "18446744073709551616-x".to_owned(),
+            "-x".to_owned(),
+        ];
+        cases.push(format!("{}1754425094719-{}", "0".repeat(100_000), "x".repeat(100_000)));
+        for text in cases {
+            let value = Value::String(text.clone());
+            assert_eq!(
+                projected_step_timestamp(Some(JsonView::from(&value))).unwrap(),
+                step_id_ts(&text)
+            );
+        }
     }
 
     #[test]
