@@ -251,7 +251,6 @@ clustervision is a Rust workspace. `cv-core` is the library every other crate is
 | **`cv-search`** | Pure-Rust search: full-text via [tantivy](https://github.com/quickwit-oss/tantivy) (BM25 + snippets) and semantic via embeddings (model2vec). |
 | **`cv-web`** | WASM bindings — ingest an uploaded harness `.zip` entirely in-browser and hand back sessions as JSON. |
 | **`app/`** | The desktop app — a Tauri v2 shell around the web UI, reading through `cv_core::api` in-process. |
-| `cv-mcp`, `cvd` | One-release shims that print the new spelling and exec `cv mcp` / `cv archive`, `cv watch`, `cv serve`. |
 
 The shape to take away: **`cv-core` owns the IR, the adapters, and discovery; everything else is a lens onto it.** A bug fixed in an adapter improves the CLI, the server, the web UI, and the app at once — because they all see the same `Session`.
 

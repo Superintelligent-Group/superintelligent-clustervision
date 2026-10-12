@@ -35,7 +35,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/emberian/cv/releases/latest/download/cv-installer.sh | sh
 ```
 
-This installs `cv` (plus `cv-mcp` and `cvd`, one-release shims for `cv mcp` and `cv archive`/`cv watch`/`cv serve`).
+This installs `cv`, the one binary (`cv mcp`, `cv serve`, `cv watch` and `cv archive` are its subcommands).
 
 Or build from source (needs a recent Rust toolchain):
 
@@ -43,7 +43,7 @@ Or build from source (needs a recent Rust toolchain):
 git clone https://github.com/emberian/cv && cd cv
 cargo build --release      # → target/release/cv
 make install               # cargo install --path crates/cv --force --target-dir target → ~/.cargo/bin/cv
-cv --version               # cv 0.15.1 (<git sha>) — lags the checkout? run make install again
+cv --version               # cv 0.16.0 (<git sha>) — lags the checkout? run make install again
 ```
 
 ## 60-second tour

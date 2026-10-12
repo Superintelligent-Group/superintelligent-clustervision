@@ -3,8 +3,8 @@
 Where most of [`cv`](cli.md) is your interactive map of *this* machine, three commands are the
 long-running side of it: the pieces that turn a pile of per-machine, per-harness session files into
 a single durable **archive**, and serve the live state as JSON so [the app](viewing-and-sharing.md)'s dashboard and
-[the task inbox](tasks.md) can render it. 🔮 (They were the `cvd` binary until 0.15.0; `cvd` is a
-one-release shim that prints the new spelling and runs it.)
+[the task inbox](tasks.md) can render it. 🔮 (They were the `cvd` binary until 0.15.0; its 0.15 shim
+was removed in 0.16.0.)
 
 - **`cv archive sync`** — one-shot: snapshot every discovered session into the archive, then exit.
 - **`cv watch`** — long-running: follow live activity and archive sessions as they change.

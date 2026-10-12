@@ -48,7 +48,7 @@ jobs:
 
           # Dependency order: a crate cannot be published before the ones it depends on are live.
           # `cv-web` is `publish = false` and deliberately absent.
-          CRATES="clustervision-core cv-search clustervision cvd cv-mcp"
+          CRATES="clustervision-core cv-search clustervision"
 
           for c in $CRATES; do
             echo "::group::publish $c"

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.16.0 — 2026-10-12 — every harness, every version, every affordance
+
+cv now carries a corpus of real sessions written by 17 harnesses at the versions in use and their
+latest releases, re-read by a golden test, so a format change shows up as a test diff and old
+formats keep reading. Building it found sessions cv could not see at all (OpenCode 2.x, Qwen Code
+0.25, the Cline CLI store) and data it silently dropped (OpenClaw 10's compressed events, kimi-cli's
+rotated segments, Grok reasoning). On top of it, one vocabulary for what swarms run on: plans,
+goals, schedules, background jobs, sub-agent spawns and returns, skills, hooks, questions, branches,
+forks and model changes, queried the same way on every harness with `cv show --kind <affordance>`
+and `-q has:<affordance>`.
+
+**What reads differently:** turns that spawn a sub-agent are `subagent_spawn` (and synchronous
+results `subagent_return`) where they were `reply`/`tool_result`; Claude task-notifications and
+interrupt/meta rows are no longer `prompt`; Hermes and OpenClaw `tool_call` wrappers read as the
+tool they call. `--json` consumers keying on those kinds should update.
+
+**Run `cv index` once after upgrading**: it counts every session's affordances so `has:` answers
+from the catalog (minutes on a large fleet, incremental after).
+
+### All changes
+- **The `cvd` and `cv-mcp` shims are gone**, as 0.15 announced: `cv archive|watch|serve` and `cv mcp`. A launchd job or MCP registration that names them needs the new spelling.
+
 - `has:plan` and the other affordance flags answer from per-session counts in the catalog (filled by `cv index` and any full read); only uncounted sessions are parsed.
 - `cv tools --timeline` shows each call's `tool_use_id` (in `--json` too), the id `cv cat <session> <id>` takes.
 - `cv tools --timeline` shows one line per tool call, matching `cv tools` counts; a multi-file patch's other files are in `more_targets`.
@@ -18,7 +40,6 @@
 - Gemini: tool results and thoughts no longer appear twice after a resume, and a resumed 0.46 session is no longer hidden by its empty twin.
 - Gemini: hook context is its own turn; `invoke_agent` calls are sub-agent spawns and returns.
 - Gemini and Qwen corpus: real stores from Gemini CLI 0.46.0 and 0.63.0 and Qwen Code 0.25.1 in the golden test.
-
 - Codex 0.161/0.162: `turn_aborted` notes keep the abort `error` and `root_turn_id`; `cv formats` names carried records `event_msg.<type>` as the manifest does.
 - Codex corpus: real rollouts from Codex 0.161.0 and 0.162.1, re-read by a golden test so every recorded format keeps reading.
 - `cv index` merges its segments itself, by size, to completion: no more abandoned ~1 GB background merge on long runs.

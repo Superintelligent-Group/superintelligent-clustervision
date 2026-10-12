@@ -2,14 +2,14 @@
 # temp target dir by default — a full rebuild every time — so `install` points it at the
 # workspace's own `target/` (same release profile, incremental).
 CARGO ?= cargo
-BINS  ?= crates/cv crates/cv-mcp crates/cvd   # the last two are one-release exec shims
+BINS  ?= crates/cv
 
 .PHONY: build install version test
 
 build:
 	$(CARGO) build --release
 
-## Install cv (and the cv-mcp/cvd shims) into ~/.cargo/bin from this checkout, reusing target/release.
+## Install cv into ~/.cargo/bin from this checkout, reusing target/release.
 install:
 	@for b in $(BINS); do $(CARGO) install --path $$b --force --target-dir target || exit 1; done
 	@echo; cv --version; echo "checkout: $$(git rev-parse --short=12 HEAD)$$(git status --porcelain | grep -q . && echo -dirty)"

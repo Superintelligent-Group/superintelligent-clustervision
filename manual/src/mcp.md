@@ -38,7 +38,7 @@ Any MCP host works — give it the absolute path to `cv` as the command and `mcp
 argument. **stdout is the protocol channel**, so all diagnostics go to stderr. It implements
 `initialize`, `ping`, `tools/list` and `tools/call` against protocol version `2025-06-18`, and
 every tool returns its result as a single text content block. (Until 0.15.0 this was a separate
-`cv-mcp` binary; `cv-mcp` is now a one-release shim that runs `cv mcp`.)
+`cv-mcp` binary; the 0.15 shim was removed in 0.16.0.)
 
 ## The tools are generated from the CLI
 

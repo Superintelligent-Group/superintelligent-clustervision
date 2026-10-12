@@ -22,8 +22,8 @@ reason written next to it.*
 - `cv-core`: IR, adapters, emit, the read API that every door maps onto, tasks, lanes, watch.
   `cv-search` stays the one satellite only because tantivy does not belong inside the dependency
   fence. `cv-web` is the wasm cdylib.
-- `cv`: `cv <verb>`, `cv mcp`, `cv serve`, `cv watch`. `cvd` and `cv-mcp` are subcommands, not
-  binaries. The MCP roster is generated from the in-process clap tree, so it cannot skew from the
+- `cv`: `cv <verb>`, `cv mcp`, `cv serve`, `cv watch`. The former `cvd` and `cv-mcp` binaries
+  are these subcommands. The MCP roster is generated from the in-process clap tree, so it cannot skew from the
   CLI (it once shelled out to whatever `cv` was on PATH, and found a stale one).
 - **An adapter is `roots + discover + record-to-Message stream`, 150 to 400 lines**, importing
   its wire codec (`harness/wire/{anthropic,openai}`) and its store helper

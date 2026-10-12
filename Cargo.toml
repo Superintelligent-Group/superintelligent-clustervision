@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/cv-core", "crates/cv", "crates/cv-mcp", "crates/cvd", "crates/cv-web", "crates/cv-search", "crates/cv-testkit"]
+members = ["crates/cv-core", "crates/cv", "crates/cv-web", "crates/cv-search", "crates/cv-testkit"]
 
 [workspace.package]
-version = "0.15.1"
+version = "0.16.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/emberian/cv"

@@ -113,7 +113,7 @@ Full docs — every CLI command, the MCP tools, the HTTP API, the app, cross-har
 
 ## 🛠️ Install
 
-**Prebuilt binaries** for macOS / Linux / Windows (arm64 · x64 · x86) ship on every release — grab the latest from **[Releases](https://github.com/emberian/cv/releases/latest)** (`cv`, plus the one-release `cv-mcp`/`cvd` shims), or one-line it:
+**Prebuilt binaries** for macOS / Linux / Windows (arm64 · x64 · x86) ship on every release — grab the latest from **[Releases](https://github.com/emberian/cv/releases/latest)** (`cv`), or one-line it:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/emberian/cv/releases/latest/download/cv-installer.sh | sh
@@ -124,7 +124,7 @@ Or from source:
 ```sh
 cargo build --release          # → target/release/cv
 make install                   # = cargo install --path crates/cv --force --target-dir target  → ~/.cargo/bin/cv
-cv --version                   # cv 0.15.1 (<git sha>) — compare against `git rev-parse --short=12 HEAD`
+cv --version                   # cv 0.16.0 (<git sha>) — compare against `git rev-parse --short=12 HEAD`
 ```
 
 `cv --version` prints the commit the binary was built from (`-dirty` when the tree had edits), so
