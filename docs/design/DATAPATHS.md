@@ -77,7 +77,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
-| LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Harmony decoding and demanded output/metadata remain owned; discovery still owns escaped scratch and first-title candidates |
+| LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Harmony decoding and demanded output/metadata remain owned; discovery uses bounded title prefixes; Harmony and arbitrary demanded metadata need separate limits |
 | ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text, selected owned output and sender/empty-archive compatibility edges |
 | OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |
 
@@ -102,7 +102,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | API pagination | Bounded source-verified page checkpoints and head metadata cache; no messages cached | Safe continuation formats only; source/dependency changes and oversized state fall back |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
-| Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Matched-query spool CPU cost and demanded owned producer fields remain |
+| Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; usage rows stage in bounded private storage | Exact dedup disk I/O, repeated usage scans and model roster growth; preserve duplicate precedence and float addition order |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
@@ -481,10 +481,13 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Ordered usage staging/shared exact dedup and semantic source/model reuse implementations; scoped ordering/identity oracles.
 - [x] Checked lazy Text demands in JSON output, archive and search; failures propagate before publication.
 - [x] Dataset filter/output staging preserves late selection and byte fidelity with bounded history retention.
-- [ ] Final stats/Hermes cached-spill CPU, matched-query dataset CPU and full semantic end-to-end evidence.
-- [ ] Remove escaped-output CPU regressions against matched release controls; preserve malformed-text fallback and exact canonical output.
-- [ ] Stream whole CLI JSON show/export through bounded staging; selected messages and final strings are still collected today.
-- [ ] Exact session-ranked search limits and pre-limit CLI/HTTP filters; current chunk/candidate overfetch can hide matching sessions.
+- [x] Matched-query dataset spool CPU: bounded slice decoding preserves exact output and flat heap.
+- [ ] Final stats/Hermes cached-spill CPU and full semantic end-to-end evidence; ordered usage-row reuse is in progress.
+- [x] Matched release controls for streamed native escaped output; adaptive validation and canonical short-escape bypass preserve exact output.
+- [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
+- [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
+- [x] Exact session-ranked search limits and pre-limit CLI/HTTP filters, including tied scores and current metadata.
+- [ ] Measure exact search collector stored-document lookup costs before changing schema or merge policy.
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
@@ -511,8 +514,8 @@ portable values are 862,007 and 235,180. Independent provider totals, duplicate 
 buckets and temporary-file cleanup pass in all eight cases. These fixtures hold the model roster
 and per-record metadata small; they do not bound arbitrary output cardinality or native memory.
 The diagnostic binaries use the development profile; no throughput inference follows from these
-allocation measurements. Escaped-output timing comparisons are being repeated with explicit,
-matched release builds before drawing conclusions from earlier seconds-scale probe reports.
+allocation measurements. Earlier seconds-scale escaped-output probe reports had an unspecified
+build profile and are superseded by the matched release comparison below.
 
 The production semantic projection check passes at 100 MB decoded payload: arguments, plain text
 and escaped text use 136,982 / 134,813 / 163,539 bytes of additional requested Rust heap. The
@@ -615,3 +618,40 @@ requested live Rust bytes above baseline; the old selected-tree + pretty String 
 111,114,689 bytes. Source generation precedes allocation measurement; file-backed pages and
 allocator/native overhead are excluded. Exact output bytes are covered separately by old
 materialized oracles for plain and OpenSession documents, windows, budgets and late EOF metadata.
+
+
+Post-reboot matched release measurements (optimization level 3, thin LTO) separate output-demand
+CPU from construction/validation, hashing and heap instrumentation. On 32 MiB encoded argument
+bodies, three alternating runs reduce median CPU from 0.252 to 0.00798 s for newline escapes,
+0.280 to 0.100 s for quotes, and 0.281 to 0.0114 s for backslashes. Unicode escapes stay near
+parity (0.0750 versus 0.0766 s). Checked text writing improves 7–13% on the corresponding
+short-escape cases. Ten large output groups match baseline and materialized hashes and lengths;
+native and portable 16/64 MiB heap controls stay flat. These are primitive output-demand costs,
+not whole-adapter or whole-fleet throughput.
+
+Dataset deferred-record replay now parses ordinary records from a bounded 64 KiB slice, retaining
+a buffered fallback for oversized records. The matched 48,000-record, 45.9 MB source experiment
+reduces matched-query CPU from 0.775718 to 0.333713 s (57%); rejected-query CPU stays near parity
+(0.183512/0.184421 s). Output is exactly 40,968,015 bytes with unchanged SHA-256. At 12,000 and
+48,000 records, matched-query peak Rust heap stays 1,249,147 bytes, rejected-query 380,636 bytes.
+This measures spool decoding; the separate decoded-argument lifetime work remains in progress.
+
+LM Studio discovery now uses the same checked source document views as its selected reader.
+The portable whole-file read previously retained 16.8/67.1 MB for 16/64 MiB named plain sessions;
+it now retains about 263 KB for plain and 329 KB for escaped sessions. Continue and LM Studio
+count/discovery pass 32 native/portable plain/escaped scale cases with four fixed records,
+a 2 MiB absolute cap and 256 KiB growth allowance. CI runs this selected-docs gate. Nineteen
+LM Studio tests pass in each configuration, including whole-Value metadata oracles, malformed
+unknown fields, duplicate keys, Unicode title prefixes and empty array text parts. Harmony,
+arbitrarily large metadata and full demanded output are separate. Clean discovery CPU controls
+are in progress.
+
+The integrated CLI JSON heap gate also passes after the decoder changes: 60,001,188 emitted
+bytes use 1,057,238 bytes of peak requested Rust heap, versus 111,114,689 for the materialized
+control. The one-byte difference from the earlier run is variable scratch-path metadata, not a
+changed output contract. Independent exact-window oracles cover output fidelity.
+
+Cursor's installed IDE uses numeric modes; the adapter now preserves both the interpreted name
+and original value, including unknown enums. A genuine newer CLI capture exposed a separate
+blobs/meta store. Native capture and support are in progress; this is distinct from the IDE
+SQLite path and is not covered by the older corpus.
