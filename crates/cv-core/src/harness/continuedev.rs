@@ -36,16 +36,16 @@
 //! Missing index → glob `*.json` (minus `sessions.json`). Missing fields → skip. `content` as
 //! string or array both work. `dateCreated` ms-epoch or ISO both work. Never panics.
 
-use super::store::DiscardValue;
+use super::store::document::{Fields, InvalidStruct};
+use crate::json::{InvalidJson, JsonSource, JsonView};
+mod view;
 use super::wire::{openai, text_parts};
 use super::{ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::de::{MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
-use serde_json::value::RawValue;
+
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -134,16 +134,9 @@ impl Adapter for Continue {
         Ok(out)
     }
 
-    /// Native streaming parse. A Continue session is a single JSON document
-    /// (`{title, workspaceDirectory, history:[Item,…]}`), so instead of building the whole-document
-    /// `Value` (which owns every `history` item body — gigabytes for a large session), we
-    /// borrow-deserialize only the document *structure*: the small session-level strings by value,
-    /// and `history` as a `Vec<&RawValue>` slicing the mapped/owned bytes. Each item is then turned
-    /// into one small `Value` ([`history_item_to_message`]), emitted to `sink`, and dropped before
-    /// the next — so peak memory is O(largest item) + the mmap (reclaimable) + the slice vec.
-    fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    /// Project one accepted history item at a time, retaining body source ranges in lazy mode.
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
-            // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Continue, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
             let mut s = Session {
@@ -154,131 +147,106 @@ impl Adapter for Continue {
                 source_path: Some(r.path.clone()),
                 ..Session::new(r.id.clone(), Harness::Continue)
             };
-
-            // Map (or read) the file's raw bytes; the borrowed `Doc` slices into them.
-            let Some(bytes) = read_bytes(&r.path) else {
+            sink.dependency(&r.path);
+            if let Some(error) = sink.take_error() {
+                return Err(error);
+            }
+            let Some(source) = JsonSource::capture(&r.path).ok() else {
                 sink.meta(&s);
                 return Ok(s);
             };
-            let Ok(doc) = serde_json::from_slice::<Doc>(bytes.as_ref()) else {
-                sink.meta(&s);
-                return Ok(s);
-            };
-
-            // Backfill session-level fields from the file itself (index may be sparse/absent).
-            if s.title.is_none() {
-                s.title = doc
-                    .title
-                    .as_deref()
-                    .filter(|t| !t.trim().is_empty())
-                    .map(|t| crate::ir::truncate(t, 80));
-            }
-            if s.cwd.is_none() {
-                s.cwd = doc
-                    .workspace_directory
-                    .as_deref()
-                    .filter(|p| !p.is_empty())
-                    .map(workspace_to_path);
-            }
-
-            // Metadata is fully known now (model is only ever backfilled per-item below, and the bridge
-            // sinks read it from the returned Session); hand the header to the sink before the body.
-            sink.meta(&s);
-
-            // Tool calls whose results came from an item's `toolCallStates` (the cn CLI's shape), so a
-            // later `role: "tool"` item answering the same call is not emitted twice.
-            let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for item in doc.history {
-                // ONE small Value per item — parsed, emitted, dropped before the next.
-                let Ok(v) = serde_json::from_str::<Value>(item.get()) else {
-                    continue;
+            let result = source.read_syntax(|root| {
+                let Some(doc) = Fields::parse_struct(root, &["title", "workspaceDirectory", "history"])? else {
+                    return Err(InvalidStruct("expected Continue session struct").into());
                 };
-                let reply_id = v.pointer("/message/toolCallId").and_then(Value::as_str);
-                if reply_id.is_some_and(|id| answered.contains(id)) {
-                    continue;
+                let title = view::title(doc.get("title"), true)?;
+                let workspace = optional_string(doc.get("workspaceDirectory"))?;
+                let history = doc.get("history").map(JsonView::accepted_array).transpose()?;
+                if doc.get("history").is_some() && history.as_ref().is_some_and(Option::is_none) {
+                    return Err(InvalidStruct("expected Continue history array").into());
                 }
-                let results = tool_states_message(&v);
-                if let Some(m) = history_item_to_message(&v, &mut s.model) {
-                    // A `system` history item is the system prompt — the session-level fact.
-                    if s.system_prompt.is_none() && m.kind == MessageKind::SystemPrompt {
-                        if let Some(t) = m.text() {
-                            if !t.trim().is_empty() {
-                                s.system_prompt = Some(t);
+                if s.title.is_none() {
+                    s.title = title;
+                }
+                if s.cwd.is_none() {
+                    s.cwd = workspace.filter(|p| !p.is_empty()).map(|p| workspace_to_path(&p));
+                }
+                sink.meta(&s);
+                let mut answered = std::collections::HashSet::<String>::new();
+                let mut has_sources = false;
+                for item in history.into_iter().flatten().flatten() {
+                    let Some(item) = item? else { continue };
+                    let reply_id = view::reply_id(item)?;
+                    if reply_id.is_some_and(|id| answered.contains(&id)) {
+                        continue;
+                    }
+                    let (message, results) = if opts.spans {
+                        view::messages(item, &mut s.model)?
+                    } else {
+                        let value = item.resolve()?;
+                        (
+                            history_item_to_message(value.as_ref(), &mut s.model),
+                            tool_states_message(value.as_ref()),
+                        )
+                    };
+                    if let Some(message) = message {
+                        if s.system_prompt.is_none() && message.kind == MessageKind::SystemPrompt {
+                            let mut text_message = message.clone();
+                            text_message.materialize_text(&s.resolver());
+                            let text = text_message.text();
+                            if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                                s.system_prompt = Some(text);
                             }
                         }
-                    }
-                    if sink.message(m) == Flow::Stop {
-                        break;
-                    }
-                }
-                if let Some(r) = results {
-                    for b in &r.content {
-                        if let Block::ToolResult { tool_use_id, .. } = b {
-                            answered.insert(tool_use_id.clone());
+                        let sourced = view::has_sources(&message);
+                        has_sources |= sourced;
+                        if sourced {
+                            source.check()?;
+                        }
+                        let flow = sink.try_message(message)?;
+                        if sourced {
+                            source.check()?;
+                        }
+                        if flow == Flow::Stop {
+                            break;
                         }
                     }
-                    if sink.message(r) == Flow::Stop {
-                        break;
+                    if let Some(results) = results {
+                        for block in &results.content {
+                            if let Block::ToolResult { tool_use_id, .. } = block {
+                                answered.insert(tool_use_id.clone());
+                            }
+                        }
+                        if sink.try_message(results)? == Flow::Stop {
+                            break;
+                        }
                     }
                 }
+                if has_sources {
+                    source.check()?;
+                }
+                Ok(())
+            });
+            if let Err(error) = result {
+                if !error.is::<InvalidJson>() && !error.is::<InvalidStruct>() {
+                    return Err(error);
+                }
+                sink.meta(&s);
             }
-
             Ok(s)
         })
     }
 }
 
-// ---------------------------------------------------------------------------
-// Streaming document structure (borrows the mapped/owned bytes)
-// ---------------------------------------------------------------------------
-
-/// The document *structure* of a Continue session, borrowed from the source bytes: the small
-/// session-level strings by value, and `history` as raw item slices (NOT materialized into owned
-/// `Value`s). Borrowing avoids building the whole-document `Value` for [`Continue::stream`].
-#[derive(serde::Deserialize)]
-struct Doc<'a> {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default, rename = "workspaceDirectory")]
-    workspace_directory: Option<String>,
-    #[serde(default, borrow)]
-    history: Vec<&'a RawValue>,
-}
-
-/// Owns either an mmap of `path` or its bytes read into a `Vec`, exposing `.as_ref()` as `&[u8]`.
-/// `None` on any read/map error (callers treat it as an empty/unparseable session, like the old
-/// `read_to_string`/`from_str` did).
-enum Bytes {
-    #[cfg(feature = "mmap")]
-    Mapped(memmap2::Mmap),
-    Owned(Vec<u8>),
-}
-
-impl AsRef<[u8]> for Bytes {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            #[cfg(feature = "mmap")]
-            Bytes::Mapped(m) => m,
-            Bytes::Owned(v) => v,
-        }
+fn optional_string(view: Option<JsonView<'_>>) -> Result<Option<String>> {
+    let Some(view) = view else { return Ok(None) };
+    if view.is_null()? {
+        return Ok(None);
     }
-}
-
-/// Memory-map `path` (default `mmap` feature) so a large session's bytes are paged in on demand and
-/// reclaimable; fall back to reading the whole file into a `Vec` when the feature is off or the map
-/// fails (e.g. a zero-length file, where mmap is invalid).
-fn read_bytes(path: &Path) -> Option<Bytes> {
-    #[cfg(feature = "mmap")]
-    {
-        if let Ok(file) = fs::File::open(path) {
-            // SAFETY: cv reads its own session store; a concurrent truncation by another process
-            // could in theory cause a SIGBUS, the standard caveat for all mmap'd file reads.
-            if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
-                return Some(Bytes::Mapped(map));
-            }
-        }
+    if !view.is_string()? || !view.accepts_value()? {
+        return Err(InvalidStruct("expected optional string").into());
     }
-    fs::read(path).ok().map(Bytes::Owned)
+    Ok(view.resolve()?.as_str().map(str::to_owned))
 }
 
 // ---------------------------------------------------------------------------
@@ -512,37 +480,36 @@ struct IndexMeta {
 /// Read `sessions.json` (array of `{sessionId, title, dateCreated, workspaceDirectory}`). Empty vec
 /// on any error.
 fn read_index(path: &Path) -> Vec<IndexMeta> {
-    let Ok(text) = fs::read_to_string(path) else {
+    let Some(source) = JsonSource::capture(path).ok() else {
         return Vec::new();
     };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return Vec::new();
-    };
-    let Some(arr) = v.as_array() else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|e| {
-            let session_id = e.get("sessionId").and_then(Value::as_str)?.to_string();
-            if session_id.is_empty() {
-                return None;
+    source
+        .read_document(|root| {
+            let mut out = Vec::new();
+            if let Some(entries) = root.array()? {
+                for entry in entries {
+                    let Some(fields) =
+                        Fields::parse(entry?, &["sessionId", "title", "dateCreated", "workspaceDirectory"])?
+                    else {
+                        continue;
+                    };
+                    let Some(session_id) = fields.string("sessionId")?.filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
+                    out.push(IndexMeta {
+                        session_id,
+                        title: view::title(fields.get("title"), false)?,
+                        cwd: fields
+                            .string("workspaceDirectory")?
+                            .filter(|p| !p.is_empty())
+                            .map(|p| workspace_to_path(&p)),
+                        created_at: fields.value("dateCreated")?.as_ref().and_then(parse_date),
+                    });
+                }
             }
-            Some(IndexMeta {
-                session_id,
-                title: e
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .filter(|t| !t.trim().is_empty())
-                    .map(|t| crate::ir::truncate(t, 80)),
-                cwd: e
-                    .get("workspaceDirectory")
-                    .and_then(Value::as_str)
-                    .filter(|p| !p.is_empty())
-                    .map(workspace_to_path),
-                created_at: e.get("dateCreated").and_then(parse_date),
-            })
+            Ok(out)
         })
-        .collect()
+        .unwrap_or_default()
 }
 
 /// Build a `SessionRef` from index metadata + the on-disk transcript path.
@@ -570,98 +537,27 @@ struct Scan {
     message_count: usize,
 }
 
-impl<'de> Deserialize<'de> for Scan {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Fields;
-        impl<'de> Visitor<'de> for Fields {
-            type Value = Scan;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a Continue session object")
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Scan, A::Error> {
-                let mut scan = Scan::default();
-                while let Some(key) = map.next_key::<String>()? {
-                    if key == "history" {
-                        scan.message_count = map.next_value::<HistoryCount>()?.0;
-                    } else {
-                        match key.as_str() {
-                            "title" => {
-                                let v: Value = map.next_value()?;
-                                scan.title = v
-                                    .as_str()
-                                    .filter(|t| !t.trim().is_empty())
-                                    .map(|t| crate::ir::truncate(t, 80));
-                            }
-                            "workspaceDirectory" => {
-                                let v: Value = map.next_value()?;
-                                scan.cwd = v.as_str().filter(|p| !p.is_empty()).map(workspace_to_path);
-                            }
-                            _ => {
-                                map.next_value::<DiscardValue>()?;
-                            }
-                        }
+fn scan_session(path: &Path) -> Option<Scan> {
+    let source = JsonSource::capture(path).ok()?;
+    source
+        .read_document(|root| {
+            let mut scan = Scan::default();
+            if let Some(fields) = Fields::parse(root, &["title", "workspaceDirectory", "history"])? {
+                scan.title = view::title(fields.get("title"), false)?;
+                scan.cwd = fields
+                    .string("workspaceDirectory")?
+                    .filter(|p| !p.is_empty())
+                    .map(|p| workspace_to_path(&p));
+                if let Some(history) = fields.get("history").map(JsonView::array).transpose()?.flatten() {
+                    for item in history {
+                        item?;
+                        scan.message_count += 1;
                     }
                 }
-                Ok(scan)
             }
-        }
-        d.deserialize_map(Fields)
-    }
-}
-
-struct HistoryCount(usize);
-
-impl<'de> Deserialize<'de> for HistoryCount {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Count;
-        impl<'de> Visitor<'de> for Count {
-            type Value = HistoryCount;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("any JSON value")
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<HistoryCount, A::Error> {
-                let mut count = 0;
-                while seq.next_element::<DiscardValue>()?.is_some() {
-                    count += 1;
-                }
-                Ok(HistoryCount(count))
-            }
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<HistoryCount, A::Error> {
-                DiscardValue::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(HistoryCount(0))
-            }
-            fn visit_bool<E>(self, _: bool) -> Result<HistoryCount, E> {
-                Ok(HistoryCount(0))
-            }
-            fn visit_i64<E>(self, _: i64) -> Result<HistoryCount, E> {
-                Ok(HistoryCount(0))
-            }
-            fn visit_u64<E>(self, _: u64) -> Result<HistoryCount, E> {
-                Ok(HistoryCount(0))
-            }
-            fn visit_f64<E>(self, _: f64) -> Result<HistoryCount, E> {
-                Ok(HistoryCount(0))
-            }
-            fn visit_str<E>(self, _: &str) -> Result<HistoryCount, E> {
-                Ok(HistoryCount(0))
-            }
-            fn visit_unit<E>(self) -> Result<HistoryCount, E> {
-                Ok(HistoryCount(0))
-            }
-        }
-        d.deserialize_any(Count)
-    }
-}
-
-fn scan_session(path: &Path) -> Option<Scan> {
-    let bytes = read_bytes(path)?;
-    let bytes = bytes.as_ref();
-    // Non-object JSON used to yield empty metadata, rather than a parse error.
-    if bytes.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
-        serde_json::from_slice::<DiscardValue>(bytes).ok()?;
-        return Some(Scan::default());
-    }
-    serde_json::from_slice(bytes).ok()
+            Ok(scan)
+        })
+        .ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +567,10 @@ fn scan_session(path: &Path) -> Option<Scan> {
 /// Convert one `history` item into an IR `Message`. `None` for an empty/message-less item. `model`
 /// is filled opportunistically from a `promptLogs[].modelTitle`/`modelProvider` if present.
 fn history_item_to_message(item: &Value, model: &mut Option<String>) -> Option<Message> {
+    history_item_with_body(item, model, None)
+}
+
+fn history_item_with_body(item: &Value, model: &mut Option<String>, body: Option<Vec<Block>>) -> Option<Message> {
     let message = item.get("message")?;
     let role_str = message.get("role").and_then(Value::as_str).unwrap_or("user");
     let role = match role_str {
@@ -700,28 +600,32 @@ fn history_item_to_message(item: &Value, model: &mut Option<String>) -> Option<M
         }
     }
 
-    match role {
-        Role::Tool => {
-            // A tool result. Continue stores the output in `content`.
-            let content = text_parts(message.get("content"));
-            let tool_use_id = message
-                .get("toolCallId")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            m.content.push(Block::ToolResult {
-                tool_use_id,
-                content: content.into(),
-                is_error: false,
-                tool_name: None,
-                status: Some("completed".into()),
-                details: None,
-            });
-        }
-        _ => {
-            push_content(&mut m, message.get("content"));
-            if role == Role::Assistant {
-                m.content.extend(openai::tool_calls(message.get("toolCalls")));
+    if let Some(body) = body {
+        m.content = body;
+    } else {
+        match role {
+            Role::Tool => {
+                // A tool result. Continue stores the output in `content`.
+                let content = text_parts(message.get("content"));
+                let tool_use_id = message
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                m.content.push(Block::ToolResult {
+                    tool_use_id,
+                    content: content.into(),
+                    is_error: false,
+                    tool_name: None,
+                    status: Some("completed".into()),
+                    details: None,
+                });
+            }
+            _ => {
+                push_content(&mut m, message.get("content"));
+                if role == Role::Assistant {
+                    m.content.extend(openai::tool_calls(message.get("toolCalls")));
+                }
             }
         }
     }
@@ -872,6 +776,153 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn selected_history_views_match_owned_codec_and_derived_header_acceptance() {
+        #[derive(serde::Deserialize)]
+        struct OldDoc<'a> {
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default, rename = "workspaceDirectory")]
+            workspace: Option<String>,
+            #[serde(default, borrow)]
+            history: Vec<&'a serde_json::value::RawValue>,
+        }
+        let world = cv_testkit::World::new("continue-view-oracle");
+        let path = world.base.join("s.json");
+        let body = "雪\n\"\\".repeat(8192);
+        let items = json!([
+            {"message":{"role":"user","content":[{"text":""},{"type":"ignored","text":body},{"type":"imageUrl","imageUrl":{"url":"file:///image"}}]},
+                "contextItems":[{"name":"a","description":"file","content":body,"uri":{"type":"file","value":"a.rs"}}]},
+            {"message":{"role":"assistant","content":body,
+                "toolCalls":[{"id":"a","function":{"name":"read","arguments":{"payload":body}}},{"id":"b","function":{"name":"edit","arguments":"{\"x\":1}"}}],
+                "usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":40,"ignored":body},"model":"m","cost_cents":2,"ignored":body}},
+                "promptLogs":[{"modelTitle":null,"modelProvider":"suppressed","ignored":body}],
+                "toolCallStates":[{"toolCallId":"a","status":"errored","toolCall":{"function":{"name":"read"}},"output":[{"content":body,"ignored":body}]}]},
+            {"message":{"role":"tool","toolCallId":"a","content":[{"text":""},{"text":body}]}},
+            {"message":null,"contextItems":[{"name":"still a file","content":body}]},
+            {"message":{"role":"system","content":body}}
+        ]);
+        fs::write(&path, serde_json::to_vec(&items).unwrap()).unwrap();
+        let source = JsonSource::capture(&path).unwrap();
+        source
+            .read_document(|root| {
+                let mut expected_model = None;
+                let mut actual_model = None;
+                for (view, owned) in root.array()?.unwrap().zip(items.as_array().unwrap()) {
+                    let expected = (
+                        history_item_to_message(owned, &mut expected_model),
+                        tool_states_message(owned),
+                    );
+                    let mut actual = view::messages(view?, &mut actual_model)?;
+                    if let Some(message) = &actual.0 {
+                        if owned.pointer("/message/toolCalls").is_some() {
+                            assert!(view::has_sources(message));
+                        }
+                    }
+                    let resolver = crate::lazy::Resolver::new(Some(path.clone()));
+                    for message in [&mut actual.0, &mut actual.1].into_iter().flatten() {
+                        message.materialize(&resolver)?;
+                    }
+                    assert_eq!(
+                        serde_json::to_string(&actual).unwrap(),
+                        serde_json::to_string(&expected).unwrap()
+                    );
+                    assert_eq!(actual_model, expected_model);
+                }
+                Ok(())
+            })
+            .unwrap();
+        for text in [
+            "{}",
+            "[]",
+            "[null,null,[]]",
+            "[\"title\",\"/cwd\",[]]",
+            "[null,null,[],0]",
+            "{\"title\":null,\"history\":[]}",
+            "{\"title\":1,\"history\":[]}",
+            "{\"title\":\"a\",\"title\":\"b\",\"history\":[]}",
+            "{\"history\":null}",
+            "{\"ignored\":1e400,\"history\":[{\"message\":{\"content\":\"yes\"}}]}",
+            "{\"title\":\"\\ud800\",\"history\":[]}",
+            "{\"ignored\":\"\\ud800\",\"history\":[]}",
+        ] {
+            fs::write(&path, text).unwrap();
+            let reference = SessionRef::new("s", Harness::Continue, path.clone());
+            let mut sink = crate::stream::CollectSink::default();
+            let actual = Continue { sessions: None }
+                .stream(&reference, &ParseOptions::lazy(), &mut sink)
+                .unwrap();
+            match serde_json::from_str::<OldDoc<'_>>(text) {
+                Ok(old) => {
+                    let mut model = None;
+                    let expected: Vec<_> = old
+                        .history
+                        .iter()
+                        .filter_map(|v| serde_json::from_str::<Value>(v.get()).ok())
+                        .filter_map(|v| history_item_to_message(&v, &mut model))
+                        .collect();
+                    assert_eq!(sink.messages.len(), expected.len(), "{text}");
+                    assert_eq!(
+                        actual.title,
+                        old.title
+                            .filter(|t| !t.trim().is_empty())
+                            .map(|t| crate::ir::truncate(&t, 80)),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        actual.cwd,
+                        old.workspace.filter(|w| !w.is_empty()).map(|w| workspace_to_path(&w)),
+                        "{text}"
+                    );
+                }
+                Err(_) => {
+                    assert!(sink.messages.is_empty(), "{text}");
+                    assert!(actual.title.is_none(), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn published_arguments_reject_source_changes_after_a_stopping_callback() {
+        let world = cv_testkit::World::new("continue-source-change");
+        let path = world.base.join("s.json");
+        fs::write(&path, serde_json::to_vec(&json!({"history":[{"message":{"role":"assistant","toolCalls":[{"id":"a","function":{"name":"read","arguments":{"payload":"x".repeat(8192)}}}]}}]})).unwrap()).unwrap();
+        let reference = SessionRef::new("s", Harness::Continue, path.clone());
+        let mut published = None;
+        let mut mutate = |message: Message| {
+            if let Some(input) = message.content.iter().find_map(|block| match block {
+                Block::ToolUse {
+                    input: crate::Json::Source(_),
+                    ..
+                } => {
+                    if let Block::ToolUse { input, .. } = block {
+                        Some(input)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }) {
+                published = Some(input.clone());
+                use std::io::Write;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b" ")
+                    .unwrap();
+                Flow::Stop
+            } else {
+                Flow::Continue
+            }
+        };
+        assert!(Continue { sessions: None }
+            .stream(&reference, &ParseOptions::lazy(), &mut mutate)
+            .is_err());
+        assert!(published.unwrap().resolve().is_err());
+    }
 
     #[test]
     fn cn_tool_call_states_become_tool_results_and_usage_is_read() {

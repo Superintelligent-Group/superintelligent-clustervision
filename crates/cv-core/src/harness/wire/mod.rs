@@ -17,7 +17,7 @@ pub mod anthropic;
 pub mod openai;
 
 /// A part is an image whatever the family calls it.
-fn is_image_part(ty: &str) -> bool {
+pub(crate) fn is_image_part(ty: &str) -> bool {
     matches!(ty, "image" | "image_url" | "input_image" | "output_image" | "imageUrl")
 }
 
