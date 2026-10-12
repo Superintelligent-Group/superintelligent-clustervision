@@ -415,7 +415,15 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
             text: "a\n\"é😀".repeat(8192).into(),
         },
     );
-    let bytes = serde_json::to_vec(&document(&original)).unwrap();
+    let mut written = serde_json::to_value(document(&original)).unwrap();
+    let ignored = "ignored\n\"😀".repeat(8192);
+    written["unknown"] = json!(ignored);
+    written["messages"][0]["unknown"] = json!(ignored);
+    written["messages"][0]["content"][0]["unknown"] = json!(ignored);
+    written["git"]["unknown"] = json!(ignored);
+    written["lineage"]["unknown"] = json!(ignored);
+    written["messages"][1]["usage"]["unknown"] = json!(ignored);
+    let bytes = serde_json::to_vec(&written).unwrap();
     std::fs::write(&path, &bytes).unwrap();
     let mut expected = from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
     expected.source_path = Some(path.clone());

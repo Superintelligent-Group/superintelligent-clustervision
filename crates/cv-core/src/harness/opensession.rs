@@ -216,7 +216,35 @@ fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink)
     let raw = source.raw()?;
     anyhow::ensure!(accepts_value(raw), "not JSON: invalid scalar or nesting depth");
     let record = Record::parse(raw).context("an OpenSession document is a JSON object")?;
-    let mut meta = record.without(&["messages"])?;
+    // Match the IR's ignored-field behavior without decoding unrecognized document payloads.
+    let mut meta = record.project(&[
+        VERSION_KEY,
+        VERSION_KEY_V02,
+        "id",
+        "harness",
+        "cwd",
+        "title",
+        "created_at",
+        "updated_at",
+        "model",
+        "system_prompt",
+        "source_path",
+        "extra",
+    ])?;
+    project_object(&record, &mut meta, "git", &["branch", "commit", "remote"])?;
+    project_object(
+        &record,
+        &mut meta,
+        "lineage",
+        &[
+            "forked_from",
+            "parent",
+            "spawned_by_tool_use",
+            "continued_in",
+            "continues",
+            "agent_path",
+        ],
+    )?;
     meta.insert("messages".into(), Value::Array(Vec::new()));
     let mut session = from_object(meta)?;
     let messages = record
@@ -239,19 +267,38 @@ fn stream_document(path: &Path, opts: &ParseOptions, sink: &mut dyn MessageSink)
 }
 
 fn ir_message(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Message> {
-    if !spans {
-        return serde_json::from_value(serde_json::from_str(raw.get())?).context("not an OpenSession message");
-    }
     let Some(record) = Record::parse(raw) else {
         return serde_json::from_value(serde_json::from_str(raw.get())?).context("not an OpenSession message");
     };
-    let mut fields = record.without(&["content"])?;
+    let mut fields = record.project(&[
+        "id",
+        "parent_id",
+        "role",
+        "kind",
+        "origin",
+        "timestamp",
+        "model",
+        "extra",
+    ])?;
+    project_object(
+        &record,
+        &mut fields,
+        "usage",
+        &[
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "reasoning_tokens",
+            "cost_usd",
+        ],
+    )?;
     if let Some(content) = record.get("content") {
         let value = if let Some(blocks) = array(content) {
             Value::Array(
                 blocks
                     .into_iter()
-                    .map(|raw| ir_block(raw, source))
+                    .map(|raw| ir_block(raw, source, spans))
                     .collect::<Result<_>>()?,
             )
         } else {
@@ -262,21 +309,48 @@ fn ir_message(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Message> {
     serde_json::from_value(Value::Object(fields)).context("not an OpenSession message")
 }
 
-fn ir_block(raw: Raw<'_>, source: &Source) -> Result<Value> {
+/// These typed IR metadata objects ignore unrecognized fields just like their deserializers.
+/// Preserve duplicate-key normalization and validate known values through the IR below.
+fn project_object(
+    record: &Record<'_>,
+    fields: &mut serde_json::Map<String, Value>,
+    key: &str,
+    keys: &[&str],
+) -> Result<()> {
+    if let Some(raw) = record.get(key) {
+        let value = if let Some(object) = Record::parse(raw) {
+            Value::Object(object.project(keys)?)
+        } else {
+            serde_json::from_str(raw.get())?
+        };
+        fields.insert(key.into(), value);
+    }
+    Ok(())
+}
+
+fn ir_block(raw: Raw<'_>, source: &Source, spans: bool) -> Result<Value> {
     let Some(record) = Record::parse(raw) else {
         return Ok(serde_json::from_str(raw.get())?);
     };
-    let text_key = match record.string("type").as_deref() {
-        Some("text" | "thinking") => Some("text"),
-        Some("tool_result") => Some("content"),
-        _ => None,
+    let ty = record.string("type");
+    let (keys, text_key): (&[&str], Option<&str>) = match ty.as_deref() {
+        Some("text") => (&["type"], Some("text")),
+        Some("thinking") => (&["type", "signature", "encrypted", "redacted"], Some("text")),
+        Some("tool_use") => (&["type", "id", "name", "input", "namespace"], None),
+        Some("tool_result") => (
+            &["type", "tool_use_id", "is_error", "tool_name", "status", "details"],
+            Some("content"),
+        ),
+        Some("image") => (&["type", "media_type", "data_ref"], None),
+        Some("file") => (&["type", "mime", "path", "source"], None),
+        _ => (&["type"], None), // The authoritative enum deserializer rejects this shape.
     };
-    let mut fields = record.without(&text_key.into_iter().collect::<Vec<_>>())?;
+    let mut fields = record.project(keys)?;
     if let Some(key) = text_key {
         if let Some(raw) = record.get(key) {
             fields.insert(
                 key.into(),
-                match source.text(raw, true) {
+                match source.text(raw, spans) {
                     Some(text) => serde_json::to_value(text)?,
                     None => serde_json::from_str(raw.get())?,
                 },

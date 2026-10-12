@@ -208,13 +208,6 @@ impl<'a> Record<'a> {
             .map(|(key, raw)| Ok((key.to_string(), serde_json::from_str(raw.get())?)))
             .collect()
     }
-    pub fn without(&self, keys: &[&str]) -> Result<serde_json::Map<String, Value>> {
-        self.fields
-            .iter()
-            .filter(|(key, _)| !keys.contains(&key.as_str()))
-            .map(|(key, raw)| Ok((key.clone(), serde_json::from_str(raw.get())?)))
-            .collect()
-    }
     pub fn string(&self, key: &str) -> Option<String> {
         serde_json::from_str(self.fields.get(key)?.get()).ok()
     }
