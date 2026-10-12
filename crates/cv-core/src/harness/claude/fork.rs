@@ -16,7 +16,11 @@
 //! never chosen; a fork of a fork resolves to the original.
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use serde_json::value::RawValue;
+#[cfg(test)]
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -34,31 +38,108 @@ struct Head {
     copied: bool,
 }
 
-fn head(path: &Path) -> Option<Head> {
-    let reader = BufReader::new(fs::File::open(path).ok()?);
-    let mut newest: Option<DateTime<Utc>> = None;
-    for line in reader.lines().take(HEAD_LINES) {
+/// Only the fields used to recognize a copy. Raw values skip giant message payloads; the
+/// last occurrence wins, exactly as Value's object map does (including non-string values).
+#[derive(Default)]
+struct Fields<'a> {
+    uuid: Option<&'a RawValue>,
+    timestamp: Option<&'a RawValue>,
+    subtype: Option<&'a RawValue>,
+    parent: Option<&'a RawValue>,
+}
+
+impl<'de> Deserialize<'de> for Fields<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct Projection;
+        impl<'de> serde::de::Visitor<'de> for Projection {
+            type Value = Fields<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut out = Fields::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    let value = map.next_value::<&'de RawValue>()?;
+                    match key.as_str() {
+                        "uuid" => out.uuid = Some(value),
+                        "timestamp" => out.timestamp = Some(value),
+                        "subtype" => out.subtype = Some(value),
+                        "parentUuid" => out.parent = Some(value),
+                        _ => {}
+                    }
+                }
+                Ok(out)
+            }
+        }
+        de.deserialize_map(Projection)
+    }
+}
+
+fn string(raw: Option<&RawValue>) -> Option<Cow<'_, str>> {
+    let raw = raw?.get();
+    if let Ok(s) = serde_json::from_str::<&str>(raw) {
+        Some(Cow::Borrowed(s))
+    } else {
+        serde_json::from_str::<String>(raw).ok().map(Cow::Owned)
+    }
+}
+
+/// Visit physical UTF-8 lines, stopping on a read/UTF-8 error as BufRead::lines did. Native
+/// mapping keeps a giant first record out of the private heap; the portable transport retains
+/// just one physical line. Both preserve the head's physical-line budget, including malformed
+/// and empty records, and do not Unicode-trim JSON.
+fn lines(path: &Path, limit: usize, mut visit: impl FnMut(&str) -> bool) -> Option<()> {
+    let file = fs::File::open(path).ok()?;
+    #[cfg(feature = "mmap")]
+    if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+        for line in map.split(|byte| *byte == b'\n').take(limit) {
+            let Ok(line) = std::str::from_utf8(line) else { break };
+            if !visit(line) {
+                break;
+            }
+        }
+        return Some(());
+    }
+    for line in BufReader::new(file).lines().take(limit) {
         let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        if !visit(&line) {
+            break;
+        }
+    }
+    Some(())
+}
+
+fn head(path: &Path) -> Option<Head> {
+    let mut newest: Option<DateTime<Utc>> = None;
+    let mut found = None;
+    lines(path, HEAD_LINES, |line| {
+        let Ok(v) = serde_json::from_str::<Fields<'_>>(line) else {
+            return true;
         };
-        let at = v.get("timestamp").and_then(Value::as_str).and_then(super::parse_ts);
-        if let Some(uuid) = v.get("uuid").and_then(Value::as_str) {
-            let boundary = v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-                && v.get("parentUuid").is_none_or(Value::is_null);
+        // Raw ignored values skip checks Value performs; retain its acceptance before using
+        // timestamps, including malformed discarded and overwritten fields.
+        if !crate::harness::store::json::value_compatible(line.as_bytes()) {
+            return true;
+        }
+        let at = string(v.timestamp).as_deref().and_then(super::parse_ts);
+        if let Some(uuid) = string(v.uuid) {
+            let boundary = string(v.subtype).as_deref() == Some("compact_boundary")
+                && v.parent.is_none_or(|parent| parent.get() == "null");
             let older = matches!((at, newest), (Some(a), Some(n)) if a < n);
-            return Some(Head {
-                uuid: uuid.to_string(),
+            found = Some(Head {
+                uuid: uuid.into_owned(),
                 at,
                 boundary,
                 copied: boundary || older,
             });
+            return false;
         }
         if let Some(a) = at {
             newest = Some(newest.map_or(a, |n| n.max(a)));
         }
-    }
-    None
+        true
+    })?;
+    found
 }
 
 fn modified(path: &Path) -> Option<DateTime<Utc>> {
@@ -67,13 +148,12 @@ fn modified(path: &Path) -> Option<DateTime<Utc>> {
 
 /// Whether `path` holds `needle` anywhere (line by line, so peak memory is one line).
 fn holds(path: &Path, needle: &str) -> bool {
-    let Ok(f) = fs::File::open(path) else {
-        return false;
-    };
-    BufReader::new(f)
-        .lines()
-        .map_while(Result::ok)
-        .any(|l| l.contains(needle))
+    let mut found = false;
+    lines(path, usize::MAX, |line| {
+        found = line.contains(needle);
+        !found
+    });
+    found
 }
 
 /// The session id `path` was forked from, when its head says it is a fork and a sibling holds the
@@ -145,6 +225,77 @@ mod tests {
 
     fn queued(ts: &str) -> Value {
         json!({"type": "queue-operation", "operation": "enqueue", "timestamp": ts})
+    }
+
+    fn legacy_head(path: &Path) -> Option<Head> {
+        let mut newest: Option<DateTime<Utc>> = None;
+        for line in BufReader::new(fs::File::open(path).ok()?).lines().take(HEAD_LINES) {
+            let Ok(line) = line else { break };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let at = v
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(super::super::parse_ts);
+            if let Some(uuid) = v.get("uuid").and_then(Value::as_str) {
+                let boundary = v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+                    && v.get("parentUuid").is_none_or(Value::is_null);
+                return Some(Head {
+                    uuid: uuid.into(),
+                    at,
+                    boundary,
+                    copied: boundary || matches!((at,newest), (Some(a),Some(n)) if a<n),
+                });
+            }
+            if let Some(a) = at {
+                newest = Some(newest.map_or(a, |n| n.max(a)));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn projected_heads_match_value_validation_and_physical_line_limits() {
+        let w = cv_testkit::World::in_process("fork-head-projection");
+        let path = w.base.join("head.jsonl");
+        let uuid = r#"{"uuid":"shared","timestamp":"2026-09-19T00:00:00Z"}"#;
+        let queued = r#"{"timestamp":"2026-09-19T01:00:00Z"}"#;
+        let mut cases: Vec<Vec<u8>> = vec![
+            format!("{queued}\n{uuid}\n").into_bytes(),
+            format!("{}{uuid}\n", "\n".repeat(63)).into_bytes(),
+            format!("{}{uuid}\n", "\n".repeat(64)).into_bytes(),
+            format!("malformed\nnull\n[1,2]\n{uuid}\n").into_bytes(),
+            format!("\u{a0}{queued}\n{uuid}\n").into_bytes(),
+            format!("{{\"uuid\":\"bad\",\"ignored\":1e400}}\n{uuid}\n").into_bytes(),
+            format!("{{\"uuid\":\"bad\",\"ignored\":\"\\ud800\"}}\n{uuid}\n").into_bytes(),
+            br#"{"uuid":"first","uuid":17}
+{"uuid":"last","uuid":"final","subtype":"compact_boundary","parentUuid":null}
+"#
+            .to_vec(),
+            br#"{"uuid":"parent","subtype":"compact_boundary","parentUuid":false}
+"#
+            .to_vec(),
+            br#"{"uuid":"escaped\u0031","timestamp":[],"parentUuid":null}
+"#
+            .to_vec(),
+        ];
+        cases.push([b"\xff\n".as_slice(), uuid.as_bytes()].concat());
+        cases.push(format!("{{\"uuid\":\"giant\",\"message\":\"{}\"}}\n", "payload".repeat(150_000)).into_bytes());
+        cases.push(
+            format!(
+                "{{\"uuid\":\"escaped\",\"message\":\"{}\"}}\n",
+                "\\u0061".repeat(150_000)
+            )
+            .into_bytes(),
+        );
+        let observe = |head: Option<Head>| head.map(|h| (h.uuid, h.at, h.boundary, h.copied));
+        for (i, bytes) in cases.iter().enumerate() {
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(observe(head(&path)), observe(legacy_head(&path)), "case {i}");
+        }
+        fs::write(&path, [b"prefix\n\xff\n".as_slice(), b"needle\n"].concat()).unwrap();
+        assert!(!holds(&path, "needle"), "invalid UTF-8 stops sibling traversal");
     }
 
     /// An uncompacted source: the fork starts with the same `uuid`, after its own newer queue
