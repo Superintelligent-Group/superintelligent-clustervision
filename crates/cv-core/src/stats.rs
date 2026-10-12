@@ -711,6 +711,152 @@ mod tests {
         }
     }
 
+    // Frozen pre-spill compute recipe: this oracle exercises the original parallel helpers and
+    // whole-transcript vectors, rather than comparing two runs of the new streaming fold.
+    fn legacy_compute(refs: &[SessionRef]) -> TokenStats {
+        let mut all = refs.to_vec();
+        let subs = crate::par_flat_map(refs.to_vec(), |r| {
+            crate::subagent_tree_of(&r).into_iter().map(|s| s.session).collect()
+        });
+        let subagents = subs.len();
+        all.extend(subs);
+        let total = all.len();
+        let parsed = crate::par_filter_map(all, |r| {
+            let adapter = crate::harness::for_harness(r.harness)?;
+            let mut hits = Vec::new();
+            let session = adapter
+                .try_stream(&r, &ParseOptions::lazy_extra(), &mut |m: Message| {
+                    if let Some(usage) = m
+                        .usage
+                        .as_ref()
+                        .filter(|u| u.total_tokens() > 0 || u.cost_usd.is_some())
+                    {
+                        hits.push(UsageHit {
+                            key: usage_key(r.harness, &m),
+                            harness: r.harness,
+                            model: m.model.clone().unwrap_or_default(),
+                            usage: usage.clone(),
+                        });
+                    }
+                    Flow::Continue
+                })
+                .ok()?;
+            for hit in &mut hits {
+                if hit.model.is_empty() {
+                    hit.model = session.model.clone().unwrap_or_else(|| "(unknown)".into());
+                }
+            }
+            Some(hits)
+        });
+        let mut stats = TokenStats {
+            sessions: refs.len(),
+            subagents,
+            failed: total - parsed.len(),
+            ..TokenStats::default()
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = HashMap::new();
+        for hit in parsed.into_iter().flatten() {
+            if let Some(key) = hit.key {
+                if !seen.insert(key) {
+                    stats.duplicates += 1;
+                    continue;
+                }
+            }
+            let harness = hit.harness.as_str();
+            rows.entry((harness, hit.model.clone()))
+                .or_insert_with(|| TokenRow {
+                    harness,
+                    model: hit.model,
+                    ..TokenRow::default()
+                })
+                .add(&hit.usage);
+        }
+        stats.rows = rows.into_values().collect();
+        stats.rows.sort_by(|a, b| {
+            b.total()
+                .cmp(&a.total())
+                .then(a.harness.cmp(b.harness))
+                .then(a.model.cmp(&b.model))
+        });
+        stats
+    }
+
+    #[test]
+    fn old_parallel_compute_matches_multiple_transcript_precedence_and_cost_bits() {
+        let world = cv_testkit::World::in_process("token-stats-parallel-oracle");
+        let mut refs = Vec::new();
+        for (i, model) in ["first", "ignored", "ignored-again"].into_iter().enumerate() {
+            let value = json!({"type":"assistant","uuid":format!("a{i}"),"message":{
+                "id":"shared-response","role":"assistant","model":model,
+                "content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":i + 1,"output_tokens":2}}});
+            let path = world.write_session(&format!("claude-{i}"), &[value]);
+            refs.push(SessionRef::new(format!("claude-{i}"), Harness::Claude, path));
+        }
+        let storage = world.home.join(".local/share/opencode/storage");
+        for (i, cost) in [0.1, 0.2, 0.3, 0.1, 0.2, 0.3].into_iter().enumerate() {
+            let id = format!("oc-{i}");
+            let mid = format!("msg-{i}");
+            let session = storage.join("session").join(format!("{id}.json"));
+            std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+            std::fs::write(&session, "{}").unwrap();
+            let message = storage.join("message").join(&id).join("one.json");
+            std::fs::create_dir_all(message.parent().unwrap()).unwrap();
+            std::fs::write(
+                &message,
+                json!({"id":mid,"role":"assistant","modelID":"sum-model",
+                "cost":cost,"time":{"created":1},"tokens":{"input":1,"output":1}})
+                .to_string(),
+            )
+            .unwrap();
+            let part = storage.join("part").join(&mid).join("one.json");
+            std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+            std::fs::write(part, r#"{"type":"text","text":"answer"}"#).unwrap();
+            refs.push(SessionRef::new(id, Harness::OpenCode, session));
+        }
+        refs.push(SessionRef::new(
+            "missing",
+            Harness::Claude,
+            world.base.join("absent.jsonl"),
+        ));
+        let check = || {
+            let old = legacy_compute(&refs);
+            let new = TokenStats::compute(&refs).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&new.to_json()).unwrap(),
+                serde_json::to_vec(&old.to_json()).unwrap()
+            );
+            assert_eq!(new.duplicates, 2);
+            assert_eq!(new.failed, 1);
+            let old_cost = old
+                .rows
+                .iter()
+                .find(|r| r.harness == "opencode")
+                .unwrap()
+                .cost_usd
+                .unwrap();
+            let new_cost = new
+                .rows
+                .iter()
+                .find(|r| r.harness == "opencode")
+                .unwrap()
+                .cost_usd
+                .unwrap();
+            assert_eq!(new_cost.to_bits(), old_cost.to_bits());
+            assert_eq!(new.rows.iter().find(|r| r.harness == "claude").unwrap().model, "first");
+        };
+        #[cfg(feature = "parallel")]
+        for workers in [1, 2, 4] {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap()
+                .install(check);
+        }
+        #[cfg(not(feature = "parallel"))]
+        check();
+    }
+
     #[test]
     fn tokens_compute_reads_claude_message_ids_across_transcripts_and_subagents() {
         // Two lines of one streamed response in the parent, the same response again in a resumed
