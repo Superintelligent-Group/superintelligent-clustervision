@@ -537,11 +537,11 @@ mod tests {
                 details: None,
             },
         ];
-        let a = assistant_blocks(&blocks, &ANTHROPIC);
+        let a = assistant_blocks(&blocks, &ANTHROPIC).unwrap();
         assert_eq!(a.len(), 5, "tool results are not assistant content");
         assert_eq!(a[1]["type"], "redacted_thinking");
         assert_eq!(a[4]["type"], "text", "a file on an assistant turn is a marker");
-        let u = user_blocks(&blocks, &ANTHROPIC);
+        let u = user_blocks(&blocks, &ANTHROPIC).unwrap();
         assert_eq!(u[4]["type"], "document");
         assert_eq!(u[5]["type"], "tool_result");
         let back = blocks_from(Some(&Value::Array(u)), &ANTHROPIC);
@@ -550,11 +550,11 @@ mod tests {
             matches!(&back[4], Block::File { path: Some(p), source: Some(s), .. } if p == "a.pdf" && s == "file:f9")
         );
         // OpenClaw has no redacted block: the thinking block is written plain, under its keys.
-        let oc = assistant_blocks(&blocks, &OPENCLAW);
+        let oc = assistant_blocks(&blocks, &OPENCLAW).unwrap();
         assert_eq!(oc[1]["type"], "thinking");
         assert_eq!(oc[2]["type"], "toolCall");
         assert_eq!(oc[2]["arguments"]["path"], "x");
         assert_eq!(oc[3]["mimeType"], "image/png");
-        assert_eq!(tool_result_blocks(&blocks).len(), 1);
+        assert_eq!(tool_result_blocks(&blocks).unwrap().len(), 1);
     }
 }
