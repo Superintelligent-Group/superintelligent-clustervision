@@ -118,6 +118,35 @@ fn json_consumers_unreadable_sources_return_errors_before_emit_writes() {
             "{target} created output before rejecting a missing source"
         );
     }
+    // Direct public harness writers also preflight; generic dispatch cannot mask a missed guard.
+    type Emitter =
+        fn(&Session, &std::path::Path, &cv_core::emit::EmitOptions) -> anyhow::Result<cv_core::harness::EmitResult>;
+    let direct: Vec<Emitter> = vec![
+        cv_core::harness::claude::emit,
+        cv_core::harness::codex::emit,
+        cv_core::harness::grok::emit,
+        cv_core::harness::opencode::emit,
+        cv_core::harness::openclaw::emit,
+        cv_core::harness::gemini::emit,
+        cv_core::harness::lmstudio::emit,
+        cv_core::harness::cline::emit,
+        cv_core::harness::roo::emit,
+        cv_core::harness::continuedev::emit,
+        cv_core::harness::qwen::emit,
+    ];
+    for (index, emit) in direct.iter().enumerate() {
+        let out = fixture.dir.join(format!("direct-{index}"));
+        assert!(emit(&fixture.sourced, &out, &cv_core::emit::EmitOptions::default()).is_err());
+        assert!(!out.exists());
+    }
+    #[cfg(feature = "sqlite")]
+    {
+        let out = fixture.dir.join("direct-hermes");
+        assert!(
+            cv_core::harness::hermes::emit(&fixture.sourced, &out, &cv_core::emit::EmitOptions::default()).is_err()
+        );
+        assert!(!out.exists());
+    }
     assert!(cv_core::harness::wire::anthropic::assistant_blocks(
         &fixture.sourced.messages[1].content,
         &cv_core::harness::wire::anthropic::ANTHROPIC
