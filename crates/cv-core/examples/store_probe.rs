@@ -146,7 +146,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
-                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len\n\
+                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|resolve|resolved-len|json-len|json-write\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -533,6 +533,35 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail["metadata"] = serde_json::to_value(&s)?;
             }
         }
+        "json-len" | "json-write" => {
+            let (offset, len) = a.span.context("json-len/json-write requires --span OFFSET:LENGTH")?;
+            // Unlike text spans, this range contains a complete JSON value, including quotes
+            // or containers. Construction and strict validation are part of the stage.
+            let value = cv_core::Json::source(&r.path, offset, len)?;
+            if a.operation == "json-len" {
+                out.detail = json!({ "canonical_bytes": value.canonical_len()? });
+            } else if a.hash_output {
+                let mut digest = DigestWriter::default();
+                value.write_canonical(&mut digest)?;
+                out.detail = json!({ "canonical_bytes": digest.bytes,
+                                     "canonical_sha256": digest.digest.finish_hex() });
+            } else {
+                struct CountWriter(u64);
+                impl Write for CountWriter {
+                    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                        std::hint::black_box(buf);
+                        self.0 += buf.len() as u64;
+                        Ok(buf.len())
+                    }
+                    fn flush(&mut self) -> io::Result<()> {
+                        Ok(())
+                    }
+                }
+                let mut writer = CountWriter(0);
+                value.write_canonical(&mut writer)?;
+                out.detail = json!({ "canonical_bytes": writer.0 });
+            }
+        }
         "chunks" | "resolve" | "resolved-len" => {
             let (offset, len) = a
                 .span
@@ -629,7 +658,7 @@ fn main() -> Result<()> {
                 "affordances" => "full",
                 "affordance-read" => "production-defined",
                 "query" | "query-collect" | "tools" | "tools-collect" => "lazy",
-                "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" => "not-applicable",
+                "baseline" | "discover" | "chunks" | "resolve" | "resolved-len" | "json-len" | "json-write" => "not-applicable",
                 _ => &a.mode,
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }
