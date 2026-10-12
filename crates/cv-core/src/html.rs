@@ -251,6 +251,7 @@ pub fn share_begin(meta: &ShareMeta) -> String {
 }
 
 /// One message card. `idx` becomes the anchor id (`#m0`, `#m1`, …) used by keyboard nav.
+/// A source error may leave a prefix in `out`; callers must discard the staged card on failure.
 pub fn share_message(m: &Message, idx: usize, out: &mut String) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     let role = role_class(m.role);

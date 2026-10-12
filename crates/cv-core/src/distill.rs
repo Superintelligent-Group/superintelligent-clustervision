@@ -1237,7 +1237,7 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
     )?;
     let mut messages = vec![first];
     messages.append(&mut tail);
-    let mut output = Session {
+    let output = Session {
         id: session.id.clone(),
         harness: session.harness,
         cwd: session.cwd.clone(),
@@ -1255,8 +1255,7 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
         source_path: None,
         extra: serde_json::Map::new(),
     };
-    // Only the selected tail is demanded; earlier source-backed inputs need not be read here.
-    output.materialize()?;
+    // The selected tail was already materialized; earlier inputs were never demanded.
     Ok(output)
 }
 

@@ -239,7 +239,8 @@ pub enum Format {
 /// Write `session` as one JSONL record (no trailing newline) **streaming** — content (incl. giant
 /// span fields) is rendered straight to `w` in chunks and JSON-escaped per chunk, so the whole record
 /// is never held in memory. Returns `false` (writing nothing) when the session has no non-empty turns.
-/// With `redact`, each message is scrubbed (one materialized message at a time) before rendering.
+/// With `redact`, each demanded field is scrubbed before rendering. A source or writer error
+/// may leave a prefix in `w`; publish the record only after this function succeeds.
 pub fn write_record<W: std::io::Write>(
     session: &Session,
     w: &mut W,

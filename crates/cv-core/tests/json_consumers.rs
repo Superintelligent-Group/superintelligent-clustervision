@@ -126,6 +126,23 @@ fn json_consumers_unreadable_sources_return_errors_before_emit_writes() {
 }
 
 #[test]
+fn json_consumers_changed_source_is_an_error_in_full_and_mutable_paths() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.dir.join("input.json"), b"{}").unwrap();
+    assert!(cv_core::redact::redact(&fixture.sourced).is_err());
+    assert!(cv_core::html::share_message(&fixture.sourced.messages[1], 1, &mut String::new()).is_err());
+    assert!(cv_core::dataset::write_record(
+        &fixture.sourced,
+        &mut Vec::new(),
+        cv_core::dataset::Format::Chatml,
+        None
+    )
+    .is_err());
+    assert!(cv_core::distill::distill(&fixture.sourced, &cv_core::distill::DistillOptions::default()).is_err());
+    assert!(serde_json::to_value(&fixture.sourced).is_err());
+}
+
+#[test]
 fn json_consumers_resumable_selection_does_not_read_elided_input() {
     let fixture = Fixture::new();
     let options = cv_core::distill::DistillOptions::default();
