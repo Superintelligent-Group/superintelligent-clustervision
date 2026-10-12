@@ -217,8 +217,7 @@ impl Adapter for Kimi {
                 &enrich,
                 opts,
                 ContextState::default(),
-                None,
-                capture,
+                ContextStart { at: None, capture },
                 sink,
             ))
         })
@@ -297,8 +296,10 @@ impl Adapter for Kimi {
                 &enrich,
                 opts,
                 state.ctx,
-                Some(from.offset),
-                true,
+                ContextStart {
+                    at: Some(from.offset),
+                    capture: true,
+                },
                 &mut spawns,
             )))
         })
@@ -389,20 +390,24 @@ struct ContextCheckpoint {
     ctx: ContextState,
 }
 
+struct ContextStart {
+    at: Option<u64>,
+    capture: bool,
+}
+
 fn stream_context(
     mut s: Session,
     segments: &[PathBuf],
     enrich: &WireEnrich,
     opts: &ParseOptions,
     mut ctx: ContextState,
-    at: Option<u64>,
-    capture: bool,
+    start: ContextStart,
     sink: &mut dyn MessageSink,
 ) -> Session {
     let mut pending: Option<Message> = None;
     let mut stopped = false;
     let prior_skipped = ctx.skipped;
-    let skipped = for_each_segment_record_at(segments, at, |v, starts, position, skipped| {
+    let skipped = for_each_segment_record_at(segments, start.at, |v, starts, position, skipped| {
         if let Some(name) = starts {
             ctx.rotated = Some(name.into());
         }
@@ -424,7 +429,7 @@ fn stream_context(
                 stopped = true;
                 return Flow::Stop;
             }
-            if let Some(offset) = position.filter(|_| capture) {
+            if let Some(offset) = position.filter(|_| start.capture) {
                 if sink.wants_checkpoint(offset) {
                     #[derive(serde::Serialize)]
                     struct State<'a> {
