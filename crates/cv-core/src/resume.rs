@@ -3,10 +3,16 @@
 //! A pass that streams through [`stream::stream_resumable`](crate::stream::stream_resumable)
 //! takes [`Checkpoint`]s as it goes; its last one, stored here as a **mark** per transcript file,
 //! lets the next pass over the same file (grown by an append) read only what came after it. A
-//! mark is trusted only while it still describes the file: the file is at least `offset` bytes
-//! long, the bytes before `offset` (and the file's head) hash as they did, and the mark was
+//! mark passes its guards when the file is at least `offset` bytes long, the sampled head and
+//! the sampled bytes immediately before `offset` hash as they did, and the mark was
 //! written by this very parser ([`version`]: the cv release, the affordance view, the adapter's
 //! state format and the consumer's). Anything else means a whole pass, which writes a new mark.
+//!
+//! These samples do not establish that the entire prefix is unchanged. Resuming assumes the
+//! adapter's immutable-prefix append contract; an edit outside the samples followed by growth
+//! can escape detection. Proving arbitrary prefix edits absent requires reading that prefix or
+//! a trusted writer change signal. Consumers must separately reject non-growth rewrites; the
+//! FTS sweep compares the current size with the size of its previously indexed source.
 //!
 //! The marks live in the catalog db beside the counts and events they continue (`resume_marks`);
 //! like the rest of the catalog it is a cache, best-effort throughout.
@@ -19,7 +25,7 @@ use std::path::Path;
 /// How many bytes the prefix hash reads at the head of the file and again just before the mark.
 const HASH_SPAN: u64 = 4096;
 
-/// A stored mark minus its state: enough to tell whether it still describes the file.
+/// A stored mark minus its state: version, position and sampled-byte guard for append reuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkHead {
     pub offset: u64,
@@ -38,7 +44,8 @@ impl MarkHead {
         })
     }
 
-    /// Whether this mark still describes `path`, now `size` bytes long, for a pass at `version`.
+    /// Whether the version, minimum length and sampled bytes match. This does not establish
+    /// that the whole old prefix is unchanged or that the file grew since its last read.
     pub fn holds(&self, path: &Path, size: u64, version: &str) -> bool {
         self.version == version && size >= self.offset && prefix_hash(path, self.offset) == Some(self.hash)
     }
@@ -238,10 +245,9 @@ pub fn update(_marks: &[MarkUpdate]) {}
 mod tests {
     use super::*;
 
-    /// A mark holds while the file only grows; changing a byte before it, cutting the file
-    /// short of it, or another parser version all break it.
+    /// A mark permits growth; sampled-byte edits, truncation and another version break it.
     #[test]
-    fn a_mark_holds_across_an_append_and_nothing_else() {
+    fn a_mark_checks_samples_length_and_version_across_an_append() {
         let dir = std::env::temp_dir().join(format!("cv-mark-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
