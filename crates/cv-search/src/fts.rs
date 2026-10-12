@@ -96,17 +96,9 @@ fn fields_of(schema: &Schema) -> Result<Fields> {
 /// by an older `cv` (pre-`path`/`mtime`/`preview`, pre-subagent-provenance, or pre-`size`) and
 /// must be rebuilt fresh — one-time on upgrade, from the indexing path only.
 fn schema_current(schema: &Schema) -> bool {
-    [
-        "path",
-        "mtime",
-        "preview",
-        "parent_id",
-        "agent_id",
-        "workflow",
-        "size",
-    ]
-    .iter()
-    .all(|f| schema.get_field(f).is_ok())
+    ["path", "mtime", "preview", "parent_id", "agent_id", "workflow", "size"]
+        .iter()
+        .all(|f| schema.get_field(f).is_ok())
 }
 
 /// Open the index at `dir` for **indexing**: created when absent, and an existing index with a
@@ -115,14 +107,12 @@ fn schema_current(schema: &Schema) -> bool {
 /// transient IO/lock error) propagates: only a positively-identified schema mismatch may delete;
 /// read-only callers use [`open_existing`], which never deletes anything.
 fn open_or_create(dir: &Path) -> Result<(Index, Fields)> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("creating tantivy dir {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating tantivy dir {}", dir.display()))?;
     // No `meta.json` → nothing here is an index (a fresh dir, or stray leftovers from a failed
     // create): safe to start clean.
     if !dir.join("meta.json").exists() {
         let _ = std::fs::remove_dir_all(dir);
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("recreating tantivy dir {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("recreating tantivy dir {}", dir.display()))?;
         let index = Index::create_in_dir(dir, build_schema())
             .with_context(|| format!("creating tantivy index in {}", dir.display()))?;
         let fields = fields_of(&index.schema())?;
@@ -139,10 +129,8 @@ fn open_or_create(dir: &Path) -> Result<(Index, Fields)> {
         return Ok((index, fields));
     }
     // Positively identified as an older-schema index → rebuild fresh.
-    std::fs::remove_dir_all(dir)
-        .with_context(|| format!("clearing stale-schema index at {}", dir.display()))?;
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("recreating tantivy dir {}", dir.display()))?;
+    std::fs::remove_dir_all(dir).with_context(|| format!("clearing stale-schema index at {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("recreating tantivy dir {}", dir.display()))?;
     let index = Index::create_in_dir(dir, build_schema())
         .with_context(|| format!("creating tantivy index in {}", dir.display()))?;
     let fields = fields_of(&index.schema())?;
@@ -153,8 +141,7 @@ fn open_or_create(dir: &Path) -> Result<(Index, Fields)> {
 /// failure during a search must not wipe an index that took an hour to build. A stale-schema index
 /// is an error pointing at `cv index` (whose path is the one allowed to rebuild).
 fn open_existing(dir: &Path) -> Result<(Index, Fields)> {
-    let index = Index::open_in_dir(dir)
-        .with_context(|| format!("opening tantivy index at {}", dir.display()))?;
+    let index = Index::open_in_dir(dir).with_context(|| format!("opening tantivy index at {}", dir.display()))?;
     if !schema_current(&index.schema()) {
         anyhow::bail!(
             "full-text index at {} was built by an older cv — run `cv index` to rebuild it",
@@ -184,9 +171,7 @@ const DEAD_RATIO: f32 = 0.5;
 /// ~1.2 GB that ran ~11 s at ~1 GB resident — and `cv index` exited first, abandoning it, so the
 /// next run started it again. Merging is [`compact`]'s job, sized by bytes, run to completion.
 fn open_writer(index: &Index, heap: usize) -> Result<IndexWriter> {
-    let writer: IndexWriter = index
-        .writer(heap)
-        .context("creating tantivy index writer")?;
+    let writer: IndexWriter = index.writer(heap).context("creating tantivy index writer")?;
     writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
     Ok(writer)
 }
@@ -214,11 +199,8 @@ fn compact(dir: &Path, index: &Index, writer: &mut IndexWriter) -> Result<usize>
     };
     let mut merges = 0;
     loop {
-        let metas = index
-            .searchable_segment_metas()
-            .context("listing segments")?;
-        let mut tiers: std::collections::BTreeMap<u32, Vec<tantivy::index::SegmentId>> =
-            Default::default();
+        let metas = index.searchable_segment_metas().context("listing segments")?;
+        let mut tiers: std::collections::BTreeMap<u32, Vec<tantivy::index::SegmentId>> = Default::default();
         let mut pick: Option<Vec<tantivy::index::SegmentId>> = None;
         for m in &metas {
             if m.max_doc() > 0 && m.num_deleted_docs() as f32 / m.max_doc() as f32 > DEAD_RATIO {
@@ -352,12 +334,7 @@ enum Out {
 /// alone). Interim commits land only when no session is half-sent, so a crash never leaves a
 /// truncated session stamped fresh; past [`COMMIT_EVERY`] × 8 uncommitted docs the workers drain
 /// to make one.
-pub(crate) fn sweep(
-    dir: &Path,
-    refs: Vec<cv_core::SessionRef>,
-    rebuild: bool,
-    subagents: bool,
-) -> Result<Swept> {
+pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<Swept> {
     let (index, f) = open_or_create(dir)?;
     let mut writer = open_writer(&index, 50_000_000)?;
     if rebuild {
@@ -513,9 +490,7 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
                             break None;
                         }
                         let cost = job_cost(q.groups.last().unwrap());
-                        if !q.draining
-                            && (q.in_flight == 0 || q.in_flight + cost <= IN_FLIGHT_BYTES)
-                        {
+                        if !q.draining && (q.in_flight == 0 || q.in_flight + cost <= IN_FLIGHT_BYTES) {
                             q.in_flight += cost;
                             break q.groups.pop();
                         }
@@ -555,17 +530,11 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
                     }
                     since_commit += 1;
                 }
-                Out::Done {
-                    job,
-                    events,
-                    counted,
-                } => {
+                Out::Done { job, events, counted } => {
                     // Only stamp events after a complete pass: a parse error leaves the sync rows
                     // untouched so the session is retried next run.
                     if let Some(events) = events {
-                        cv_core::events::record_with(
-                            &job.r, &events, job.mtime, job.size, &job.prov,
-                        );
+                        cv_core::events::record_with(&job.r, &events, job.mtime, job.size, &job.prov);
                     }
                     if let Some(c) = counted {
                         c.record(&job.r);
@@ -582,10 +551,7 @@ fn run_jobs(writer: &mut IndexWriter, f: &Fields, jobs: Vec<Job>) -> Result<usiz
                         writer.delete_term(Term::from_field_text(f.id, &job.r.id));
                         open.remove(&job.r.id);
                     }
-                    eprintln!(
-                        "cv-search: parse failed for {} ({}): {err:#}",
-                        job.r.id, job.r.harness
-                    );
+                    eprintln!("cv-search: parse failed for {} ({}): {err:#}", job.r.id, job.r.harness);
                 }
             }
             if since_commit >= COMMIT_EVERY && failure.is_none() {
@@ -613,9 +579,7 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>) -> bool 
     let Some(adapter) = cv_core::harness::for_harness(job.r.harness) else {
         return true;
     };
-    let mut events = job
-        .events
-        .then(|| cv_core::events::EventSink::new(job.r.cwd.clone()));
+    let mut events = job.events.then(|| cv_core::events::EventSink::new(job.r.cwd.clone()));
     let result = if job.fts {
         let begin = Out::Begin {
             id: job.r.id.clone(),
@@ -715,9 +679,7 @@ fn index_session_clean(
     prov: cv_core::events::Provenance,
 ) -> Result<usize> {
     let result = {
-        let mut add = |doc: TantivyDocument| -> Result<()> {
-            writer.add_document(doc).map(|_| ()).map_err(Into::into)
-        };
+        let mut add = |doc: TantivyDocument| -> Result<()> { writer.add_document(doc).map(|_| ()).map_err(Into::into) };
         index_session(&mut add, f, adapter, r, mtime, size, events, prov)
     };
     match result {
@@ -961,9 +923,7 @@ impl<'w> ChunkSink<'w> {
                 // `<session>/tool-results/<id>.txt`): index the file's head too, so the text the tool
                 // produced is findable even though the transcript holds only the pointer.
                 if let Some(p) = b.persisted_output_path() {
-                    if let Some(t) =
-                        cv_core::lazy::read_head(std::path::Path::new(p), PERSISTED_INDEX_CAP)
-                    {
+                    if let Some(t) = cv_core::lazy::read_head(std::path::Path::new(p), PERSISTED_INDEX_CAP) {
                         for piece in t.as_bytes().chunks(CHUNK_BYTES) {
                             self.push_chunk(&String::from_utf8_lossy(piece));
                         }
@@ -1037,16 +997,9 @@ use cv_core::events::size_primary_freshness;
 /// mirroring [`cv_core::offsets`]'s `(0, 0)` semantics. An entry is present only when a doc carried a
 /// size; a pre-`size` index never reaches here (it's rebuilt by [`open_or_create`]), so an unknown
 /// size is correctly treated as not-fresh rather than skipped.
-fn fts_is_fresh(
-    r: &cv_core::SessionRef,
-    stored: Option<&(i64, i64)>,
-    mtime: i64,
-    size: i64,
-) -> bool {
+fn fts_is_fresh(r: &cv_core::SessionRef, stored: Option<&(i64, i64)>, mtime: i64, size: i64) -> bool {
     stored.is_some_and(|&(stored_mtime, stored_size)| {
-        stored_size == size
-            && size != 0
-            && (size_primary_freshness(r) || (stored_mtime == mtime && mtime != 0))
+        stored_size == size && size != 0 && (size_primary_freshness(r) || (stored_mtime == mtime && mtime != 0))
     })
 }
 
@@ -1069,10 +1022,7 @@ fn read_indexed_sigs(index: &Index, f: &Fields) -> Result<IndexedSigs> {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let id = doc
-                .get_first(f.id)
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let id = doc.get_first(f.id).and_then(|v| v.as_str()).map(str::to_string);
             let mt = doc.get_first(f.mtime).and_then(|v| v.as_i64());
             let sz = doc.get_first(f.size).and_then(|v| v.as_i64());
             if let (Some(id), Some(mt), Some(sz)) = (id, mt, sz) {
@@ -1177,11 +1127,7 @@ pub(crate) fn index_refs_incremental(dir: &Path, refs: &[cv_core::SessionRef]) -
 /// `catalog = true` tees the top-level pass into the event catalog (set it only under an isolated
 /// `CLUSTERVISION_HOME`). Returns the number of sub-agent transcripts folded in.
 #[cfg(test)]
-pub(crate) fn index_refs_with_subagents(
-    dir: &Path,
-    refs: &[cv_core::SessionRef],
-    catalog: bool,
-) -> Result<usize> {
+pub(crate) fn index_refs_with_subagents(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool) -> Result<usize> {
     index_refs(dir, refs, catalog)?;
     Ok(sweep(dir, refs.to_vec(), false, true)?.changed)
 }
@@ -1196,10 +1142,7 @@ pub(crate) fn index_refs_with_subagents(
 /// `harness:claude`, phrases `"foo bar"`, and booleans `a AND b` work too.
 pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
     if !dir.join("meta.json").exists() {
-        anyhow::bail!(
-            "no full-text index at {} — run `index_all` first",
-            dir.display()
-        );
+        anyhow::bail!("no full-text index at {} — run `index_all` first", dir.display());
     }
     // Read-only open: a transient failure here must surface as an error, never as a wiped index.
     let (index, f) = open_existing(dir)?;
@@ -1239,11 +1182,8 @@ pub fn text_search(dir: &Path, query: &str, limit: usize) -> Result<Vec<Hit>> {
         if hits.len() >= limit {
             break;
         }
-        let get_str = |field: Field| -> Option<String> {
-            doc.get_first(field)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        };
+        let get_str =
+            |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
         if !seen.insert(id.clone()) {
             continue; // another chunk of a session we already have
         }
@@ -1353,8 +1293,7 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
                 if remaining == 0 {
                     return;
                 }
-                self.buf
-                    .push_str(&self.resolver.resolve_prefix(sp, remaining));
+                self.buf.push_str(&self.resolver.resolve_prefix(sp, remaining));
             } else if let Some(s) = text.inline_str() {
                 self.buf.push_str(s);
             }
@@ -1383,9 +1322,7 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
                         if let Some(p) = b.persisted_output_path() {
                             let remaining = SNIPPET_SCAN_CAP.saturating_sub(self.buf.len());
                             if remaining > 0 {
-                                if let Some(t) =
-                                    cv_core::lazy::read_head(std::path::Path::new(p), remaining)
-                                {
+                                if let Some(t) = cv_core::lazy::read_head(std::path::Path::new(p), remaining) {
                                     self.buf.push_str(&t);
                                     self.buf.push('\n');
                                 }
@@ -1434,10 +1371,7 @@ fn query_terms(query: &str) -> Vec<String> {
         .split_whitespace()
         .filter(|t| !t.contains(':'))
         .filter(|t| !matches!(*t, "AND" | "OR" | "NOT"))
-        .map(|t| {
-            t.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
         .filter(|t| !t.is_empty())
         .collect()
 }
@@ -1578,10 +1512,7 @@ mod tests {
         let b2 = "Loading dataframes and grouping by columns in pandas.";
         let p1 = write_claude(&sdir, "a1", b1);
         let p2 = write_claude(&sdir, "b2", b2);
-        let refs = vec![
-            sref("a1", "Rust tantivy index", p1),
-            sref("b2", "Python pandas", p2),
-        ];
+        let refs = vec![sref("a1", "Rust tantivy index", p1), sref("b2", "Python pandas", p2)];
         let n = index_refs(&dir, &refs, false).unwrap();
         assert_eq!(n, 2);
 
@@ -1642,20 +1573,8 @@ mod tests {
             serde_json::json!({"type":"user","uuid":"u1","parentUuid":"a0","sessionId":"p1","timestamp":"2026-09-19T00:00:02Z",
                 "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":stub}]}}),
         ];
-        std::fs::write(
-            &p,
-            lines
-                .iter()
-                .map(|l| l.to_string() + "\n")
-                .collect::<String>(),
-        )
-        .unwrap();
-        index_refs(
-            &dir,
-            &[sref("p1", "harvest run", p.display().to_string())],
-            false,
-        )
-        .unwrap();
+        std::fs::write(&p, lines.iter().map(|l| l.to_string() + "\n").collect::<String>()).unwrap();
+        index_refs(&dir, &[sref("p1", "harvest run", p.display().to_string())], false).unwrap();
 
         let hits = text_search(&dir, "zanzibar", 10).unwrap();
         assert_eq!(
@@ -1821,11 +1740,7 @@ mod tests {
 
         // Term in every chunk → multiple matching docs, but deduped to exactly one row for the id.
         let hits = text_search(&dir, "padding", 10).unwrap();
-        assert_eq!(
-            hits.len(),
-            1,
-            "chunks of one session must dedup to a single hit"
-        );
+        assert_eq!(hits.len(), 1, "chunks of one session must dedup to a single hit");
         assert_eq!(hits[0].id, "big");
 
         // Term only in the trailing chunk → still indexed and findable (proves later chunks are added).
@@ -1858,10 +1773,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "m");
         // No ai-title → label is the first user message's text.
-        assert_eq!(
-            hits[0].title.as_deref(),
-            Some("alpha question about tantivy")
-        );
+        assert_eq!(hits[0].title.as_deref(), Some("alpha question about tantivy"));
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&sdir).ok();
@@ -1880,10 +1792,7 @@ mod tests {
         let p = write_claude(&sdir, "giant", &body);
 
         let snip = live_snippet(&p, "claude", "zqearly").expect("snippet");
-        assert!(
-            snip.contains("zqearly"),
-            "in-cap term should window: {snip:?}"
-        );
+        assert!(snip.contains("zqearly"), "in-cap term should window: {snip:?}");
 
         let snip = live_snippet(&p, "claude", "zqlate").expect("snippet");
         assert!(
@@ -1898,10 +1807,7 @@ mod tests {
     fn make_snippet_windows_match_then_falls_back_to_head() {
         let body = "the quick brown fox jumps over the lazy dog";
         let snip = make_snippet(body, "brown");
-        assert!(
-            snip.contains("brown"),
-            "snippet should window the match: {snip:?}"
-        );
+        assert!(snip.contains("brown"), "snippet should window the match: {snip:?}");
         // No term matches → fall back to the head of the body.
         assert_eq!(make_snippet("hello world", "kubernetes"), "hello world");
     }
@@ -2019,18 +1925,9 @@ mod tests {
 
         // …and the SAME pass landed events in the catalog.
         let rows = cv_core::events::events_for("claude", "tee-evt", None);
-        let edit = rows
-            .iter()
-            .find(|e| e.kind == "file_edit")
-            .expect("edit event");
-        assert_eq!(
-            edit.target.as_deref(),
-            Some("/repo/crates/cv-search/src/fts.rs")
-        );
-        let cmd = rows
-            .iter()
-            .find(|e| e.kind == "command")
-            .expect("command event");
+        let edit = rows.iter().find(|e| e.kind == "file_edit").expect("edit event");
+        assert_eq!(edit.target.as_deref(), Some("/repo/crates/cv-search/src/fts.rs"));
+        let cmd = rows.iter().find(|e| e.kind == "command").expect("command event");
         assert_eq!(cmd.target.as_deref(), Some("cargo test -p cv-search"));
 
         // The touched query resolves it by path suffix.
@@ -2073,11 +1970,7 @@ mod tests {
         let sdir = tmpdir();
         // Parent transcript + a sub-agent whose body alone holds the unique marker.
         let pp = write_claude(&sdir, "parent1", "orchestrator planning the work");
-        write_subagent(
-            &pp,
-            "child9",
-            "deep in the weeds: zqsubmarker lives only here",
-        );
+        write_subagent(&pp, "child9", "deep in the weeds: zqsubmarker lives only here");
         let parent = sref("parent1", "parent session", pp);
 
         // (a) Top-level only: the sub-agent marker is invisible.
@@ -2105,16 +1998,8 @@ mod tests {
         assert_eq!(hits.len(), 1, "sub-agent term findable once folded");
         let h = &hits[0];
         assert_eq!(h.id, "agent-child9");
-        assert_eq!(
-            h.parent_id.as_deref(),
-            Some("parent1"),
-            "tagged with parent id"
-        );
-        assert_eq!(
-            h.agent_id.as_deref(),
-            Some("child9"),
-            "tagged with agent id"
-        );
+        assert_eq!(h.parent_id.as_deref(), Some("parent1"), "tagged with parent id");
+        assert_eq!(h.agent_id.as_deref(), Some("child9"), "tagged with agent id");
         assert_eq!(h.workflow, None, "directly-spawned agent has no workflow");
         // A fielded query can scope to one parent's whole forest.
         let scoped = text_search(&dir, "parent_id:parent1 zqsubmarker", 10).unwrap();
@@ -2206,28 +2091,16 @@ mod tests {
         let mut refs: Vec<_> = (0..40)
             .map(|i| {
                 let id = format!("s{i}");
-                sref(
-                    &id,
-                    "t",
-                    write_claude(&sdir, &id, &format!("zqword{i} common")),
-                )
+                sref(&id, "t", write_claude(&sdir, &id, &format!("zqword{i} common")))
             })
             .collect();
-        refs.push(sref(
-            "s0",
-            "t",
-            write_claude(&dup, "s0", "zqdupword common"),
-        ));
+        refs.push(sref("s0", "t", write_claude(&dup, "s0", "zqdupword common")));
         index_refs(&seq, &refs, false).unwrap();
         sweep(&par, refs.clone(), true, false).unwrap();
         let docs = |d: &Path| {
             let (index, f) = open_existing(d).unwrap();
             let n = index.reader().unwrap().searcher().num_docs();
-            let mut ids: Vec<String> = read_indexed_sigs(&index, &f)
-                .unwrap()
-                .0
-                .into_keys()
-                .collect();
+            let mut ids: Vec<String> = read_indexed_sigs(&index, &f).unwrap().0.into_keys().collect();
             ids.sort();
             (n, ids)
         };
@@ -2242,11 +2115,7 @@ mod tests {
             .chain(["zqdupword".into(), "common".into()])
         {
             let ids = |d: &Path| {
-                let mut v: Vec<String> = text_search(d, &q, 100)
-                    .unwrap()
-                    .into_iter()
-                    .map(|h| h.id)
-                    .collect();
+                let mut v: Vec<String> = text_search(d, &q, 100).unwrap().into_iter().map(|h| h.id).collect();
                 v.sort();
                 v
             };
@@ -2307,13 +2176,8 @@ mod tests {
             1,
             "fixture must discover exactly one sub-agent"
         );
-        let changed = sweep(&dir, vec![parent.clone()], false, true)
-            .unwrap()
-            .changed;
-        assert_eq!(
-            changed, 0,
-            "catalog-only pass must not rewrite tantivy docs"
-        );
+        let changed = sweep(&dir, vec![parent.clone()], false, true).unwrap().changed;
+        assert_eq!(changed, 0, "catalog-only pass must not rewrite tantivy docs");
 
         assert_eq!(
             text_search(&dir, "zqkeepme", 10).unwrap().len(),
@@ -2362,23 +2226,10 @@ mod tests {
         let h = IsolatedHome::new();
         let dir = tmpdir();
 
-        let pp = write_claude_msgs(
-            &h.home,
-            "evt-parent",
-            &[("user", "spawn an agent to touch a file")],
-        );
+        let pp = write_claude_msgs(&h.home, "evt-parent", &[("user", "spawn an agent to touch a file")]);
         // A sub-agent whose assistant turn edits a file.
-        let stem = Path::new(&pp)
-            .file_stem()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let sub_dir = Path::new(&pp)
-            .parent()
-            .unwrap()
-            .join(&stem)
-            .join("subagents");
+        let stem = Path::new(&pp).file_stem().unwrap().to_str().unwrap().to_string();
+        let sub_dir = Path::new(&pp).parent().unwrap().join(&stem).join("subagents");
         std::fs::create_dir_all(&sub_dir).unwrap();
         let sub_path = sub_dir.join("agent-ed1.jsonl");
         // Absolute target so the catalog query is unambiguous (the agent transcript carries no cwd
@@ -2407,10 +2258,7 @@ mod tests {
 
         // And the per-session events carry it too.
         let rows = cv_core::events::events_for("claude", "agent-ed1", None);
-        let edit = rows
-            .iter()
-            .find(|e| e.kind == "file_edit")
-            .expect("edit event");
+        let edit = rows.iter().find(|e| e.kind == "file_edit").expect("edit event");
         assert_eq!(edit.parent_id.as_deref(), Some("evt-parent"));
         assert_eq!(edit.agent_id.as_deref(), Some("ed1"));
 
@@ -2429,12 +2277,7 @@ mod tests {
         assert!(body.len() > CHUNK_BYTES, "fixture must exceed one chunk");
         body.push_str("zqxmarker");
         let p = write_claude(&sdir, "bigone", &body);
-        index_refs(
-            &dir,
-            &[sref("bigone", "huge doomed session", p.clone())],
-            false,
-        )
-        .unwrap();
+        index_refs(&dir, &[sref("bigone", "huge doomed session", p.clone())], false).unwrap();
 
         std::fs::remove_file(&p).unwrap();
 
@@ -2448,11 +2291,7 @@ mod tests {
         );
         assert!(hits[0].snippet.ends_with("(source file moved)"));
         // The stored preview itself is capped (marker text rides on top of it).
-        let stored = hits[0]
-            .snippet
-            .trim_end_matches(" (source file moved)")
-            .chars()
-            .count();
+        let stored = hits[0].snippet.trim_end_matches(" (source file moved)").chars().count();
         assert!(stored <= PREVIEW_CHARS, "preview over cap: {stored} chars");
 
         std::fs::remove_dir_all(&dir).ok();
