@@ -36,6 +36,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod composer;
+mod legacy;
+mod source;
+
 pub struct Cursor {
     /// `<AppSupport>/Cursor/User` if it exists.
     user_dir: Option<PathBuf>,
@@ -257,9 +261,9 @@ fn percent_decode(s: &str) -> String {
 
 // LIKE is case-insensitive by default and cannot use Cursor's binary key index. Bound the
 // exact prefix instead, and keep the table-scan row order so timestamp ties remain stable.
-const COMPOSER_ROWS: &str = "SELECT key, value FROM cursorDiskKV \
+const COMPOSER_ROWS: &str = "SELECT key FROM cursorDiskKV \
     WHERE key >= 'composerData:' AND key < 'composerData;' ORDER BY rowid";
-const COMPOSER_ROWS_WITHOUT_ROWID: &str = "SELECT key, value FROM cursorDiskKV \
+const COMPOSER_ROWS_WITHOUT_ROWID: &str = "SELECT key FROM cursorDiskKV \
     WHERE key >= 'composerData:' AND key < 'composerData;'";
 
 fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathBuf>, out: &mut Vec<SessionRef>) {
@@ -271,27 +275,21 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
         Ok(s) => s,
         Err(_) => return,
     };
-    let rows = stmt.query_map([], |row| {
-        let key: String = row.get(0)?;
-        let value: String = match row.get::<_, String>(1) {
-            Ok(s) => s,
-            Err(_) => row
-                .get::<_, Vec<u8>>(1)
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default(),
-        };
-        Ok((key, value))
-    });
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0));
     let Ok(rows) = rows else { return };
 
-    for (key, value) in rows.flatten() {
+    for key in rows.flatten() {
         let Some(composer_id) = key.strip_prefix("composerData:") else {
             continue;
         };
-        let Ok(d) = serde_json::from_str::<Value>(&value) else {
+        let Ok(source) = source::cell(conn, "cursorDiskKV", &key) else {
             continue;
         };
-        let count = conversation_len(&d);
+        let Some(header) = composer::header(&source) else {
+            continue;
+        };
+        let d = &header.metadata;
+        let count = header.count();
         // Skip threads that have no messages at all (Cursor leaves empty composer shells around).
         if count == 0 {
             continue;
@@ -317,6 +315,7 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
 }
 
 /// Number of messages in a composerData record, across both shapes.
+#[cfg(test)]
 fn conversation_len(d: &Value) -> usize {
     if let Some(h) = d.get("fullConversationHeadersOnly").and_then(Value::as_array) {
         return h.len();
@@ -328,10 +327,12 @@ fn conversation_len(d: &Value) -> usize {
 }
 
 fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
-    let mut lookup = conn.prepare("SELECT value FROM cursorDiskKV WHERE key = ?1")?;
+    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let key = format!("composerData:{}", r.id);
-    let raw = disk_kv_get(&mut lookup, &key).with_context(|| format!("composerData:{} not found", r.id))?;
-    let d: Value = serde_json::from_str(&raw).context("composerData JSON")?;
+    let source = source::cell(conn, "cursorDiskKV", &key)?;
+    let header = composer::header(&source).context("composerData JSON")?;
+    let d = &header.metadata;
+    let mut lookup = conn.prepare("SELECT value FROM cursorDiskKV WHERE key = ?1")?;
 
     let created = d.get("createdAt").and_then(Value::as_i64);
     let updated = d.get("lastUpdatedAt").and_then(Value::as_i64).or(created);
@@ -392,35 +393,29 @@ fn stream_global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
         sink.message(m)
     };
 
-    // Newer shape: headers point at external bubble rows (each a separate DB row, fetched lazily so
-    // one bubble is resident at a time). Older shape: inline conversation array.
-    if let Some(headers) = d.get("fullConversationHeadersOnly").and_then(Value::as_array) {
-        for h in headers {
-            let Some(bubble_id) = h.get("bubbleId").and_then(Value::as_str) else {
-                continue;
+    // The immutable, fully validated source replays only the authoritative selected array.
+    header.replay(&source, &mut |value, external| {
+        let bubble = if external {
+            let Some(bubble_id) = value.get("bubbleId").and_then(Value::as_str) else {
+                return Flow::Continue;
             };
             let bkey = format!("bubbleId:{}:{}", r.id, bubble_id);
             let Some(braw) = disk_kv_get(&mut lookup, &bkey) else {
-                continue;
+                return Flow::Continue;
             };
-            let Ok(bv) = serde_json::from_str::<Value>(&braw) else {
-                continue;
+            let Ok(bubble) = serde_json::from_str::<Value>(&braw) else {
+                return Flow::Continue;
             };
-            if let Some(m) = bubble_to_message(&bv) {
-                if emit(sink, m) == Flow::Stop {
-                    break;
-                }
-            }
+            bubble
+        } else {
+            value
+        };
+        if let Some(message) = bubble_to_message(&bubble) {
+            emit(sink, message)
+        } else {
+            Flow::Continue
         }
-    } else if let Some(conv) = d.get("conversation").and_then(Value::as_array) {
-        for bv in conv {
-            if let Some(m) = bubble_to_message(bv) {
-                if emit(sink, m) == Flow::Stop {
-                    break;
-                }
-            }
-        }
-    }
+    });
 
     session.model = last_model.or_else(|| {
         d.pointer("/modelConfig/modelName")
@@ -614,25 +609,21 @@ fn collect_lexical_text(node: &Value, out: &mut String) {
 const LEGACY_CHAT_KEY: &str = "workbench.panel.aichat.view.aichat.chatdata";
 
 fn discover_legacy_workspace(conn: &Connection, db: &Path, cwd: Option<&Path>, out: &mut Vec<SessionRef>) {
-    let Some(raw) = item_table_get(conn, LEGACY_CHAT_KEY) else {
+    let Ok(source) = source::cell(conn, "ItemTable", LEGACY_CHAT_KEY) else {
         return;
     };
-    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-        return;
-    };
-    let Some(tabs) = v.get("tabs").and_then(Value::as_array) else {
-        return;
-    };
+    let Some(header) = legacy::header(&source) else { return };
+    let Some((_, tabs)) = &header.tabs else { return };
     for tab in tabs {
-        let Some(tab_id) = tab.get("tabId").and_then(Value::as_str) else {
+        let Some(tab_id) = tab.metadata.get("tabId").and_then(Value::as_str) else {
             continue;
         };
-        let bubbles = tab.get("bubbles").and_then(Value::as_array);
-        let count = bubbles.map(|b| b.len()).unwrap_or(0);
+        let count = tab.bubbles.map_or(0, |(_, count)| count);
         if count == 0 {
             continue;
         }
         let title = tab
+            .metadata
             .get("chatTitle")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
@@ -647,16 +638,15 @@ fn discover_legacy_workspace(conn: &Connection, db: &Path, cwd: Option<&Path>, o
 }
 
 fn stream_legacy(conn: &Connection, r: &SessionRef, tab_id: &str, sink: &mut dyn MessageSink) -> Result<Session> {
-    let raw = item_table_get(conn, LEGACY_CHAT_KEY).context("legacy chatdata not found")?;
-    let v: Value = serde_json::from_str(&raw).context("legacy chatdata JSON")?;
-    let tabs = v
-        .get("tabs")
-        .and_then(Value::as_array)
-        .context("legacy chatdata has no tabs")?;
-    let tab = tabs
+    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let source = source::cell(conn, "ItemTable", LEGACY_CHAT_KEY)?;
+    let header = legacy::header(&source).context("legacy chatdata JSON")?;
+    let (_, tabs) = header.tabs.as_ref().context("legacy chatdata has no tabs")?;
+    let selected = tabs
         .iter()
-        .find(|t| t.get("tabId").and_then(Value::as_str) == Some(tab_id))
+        .position(|tab| tab.metadata.get("tabId").and_then(Value::as_str) == Some(tab_id))
         .with_context(|| format!("legacy tab {tab_id} not found"))?;
+    let tab = &tabs[selected].metadata;
 
     let title = tab
         .get("chatTitle")
@@ -673,15 +663,13 @@ fn stream_legacy(conn: &Connection, r: &SessionRef, tab_id: &str, sink: &mut dyn
         ..Session::new(r.id.clone(), Harness::Cursor)
     };
     sink.meta(&session);
-    if let Some(bubbles) = tab.get("bubbles").and_then(Value::as_array) {
-        for b in bubbles {
-            if let Some(m) = legacy_bubble_to_message(b) {
-                if sink.message(m) == Flow::Stop {
-                    break;
-                }
-            }
+    header.replay(&source, selected, &mut |bubble| {
+        if let Some(message) = legacy_bubble_to_message(&bubble) {
+            sink.message(message)
+        } else {
+            Flow::Continue
         }
-    }
+    });
     Ok(session)
 }
 
