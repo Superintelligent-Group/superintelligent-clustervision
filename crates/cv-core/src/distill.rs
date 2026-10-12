@@ -1078,11 +1078,11 @@ fn resumable_tail(
         match (m.role, m.kind) {
             (Role::Assistant, _) => {
                 let mut m2 = m.clone();
-                m2.materialize(resolver)?;
                 m2.usage = None;
                 if !opts.keep_tail_thinking {
                     m2.content.retain(|b| !matches!(b, Block::Thinking { .. }));
                 }
+                m2.materialize(resolver)?;
                 if !m2.content.is_empty() {
                     out.push(m2);
                 }
