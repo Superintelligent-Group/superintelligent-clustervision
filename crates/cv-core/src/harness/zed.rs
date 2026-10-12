@@ -135,11 +135,14 @@ impl Adapter for Zed {
 }
 
 fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
+    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let rowid = conn.prepare("SELECT _rowid_ FROM threads LIMIT 0").is_ok();
     let cols = columns(conn, "threads");
     let has = |c: &str| cols.contains(c);
     let sql = format!(
-        "SELECT id, summary, updated_at, {created}, {folders}, {order}, data_type, data \
+        "SELECT id, summary, updated_at, {created}, {folders}, {order}, data_type, {rowid} \
          FROM threads ORDER BY updated_at DESC",
+        rowid = if rowid { "_rowid_" } else { "NULL" },
         created = if has("created_at") { "created_at" } else { "NULL" },
         folders = if has("folder_paths") { "folder_paths" } else { "NULL" },
         order = if has("folder_paths_order") {
@@ -161,11 +164,11 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let folders = row.get::<_, Option<String>>(4).ok().flatten();
         let order = row.get::<_, Option<String>>(5).ok().flatten();
         let data_type = row.get::<_, Option<String>>(6).ok().flatten();
-        let data = match row.get_ref(7) {
-            Ok(rusqlite::types::ValueRef::Blob(data)) => data,
-            _ => &[],
-        };
-        let thread = blob::header(data_type.as_deref(), data, true);
+        // Sorting only metadata avoids putting every complete blob in SQLite's temporary
+        // sorter. Native rowid stores can read the payload in fixed-size pages; older or
+        // WITHOUT ROWID stores retain a point-lookup borrowed-cell fallback.
+        let rowid = row.get::<_, Option<i64>>(7).ok().flatten();
+        let thread = thread_header(conn, &id, rowid, data_type.as_deref(), true);
         let count = thread.as_ref().map(|t| t.message_count).unwrap_or(0);
         let cwd = thread.as_ref().and_then(|t| snapshot_cwd(&t.metadata));
         let cwd = cwd.or_else(|| first_folder_path(folders.as_deref(), order.as_deref()));
@@ -186,11 +189,14 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
 }
 
 fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
+    let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let rowid = conn.prepare("SELECT _rowid_ FROM threads LIMIT 0").is_ok();
     let cols = columns(conn, "threads");
     let has = |c: &str| cols.contains(c);
     let sql = format!(
-        "SELECT summary, updated_at, {created}, {parent}, {folders}, {order}, data_type, data \
-         FROM threads WHERE id = ?1",
+        "SELECT summary, updated_at, {created}, {parent}, {folders}, {order}, data_type, {rowid}, \
+         CASE WHEN typeof(data) = 'blob' THEN length(data) ELSE 0 END FROM threads WHERE id = ?1",
+        rowid = if rowid { "_rowid_" } else { "NULL" },
         created = if has("created_at") { "created_at" } else { "NULL" },
         parent = if has("parent_id") { "parent_id" } else { "NULL" },
         folders = if has("folder_paths") { "folder_paths" } else { "NULL" },
@@ -210,13 +216,11 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     let folders = row.get::<_, Option<String>>(4).ok().flatten();
     let order = row.get::<_, Option<String>>(5).ok().flatten();
     let data_type = row.get::<_, Option<String>>(6).ok().flatten();
-    let data = match row.get_ref(7) {
-        Ok(rusqlite::types::ValueRef::Blob(data)) => data,
-        _ => &[],
-    };
-    // Both passes borrow the same cell under the same active read statement. Validate the
-    // complete document before emitting any message, including malformed ignored fields.
-    let mut thread = blob::header(data_type.as_deref(), data, false);
+    let rowid = row.get::<_, Option<i64>>(7).ok().flatten();
+    let data_len = row.get::<_, i64>(8).unwrap_or(0);
+    // Both passes read the same SQLite cell under one read snapshot. Validate the complete
+    // document before emitting any message, including malformed ignored fields.
+    let mut thread = thread_header(conn, &r.id, rowid, data_type.as_deref(), false);
 
     let mut zed = serde_json::Map::new();
     let mut model = None;
@@ -243,7 +247,7 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
         git = snapshot_git(&t);
         model = t.get("model").and_then(model_string);
         thread_extras(&t, &mut zed, &mut parent_thread_id);
-    } else if !data.is_empty() {
+    } else if data_len > 0 {
         // The row exists but its blob wouldn't decode — surface that instead of erroring, so one
         // corrupt thread never breaks listings or bulk exports.
         zed.insert("undecodable_blob".into(), Value::Bool(true));
@@ -286,9 +290,64 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     sink.meta(&s);
 
     if let Some(t) = &thread {
-        blob::replay(data_type.as_deref(), data, t, &mut |m| sink.message(m));
+        thread_replay(conn, &r.id, rowid, data_type.as_deref(), t, &mut |m| sink.message(m));
     }
     Ok(s)
+}
+
+/// The native rowid table supports truly incremental read-only I/O. A schema variant or a
+/// blob-open failure falls back to one indexed cell lookup, preserving unreadable/nonblob
+/// behavior without changing the source database or introducing compressed-byte spans.
+fn thread_header(
+    conn: &Connection,
+    id: &str,
+    rowid: Option<i64>,
+    data_type: Option<&str>,
+    count: bool,
+) -> Option<blob::Header> {
+    if let Some(rowid) = rowid {
+        if let Ok(data) = conn.blob_open(rusqlite::DatabaseName::Main, "threads", "data", rowid, true) {
+            return blob::header_reader(data_type, data, count);
+        }
+    }
+    with_cell(conn, id, rowid, |data| blob::header(data_type, data, count)).flatten()
+}
+
+fn thread_replay(
+    conn: &Connection,
+    id: &str,
+    rowid: Option<i64>,
+    data_type: Option<&str>,
+    header: &blob::Header,
+    f: &mut dyn FnMut(Message) -> Flow,
+) {
+    if let Some(rowid) = rowid {
+        if let Ok(data) = conn.blob_open(rusqlite::DatabaseName::Main, "threads", "data", rowid, true) {
+            blob::replay_reader(data_type, data, header, f);
+            return;
+        }
+    }
+    let _ = with_cell(conn, id, rowid, |data| blob::replay(data_type, data, header, f));
+}
+
+fn with_cell<T>(conn: &Connection, id: &str, rowid: Option<i64>, f: impl FnOnce(&[u8]) -> T) -> Option<T> {
+    let sql = if rowid.is_some() {
+        "SELECT data FROM threads WHERE _rowid_ = ?1"
+    } else {
+        "SELECT data FROM threads WHERE id = ?1"
+    };
+    let mut stmt = conn.prepare(sql).ok()?;
+    let key: &dyn rusqlite::ToSql = match &rowid {
+        Some(rowid) => rowid,
+        None => &id,
+    };
+    let mut rows = stmt.query([key]).ok()?;
+    let row = rows.next().ok()??;
+    let data = match row.get_ref(0) {
+        Ok(rusqlite::types::ValueRef::Blob(data)) => data,
+        _ => &[],
+    };
+    Some(f(data))
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1133,82 @@ mod tests {
             .harness_extra(Harness::Zed)
             .and_then(|b| b.get("thread_version"))
             .is_none());
+    }
+
+    #[test]
+    fn metadata_sort_preserves_ties_and_without_rowid_fallback() {
+        for schema in [
+            SCHEMA.to_string(),
+            SCHEMA.replace("        );", "        ) WITHOUT ROWID;"),
+        ] {
+            let c = mk(&schema);
+            let data = zstd_blob(&legacy_thread());
+            for id in ["z", "a", "m"] {
+                insert(&c, id, id, "zstd", &data);
+            }
+            let expected: Vec<String> = c
+                .prepare("SELECT id, data FROM threads ORDER BY updated_at DESC")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let actual = discover_db(&c, Path::new(":memory:")).unwrap();
+            assert_eq!(
+                actual.iter().map(|r| &r.id).collect::<Vec<_>>(),
+                expected.iter().collect::<Vec<_>>()
+            );
+            for r in actual {
+                assert_eq!(r.message_count, 3);
+                assert_eq!(parse_thread(&c, &r).unwrap().messages.len(), 4);
+            }
+            c.execute("UPDATE threads SET data = 'not a blob' WHERE id = 'a'", [])
+                .unwrap();
+            let unreadable = parse_thread(&c, &sref("a")).unwrap();
+            assert!(unreadable.messages.is_empty());
+            assert!(unreadable.harness_extra(Harness::Zed).is_none());
+        }
+    }
+
+    #[test]
+    fn read_snapshot_allows_wal_writer_and_keeps_both_passes_consistent() {
+        let world = cv_testkit::World::new("zed-snapshot");
+        let path = world.base.join("threads.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        writer.execute_batch(SCHEMA).unwrap();
+        insert(&writer, "t", "old", "zstd", &zstd_blob(&legacy_thread()));
+        let reader = open_ro(&path).unwrap();
+        struct UpdatingSink<'a> {
+            writer: &'a Connection,
+            messages: Vec<Message>,
+        }
+        impl MessageSink for UpdatingSink<'_> {
+            fn meta(&mut self, _: &Session) {
+                self.writer
+                    .execute(
+                        "UPDATE threads SET data = ?1 WHERE id = 't'",
+                        [zstd_blob(&modern_thread())],
+                    )
+                    .unwrap();
+            }
+            fn message(&mut self, message: Message) -> Flow {
+                self.messages.push(message);
+                Flow::Continue
+            }
+        }
+        let mut sink = UpdatingSink {
+            writer: &writer,
+            messages: Vec::new(),
+        };
+        let session = stream_thread(&reader, &sref("t"), &mut sink).unwrap();
+        assert_eq!(session.model.as_deref(), Some("zed.dev/claude-sonnet-4-thinking"));
+        assert_eq!(sink.messages.len(), 4);
+        assert_eq!(sink.messages[0].text().as_deref(), Some("why is test_foo flaky?"));
+        assert_eq!(
+            parse_thread(&reader, &sref("t")).unwrap().model.as_deref(),
+            Some("openai/gpt-5-mini")
+        );
     }
 
     #[test]

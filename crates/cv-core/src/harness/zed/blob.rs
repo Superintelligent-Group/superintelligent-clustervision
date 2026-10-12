@@ -56,6 +56,52 @@ fn pass(
     }
 }
 
+/// Incremental SQLite blobs do not expose contiguous source bytes. Both passes reopen the
+/// same cell inside the caller's read transaction, retaining only decoder/message scratch.
+pub(super) fn header_reader(data_type: Option<&str>, data: impl std::io::Read, count: bool) -> Option<Header> {
+    pass_reader(data_type, data, count, None, &mut |_| Flow::Continue)
+}
+
+pub(super) fn replay_reader(
+    data_type: Option<&str>,
+    data: impl std::io::Read,
+    header: &Header,
+    f: &mut dyn FnMut(Message) -> Flow,
+) {
+    if let Some(target) = header.last_messages {
+        let _ = pass_reader(data_type, data, false, Some(target), f);
+    }
+}
+
+fn pass_reader(
+    data_type: Option<&str>,
+    data: impl std::io::Read,
+    count: bool,
+    target: Option<usize>,
+    f: &mut dyn FnMut(Message) -> Flow,
+) -> Option<Header> {
+    use std::io::BufRead;
+    let mut data = std::io::BufReader::new(data);
+    let compressed = match data_type {
+        Some("zstd") => true,
+        Some("json") => false,
+        _ => data.fill_buf().ok()?.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+    };
+    let seed = Root { count, target, f };
+    if compressed {
+        let decoder = ruzstd::decoding::StreamingDecoder::new(data).ok()?;
+        let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(decoder));
+        let out = seed.deserialize(&mut de).ok()?;
+        de.end().ok()?;
+        Some(out)
+    } else {
+        let mut de = serde_json::Deserializer::from_reader(data);
+        let out = seed.deserialize(&mut de).ok()?;
+        de.end().ok()?;
+        Some(out)
+    }
+}
+
 // Both root and messages accept non-container scalars, just as Value followed by get/as_array
 // did. Serde still checks finite numbers, UTF-16 and container depth on every discarded value.
 macro_rules! scalars {
@@ -255,6 +301,17 @@ mod tests {
                         old.is_some(),
                         "compressed={compressed} count={count}: {text}"
                     );
+                    let streamed = header_reader(
+                        Some(if compressed { "zstd" } else { "json" }),
+                        std::io::Cursor::new(&bytes),
+                        count,
+                    );
+                    assert_eq!(streamed.is_some(), old.is_some());
+                    if let (Some(a), Some(b)) = (&projection, &streamed) {
+                        assert_eq!(a.metadata, b.metadata);
+                        assert_eq!(a.message_count, b.message_count);
+                        assert_eq!(a.last_messages, b.last_messages);
+                    }
                     let Some(h) = projection else { continue };
                     if count {
                         assert_eq!(
@@ -290,6 +347,15 @@ mod tests {
                     });
                     assert_eq!(
                         serde_json::to_value(&actual).unwrap(),
+                        serde_json::to_value(&expected).unwrap()
+                    );
+                    let mut streamed = Vec::new();
+                    replay_reader(None, std::io::Cursor::new(&bytes), &h, &mut |m| {
+                        streamed.push(m);
+                        Flow::Continue
+                    });
+                    assert_eq!(
+                        serde_json::to_value(&streamed).unwrap(),
                         serde_json::to_value(&expected).unwrap()
                     );
                     let mut stopped = Vec::new();
