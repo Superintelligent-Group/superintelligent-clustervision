@@ -860,6 +860,37 @@ mod tests {
                 expected = Some(actual);
             }
         }
+        let mut published = None;
+        let mut mutate = |message: Message| {
+            let input = message.content.iter().find_map(|block| match block {
+                Block::ToolUse {
+                    input: crate::json::Json::Source(_),
+                    ..
+                } => Some(block),
+                _ => None,
+            });
+            if let Some(Block::ToolUse { input, .. }) = input {
+                published = Some(input.clone());
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b" ")
+                    .unwrap();
+                crate::stream::Flow::Stop
+            } else {
+                crate::stream::Flow::Continue
+            }
+        };
+        assert!(
+            stream_with_options(&path, "sdk", &ParseOptions::lazy(), &mut mutate).is_err(),
+            "source mutation after publication must reject completion"
+        );
+        assert!(
+            published.unwrap().resolve().is_err(),
+            "published descriptor must retain its captured identity"
+        );
         for scalar in ["1e400", "\"\\ud800\""] {
             fs::write(
                 &path,

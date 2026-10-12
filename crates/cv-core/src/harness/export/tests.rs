@@ -300,6 +300,37 @@ fn native_archive_matches_owned_codec_across_modes_and_invalidation() {
                 serde_json::to_value(&expected).unwrap()
             );
         }
+        let mut published = None;
+        let mut mutate = |message: Message| {
+            let input = message.content.iter().find_map(|block| match block {
+                Block::ToolUse {
+                    input: crate::json::Json::Source(_),
+                    ..
+                } => Some(block),
+                _ => None,
+            });
+            if let Some(Block::ToolUse { input, .. }) = input {
+                published = Some(input.clone());
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b" ")
+                    .unwrap();
+                crate::stream::Flow::Stop
+            } else {
+                crate::stream::Flow::Continue
+            }
+        };
+        assert!(
+            native::stream(kind, &expected_ref, &ParseOptions::lazy(), &mut mutate).is_err(),
+            "source mutation after publication must reject completion"
+        );
+        assert!(
+            published.unwrap().resolve().is_err(),
+            "published descriptor must retain its captured identity"
+        );
         assert_eq!(
             native::stream(kind, &expected_ref, &ParseOptions::lazy(), &mut Stop)
                 .unwrap()
@@ -347,10 +378,27 @@ fn native_archive_matches_raw_value_acceptance_and_duplicate_precedence() {
     std::fs::write(&path, duplicate).unwrap();
     let refs = discover_kind_in(Kind::Claude, vec![path.clone()]);
     assert_eq!(refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["new"]);
+    let roles = json!({"uuid":"roles","chat_messages":[
+        {"sender":"human"},{"sender":"user"},{"sender":"assistant"},{"sender":"tool"}
+    ]});
+    std::fs::write(&path, serde_json::to_vec(&json!([roles])).unwrap()).unwrap();
+    let refs = discover_kind_in(Kind::Claude, vec![path.clone()]);
+    assert_eq!(
+        refs[0].message_count,
+        conv_ref(Kind::Claude, &path, &roles).unwrap().message_count
+    );
+    assert_eq!(refs[0].message_count, 2);
     std::fs::write(&path, "[]").unwrap();
     assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
     std::fs::write(&path, "").unwrap();
     assert!(discover_kind_in(Kind::Claude, vec![path.clone()]).is_empty());
+    let r = SessionRef::new("missing", Harness::ClaudeExport, path.clone());
+    assert!(
+        native::stream(Kind::Claude, &r, &ParseOptions::lazy(), &mut CollectSink::default())
+            .unwrap_err()
+            .to_string()
+            .contains("conversation missing not found")
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

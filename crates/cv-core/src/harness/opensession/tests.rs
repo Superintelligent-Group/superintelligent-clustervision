@@ -458,6 +458,37 @@ fn native_messages_match_document_codec_and_reject_late_invalid_turns() {
             serde_json::to_value(&expected).unwrap()
         );
     }
+    let mut published = None;
+    let mut mutate = |message: Message| {
+        let input = message.content.iter().find_map(|block| match block {
+            Block::ToolUse {
+                input: crate::json::Json::Source(_),
+                ..
+            } => Some(block),
+            _ => None,
+        });
+        if let Some(Block::ToolUse { input, .. }) = input {
+            published = Some(input.clone());
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b" ")
+                .unwrap();
+            crate::stream::Flow::Stop
+        } else {
+            crate::stream::Flow::Continue
+        }
+    };
+    assert!(
+        stream_document(&path, &ParseOptions::lazy(), &mut mutate).is_err(),
+        "source mutation after publication must reject completion"
+    );
+    assert!(
+        published.unwrap().resolve().is_err(),
+        "published descriptor must retain its captured identity"
+    );
     let mut bad = serde_json::to_value(document(&original)).unwrap();
     bad["messages"].as_array_mut().unwrap().push(json!({"role":"invalid"}));
     std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();

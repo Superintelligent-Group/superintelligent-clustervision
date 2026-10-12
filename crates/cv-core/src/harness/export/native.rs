@@ -230,7 +230,10 @@ fn view_ref(kind: Kind, path: &Path, r: &Fields<'_>, id: &str) -> Result<Session
     let mut message_count = 0;
     for view in nodes.iter()? {
         if let Some(role) = node_role(kind, view?)? {
-            if matches!(role_from_str(&role), Role::User | Role::Assistant) {
+            if match kind {
+                Kind::ChatGpt => matches!(role_from_str(&role), Role::User | Role::Assistant),
+                Kind::Claude => matches!(role.as_str(), "human" | "assistant"),
+            } {
                 message_count += 1;
             }
         }
