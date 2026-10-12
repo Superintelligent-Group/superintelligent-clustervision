@@ -439,6 +439,16 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
         None => Watcher::with_discovery(filter, false, cv_core::sessions),
     };
 
+    observe_poll(&mut watcher, baseline, max_messages, char_cap, message_text)
+}
+
+fn observe_poll(
+    watcher: &mut Watcher,
+    baseline: bool,
+    max_messages: usize,
+    char_cap: usize,
+    mut project: impl FnMut(&cv_core::Message) -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
     let mut out_msgs: Vec<Value> = Vec::new();
     let mut chars_used = 0usize;
     let mut projection_error = None;
@@ -450,7 +460,7 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
             let r = &ev.reference;
             let mut taken = 0;
             for m in &ev.new_messages {
-                let text = match message_text(m) {
+                let text = match project(m) {
                     Ok(text) => text,
                     Err(error) => {
                         projection_error = Some(error);
@@ -546,5 +556,65 @@ fn parse_harness(args: &Value) -> anyhow::Result<Option<Harness>> {
                 Harness::ALL.iter().map(|h| h.as_str()).collect::<Vec<_>>().join(", ")
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use cv_core::{Block, Json, Message, Role, SessionRef};
+
+    fn discover() -> Vec<SessionRef> {
+        cv_core::harness::for_harness(Harness::Claude)
+            .unwrap()
+            .discover()
+            .unwrap()
+    }
+
+    #[test]
+    fn observe_projection_failure_returns_error_without_a_success_cursor() {
+        let world = cv_testkit::World::in_process("mcp-json-boundary");
+        world.write_session("observe-json", &[json!({"type":"user", "sessionId":"observe-json", "uuid":"u", "message":{"role":"user","content":"new activity"}})]);
+        let path = world.base.join("arguments.json");
+        let value = json!({"argument":"月🌙é\n\"\\".repeat(300)});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let message = |input| {
+            let mut message = Message::new(Role::Assistant);
+            message.content.push(Block::ToolUse {
+                id: "call".into(),
+                name: "custom".into(),
+                input,
+                namespace: None,
+            });
+            message
+        };
+        let owned_text = message_text(&message(value.into())).unwrap();
+        for deleted in [false, true] {
+            std::fs::write(&path, &bytes).unwrap();
+            let source = message(Json::source(&path, 0, bytes.len() as u64).unwrap());
+            assert_eq!(message_text(&source).unwrap(), owned_text);
+            if deleted {
+                std::fs::remove_file(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"{} ").unwrap();
+            }
+            let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+            let mut demanded = false;
+            let result = observe_poll(&mut watcher, false, 50, 16_000, |_| {
+                demanded = true;
+                message_text(&source)
+            });
+            assert!(demanded, "must exercise a demanded callback projection");
+            assert!(
+                result.is_err(),
+                "cannot serialize a success cursor after failed projection"
+            );
+            let mut recovered = 0;
+            watcher.poll_bounded(50, |event| {
+                recovered += event.new_messages.len();
+                event.new_messages.len()
+            });
+            assert_eq!(recovered, 1, "failed projection must leave offered messages unread");
+        }
     }
 }
