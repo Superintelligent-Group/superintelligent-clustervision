@@ -7,7 +7,7 @@ use std::path::Path;
 /// Render a session as Markdown (good for sharing / feeding to another model). The streaming
 /// `cv export --format md` renders the same header and sections one message at a time through
 /// [`md_header`] and [`md_message`].
-pub fn to_markdown(s: &Session) -> String {
+pub fn to_markdown(s: &Session) -> anyhow::Result<String> {
     let mut out = md_header(
         &s.label(),
         s.harness,
@@ -17,9 +17,9 @@ pub fn to_markdown(s: &Session) -> String {
         s.created_at,
     );
     for m in &s.messages {
-        md_message(m, &mut out);
+        md_message(m, &mut out)?;
     }
-    out
+    Ok(out)
 }
 
 /// The Markdown front-matter: title, harness, id, cwd (home-relative), model and start time, each
@@ -47,16 +47,17 @@ pub fn md_header(
 }
 
 /// One Markdown section per turn: `## <turn label>` then every block through [`md_block`].
-pub fn md_message(m: &Message, out: &mut String) {
+pub fn md_message(m: &Message, out: &mut String) -> anyhow::Result<()> {
     out.push_str(&format!("## {}\n\n", turn_label(m)));
     for b in &m.content {
-        md_block(b, out);
+        md_block(b, out)?;
     }
+    Ok(())
 }
 
 /// One block as Markdown: text verbatim, thinking as a quoted `🧠` aside, a tool call as a fenced
 /// JSON input, a result as a fenced (4000-char) excerpt, files and images as italic placeholders.
-pub fn md_block(b: &Block, out: &mut String) {
+pub fn md_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
     match b {
         Block::Text { text } => {
             out.push_str(text);
@@ -68,7 +69,9 @@ pub fn md_block(b: &Block, out: &mut String) {
             out.push_str("\n\n");
         }
         Block::ToolUse { name, input, .. } => {
-            out.push_str(&format!("**🔧 {name}**\n\n```json\n{input}\n```\n\n"));
+            out.push_str(&format!("**🔧 {name}**\n\n```json\n"));
+            crate::projection::append_json(out, input)?;
+            out.push_str("\n```\n\n");
         }
         Block::ToolResult { content, is_error, .. } => {
             out.push_str(&format!(
@@ -82,6 +85,7 @@ pub fn md_block(b: &Block, out: &mut String) {
         }
         Block::Image { .. } => out.push_str("_[image]_\n\n"),
     }
+    Ok(())
 }
 
 fn file_label(path: &Option<String>, source: &Option<String>) -> String {

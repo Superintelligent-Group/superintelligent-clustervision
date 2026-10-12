@@ -80,6 +80,8 @@ impl Report {
             unnamed: HashMap::new(),
             startup: None,
             compactions: CompactionSink::new(false),
+            error: None,
+            failed: false,
         }
     }
 
@@ -154,11 +156,18 @@ pub struct SessionPass<'a> {
     /// The first turn's total context (≈ system + tools + rules + first message).
     startup: Option<u64>,
     compactions: CompactionSink,
+    error: Option<anyhow::Error>,
+    failed: bool,
 }
 
 impl SessionPass<'_> {
     /// Fold the session's compactions and fixed-overhead estimate into the report.
-    pub fn finish(self) {
+    pub fn finish(self) -> anyhow::Result<()> {
+        if self.failed {
+            return Err(self
+                .error
+                .unwrap_or_else(|| anyhow::anyhow!("doctor source read failed")));
+        }
         let rep = self.rep;
         for (id, t) in self.unnamed {
             let name = self.names.get(&id).map_or("(unknown tool)", String::as_str);
@@ -176,9 +185,10 @@ impl SessionPass<'_> {
             }
         }
         rep.startup_ctx = rep.startup_ctx.max(self.startup.unwrap_or(0));
+        Ok(())
     }
 
-    fn observe(&mut self, m: &Message) {
+    fn observe(&mut self, m: &Message) -> anyhow::Result<()> {
         let rep = &mut *self.rep;
         rep.messages += 1;
         if let Some(u) = &m.usage {
@@ -207,18 +217,18 @@ impl SessionPass<'_> {
                         // output, turn context): real per-turn context, itemized by kind — it
                         // used to hide inside "fixed overhead".
                         (_, MessageKind::InjectedContext) => {
-                            let t = tokens();
+                            let t = tokens()?;
                             rep.attachments += t;
                             *rep.by_attachment.entry(injected_kind(m)).or_default() += t;
                         }
-                        (Role::Assistant, _) => rep.assistant_text += tokens(),
-                        (Role::System, _) => rep.system_text += tokens(),
-                        _ => rep.user_text += tokens(),
+                        (Role::Assistant, _) => rep.assistant_text += tokens()?,
+                        (Role::System, _) => rep.system_text += tokens()?,
+                        _ => rep.user_text += tokens()?,
                     }
                 }
-                Block::Thinking { .. } => rep.thinking += tokens(),
+                Block::Thinking { .. } => rep.thinking += tokens()?,
                 Block::ToolUse { id, name, .. } => {
-                    rep.tool_call_args += tokens();
+                    rep.tool_call_args += tokens()?;
                     self.names.insert(id.clone(), name.clone());
                     let e = rep.by_tool.entry(name.clone()).or_default();
                     e.calls += 1;
@@ -227,7 +237,7 @@ impl SessionPass<'_> {
                 Block::ToolResult {
                     tool_name, tool_use_id, ..
                 } => {
-                    let t = tokens();
+                    let t = tokens()?;
                     rep.tool_results += t;
                     match tool_name {
                         Some(name) => {
@@ -238,16 +248,30 @@ impl SessionPass<'_> {
                         None => *self.unnamed.entry(tool_use_id.clone()).or_default() += t,
                     }
                 }
-                Block::Image { .. } => rep.images += tokens(),
+                Block::Image { .. } => rep.images += tokens()?,
                 Block::File { .. } => {}
             }
         }
+        Ok(())
     }
 }
 
 impl MessageSink for SessionPass<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error
+            .take()
+            .or_else(|| self.failed.then(|| anyhow::anyhow!("doctor source read failed")))
+    }
+
     fn message(&mut self, m: Message) -> Flow {
-        self.observe(&m);
+        if self.failed {
+            return Flow::Stop;
+        }
+        if let Err(error) = self.observe(&m) {
+            self.failed = true;
+            self.error = Some(error);
+            return Flow::Stop;
+        }
         self.compactions.message(m)
     }
 }
@@ -274,7 +298,7 @@ mod tests {
         m.content.push(Block::ToolUse {
             id: id.into(),
             name: name.into(),
-            input: json!({}),
+            input: json!({}).into(),
             namespace: None,
         });
         m
@@ -293,7 +317,7 @@ mod tests {
         ] {
             let _ = pass.message(m);
         }
-        pass.finish();
+        pass.finish().unwrap();
         let mcp = &rep.by_tool["mcp__s__q"];
         assert_eq!((mcp.calls, mcp.result_tokens, mcp.is_mcp), (1, 20, true));
         assert_eq!(rep.by_tool["(unknown tool)"].result_tokens, 1);

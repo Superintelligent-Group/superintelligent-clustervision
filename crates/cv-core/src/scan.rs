@@ -14,9 +14,9 @@
 
 use crate::ir::{truncate, Block, Harness, Message, Role, SessionRef};
 use crate::lazy::{Resolver, Text};
+use crate::projection::Head;
 use crate::stream::{Flow, MessageSink, ParseOptions};
-use anyhow::Result;
-use std::fmt::Write as _;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Searchable-haystack cap per session for the no-index live scan.
@@ -30,42 +30,46 @@ pub const LIVE_HAY_BYTES: usize = 256 * 1024;
 ///
 /// The no-index live path for `cv pack`, `cv search` and `cv serve`'s `/api/search` alike.
 pub struct CapSink {
-    pub hay: String,
+    pub hay: Head,
     pub first_user: Option<String>,
     resolver: Resolver,
+    error: Option<anyhow::Error>,
+    failed: bool,
 }
 
 impl CapSink {
     /// A fresh sink for one session at `path` (the resolver reads lazy spans back from it).
     pub fn new(path: &Path) -> Self {
         CapSink {
-            hay: String::new(),
+            hay: Head::new(LIVE_HAY_BYTES),
             first_user: None,
             resolver: Resolver::new(Some(path.to_path_buf())),
+            error: None,
+            failed: false,
         }
     }
 
     fn push_text(&mut self, text: &Text) {
-        let remaining = LIVE_HAY_BYTES.saturating_sub(self.hay.len());
-        if remaining == 0 {
-            return;
-        }
-        if let Some(sp) = text.as_span() {
-            self.hay.push_str(&self.resolver.resolve_prefix(sp, remaining as u64));
-        } else if let Some(t) = text.inline_str() {
-            self.hay.push_str(&t[..floor_char(t, remaining.min(t.len()))]);
-        }
-        self.hay.push('\n');
+        self.hay.push_text(text, &self.resolver);
+        self.hay.push("\n");
     }
 }
 
 impl MessageSink for CapSink {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error
+            .take()
+            .or_else(|| self.failed.then(|| anyhow::anyhow!("live search source read failed")))
+    }
     fn message(&mut self, m: Message) -> Flow {
+        if self.failed {
+            return Flow::Stop;
+        }
         if self.first_user.is_none() && m.role == Role::User {
             for b in &m.content {
                 if let Block::Text { text } = b {
                     if let Some(t) = text.inline_str().filter(|t| !t.trim().is_empty()) {
-                        self.first_user = Some(t.to_string());
+                        self.first_user = Some(t.chars().take(73).collect());
                         break;
                     }
                 }
@@ -75,24 +79,26 @@ impl MessageSink for CapSink {
             match b {
                 Block::Text { text } | Block::Thinking { text, .. } => self.push_text(text),
                 Block::ToolUse { name, input, .. } => {
-                    if self.hay.len() < LIVE_HAY_BYTES {
-                        self.hay.push_str(name);
-                        self.hay.push(' ');
-                        let _ = write!(self.hay, "{input}");
-                        self.hay.push('\n');
+                    self.hay.push(name);
+                    self.hay.push(" ");
+                    if let Err(error) = self.hay.push_json(input) {
+                        self.error = Some(error);
+                        self.failed = true;
+                        return Flow::Stop;
                     }
+                    self.hay.push("\n");
                 }
                 Block::ToolResult { content, .. } => self.push_text(content),
                 Block::File { path, source, .. } => {
                     if let Some(p) = path.as_deref().or(source.as_deref()) {
-                        self.hay.push_str(p);
-                        self.hay.push('\n');
+                        self.hay.push(p);
+                        self.hay.push("\n");
                     }
                 }
                 Block::Image { .. } => {}
             }
         }
-        if self.hay.len() >= LIVE_HAY_BYTES && self.first_user.is_some() {
+        if self.hay.full() && self.first_user.is_some() {
             Flow::Stop
         } else {
             Flow::Continue
@@ -131,17 +137,16 @@ pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<L
         }
         for r in adapter.discover()? {
             let mut sink = CapSink::new(&r.path);
-            let meta = match adapter.stream(&r, &ParseOptions::lazy(), &mut sink) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
+            let meta = adapter
+                .try_stream(&r, &ParseOptions::lazy(), &mut sink)
+                .with_context(|| format!("scanning {}:{}", r.harness, r.id))?;
             // Lowercase only the bounded head (the match check), windowing the snippet from the
             // original-case haystack.
-            let low = sink.hay.to_lowercase();
+            let low = sink.hay.as_str().to_lowercase();
             let Some(pos) = low.find(&needle) else { continue };
             out.hits.push(LiveHit {
                 title: crate::label_from(meta.title.as_deref(), sink.first_user.as_deref()),
-                snippet: snippet(&sink.hay, pos.min(sink.hay.len()), needle.len()),
+                snippet: snippet(sink.hay.as_str(), pos.min(sink.hay.len()), needle.len()),
                 session: r,
             });
             if out.hits.len() >= limit {
@@ -182,6 +187,53 @@ pub fn ceil_char(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_head_caps_arguments_paths_and_labels_together() {
+        let mut sink = CapSink::new(Path::new("unused"));
+        let input = serde_json::json!({"content": "🌙\n".repeat(LIVE_HAY_BYTES)});
+        let mut message = Message::new(Role::User);
+        message.content = vec![
+            Block::Text { text: "prompt".into() },
+            Block::ToolUse {
+                id: "t".into(),
+                name: "Edit".into(),
+                input: input.clone().into(),
+                namespace: None,
+            },
+            Block::File {
+                mime: None,
+                path: Some("later".repeat(LIVE_HAY_BYTES)),
+                source: None,
+            },
+        ];
+        assert_eq!(sink.message(message), Flow::Stop);
+        let complete = format!("prompt\nEdit {input}\nlater");
+        assert_eq!(sink.hay.as_str(), &complete[..floor_char(&complete, LIVE_HAY_BYTES)]);
+        assert_eq!(sink.first_user.as_deref(), Some("prompt"));
+        assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
+    }
+
+    #[test]
+    fn failed_source_is_not_a_successful_short_head() {
+        let dir = cv_testkit::temp_dir("live-head-source-error");
+        let path = dir.join("input.json");
+        std::fs::write(&path, "{}").unwrap();
+        let input = crate::json::Json::source(&path, 0, 2).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut sink = CapSink::new(&path);
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::ToolUse {
+            id: "t".into(),
+            name: "Edit".into(),
+            input,
+            namespace: None,
+        });
+        assert!(sink.try_message(message).is_err());
+        assert_eq!(sink.message(Message::new(Role::User)), Flow::Stop);
+        assert!(sink.take_error().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn snippets_window_the_match_and_stay_on_char_boundaries() {

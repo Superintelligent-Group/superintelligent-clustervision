@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -411,33 +412,112 @@ pub fn classify_api_error(e: &ApiErrorNotice) -> Option<&'static str> {
 }
 
 /// One line for a tool call: the tool name plus the argument a reader would look at first.
-pub fn tool_summary(name: &str, input: &Value) -> String {
-    let pick = |keys: &[&str]| {
-        keys.iter()
-            .find_map(|k| input.get(k).and_then(Value::as_str))
-            .map(str::to_string)
-    };
-    let arg = pick(&[
-        "command",
-        "file_path",
-        "path",
-        "pattern",
-        "query",
-        "description",
-        "prompt",
-        "url",
-        "skill",
-    ])
-    .unwrap_or_else(|| match input {
-        Value::Object(m) if m.is_empty() => String::new(),
-        other => other.to_string(),
-    });
+pub fn tool_summary(name: &str, input: &crate::json::Json) -> Result<String> {
+    let arg = input.with_view(|view| {
+        for key in [
+            "command",
+            "file_path",
+            "path",
+            "pattern",
+            "query",
+            "description",
+            "prompt",
+            "url",
+            "skill",
+        ] {
+            let Some(value) = view.get(key)? else { continue };
+            let mut head = String::new();
+            let mut left = 81;
+            if value.for_each_str_chunk(|chunk| {
+                for ch in chunk.chars().take(left) {
+                    head.push(ch);
+                    left -= 1;
+                }
+                Ok(())
+            })? {
+                return Ok(head);
+            }
+        }
+        let (head, _) = view.canonical_prefix(4 * 81)?;
+        Ok(if head == "{}" { String::new() } else { head })
+    })?;
     let arg = crate::ir::truncate(&arg, 80);
-    if arg.is_empty() {
+    Ok(if arg.is_empty() {
         name.to_string()
     } else {
         format!("{name} · {arg}")
+    })
+}
+
+/// Locate the existing endpoint grammar without retaining a whole command or an unsuccessful
+/// candidate. Replay only the accepted range; a valid endpoint's full value is demanded output.
+fn endpoint_from(view: crate::json::JsonView<'_>) -> Result<Option<String>> {
+    const KEY: &[u8] = b"CV_ENDPOINT=";
+    let kind_char = |b: u8| b.is_ascii_alphanumeric() || b"_.@-".contains(&b);
+    let mut key = 0;
+    let mut phase = 0;
+    let mut start = 0;
+    let mut end = 0;
+    let mut pos = 0;
+    let mut found = None;
+    let string = view.for_each_str_chunk(|chunk| {
+        for &byte in chunk.as_bytes() {
+            if found.is_some() {
+                break;
+            }
+            match phase {
+                1 if matches!(byte, b'\"' | b'\'') => phase = 2,
+                1 | 2 if kind_char(byte) => {
+                    start = pos;
+                    phase = 3;
+                }
+                3 if kind_char(byte) => {}
+                3 if byte == b':' => phase = 4,
+                4 if kind_char(byte) => {
+                    end = pos + 1;
+                    phase = 5;
+                }
+                5 if kind_char(byte) || matches!(byte, b'/' | b':') => end = pos + 1,
+                5 => {
+                    found = Some((start, end));
+                    phase = 0;
+                }
+                _ => phase = 0,
+            }
+            key = if byte == KEY[key] {
+                key + 1
+            } else {
+                usize::from(byte == KEY[0])
+            };
+            if key == KEY.len() {
+                if found.is_none() {
+                    phase = 1;
+                }
+                key = 0;
+            }
+            pos += 1;
+        }
+        Ok(())
+    })?;
+    if !string {
+        return Ok(None);
     }
+    if found.is_none() && phase == 5 {
+        found = Some((start, end));
+    }
+    let Some((start, end)) = found else { return Ok(None) };
+    let mut output = String::with_capacity(end - start);
+    let mut offset = 0;
+    view.for_each_str_chunk(|chunk| {
+        let a = start.saturating_sub(offset).min(chunk.len());
+        let b = end.saturating_sub(offset).min(chunk.len());
+        if a < b {
+            output.push_str(&chunk[a..b]);
+        }
+        offset += chunk.len();
+        Ok(())
+    })?;
+    Ok(Some(output))
 }
 
 /// What one streamed pass over a transcript yields.
@@ -456,18 +536,19 @@ struct Pass {
     endpoint: Option<String>,
 }
 
-fn pass(r: &SessionRef) -> Option<Pass> {
-    let adapter = crate::harness::for_harness(r.harness)?;
+fn pass(r: &SessionRef) -> Result<Pass> {
+    let adapter = crate::harness::for_harness(r.harness).context("unsupported lane harness")?;
     let mut p = Pass::default();
     let mut seen = std::collections::HashSet::new();
-    // `extra` on so Claude's `message.id` (the usage dedupe key) is materialized; `spans` off so
-    // text blocks are inline and `Message::text` is safe — content is read per message and dropped.
-    let opts = ParseOptions {
-        extra: true,
-        ..ParseOptions::default()
-    };
-    let session = adapter
-        .stream(r, &opts, &mut |m: Message| {
+    // Keep rich usage metadata and source-backed arguments. Only text is materialized for the
+    // demanded last report; tool summaries and endpoints project their own bounded facts.
+    let opts = ParseOptions::lazy_extra();
+    let resolver = crate::lazy::Resolver::new(Some(r.path.clone()));
+    let session = adapter.try_stream(
+        r,
+        &opts,
+        &mut crate::stream::TryFnSink::new(|mut m: Message| {
+            m.materialize_text(&resolver);
             if m.is_model_visible() && matches!(m.role, Role::User | Role::Assistant) {
                 p.messages += 1;
             }
@@ -499,25 +580,25 @@ fn pass(r: &SessionRef) -> Option<Pass> {
                 for b in &m.content {
                     if let Block::ToolUse { name, input, .. } = b {
                         p.tool_calls += 1;
-                        p.last_tool = Some(tool_summary(name, input));
+                        p.last_tool = Some(tool_summary(name, input)?);
                         // Only the lane's OWN shell commands name its endpoint. An `Agent` prompt
                         // or a `Write`n brief that carries `export CV_ENDPOINT=lane:child` is the
                         // CHILD's export; scanning the whole input joined the parent to it.
                         if p.endpoint.is_none() {
-                            if let Some(cmd) = input.get("command").and_then(Value::as_str) {
-                                p.endpoint = endpoint_in(cmd);
-                            }
+                            p.endpoint = input.with_view(|view| {
+                                view.get("command")?.map(endpoint_from).transpose().map(Option::flatten)
+                            })?;
                         }
                     }
                 }
             }
-            Flow::Continue
-        })
-        .ok()?;
+            Ok(Flow::Continue)
+        }),
+    )?;
     if p.model.is_none() {
         p.model = session.model.clone();
     }
-    Some(p)
+    Ok(p)
 }
 
 /// Resolve the status of one lane from its three possible sources, most authoritative first;
@@ -570,7 +651,7 @@ fn lane_of(
     sub: SubagentInfo,
     notices: &HashMap<String, TaskNotice>,
     ledger: &HashMap<String, DateTime<Utc>>,
-) -> Option<Lane> {
+) -> Result<Lane> {
     let p = pass(&sub.session)?;
     // `subagent_end` reads Claude's jsonl sidecars; other harnesses' child sessions live inside
     // their own stores (a `.db` path here), where a jsonl scan is meaningless.
@@ -603,7 +684,7 @@ fn lane_of(
         .api_error
         .as_ref()
         .filter(|_| matches!(cause, Some("rate-limited" | "context")));
-    Some(Lane {
+    Ok(Lane {
         agent_id,
         session_id: sub.session.id.clone(),
         path: sub.session.path.clone(),
@@ -633,20 +714,58 @@ fn lane_of(
 }
 
 /// Every sub-agent of `parent` as a [`Lane`], **launch order** (oldest first — the order the
-/// orchestrator issued them, which is how a status table reads). Transcripts that fail to parse
-/// are skipped (counted nowhere: one bad file must not hide a fleet).
-pub fn lanes_of(parent: &SessionRef) -> Vec<Lane> {
+/// orchestrator issued them, which is how a status table reads). Read failures are explicit so a
+/// changing or unreadable source cannot silently remove a lane from the forest.
+pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
     let subs = crate::subagent_tree_of(parent);
     let notices = task_notices(&parent.path);
     let ledger = ledger_stops(&read_ledger());
-    let mut lanes = crate::par_filter_map(subs, |s| lane_of(s, &notices, &ledger));
+    let mut lanes = crate::par_filter_map(subs, |s| Some(lane_of(s, &notices, &ledger)))
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
     lanes.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.agent_id.cmp(&b.agent_id)));
-    lanes
+    Ok(lanes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_endpoint_matches_existing_regex_across_decoded_chunks() {
+        let dir = cv_testkit::temp_dir("streamed-lane-endpoint");
+        let path = dir.join("command.json");
+        let mut cases = vec![
+            "CV_ENDPOINT=lane:one".to_string(),
+            "CV_ENDPOINT=lane:/bad; CV_ENDPOINT=lane:good".into(),
+            "CV_ENDPOINT='lane:one/two:three' tail".into(),
+            "CV_ENDPOINT=badCV_ENDPOINT=lane:inner".into(),
+            "CV_ENDPOINT=lane:CV_ENDPOINT=other:later".into(),
+            "CV_ENDPOINT=\"\"lane:no; CV_ENDPOINT=lane:yes".into(),
+            "CV_ENDPOINT={owner}; CV_ENDPOINT=$X; CV_ENDPOINT=lane:real".into(),
+            "CV_ENDPOINT=世界:no".into(),
+        ];
+        for split in 0..20 {
+            cases.push(format!(
+                "{}CV_ENDPOINT=\"lane:chunk/tail\" done",
+                "\t".repeat(65_536 - split)
+            ));
+        }
+        cases.push(format!(
+            "CV_ENDPOINT={} CV_ENDPOINT=lane:after-invalid",
+            "x".repeat(150_000)
+        ));
+        for text in cases {
+            let expected = endpoint_in(&text);
+            let value = serde_json::json!(text);
+            assert_eq!(endpoint_from(crate::json::JsonView::from(&value)).unwrap(), expected);
+            let encoded = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &encoded).unwrap();
+            let source = crate::json::Json::source(&path, 0, encoded.len() as u64).unwrap();
+            assert_eq!(source.with_view(endpoint_from).unwrap(), expected);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn the_three_real_strand_phrasings_match_and_a_report_does_not() {
@@ -823,13 +942,20 @@ mod tests {
     #[test]
     fn tool_summary_picks_the_telling_argument() {
         assert_eq!(
-            tool_summary("Bash", &serde_json::json!({"command": "cargo build", "timeout": 5})),
+            tool_summary(
+                "Bash",
+                &serde_json::json!({"command": "cargo build", "timeout": 5}).into()
+            )
+            .unwrap(),
             "Bash · cargo build"
         );
         assert_eq!(
-            tool_summary("Read", &serde_json::json!({"file_path": "/x/y.rs"})),
+            tool_summary("Read", &serde_json::json!({"file_path": "/x/y.rs"}).into()).unwrap(),
             "Read · /x/y.rs"
         );
-        assert_eq!(tool_summary("TaskStop", &serde_json::json!({})), "TaskStop");
+        assert_eq!(
+            tool_summary("TaskStop", &serde_json::json!({}).into()).unwrap(),
+            "TaskStop"
+        );
     }
 }
