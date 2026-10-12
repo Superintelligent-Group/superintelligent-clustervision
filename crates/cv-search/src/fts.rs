@@ -1376,13 +1376,11 @@ impl<'w> ChunkSink<'w> {
             Block::ToolUse { name, input, .. } => {
                 self.push_chunk(name);
                 self.push_chunk(" ");
-                // Value Display streams serde's compact canonical JSON into fmt::Write. Unlike
-                // to_string, even a single giant string fragment goes straight to bounded docs.
-                if std::fmt::write(&mut JsonChunks::new(self), format_args!("{input}")).is_err()
-                    && !self.failed
-                    && self.err.is_none()
-                {
-                    self.err = Some(anyhow::anyhow!("serializing tool input for search"));
+                // Canonical JSON streams into bounded body documents without owning a value tree.
+                if let Err(error) = input.write_canonical(&mut JsonChunks::new(self)) {
+                    if !self.failed && self.err.is_none() {
+                        self.err = Some(error.context("serializing tool input for search"));
+                    }
                 }
                 self.push_chunk("\n");
             }
@@ -1413,7 +1411,7 @@ impl<'w> ChunkSink<'w> {
     }
 }
 
-/// Formatter fragments are valid UTF-8; the chunk reducer owns splitting and output failures.
+/// Canonical writer fragments are UTF-8; the reducer owns splitting and output failures.
 struct JsonChunks<'a, 'w> {
     sink: &'a mut ChunkSink<'w>,
     preview_chars: usize,
@@ -1428,8 +1426,10 @@ impl<'a, 'w> JsonChunks<'a, 'w> {
         }
     }
 }
-impl std::fmt::Write for JsonChunks<'_, '_> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+impl std::io::Write for JsonChunks<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let s =
+            std::str::from_utf8(bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         // Formatter fragments can split a word. Carry its state across writes so the preview
         // stays identical to extend_preview on the former single serialized string.
         if self.preview_chars < PREVIEW_CHARS {
@@ -1453,11 +1453,14 @@ impl std::fmt::Write for JsonChunks<'_, '_> {
             }
         }
         self.sink.push_body(s);
-        if self.sink.err.is_some() {
-            Err(std::fmt::Error)
+        if self.sink.failed || self.sink.err.is_some() {
+            Err(std::io::Error::other("search document output failed"))
         } else {
-            Ok(())
+            Ok(bytes.len())
         }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1902,64 +1905,56 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
     };
 
     struct Acc {
-        buf: String,
+        head: cv_core::projection::Head,
         resolver: cv_core::Resolver,
-    }
-    impl Acc {
-        /// Append one content text: inline as-is; a span resolved to at most the remaining budget
-        /// (never materialized whole — `resolve_prefix` also keeps a truncated escaped span clean).
-        fn push_text(&mut self, text: &cv_core::Text) {
-            if let Some(sp) = text.as_span() {
-                let remaining = SNIPPET_SCAN_CAP.saturating_sub(self.buf.len()) as u64;
-                if remaining == 0 {
-                    return;
-                }
-                self.buf.push_str(&self.resolver.resolve_prefix(sp, remaining));
-            } else if let Some(s) = text.inline_str() {
-                self.buf.push_str(s);
-            }
-        }
+        error: Option<anyhow::Error>,
     }
     impl MessageSink for Acc {
+        fn take_error(&mut self) -> Result<()> {
+            self.error.take().map_or(Ok(()), Err)
+        }
         fn message(&mut self, m: Message) -> Flow {
-            // Same projection as `Message::append_searchable`, but span-aware.
-            use std::fmt::Write as _;
             for b in &m.content {
+                if self.head.full() {
+                    break;
+                }
                 match b {
                     Block::Text { text } | Block::Thinking { text, .. } => {
-                        self.push_text(text);
-                        self.buf.push('\n');
+                        self.head.push_text(text, &self.resolver);
+                        self.head.push("\n");
                     }
                     Block::ToolUse { name, input, .. } => {
-                        self.buf.push_str(name);
-                        self.buf.push(' ');
-                        let _ = write!(self.buf, "{input}");
-                        self.buf.push('\n');
+                        self.head.push(name);
+                        self.head.push(" ");
+                        if let Err(error) = self.head.push_json(input) {
+                            self.error = Some(error);
+                            return Flow::Stop;
+                        }
+                        self.head.push("\n");
                     }
                     Block::ToolResult { content, .. } => {
-                        self.push_text(content);
-                        self.buf.push('\n');
-                        // Persisted output: scan the sidecar file's head for the snippet too.
+                        self.head.push_text(content, &self.resolver);
+                        self.head.push("\n");
                         if let Some(p) = b.persisted_output_path() {
-                            let remaining = SNIPPET_SCAN_CAP.saturating_sub(self.buf.len());
+                            let remaining = self.head.remaining();
                             if remaining > 0 {
                                 if let Some(t) = cv_core::lazy::read_head(std::path::Path::new(p), remaining) {
-                                    self.buf.push_str(&t);
-                                    self.buf.push('\n');
+                                    self.head.push(&t);
+                                    self.head.push("\n");
                                 }
                             }
                         }
                     }
                     Block::File { path, source, .. } => {
                         if let Some(p) = path.as_deref().or(source.as_deref()) {
-                            self.buf.push_str(p);
-                            self.buf.push('\n');
+                            self.head.push(p);
+                            self.head.push("\n");
                         }
                     }
                     Block::Image { .. } => {}
                 }
             }
-            if self.buf.len() >= SNIPPET_SCAN_CAP {
+            if self.head.full() {
                 Flow::Stop
             } else {
                 Flow::Continue
@@ -1967,11 +1962,12 @@ fn live_snippet(path: &str, harness: &str, query: &str) -> Option<String> {
         }
     }
     let mut acc = Acc {
-        buf: String::new(),
+        head: cv_core::projection::Head::new(SNIPPET_SCAN_CAP),
         resolver: cv_core::Resolver::new(Some(PathBuf::from(path))),
+        error: None,
     };
     cv_core::stream::stream_counted(&*adapter, &sref, &ParseOptions::lazy(), &mut acc).ok()?;
-    Some(make_snippet(&acc.buf, query))
+    Some(make_snippet(acc.head.as_str(), query))
 }
 
 /// Window the body around the first matching query term; fall back to a head if nothing matches.
@@ -2062,7 +2058,7 @@ mod tests {
             &cv_core::Block::ToolUse {
                 id: "call".into(),
                 name: "Edit".into(),
-                input,
+                input: input.into(),
                 namespace: None,
             },
         );
@@ -2072,6 +2068,43 @@ mod tests {
         drop(sink);
         assert!(bodies.len() > 1);
         assert_eq!(bodies.concat(), expected);
+    }
+
+    #[test]
+    fn tool_input_source_json_matches_canonical_body_and_reports_staleness() {
+        let dir = std::env::temp_dir().join(format!("cv-fts-json-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("input.json");
+        let raw = format!("{{\"arg\":\"{}\",\"tail\":true}}", "\\u00e9\\n\\\"".repeat(CHUNK_BYTES));
+        std::fs::write(&path, &raw).unwrap();
+        let input = cv_core::json::Json::source(&path, 0, raw.len() as u64).unwrap();
+        let expected = format!("tool {}\n", serde_json::from_str::<serde_json::Value>(&raw).unwrap());
+        let block = cv_core::Block::ToolUse {
+            id: "call".into(),
+            name: "tool".into(),
+            input,
+            namespace: None,
+        };
+        let f = fields_of(&build_schema()).unwrap();
+        let r = cv_core::SessionRef::new("input", cv_core::Harness::Claude, &path);
+        let mut bodies = Vec::new();
+        let mut out = |doc: TantivyDocument| -> Result<()> {
+            if let Some(body) = doc.get_first(f.body).and_then(|value| value.as_str()) {
+                bodies.push(body.to_owned());
+            }
+            Ok(())
+        };
+        let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
+        sink.append_block(&cv_core::Resolver::new(None), &block);
+        sink.finish().unwrap();
+        drop(sink);
+        assert_eq!(bodies.concat(), expected);
+        std::fs::write(&path, "null").unwrap();
+        let mut ignore = |_doc: TantivyDocument| -> Result<()> { Ok(()) };
+        let mut sink = ChunkSink::new(&mut ignore, &f, &r, 1, 1, Default::default());
+        sink.append_block(&cv_core::Resolver::new(None), &block);
+        assert!(format!("{:#}", sink.finish().unwrap_err()).contains("JSON source changed"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2089,7 +2122,7 @@ mod tests {
             &cv_core::Block::ToolUse {
                 id: "call".into(),
                 name: "Edit".into(),
-                input: serde_json::json!({"content":"x".repeat(8 * CHUNK_BYTES)}),
+                input: serde_json::json!({"content":"x".repeat(8 * CHUNK_BYTES)}).into(),
                 namespace: None,
             },
         );

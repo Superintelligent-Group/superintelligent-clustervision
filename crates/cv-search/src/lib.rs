@@ -17,7 +17,7 @@
 //! Both indexes live under `$CLUSTERVISION_HOME` (or `~/.clustervision`): the tantivy index in
 //! `…/tantivy/` and the embedding store in `…/embeddings.bin`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub mod fts;
@@ -156,13 +156,8 @@ pub(crate) fn stream_corpus(mut f: impl FnMut(Doc) -> Result<()>) -> Result<usiz
             continue;
         };
         let mut sink = DocSink::new(cv_core::Resolver::new(Some(r.path.clone())));
-        let meta = match cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), &mut sink) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("cv-search: parse failed for {} ({}): {e:#}", r.id, r.harness);
-                continue;
-            }
-        };
+        let meta = cv_core::stream::stream_counted(&*adapter, &r, &ParseOptions::lazy(), &mut sink)
+            .with_context(|| format!("reading semantic corpus session {} ({})", r.id, r.harness))?;
         let title = cv_core::label_from(meta.title.as_deref(), sink.first_user_text.as_deref());
         let doc = Doc {
             id: r.id.clone(),

@@ -1,71 +1,11 @@
 //! Bounded semantic body and label projections; no embedding model is needed to test them.
 use cv_core::{Block, Flow, Message, MessageSink, Resolver, Role, Text};
-use std::fmt::{self, Write};
 
 const EMBED_HEAD_BYTES: usize = 64 * 1024;
 const FIRST_USER_RAW_HEAD: u64 = 512;
 const LABEL_CHARS: usize = 73; // label_from reads 72 characters plus one for its ellipsis.
 
-/// A decoded UTF-8 byte prefix. Once a scalar does not fit, later writes cannot skip it.
-/// All text, punctuation, paths, names and streamed JSON formatting share this one budget.
-pub(super) struct Head {
-    text: String,
-    limit: usize,
-    stopped: bool,
-}
-impl Head {
-    fn new(limit: usize) -> Self {
-        Self {
-            text: String::with_capacity(limit),
-            limit,
-            stopped: false,
-        }
-    }
-    fn remaining(&self) -> usize {
-        if self.stopped {
-            0
-        } else {
-            self.limit - self.text.len()
-        }
-    }
-    fn full(&self) -> bool {
-        self.remaining() == 0
-    }
-    fn push(&mut self, text: &str) {
-        if self.full() {
-            return;
-        }
-        let mut end = text.len().min(self.remaining());
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.text.push_str(&text[..end]);
-        self.stopped |= end < text.len();
-    }
-    fn push_text(&mut self, text: &Text, resolver: &Resolver) {
-        if self.full() {
-            return;
-        }
-        // Preserve the existing raw-prefix selection for spans. Decoded malformed UTF-8 may
-        // expand beyond this raw budget, so still apply the final decoded-byte bound.
-        let prefix = text.resolve_prefix(resolver, self.remaining() as u64);
-        self.push(&prefix);
-    }
-    pub(super) fn into_string(self) -> String {
-        self.text
-    }
-}
-impl fmt::Write for Head {
-    fn write_str(&mut self, text: &str) -> fmt::Result {
-        self.push(text);
-        // Stop Value's streaming serializer instead of formatting the unneeded remainder.
-        if self.stopped || self.full() {
-            Err(fmt::Error)
-        } else {
-            Ok(())
-        }
-    }
-}
+use cv_core::projection::Head;
 
 /// Message::text's joining and non-whitespace test, retaining only the label's required chars.
 /// Inline whitespace beyond the head still counts when deciding which user message is first.
@@ -97,6 +37,7 @@ pub(super) struct DocSink {
     pub(super) body: Head,
     pub(super) first_user_text: Option<String>,
     resolver: Resolver,
+    error: Option<anyhow::Error>,
 }
 impl DocSink {
     pub(super) fn new(resolver: Resolver) -> Self {
@@ -104,6 +45,7 @@ impl DocSink {
             body: Head::new(EMBED_HEAD_BYTES),
             first_user_text: None,
             resolver,
+            error: None,
         }
     }
     /// Message::append_searchable's projection, plus persisted-output heads, within one budget.
@@ -121,7 +63,10 @@ impl DocSink {
                     self.body.push(name);
                     self.body.push(" ");
                     if !self.body.full() {
-                        let _ = write!(self.body, "{input}");
+                        if let Err(error) = self.body.push_json(input) {
+                            self.error = Some(error);
+                            return;
+                        }
                     }
                     self.body.push("\n");
                 }
@@ -151,6 +96,12 @@ impl DocSink {
     }
 }
 impl MessageSink for DocSink {
+    fn take_error(&mut self) -> anyhow::Result<()> {
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
     fn message(&mut self, message: Message) -> Flow {
         if self.first_user_text.is_none() && message.role == Role::User {
             let mut label = UserLabel::default();
@@ -164,7 +115,7 @@ impl MessageSink for DocSink {
             }
         }
         self.append_searchable(&message);
-        if self.body.full() && self.first_user_text.is_some() {
+        if self.error.is_some() || (self.body.full() && self.first_user_text.is_some()) {
             Flow::Stop
         } else {
             Flow::Continue
@@ -186,7 +137,7 @@ mod tests {
         Block::ToolUse {
             id: "call".into(),
             name: "tool".into(),
-            input: value,
+            input: value.into(),
             namespace: None,
         }
     }
@@ -232,10 +183,10 @@ mod tests {
         let mut expected = String::new();
         let mut actual = sink();
         for m in &messages {
-            m.append_searchable(&mut expected);
+            m.append_searchable(&mut expected).unwrap();
             actual.message(m.clone());
         }
-        assert_eq!(actual.body.text, expected);
+        assert_eq!(actual.body.as_str(), expected);
         assert_eq!(
             cv_core::label_from(None, actual.first_user_text.as_deref()),
             cv_core::label_from(None, messages[1].text().as_deref())
@@ -244,7 +195,39 @@ mod tests {
             body.bytes()
                 .fold(0u64, |sum, byte| sum.wrapping_mul(31).wrapping_add(byte as u64))
         };
-        assert_eq!(fake_embed(&actual.body.text), fake_embed(&expected));
+        assert_eq!(fake_embed(actual.body.as_str()), fake_embed(&expected));
+    }
+
+    #[test]
+    fn semantic_head_source_json_preserves_prefix_and_reports_changed_source() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-json-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("input.json");
+        let raw = "{\"arg\":\"\\u00e9\\n\\\"\",\"tail\":true}";
+        std::fs::write(&path, raw).unwrap();
+        let json = cv_core::json::Json::source(&path, 0, raw.len() as u64).unwrap();
+        let mut message = message(Role::Assistant, vec![tool(json!(null))]);
+        if let Block::ToolUse { input, .. } = &mut message.content[0] {
+            *input = json;
+        }
+        let mut expected = String::new();
+        message.append_searchable(&mut expected).unwrap();
+        for limit in 0..expected.len() {
+            let mut actual = sink();
+            actual.body = Head::new(limit);
+            actual.message(message.clone());
+            actual.take_error().unwrap();
+            assert_eq!(actual.body.as_str(), prefix(&expected, limit), "limit {limit}");
+        }
+        std::fs::write(&path, "null").unwrap();
+        let mut actual = sink();
+        actual.message(message);
+        assert!(actual
+            .take_error()
+            .unwrap_err()
+            .to_string()
+            .contains("JSON source changed"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -261,14 +244,14 @@ mod tests {
                 Block::ToolUse {
                     id: "call".into(),
                     name: "n".repeat(size),
-                    input: json!(null),
+                    input: json!(null).into(),
                     namespace: None,
                 },
             ] {
                 let mut actual = sink();
                 actual.message(message(Role::User, vec![content]));
-                assert!(actual.body.text.len() <= EMBED_HEAD_BYTES);
-                assert_eq!(actual.body.text.capacity(), EMBED_HEAD_BYTES);
+                assert!(actual.body.len() <= EMBED_HEAD_BYTES);
+                assert_eq!(actual.body.capacity(), EMBED_HEAD_BYTES);
                 assert!(actual
                     .first_user_text
                     .as_ref()
@@ -288,12 +271,12 @@ mod tests {
             ],
         );
         let mut expected = String::new();
-        m.append_searchable(&mut expected);
+        m.append_searchable(&mut expected).unwrap();
         for limit in 0..expected.len() {
             let mut actual = sink();
             actual.body = Head::new(limit);
             actual.message(m.clone());
-            assert_eq!(actual.body.text, prefix(&expected, limit), "limit {limit}");
+            assert_eq!(actual.body.as_str(), prefix(&expected, limit), "limit {limit}");
         }
     }
 
@@ -340,14 +323,14 @@ mod tests {
             Flow::Continue
         ));
         let projected = format!("stub\n{output}\n");
-        assert_eq!(actual.body.text, prefix(&projected, EMBED_HEAD_BYTES));
+        assert_eq!(actual.body.as_str(), prefix(&projected, EMBED_HEAD_BYTES));
         assert!(actual.body.full());
-        let saved = actual.body.text.clone();
+        let saved = actual.body.as_str().to_owned();
         assert!(matches!(
             actual.message(message(Role::User, vec![text("label")])),
             Flow::Stop
         ));
-        assert_eq!(actual.body.text, saved);
+        assert_eq!(actual.body.as_str(), saved);
         assert_eq!(actual.first_user_text.as_deref(), Some("label"));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -374,8 +357,8 @@ mod tests {
             if projected.len() < EMBED_HEAD_BYTES && expected.len() <= EMBED_HEAD_BYTES {
                 projected.push('\n');
             }
-            assert_eq!(actual.body.text, projected);
-            assert!(actual.body.text.len() <= EMBED_HEAD_BYTES);
+            assert_eq!(actual.body.as_str(), projected);
+            assert!(actual.body.len() <= EMBED_HEAD_BYTES);
             assert_eq!(
                 cv_core::label_from(None, actual.first_user_text.as_deref()),
                 expected_label
