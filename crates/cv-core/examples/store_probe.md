@@ -157,3 +157,10 @@ measured separately from ordinary tool/model/path queries.
 generates N Edit calls with distinct absolute paths and model `test`; B is the total decoded
 argument content. Fixed-size arguments across larger N expose query retention. Setting B to
 zero and growing N isolates event/histogram retention without a demanded giant argument.
+
+`check-heap-budget.py ... --only query` compares the production reducer and collector on
+16/64 MiB Claude/Codex histories with fixed 256 KiB arguments. Queries demand the last unique
+target, verify the boolean oracle, and enforce the same 8 MiB / 2 MiB native heap limits.
+The collector's peak is reported as a negative control, without applying the reducer budget
+to its deliberately retained IR. A single giant argument still requires a record-sized Value;
+this gate promises bounded history retention, not lazy argument materialization.

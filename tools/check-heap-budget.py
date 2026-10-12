@@ -164,6 +164,35 @@ def doctors(binary, root, env, baseline=None):
             bound(peaks, STORE_CEILING, STORE_GROWTH, f"doctor {harness} escaped={escaped}")
 
 
+def queries(binary, root, env):
+    """Exercise retained rich histories, while leaving giant argument obligations explicit."""
+    generator = Path(__file__).with_name("perf-fixture.py")
+    for harness in ("claude", "codex"):
+        for escaped in (False, True):
+            peaks = []
+            for size in SIZES:
+                records = size // (256 << 10)
+                command = [sys.executable, str(generator), harness,
+                           str(root / f"query-{harness}-{size}-{escaped}"),
+                           "--payload-bytes", str(size), "--records", str(records), "--shape", "tool-arguments"]
+                if escaped:
+                    command.append("--escaped")
+                manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                # Demand the final record's unique target, refuting an early successful stop.
+                expression = f"tool:edit AND touched:file-{records - 1}.rs AND model:test"
+                common = [harness, manifest["id"], manifest["path"], "--root", manifest["root"], "--query", expression]
+                row, peak = probe(binary, ["query", *common], env, True)
+                reference, collected_peak = probe(binary, ["query-collect", *common], env, True)
+                assert row["detail"] == reference["detail"] and row["detail"]["matches"], "query result changed or final record was skipped"
+                peaks.append(peak)
+                print(json.dumps({"case": f"query-{harness}-{'escaped' if escaped else 'plain'}",
+                                  "decoded_argument_bytes": size, "records": records,
+                                  "physical_input_bytes": manifest["physical_input_bytes"],
+                                  "peak_live_rust_bytes": peak, "collected_peak_live_rust_bytes": collected_peak,
+                                  "matches": row["detail"]["matches"]}), flush=True)
+            bound(peaks, STORE_CEILING, STORE_GROWTH, f"query {harness} escaped={escaped}")
+
+
 def raw_body(path, repeats, malformed):
     block_repeats = 16 << 10
     block = b"x\\n" * block_repeats
@@ -198,7 +227,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "doctor"), help="focused local check; default CI runs stores and chunks")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "doctor", "query"), help="focused local check; default pass runs stores and chunks")
     parser.add_argument("--baseline-probe", type=Path, help="with active/doctor, separately check baseline behavior parity")
     parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
                         help="repeat to focus --only active on selected native formats")
@@ -214,6 +243,8 @@ def main():
         env = dict(os.environ, CLUSTERVISION_HOME=str(catalog))
         if args.only == "doctor":
             doctors(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
+        elif args.only == "query":
+            queries(args.probe.resolve(), root, env)
         elif args.only == "active":
             active_formats(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None, args.format)
         elif args.only != "chunks":
