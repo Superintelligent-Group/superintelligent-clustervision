@@ -17,6 +17,7 @@ struct Key {
     harness: String,
     id: String,
     path: std::path::PathBuf,
+    primary: std::path::PathBuf,
     version: String,
     extra: bool,
     cwd: Option<std::path::PathBuf>,
@@ -27,11 +28,12 @@ struct Key {
 }
 
 impl Key {
-    fn of(r: &SessionRef, version: String, extra: bool) -> Self {
+    fn of(r: &SessionRef, primary: &std::path::Path, version: String, extra: bool) -> Self {
         Self {
             harness: r.harness.as_str().into(),
             id: r.id.clone(),
             path: r.path.clone(),
+            primary: primary.to_path_buf(),
             version,
             extra,
             cwd: r.cwd.clone(),
@@ -42,11 +44,11 @@ impl Key {
         }
     }
 
-    fn admitted(r: &SessionRef, version: String, extra: bool) -> Option<Self> {
+    fn admitted(r: &SessionRef, primary: &std::path::Path, version: String, extra: bool) -> Option<Self> {
         // Readers can use every catalog hint as fallback metadata. Check the borrowed ref before
         // copying it so oversized demanded hints never become temporary cache keys.
-        bounded_size(r)?;
-        Some(Self::of(r, version, extra))
+        bounded_size(&(r, primary))?;
+        Some(Self::of(r, primary, version, extra))
     }
 }
 
@@ -194,7 +196,7 @@ pub(super) fn window(
         let mut sink = window_sink(&primary, start, end, false, ReadSet::default());
         return Ok((adapter.try_stream(r, &opts, &mut sink)?, sink));
     }
-    let key = version.and_then(|version| Key::admitted(r, version, extra));
+    let key = version.and_then(|version| Key::admitted(r, &primary, version, extra));
     let (before, reads) = captured(r, &primary);
     let mut sink = window_sink(&primary, start, end, key.is_some(), reads);
     let mut resumed = false;
@@ -260,7 +262,7 @@ pub(super) fn window(
 
 pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
     let primary = adapter.resume_source(r);
-    let key = Key::admitted(r, format!("{}/api-head1", env!("CARGO_PKG_VERSION")), false);
+    let key = Key::admitted(r, &primary, format!("{}/api-head1", env!("CARGO_PKG_VERSION")), false);
     if let Some(entry) = key.as_ref().and_then(|key| cache.get(key)) {
         if fresh(r, &entry.source, &primary) {
             if let Payload::Head(value) = entry.payload {
@@ -446,12 +448,13 @@ mod tests {
         let world = cv_testkit::World::in_process("api_native_windows");
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
         let mut checked = 0;
-        for harness in [Harness::Claude, Harness::Codex, Harness::KimiCode] {
+        for harness in [Harness::Claude, Harness::Codex, Harness::KimiCode, Harness::Grok] {
             let adapter: Box<dyn Adapter> = match harness {
                 Harness::Claude => Box::new(crate::harness::claude::Claude::with_config_dir(
                     &world.home.join(".claude"),
                 )),
                 Harness::Codex => Box::new(crate::harness::codex::Codex::with_home(&world.home.join(".codex"))),
+                Harness::Grok => Box::new(crate::harness::grok::Grok::with_home(&world.home.join(".grok"))),
                 _ => Box::new(crate::harness::kimi_code::KimiCode::with_home(
                     &world.home.join(".kimi-code"),
                 )),
@@ -473,6 +476,11 @@ mod tests {
                     } else {
                         agent
                     }
+                } else if harness == Harness::Grok {
+                    if file.file_name() != "chat_history.jsonl" {
+                        continue;
+                    }
+                    file.path().parent().unwrap()
                 } else {
                     file.path()
                 };
@@ -590,13 +598,56 @@ mod tests {
             assert_eq!(adapter.0.load(Ordering::Relaxed), i + 1);
         }
         r.title = Some("x".repeat(MAX_ENTRY_BYTES + 1024));
-        assert!(Key::admitted(&r, "head".into(), false).is_none());
+        assert!(Key::admitted(&r, &r.path, "head".into(), false).is_none());
         let prior = cache.entries.lock().unwrap().len();
         for _ in 0..2 {
             assert_eq!(head(&cache, &adapter, &r).unwrap()["title"], json!(r.title));
         }
         assert_eq!(adapter.0.load(Ordering::Relaxed), 8);
         assert_eq!(cache.entries.lock().unwrap().len(), prior);
+    }
+
+    #[test]
+    fn distinct_actual_sources_with_equal_size_and_mtime_do_not_alias() {
+        struct Selected(std::path::PathBuf, AtomicUsize);
+        impl Adapter for Selected {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn resume_source(&self, _: &SessionRef) -> std::path::PathBuf {
+                self.0.clone()
+            }
+            fn stream(&self, r: &SessionRef, _: &ParseOptions, _: &mut dyn MessageSink) -> Result<Session> {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                let mut s = Session::new(&r.id, r.harness);
+                s.title = Some(std::fs::read_to_string(&self.0)?);
+                Ok(s)
+            }
+        }
+        let world = cv_testkit::World::in_process("api_distinct_actual_sources");
+        let r = fixture(&world, 1);
+        let old = world.home.join("old-source");
+        let new = world.home.join("new-source");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&new, "new").unwrap();
+        let modified = std::fs::metadata(&old).unwrap().modified().unwrap();
+        std::fs::File::open(&new)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let first = Selected(old, AtomicUsize::new(0));
+        let second = Selected(new, AtomicUsize::new(0));
+        let cache = Cache::default();
+        assert_eq!(head(&cache, &first, &r).unwrap()["title"], "old");
+        assert_eq!(head(&cache, &second, &r).unwrap()["title"], "new");
+        assert_eq!(head(&cache, &second, &r).unwrap()["title"], "new");
+        assert_eq!(second.1.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -608,7 +659,7 @@ mod tests {
         let cache = Cache::default();
         for i in 0..100 {
             cache.insert(Entry {
-                key: Key::of(&r, format!("head{i}"), false),
+                key: Key::of(&r, &r.path, format!("head{i}"), false),
                 source: source.clone(),
                 payload: Payload::Head(json!("x".repeat(100_000))),
                 bytes: 0,
