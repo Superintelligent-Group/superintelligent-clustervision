@@ -152,3 +152,8 @@ the heap snapshot. Use rich tool arguments and repeated events to measure retain
 large text spans alone do not exercise that distinction. Callback counts are not observed by
 these composed APIs. Compaction predicates have a separate validation pass and should be
 measured separately from ordinary tool/model/path queries.
+
+`perf-fixture.py claude|codex NEW_DIR --shape tool-arguments --records N --payload-bytes B`
+generates N Edit calls with distinct absolute paths and model `test`; B is the total decoded
+argument content. Fixed-size arguments across larger N expose query retention. Setting B to
+zero and growing N isolates event/histogram retention without a demanded giant argument.

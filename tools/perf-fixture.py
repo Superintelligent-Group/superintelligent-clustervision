@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
     parser.add_argument("--entropy", action="store_true", help="Zed only: deterministic low-compressibility payloads")
-    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected"], default="history")
+    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
@@ -38,8 +38,8 @@ def main():
         (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(manifest))
         return
-    if args.shape != "history":
-        parser.error("this harness supports only --shape history")
+    if args.shape != "history" and not (args.shape == "tool-arguments" and args.harness in ("claude", "codex")):
+        parser.error("this harness supports history; Claude/Codex also support tool-arguments")
     sid = "00000000-0000-4000-8000-000000000001"
     stamp = "2026-01-01T00:00:00Z"
     if args.harness == "claude":
@@ -100,7 +100,15 @@ def main():
             f.write("]}\n")
         elif args.harness == "codex":
             line(f, {"type": "session_meta", "timestamp": stamp, "payload": {"id": sid, "timestamp": stamp}})
+            if args.shape == "tool-arguments":
+                line(f, {"type": "turn_context", "timestamp": stamp, "payload": {"cwd": "/perf", "model": "test"}})
             for i in range(args.records):
+                if args.shape == "tool-arguments":
+                    arguments = {"file_path": f"/perf/file-{i}.rs", "content": payload(i)}
+                    line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                        "type": "function_call", "name": "Edit", "call_id": f"c{i}",
+                        "arguments": json.dumps(arguments, separators=(",", ":"))}})
+                    continue
                 for kind, fields in [
                     ("function_call", {"name": "shell", "call_id": f"c{i}", "arguments": '{"command":"true"}'}),
                     ("function_call_output", {"call_id": f"c{i}", "output": payload(i)}),
@@ -109,6 +117,14 @@ def main():
         else:
             parent = None
             for i in range(args.records):
+                if args.shape == "tool-arguments":
+                    uuid = f"m{i}"
+                    line(f, {"type": "assistant", "uuid": uuid, "parentUuid": parent, "sessionId": sid,
+                             "cwd": "/perf", "timestamp": stamp, "message": {"role": "assistant", "model": "test",
+                             "content": [{"type": "tool_use", "id": f"c{i}", "name": "Edit",
+                                          "input": {"file_path": f"/perf/file-{i}.rs", "content": payload(i)}}]}})
+                    parent = uuid
+                    continue
                 for j, (kind, content) in enumerate([
                     ("user", f"prompt {i}"),
                     ("assistant", [{"type": "tool_use", "id": f"c{i}", "name": "Bash", "input": {"command": "true"}}]),
@@ -122,8 +138,9 @@ def main():
         "harness": args.harness, "id": sid, "path": str(path),
         "root": str(path.parent if args.harness == "lmstudio" else root),
         "decoded_payload_bytes": args.payload_bytes, "physical_input_bytes": path.stat().st_size,
-        "records": args.records, "escaped": args.escaped,
-        "expected_messages": (args.records + 1 if args.harness == "lmstudio" else args.records
+        "records": args.records, "escaped": args.escaped, "shape": args.shape,
+        "expected_messages": (args.records if args.shape == "tool-arguments" else
+                              args.records + 1 if args.harness == "lmstudio" else args.records
                               if args.harness == "continue" else args.records * (3 if args.harness == "claude" else 2)),
     }
     (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
