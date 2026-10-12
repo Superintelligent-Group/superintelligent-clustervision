@@ -2817,3 +2817,24 @@ fn task_provisional_resolution_veto_and_confirm() {
     assert_eq!(t["decision"]["resolution"]["choice"], "x");
     assert_eq!(t["decision"]["superseded_provisional"]["by"], "orchestrator:o");
 }
+
+// ───────────────────────────── tools --timeline → cat ─────────────────────────────
+
+/// Every timeline entry carries its call's id, and that id is what `cv cat` takes: on screen and
+/// in `--json`.
+#[test]
+fn timeline_ids_reach_cat() {
+    let w = World::new("timeline-ids");
+    standard_corpus(&w);
+    let (out, _) = w.cv_ok(&["tools", "alphasess", "--timeline", "--json"]);
+    let tl: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(tl.len(), 1, "{out}");
+    let id = tl[0]["tool_use_id"].as_str().unwrap();
+    assert_eq!(id, "t1");
+    let (screen, _) = w.cv_ok(&["tools", "alphasess", "--timeline"]);
+    assert!(screen.contains(" t1 "), "{screen}");
+    let (out, _) = w.cv_ok(&["cat", "alphasess", id]);
+    assert_eq!(out.trim(), "edited ok");
+    let (out, _) = w.cv_ok(&["cat", "alphasess", id, "--input"]);
+    assert!(out.contains("/work/proj/src/widget.rs"), "{out}");
+}

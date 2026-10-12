@@ -352,7 +352,7 @@ cv tools 3b829648 --timeline               # chronological tool-call feed, tagge
 cv tools 3b829648 --json
 ```
 
-`--timeline` is also how you find the `tool_use_id` to hand to [`cv cat`](#cv-cat).
+`--timeline` is also how you find the `tool_use_id` to hand to [`cv cat`](#cv-cat): each line (and each `--json` entry's `tool_use_id`) carries its call's id.
 
 ### `cv workflow`
 

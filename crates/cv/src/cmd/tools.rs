@@ -196,9 +196,11 @@ fn tools_timeline(r: &cv_core::SessionRef, agent: Option<&str>, json: bool) -> R
             target.push_str(&format!(" (+{} more)", e.more_targets.len()));
         }
         println!(
-            "{}  {:8}  {:9}  {:14}  {}",
+            // The id in full: `cv cat` matches it exactly, so a shortened one would not reach it.
+            "{}  {:8}  {}  {:9}  {:14}  {}",
             time,
             who,
+            e.tool_use_id,
             e.kind,
             e.tool.as_deref().unwrap_or("-"),
             target,

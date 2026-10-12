@@ -12,8 +12,8 @@
 //! *results* are never materialized (large outputs stay lazy on disk). One streamed pass per agent.
 
 use crate::events::{self, Event, EventSink};
-use crate::ir::{Message, SessionRef};
-use crate::stream::ParseOptions;
+use crate::ir::{Block, Message, SessionRef};
+use crate::stream::{Flow, MessageSink, ParseOptions};
 use std::collections::BTreeMap;
 
 /// A per-tool tally with the kind breakdown the event classifier assigns.
@@ -134,6 +134,8 @@ pub struct ToolEvent {
     pub msg_idx: usize,
     /// Unix seconds of the call's message, when timestamped.
     pub ts: Option<i64>,
+    /// The call's `tool_use` id: what `cv cat <session> <id>` takes.
+    pub tool_use_id: String,
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
@@ -144,16 +146,57 @@ pub struct ToolEvent {
     pub more_targets: Vec<String>,
 }
 
+/// A sink that classifies each `tool_use` block on its own, so every row is paired with the id of
+/// the call it came from. (The rows themselves are [`events::extract`]'s; results are skipped,
+/// since the timeline is calls.)
+struct CallSink {
+    cwd: Option<std::path::PathBuf>,
+    msg_idx: usize,
+    rows: Vec<(String, Event)>,
+}
+
+impl CallSink {
+    fn new(cwd: Option<std::path::PathBuf>) -> Self {
+        CallSink {
+            cwd,
+            msg_idx: 0,
+            rows: Vec::new(),
+        }
+    }
+}
+
+impl MessageSink for CallSink {
+    fn meta(&mut self, s: &crate::ir::Session) {
+        if self.cwd.is_none() {
+            self.cwd = s.cwd.clone();
+        }
+    }
+
+    fn message(&mut self, m: Message) -> Flow {
+        for b in &m.content {
+            if let Block::ToolUse { id, .. } = b {
+                let mut one = Message::new(m.role);
+                one.timestamp = m.timestamp;
+                one.content = vec![b.clone()];
+                let rows = events::extract(&one, self.msg_idx, self.cwd.as_deref());
+                self.rows.extend(rows.into_iter().map(|e| (id.clone(), e)));
+            }
+        }
+        self.msg_idx += 1;
+        Flow::Continue
+    }
+}
+
 /// One agent's classified rows as timeline entries, one per call: a row that continues a call
 /// ([`Event::call`] false) folds into the entry before it. Error rows are results, not calls.
-fn timeline_calls(agent: &str, evs: Vec<Event>, out: &mut Vec<ToolEvent>) {
+fn timeline_calls(agent: &str, rows: Vec<(String, Event)>, out: &mut Vec<ToolEvent>) {
     let first = out.len();
-    for e in evs {
+    for (id, e) in rows {
         if e.kind == "error" {
             continue;
         }
         if !e.call {
-            if let Some(prev) = out[first..].last_mut().filter(|p| p.msg_idx == e.msg_idx) {
+            if let Some(prev) = out[first..].last_mut().filter(|p| p.tool_use_id == id) {
                 prev.more_targets.extend(e.target);
                 continue;
             }
@@ -162,6 +205,7 @@ fn timeline_calls(agent: &str, evs: Vec<Event>, out: &mut Vec<ToolEvent>) {
             agent: agent.to_string(),
             msg_idx: e.msg_idx,
             ts: e.ts,
+            tool_use_id: id,
             kind: e.kind,
             tool: e.tool,
             target: e.target,
@@ -288,14 +332,14 @@ pub fn forest_timeline(r: &SessionRef) -> anyhow::Result<Vec<ToolEvent>> {
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
     let mut out: Vec<ToolEvent> = Vec::new();
 
-    let mut sink = EventSink::new(r.cwd.clone());
+    let mut sink = CallSink::new(r.cwd.clone());
     adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
-    timeline_calls(ORCHESTRATOR, sink.into_events(), &mut out);
+    timeline_calls(ORCHESTRATOR, sink.rows, &mut out);
 
     for s in crate::subagent_tree_of(r) {
-        let mut sink = EventSink::new(s.session.cwd.clone());
+        let mut sink = CallSink::new(s.session.cwd.clone());
         if adapter.stream(&s.session, &ParseOptions::lazy(), &mut sink).is_ok() {
-            timeline_calls(s.agent_id(), sink.into_events(), &mut out);
+            timeline_calls(s.agent_id(), sink.rows, &mut out);
         }
     }
 
@@ -321,6 +365,12 @@ mod tests {
         let mut m = Message::new(Role::Assistant);
         m.content = blocks;
         m
+    }
+    fn with_id(mut b: Block, call: &str) -> Block {
+        if let Block::ToolUse { id, .. } = &mut b {
+            *id = call.into();
+        }
+        b
     }
     fn tool_use(name: &str, input: serde_json::Value) -> Block {
         Block::ToolUse {
@@ -387,35 +437,41 @@ mod tests {
     }
 
     /// The timeline has one entry per call, the count `cv tools` reports: a three-file patch is one
-    /// line carrying its other files, not three.
+    /// line carrying its other files, not three. Each entry carries its call's id.
     #[test]
     fn timeline_has_one_entry_per_call() {
         let patch = "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** Add File: b.rs\n+z\n\
                      *** Delete File: c.rs\n*** End Patch";
         let msgs = [
             asst(vec![
-                tool_use("shell", json!({"command": ["apply_patch", patch]})),
-                tool_use("apply_patch", json!({"input": patch})),
+                with_id(tool_use("shell", json!({"command": ["apply_patch", patch]})), "c1"),
+                with_id(tool_use("apply_patch", json!({"input": patch})), "c2"),
             ]),
-            asst(vec![tool_use("shell", json!({"command": "ls"}))]),
+            asst(vec![with_id(tool_use("shell", json!({"command": "ls"})), "c3")]),
         ];
-        let cwd = Some(std::path::Path::new("/repo"));
-        let evs: Vec<Event> = msgs
-            .iter()
-            .enumerate()
-            .flat_map(|(i, m)| events::extract(m, i, cwd))
-            .collect();
-        let h = ToolHistogram::from_messages(msgs.iter(), cwd);
+        let cwd = std::path::Path::new("/repo");
+        let mut sink = CallSink::new(Some(cwd.into()));
+        for m in &msgs {
+            sink.message(m.clone());
+        }
+        let h = ToolHistogram::from_messages(msgs.iter(), Some(cwd));
         let mut tl = Vec::new();
-        timeline_calls(ORCHESTRATOR, evs, &mut tl);
+        timeline_calls(ORCHESTRATOR, sink.rows, &mut tl);
         assert_eq!(tl.len(), h.total_calls);
-        let line = |e: &ToolEvent| (e.tool.clone().unwrap(), e.kind, e.more_targets.len());
+        let line = |e: &ToolEvent| {
+            (
+                e.tool_use_id.clone(),
+                e.tool.clone().unwrap(),
+                e.kind,
+                e.more_targets.len(),
+            )
+        };
         assert_eq!(
             tl.iter().map(line).collect::<Vec<_>>(),
             [
-                ("shell".into(), "command", 3),
-                ("apply_patch".into(), "file_edit", 2),
-                ("shell".into(), "command", 0)
+                ("c1".into(), "shell".into(), "command", 3),
+                ("c2".into(), "apply_patch".into(), "file_edit", 2),
+                ("c3".into(), "shell".into(), "command", 0)
             ]
         );
     }

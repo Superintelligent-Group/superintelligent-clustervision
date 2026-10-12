@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv tools --timeline` shows each call's `tool_use_id` (in `--json` too), the id `cv cat <session> <id>` takes.
 - `cv tools --timeline` shows one line per tool call, matching `cv tools` counts; a multi-file patch's other files are in `more_targets`.
 - `cv port --harness qwen` writes Qwen Code 0.25 session JSONL under `~/.qwen/projects`; it wrote the gemini-cli shape 0.25 no longer reads.
 - `cv show <id> --kind plan,schedule,background_job,…` (`affordances` for all) lists plans, goals, schedules, jobs, spawns, skills, hooks and forks across harnesses, side stores included.
