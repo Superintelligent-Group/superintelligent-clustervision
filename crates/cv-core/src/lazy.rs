@@ -266,25 +266,38 @@ impl Resolver {
         }
     }
 
-    /// Feed the span's text to `f` in `chunk`-byte pieces **without materializing the whole field** —
-    /// for unescaped spans the pieces are borrowed straight from the mmap (only touched pages page in,
-    /// and they're reclaimable). Chunk boundaries are kept on char boundaries; if `escaped`, the whole
-    /// field is unescaped once (escapes can't be unescaped piecewise) then chunked. Lets a consumer
-    /// (e.g. the chunked indexer) stream a 700 MB field through a 4 MB window.
+    /// Feed the span's text without materializing the whole field. Pieces end on char boundaries
+    /// and contain at most `chunk` bytes plus the rest of one Unicode scalar. Escaped bodies are
+    /// validated before decoding so malformed JSON retains `resolve`'s raw, lossy fallback.
+    /// The non-mmap path reads through a fixed-size source window, even for unescaped spans.
     pub fn for_each_chunk(&self, sp: &Span, chunk: usize, mut f: impl FnMut(&str)) {
-        let chunk = chunk.max(1);
-        match self.raw_bytes(sp) {
-            None => {}
-            Some(bytes) if sp.escaped => {
-                // Escaped: must unescape as a whole (rare for truly giant fields — those are usually
-                // base64/file dumps without many escapes; unescape only allocates when there ARE
-                // backslashes). Then hand out in char-boundary pieces.
-                let s = unescape_json_body(&bytes);
-                emit_chunks(&s, chunk, &mut f);
+        #[cfg(feature = "mmap")]
+        {
+            if let Some(bytes) = self.raw_bytes(sp) {
+                if !sp.escaped {
+                    if let Ok(s) = std::str::from_utf8(&bytes) {
+                        emit_chunks(s, chunk.max(1), &mut f);
+                        return;
+                    }
+                }
+                let mut reader = std::io::Cursor::new(bytes.as_ref());
+                stream_body(&mut reader, 0, sp.len, sp.escaped, chunk.max(1), &mut f);
             }
-            Some(bytes) => {
-                let s = String::from_utf8_lossy(&bytes);
-                emit_chunks(&s, chunk, &mut f);
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            use std::io::Seek;
+            let Some(path) = self.path_for(sp) else { return };
+            let Ok(file) = std::fs::File::open(path) else { return };
+            let Some(end) = sp.offset.checked_add(sp.len) else {
+                return;
+            };
+            if !file.metadata().is_ok_and(|m| end <= m.len()) {
+                return;
+            }
+            let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+            if reader.seek(std::io::SeekFrom::Start(sp.offset)).is_ok() {
+                stream_body(&mut reader, sp.offset, sp.len, sp.escaped, chunk.max(1), &mut f);
             }
         }
     }
@@ -354,18 +367,224 @@ pub fn json_string_span(raw: &RawValue, within: &[u8], base_off: u64) -> Option<
 /// on the `raw_value` feature surface directly.
 pub use serde_json::value::RawValue;
 
-/// Emit `s` in `chunk`-byte pieces split on char boundaries.
+/// Preserve the zero-allocation mapped path for ordinary UTF-8 spans.
+#[cfg(feature = "mmap")]
 fn emit_chunks(s: &str, chunk: usize, f: &mut impl FnMut(&str)) {
     let mut start = 0;
-    let bytes = s.as_bytes();
     while start < s.len() {
-        let mut end = (start + chunk).min(s.len());
-        while end < s.len() && (bytes[end] & 0xC0) == 0x80 {
-            end += 1; // don't split a UTF-8 continuation byte
+        let mut end = start.saturating_add(chunk).min(s.len());
+        while !s.is_char_boundary(end) {
+            end += 1;
         }
         f(&s[start..end]);
         start = end;
     }
+}
+
+/// Decode using a bounded output buffer and, when necessary, a validation pass. Validation
+/// cannot emit: a malformed escape at EOF makes the existing resolver return the *entire* raw
+/// body, including otherwise valid escapes at its head.
+fn stream_body<R: std::io::BufRead + std::io::Seek>(
+    reader: &mut R,
+    start: u64,
+    len: u64,
+    escaped: bool,
+    chunk: usize,
+    f: &mut impl FnMut(&str),
+) {
+    use std::io::{Read, SeekFrom};
+    let decode = if escaped {
+        let mut body = reader.by_ref().take(len);
+        decode_json_body(&mut body, &mut |_| {}).unwrap_or(false)
+    } else {
+        false
+    };
+    if reader.seek(SeekFrom::Start(start)).is_err() {
+        return;
+    }
+    let mut output = ChunkOutput {
+        text: String::with_capacity(chunk.saturating_add(3)),
+        chunk,
+        f,
+    };
+    let mut body = reader.by_ref().take(len);
+    if decode {
+        let _ = decode_json_body(&mut body, &mut |s| output.push(s));
+    } else {
+        stream_lossy_utf8(&mut body, &mut |s| output.push(s));
+    }
+    output.flush();
+}
+
+struct ChunkOutput<'a, F> {
+    text: String,
+    chunk: usize,
+    f: &'a mut F,
+}
+
+impl<F: FnMut(&str)> ChunkOutput<'_, F> {
+    fn push(&mut self, mut s: &str) {
+        while !s.is_empty() {
+            let mut end = (self.chunk - self.text.len()).min(s.len());
+            while !s.is_char_boundary(end) {
+                end += 1;
+            }
+            self.text.push_str(&s[..end]);
+            s = &s[end..];
+            if self.text.len() >= self.chunk {
+                self.flush();
+            }
+        }
+    }
+
+    fn flush(&mut self) {
+        if !self.text.is_empty() {
+            (self.f)(&self.text);
+            self.text.clear();
+        }
+    }
+}
+
+fn peek_byte(reader: &mut impl std::io::BufRead) -> Option<u8> {
+    reader.fill_buf().ok()?.first().copied()
+}
+
+fn read_byte(reader: &mut impl std::io::BufRead) -> Option<u8> {
+    let byte = peek_byte(reader)?;
+    reader.consume(1);
+    Some(byte)
+}
+
+/// Read exactly one scalar, consuming the same invalid subsequence as `from_utf8_lossy`.
+/// A byte that starts the next scalar is left in the reader, including after an invalid prefix.
+fn read_scalar(reader: &mut impl std::io::BufRead) -> Result<char, ()> {
+    let mut bytes = [0; 4];
+    let mut n = 0;
+    while let Some(byte) = peek_byte(reader) {
+        bytes[n] = byte;
+        n += 1;
+        match std::str::from_utf8(&bytes[..n]) {
+            Ok(s) => {
+                reader.consume(1);
+                return Ok(s.chars().next().unwrap());
+            }
+            Err(e) => match e.error_len() {
+                Some(invalid) => {
+                    if invalid == n {
+                        reader.consume(1);
+                    }
+                    return Err(());
+                }
+                None => reader.consume(1),
+            },
+        }
+    }
+    Err(())
+}
+
+fn stream_lossy_utf8(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) {
+    loop {
+        let Ok(bytes) = reader.fill_buf() else { return };
+        if bytes.is_empty() {
+            return;
+        }
+        let valid = match std::str::from_utf8(bytes) {
+            Ok(s) => {
+                f(s);
+                s.len()
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                // SAFETY: `valid_up_to` is the validated UTF-8 prefix.
+                f(unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) });
+                valid
+            }
+        };
+        reader.consume(valid);
+        if valid == 0 {
+            let scalar = read_scalar(reader).unwrap_or('\u{fffd}');
+            f(scalar.encode_utf8(&mut [0; 4]));
+        }
+    }
+}
+
+/// Strict JSON-body decoder. Unescaped bodies deliberately bypass this validator in
+/// `stream_body`, matching `unescape_json_body` even for raw quotes/control bytes.
+fn decode_json_body(reader: &mut impl std::io::BufRead, f: &mut impl FnMut(&str)) -> Result<bool, ()> {
+    let mut has_escape = false;
+    loop {
+        let bytes = reader.fill_buf().map_err(|_| ())?;
+        if bytes.is_empty() {
+            return Ok(has_escape);
+        }
+        let end = bytes
+            .iter()
+            .position(|&b| b == b'\\' || b == b'"' || b < 0x20)
+            .unwrap_or(bytes.len());
+        let valid = match std::str::from_utf8(&bytes[..end]) {
+            Ok(s) => {
+                f(s);
+                s.len()
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                // SAFETY: `valid_up_to` is the validated UTF-8 prefix.
+                f(unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) });
+                valid
+            }
+        };
+        reader.consume(valid);
+        if valid != 0 {
+            continue;
+        }
+        if end != 0 {
+            let scalar = read_scalar(reader)?;
+            f(scalar.encode_utf8(&mut [0; 4]));
+            continue;
+        }
+        if read_byte(reader) != Some(b'\\') {
+            return Err(());
+        }
+        has_escape = true;
+        let scalar = match read_byte(reader).ok_or(())? {
+            b'"' => '"',
+            b'\\' => '\\',
+            b'/' => '/',
+            b'b' => '\u{0008}',
+            b'f' => '\u{000c}',
+            b'n' => '\n',
+            b'r' => '\r',
+            b't' => '\t',
+            b'u' => {
+                let first = read_hex_quad(reader)?;
+                let code = if (0xd800..0xdc00).contains(&first) {
+                    if read_byte(reader) != Some(b'\\') || read_byte(reader) != Some(b'u') {
+                        return Err(());
+                    }
+                    let second = read_hex_quad(reader)?;
+                    if !(0xdc00..0xe000).contains(&second) {
+                        return Err(());
+                    }
+                    0x10000 + ((first as u32 - 0xd800) << 10) + second as u32 - 0xdc00
+                } else {
+                    first as u32
+                };
+                char::from_u32(code).ok_or(())?
+            }
+            _ => return Err(()),
+        };
+        f(scalar.encode_utf8(&mut [0; 4]));
+    }
+}
+
+fn read_hex_quad(reader: &mut impl std::io::BufRead) -> Result<u16, ()> {
+    let mut value = 0;
+    for _ in 0..4 {
+        let digit = read_byte(reader).ok_or(())?;
+        let digit = (digit as char).to_digit(16).ok_or(())?;
+        value = (value << 4) | digit as u16;
+    }
+    Ok(value)
 }
 
 /// The longest prefix of `raw` (a JSON string body) that ends on a *complete* escape sequence —
@@ -419,6 +638,171 @@ fn unescape_json_body(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chunked_body(raw: &[u8], escaped: bool, input_window: usize, chunk: usize) -> String {
+        let mut reader = std::io::BufReader::with_capacity(input_window, std::io::Cursor::new(raw));
+        let mut result = String::new();
+        stream_body(&mut reader, 0, raw.len() as u64, escaped, chunk.max(1), &mut |s| {
+            assert!(!s.is_empty());
+            assert!(s.len() <= chunk.max(1) + 3, "chunk {chunk}: {s:?}");
+            result.push_str(s);
+        });
+        result
+    }
+
+    #[test]
+    fn chunks_match_serde_across_escape_and_unicode_boundaries() {
+        let mut bodies = vec![
+            r#"\"\\\/\b\f\n\r\t\u0000\u007f\u0080\u07ff\u0800\uffff\uD834\uDD1E"#.to_owned(),
+            r#"\\\\\\\"\\n\n\\u0041\u0041"#.to_owned(),
+            "ASCII é λ 世 😀 mixed".to_owned(),
+            String::new(),
+        ];
+        let source = "quote \" slash \\ controls \u{0000}\u{0008}\u{000c}\n\r\t / é λ 世 😀";
+        let quoted = serde_json::to_string(source).unwrap();
+        bodies.push(quoted[1..quoted.len() - 1].to_owned());
+        for body in bodies {
+            for padding in 0..13 {
+                let body = format!("{}{body}tail", "x".repeat(padding));
+                let expected: String = serde_json::from_str(&format!("\"{body}\"")).unwrap();
+                for window in 1..18 {
+                    for chunk in 0..18 {
+                        assert_eq!(
+                            chunked_body(body.as_bytes(), true, window, chunk),
+                            expected,
+                            "window={window}, chunk={chunk}, body={body:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunks_preserve_malformed_and_lossy_fallback() {
+        let bodies: &[&[u8]] = &[
+            b"good\\nthen\\q",
+            b"good\\nthen\\",
+            b"\\u",
+            b"\\u123",
+            b"\\u12xz",
+            b"\\uD800",
+            b"\\uDC00",
+            b"\\uD800\\u0041",
+            b"\\uD800x\\uDC00",
+            b"good\\nthen\"quote",
+            b"good\\nthen\ncontrol",
+            b"good\\nthen\xff",
+            b"raw\"quote",
+            b"raw\ncontrol",
+            b"\xe1\x80A",
+            b"\xf0\x9f\x92",
+            b"\xed\xa0\x80\\n",
+            b"\xf4\x90\x80\x80",
+            b"\xc0\xaf",
+        ];
+        for raw in bodies {
+            for escaped in [false, true] {
+                let expected = if escaped {
+                    unescape_json_body(raw)
+                } else {
+                    String::from_utf8_lossy(raw).into_owned()
+                };
+                for window in 1..14 {
+                    for chunk in 0..14 {
+                        assert_eq!(
+                            chunked_body(raw, escaped, window, chunk),
+                            expected,
+                            "window={window}, chunk={chunk}, raw={raw:?}, escaped={escaped}"
+                        );
+                    }
+                }
+            }
+        }
+        // Deterministic arbitrary byte sequences exercise lossy subsequence grouping, independent
+        // of the hand-picked malformed JSON cases above.
+        let mut seed = 0x5828_7134u32;
+        for len in 0..64 {
+            for _ in 0..32 {
+                let raw: Vec<u8> = (0..len)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        seed as u8
+                    })
+                    .collect();
+                for escaped in [false, true] {
+                    let expected = if escaped {
+                        unescape_json_body(&raw)
+                    } else {
+                        String::from_utf8_lossy(&raw).into_owned()
+                    };
+                    assert_eq!(chunked_body(&raw, escaped, 3, 2), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolver_chunks_read_only_the_span_and_cross_source_windows() {
+        let dir = std::env::temp_dir().join(format!("cv-lazy-chunks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("body.txt");
+        // Both the fixed non-mmap source window and tiny output windows split escapes/scalars.
+        let raw = format!("{}é\\uD834\\uDD1E\\n{}😀", "a".repeat(65531), "b".repeat(65529));
+        let source = format!("prefix{raw}suffix");
+        std::fs::write(&path, source).unwrap();
+        let resolver = Resolver::new(Some(path));
+        let span = Span {
+            source: None,
+            offset: 6,
+            len: raw.len() as u64,
+            escaped: true,
+        };
+        let expected: String = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
+        for chunk in [0, 1, 2, 3, 7, 65536] {
+            let mut got = String::new();
+            resolver.for_each_chunk(&span, chunk, |s| {
+                assert!(s.len() <= chunk.max(1) + 3);
+                got.push_str(s);
+            });
+            assert_eq!(got, expected);
+        }
+        let invalid = Span {
+            len: source_len(&raw) + 1,
+            ..span.clone()
+        };
+        let mut calls = 0;
+        resolver.for_each_chunk(&invalid, 1, |_| calls += 1);
+        assert_eq!(calls, 0);
+        drop(resolver);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn source_len(raw: &str) -> u64 {
+        // The invalid span starts after "prefix", so include all remaining bytes plus one.
+        raw.len() as u64 + 6
+    }
+
+    #[test]
+    fn chunk_output_capacity_is_independent_of_field_size() {
+        let mut bytes = 0;
+        let mut accept = |s: &str| bytes += s.len();
+        let mut output = ChunkOutput {
+            text: String::with_capacity(10),
+            chunk: 7,
+            f: &mut accept,
+        };
+        let capacity = output.text.capacity();
+        // A giant logical field built from a small source window never grows the output buffer.
+        for _ in 0..1_000_000 {
+            output.push("é😀a");
+            assert_eq!(output.text.capacity(), capacity);
+        }
+        output.flush();
+        assert_eq!(bytes, 7_000_000);
+    }
 
     #[test]
     fn inline_roundtrips_as_string() {
