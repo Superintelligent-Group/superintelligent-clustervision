@@ -1,7 +1,7 @@
 # Store probe
 
 This diagnostic example performs one read-only operation per process on an explicit source.
-It supports Claude, Codex, Gemini, OpenClaw and Continue through their explicit-root constructors. It does not
+It supports Claude, Codex, Gemini, OpenClaw, Continue and LM Studio through explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
 The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
 scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
@@ -22,6 +22,8 @@ cp /tmp/my-probe-target/release/examples/store_probe /tmp/my-probe-heap
 Run `OP HARNESS ID PATH`, optionally `--root DIR`, `--mode lazy|bulk|full|complete` and
 `--materialize`. The default mode is lazy. The root defaults to the input's parent; for discovery
 pass the config/runtime root explicitly (`projects/`, `sessions/`, or `tmp/` lives beneath it).
+Continue expects its global directory containing `sessions/`; LM Studio expects the conversations
+directory containing `*.conversation.json` itself. OpenClaw expects its state directory.
 
 | Operation | Work measured |
 |---|---|

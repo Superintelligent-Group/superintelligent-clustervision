@@ -129,7 +129,7 @@ fn args() -> Result<Args> {
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|bulk|full|complete] \
                  [--materialize] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
                  OP: baseline|discard|count|collect|window|affordances|affordance-read|hash|discover|chunks\n\
-                 HARNESS: claude|codex|gemini|openclaw|continue; use scratch CLUSTERVISION_HOME"
+                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ => positional.push(arg),
@@ -178,8 +178,9 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
         Harness::Gemini => Box::new(cv_core::harness::gemini::Gemini::with_home(&a.root)),
         Harness::OpenClaw => Box::new(cv_core::harness::openclaw::OpenClaw::with_state_dir(&a.root)),
         Harness::Continue => Box::new(cv_core::harness::continuedev::Continue::with_root(&a.root)),
+        Harness::LmStudio => Box::new(cv_core::harness::lmstudio::LmStudio::with_root(&a.root)),
         _ => {
-            bail!("probe supports claude, codex, gemini, openclaw and continue; use explicit-root constructors when extending it")
+            bail!("probe supports claude, codex, gemini, openclaw, continue and lmstudio; use explicit-root constructors when extending it")
         }
     })
 }
