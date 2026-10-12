@@ -70,7 +70,7 @@ def stores(binary, root, env):
             bound(peaks, STORE_CEILING, STORE_GROWTH, f"{harness} shape={shape} escaped={escaped}")
 
 
-def active_formats(binary, root, env, baseline=None, formats=None):
+def active_formats(binary, root, env, baseline=None, formats=None, mmap=True):
     """Bound discarded history/unrelated bodies; selected giant output is deliberately excluded."""
     generator = Path(__file__).with_name("perf-fixture.py")
     cases = (("cline-sdk", "history"), ("opensession", "history"),
@@ -99,20 +99,23 @@ def active_formats(binary, root, env, baseline=None, formats=None):
                     catalog = root / f"catalog-{format_name}-{size}-{escaped}-{operation}"
                     catalog.mkdir()
                     case_env = dict(env, CLUSTERVISION_HOME=str(catalog))
-                    row, peak = probe(binary, [operation, *common], case_env, True)
+                    row, peak = probe(binary, [operation, *common], case_env, mmap)
                     if operation == "discard":
                         assert row["messages"] == manifest["expected_messages"], "truncated or skipped source"
                     else:
                         assert row["detail"]["discovered_sessions"] == manifest["expected_discovered_sessions"], "missing discovered session"
                     peaks[operation].append(peak)
                     print(json.dumps({"case": f"{format_name}-{shape}-{operation}-{'escaped' if escaped else 'plain'}",
+                                      "backend": "mmap" if mmap else "positioned",
                                       "decoded_payload_bytes": size, "selected_payload_bytes": manifest["selected_payload_bytes"],
                                       "physical_input_bytes": manifest["physical_input_bytes"], "messages": row["messages"],
                                       "decoded_document_bytes": manifest.get("decoded_document_bytes"),
                                       "compressed_blob_bytes": manifest.get("compressed_blob_bytes"),
                                       "peak_live_rust_bytes": peak}), flush=True)
             for operation, operation_peaks in peaks.items():
-                bound(operation_peaks, STORE_CEILING, STORE_GROWTH, f"{format_name} {shape} {operation} escaped={escaped}")
+                bound(operation_peaks, STORE_CEILING if mmap else 2 * MIB,
+                      STORE_GROWTH if mmap else MIB // 4,
+                      f"{format_name} {shape} {operation} mmap={mmap} escaped={escaped}")
             if baseline:
                 # Fidelity runs remain separate from allocation probes and use small payloads.
                 command = [sys.executable, str(generator), format_name,
@@ -126,7 +129,7 @@ def active_formats(binary, root, env, baseline=None, formats=None):
                 common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
                 for mode in ("lazy", "full"):
                     left, _ = probe(baseline, ["hash", *common, "--mode", mode], env, True)
-                    right, _ = probe(binary, ["hash", *common, "--mode", mode], env, True)
+                    right, _ = probe(binary, ["hash", *common, "--mode", mode], env, mmap)
                     assert left["messages"] == right["messages"] == manifest["expected_messages"], "fidelity count differs"
                     assert left["detail"] == right["detail"], f"{format_name}: resolved content or metadata changed ({mode})"
                 refs = []
@@ -134,7 +137,7 @@ def active_formats(binary, root, env, baseline=None, formats=None):
                     catalog = root / f"parity-catalog-{format_name}-{escaped}-{label}"
                     catalog.mkdir()
                     row, _ = probe(comparison_binary, ["discover", *common, "--hash-output"],
-                                   dict(env, CLUSTERVISION_HOME=str(catalog)), True)
+                                   dict(env, CLUSTERVISION_HOME=str(catalog)), True if label == "baseline" else mmap)
                     refs.append(row["detail"])
                 assert refs[0] == refs[1], f"{format_name}: discovered metadata changed"
 
@@ -246,6 +249,39 @@ def events(binary, root, env):
     assert peaks["events-collected"][1] > peaks["events-collected"][0] + 16 * MIB, "retained control must grow with history"
 
 
+def token_stats(binary, root, env, mmap, baseline=None):
+    """Bound usage history and exact dedup, preserving independent provider token arithmetic."""
+    generator = Path(__file__).with_name("perf-fixture.py")
+    for harness in ("claude", "codex"):
+        peaks = []
+        for calls in (16_000, 64_000):
+            name = f"stats-{harness}-{calls}-{mmap}"
+            manifest = json.loads(subprocess.check_output(
+                [sys.executable, str(generator), harness, str(root / name),
+                 "--shape", "usage", "--records", str(calls)], env=env, text=True))
+            catalog, temporary = root / f"catalog-{name}", root / f"temporary-{name}"
+            catalog.mkdir()
+            temporary.mkdir()
+            case_env = dict(env, CLUSTERVISION_HOME=str(catalog), TMPDIR=str(temporary), RAYON_NUM_THREADS="2")
+            common = [harness, manifest["id"], manifest["path"], "--root", manifest["root"]]
+            row, peak = probe(binary, ["token-stats", *common], case_env, mmap)
+            detail = row["detail"]
+            assert (detail["sessions"], detail["subagents"], detail["failed"]) == (1, 0, 0), "usage source was skipped"
+            assert detail["duplicates"] == manifest["expected_duplicates"], "response-ID precedence changed"
+            assert {key: detail["total"][key] for key in manifest["expected_totals"]} == manifest["expected_totals"], "token arithmetic changed"
+            assert len(detail["by_model"]) == len(detail["by_harness"]) == 1, "model/provider aggregation changed"
+            assert not list(temporary.iterdir()), "token staging leaked its owned temporary files"
+            peaks.append(peak)
+            if baseline:
+                reference, _ = probe(baseline, ["token-stats", *common], case_env, True)
+                assert detail == reference["detail"], "old/new token reports differ"
+            print(json.dumps({"case": f"token-stats-{harness}-{'mmap' if mmap else 'buffered'}",
+                              "calls": calls, "records": manifest["records"],
+                              "physical_input_bytes": manifest["physical_input_bytes"],
+                              "peak_live_rust_bytes": peak, "duplicates": detail["duplicates"]}), flush=True)
+        bound(peaks, 2 * MIB, MIB // 4, f"token stats {harness} mmap={mmap}")
+
+
 def raw_body(path, repeats, malformed):
     block_repeats = 16 << 10
     block = b"x\\n" * block_repeats
@@ -280,15 +316,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "doctor", "query", "events"), help="focused local check; default pass runs stores and chunks")
-    parser.add_argument("--baseline-probe", type=Path, help="with active/doctor, separately check baseline behavior parity")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "doctor", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
+    parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/stats, separately check baseline behavior parity")
     parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
                         help="repeat to focus --only active on selected native formats")
     args = parser.parse_args()
-    if args.format and args.only != "active":
-        parser.error("--format applies only to --only active")
-    if args.baseline_probe and args.only not in ("active", "doctor"):
-        parser.error("--baseline-probe applies only to active/doctor checks")
+    if args.format and args.only not in ("active", "portable-docs"):
+        parser.error("--format applies only to active/portable-docs")
+    portable_formats = ("cline-sdk", "opensession", "chatgpt-export", "claude-export")
+    if args.only == "portable-docs" and any(f not in portable_formats for f in args.format or []):
+        parser.error("portable-docs supports only document formats")
+    if args.baseline_probe and args.only not in ("active", "doctor", "stats"):
+        parser.error("--baseline-probe applies only to active/doctor/stats checks")
     with tempfile.TemporaryDirectory(prefix="cv-heap-budget-") as temporary:
         root = Path(temporary)
         catalog = root / "catalog"
@@ -300,6 +339,13 @@ def main():
             queries(args.probe.resolve(), root, env)
         elif args.only == "events":
             events(args.probe.resolve(), root, env)
+        elif args.only == "stats":
+            baseline = args.baseline_probe.resolve() if args.baseline_probe else None
+            token_stats(args.probe.resolve(), root, env, True, baseline)
+            token_stats(args.no_mmap_probe.resolve(), root, env, False)
+        elif args.only == "portable-docs":
+            active_formats(args.no_mmap_probe.resolve(), root, env, args.probe.resolve(),
+                           args.format or portable_formats, mmap=False)
         elif args.only == "active":
             active_formats(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None, args.format)
         elif args.only != "chunks":

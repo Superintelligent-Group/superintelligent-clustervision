@@ -4,6 +4,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -36,6 +37,26 @@ class DriverTests(unittest.TestCase):
     def test_size_dependent_growth_is_rejected(self):
         with self.assertRaisesRegex(AssertionError, "grows with source size"):
             budget.bound([budget.MIB, 4 * budget.MIB], 8 * budget.MIB, 2 * budget.MIB, "source")
+
+    def sqlite_driver(self):
+        # Import the actual command under Python -I without relying on ambient module paths.
+        tools = Path(__file__).parent
+        schema_spec = importlib.util.spec_from_file_location("perf_fixture_sqlite", tools / "perf_fixture_sqlite.py")
+        schema = importlib.util.module_from_spec(schema_spec)
+        schema_spec.loader.exec_module(schema)
+        driver_spec = importlib.util.spec_from_file_location("sqlite_budget", tools / "perf-sqlite-check.py")
+        driver = importlib.util.module_from_spec(driver_spec)
+        with patch.dict(sys.modules, {"perf_fixture_sqlite": schema}):
+            driver_spec.loader.exec_module(driver)
+        return driver
+
+    def test_sqlite_clean_binary_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "probe-heap"):
+            self.sqlite_driver().checked_peak({"build_features": {"mmap": True, "probe_heap": False}})
+
+    def test_sqlite_missing_counter_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "heap counters"):
+            self.sqlite_driver().checked_peak({"build_features": {"mmap": True, "probe_heap": True}})
 
 
 if __name__ == "__main__":
