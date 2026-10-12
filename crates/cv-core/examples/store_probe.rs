@@ -496,10 +496,12 @@ fn main() -> Result<()> {
     let a = args()?;
     // Production affordance::read can persist counts, and discovery cache initialization opens
     // a writable catalog. Keep composed operations faithful with an explicitly isolated catalog.
-    if a.warm_discover || matches!(
-        a.operation.as_str(),
-        "affordance-read" | "discover" | "events" | "events-collected"
-    ) {
+    if a.warm_discover
+        || matches!(
+            a.operation.as_str(),
+            "affordance-read" | "discover" | "events" | "events-collected"
+        )
+    {
         let home = std::fs::canonicalize(
             std::env::var_os("CLUSTERVISION_HOME").context("this operation requires scratch CLUSTERVISION_HOME")?,
         )
