@@ -24,7 +24,7 @@ From qwen-code v0.25.1 (`packages/core/src/tools/tool-names.ts`, `services/chatR
 | teams | `team_create`, `send_message`, `team_plan_approval`, `request_shutdown` | session | `team_create` only (the model called it) | ToolUse |
 | sub-agents | `agent` (via `tool_call`); `subagents/<parent>/agent-<id>.jsonl` (`isSidechain`) + `.meta.json` | files | yes | SubagentSpawn / SubagentReturn; child `lineage.parent`, `spawned_by_tool_use`, `agent_path` |
 | sub-sessions, workflows, arena | `create_sub_session`, `workflow`, `/arena` | session / `projects/<cwd>/workflows/` | no (budget) | — |
-| cron / loops | `cron_create`/`cron_list`/`cron_delete`, `loop_wakeup`; `tmp/<hash>/scheduled_tasks.json`; a fired job is a `user` record `subtype: cron` | session + file | create/list yes; no fire (the process exits first) | ToolUse; a fire would be InjectedContext (Scheduler) |
+| cron / loops | `cron_create`/`cron_list`/`cron_delete`, `loop_wakeup`; `tmp/<hash>/scheduled_tasks.json`; a fired job is a `user` record `subtype: cron` | session + file | create/list yes; no fire (the process exits first) | ToolUse; each job a `schedule`/`state` row for its owner (`sessionId`) or the session live at `createdAt`; a fire would be InjectedContext (Scheduler) |
 | goals | `/goal` → `goal_state` system records, `goal_runtime` user/tool_result records, `get_goal`/`update_goal` | session | yes | Notice `[goal create] …`; InjectedContext |
 | plan mode | `--approval-mode plan`, `exit_plan_mode` | session | the plan turn only; `exit_plan_mode` is not offered headless | Reply |
 | skills | `skill`; `~/.qwen/skills/` | session | yes | ToolUse |

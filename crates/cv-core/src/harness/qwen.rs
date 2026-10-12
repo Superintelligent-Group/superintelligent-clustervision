@@ -112,6 +112,78 @@ impl Adapter for Qwen {
         // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
         crate::harness::gemini::stream_for(Harness::Qwen, r, opts, sink)
     }
+
+    /// The cron jobs `cron_create` persists per project in `tmp/<sha256(cwd)>/scheduled_tasks.json`
+    /// ([`scheduled_tasks`]), for a session JSONL.
+    fn store_affordances(&self, r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+        scheduled_tasks(r)
+    }
+}
+
+/// The project's scheduled tasks that belong to `r`: one `schedule`/`state` row per job. A job
+/// names its session only when one owns it (`sessionId`, `qwen serve`); a job the `cron_create`
+/// tool made names none, so it belongs to the session that was live when it was created
+/// (`createdAt` inside the session's first..last record). The file is per project
+/// (`Storage.getGlobalTempDir()/getProjectHash(cwd)`, the sha256 of the cwd), so sub-agent
+/// transcripts, which share their parent's window, take none.
+fn scheduled_tasks(r: &SessionRef) -> Vec<crate::affordance::Affordance> {
+    use crate::affordance::{Affordance, Kind};
+    let chats = r.path.parent();
+    if chats.and_then(Path::file_name).is_none_or(|n| n != "chats") {
+        return Vec::new();
+    }
+    let Some(qwen_dir) = chats
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    else {
+        return Vec::new();
+    };
+    let Some(cwd) = r.cwd.as_ref().and_then(|c| c.to_str()) else {
+        return Vec::new();
+    };
+    let file = qwen_dir
+        .join("tmp")
+        .join(crate::digest::sha256_hex(cwd.as_bytes()))
+        .join("scheduled_tasks.json");
+    let Some(Value::Array(tasks)) = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    let window = r.created_at.zip(r.updated_at);
+    let ours = |task: &Value| match task.get("sessionId").and_then(Value::as_str) {
+        Some(owner) => owner == r.id,
+        None => {
+            let created = task
+                .get("createdAt")
+                .and_then(Value::as_i64)
+                .and_then(chrono::DateTime::from_timestamp_millis);
+            matches!((created, window), (Some(c), Some((from, to))) if from <= c && c <= to)
+        }
+    };
+    tasks
+        .iter()
+        .filter(|t| ours(t))
+        .map(|t| {
+            let s = |k: &str| t.get(k).and_then(Value::as_str).unwrap_or("");
+            let mut summary = [s("id"), s("cron"), s("prompt")]
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            if t.get("recurring").and_then(Value::as_bool) == Some(true) {
+                summary.push_str(" · recurring");
+            }
+            Affordance::store(
+                Kind::Schedule,
+                "scheduled_tasks.json",
+                truncate(&summary, 120),
+                Vec::new(),
+            )
+        })
+        .collect()
 }
 
 /// Whether a file under `~/.qwen/tmp` is one of the gemini-cli shapes: `logs.json`, a chat recording
@@ -635,6 +707,36 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
     use std::fs;
+
+    /// A job names its owner (`qwen serve`) or, made by `cron_create`, belongs to the session live
+    /// when it was created; sub-agent transcripts take none.
+    #[test]
+    fn scheduled_tasks_go_to_their_owner_or_the_live_session() {
+        let home = std::env::temp_dir().join(format!("cv-qwen-cron-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let tmp = home.join("tmp").join(crate::digest::sha256_hex(b"/p"));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("scheduled_tasks.json"),
+            serde_json::json!([
+                {"id": "own", "cron": "0 9 * * *", "prompt": "a", "sessionId": "s1", "createdAt": 0},
+                {"id": "theirs", "cron": "0 9 * * *", "prompt": "b", "sessionId": "s2", "createdAt": 1_500},
+                {"id": "made", "cron": "*/5 * * * *", "prompt": "c", "recurring": true, "createdAt": 1_500},
+                {"id": "later", "cron": "0 0 * * *", "prompt": "d", "createdAt": 9_000},
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let at = |ms| chrono::DateTime::from_timestamp_millis(ms);
+        let mut r = SessionRef::new("s1", Harness::Qwen, home.join("projects/-p/chats/s1.jsonl"));
+        r.cwd = Some(PathBuf::from("/p"));
+        (r.created_at, r.updated_at) = (at(1_000), at(2_000));
+        let got: Vec<String> = scheduled_tasks(&r).into_iter().map(|a| a.summary).collect();
+        assert_eq!(got, ["own · 0 9 * * * · a", "made · */5 * * * * · c · recurring"]);
+        r.path = home.join("projects/-p/subagents/s1/agent-x.jsonl");
+        assert!(scheduled_tasks(&r).is_empty());
+        let _ = fs::remove_dir_all(&home);
+    }
 
     /// Parse Qwen session text by delegating to the (identical) Gemini parser, then re-tag every
     /// resulting session as [`Harness::Qwen`] — the pure-text mirror of what the adapter's on-disk

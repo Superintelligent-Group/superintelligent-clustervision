@@ -193,16 +193,20 @@ echo "model calls: $CALLS"
 # the legacy tmp/ if any. Not settings, installation ids, usage logs, the extension store, or our
 # hook/skill/command inputs. The project dir name is the sanitized cwd (every non-alphanumeric byte
 # a dash), which carries the throwaway path: rename it to the sanitized placeholder path and rewrite
-# that spelling inside the files, before the scrub rewrites the slash-separated spellings.
+# that spelling inside the files, before the scrub rewrites the slash-separated spellings. The tmp/
+# dir name is the project hash (sha256 of the cwd, `getProjectHash`): it becomes the placeholder
+# path's hash, so a reader can still find `scheduled_tasks.json` from the scrubbed cwd.
 mkdir -p "$OUT/.qwen"
 [ -d "$QDIR/projects" ] && cp -R "$QDIR/projects" "$OUT/.qwen/"
 [ -d "$QDIR/tmp" ] && cp -R "$QDIR/tmp" "$OUT/.qwen/"
 python3 -I - "$OUT/.qwen" "$PROJECT" "$CORPUS_HOME" "$WORK" <<'PY'
-import os, re, sys
+import hashlib, os, re, sys
 root, project, home, work = sys.argv[1:5]
 san = lambda p: re.sub(r"[^a-zA-Z0-9]", "-", p)
+sha = lambda p: hashlib.sha256(p.encode()).hexdigest()
 pairs = []
 for base in {work, os.path.realpath(work), work.replace("/private/", "/", 1)}:
+    pairs += [(sha(project.replace(work, base, 1)), sha("/home/corpus/project"))]
     pairs += [(san(project.replace(work, base, 1)), san("/home/corpus/project")),
               (san(home.replace(work, base, 1)), san("/home/corpus")), (san(base), san("/home/corpus/.work"))]
 pairs.sort(key=lambda p: -len(p[0]))

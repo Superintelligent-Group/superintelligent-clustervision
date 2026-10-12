@@ -245,7 +245,8 @@
       "affordances": {
         "approval/state": 1,
         "schedule/create": 1,
-        "schedule/list": 1
+        "schedule/list": 1,
+        "schedule/state": 1
       },
       "lineage": {},
       "model": "glm-5.3-flash",

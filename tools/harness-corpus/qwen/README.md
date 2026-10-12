@@ -34,7 +34,9 @@ model switch (`-m glm-4.7-flash`: the name recorded; the proxy still answers wit
 `projects/` (session JSONL, sub-agent transcripts and their `.meta.json`, per-project memory and meta)
 and `tmp/` (background shell output, `scheduled_tasks.json`, the legacy gemini-cli shape if any). The
 project dir name is the sanitized cwd, which spells the throwaway path with dashes: the generator renames
-it to `-home-corpus-project` and rewrites that spelling inside the files before the scrub. Not copied:
+it to `-home-corpus-project` and rewrites that spelling inside the files before the scrub; the `tmp/` project
+hash (sha256 of the cwd) becomes the placeholder's hash the same way (0.25.1's dir was renamed after the
+fact, its one in-file mention rewritten). Not copied:
 settings, installation ids, `usage_record.jsonl`, `usage/`, the extension store, `~/.qwen/memories/`.
 
 ## Size
