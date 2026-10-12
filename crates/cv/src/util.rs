@@ -235,6 +235,7 @@ fn next_index(n: &str) -> String {
 }
 
 /// Clamp a `[start, end)` window to `len` messages (a past-the-end window is empty, never a panic).
+#[cfg(test)]
 pub(crate) fn clamp(range: (usize, Option<usize>), len: usize) -> (usize, usize) {
     let end = range.1.unwrap_or(len).min(len);
     (range.0.min(end), end)

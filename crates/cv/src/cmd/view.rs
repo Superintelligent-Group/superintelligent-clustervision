@@ -2,8 +2,8 @@
 //! plus the streaming renderer (`stream_session_render`) and its header/message helpers.
 
 use crate::util::{
-    clamp, continue_hint, count_messages, home_rel, parse_harness, resolve, resolve_found, short_id, split_harness_id,
-    usage, Window, WindowArgs,
+    continue_hint, count_messages, home_rel, parse_harness, resolve, resolve_found, short_id, split_harness_id, usage,
+    Window, WindowArgs,
 };
 use anyhow::{bail, Context, Result};
 use cv_core::ir::{truncate, Block, Harness, Message, MessageKind, Role, Session, SessionRef};
@@ -271,6 +271,104 @@ fn show_range(r: &SessionRef, window: &WindowArgs, pre_compaction: Option<usize>
     Ok(Some(Window::Range(start, Some(end))))
 }
 
+/// Collect a full-fidelity JSON window while reading through EOF for final session metadata.
+/// Discarded messages die in the sink; `Last` keeps only its bounded tail. Full options are
+/// intentional: some adapters' lazy path omits extra fields the JSON contract must preserve.
+fn session_json_window(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    window: Option<Window>,
+    max_bytes: Option<usize>,
+) -> Result<(Session, Option<usize>)> {
+    struct Selection {
+        resolver: cv_core::Resolver,
+        seen: usize,
+        start: usize,
+        end: Option<usize>,
+        tail: Option<usize>,
+        messages: std::collections::VecDeque<Message>,
+        max_bytes: Option<usize>,
+        bytes: usize,
+        next: Option<usize>,
+        error: Option<serde_json::Error>,
+    }
+    impl Selection {
+        fn keep(&mut self, mut m: Message, index: usize) {
+            if self.next.is_some() || self.error.is_some() {
+                return;
+            }
+            m.materialize(&self.resolver);
+            if let Some(budget) = self.max_bytes {
+                match serde_json::to_vec(&m) {
+                    Ok(v) => {
+                        if !self.messages.is_empty() && self.bytes + v.len() > budget {
+                            self.next = Some(index);
+                            return;
+                        }
+                        self.bytes += v.len();
+                    }
+                    Err(e) => {
+                        self.error = Some(e);
+                        return;
+                    }
+                }
+            }
+            self.messages.push_back(m);
+        }
+    }
+    impl cv_core::MessageSink for Selection {
+        fn message(&mut self, m: Message) -> cv_core::Flow {
+            let index = self.seen;
+            self.seen += 1;
+            if let Some(n) = self.tail {
+                if n > 0 {
+                    self.messages.push_back(m);
+                    if self.messages.len() > n {
+                        self.messages.pop_front();
+                    }
+                }
+            } else if index >= self.start && self.end.is_none_or(|end| index < end) {
+                self.keep(m, index);
+            }
+            // Even past the selected window, read session facts written later in the source.
+            cv_core::Flow::Continue
+        }
+    }
+    let (start, end, tail) = match window {
+        Some(Window::Last(n)) => (0, None, Some(n)),
+        Some(w) => {
+            let (start, end) = w.bounds(|| unreachable!("Last is handled by the tail"))?;
+            (start, end, None)
+        }
+        None => (0, None, None),
+    };
+    let mut sink = Selection {
+        resolver: cv_core::Resolver::new(Some(r.path.clone())),
+        seen: 0,
+        start,
+        end,
+        tail,
+        messages: Default::default(),
+        max_bytes,
+        bytes: 0,
+        next: None,
+        error: None,
+    };
+    let mut session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::full(), &mut sink)?;
+    if sink.tail.is_some() {
+        let start = sink.seen - sink.messages.len();
+        for (i, m) in std::mem::take(&mut sink.messages).into_iter().enumerate() {
+            sink.keep(m, start + i);
+        }
+    }
+    if let Some(e) = sink.error {
+        return Err(e.into());
+    }
+    session.messages = sink.messages.into_iter().collect();
+    session.materialize();
+    Ok((session, sink.next))
+}
+
 /// `show --json` / `export --format json`: the whole IR (incl. `extra`), windowed, and — under
 /// `--max-bytes` — cut at the budget with the continuation hint on **stderr** (stdout stays JSON).
 ///
@@ -287,29 +385,10 @@ fn print_session_json(
     as_document: bool,
     redact: Option<&cv_core::redact::RedactOptions>,
 ) -> Result<cv_core::redact::RedactStats> {
-    let mut session = adapter.parse(r)?;
-    let range = window.map(|w| w.bounds(|| Ok(session.messages.len()))).transpose()?;
+    let (mut session, next) = session_json_window(adapter, r, window, max_bytes)?;
     let mut stats = cv_core::redact::RedactStats::default();
-    let start = range.map(|(s, _)| s).unwrap_or(0);
-    if let Some(rg) = range {
-        let (s, e) = clamp(rg, session.messages.len());
-        session.messages = session.messages.drain(s..e).collect();
-    }
-    if let Some(budget) = max_bytes {
-        let mut bytes = 0usize;
-        let mut keep = 0usize;
-        for (i, m) in session.messages.iter().enumerate() {
-            let n = serde_json::to_vec(m)?.len();
-            if keep > 0 && bytes + n > budget {
-                break;
-            }
-            bytes += n;
-            keep = i + 1;
-        }
-        if keep < session.messages.len() {
-            eprintln!("{}", continue_hint(start + keep));
-            session.messages.truncate(keep);
-        }
+    if let Some(next) = next {
+        eprintln!("{}", continue_hint(next));
     }
     if let Some(opts) = redact {
         let (clean, st) = cv_core::redact::redact_with(&session, opts);
@@ -1265,6 +1344,150 @@ fn md_message(m: &Message) -> String {
 mod tests {
     use super::*;
 
+    /// Independent oracle: the original full parse, then slice, then apply the byte budget.
+    fn full_json_window(
+        adapter: &dyn Adapter,
+        r: &SessionRef,
+        window: Option<Window>,
+        budget: Option<usize>,
+    ) -> (Session, Option<usize>) {
+        let mut session = adapter.parse(r).unwrap();
+        let range = window.map(|w| w.bounds(|| Ok(session.messages.len())).unwrap());
+        let start = range.map(|(start, _)| start).unwrap_or(0);
+        if let Some(range) = range {
+            let (start, end) = crate::util::clamp(range, session.messages.len());
+            session.messages = session.messages.drain(start..end).collect();
+        }
+        let mut next = None;
+        if let Some(budget) = budget {
+            let mut bytes = 0;
+            let mut keep = 0;
+            for m in &session.messages {
+                let n = serde_json::to_vec(m).unwrap().len();
+                if keep > 0 && bytes + n > budget {
+                    break;
+                }
+                bytes += n;
+                keep += 1;
+            }
+            if keep < session.messages.len() {
+                next = Some(start + keep);
+                session.messages.truncate(keep);
+            }
+        }
+        (session, next)
+    }
+
+    fn assert_json_windows(adapter: &dyn Adapter, r: &SessionRef) {
+        for window in [
+            None,
+            Some(Window::First(0)),
+            Some(Window::First(1)),
+            Some(Window::Last(0)),
+            Some(Window::Last(3)),
+            Some(Window::Last(100)),
+            Some(Window::Range(2, Some(4))),
+            Some(Window::Range(100, Some(101))),
+            Some(Window::Range(3, None)),
+            Some(Window::Around { center: 1, context: 2 }),
+        ] {
+            for budget in [None, Some(0), Some(1024), Some(1 << 20)] {
+                let (expected, expected_next) = full_json_window(adapter, r, window, budget);
+                let (actual, next) = session_json_window(adapter, r, window, budget).unwrap();
+                assert_eq!(next, expected_next, "{window:?}, {budget:?}");
+                assert_eq!(
+                    serde_json::to_string_pretty(&actual).unwrap(),
+                    serde_json::to_string_pretty(&expected).unwrap(),
+                    "{window:?}, {budget:?}"
+                );
+                assert_eq!(
+                    serde_json::to_string_pretty(&cv_core::harness::opensession::document(&actual)).unwrap(),
+                    serde_json::to_string_pretty(&cv_core::harness::opensession::document(&expected)).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn json_windows_match_full_parse_with_late_metadata_and_extras() {
+        let _world = cv_testkit::World::in_process("json_windows_match_full_parse_with_late_metadata_and_extras");
+        let home = temp_home("json-window");
+        let r = claude_fixture(&home);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&r.path).unwrap();
+        for record in [
+            serde_json::json!({"type":"attachment", "attachment":{"type":"prompt_snapshot",
+                "systemPrompt":["late system prompt"]}}),
+            serde_json::json!({"type":"user", "uuid":"result", "toolUseResult":{"persistedOutput":{"path":"/tmp/output"}},
+                "message":{"role":"user", "content":[{"type":"tool_result","tool_use_id":"call","content":"done"}]}}),
+            serde_json::json!({"type":"ai-title", "aiTitle":"late title"}),
+        ] {
+            writeln!(f, "{record}").unwrap();
+        }
+        drop(f);
+        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
+        assert_json_windows(adapter.as_ref(), &r);
+        let (first, _) = session_json_window(adapter.as_ref(), &r, Some(Window::First(1)), None).unwrap();
+        assert_eq!(first.title.as_deref(), Some("late title"));
+        assert_eq!(first.system_prompt.as_deref(), Some("late system prompt"));
+        assert_eq!(first.messages.len(), 1);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn json_window_discards_large_messages_but_reads_the_eof_shell() {
+        let _world = cv_testkit::World::in_process("json_window_discards_large_messages_but_reads_the_eof_shell");
+        struct Large;
+        impl Adapter for Large {
+            fn harness(&self) -> Harness {
+                Harness::Codex
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                opts: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                assert!(opts.extra && !opts.spans);
+                let mut s = Session::new(r.id.clone(), r.harness);
+                s.title = Some("early title".into());
+                sink.meta(&s);
+                for i in 0..32 {
+                    let mut m = Message::new(Role::Assistant);
+                    m.id = Some(format!("message-{i}"));
+                    m.harness_extra_mut(r.harness)
+                        .insert("full_detail".into(), serde_json::json!(i));
+                    m.content.push(Block::Text {
+                        text: "large discarded body".repeat(8192).into(),
+                    });
+                    assert_eq!(sink.message(m), cv_core::Flow::Continue);
+                }
+                s.title = Some("final title".into());
+                s.lineage.forked_from = Some("late parent".into());
+                s.system_prompt = Some("late prompt".into());
+                sink.meta(&s);
+                Ok(s)
+            }
+        }
+        let r = SessionRef::new("json-large", Harness::Codex, "/nonexistent/json-large.jsonl");
+        for window in [Window::First(1), Window::Last(1), Window::Range(15, Some(16))] {
+            let (session, _) = session_json_window(&Large, &r, Some(window), None).unwrap();
+            assert_eq!(session.messages.len(), 1);
+            assert_eq!(session.title.as_deref(), Some("final title"));
+            assert_eq!(session.lineage.forked_from.as_deref(), Some("late parent"));
+            let (expected, _) = full_json_window(&Large, &r, Some(window), None);
+            assert_eq!(
+                serde_json::to_value(session).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
+
     /// `--kind` picks one view family: what the person said, the compaction seams, or the
     /// affordance rows (`affordances` meaning all of them); mixing families or an unknown word is a
     /// usage error naming every accepted word.
@@ -1610,6 +1833,7 @@ mod tests {
     /// `None` — overrides the discovery title).
     #[test]
     fn codex_windowed_render_is_byte_identical_to_the_full_parse() {
+        let _world = cv_testkit::World::in_process("codex_windowed_render_is_byte_identical_to_the_full_parse");
         let home = temp_home("codex");
 
         let path = home.join("rollout-r.jsonl");
@@ -1643,6 +1867,9 @@ mod tests {
             assert!(header.contains("gpt-test"), "header model expected in {range:?}");
             assert!(!header.contains("discovery title"), "parsed title wins in {range:?}");
         }
+
+        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
+        assert_json_windows(adapter.as_ref(), &r);
 
         std::fs::remove_dir_all(&home).ok();
     }
