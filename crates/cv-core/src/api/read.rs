@@ -603,4 +603,101 @@ mod tests {
         assert_eq!(head_callbacks, 20_000);
         eprintln!("pages=100 selected=20000 cached_page_callbacks={page_callbacks} repeated_heads=5 head_callbacks={head_callbacks}");
     }
+    #[test]
+    fn source_json_paths_are_dependencies_even_without_adapter_notifications() {
+        struct External {
+            path: std::path::PathBuf,
+            calls: AtomicUsize,
+        }
+        impl Adapter for External {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let input = crate::json::Json::source(&self.path, 0, std::fs::metadata(&self.path)?.len())?;
+                let mut message = Message::new(crate::Role::Assistant);
+                message.content.push(crate::Block::ToolUse {
+                    id: "call".into(),
+                    name: "Bash".into(),
+                    namespace: None,
+                    input,
+                });
+                sink.message(message);
+                Ok(Session::new(&r.id, r.harness))
+            }
+        }
+        let world = cv_testkit::World::in_process("api_external_json_dependencies");
+        let r = fixture(&world, 1);
+        let path = world.home.join("external.json");
+        std::fs::write(&path, r#"{"command":"old"}"#).unwrap();
+        let adapter = External {
+            path: path.clone(),
+            calls: AtomicUsize::new(0),
+        };
+        let cache = Cache::default();
+        head(&cache, &adapter, &r).unwrap();
+        head(&cache, &adapter, &r).unwrap();
+        assert_eq!(adapter.calls.load(Ordering::Relaxed), 1);
+        let (before, reads) = captured(&r);
+        let mut sink = window_sink(&r, 1, Some(2), false, reads);
+        adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink).unwrap();
+        let source = before.with_reads(&sink.reads);
+        assert!(fresh(&r, &source));
+        std::fs::write(path, r#"{"command":"updated"}"#).unwrap();
+        assert!(!fresh(&r, &source));
+        head(&cache, &adapter, &r).unwrap();
+        assert_eq!(adapter.calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn oversized_demanded_metadata_is_returned_without_cache_retention() {
+        let world = cv_testkit::World::in_process("api_large_metadata_budget");
+        let r = fixture(&world, 20);
+        let title = "x".repeat(MAX_ENTRY_BYTES + 1024);
+        let body = format!(
+            "{}\n{}",
+            json!({"type":"ai-title", "aiTitle":title}),
+            std::fs::read_to_string(&r.path).unwrap()
+        );
+        std::fs::write(&r.path, body).unwrap();
+        let inner = crate::harness::claude::Claude::with_config_dir(&world.home.join(".claude"));
+        let adapter = Observed::new(&inner);
+        let cache = Cache::default();
+        for start in [0, 5] {
+            let (shell, _) = window(&cache, &adapter, &r, start, Some(start + 5), false).unwrap();
+            assert_eq!(shell.title.as_deref(), Some(title.as_str()));
+        }
+        assert_eq!(adapter.messages.load(Ordering::Relaxed), 17);
+        assert_eq!(head(&cache, &adapter, &r).unwrap()["title"], title);
+        assert!(cache.entries.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn discarded_giant_tool_arguments_do_not_enter_continuation_state() {
+        let world = cv_testkit::World::in_process("api_discarded_tool_arguments");
+        let r = fixture(&world, 20);
+        let body = std::fs::read_to_string(&r.path).unwrap();
+        let (first, rest) = body.split_once('\n').unwrap();
+        let giant = json!({"type":"assistant", "uuid":"giant", "message":{"role":"assistant", "content":[{
+            "type":"tool_use", "id":"tool", "name":"Edit", "input":{"file_path":"a.rs", "content":"discarded-tool-content".repeat(100_000)}
+        }]}});
+        std::fs::write(&r.path, format!("{first}\n{giant}\n{rest}")).unwrap();
+        let adapter = crate::harness::claude::Claude::with_config_dir(&world.home.join(".claude"));
+        let cache = Cache::default();
+        let (shell, sink) = window(&cache, &adapter, &r, 2, Some(4), false).unwrap();
+        assert_eq!(result(&shell, &sink), oracle(&adapter, &r, 2, Some(4), false));
+        let entries = cache.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].bytes < 16 * 1024);
+        assert!(!serde_json::to_string(&entries[0])
+            .unwrap()
+            .contains("discarded-tool-content"));
+    }
 }

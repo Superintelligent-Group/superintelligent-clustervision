@@ -236,12 +236,15 @@ fn session_head(harness: &str, id: &str) -> (u16, Value) {
     };
     let mut row = crate::rows::session_row(&r, size_of(&r));
     let map = row.as_object_mut().expect("session_row is an object");
-    for (key, value) in head.as_object().expect("head metadata is an object") {
+    let Value::Object(head) = head else {
+        unreachable!("head metadata is an object")
+    };
+    for (key, value) in head {
         // Parsed title/cwd replace catalog hints only when present, as before.
         if matches!(key.as_str(), "title" | "cwd") && value.is_null() {
             continue;
         }
-        map.insert(key.clone(), value.clone());
+        map.insert(key, value);
     }
     ok(row)
 }
