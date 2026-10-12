@@ -92,7 +92,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter | Preserve cheap path; measure discovery separately |
 | Full discovery | Scans + cache persistence + catalog replacement/watch construction | Metadata reducers instead of collect-to-count; dependency-aware caching |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
-| JSON show / MCP show | Lazy full-extras stream into selected window; EOF metadata retained | Selected output and demanded structured extras; selected-message serialization for byte budgets |
+| JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP collects selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP selected payloads |
 | Affordance view | Lazy full-extras stream into classified rows; bounded text summaries | Rich extras, side stores and result rows; escaped validation still traverses the whole field |
 | Doctor | Lazy-extra stream; resolved text lengths and JSON writer counts | Attribution state, adapter rich/fallback parsing and structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
@@ -599,3 +599,19 @@ limits in portable adapters and full selected output remain separate. Producers 
 doctor, events, query, search, rendering and mutable consumers have explicit demands and pass
 raw serialized output, classifier, token-count and search-body oracles. This is a deliberate Rust
 API evolution, not an IR JSON schema change.
+
+CLI JSON composition now shares archive's serde-derived Session envelope and pretty frame injection.
+The normal show/export path serializes lazy selected messages directly into bounded private staging;
+compact budget counts use a counting writer, and no output reaches stdout until source traversal,
+EOF metadata and final envelope serialization succeed. Last windows retain only their lazy IR tail
+and resolve it after EOF. Shared counted-stream classifiers can still demand source fields outside
+the selected output window. Adapters that already own
+large messages/extras and cross-field redaction still impose their existing retention costs.
+
+The isolated `staged_json_selected_payload_heap` gate (`cv` binary tests, `probe-heap`, ignored,
+`--test-threads=1`) emits 60,001,189 bytes from four selected 15 MB source-backed escaped
+argument messages with budgeting enabled. Staged composition and sink copy peak at 1,378,749
+requested live Rust bytes above baseline; the old selected-tree + pretty String path peaks at
+111,114,689 bytes. Source generation precedes allocation measurement; file-backed pages and
+allocator/native overhead are excluded. Exact output bytes are covered separately by old
+materialized oracles for plain and OpenSession documents, windows, budgets and late EOF metadata.

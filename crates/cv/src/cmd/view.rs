@@ -374,6 +374,129 @@ fn session_json_window(
     Ok((session, sink.next))
 }
 
+/// Stage selected JSON frames while the adapter runs to EOF. Frames spill rather than retaining
+/// decoded payloads; the final Session envelope also spills before stdout is touched.
+fn staged_session_json(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    window: Option<Window>,
+    max_bytes: Option<usize>,
+    document: bool,
+) -> Result<(cv_core::bytes::ByteSource, Option<usize>)> {
+    use cv_core::bytes::ByteStage;
+    struct Counter(usize);
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("JSON size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    struct Selection {
+        resolver: cv_core::Resolver,
+        seen: usize,
+        start: usize,
+        end: Option<usize>,
+        tail: Option<usize>,
+        tail_messages: std::collections::VecDeque<Message>,
+        stage: ByteStage,
+        budget: Option<usize>,
+        bytes: usize,
+        count: usize,
+        next: Option<usize>,
+        error: Option<anyhow::Error>,
+    }
+    impl Selection {
+        fn accept(&mut self, message: Message, index: usize) -> Result<()> {
+            if self.next.is_some() {
+                return Ok(());
+            }
+            let mut size = Counter(0);
+            if self.budget.is_some() {
+                message.write_json(&mut size, &self.resolver)?;
+            }
+            if self.count > 0
+                && self
+                    .budget
+                    .is_some_and(|budget| size.0 > budget.saturating_sub(self.bytes))
+            {
+                self.next = Some(index);
+                return Ok(());
+            }
+            super::session_json::write_message_frame(&mut self.stage, &message, &self.resolver)?;
+            self.bytes = self.bytes.checked_add(size.0).context("JSON budget size overflow")?;
+            self.count += 1;
+            Ok(())
+        }
+    }
+    impl cv_core::MessageSink for Selection {
+        fn meta(&mut self, session: &Session) {
+            self.resolver = session.resolver();
+        }
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.error.take()
+        }
+        fn message(&mut self, message: Message) -> cv_core::Flow {
+            let index = self.seen;
+            self.seen += 1;
+            if self.error.is_none()
+                && (self.tail.is_some_and(|n| n > 0)
+                    || (self.tail.is_none() && index >= self.start && self.end.is_none_or(|end| index < end)))
+            {
+                if let Some(n) = self.tail {
+                    self.tail_messages.push_back(message);
+                    if self.tail_messages.len() > n {
+                        self.tail_messages.pop_front();
+                    }
+                } else if let Err(error) = self.accept(message, index) {
+                    self.error = Some(error);
+                }
+            }
+            cv_core::Flow::Continue
+        }
+    }
+    let (start, end, tail) = match window {
+        Some(Window::Last(n)) => (0, None, Some(n)),
+        Some(w) => {
+            let (start, end) = w.bounds(|| unreachable!())?;
+            (start, end, None)
+        }
+        None => (0, None, None),
+    };
+    let mut sink = Selection {
+        resolver: cv_core::Resolver::new(Some(r.path.clone())),
+        seen: 0,
+        start,
+        end,
+        tail,
+        tail_messages: Default::default(),
+        stage: ByteStage::default(),
+        budget: max_bytes,
+        bytes: 0,
+        count: 0,
+        next: None,
+        error: None,
+    };
+    let session = cv_core::stream::stream_counted(adapter, r, &cv_core::ParseOptions::lazy_extra(), &mut sink)?;
+    if let Some(error) = sink.error.take() {
+        return Err(error);
+    }
+    let start = sink.seen - sink.tail_messages.len();
+    for (i, message) in std::mem::take(&mut sink.tail_messages).into_iter().enumerate() {
+        sink.accept(message, start + i)?;
+    }
+    let frames = sink.stage.finish()?;
+    let mut output = ByteStage::default();
+    super::session_json::write_document(&mut output, &session, &frames, sink.count, document)?;
+    output.write_all(b"\n")?;
+    Ok((output.finish()?, sink.next))
+}
+
 /// `show --json` / `export --format json`: the whole IR (incl. `extra`), windowed, and — under
 /// `--max-bytes` — cut at the budget with the continuation hint on **stderr** (stdout stays JSON).
 ///
@@ -390,6 +513,18 @@ fn print_session_json(
     as_document: bool,
     redact: Option<&cv_core::redact::RedactOptions>,
 ) -> Result<cv_core::redact::RedactStats> {
+    if redact.is_none() {
+        let (output, next) = staged_session_json(adapter, r, window, max_bytes, as_document)?;
+        if let Some(next) = next {
+            eprintln!("{}", continue_hint(next));
+        }
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        output.copy_to(&mut out)?;
+        out.flush()?;
+        return Ok(cv_core::redact::RedactStats::default());
+    }
+    // Redaction's cross-field rules require the materialized selected tree.
     let (mut session, next) = session_json_window(adapter, r, window, max_bytes)?;
     let mut stats = cv_core::redact::RedactStats::default();
     if let Some(next) = next {
@@ -1369,6 +1504,82 @@ fn md_message(m: &Message) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "isolated allocator measurement; run alone with --test-threads=1"]
+    fn staged_json_selected_payload_heap() {
+        let world = cv_testkit::World::in_process("staged-json-heap");
+        let path = world.base.join("arguments.json");
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        file.write_all(b"{\"argument\":\"").unwrap();
+        let piece = b"escaped\\n\\t\\\"\\\\";
+        for _ in 0..1_000_000 {
+            file.write_all(piece).unwrap();
+        }
+        file.write_all(b"\"}").unwrap();
+        file.flush().unwrap();
+        drop(file);
+        struct Replay {
+            path: PathBuf,
+            len: u64,
+        }
+        impl Adapter for Replay {
+            fn harness(&self) -> Harness {
+                Harness::Codex
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                vec![]
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(vec![])
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                _: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                let mut session = Session::new(&r.id, r.harness);
+                sink.meta(&session);
+                for _ in 0..4 {
+                    let mut message = Message::new(Role::Assistant);
+                    message.content.push(Block::ToolUse {
+                        id: "call".into(),
+                        name: "tool".into(),
+                        namespace: None,
+                        input: cv_core::Json::source(&self.path, 0, self.len)?,
+                    });
+                    sink.message(message);
+                }
+                session.title = Some("late metadata".into());
+                Ok(session)
+            }
+        }
+        let adapter = Replay {
+            len: std::fs::metadata(&path).unwrap().len(),
+            path: path.clone(),
+        };
+        let r = SessionRef::new("heap", Harness::Codex, &path);
+        let baseline = cv_testkit::heap::begin();
+        let (output, _) = staged_session_json(&adapter, &r, None, Some(usize::MAX), false).unwrap();
+        let emitted = output.copy_to(&mut std::io::sink()).unwrap();
+        let streamed = cv_testkit::heap::end(baseline);
+        drop(output);
+        let baseline = cv_testkit::heap::begin();
+        let (session, _) = session_json_window(&adapter, &r, None, Some(usize::MAX)).unwrap();
+        let output = serde_json::to_string_pretty(&session).unwrap();
+        let materialized = cv_testkit::heap::end(baseline);
+        eprintln!(
+            "staged={} materialized={} output={}",
+            streamed.peak_above_baseline_bytes,
+            materialized.peak_above_baseline_bytes,
+            output.len()
+        );
+        assert_eq!(emitted, output.len() as u64 + 1);
+        assert!(streamed.peak_above_baseline_bytes < 8 * 1024 * 1024);
+        assert!(materialized.peak_above_baseline_bytes > 64 * 1024 * 1024);
+    }
+
     #[test]
     fn source_show_preview_matches_owned_unicode_and_fails_without_continuation() {
         let world = cv_testkit::World::in_process("show-json-boundary");
@@ -1416,6 +1627,23 @@ mod tests {
             session.messages.push(source_message.clone());
             let adapter = Replay(session);
             let r = SessionRef::new("source-preview", Harness::OpenSession, world.base.join("primary.json"));
+            if !deleted {
+                for document in [false, true] {
+                    let (staged, next) = staged_session_json(&adapter, &r, None, Some(1), document).unwrap();
+                    let (materialized, expected_next) = full_json_window(&adapter, &r, None, Some(1));
+                    assert_eq!(next, expected_next);
+                    let mut actual = Vec::new();
+                    staged.copy_to(&mut actual).unwrap();
+                    let mut expected = if document {
+                        serde_json::to_vec_pretty(&cv_core::harness::opensession::document(&materialized)).unwrap()
+                    } else {
+                        serde_json::to_vec_pretty(&materialized).unwrap()
+                    };
+                    expected.push(b'\n');
+                    assert_eq!(actual, expected);
+                }
+            }
+
             let mut output = Vec::new();
             let outcome = stream_session_render(
                 &adapter,
@@ -1437,6 +1665,15 @@ mod tests {
                 std::fs::write(&path, b"{} ").unwrap();
             }
             assert!(show_message(&source_message).is_err());
+            for window in [None, Some(Window::Last(1))] {
+                assert!(staged_session_json(&adapter, &r, window, Some(1), false).is_err());
+            }
+            // The shared counted stream may demand source fields even outside the output window.
+            assert_eq!(
+                staged_session_json(&adapter, &r, Some(Window::First(0)), None, false).is_err(),
+                session_json_window(&adapter, &r, Some(Window::First(0)), None).is_err()
+            );
+
             for range in [None, Some(Window::Last(1))] {
                 let mut output = Vec::new();
                 assert!(
@@ -1512,6 +1749,19 @@ mod tests {
         ] {
             for budget in [None, Some(0), Some(1024), Some(1 << 20)] {
                 let (expected, expected_next) = full_json_window(adapter, r, window, budget);
+                for document in [false, true] {
+                    let (staged, next) = staged_session_json(adapter, r, window, budget, document).unwrap();
+                    let mut bytes = Vec::new();
+                    staged.copy_to(&mut bytes).unwrap();
+                    let mut oracle = if document {
+                        serde_json::to_vec_pretty(&cv_core::harness::opensession::document(&expected)).unwrap()
+                    } else {
+                        serde_json::to_vec_pretty(&expected).unwrap()
+                    };
+                    oracle.push(b'\n');
+                    assert_eq!(next, expected_next, "staged {window:?}, {budget:?}");
+                    assert_eq!(bytes, oracle, "staged {window:?}, {budget:?}, document={document}");
+                }
                 let (actual, next) = session_json_window(adapter, r, window, budget).unwrap();
                 assert_eq!(next, expected_next, "{window:?}, {budget:?}");
                 assert_eq!(
