@@ -135,7 +135,7 @@ fn args() -> Result<Args> {
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--span OFFSET:LENGTH --escaped --chunk-bytes N]\n\
                  OP: baseline|discard|count|collect|window|affordances|affordance-read|doctor|hash|discover|events|events-collected|chunks|resolve\n\
-                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin; use scratch CLUSTERVISION_HOME"
+                 HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|devin|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ => positional.push(arg),
@@ -195,6 +195,13 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
         Harness::Kimi => Box::new(cv_core::harness::kimi::Kimi::with_home(&a.root)),
         Harness::KimiCode => Box::new(cv_core::harness::kimi_code::KimiCode::with_home(&a.root)),
         Harness::Grok => Box::new(cv_core::harness::grok::Grok::with_home(&a.root)),
+        Harness::OpenSession => Box::new(cv_core::harness::opensession::OpenSession::with_roots(vec![a
+            .root
+            .clone()])),
+        Harness::ChatGptExport => Box::new(cv_core::harness::export::ChatGptExport::with_roots(vec![a
+            .root
+            .clone()])),
+        Harness::ClaudeExport => Box::new(cv_core::harness::export::ClaudeExport::with_roots(vec![a.root.clone()])),
         #[cfg(feature = "sqlite")]
         Harness::Devin => Box::new(cv_core::harness::devin::Devin::with_root(&a.root)),
         _ => {

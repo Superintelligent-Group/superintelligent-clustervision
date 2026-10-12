@@ -2,7 +2,7 @@
 
 This diagnostic example performs one read-only operation per process on an explicit source.
 It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok
-and (with SQLite enabled) Devin through explicit-root constructors. It does not
+OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Devin through explicit-root constructors. It does not
 detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
 The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
 scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
@@ -29,6 +29,8 @@ Cline expects a home containing `.cline/`; Kimi, Kimi Code and Grok expect their
 containing `sessions/`. Devin expects the directory containing `sessions.db`. Directory session
 paths (Kimi, Kimi Code and Grok) report directory metadata size, not total transcript/sidecar bytes;
 use the generator manifest for total generated physical source sizes.
+OpenSession and account exports scan only the explicit root, excluding configured exports and
+`CV_EXPORTS`; their direct stream operations select the supplied ID from the supplied document.
 
 | Operation | Work measured |
 |---|---|
@@ -118,3 +120,13 @@ or decoded byte counts, absolute heap ceilings and growth, without a wall-time t
 collection, deliberately owned tool arguments and native SQLite heap are outside these promises.
 `--only stores` / `--only chunks` supports a scoped local check. CI's exact build commands are in
 `.github/workflows/ci.yml`; the driver always uses a temporary catalog and deletes only its own inputs.
+
+Opt-in `--only active` extends the same 8 MiB absolute / 2 MiB growth budgets to discarded
+fixed-size Cline SDK/OpenSession history, account archives' unrelated conversations, and unmatched
+Kimi wire bodies. Every 16/64 MiB discovery probe gets a fresh catalog, preventing cache hits from
+masking scan work. `--format FORMAT` narrows this campaign; `--baseline-probe HEAP_PROBE` also checks
+small resolved-message/metadata and fresh discovery digests in separate fidelity runs. Selected
+giant outputs and whole selected ChatGPT mappings are not included in these bounded claims.
+`--only doctor` checks giant Claude/Codex/Gemini decoded attribution in lazy-extra mode against
+separate full-mode processes, optionally using the supplied old baseline. Default CI's suite
+remains stores/chunks; opt-in checks require the respective reader improvements to pass.
