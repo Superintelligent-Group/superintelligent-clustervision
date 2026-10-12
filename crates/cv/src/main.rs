@@ -224,9 +224,9 @@ enum Cmd {
         /// pre-compaction size, the summary that seeded the next window (`--json`: one row per
         /// boundary with its `pre_compaction_span`). An affordance — `plan`, `goal`, `schedule`,
         /// `background_job`, `subagent_spawn`, `subagent_return`, `skill`, `hook`, `question`,
-        /// `branch`, `fork`, `model_change`, or `affordances` for all — lists those rows across
-        /// harnesses, side stores included (`--json`: `kind, action, index, timestamp, tool,
-        /// tool_use_id, summary, items, source` rows).
+        /// `approval`, `checkpoint`, `branch`, `fork`, `model_change`, or `affordances` for all —
+        /// lists those rows across harnesses, side stores included (`--json`: `kind, action,
+        /// index, timestamp, tool, tool_use_id, summary, items, source` rows).
         #[arg(long, value_name = "KIND,…", conflicts_with_all = ["subagents", "agent"])]
         kind: Option<String>,
         /// With the compaction kinds: print each summary in full, not just its head.

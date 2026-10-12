@@ -1,6 +1,6 @@
 //! Affordances: one cross-harness vocabulary for what an agent does besides talk — plans, goals,
-//! schedules, background jobs, sub-agent spawns and returns, skills, hooks, questions, branches,
-//! forks and model switches (`docs/design/AFFORDANCES.md`).
+//! schedules, background jobs, sub-agent spawns and returns, skills, hooks, questions, approvals,
+//! checkpoints, branches, forks and model switches (`docs/design/AFFORDANCES.md`).
 //!
 //! This is a **derived view**, not IR: [`of_session`] reads it off what the IR already says (tool
 //! names through the one [`classify_tool`] table, message kinds and origins, lineage, a short
@@ -55,6 +55,10 @@ kinds! {
     Hook => "hook",
     /// The agent asked the person.
     Question => "question",
+    /// A permission request and its outcome, or the approval mode the session ran under.
+    Approval => "approval",
+    /// A restorable point (a file snapshot, a shadow-git commit, a saved chat) and its restore.
+    Checkpoint => "checkpoint",
     /// Rewind / undo / reset / clear.
     Branch => "branch",
     /// This session was forked from another.
@@ -95,7 +99,8 @@ pub struct Affordance {
     pub kind: Kind,
     /// What happened: `write`, `create`, `update`, `read`, `delete`, `list`, `enter`, `exit`,
     /// `start`, `stop`, `complete`, `fire`, `spawn`, `return`, `load`, `manage`, `output`, `ask`,
-    /// `branch`, `fork`, `change`, `state` (a side store's current contents).
+    /// `deny`, `restore`, `branch`, `fork`, `change`, `state` (a side store's current contents, or a
+    /// fact the harness keeps once per session).
     pub action: &'static str,
     /// The message index, for a row read from the transcript; `None` for a store row.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +138,25 @@ impl Affordance {
     }
 }
 
+impl Affordance {
+    /// An event a side store logged (a checkpoint commit, a permission ask): a store row with its
+    /// own action and time, still without a message index.
+    pub fn store_event(
+        kind: Kind,
+        action: &'static str,
+        timestamp: Option<DateTime<Utc>>,
+        tool: impl Into<String>,
+        summary: &str,
+    ) -> Affordance {
+        Affordance {
+            action,
+            timestamp,
+            summary: crate::ir::truncate(summary, 120),
+            ..Affordance::store(kind, tool, "", Vec::new())
+        }
+    }
+}
+
 /// A side store's plan (or goal) as one row: its entries and their count by status. `None` when it
 /// holds none: an empty todo file is a plan that is not there.
 pub fn plan_state(kind: Kind, tool: impl Into<String>, items: Vec<Item>) -> Option<Affordance> {
@@ -159,6 +183,54 @@ pub fn json_files(dir: &std::path::Path) -> Vec<(String, Value)> {
         _ => a.0.cmp(&b.0),
     });
     files
+}
+
+/// The session-bag key under which an adapter lists the approval modes a session ran under, in
+/// order of first appearance (Claude `permissionMode`, Codex `approval_policy`, Kimi Code
+/// `permission.set_mode`, Qwen `approvalMode`, Kimi `state.json` `approval`).
+pub const MODES_KEY: &str = "permission_modes";
+
+/// The session-bag key under which an adapter tallies the restorable points it read past:
+/// `{count, files?, tag?}` (Claude `file-history-snapshot`, Kimi Code `file_history.checkpoint`,
+/// Kimi `_checkpoint`, a Gemini `/chat save` file).
+pub const CHECKPOINTS_KEY: &str = "checkpoints";
+
+/// Note one approval mode in a session bag ([`MODES_KEY`]); a repeat of a listed mode is a no-op.
+pub fn note_mode(bag: &mut serde_json::Map<String, Value>, mode: &str) {
+    if mode.is_empty() {
+        return;
+    }
+    let list = bag.entry(MODES_KEY).or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(a) = list.as_array_mut() {
+        if !a.iter().any(|v| v.as_str() == Some(mode)) {
+            a.push(Value::String(mode.to_string()));
+        }
+    }
+}
+
+/// Note restorable points in a session bag ([`CHECKPOINTS_KEY`]): `points` more of them, and the
+/// files they hold (each listed once).
+pub fn note_checkpoints<'f>(
+    bag: &mut serde_json::Map<String, Value>,
+    points: u64,
+    files: impl IntoIterator<Item = &'f str>,
+) {
+    let entry = bag
+        .entry(CHECKPOINTS_KEY)
+        .or_insert_with(|| serde_json::json!({"count": 0}));
+    let Some(o) = entry.as_object_mut() else {
+        return;
+    };
+    let n = o.get("count").and_then(Value::as_u64).unwrap_or(0) + points;
+    o.insert("count".into(), n.into());
+    for f in files {
+        let list = o.entry("files").or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(a) = list.as_array_mut() {
+            if !a.iter().any(|v| v.as_str() == Some(f)) {
+                a.push(Value::String(f.to_string()));
+            }
+        }
+    }
 }
 
 /// How a spawn tool's result relates to the sub-agent's return.
@@ -639,6 +711,10 @@ fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(
             "skill_invocation" => Some((Kind::Skill, "load", "skill_invocation")),
             _ => None,
         },
+        // An MCP call Codex refused because the approval policy could not ask (`never`).
+        H::Codex if bag_str("item_type") == Some("McpToolCall") && head().contains("requires approval") => {
+            Some((Kind::Approval, "deny", "McpToolCall"))
+        }
         H::OpenCode
             if bag
                 .and_then(|b| b.get("metadata"))
@@ -696,6 +772,112 @@ enum Hit<'a> {
         action: &'static str,
         tool: Option<&'static str>,
     },
+    /// A fact one block or one bag entry carries, with its own summary: a denied tool result, a
+    /// file snapshot riding a turn.
+    Detail {
+        kind: Kind,
+        action: &'static str,
+        tool: Option<&'a str>,
+        tool_use_id: Option<&'a str>,
+        summary: String,
+    },
+}
+
+/// Whether a tool result is the harness refusing the call for want of permission: Claude's denial
+/// (headless `dontAsk`: "Permission to use Bash has been denied …") and rejection (the person said
+/// no), OpenCode's rule refusal and rejection. Read off the start of an error result.
+fn denied(h: Harness, text: &str) -> bool {
+    let t = text.trim_start();
+    match h {
+        Harness::Claude => {
+            (t.starts_with("Permission to use ") && t.contains(" denied"))
+                || t.starts_with("The user doesn't want to proceed with this tool use")
+        }
+        Harness::OpenCode => {
+            t.starts_with("The user has specified a rule which prevents you from using this specific tool call")
+                || t.starts_with("The user rejected permission to use this specific tool call")
+        }
+        _ => false,
+    }
+}
+
+/// The first eight characters of a snapshot hash, for a summary.
+fn short(hash: &str) -> &str {
+    hash.get(..8).unwrap_or(hash)
+}
+
+/// The paths of a JSON list of strings, joined for a summary.
+fn joined(v: Option<&Value>) -> String {
+    v.and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default()
+}
+
+/// The restorable points a message carries beside its content: OpenCode's `patch` parts (1.x) and
+/// `snapshot{start, end, files}` (2.x) when the step changed files, Devin's `restorable` files on
+/// an edit's result.
+fn detail_hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, out: &mut Vec<Hit<'a>>) {
+    for b in &m.content {
+        let Block::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+            tool_name,
+            details,
+            ..
+        } = b
+        else {
+            continue;
+        };
+        if *is_error && denied(h, &content.resolve_prefix(resolver, 256)) {
+            out.push(Hit::Detail {
+                kind: Kind::Approval,
+                action: "deny",
+                tool: tool_name.as_deref(),
+                tool_use_id: Some(tool_use_id),
+                summary: crate::ir::truncate(content.resolve_prefix(resolver, 512).trim(), 120),
+            });
+        }
+        if let Some(files) = details
+            .as_ref()
+            .and_then(|d| d.get("restorable"))
+            .filter(|f| !joined(Some(f)).is_empty())
+        {
+            out.push(Hit::Detail {
+                kind: Kind::Checkpoint,
+                action: "create",
+                tool: tool_name.as_deref(),
+                tool_use_id: Some(tool_use_id),
+                summary: crate::ir::truncate(&joined(Some(files)), 120),
+            });
+        }
+    }
+    if h != Harness::OpenCode {
+        return;
+    }
+    let Some(bag) = m.harness_extra(h) else {
+        return;
+    };
+    for p in bag.get("patches").and_then(Value::as_array).into_iter().flatten() {
+        let hash = p.get("hash").and_then(Value::as_str).unwrap_or("");
+        out.push(Hit::Detail {
+            kind: Kind::Checkpoint,
+            action: "create",
+            tool: Some("patch"),
+            tool_use_id: None,
+            summary: crate::ir::truncate(&format!("{} · {}", short(hash), joined(p.get("files"))), 120),
+        });
+    }
+    if let Some(snap) = bag.get("snapshot").filter(|v| !joined(v.get("files")).is_empty()) {
+        let hash = snap.get("start").and_then(Value::as_str).unwrap_or("");
+        out.push(Hit::Detail {
+            kind: Kind::Checkpoint,
+            action: "create",
+            tool: Some("snapshot"),
+            tool_use_id: None,
+            summary: crate::ir::truncate(&format!("{} · {}", short(hash), joined(snap.get("files"))), 120),
+        });
+    }
 }
 
 fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver) -> Vec<Hit<'a>> {
@@ -744,27 +926,120 @@ fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver) -> Vec
     if let Some((kind, action, tool)) = message {
         out.push(Hit::Message { kind, action, tool });
     }
+    detail_hits(h, m, resolver, &mut out);
     out
 }
 
-/// Every affordance the transcript shows, in message order (fork first, when the session is one).
-/// Safe on a lazy parse: text is read through the session's resolver, a few KB at most per message.
-pub fn of_session(s: &Session) -> Vec<Affordance> {
-    let resolver = s.resolver();
+/// A row the session carries once rather than at a message.
+fn session_row(kind: Kind, action: &'static str, tool: &str, summary: String, items: Vec<Item>) -> Affordance {
+    Affordance {
+        kind,
+        action,
+        index: None,
+        timestamp: None,
+        tool: Some(tool.to_string()),
+        tool_use_id: None,
+        summary: crate::ir::truncate(&summary, 120),
+        items,
+        source: Source::Message,
+    }
+}
+
+/// The facts a harness keeps once per session, as rows: the fork, the approval mode (or OpenCode's
+/// permission ruleset), the restorable points an adapter tallied ([`CHECKPOINTS_KEY`]), and
+/// OpenCode's staged revert. Read off the session's metadata, so a streamed pass that saw no
+/// message of it still counts it ([`Counter::finish`]).
+pub fn session_rows(s: &Session) -> Vec<Affordance> {
     let mut out = Vec::new();
     if let Some(from) = &s.lineage.forked_from {
         out.push(Affordance {
-            kind: Kind::Fork,
-            action: "fork",
-            index: None,
             timestamp: s.created_at,
             tool: None,
-            tool_use_id: None,
-            summary: format!("forked from {from}"),
-            items: Vec::new(),
-            source: Source::Message,
+            ..session_row(Kind::Fork, "fork", "", format!("forked from {from}"), Vec::new())
         });
     }
+    let Some(bag) = s.harness_extra(s.harness) else {
+        return out;
+    };
+    let modes: Vec<&str> = match (s.harness, bag.get("agent_mode")) {
+        // Devin's `agent_mode` is its permission mode (`bypass`, `normal`, `accept-edits`, `plan`).
+        (Harness::Devin, Some(Value::String(m))) => vec![m.as_str()],
+        _ => bag
+            .get(MODES_KEY)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default(),
+    };
+    if !modes.is_empty() {
+        let tool = if s.harness == Harness::Devin {
+            "agent_mode"
+        } else {
+            MODES_KEY
+        };
+        let summary = format!("mode: {}", modes.join(" → "));
+        out.push(session_row(Kind::Approval, "state", tool, summary, Vec::new()));
+    }
+    if s.harness == Harness::OpenCode {
+        // The session's permission ruleset: `[{permission, pattern, action}]`.
+        let rules: Vec<Item> = bag
+            .get("permission")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                let what = r.get("permission").and_then(Value::as_str)?;
+                let pattern = r.get("pattern").and_then(Value::as_str).unwrap_or("*");
+                Some(Item {
+                    content: format!("{what} {pattern}"),
+                    status: r.get("action").and_then(Value::as_str).map(str::to_string),
+                })
+            })
+            .collect();
+        if !rules.is_empty() {
+            let summary = items_summary(&rules).replacen(" item", " rule", 1);
+            out.push(session_row(Kind::Approval, "state", "permission", summary, rules));
+        }
+        if let Some(rev) = bag.get("revert").and_then(Value::as_object) {
+            let to = rev.get("messageID").and_then(Value::as_str).unwrap_or("?");
+            let snap = rev.get("snapshot").and_then(Value::as_str).map(short).unwrap_or("");
+            let summary = format!("to {to} · snapshot {snap}");
+            out.push(session_row(Kind::Checkpoint, "restore", "revert", summary, Vec::new()));
+        }
+    }
+    if let Some(cp) = bag.get(CHECKPOINTS_KEY).and_then(Value::as_object) {
+        let n = cp.get("count").and_then(Value::as_u64).unwrap_or(0);
+        let files: Vec<Item> = cp
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|f| Item {
+                content: f.to_string(),
+                status: None,
+            })
+            .collect();
+        let mut summary = format!("{n} checkpoint{}", if n == 1 { "" } else { "s" });
+        if let Some(tag) = cp.get("tag").and_then(Value::as_str) {
+            summary.push_str(&format!(" · tag {tag}"));
+        }
+        if !files.is_empty() {
+            let k = files.len();
+            summary.push_str(&format!(" · {k} file{} tracked", if k == 1 { "" } else { "s" }));
+        }
+        if n > 0 {
+            out.push(session_row(Kind::Checkpoint, "state", CHECKPOINTS_KEY, summary, files));
+        }
+    }
+    out
+}
+
+/// Every affordance the transcript shows: the session's own rows ([`session_rows`]) first, then
+/// message order. Safe on a lazy parse: text is read through the session's resolver, a few KB at
+/// most per message.
+pub fn of_session(s: &Session) -> Vec<Affordance> {
+    let resolver = s.resolver();
+    let mut out = session_rows(s);
     for (i, m) in s.messages.iter().enumerate() {
         for hit in hits(s.harness, m, &resolver) {
             out.push(match hit {
@@ -806,11 +1081,33 @@ pub fn of_session(s: &Session) -> Vec<Affordance> {
                     items: Vec::new(),
                     source: Source::Message,
                 },
+                Hit::Detail {
+                    kind,
+                    action,
+                    tool,
+                    tool_use_id,
+                    summary,
+                } => Affordance {
+                    kind,
+                    action,
+                    index: Some(i),
+                    timestamp: m.timestamp,
+                    tool: tool.map(str::to_string),
+                    tool_use_id: tool_use_id.map(str::to_string),
+                    summary,
+                    items: Vec::new(),
+                    source: Source::Message,
+                },
             });
         }
     }
     out
 }
+
+/// The view's version, stored beside the catalog's counts: bump it whenever a kind, a table row or
+/// a reader changes what [`Counter`] would count, so rows an older view counted read as "not
+/// counted" and are recounted, instead of answering `has:<new kind>` with a stale no.
+pub const VIEW_VERSION: u32 = 2;
 
 /// Affordance counts by kind: what the catalog stores per session so `has:<kind>` never parses.
 pub type Counts = std::collections::BTreeMap<Kind, u32>;
@@ -834,18 +1131,15 @@ impl Counter {
 
     pub fn note(&mut self, m: &Message) {
         for hit in hits(self.harness, m, &self.resolver) {
-            let (Hit::Call { kind, .. } | Hit::Message { kind, .. }) = hit;
+            let (Hit::Call { kind, .. } | Hit::Message { kind, .. } | Hit::Detail { kind, .. }) = hit;
             *self.counts.entry(kind).or_default() += 1;
         }
     }
 
-    /// The whole session's counts: what the messages showed, the session's fork, and `store` (the
-    /// adapter's side-store rows).
+    /// The whole session's counts: what the messages showed, the session's own rows
+    /// ([`session_rows`]), and `store` (the adapter's side-store rows).
     pub fn finish(mut self, s: &Session, store: &[Affordance]) -> Counts {
-        if s.lineage.forked_from.is_some() {
-            *self.counts.entry(Kind::Fork).or_default() += 1;
-        }
-        for a in store {
+        for a in session_rows(s).iter().chain(store) {
             *self.counts.entry(a.kind).or_default() += 1;
         }
         self.counts
@@ -962,6 +1256,111 @@ mod tests {
             classify_tool(Harness::Claude, "TaskList", &none),
             Some((Kind::Plan, "read"))
         );
+    }
+
+    fn result(id: &str, text: &str, is_error: bool, details: Option<Value>) -> Message {
+        let mut m = Message::new(Role::Tool);
+        m.content.push(Block::ToolResult {
+            tool_use_id: id.into(),
+            content: text.into(),
+            is_error,
+            tool_name: Some("Bash".into()),
+            status: None,
+            details,
+        });
+        m
+    }
+
+    fn kinds_actions(rows: &[Affordance]) -> Vec<(Kind, &'static str)> {
+        rows.iter().map(|a| (a.kind, a.action)).collect()
+    }
+
+    /// A refusal is an approval row only as the error result its harness writes; the same words
+    /// in a successful result (a file that quotes them) or from another harness are not.
+    #[test]
+    fn a_permission_refusal_is_a_denied_approval() {
+        let mut s = Session::new("s", Harness::Claude);
+        s.messages = vec![
+            result("a", "Permission to use Bash has been denied because …", true, None),
+            result("b", "Permission to use Bash has been denied because …", false, None),
+            result(
+                "c",
+                "The user doesn't want to proceed with this tool use. The tool use was rejected",
+                true,
+                None,
+            ),
+        ];
+        let rows = of_session(&s);
+        assert_eq!(
+            kinds_actions(&rows),
+            [(Kind::Approval, "deny"), (Kind::Approval, "deny")]
+        );
+        assert_eq!(rows[0].tool_use_id.as_deref(), Some("a"));
+        s.harness = Harness::Codex;
+        assert!(of_session(&s).is_empty());
+        let mut oc = Session::new("o", Harness::OpenCode);
+        oc.messages = vec![result(
+            "d",
+            "The user has specified a rule which prevents you from using this specific tool call.",
+            true,
+            None,
+        )];
+        assert_eq!(kinds_actions(&of_session(&oc)), [(Kind::Approval, "deny")]);
+    }
+
+    /// What a harness keeps once per session (modes, a checkpoint tally, OpenCode's ruleset and
+    /// revert) are `session` rows, and the catalog counter counts them the same.
+    #[test]
+    fn session_facts_are_rows_the_counter_counts() {
+        let mut s = Session::new("s", Harness::Claude);
+        let bag = s.harness_extra_mut(Harness::Claude);
+        note_mode(bag, "default");
+        note_mode(bag, "plan");
+        note_mode(bag, "default");
+        note_checkpoints(bag, 1, ["a.txt"]);
+        note_checkpoints(bag, 1, ["a.txt", "b.txt"]);
+        s.messages
+            .push(result("x", "ok", false, Some(json!({"restorable": ["/w/a.txt"]}))));
+        let rows = of_session(&s);
+        assert_eq!(
+            kinds_actions(&rows),
+            [
+                (Kind::Approval, "state"),
+                (Kind::Checkpoint, "state"),
+                (Kind::Checkpoint, "create")
+            ]
+        );
+        assert_eq!(rows[0].summary, "mode: default → plan");
+        assert_eq!(rows[1].summary, "2 checkpoints · 2 files tracked");
+        assert_eq!((rows[2].index, rows[2].summary.as_str()), (Some(0), "/w/a.txt"));
+
+        let mut counter = Counter::new(&crate::ir::SessionRef::new(
+            "s",
+            Harness::Claude,
+            std::path::PathBuf::from("/nonexistent"),
+        ));
+        s.messages.iter().for_each(|m| counter.note(m));
+        let counts = counter.finish(&s, &[]);
+        assert_eq!(counts.get(&Kind::Approval), Some(&1));
+        assert_eq!(counts.get(&Kind::Checkpoint), Some(&2));
+
+        let mut oc = Session::new("o", Harness::OpenCode);
+        let bag = oc.harness_extra_mut(Harness::OpenCode);
+        bag.insert(
+            "permission".into(),
+            json!([{"permission": "bash", "pattern": "rm *", "action": "deny"}]),
+        );
+        bag.insert(
+            "revert".into(),
+            json!({"messageID": "msg_1", "snapshot": "912f5c898f9e"}),
+        );
+        let rows = of_session(&oc);
+        assert_eq!(
+            kinds_actions(&rows),
+            [(Kind::Approval, "state"), (Kind::Checkpoint, "restore")]
+        );
+        assert_eq!(rows[0].summary, "1 rule: 1 deny");
+        assert_eq!(rows[1].summary, "to msg_1 · snapshot 912f5c89");
     }
 
     #[test]

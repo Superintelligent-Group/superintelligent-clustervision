@@ -481,21 +481,34 @@ mod imp {
         crate::offsets::file_sig(&r.path)
     }
 
+    /// The key under which a counts row records the [`crate::affordance::VIEW_VERSION`] that
+    /// counted it.
+    const VERSION_KEY: &str = "_v";
+
     fn counts_text(c: &crate::affordance::Counts) -> String {
-        let obj: serde_json::Map<String, serde_json::Value> = c
+        let mut obj: serde_json::Map<String, serde_json::Value> = c
             .iter()
             .map(|(k, n)| (k.as_str().to_string(), serde_json::json!(n)))
             .collect();
+        obj.insert(VERSION_KEY.into(), crate::affordance::VIEW_VERSION.into());
         serde_json::Value::Object(obj).to_string()
     }
 
-    fn counts_of(text: &str) -> crate::affordance::Counts {
+    /// The counts a row holds, or `None` when an older view counted them (a new kind or a new
+    /// reader could have found more): such a row is "not counted", and the next full read
+    /// rewrites it.
+    fn counts_of(text: &str) -> Option<crate::affordance::Counts> {
         let Ok(serde_json::Value::Object(o)) = serde_json::from_str(text) else {
-            return Default::default();
+            return None;
         };
-        o.iter()
-            .filter_map(|(k, v)| Some((crate::affordance::Kind::parse(k)?, v.as_u64()? as u32)))
-            .collect()
+        if o.get(VERSION_KEY).and_then(serde_json::Value::as_u64) != Some(crate::affordance::VIEW_VERSION.into()) {
+            return None;
+        }
+        Some(
+            o.iter()
+                .filter_map(|(k, v)| Some((crate::affordance::Kind::parse(k)?, v.as_u64()? as u32)))
+                .collect(),
+        )
     }
 
     /// A full read of `r` finished: record its affordance counts unless the stored ones are still
@@ -511,14 +524,14 @@ mod imp {
         }
         let Some(conn) = open() else { return };
         let path = r.path.to_string_lossy();
-        let stored: Option<(i64, i64)> = conn
+        let stored: Option<(i64, i64, String)> = conn
             .query_row(
-                "SELECT sig_a, sig_b FROM affordance_counts WHERE harness=?1 AND id=?2 AND path=?3",
+                "SELECT sig_a, sig_b, counts FROM affordance_counts WHERE harness=?1 AND id=?2 AND path=?3",
                 params![r.harness.as_str(), r.id, path],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok();
-        if stored == Some((a, b)) {
+        if stored.is_some_and(|(sa, sb, text)| (sa, sb) == (a, b) && counts_of(&text).is_some()) {
             return;
         }
         let _ = conn.execute(
@@ -554,8 +567,8 @@ mod imp {
             }
         }
 
-        /// `r`'s counts when a full read recorded them and they are still fresh; `None` ("not
-        /// counted") otherwise. Stats the session once.
+        /// `r`'s counts when a full read by this view recorded them and they are still fresh;
+        /// `None` ("not counted") otherwise. Stats the session once.
         pub fn counts(&self, r: &SessionRef) -> Option<crate::affordance::Counts> {
             let key = (
                 r.harness.as_str().to_string(),
@@ -563,7 +576,11 @@ mod imp {
                 r.path.to_string_lossy().into_owned(),
             );
             let (a, b, text) = self.rows.get(&key)?;
-            ((*a, *b) == affordance_sig(r) && *a != 0).then(|| counts_of(text))
+            if (*a, *b) == affordance_sig(r) && *a != 0 {
+                counts_of(text)
+            } else {
+                None
+            }
         }
 
         /// Whether `r` has no fresh counts (a sweep re-reads it to fill them).
@@ -592,6 +609,22 @@ mod imp {
             .flatten()
             .filter(|r| harness.is_none_or(|want| r.harness == want))
             .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A counts row an older view wrote (no version, or another one) is "not counted": a kind
+        /// that view did not know must not read as absent.
+        #[test]
+        fn counts_an_older_view_wrote_are_not_counted() {
+            let mut c = crate::affordance::Counts::new();
+            c.insert(crate::affordance::Kind::Approval, 2);
+            assert_eq!(counts_of(&counts_text(&c)), Some(c));
+            assert_eq!(counts_of(r#"{"plan": 1}"#), None);
+            assert_eq!(counts_of(r#"{"plan": 1, "_v": 1}"#), None);
+        }
     }
 }
 

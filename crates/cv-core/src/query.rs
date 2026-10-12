@@ -120,6 +120,14 @@ pub const HAS_FLAGS: &[(&str, &str)] = &[
     ("skill", "loaded or managed a skill"),
     ("hook", "a user hook's output reached the model"),
     ("question", "asked the person a question"),
+    (
+        "approval",
+        "asked for, was denied or recorded a permission / approval mode",
+    ),
+    (
+        "checkpoint",
+        "left or restored a restorable point (file snapshot, shadow commit, saved chat)",
+    ),
     ("branch", "rewound, undid, reset or cleared"),
     ("fork", "was forked from another session"),
     ("model_change", "switched model mid-session"),
