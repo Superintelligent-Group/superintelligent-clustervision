@@ -638,6 +638,23 @@ mod tests {
             actual.materialize();
             let actual = serde_json::to_value(actual).unwrap();
             let expected = serde_json::to_value(expected).unwrap();
+            #[cfg(feature = "mmap")]
+            if opts.spans {
+                let mut mapped_sink = CollectSink::default();
+                let mut mapped = stream_bytes_at(
+                    new_session("session", Some(path.clone())),
+                    text.as_bytes(),
+                    0,
+                    &opts,
+                    &mut mapped_sink,
+                );
+                mapped.messages = mapped_sink.messages;
+                mapped.materialize();
+                assert!(
+                    serde_json::to_value(mapped).unwrap() == expected,
+                    "mapped mode {opts:?}"
+                );
+            }
             fn mismatch(a: &Value, b: &Value, path: &str) -> Option<String> {
                 match (a, b) {
                     (Value::Object(a), Value::Object(b)) => {

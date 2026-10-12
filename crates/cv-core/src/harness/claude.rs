@@ -218,11 +218,18 @@ impl Adapter for Claude {
     }
 
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        // Stream the transcript line-by-line — a single Claude session can be >1 GB, and
-        // `read_to_string` would resident-spike the whole file (this OOM-killed cv on the
-        // 1.35 GB polyana transcript). `BufReader::lines()` keeps peak at O(largest line); handing
-        // each message to `sink` (instead of accumulating a `Vec`) keeps it at O(largest message).
         let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+        // Lazy spans borrow record slices from the file: even a giant output needs no private
+        // largest-line buffer. Buffered readers remain the fallback and the bulk/full path.
+        #[cfg(feature = "mmap")]
+        if opts.spans {
+            if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+                #[cfg(unix)]
+                let _ = map.advise(memmap2::Advice::Sequential);
+                let s = stream_bytes_at(new_session(&r.id, Some(r.path.clone())), &map, 0, opts, sink);
+                return Ok(with_fork_source(s, &r.path));
+            }
+        }
         let s = stream_reader(&r.id, BufReader::new(file), Some(r.path.clone()), opts, sink);
         Ok(with_fork_source(s, &r.path))
     }
@@ -245,6 +252,19 @@ impl Adapter for Claude {
             return Ok(None);
         };
         let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+        #[cfg(feature = "mmap")]
+        if opts.spans {
+            if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+                #[cfg(unix)]
+                let _ = map.advise(memmap2::Advice::Sequential);
+                let bytes = usize::try_from(from.offset)
+                    .ok()
+                    .and_then(|offset| map.get(offset..))
+                    .unwrap_or(&[]);
+                let s = stream_bytes_at(session, bytes, from.offset, opts, sink);
+                return Ok(Some(with_fork_source(s, &r.path)));
+            }
+        }
         file.seek(SeekFrom::Start(from.offset))
             .with_context(|| format!("seeking {}", r.path.display()))?;
         let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink);
@@ -381,6 +401,37 @@ fn stream_reader_at<R: BufRead>(
             cp.put(ADAPTER_LAYER, &session);
             sink.checkpoint(&mut cp);
         }
+    }
+    session
+}
+
+/// The mapped-file counterpart of `stream_reader_at`. Newline slices include their LF so
+/// checkpoint eligibility and partial-tail replay use exactly the buffered reader's boundaries.
+#[cfg(feature = "mmap")]
+fn stream_bytes_at(
+    mut session: Session,
+    bytes: &[u8],
+    base_off: u64,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Session {
+    let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
+    let sink = &mut spawns;
+    let mut start = 0;
+    for end in memchr::memchr_iter(b'\n', bytes).map(|i| i + 1) {
+        if ingest_bytes(&mut session, &bytes[start..end], base_off + start as u64, opts, sink) == Flow::Stop {
+            return session;
+        }
+        let file_off = base_off + end as u64;
+        if sink.wants_checkpoint(file_off) {
+            let mut cp = Checkpoint::new(file_off);
+            cp.put(ADAPTER_LAYER, &session);
+            sink.checkpoint(&mut cp);
+        }
+        start = end;
+    }
+    if start < bytes.len() {
+        ingest_bytes(&mut session, &bytes[start..], base_off + start as u64, opts, sink);
     }
     session
 }
@@ -2915,6 +2966,109 @@ mod tests {
         sink: &mut dyn MessageSink,
     ) -> Session {
         stream_reader(id, reader, source_path, &ParseOptions::lazy(), sink)
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mapped_lines_preserve_checkpoints_offsets_resume_and_partial_tails() {
+        #[derive(Default)]
+        struct Capture {
+            messages: Vec<Message>,
+            checkpoints: Vec<Checkpoint>,
+            stop_after: Option<usize>,
+        }
+        impl MessageSink for Capture {
+            fn message(&mut self, message: Message) -> Flow {
+                self.messages.push(message);
+                if self.stop_after == Some(self.messages.len()) {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                }
+            }
+            fn wants_checkpoint(&mut self, _: u64) -> bool {
+                true
+            }
+            fn checkpoint(&mut self, cp: &mut Checkpoint) {
+                self.checkpoints.push(cp.clone());
+            }
+        }
+        fn resolved(mut session: Session, sink: &mut Capture) -> Value {
+            session.messages = std::mem::take(&mut sink.messages);
+            session.materialize();
+            serde_json::to_value(session).unwrap()
+        }
+        let dir = cv_testkit::temp_dir("claude-mapped-lines");
+        let path = dir.join("s.jsonl");
+        let body = "wide \"payload\"\n".repeat(1000);
+        let first = serde_json::json!({"type":"user","uuid":"u","cwd":"/project","permissionMode":"plan","timestamp":"2026-01-02T00:00:00Z","message":{"content":"question"}});
+        let second = serde_json::json!({"type":"assistant","uuid":"a","parentUuid":"u","timestamp":"2026-01-01T00:00:00Z","message":{"model":"test-model","content":[{"type":"text","text":body},{"type":"tool_use","id":"call","name":"Agent","input":{"prompt":"test"}}]}});
+        let tail = serde_json::json!({"type":"user","uuid":"t","parentUuid":"a","toolUseResult":{"agentId":"agent"},"message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"done"}]}});
+        let prefix = format!("  {first}\r\n\n{second}\n");
+        for tail in [
+            tail.to_string(),
+            r#"{"type":"assistant","message": {"content":"partial"#.to_owned(),
+        ] {
+            let text = format!("{prefix}{tail}");
+            fs::write(&path, &text).unwrap();
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_offsets(),
+                ParseOptions::lazy_extra(),
+            ] {
+                for stop_after in [None, Some(1), Some(2)] {
+                    let mut buffered = Capture {
+                        stop_after,
+                        ..Capture::default()
+                    };
+                    let expected = stream_reader(
+                        "s",
+                        BufReader::new(fs::File::open(&path).unwrap()),
+                        Some(path.clone()),
+                        &opts,
+                        &mut buffered,
+                    );
+                    let mut mapped = Capture {
+                        stop_after,
+                        ..Capture::default()
+                    };
+                    let actual = Claude::with_config_dir(&dir)
+                        .stream(&scan(&path).unwrap(), &opts, &mut mapped)
+                        .unwrap();
+                    assert_eq!(mapped.checkpoints, buffered.checkpoints);
+                    assert_eq!(resolved(actual, &mut mapped), resolved(expected, &mut buffered));
+                    if stop_after.is_none() {
+                        assert_eq!(
+                            mapped.checkpoints.last().unwrap().offset,
+                            prefix.len() as u64,
+                            "partial tail is never checkpointed"
+                        );
+                        for cp in &mapped.checkpoints {
+                            let mut mapped_tail = Capture::default();
+                            let actual = Claude::with_config_dir(&dir)
+                                .resume(&scan(&path).unwrap(), &opts, &mut mapped_tail, cp)
+                                .unwrap()
+                                .unwrap();
+                            let offset = cp.offset as usize;
+                            let mut buffered_tail = Capture::default();
+                            let expected = stream_reader_at(
+                                cp.get(ADAPTER_LAYER).unwrap(),
+                                std::io::Cursor::new(&text.as_bytes()[offset..]),
+                                cp.offset,
+                                &opts,
+                                &mut buffered_tail,
+                            );
+                            assert_eq!(mapped_tail.checkpoints, buffered_tail.checkpoints);
+                            assert_eq!(
+                                resolved(actual, &mut mapped_tail),
+                                resolved(expected, &mut buffered_tail)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// The stamp `cv rewind` cuts at: under `lazy_offsets()` every message is stamped with the
