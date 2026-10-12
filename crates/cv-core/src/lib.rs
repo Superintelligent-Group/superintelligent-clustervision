@@ -31,6 +31,7 @@ pub mod harness;
 pub mod html;
 pub mod ingest;
 pub mod ir;
+mod ir_json;
 pub mod json;
 pub mod lanes;
 pub mod lazy;
