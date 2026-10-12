@@ -112,7 +112,6 @@ impl JsonSource {
     pub(crate) fn len(&self) -> u64 {
         self.0.identity.len
     }
-    #[cfg(any(not(feature = "mmap"), test))]
     pub(crate) fn check_metadata(&self, metadata: Metadata) -> Result<()> {
         anyhow::ensure!(
             Identity::from_metadata(metadata)? == self.0.identity,
@@ -157,7 +156,9 @@ impl JsonRange {
     #[cfg(feature = "mmap")]
     fn with_raw<T>(&self, f: impl for<'a> FnOnce(Raw<'a>) -> Result<T>) -> Result<T> {
         self.source.check()?;
-        let source = Source::open(self.path())?;
+        let file = std::fs::File::open(self.path())?;
+        self.source.check_metadata(file.metadata()?)?;
+        let source = Source::map_file(&file)?;
         self.source.check()?;
         // Even validated ranges keep the safe UTF-8 check on newly mapped/read external bytes.
         // No unchecked string cast is justified by metadata identity.
@@ -167,6 +168,7 @@ impl JsonRange {
         let result = f(raw);
         // Check even after callback failure: an intentional staged-output cap must not hide
         // a source mutation. Source failure takes precedence over the callback error.
+        self.source.check_metadata(file.metadata()?)?;
         self.source.check()?;
         result
     }
