@@ -114,11 +114,16 @@ impl JsonInputs {
         }
     }
 
-    fn finish(&self) -> Result<()> {
+    fn check_opened(&self, file: &fs::File) -> Result<()> {
+        self.source.check_metadata(file.metadata()?)
+    }
+
+    fn finish(&self, file: &fs::File) -> Result<()> {
         if let Some(error) = self.error.borrow_mut().take() {
             return Err(error);
         }
         if self.has_sources.get() {
+            self.check_opened(file)?;
             self.source.check()
         } else {
             Ok(())
@@ -126,8 +131,8 @@ impl JsonInputs {
     }
 }
 
-fn finish_inputs(inputs: Option<&JsonInputs>) -> Result<()> {
-    inputs.map_or(Ok(()), JsonInputs::finish)
+fn finish_inputs(inputs: Option<&JsonInputs>, file: &fs::File) -> Result<()> {
+    inputs.map_or(Ok(()), |inputs| inputs.finish(file))
 }
 
 pub struct Claude {
@@ -308,6 +313,9 @@ impl Adapter for Claude {
         crate::stream::checked(sink, |sink| {
             let inputs = JsonInputs::capture(&r.path, opts)?;
             let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            if let Some(inputs) = &inputs {
+                inputs.check_opened(&file)?;
+            }
             // Lazy spans borrow record slices from the file: even a giant output needs no private
             // largest-line buffer. Buffered readers remain the fallback and the bulk/full path.
             #[cfg(feature = "mmap")]
@@ -323,19 +331,19 @@ impl Adapter for Claude {
                         sink,
                         inputs.as_ref(),
                     );
-                    finish_inputs(inputs.as_ref())?;
+                    finish_inputs(inputs.as_ref(), &file)?;
                     return Ok(with_fork_source(s, &r.path, sink));
                 }
             }
             let s = stream_reader_at(
                 new_session(&r.id, Some(r.path.clone())),
-                BufReader::new(file),
+                BufReader::new(&file),
                 0,
                 opts,
                 sink,
                 inputs.as_ref(),
             );
-            finish_inputs(inputs.as_ref())?;
+            finish_inputs(inputs.as_ref(), &file)?;
             Ok(with_fork_source(s, &r.path, sink))
         })
     }
@@ -360,6 +368,9 @@ impl Adapter for Claude {
             };
             let inputs = JsonInputs::capture(&r.path, opts)?;
             let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            if let Some(inputs) = &inputs {
+                inputs.check_opened(&file)?;
+            }
             #[cfg(feature = "mmap")]
             if opts.spans {
                 if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
@@ -370,14 +381,14 @@ impl Adapter for Claude {
                         .and_then(|offset| map.get(offset..))
                         .unwrap_or(&[]);
                     let s = stream_bytes_at(session, bytes, from.offset, opts, sink, inputs.as_ref());
-                    finish_inputs(inputs.as_ref())?;
+                    finish_inputs(inputs.as_ref(), &file)?;
                     return Ok(Some(with_fork_source(s, &r.path, sink)));
                 }
             }
             file.seek(SeekFrom::Start(from.offset))
                 .with_context(|| format!("seeking {}", r.path.display()))?;
-            let s = stream_reader_at(session, BufReader::new(file), from.offset, opts, sink, inputs.as_ref());
-            finish_inputs(inputs.as_ref())?;
+            let s = stream_reader_at(session, BufReader::new(&file), from.offset, opts, sink, inputs.as_ref());
+            finish_inputs(inputs.as_ref(), &file)?;
             Ok(Some(with_fork_source(s, &r.path, sink)))
         })
     }
@@ -3259,6 +3270,21 @@ mod tests {
         assert_eq!(deleting.calls, 1);
         assert_eq!(deleting.checkpoints, 0);
         assert!(deleting.captured.unwrap().resolve().is_err());
+    }
+
+    #[test]
+    fn native_json_inputs_verify_the_opened_file_before_using_ranges() {
+        let world = cv_testkit::World::in_process("claude-json-input-opened");
+        let path = world.proj.join("source.jsonl");
+        let replacement = world.proj.join("replacement.jsonl");
+        fs::write(&path, "{\"a\":1}").unwrap();
+        fs::write(&replacement, "{\"b\":200}").unwrap();
+        let inputs = JsonInputs::capture(&path, &ParseOptions::lazy()).unwrap().unwrap();
+        // The named path still matches capture, but a file opened during a transient path swap
+        // must not lend its validated bytes/offsets to descriptors of the original file.
+        inputs.source.check().unwrap();
+        assert!(inputs.check_opened(&fs::File::open(&replacement).unwrap()).is_err());
+        inputs.check_opened(&fs::File::open(&path).unwrap()).unwrap();
     }
 
     #[test]
