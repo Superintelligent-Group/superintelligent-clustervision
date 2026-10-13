@@ -48,6 +48,12 @@ impl Payload<'_> {
             }
             match text {
                 Text::Inline(s) => info.feed(s),
+                Text::Source(source) => {
+                    let _ = source.try_for_each_chunk(4096, |part| {
+                        info.feed(part);
+                        Ok(())
+                    });
+                }
                 Text::Span(sp) => {
                     // Ordinary prompts need only a short prefix. Fall back to a bounded scan
                     // when leading whitespace hides the classification marker beyond it.

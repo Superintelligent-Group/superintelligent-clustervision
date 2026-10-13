@@ -495,6 +495,16 @@ pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
         };
         match text {
             crate::lazy::Text::Inline(s) => feed(s),
+            crate::lazy::Text::Source(source) => {
+                let prefix = source.try_prefix(1024).unwrap_or_default();
+                feed(&prefix);
+                if require_nonwhite && !nonwhite && source.raw_len() > 1024 {
+                    let _ = source.try_for_each_chunk(4096, |chunk| {
+                        nonwhite |= chunk.chars().any(|c| !c.is_whitespace());
+                        Ok(())
+                    });
+                }
+            }
             crate::lazy::Text::Span(sp) => {
                 let prefix = resolver.resolve_prefix(sp, 1024);
                 feed(&prefix);

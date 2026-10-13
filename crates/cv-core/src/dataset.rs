@@ -122,9 +122,9 @@ fn render_blocks_impl(
                     }
                     sep(&mut started, emit)?;
                     emit(s)?;
-                } else if let Some(sp) = text.as_span() {
+                } else {
                     sep(&mut started, emit)?;
-                    resolver.try_for_each_chunk(sp, SPAN_CHUNK, &mut *emit)?;
+                    text.try_for_each_chunk(resolver, SPAN_CHUNK, &mut *emit)?;
                 }
             }
             Block::Thinking { text, redacted, .. } => {
@@ -148,10 +148,10 @@ fn render_blocks_impl(
                     emit("<thinking>\n")?;
                     emit(s)?;
                     emit("\n</thinking>")?;
-                } else if let Some(sp) = text.as_span() {
+                } else {
                     sep(&mut started, emit)?;
                     emit("<thinking>\n")?;
-                    resolver.try_for_each_chunk(sp, SPAN_CHUNK, &mut *emit)?;
+                    text.try_for_each_chunk(resolver, SPAN_CHUNK, &mut *emit)?;
                     emit("\n</thinking>")?;
                 }
             }
@@ -194,8 +194,8 @@ fn render_blocks_impl(
                     emit(&crate::redact::scrub_cow(&s, opts, stats))?;
                 } else if let Some(s) = content.inline_str() {
                     emit(s)?;
-                } else if let Some(sp) = content.as_span() {
-                    resolver.try_for_each_chunk(sp, SPAN_CHUNK, &mut *emit)?;
+                } else {
+                    content.try_for_each_chunk(resolver, SPAN_CHUNK, &mut *emit)?;
                 }
                 emit("\n```")?;
             }

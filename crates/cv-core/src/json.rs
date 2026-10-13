@@ -200,6 +200,24 @@ impl JsonSource {
             decoded: None,
         })
     }
+    pub(crate) fn read_range_value<T>(
+        &self,
+        offset: u64,
+        len: u64,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.range(offset, len)?.with_validation(Validation::Value, f)
+    }
+    pub(crate) fn read_backing_value<T>(
+        &self,
+        backing: Arc<crate::harness::store::bytes::ByteSource>,
+        offset: u64,
+        len: u64,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.backing_range(backing, offset, len)?
+            .with_validation(Validation::Value, f)
+    }
     pub(crate) fn read_range_syntax<T>(
         &self,
         offset: u64,
@@ -217,6 +235,15 @@ impl JsonSource {
         len: u64,
         f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
     ) -> Result<T> {
+        self.backing_range(backing, offset, len)?
+            .with_validation(Validation::Syntax, f)
+    }
+    fn backing_range(
+        &self,
+        backing: Arc<crate::harness::store::bytes::ByteSource>,
+        offset: u64,
+        len: u64,
+    ) -> Result<JsonRange> {
         self.check()?;
         let backing_len = backing.len()?;
         anyhow::ensure!(
@@ -233,17 +260,15 @@ impl JsonSource {
                 *decoded = Some(backing.clone());
             }
         }
-        JsonRange {
+        Ok(JsonRange {
             source: self.clone(),
             offset,
             len,
             decoded: Some(backing),
-        }
-        .with_validation(Validation::Syntax, f)
+        })
     }
     pub(crate) fn read_document<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
-        self.range(0, self.0.identity.len)?
-            .with_validation(Validation::Value, f)
+        self.read_range_value(0, self.0.identity.len, f)
     }
     /// Validate whole-source JSON grammar and UTF-8 without imposing Value's scalar/depth
     /// policy on ignored fields. Typed document consumers enforce their known-field schema
@@ -274,11 +299,24 @@ impl JsonSource {
     }
 }
 impl JsonRange {
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         self.source.check()?;
         Ok(())
     }
 
+    pub(crate) fn dependencies(&self) -> Option<&crate::source::ReadSet> {
+        self.source.0.reads.as_deref()
+    }
+    pub(crate) fn same_range(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.offset == other.offset
+            && self.len == other.len
+            && match (&self.decoded, &other.decoded) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
     fn child(&self, offset: u64, len: u64) -> Result<Self> {
         anyhow::ensure!(
             len != 0
@@ -350,7 +388,7 @@ impl JsonRange {
         self.check()?;
         result
     }
-    fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
+    pub(crate) fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
         self.with_validation(Validation::Cached, f)
     }
     fn with_validation<T>(
@@ -650,8 +688,34 @@ impl<'a> JsonView<'a> {
             View::Portable(source) => Some((source.value.offset, source.value.len)),
         })
     }
+    /// Retain the selected string independently of a session's implicit primary path.
+    pub fn source_text(self) -> Result<Option<crate::lazy::Text>> {
+        if !self.is_string()? {
+            return Ok(None);
+        }
+        if self
+            .source_range()?
+            .is_some_and(|(_, len)| len > crate::lazy::INLINE_MAX as u64)
+        {
+            if let Json::Source(range) = self.to_json()? {
+                return Ok(Some(crate::lazy::Text::Source(crate::lazy::SourceText::new(range))));
+            }
+        }
+        self.text(false)
+    }
     /// Native transcript text uses the session's primary source, just like existing Text spans.
     pub(crate) fn text(self, spans: bool) -> Result<Option<crate::lazy::Text>> {
+        if spans
+            && match self.0 {
+                #[cfg(feature = "mmap")]
+                View::Source(source) => source.range.decoded.is_some(),
+                #[cfg(not(feature = "mmap"))]
+                View::Portable(source) => source.owner.decoded.is_some(),
+                View::Owned(_) => false,
+            }
+        {
+            return self.source_text();
+        }
         match self.0 {
             View::Owned(value) => Ok(value.as_str().map(|s| crate::lazy::Text::Inline(s.to_owned()))),
             #[cfg(feature = "mmap")]
@@ -715,10 +779,7 @@ impl<'a> JsonView<'a> {
         if blank {
             return Ok(serde_json::json!({}).into());
         }
-        match range.source.read_backing_syntax(bytes, offset, len, |view| {
-            if !view.accepts_value()? {
-                return Err(InvalidJson.into());
-            }
+        match range.source.read_backing_value(bytes, offset, len, |view| {
             if view.is_object()? || view.is_array()? {
                 Ok(Some(view.to_json()?))
             } else {

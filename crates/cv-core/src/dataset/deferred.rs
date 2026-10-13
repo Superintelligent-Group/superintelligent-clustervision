@@ -8,9 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Read, Write};
 
 #[derive(Serialize, Deserialize)]
+enum SourceSlot {
+    Input(usize),
+    Text { index: usize, skip: usize },
+}
+#[derive(Serialize, Deserialize)]
 pub(super) struct DeferredMessage {
     message: Message,
-    sources: Vec<(usize, SourceDescriptor)>,
+    sources: Vec<(SourceSlot, SourceDescriptor)>,
 }
 impl DeferredMessage {
     pub(super) fn new(mut message: Message, registry: &mut SourceRegistry) -> Self {
@@ -24,6 +29,19 @@ impl DeferredMessage {
         message.extra = serde_json::Map::new();
         let mut sources = Vec::new();
         for (index, block) in message.content.iter_mut().enumerate() {
+            let text = match &mut *block {
+                Block::Text { text } | Block::Thinking { text, .. } => Some(text),
+                Block::ToolResult { content, .. } => Some(content),
+                _ => None,
+            };
+            if let Some(text) = text {
+                if let crate::lazy::Text::Source(source) = text {
+                    let skip = source.skip;
+                    let mut json = source.json();
+                    sources.push((SourceSlot::Text { index, skip }, registry.detach(&mut json).unwrap()));
+                    *text = crate::lazy::Text::Inline(String::new());
+                }
+            }
             match block {
                 Block::Thinking {
                     signature, encrypted, ..
@@ -37,7 +55,7 @@ impl DeferredMessage {
                     *id = String::new();
                     *namespace = None;
                     if let Some(source) = registry.detach(input) {
-                        sources.push((index, source));
+                        sources.push((SourceSlot::Input(index), source));
                     }
                 }
                 Block::ToolResult {
@@ -61,20 +79,45 @@ impl DeferredMessage {
     }
 
     pub(super) fn restore(mut self, registry: &SourceRegistry) -> Result<Message> {
-        for (index, descriptor) in self.sources {
+        for (slot, descriptor) in self.sources {
+            let index = match slot {
+                SourceSlot::Input(index) | SourceSlot::Text { index, .. } => index,
+            };
             let block = self
                 .message
                 .content
                 .get_mut(index)
                 .context("invalid staged source block index")?;
-            let Block::ToolUse { input, .. } = block else {
-                anyhow::bail!("invalid staged source block type")
-            };
-            anyhow::ensure!(
-                matches!(input, Json::Owned(serde_json::Value::Null)),
-                "invalid staged source placeholder"
-            );
-            *input = registry.restore(descriptor)?;
+            let restored = registry.restore(descriptor)?;
+            match slot {
+                SourceSlot::Input(_) => {
+                    let Block::ToolUse { input, .. } = block else {
+                        anyhow::bail!("invalid staged source block type")
+                    };
+                    anyhow::ensure!(
+                        matches!(input, Json::Owned(serde_json::Value::Null)),
+                        "invalid staged source placeholder"
+                    );
+                    *input = restored;
+                }
+                SourceSlot::Text { skip, .. } => {
+                    let text = match block {
+                        Block::Text { text } | Block::Thinking { text, .. } => text,
+                        Block::ToolResult { content, .. } => content,
+                        _ => anyhow::bail!("invalid staged text block type"),
+                    };
+                    anyhow::ensure!(
+                        matches!(text, crate::lazy::Text::Inline(value) if value.is_empty()),
+                        "invalid staged text placeholder"
+                    );
+                    let Json::Source(range) = restored else {
+                        anyhow::bail!("missing staged text source")
+                    };
+                    let mut source = crate::lazy::SourceText::new(range);
+                    source.skip = skip;
+                    *text = crate::lazy::Text::Source(source);
+                }
+            }
         }
         Ok(self.message)
     }
@@ -84,6 +127,7 @@ fn text_heap(text: &crate::lazy::Text) -> usize {
     match text {
         crate::lazy::Text::Inline(text) => text.capacity(),
         crate::lazy::Text::Span(span) => span.source.as_ref().map_or(0, std::path::PathBuf::capacity),
+        crate::lazy::Text::Source(_) => unreachable!("source text detached before staging"),
     }
 }
 fn value_heap(value: &serde_json::Value) -> usize {
@@ -103,7 +147,7 @@ fn value_heap(value: &serde_json::Value) -> usize {
 impl Record for DeferredMessage {
     type ReadState = Vec<u8>;
     fn heap_bytes(&self) -> usize {
-        self.sources.capacity() * std::mem::size_of::<(usize, SourceDescriptor)>()
+        self.sources.capacity() * std::mem::size_of::<(SourceSlot, SourceDescriptor)>()
             + self.message.content.capacity() * std::mem::size_of::<Block>()
             + self
                 .message
@@ -273,7 +317,7 @@ mod tests {
         for failure in ["index", "type", "placeholder", "source", "duplicate"] {
             let mut corrupted = encoded.clone();
             match failure {
-                "index" => corrupted["sources"][0][0] = 999.into(),
+                "index" => corrupted["sources"][0][0]["Input"] = 999.into(),
                 "type" => corrupted["message"]["content"][0] = serde_json::json!({"type":"text","text":"x"}),
                 "placeholder" => corrupted["message"]["content"][0]["input"] = true.into(),
                 "source" => corrupted["sources"][0][1]["source"] = 999.into(),

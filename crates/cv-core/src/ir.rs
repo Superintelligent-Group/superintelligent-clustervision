@@ -645,6 +645,18 @@ impl Message {
     /// inline. Streaming consumers call this per message (peak = one message) instead of holding a
     /// whole materialized session.
     pub fn materialize(&mut self, resolver: &crate::lazy::Resolver) -> anyhow::Result<()> {
+        for block in &mut self.content {
+            let text = match block {
+                Block::Text { text } | Block::Thinking { text, .. } => Some(text),
+                Block::ToolResult { content, .. } => Some(content),
+                _ => None,
+            };
+            if let Some(text) = text {
+                if let crate::lazy::Text::Source(source) = text {
+                    *text = crate::lazy::Text::Inline(source.try_resolve()?);
+                }
+            }
+        }
         self.materialize_text(resolver);
         for block in &mut self.content {
             if let Block::ToolUse { input, .. } = block {
@@ -663,7 +675,11 @@ impl Message {
                 Block::ToolResult { content, .. } => content,
                 _ => continue,
             };
-            if slot.is_span() {
+            if let crate::lazy::Text::Source(source) = slot {
+                if let Ok(owned) = source.try_resolve() {
+                    *slot = crate::lazy::Text::Inline(owned);
+                }
+            } else if slot.is_span() {
                 let owned = slot.resolve(resolver).into_owned();
                 *slot = crate::lazy::Text::Inline(owned);
             }
@@ -1010,6 +1026,7 @@ pub fn est_tokens_resolved(
     est_tokens_with(block, bytes_per_token, |text| match text {
         crate::lazy::Text::Inline(s) => s.len(),
         crate::lazy::Text::Span(span) => resolver.resolved_len(span),
+        crate::lazy::Text::Source(source) => source.try_decoded_len().unwrap_or(0),
     })
 }
 

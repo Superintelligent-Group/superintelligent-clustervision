@@ -593,7 +593,7 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
                         Some(Returns::ResultUnless(marker)) => {
                             returned |= match content {
                                 crate::lazy::Text::Inline(t) => !t.contains(marker),
-                                crate::lazy::Text::Span(_) => true,
+                                crate::lazy::Text::Span(_) | crate::lazy::Text::Source(_) => true,
                             }
                         }
                         _ => {}

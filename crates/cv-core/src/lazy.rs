@@ -14,6 +14,9 @@
 //! (peak = whole session, their choice). Below the inline threshold everything is `Inline`, where
 //! `Deref`/`Display` just work.
 
+mod source;
+pub use source::SourceText;
+
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
@@ -84,6 +87,7 @@ pub struct Span {
 pub enum Text {
     Inline(String),
     Span(Span),
+    Source(SourceText),
 }
 
 impl Text {
@@ -91,19 +95,19 @@ impl Text {
     pub fn inline_str(&self) -> Option<&str> {
         match self {
             Text::Inline(s) => Some(s),
-            Text::Span(_) => None,
+            Text::Span(_) | Text::Source(_) => None,
         }
     }
 
     pub fn is_span(&self) -> bool {
-        matches!(self, Text::Span(_))
+        matches!(self, Text::Span(_) | Text::Source(_))
     }
 
     /// The span, if this is lazy content.
     pub fn as_span(&self) -> Option<&Span> {
         match self {
             Text::Span(sp) => Some(sp),
-            Text::Inline(_) => None,
+            Text::Inline(_) | Text::Source(_) => None,
         }
     }
 
@@ -113,6 +117,7 @@ impl Text {
         match self {
             Text::Inline(s) => Cow::Borrowed(s),
             Text::Span(sp) => resolver.resolve(sp),
+            Text::Source(source) => Cow::Owned(source.try_resolve().unwrap_or_default()),
         }
     }
 
@@ -121,6 +126,7 @@ impl Text {
         match self {
             Text::Inline(s) => Ok(Cow::Borrowed(s)),
             Text::Span(sp) => resolver.try_resolve(sp),
+            Text::Source(source) => Ok(Cow::Owned(source.try_resolve()?)),
         }
     }
 
@@ -129,6 +135,9 @@ impl Text {
         match self {
             Text::Inline(s) => Ok(Cow::Borrowed(s)),
             Text::Span(sp) => resolver.try_resolve_prefix(sp, max_raw),
+            Text::Source(source) => Ok(Cow::Owned(
+                source.try_prefix(usize::try_from(max_raw).unwrap_or(usize::MAX))?,
+            )),
         }
     }
 
@@ -140,6 +149,11 @@ impl Text {
         match self {
             Text::Inline(s) => Cow::Borrowed(s),
             Text::Span(sp) => resolver.resolve_prefix(sp, max_raw),
+            Text::Source(source) => Cow::Owned(
+                source
+                    .try_prefix(usize::try_from(max_raw).unwrap_or(usize::MAX))
+                    .unwrap_or_default(),
+            ),
         }
     }
 
@@ -148,9 +162,70 @@ impl Text {
         match self {
             Text::Inline(s) => s.len(),
             Text::Span(sp) => sp.len as usize,
+            Text::Source(source) => source.raw_len(),
         }
     }
 
+    pub fn try_for_each_chunk(
+        &self,
+        resolver: &Resolver,
+        chunk: usize,
+        mut f: impl FnMut(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Text::Inline(text) => {
+                let mut part = text.as_str();
+                while !part.is_empty() {
+                    let mut end = part.len().min(chunk.max(1));
+                    while !part.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    f(&part[..end])?;
+                    part = &part[end..];
+                }
+                Ok(())
+            }
+            Text::Span(span) => resolver.try_for_each_chunk(span, chunk, f),
+            Text::Source(source) => source.try_for_each_chunk(chunk, f),
+        }
+    }
+    pub fn try_decoded_len(&self, resolver: &Resolver) -> anyhow::Result<usize> {
+        let mut len = 0usize;
+        self.try_for_each_chunk(resolver, 64 * 1024, |part| {
+            len = len
+                .checked_add(part.len())
+                .ok_or_else(|| anyhow::anyhow!("text length overflow"))?;
+            Ok(())
+        })?;
+        Ok(len)
+    }
+    pub fn with_skipped_prefix(mut self, bytes: usize) -> anyhow::Result<Self> {
+        match &mut self {
+            Text::Inline(text) => {
+                *text = text
+                    .get(bytes..)
+                    .ok_or_else(|| anyhow::anyhow!("text prefix past end or invalid UTF8 boundary"))?
+                    .to_owned();
+            }
+            Text::Source(source) => {
+                let prefix = source.try_prefix(bytes.saturating_add(3))?;
+                anyhow::ensure!(
+                    prefix.get(bytes..).is_some(),
+                    "source text prefix past end or invalid UTF8 boundary"
+                );
+                source.skip = source
+                    .skip
+                    .checked_add(bytes)
+                    .ok_or_else(|| anyhow::anyhow!("text prefix overflow"))?;
+            }
+            Text::Span(span) if !span.escaped && bytes as u64 <= span.len => {
+                span.offset += bytes as u64;
+                span.len -= bytes as u64;
+            }
+            Text::Span(_) => anyhow::bail!("decoded prefix needs source_text for escaped spans"),
+        }
+        Ok(self)
+    }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -180,7 +255,7 @@ impl Deref for Text {
     fn deref(&self) -> &str {
         match self {
             Text::Inline(s) => s,
-            Text::Span(_) => {
+            Text::Span(_) | Text::Source(_) => {
                 panic!("Text::Span read as &str without resolving — call Session::materialize() or Text::resolve(&resolver) first")
             }
         }
@@ -192,7 +267,7 @@ impl fmt::Display for Text {
         match self {
             Text::Inline(s) => f.write_str(s),
             // Don't panic in Display; an unmaterialized span renders empty. Materialize for output.
-            Text::Span(_) => Ok(()),
+            Text::Span(_) | Text::Source(_) => Ok(()),
         }
     }
 }
@@ -216,6 +291,7 @@ impl Serialize for Text {
         match self {
             Text::Inline(t) => s.serialize_str(t),
             Text::Span(sp) => sp.serialize(s),
+            Text::Source(source) => s.serialize_str(&source.try_resolve().map_err(serde::ser::Error::custom)?),
         }
     }
 }

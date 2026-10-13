@@ -223,6 +223,12 @@ impl Facts {
 fn chunks(text: &Text, resolver: &Resolver, mut visit: impl FnMut(&str)) {
     match text {
         Text::Span(span) => resolver.for_each_chunk(span, CHUNK, visit),
+        Text::Source(source) => {
+            let _ = source.try_for_each_chunk(CHUNK, |part| {
+                visit(part);
+                Ok(())
+            });
+        }
         Text::Inline(text) => {
             let mut rest = text.as_str();
             while !rest.is_empty() {
@@ -248,6 +254,24 @@ pub(super) fn facts(text: &Text, resolver: &Resolver) -> Facts {
 pub(super) fn starts_with(text: &Text, resolver: &Resolver, wanted: &str) -> bool {
     if let Text::Inline(text) = text {
         return text.trim_start().starts_with(wanted);
+    }
+    if let Text::Source(source) = text {
+        let mut head = String::new();
+        let mut started = false;
+        let _ = source.try_for_each_chunk(CHUNK, |mut part| {
+            if !started {
+                part = part.trim_start();
+                started = !part.is_empty();
+            }
+            for ch in part
+                .chars()
+                .take(wanted.chars().count().saturating_sub(head.chars().count()))
+            {
+                head.push(ch);
+            }
+            Ok(())
+        });
+        return head.starts_with(wanted);
     }
     let span = text.as_span().unwrap();
     let prefix = text.resolve_prefix(resolver, 256);
