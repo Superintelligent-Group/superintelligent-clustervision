@@ -30,7 +30,7 @@ impl TextSets {
     /// Resolve every distinct `text:` needle in `query` with `search`, which answers "which session
     /// ids match this needle". A caller with no index passes a closure returning an empty set, and
     /// every `text:` needle then matches nothing (the CLI warns once when it does this).
-    pub fn resolve(query: &SessionQuery, search: impl Fn(&str) -> HashSet<String>) -> TextSets {
+    pub fn resolve(query: &SessionQuery, mut search: impl FnMut(&str) -> HashSet<String>) -> TextSets {
         let mut map = HashMap::new();
         for n in query.needles(FieldId::Text) {
             let ids = search(&n);

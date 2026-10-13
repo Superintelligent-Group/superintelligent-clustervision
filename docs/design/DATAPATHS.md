@@ -2427,3 +2427,13 @@ Tantivy 0.26.1 defaults to a single-thread executor, as used by production index
 control. A custom parallel executor may duplicate concurrent cache misses; no once-per-ID
 physical-work claim applies there. Snippet enrichment remains the existing separate selected-hit
 operation. No persistent cache, schema, public query syntax or publication behavior changes.
+
+The adjacent CLI `text_sets` path now batches distinct text needles through additive
+`cv_search::text_search_ids_batch`. Index open/reader snapshot setup occurs once per operation
+instead of once per needle; parsing and complete ID matching remain independent per needle.
+One malformed needle retains its own error and becomes the CLI's existing empty match set,
+while setup failure makes all needles empty. Resolved sets move into `TextSets` without cloning
+IDs. Empty batches open nothing. The existing no-source/all-chunk-matches control now compares
+five batch needles, including a malformed middle needle, with separate production searches;
+complete IDs and errors match. This removes repeated setup, not matching-document work;
+queries share one consistent index snapshot rather than reopening between predicates.

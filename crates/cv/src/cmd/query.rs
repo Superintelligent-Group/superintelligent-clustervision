@@ -29,12 +29,48 @@ pub(crate) fn build(query: Option<String>) -> Result<Option<SessionQuery>> {
 /// If there's no index, warn
 /// once and treat every `text:` needle as matching nothing.
 pub(crate) fn text_sets(query: &SessionQuery) -> TextSets {
-    if query.needles(FieldId::Text).is_empty() {
+    let needles = query.needles(FieldId::Text);
+    if needles.is_empty() {
         return TextSets::empty();
     }
     if !cv_search::default_tantivy_dir().exists() {
         eprintln!("cv query: text: needs a full-text index — run `cv index` (treating text: as no match)");
         return TextSets::resolve(query, |_| HashSet::new());
     }
-    TextSets::resolve(query, |n| cv_search::text_search_ids(None, n).unwrap_or_default())
+    let borrowed: Vec<_> = needles.iter().map(String::as_str).collect();
+    let matches = cv_search::text_search_ids_batch(None, &borrowed).unwrap_or_default();
+    let mut sets: std::collections::HashMap<_, _> = needles
+        .into_iter()
+        .zip(matches.into_iter().map(Result::unwrap_or_default))
+        .collect();
+    TextSets::resolve(query, |needle| sets.remove(needle).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_sets_batch_distinct_needles_without_losing_membership() {
+        let world = cv_testkit::World::in_process("query_text_sets_batch");
+        let refs: Vec<_> = [("first", "alpha"), ("second", "beta")]
+            .into_iter()
+            .map(|(id, content)| {
+                let path = world.write_session(
+                    id,
+                    &[serde_json::json!({
+                        "type":"user", "message":{"role":"user", "content":content}
+                    })],
+                );
+                cv_core::SessionRef::new(id, cv_core::Harness::Claude, path)
+            })
+            .collect();
+        cv_search::index_sessions(None, refs, true, false).unwrap();
+        let query = SessionQuery::parse("text:alpha OR text:beta OR text:alpha").unwrap();
+        let sets = text_sets(&query);
+        assert!(sets.contains("alpha", "first"));
+        assert!(!sets.contains("alpha", "second"));
+        assert!(sets.contains("beta", "second"));
+        assert!(!sets.contains("beta", "first"));
+    }
 }

@@ -130,6 +130,15 @@ pub fn text_search_ids(dir: impl Into<Option<PathBuf>>, query: &str) -> Result<s
     fts::text_search_ids(&dir.into().unwrap_or_else(default_tantivy_dir), query)
 }
 
+/// Match several full-text needles using one index-reader snapshot. The outer result reports
+/// index setup errors; each returned result independently reports that needle's query error.
+pub fn text_search_ids_batch(
+    dir: impl Into<Option<PathBuf>>,
+    queries: &[&str],
+) -> Result<Vec<Result<std::collections::HashSet<String>>>> {
+    fts::text_search_ids_batch(&dir.into().unwrap_or_else(default_tantivy_dir), queries)
+}
+
 /// Rank sessions with stored previews; no source transcripts are read.
 pub fn text_search_indexed(dir: impl Into<Option<PathBuf>>, query: &str, limit: usize) -> Result<Vec<Hit>> {
     fts::text_search_indexed(&dir.into().unwrap_or_else(default_tantivy_dir), query, limit)

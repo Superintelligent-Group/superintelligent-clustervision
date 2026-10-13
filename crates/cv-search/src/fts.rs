@@ -2194,8 +2194,26 @@ fn parse_text_query(index: &Index, f: &Fields, query: &str) -> Result<Box<dyn ta
 pub fn text_search_ids(dir: &Path, query: &str) -> Result<HashSet<String>> {
     let (index, f) = open_existing(dir)?;
     let reader = index.reader().context("opening index reader")?;
+    matching_ids(&index, &f, &reader.searcher(), query)
+}
+
+/// Resolve several needles against one reader snapshot. Setup failures fail the operation;
+/// malformed individual queries retain their own errors without discarding other needles.
+pub fn text_search_ids_batch(dir: &Path, queries: &[&str]) -> Result<Vec<Result<HashSet<String>>>> {
+    if queries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (index, f) = open_existing(dir)?;
+    let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
-    let parsed = parse_text_query(&index, &f, query)?;
+    Ok(queries
+        .iter()
+        .map(|query| matching_ids(&index, &f, &searcher, query))
+        .collect())
+}
+
+fn matching_ids(index: &Index, f: &Fields, searcher: &tantivy::Searcher, query: &str) -> Result<HashSet<String>> {
+    let parsed = parse_text_query(index, f, query)?;
     searcher
         .search(&parsed, &crate::session_collector::SessionIds(f.id))
         .context("matching session IDs")
@@ -3232,6 +3250,24 @@ mod tests {
         assert!(text_search_ids(&dir, "alpha nonexistent").unwrap().is_empty());
         assert!(text_search_ids(&dir, "harness:codex alpha").unwrap().is_empty());
         assert!(text_search_ids(&dir, "\"").is_err());
+        let needles = [
+            "alpha",
+            "\"",
+            "alpha nonexistent",
+            "\"alpha beta\" harness:claude",
+            "harness:codex alpha",
+        ];
+        let batch = text_search_ids_batch(&dir, &needles).unwrap();
+        for (query, result) in needles.iter().zip(batch) {
+            match (text_search_ids(&dir, query), result) {
+                (Ok(single), Ok(batched)) => assert_eq!(single, batched),
+                (Err(single), Err(batched)) => assert_eq!(single.to_string(), batched.to_string()),
+                _ => panic!("batch/single query mismatch: {query}"),
+            }
+        }
+        let absent = dir.join("no-index");
+        assert!(text_search_ids_batch(&absent, &[]).unwrap().is_empty());
+        assert!(text_search_ids_batch(&absent, &["alpha"]).is_err());
 
         // Many matching chunks and unique sessions: membership enumerates the entire match set.
         let (index, f) = open_existing(&dir).unwrap();
