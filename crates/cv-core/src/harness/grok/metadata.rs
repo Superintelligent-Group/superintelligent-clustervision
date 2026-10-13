@@ -38,6 +38,40 @@ impl<'a> Row<'a> {
             }),
         })
     }
+    pub(super) fn number(self) -> Result<Option<serde_json::Number>> {
+        match self {
+            #[cfg(feature = "mmap")]
+            Self::Mapped { raw, .. } => Ok(serde_json::from_str(raw.get()).ok()),
+            Self::Positioned { range, context, .. } => {
+                if matches!(context.kind(range)?, Some(b'-' | b'0'..=b'9')) {
+                    Ok(Some(context.materialize(range)?))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+    pub(super) fn number_field(self, key: &str) -> Result<Option<serde_json::Number>> {
+        self.get(key)?.map(Self::number).transpose().map(Option::flatten)
+    }
+    pub(super) fn ordered_keys(self) -> Result<Vec<String>> {
+        match self {
+            #[cfg(feature = "mmap")]
+            Self::Mapped { raw, .. } => Ok(super::ordered_keys(raw)),
+            Self::Positioned { range, context, .. } => {
+                let mut keys = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for entry in context.object(range)?.into_iter().flatten() {
+                    let (key, _) = entry?;
+                    let key: String = context.materialize(key)?;
+                    if seen.insert(key.clone()) {
+                        keys.push(key)
+                    }
+                }
+                Ok(keys)
+            }
+        }
+    }
     pub(super) fn string(self) -> Result<Option<String>> {
         match self {
             #[cfg(feature = "mmap")]
@@ -141,9 +175,21 @@ impl<'a> Row<'a> {
 }
 
 pub(super) fn scan(path: &Path, visit: impl FnMut(Row<'_>) -> Result<()>) -> Option<()> {
-    scan_with(path, false, visit).ok()
+    scan_selected_with(path, false, false, visit).ok()
 }
-fn scan_with(path: &Path, force_positioned: bool, mut visit: impl FnMut(Row<'_>) -> Result<()>) -> Result<()> {
+pub(super) fn scan_hooks(path: &Path, visit: impl FnMut(Row<'_>) -> Result<()>) -> Option<()> {
+    scan_selected_with(path, false, true, visit).ok()
+}
+#[cfg(test)]
+fn scan_with(path: &Path, force_positioned: bool, visit: impl FnMut(Row<'_>) -> Result<()>) -> Result<()> {
+    scan_selected_with(path, force_positioned, false, visit)
+}
+fn scan_selected_with(
+    path: &Path,
+    force_positioned: bool,
+    hooks_only: bool,
+    mut visit: impl FnMut(Row<'_>) -> Result<()>,
+) -> Result<()> {
     let captured = JsonSource::capture(path)?;
     let file = std::fs::File::open(path)?;
     captured.check_metadata(file.metadata()?)?;
@@ -153,6 +199,9 @@ fn scan_with(path: &Path, force_positioned: bool, mut visit: impl FnMut(Row<'_>)
             let text = std::str::from_utf8(source.bytes())?;
             for line in text.lines() {
                 let line = line.trim();
+                if hooks_only && !line.contains(HOOK_LITERAL) {
+                    continue;
+                }
                 let Ok(validated) = serde_json::from_str::<&crate::lazy::RawValue>(line) else {
                     continue;
                 };
@@ -183,7 +232,7 @@ fn scan_with(path: &Path, force_positioned: bool, mut visit: impl FnMut(Row<'_>)
     for record in ranges::records(file, context.range())? {
         let (range, _) = record?;
         let range = ranges::trim(file, range)?;
-        if range.len == 0 || !context.validate(range)? {
+        if range.len == 0 || (hooks_only && !contains_hook(file, range)?) || !context.validate(range)? {
             continue;
         }
         let range = context.cursor(range)?.value()?;
@@ -198,9 +247,80 @@ fn scan_with(path: &Path, force_positioned: bool, mut visit: impl FnMut(Row<'_>)
     Ok(())
 }
 
+const HOOK_LITERAL: &str = "\"hook_execution\"";
+/// Preserve literal encoded-byte selection across fixed read windows; this does not inspect JSON.
+fn contains_hook(file: &std::fs::File, range: Range) -> Result<bool> {
+    use std::io::Read;
+    let mut input = ranges::reader(file, range)?;
+    let mut window = [0u8; 64 * 1024 + 16];
+    let mut carry = 0;
+    loop {
+        let read = input.read(&mut window[carry..])?;
+        if read == 0 {
+            return Ok(false);
+        }
+        let end = carry + read;
+        if memchr::memmem::find(&window[..end], HOOK_LITERAL.as_bytes()).is_some() {
+            return Ok(true);
+        }
+        carry = (HOOK_LITERAL.len() - 1).min(end);
+        window.copy_within(end - carry..end, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checkpoint_keys_and_literal_hook_selection_match_both_backends() -> Result<()> {
+        let world = cv_testkit::World::in_process("grok-positioned-affordances");
+        let path = world.base.join("rows.jsonl");
+        let body = "ignored ".repeat(20000);
+        fs::write(&path,format!("{{\"prompt_index\":7,\"file_snapshots\":{{\"b\":\"{body}\",\"a\":false,\"\\u0062\":null}},\"after_snapshots\":\"{body}\"}}"))?;
+        for force in [false, true] {
+            let mut keys = Vec::new();
+            let mut prompt = None;
+            scan_selected_with(&path, force, false, |row| {
+                keys = row.get("file_snapshots")?.unwrap().ordered_keys()?;
+                prompt = row.number_field("prompt_index")?.and_then(|n| n.as_u64());
+                Ok(())
+            })?;
+            assert_eq!(keys, ["b", "a"]);
+            assert_eq!(prompt, Some(7));
+        }
+        let text=concat!(
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"hook_execution\",\"event_name\":\"literal\"}}}\n",
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"hook\\u005fexecution\",\"event_name\":\"skip\"}}}\n",
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"hook\\u005fexecution\",\"event_name\":\"selected\"}},\"ignored\":\"hook_execution\"}\n",
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"hook_execution\"}},\"ignored\":\"\\ud800\"}\n"
+        );
+        fs::write(&path, text)?;
+        for force in [false, true] {
+            let mut events = Vec::new();
+            scan_selected_with(&path, force, true, |row| {
+                let update = row.get("params")?.unwrap().get("update")?.unwrap();
+                events.push(update.string_field("event_name")?);
+                Ok(())
+            })?;
+            assert_eq!(events, [Some("literal".into()), Some("selected".into())]);
+        }
+        // Exercise every placement of a split marker at the fixed window boundary.
+        for split in 1..HOOK_LITERAL.len() {
+            let text = format!("{}{} suffix", "x".repeat(64 * 1024 + 16 - split), HOOK_LITERAL);
+            fs::write(&path, &text)?;
+            let file = std::fs::File::open(&path)?;
+            assert!(contains_hook(
+                &file,
+                Range {
+                    offset: 0,
+                    len: text.len() as u64
+                }
+            )?);
+        }
+        fs::write(&path, b"{\"ignored\":1}\n\xff")?;
+        assert!(scan_selected_with(&path, true, true, |_| Ok(())).is_err());
+        Ok(())
+    }
     #[test]
     fn positioned_metadata_matches_mapped_fields_titles_and_whole_utf8_policy() -> Result<()> {
         let world = cv_testkit::World::in_process("grok-positioned-metadata");

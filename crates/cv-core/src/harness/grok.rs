@@ -35,10 +35,9 @@ mod metadata;
 mod selected;
 pub use emit::emit;
 
-use super::store::{
-    document::{self, Raw, Record},
-    jsonl,
-};
+use super::store::document;
+#[cfg(feature = "mmap")]
+use super::store::document::{Raw, Record};
 use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
@@ -186,14 +185,16 @@ impl Adapter for Grok {
 fn rewind_points(dir: &Path) -> Vec<crate::affordance::Affordance> {
     use crate::affordance::{Affordance, Kind};
     let mut out = Vec::new();
-    if jsonl::scan(&dir.join("rewind_points.jsonl"), |raw, _| {
-        let v = fields(raw);
-        let selected = v.project(&["prompt_index", "created_at"]).unwrap_or_default();
-        let ts = selected.get("created_at").and_then(Value::as_str).and_then(parse_ts);
-        let files = v.get("file_snapshots").map(ordered_keys).unwrap_or_default();
-        let mut summary = match selected.get("prompt_index").and_then(Value::as_u64) {
+    if metadata::scan(&dir.join("rewind_points.jsonl"), |v| {
+        let ts = v.string_field("created_at")?.as_deref().and_then(parse_ts);
+        let files = v
+            .get("file_snapshots")?
+            .map(|v| v.ordered_keys())
+            .transpose()?
+            .unwrap_or_default();
+        let mut summary = match v.number_field("prompt_index")?.and_then(|n| n.as_u64()) {
             Some(i) => format!("prompt {i}"),
-            None => "prompt".to_string(),
+            None => "prompt".into(),
         };
         if !files.is_empty() {
             summary.push_str(&format!(" · {}", files.join(", ")));
@@ -205,16 +206,19 @@ fn rewind_points(dir: &Path) -> Vec<crate::affordance::Affordance> {
             "rewind_points.jsonl",
             &summary,
         ));
+        Ok(())
     })
     .is_none()
     {
         out.clear();
     }
+
     out
 }
 
 /// Preserve the original key insertion order (including duplicate-key replacement) without
 /// decoding snapshot bodies. The surrounding line has already passed strict Value validation.
+#[cfg(feature = "mmap")]
 fn ordered_keys(raw: Raw<'_>) -> Vec<String> {
     struct Keys;
     impl<'de> serde::de::Visitor<'de> for Keys {
@@ -244,34 +248,44 @@ fn ordered_keys(raw: Raw<'_>) -> Vec<String> {
 fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
     use crate::affordance::{Affordance, Kind};
     let mut out = Vec::new();
-    if jsonl::scan_selected(
-        &dir.join("updates.jsonl"),
-        |l| l.contains("\"hook_execution\""),
-        |raw, _| {
-            let v = fields(raw);
-            let params = v.get("params").map(fields).unwrap_or_else(|| Record::empty(raw));
-            let u = params.get("update").map(fields).unwrap_or_else(|| Record::empty(raw));
-            if u.string("sessionUpdate").as_deref() != Some("hook_execution") {
-                return;
-            }
-            let event = u.string("event_name").unwrap_or_else(|| "hook".to_string());
-            let timestamp = params
-                .get("_meta")
-                .map(fields)
-                .and_then(|m| m.value("agentTimestampMs"))
-                .and_then(|v| v.as_i64())
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .or_else(|| {
-                    v.value("timestamp")
-                        .and_then(|v| v.as_i64())
-                        .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
-                });
-            for run in u.get("runs").and_then(document::array_iter).into_iter().flatten() {
-                let run = fields(run);
-                let name = run.string("name").unwrap_or_default();
-                let status = run.get("status").map(fields).unwrap_or_else(|| Record::empty(raw));
-                let mut summary = format!("{event}: {name} · {}", status.string("status").unwrap_or_default());
-                if let Some(ms) = status.value("elapsed_ms").and_then(|v| v.as_u64()) {
+    if metadata::scan_hooks(&dir.join("updates.jsonl"), |v| {
+        let Some(params) = v.get("params")? else { return Ok(()) };
+        let Some(u) = params.get("update")? else { return Ok(()) };
+        if u.string_field("sessionUpdate")?.as_deref() != Some("hook_execution") {
+            return Ok(());
+        }
+        let event = u.string_field("event_name")?.unwrap_or_else(|| "hook".into());
+        let millis = params
+            .get("_meta")?
+            .map(|v| v.number_field("agentTimestampMs"))
+            .transpose()?
+            .flatten()
+            .and_then(|n| n.as_i64());
+        let timestamp = millis.and_then(chrono::DateTime::from_timestamp_millis);
+        let timestamp = if timestamp.is_some() {
+            timestamp
+        } else {
+            v.number_field("timestamp")?
+                .and_then(|n| n.as_i64())
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        };
+        if let Some(runs) = u.get("runs")? {
+            for run in runs.array()? {
+                let run = run?;
+                let name = run.string_field("name")?.unwrap_or_default();
+                let status = run.get("status")?;
+                let label = status
+                    .map(|v| v.string_field("status"))
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or_default();
+                let mut summary = format!("{event}: {name} · {label}");
+                if let Some(ms) = status
+                    .map(|v| v.number_field("elapsed_ms"))
+                    .transpose()?
+                    .flatten()
+                    .and_then(|n| n.as_u64())
+                {
                     summary.push_str(&format!(" · {ms} ms"));
                 }
                 out.push(Affordance::store_event(
@@ -282,12 +296,14 @@ fn hook_runs(dir: &Path) -> Vec<crate::affordance::Affordance> {
                     &summary,
                 ));
             }
-        },
-    )
+        }
+        Ok(())
+    })
     .is_none()
     {
         out.clear();
     }
+
     out
 }
 
@@ -433,6 +449,7 @@ fn stream_history_at(
     Ok(s)
 }
 
+#[cfg(feature = "mmap")]
 fn fields(raw: Raw<'_>) -> Record<'_> {
     Record::parse(raw).unwrap_or_else(|| Record::empty(raw))
 }
