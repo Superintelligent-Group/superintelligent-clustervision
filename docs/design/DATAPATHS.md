@@ -1273,3 +1273,26 @@ show default history CPU 25.85→56.54 ms (16 MiB), 93.21→202.26 ms (64 MiB); 
 Source syntax/compatibility scanning and staged copying need further CPU work; these changes
 claim reduced peak heap, not throughput. Full new counters and timing trials are in
 `PRUNE-SOURCE-EVIDENCE.json`.
+
+
+### OpenCode selected-payload CPU controls (2026-10-12)
+
+A single 2.x text result now retains its checked original range rather than copying through a
+joined-text extent. Five alternating release trials on each 32 MB fixture give operation-wall
+medians (owned / joined / direct): plain 23.12 / 38.24 / 23.61 ms; escaped 77.84 / 97.49 / 81.51 ms.
+Direct requested Rust heap peaks at about 136 KB versus 128–136 MB owned. Multi-item results still
+use the bounded joined builder. All 46 native sessions in five output modes match the frozen
+owned baseline exactly after this change and the guarded private SQLite read integration.
+
+The shared strict-native ASCII escape decoder uses one 64 KiB UTF-8-aligned scratch buffer;
+Unicode escapes retain the surrogate-aware fallback. Five alternating selected 32 MB encoded
+input trials reduce escaped operation wall from 349.9 to 327.6 ms and requested Rust heap from
+320 to 205 KB. Plain operation wall is unchanged (50.4 / 51.0 ms), with heap 307 / 205 KB.
+This does not establish universal throughput superiority: escaped encoded input remains about
+1.37 times the owned control, with decoded-document validation and spill still material costs.
+Stage controls attribute roughly 137 ms to escaped decode/append and 67 ms to decoded validation
+before the decoder change. Measurements use the heap-instrumented release probe, not allocator-free
+CPU accounting. Private raw trials: `opencode-parts-evidence/direct-result-release.json`,
+`ascii-fast-release.json`, `encoded-stage-release.json`, and `direct-decoder-final-native.json`
+under `/Users/ember/dev/cv-worktrees/`. Native Json/OpenCode, portable SQLite/OpenCode, plain
+no-default OpenCode scoped tests and native library clippy pass.
