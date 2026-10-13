@@ -756,6 +756,36 @@ check("an unfolded dropzone is still the prominent invitation", () => {
 });
 
 suite("First transcript window — independent late metadata");
+await acheck("loading header defers enrichment; hydrated session fetches each panel once", async () => {
+  const original = globalThis.fetch;
+  const requests = [];
+  const transcript = document.createElement("cv-transcript");
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    requests.push(path);
+    const rows = path.endsWith("/events")
+      ? [{ kind: "command", target: "echo ready" }]
+      : [{ harness: "claude", id: "child", title: "Child session" }];
+    return { ok: true, json: async () => rows };
+  };
+  try {
+    const stub = normalizeSession({ harness: "claude", id: "loading", title: "Loading session" });
+    stub._stub = true;
+    transcript.session = stub;
+    has(transcript.textContent, "Loading session", "header is immediately visible");
+    eq(requests.length, 0, "header must not start background source reads");
+    transcript.session = { ...stub, _stub: false,
+      messages: [{ role: "user", content: [{ type: "text", text: "ready" }] }] };
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    eq(requests.filter(p => p.endsWith("/events")).length, 1, "one events read");
+    eq(requests.filter(p => p.endsWith("/subagents")).length, 1, "one sub-agent read");
+    truthy(transcript.querySelector(".ev-panel"), "events remain available after hydration");
+    eq(transcript.querySelector(".sub-row-title")?.textContent, "child", "sub-agents remain available after hydration");
+    truthy(transcript.querySelector(".turn"), "message is visible");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });

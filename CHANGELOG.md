@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Browser transcript loading defers events and sub-agent reads until the first page arrives, avoiding duplicate enrichment requests and prioritizing messages.
+
 - Small unqueried JSON listings rank selected rows without fully ordering the inventory, preserving ties and missing-file behavior.
 
 - MCP startup reuses the parsed command tree and releases parser state before serving requests, preserving generated tools and command results.

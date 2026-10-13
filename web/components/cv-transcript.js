@@ -110,8 +110,12 @@ class CvTranscript extends HTMLElement {
     this._io = null;
     this._pump();
 
-    this._mountSubagents(s);
-    this._mountEvents(s);
+    // A loading stub paints only the header. The hydrated session will replace this DOM;
+    // starting its enrichment now duplicates both reads and competes with the first page.
+    if (!s._stub) {
+      this._mountSubagents(s);
+      this._mountEvents(s);
+    }
   }
 
   /** Render messages from `_cursor` up to `_limit` in rAF-scheduled chunks (first chunk synchronously). */
