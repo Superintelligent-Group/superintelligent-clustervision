@@ -1,8 +1,8 @@
 //! One explicitly rooted, read-only operation per process. See examples/store_probe.md.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use cv_core::{Adapter, Block, Flow, Harness, Message, ParseOptions, Session, SessionRef};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -144,16 +144,20 @@ fn adapter(a: &Args) -> Result<Box<dyn Adapter>> {
         Harness::Kimi => Box::new(cv_core::harness::kimi::Kimi::with_home(&a.root)),
         Harness::KimiCode => Box::new(cv_core::harness::kimi_code::KimiCode::with_home(&a.root)),
         Harness::Grok => Box::new(cv_core::harness::grok::Grok::with_home(&a.root)),
-        Harness::OpenSession => Box::new(cv_core::harness::opensession::OpenSession::with_roots(vec![
-            a.root.clone(),
-        ])),
-        Harness::ChatGptExport => Box::new(cv_core::harness::export::ChatGptExport::with_roots(vec![
-            a.root.clone(),
-        ])),
+        Harness::OpenSession => Box::new(cv_core::harness::opensession::OpenSession::with_roots(vec![a
+            .root
+            .clone()])),
+        Harness::ChatGptExport => Box::new(cv_core::harness::export::ChatGptExport::with_roots(vec![a
+            .root
+            .clone()])),
         Harness::ClaudeExport => Box::new(cv_core::harness::export::ClaudeExport::with_roots(vec![a.root.clone()])),
         Harness::Qwen => Box::new(cv_core::harness::qwen::Qwen::with_home(&a.root)),
         #[cfg(feature = "sqlite")]
-        Harness::Cursor => Box::new(cv_core::harness::cursor::Cursor::with_user_dir(&a.root)),
+        Harness::Cursor => Box::new(if a.id.starts_with("cli:") {
+            cv_core::harness::cursor::Cursor::with_cli_home(&a.root)
+        } else {
+            cv_core::harness::cursor::Cursor::with_user_dir(&a.root)
+        }),
         #[cfg(feature = "sqlite")]
         Harness::OpenCode => Box::new(cv_core::harness::opencode::OpenCode::with_data_dir(&a.root)),
         #[cfg(feature = "sqlite")]

@@ -71,7 +71,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Continue | Native/positioned typed header and selected-record source views; lazy payloads and tool-answer dedup | JSON-encoded arguments, selected composites, answer-ID state and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
-| Cursor SQLite | Indexed composer key range; prepared bubble lookups | Composed sessions/blobs; global/workspace dependencies |
+| Cursor SQLite | Indexed IDE composer ranges; CLI/ACP snapshot replay of reachable protobuf/JSON blobs | Selected message scalars and rich fields; shared private text backing activation in progress |
 | Devin SQLite | Compact structural forest projection, then selected full metadata per emitted row | Necessary navigation state grows with nodes; strict metadata projection has a measured CPU cost |
 | Hermes SQLite | Indexed rows; prompt suppression uses the shared portable exact string set | Initial SQL spill had significant CPU/temp-I/O cost; final cached exact-set CPU proof pending |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
@@ -487,7 +487,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
 - [x] Exact session-ranked search limits and pre-limit CLI/HTTP filters, including tied scores and current metadata.
-- [ ] Measure exact search collector stored-document lookup costs before changing schema or merge policy.
+- [x] Measure exact search collector stored-document costs; project stored IDs without decoding unrelated metadata, preserving existing indexes.
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
@@ -643,8 +643,7 @@ count/discovery pass 32 native/portable plain/escaped scale cases with four fixe
 a 2 MiB absolute cap and 256 KiB growth allowance. CI runs this selected-docs gate. Nineteen
 LM Studio tests pass in each configuration, including whole-Value metadata oracles, malformed
 unknown fields, duplicate keys, Unicode title prefixes and empty array text parts. Harmony,
-arbitrarily large metadata and full demanded output are separate. Clean discovery CPU controls
-are in progress.
+arbitrarily large metadata and full demanded output are separate. Clean discovery CPU controls and the remaining portable regression are recorded below.
 
 The integrated CLI JSON heap gate also passes after the decoder changes: 60,001,189 emitted
 bytes (including the final newline) use 1,057,238 bytes of peak requested Rust heap, versus 111,114,689 for the materialized
@@ -653,8 +652,12 @@ exact-window oracles cover output fidelity.
 
 Cursor's installed IDE uses numeric modes; the adapter now preserves both the interpreted name
 and original value, including unknown enums. A genuine newer CLI capture exposed a separate
-blobs/meta store. Native capture and support are in progress; this is distinct from the IDE
-SQLite path and is not covered by the older corpus.
+blobs/meta store. Native CLI/ACP support and a scrubbed 2026.10.01-e373342 capture are integrated.
+This is distinct from the IDE SQLite path; the capture contains 10 messages, 5 logical turns and
+three linked tool call/result pairs. Archive/ACP/lineage edge cases have separate synthetic tests.
+Optional ACP metadata and DB/WAL changes participate in discovery and consumer freshness; the
+reader records conditional sidecar reads before opening them. All 24 Cursor tests pass on the
+integrated source. Selected message scalar retention remains an active performance target.
 ### Encoded argument backing (2026-10-12, intermediate)
 
 Continue's lazy producer now decodes JSON-encoded argument strings above 4 KiB into private
@@ -719,3 +722,30 @@ match independent incremental Python ChatML hashes and lengths (24,804,015/99,21
 The gate caps heap at 2 MiB with 256 KiB growth allowance; generation is outside the measured
 child. These debug allocation probes make no throughput claim. Root composition checks also
 pass 29 JSON/transport/output tests, 14 dataset tests and the native core library lint gate.
+
+
+Exact FTS session ranking now projects the first stored field (ID) through Tantivy's document
+reader, falling back to the full document when field order differs. Body text was already not
+stored: an indexed 8 MiB body occupies only 22 stored bytes in the control. On an optimized
+200-query run over 32,000 matching chunks/500 sessions, user CPU falls from 7.01 to 3.23 seconds;
+retired instructions fall from 85.68 to 39.62 billion. Candidate scores/IDs/chunk addresses match
+on every query. Both warm runs report zero block-input operations and the same process footprint;
+this demonstrates reduced decoding CPU, not reduced disk I/O, heap or whole-fleet latency. No
+schema migration is needed. Scoped composition tests cover unusual stored field ordering and
+bounded winners; lane tests also cover filters, ties, deletions, membership and snippets.
+
+LM Studio's title follow-up stops decoded-prefix work only after whole source validation, keeps
+source identity checks after intentional stops, and avoids a redundant UTF-8 pass for existing
+Rust strings. Forty-eight baseline/candidate native/portable SessionRef hash/length results match
+an independent oracle. In three alternating clean release pairs at 64 MiB, native first-user
+plain discovery improves 0.036374 to 0.026149 seconds; escaped stays near parity
+(0.184956/0.191024). Named native scans incur about 7/23 ms extra CPU (plain/escaped).
+Portable bounded discovery remains slower than the old whole-file scanner: named plain
+0.022480/0.079927 seconds, named escaped 0.196924/0.860296, first-user escaped
+0.202211/1.239459. This is unfinished work: repeated validation/traversal is being fused and the
+existing bounded native string-endpoint cache is being connected to portable views. The flat-heap
+result does not erase this CPU regression. CPU runs exclude allocation instrumentation and
+hashing; other agent work remained active on the host.
+
+Integrated Cursor composition also passes the six corpus gates (golden summaries, doctor, query
+facts and secret/path checks), four offline scrub-codec tests and the explicit-root probe build.
