@@ -345,17 +345,30 @@ fn record_reads(message: &Message, primary: &std::path::Path, reads: &mut source
             if range.path() != primary {
                 reads.record(range.path());
             }
+            if let Some(guard) = range.dependencies() {
+                reads.merge(guard);
+            }
         }
-        let span = match block {
-            crate::Block::Text { text } | crate::Block::Thinking { text, .. } => text.as_span(),
-            crate::Block::ToolResult { content, .. } => content.as_span(),
+        let text = match block {
+            crate::Block::Text { text } | crate::Block::Thinking { text, .. } => Some(text),
+            crate::Block::ToolResult { content, .. } => Some(content),
             _ => None,
         };
-        if let Some(path) = span
-            .and_then(|span| span.source.as_ref())
-            .filter(|path| path.as_path() != primary)
-        {
-            reads.record(path);
+        match text {
+            Some(crate::Text::Span(span)) => {
+                if let Some(path) = span.source.as_ref().filter(|path| path.as_path() != primary) {
+                    reads.record(path);
+                }
+            }
+            Some(crate::Text::Source(source)) => {
+                if source.path() != primary {
+                    reads.record(source.path());
+                }
+                if let Some(guard) = source.dependencies() {
+                    reads.merge(guard);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -530,6 +543,37 @@ fn read_inner(
 mod tests {
     use super::*;
     use crate::harness;
+
+    #[test]
+    fn materialized_read_sets_keep_original_text_and_argument_guards() {
+        let world = cv_testkit::World::in_process("watch-source-guards");
+        let path = world.home.join("source.json");
+        let sidecar = world.home.join("optional-meta.json");
+        let body = serde_json::to_vec(&"text".repeat(4096)).unwrap();
+        std::fs::write(&path, &body).unwrap();
+        let mut guard = source::ReadSet::default();
+        guard.record(&sidecar);
+        let value = crate::Json::source_with_reads(&path, 0, body.len() as u64, &guard).unwrap();
+        let text = value.with_view(|view| view.source_text()).unwrap().unwrap();
+        assert!(matches!(text, crate::Text::Source(_)));
+        let mut message = Message::new(crate::Role::Assistant);
+        message.content.push(crate::Block::Text { text });
+        let mut text_reads = source::ReadSet::default();
+        record_reads(&message, &path, &mut text_reads);
+        message.content = vec![crate::Block::ToolUse {
+            id: "call".into(),
+            name: "test".into(),
+            namespace: None,
+            input: value,
+        }];
+        let mut input_reads = source::ReadSet::default();
+        record_reads(&message, &path, &mut input_reads);
+        assert!(text_reads.fresh(&mut source::Probe::default()));
+        assert!(input_reads.fresh(&mut source::Probe::default()));
+        std::fs::write(&sidecar, "created after capture").unwrap();
+        assert!(!text_reads.fresh(&mut source::Probe::default()));
+        assert!(!input_reads.fresh(&mut source::Probe::default()));
+    }
 
     #[test]
     fn different_concrete_primary_files_cannot_reuse_equal_stat_metadata() {

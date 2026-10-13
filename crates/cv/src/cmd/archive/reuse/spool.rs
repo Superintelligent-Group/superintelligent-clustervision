@@ -78,19 +78,14 @@ impl cv_core::MessageSink for Spool {
                     if let cv_core::Block::Text { text } = block {
                         // Message::text inserts a separator after any preceding nonempty block,
                         // including before a later empty block. Preserve that exact label rule.
-                        let separator = match text {
-                            cv_core::Text::Inline(_) | cv_core::Text::Span(_) => has_text.get(),
-                        };
+                        let separator = has_text.get();
                         if separator {
                             add("\n");
                         }
-                        match text {
-                            cv_core::Text::Inline(text) => add(text),
-                            cv_core::Text::Span(span) => self.resolver.try_for_each_chunk(span, 64 * 1024, |text| {
-                                add(text);
-                                Ok(())
-                            })?,
-                        }
+                        text.try_for_each_chunk(&self.resolver, 64 * 1024, |text| {
+                            add(text);
+                            Ok(())
+                        })?;
                     }
                 }
                 self.first_user = Some(FirstUser {
@@ -136,6 +131,37 @@ mod tests {
         let mut message = Message::new(Role::User);
         message.content.push(Block::Text { text: text.into() });
         message
+    }
+
+    #[test]
+    fn source_text_frames_and_labels_match_owned_and_reject_changed_guards() {
+        let world = cv_testkit::World::in_process("archive-source-text");
+        let path = world.home.join("source.json");
+        let sidecar = world.home.join("optional-meta.json");
+        let body = "  λ moon\n\"text\" ".repeat(10_000);
+        let encoded = serde_json::to_vec(&body).unwrap();
+        fs::write(&path, &encoded).unwrap();
+        let mut guard = cv_core::source::ReadSet::default();
+        guard.record(&sidecar);
+        let json = cv_core::Json::source_with_reads(&path, 0, encoded.len() as u64, &guard).unwrap();
+        let text = json.with_view(|v| v.source_text()).unwrap().unwrap();
+        assert!(matches!(text, cv_core::Text::Source(_)));
+        let mut owned = Session::new("source-label", Harness::Codex);
+        owned.messages.push(message(&body));
+        let mut lazy = owned.clone();
+        lazy.messages[0].content = vec![Block::Text { text }];
+        let (expected, label) = stage(&owned);
+        let (actual, source_label) = stage(&lazy);
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        expected.copy_to(&mut left).unwrap();
+        actual.copy_to(&mut right).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(label.unwrap().head, source_label.unwrap().head);
+        fs::write(&sidecar, "new metadata").unwrap();
+        let mut spool = Spool::new(&SessionRef::new("source-label", Harness::Codex, path));
+        assert_eq!(spool.message(lazy.messages.remove(0)), Flow::Stop);
+        assert!(spool.take_error().is_some());
     }
 
     #[test]

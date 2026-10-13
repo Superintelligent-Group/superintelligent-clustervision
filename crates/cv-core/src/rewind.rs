@@ -245,13 +245,10 @@ impl CommitEvidenceSink {
                         continue;
                     };
                     let mut matches = ShaMatches::new(&self.shas);
-                    match content {
-                        crate::Text::Inline(text) => matches.push(text),
-                        crate::Text::Span(span) => self.resolver.try_for_each_chunk(span, 64 * 1024, |chunk| {
-                            matches.push(chunk);
-                            Ok(())
-                        })?,
-                    }
+                    content.try_for_each_chunk(&self.resolver, 64 * 1024, |chunk| {
+                        matches.push(chunk);
+                        Ok(())
+                    })?;
                     for (sha, matched) in self.shas.iter().zip(matches.finish()) {
                         if matched {
                             created |= *kind == EvidenceKind::Created;
@@ -995,6 +992,44 @@ mod json_read_tests {
                 assert_eq!(scan.finish(), expected);
             }
         }
+    }
+
+    #[test]
+    fn commit_evidence_scans_guarded_source_text_without_an_implicit_path() {
+        let world = cv_testkit::World::in_process("rewind-guarded-text");
+        let path = world.home.join("source.json");
+        let sidecar = world.home.join("meta.json");
+        let body = format!("{}[main ABCDEF123] done", "λ\n".repeat(30_000));
+        let encoded = serde_json::to_vec(&body).unwrap();
+        std::fs::write(&path, &encoded).unwrap();
+        let mut guard = crate::source::ReadSet::default();
+        guard.record(&sidecar);
+        let json = crate::Json::source_with_reads(&path, 0, encoded.len() as u64, &guard).unwrap();
+        let content = json.with_view(|view| view.source_text()).unwrap().unwrap();
+        let mut message = Message::new(crate::Role::Tool);
+        message.content.push(Block::ToolResult {
+            tool_use_id: "call".into(),
+            content,
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: None,
+        });
+        let sink = || {
+            let mut sink = CommitEvidenceSink::new(vec!["abcdef1234567".into()], None);
+            sink.git_calls
+                .insert("call".into(), (EvidenceKind::Created, "git commit".into()));
+            sink
+        };
+        let mut first = sink();
+        assert_eq!(first.message(message.clone()), Flow::Continue);
+        assert!(first.take_error().is_none());
+        assert_eq!(first.found.len(), 1);
+        std::fs::write(sidecar, "changed").unwrap();
+        let mut stale = sink();
+        assert_eq!(stale.message(message), Flow::Stop);
+        assert!(stale.take_error().is_some());
+        assert!(stale.found.is_empty());
     }
 
     #[test]
