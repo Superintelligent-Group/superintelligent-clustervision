@@ -930,6 +930,12 @@ impl<'a> JsonView<'a> {
     /// Decode OpenAI's encoded argument document into a private bounded backing. Invalid,
     /// partial and scalar arguments retain the original string representation.
     pub(crate) fn encoded_argument(self) -> Result<Json> {
+        if self.is_null()? {
+            return Ok(serde_json::json!({}).into());
+        }
+        if !self.is_string()? {
+            return self.to_json();
+        }
         if !self
             .source_range()?
             .is_some_and(|(_, len)| len > crate::lazy::INLINE_MAX as u64)

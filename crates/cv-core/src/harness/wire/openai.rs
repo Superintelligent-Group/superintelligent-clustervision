@@ -108,8 +108,8 @@ pub(crate) fn part_view(part: crate::json::JsonView<'_>, q: &Quirks) -> anyhow::
     let ty = fields.string("type")?.unwrap_or_default();
     if let Some((think_ty, text_key)) = q.thinking {
         if ty == think_ty {
-            let text = fields
-                .get(text_key)
+            let text = part
+                .get(text_key)?
                 .map(|v| v.source_text())
                 .transpose()?
                 .flatten()
@@ -130,8 +130,87 @@ pub(crate) fn part_view(part: crate::json::JsonView<'_>, q: &Quirks) -> anyhow::
             }));
         }
     }
-    if super::is_image_part(&ty) || matches!(ty.as_str(), "audio_url" | "video_url") {
-        return Ok(part_to_block(part.resolve()?.as_ref(), q));
+    if super::is_image_part(&ty) {
+        let nested = |key| -> anyhow::Result<Option<crate::json::JsonView<'_>>> {
+            part.get(key)?.map(|v| v.get("url")).transpose().map(Option::flatten)
+        };
+        let url = nested("image_url")?
+            .or(part.get("image_url")?)
+            .or(nested("imageUrl")?)
+            .or(part.get("url")?);
+        let url = match url {
+            Some(url) if url.is_string()? => Some(url),
+            _ => None,
+        };
+        let (media_type, data_ref) = match url {
+            None => (None, None),
+            Some(url) if q.data_url_as_marker => {
+                let mut prefix = String::new();
+                let mut decided = false;
+                let mut data = false;
+                let mut media_done = false;
+                let mut media = String::new();
+                url.for_each_str_chunk(|chunk| {
+                    for c in chunk.chars() {
+                        if !decided {
+                            prefix.push(c);
+                            if prefix.len() >= 5 {
+                                data = prefix == "data:";
+                                decided = true;
+                            }
+                        } else if data && !media_done {
+                            if c == ';' {
+                                media_done = true;
+                            } else {
+                                media.push(c);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+                if data {
+                    (media.contains('/').then_some(media), Some("base64:inline".into()))
+                } else {
+                    (None, Some(url.resolve()?.as_str().unwrap().to_owned()))
+                }
+            }
+            Some(url) => {
+                let value = if let Some(max) = q.image_ref_truncate {
+                    let mut prefix = String::new();
+                    let mut count = 0;
+                    url.for_each_str_chunk(|chunk| {
+                        for c in chunk.chars() {
+                            if count > max {
+                                break;
+                            }
+                            prefix.push(c);
+                            count += 1;
+                        }
+                        Ok(())
+                    })?;
+                    crate::ir::truncate(&prefix, max)
+                } else {
+                    url.resolve()?.as_str().unwrap().to_owned()
+                };
+                (None, Some(value))
+            }
+        };
+        return Ok(Some(Block::Image { media_type, data_ref }));
+    }
+    if matches!(ty.as_str(), "audio_url" | "video_url") {
+        let source = part
+            .get(&ty)?
+            .map(|v| v.get("url"))
+            .transpose()?
+            .flatten()
+            .map(|v| v.resolve().map(|v| v.as_str().map(str::to_owned)))
+            .transpose()?
+            .flatten();
+        return Ok(Some(Block::File {
+            mime: None,
+            path: None,
+            source,
+        }));
     }
     Ok(fields
         .get("text")
@@ -333,6 +412,65 @@ pub fn tool_calls(v: Option<&Value>) -> Vec<Block> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn checked_views_match_owned_parts_and_all_argument_shapes() {
+        use crate::json::JsonSource;
+        let world = cv_testkit::World::in_process("openai_checked_views");
+        let path = world.home.join("selected.json");
+        let long = "é\n\"\\".repeat(10_000);
+        let parts = json!([
+            {"type":"text","text":long},
+            {"type":"think","think":long,"encrypted":"opaque"},
+            {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{long}")},"ignored":long},
+            {"type":"input_image","image_url":format!("https://example/{long}")},
+            {"type":"audio_url","audio_url":{"url":"file:audio"},"ignored":long},
+            {"type":"image_url","image_url":{"url":null},"url":"fallback-must-not-win"},
+            {"type":"image_url","imageUrl":{"url":"nested"}},
+            {"type":"think","think":"","encrypted":null},
+            {"text":""},
+            null
+        ]);
+        let bytes = serde_json::to_vec(&parts).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let source = JsonSource::capture(&path).unwrap();
+        for q in [&KIMI, &KIMI_CODE, &HERMES, &CODEX] {
+            let selected = source
+                .read_range_value(0, bytes.len() as u64, |view| blocks_view(Some(view), q))
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(selected).unwrap(),
+                serde_json::to_value(blocks_from(Some(&parts), q)).unwrap()
+            );
+        }
+        drop(source);
+        for arguments in [
+            json!({"payload":long}),
+            json!([long]),
+            Value::Null,
+            json!(42),
+            json!(true),
+            json!(format!("{{\"payload\":{}}}", serde_json::to_string(&long).unwrap())),
+            json!(format!("{{unfinished{long}")),
+            json!("42"),
+            json!(" "),
+        ] {
+            let call = json!({"id":"call","function":{"name":"Read","arguments":arguments},"ignored":long});
+            let bytes = serde_json::to_vec(&call).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let source = JsonSource::capture(&path).unwrap();
+            let selected = source.read_range_value(0, bytes.len() as u64, tool_call_view).unwrap();
+            assert_eq!(
+                serde_json::to_value(&selected).unwrap(),
+                serde_json::to_value(tool_call(&call)).unwrap()
+            );
+        }
+        let call = json!({"call_id":"missing","name":"Read"});
+        assert_eq!(
+            serde_json::to_value(tool_call_view((&call).into()).unwrap()).unwrap(),
+            serde_json::to_value(tool_call(&call)).unwrap()
+        );
+    }
 
     #[test]
     fn parts_in_every_dialect() {
