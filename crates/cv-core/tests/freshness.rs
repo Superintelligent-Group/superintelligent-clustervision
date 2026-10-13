@@ -91,7 +91,7 @@ fn new_session_files_detected() {
     assert_eq!(ids(&refs), vec!["alphasess", "betasess", "gammasess"]);
 }
 
-/// An in-place append doesn't change any directory mtime; the top-K recently-updated-file check
+/// An in-place append doesn't change any directory mtime; the all-primary-file check
 /// (against the scan cache's recorded `(mtime, size)`) must catch it.
 #[test]
 fn append_in_top_k_detected() {
@@ -108,7 +108,10 @@ fn append_in_top_k_detected() {
 
     let refs = cv_core::sessions();
     let alpha = refs.iter().find(|r| r.id == "alphasess").expect("alphasess present");
-    assert_eq!(alpha.message_count, 3, "append must be re-scanned via the top-K probe");
+    assert_eq!(
+        alpha.message_count, 3,
+        "append must be re-scanned via the primary probe"
+    );
 }
 
 /// Deleting a session file (dir mtime changes) or a whole project dir (watched path vanishes)
@@ -142,17 +145,17 @@ fn vanished_sessions_dropped() {
 #[test]
 fn warm_path_reads_catalog_and_full_discovery_heals() {
     let w = World::in_process("warm");
-    write_session(&w, "-work-proj", "alphasess", 2);
+    let alpha = write_session(&w, "-work-proj", "alphasess", 2);
     cv_core::discover_all();
     std::thread::sleep(FUDGE);
     cv_core::sessions();
 
-    // Plant a phantom row via the additive sync. Nothing on disk changes, so the probe stays
-    // clean — only an actual catalog read can return it.
+    // Plant an alias row over an already captured source. Nothing on disk changes, so the
+    // probe stays clean — only an actual catalog read can return the extra ID.
     let phantom = SessionRef {
         id: "phantom-row".into(),
         harness: Harness::Claude,
-        path: w.base.join("nowhere.jsonl"),
+        path: alpha,
         cwd: None,
         title: None,
         created_at: None,
@@ -257,12 +260,9 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
 }
 
 /// Why the follower (`watch::Watcher`, `cv watch`'s hot loop) takes `discover_all()` instead of the
-/// catalog path: an in-place append to a session outside the probe's top-50 most recently updated
-/// is invisible to `sessions()` until the staleness backstop (15 min by default). That session is
-/// exactly the one a follower must not miss: a lane that sat quiet while 50 others ran, then
-/// resumed. Here `sessions()` still reports the old count while the watcher reports the append.
+/// Quiet sessions outside the former top-50 window refresh through the catalog too.
 #[test]
-fn a_follower_sees_an_append_the_catalog_probe_misses() {
+fn quiet_session_append_refreshes_catalog_and_follower() {
     let w = World::in_process("follow");
     for k in 0..50 {
         write_session(&w, "-work-proj", &format!("busy{k:02}"), 9); // updated 2026-01-09
@@ -287,8 +287,8 @@ fn a_follower_sees_an_append_the_catalog_probe_misses() {
     let listed = cv_core::sessions();
     let q = listed.iter().find(|r| r.id == "quietsess").unwrap();
     assert_eq!(
-        q.message_count, 1,
-        "outside the top 50 the probe does not see the append"
+        q.message_count, 2,
+        "every primary path is checked, including quiet sessions"
     );
 
     let events = watcher.poll();
@@ -351,4 +351,49 @@ fn a_full_read_counts_affordances_for_has() {
     .unwrap();
     assert!(cv_core::catalog::AffordanceTable::load().stale(&planner_ref));
     assert_eq!(run(), ["planner"]);
+}
+
+#[test]
+fn same_size_restored_mtime_replacement_refreshes_catalog() {
+    let w = World::in_process("replacement");
+    let path = write_session(&w, "-work-proj", "replaced", 2);
+    cv_core::discover_all();
+    std::thread::sleep(FUDGE);
+    cv_core::sessions();
+    let original = fs::metadata(&path).unwrap();
+    let parent = path.parent().unwrap();
+    let dir_time = fs::metadata(parent).unwrap().modified().unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    // Same encoded size, distinct demanded cwd, installed as a new inode.
+    let replacement = text.replace("/work/proj", "/work/next");
+    assert_eq!(replacement.len(), text.len());
+    let temporary = path.with_extension("replacement");
+    fs::write(&temporary, replacement).unwrap();
+    fs::File::open(&temporary)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(original.modified().unwrap()))
+        .unwrap();
+    fs::rename(&temporary, &path).unwrap();
+    // Keep the directory watch unchanged: the primary identity must detect the replacement.
+    fs::File::open(parent)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(dir_time))
+        .unwrap();
+    let listed = cv_core::sessions();
+    let r = listed.iter().find(|r| r.id == "replaced").unwrap();
+    assert_eq!(r.cwd.as_deref(), Some(std::path::Path::new("/work/next")));
+}
+
+#[test]
+fn additive_row_without_captured_source_forces_refresh() {
+    let w = World::in_process("uncaptured");
+    write_session(&w, "-work-proj", "alphasess", 2);
+    cv_core::discover_all();
+    let mut unknown = cv_core::catalog::lookup("alphasess", Some(Harness::Claude))
+        .pop()
+        .unwrap();
+    unknown.id = "uncaptured-row".into();
+    unknown.path = w.base.join("not-a-source.jsonl");
+    cv_core::catalog::sync(&[unknown]);
+    assert_eq!(ids(&cv_core::sessions()), vec!["alphasess"]);
 }

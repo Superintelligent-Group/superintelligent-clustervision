@@ -12,8 +12,8 @@
 //! instead — a second, redundant representation of the same facts that every command paid to parse;
 //! [`load`] leaves a "safe to delete" note if one is still lying around. Reads are tolerant — a
 //! missing or unreadable cache simply means everything is re-scanned (and the cache rebuilt).
-//! Entries are reused only when the interpretation version and `(mtime, size)` match.
-//! Metadata probes do not verify content rewritten with restored timestamps.
+//! Entries are reused only when interpretation, tuple, and captured file identity match.
+//! Captured source identities also reject replacement or rewrites with restored timestamps.
 
 use crate::ir::SessionRef;
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ struct Entry {
     mtime_ns: u64,
     size: u64,
     refs: Vec<SessionRef>,
+    reads: crate::source::ReadSet,
     /// Scanned this run and not yet written back to sqlite.
     dirty: bool,
 }
@@ -36,7 +37,7 @@ struct Cache {
 
 /// Bump when discovery changes the interpretation of unchanged source bytes.
 #[cfg(feature = "sqlite")]
-pub(crate) const INTERPRETATION_VERSION: u32 = 3;
+pub(crate) const INTERPRETATION_VERSION: u32 = 4;
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static INVALIDATE: AtomicBool = AtomicBool::new(false);
 
@@ -76,8 +77,8 @@ fn load() -> Cache {
     let mut entries: HashMap<PathBuf, Entry> = HashMap::new();
     #[cfg(feature = "sqlite")]
     if let Some(conn) = crate::catalog::open_db() {
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT path, mtime_ns, size, refs FROM scan_cache WHERE interpretation_version=?1")
+        if let Ok(mut stmt) = conn
+            .prepare("SELECT path, mtime_ns, size, refs, source_reads FROM scan_cache WHERE interpretation_version=?1")
         {
             let rows = stmt.query_map([INTERPRETATION_VERSION], |row| {
                 Ok((
@@ -85,11 +86,15 @@ fn load() -> Cache {
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             });
             if let Ok(rows) = rows {
-                for (path, mtime_ns, size, refs) in rows.flatten() {
+                for (path, mtime_ns, size, refs, reads) in rows.flatten() {
                     let Ok(refs) = serde_json::from_str::<Vec<SessionRef>>(&refs) else {
+                        continue;
+                    };
+                    let Ok(reads) = serde_json::from_str(&reads) else {
                         continue;
                     };
                     entries.insert(
@@ -98,6 +103,7 @@ fn load() -> Cache {
                             mtime_ns: mtime_ns as u64,
                             size: size as u64,
                             refs,
+                            reads,
                             dirty: false,
                         },
                     );
@@ -132,13 +138,19 @@ pub(crate) fn cached_scan_many<F>(path: &Path, scan: F) -> Vec<SessionRef>
 where
     F: FnOnce() -> Vec<SessionRef>,
 {
+    let mut reads = crate::source::ReadSet::default();
+    reads.record(path);
     let Some((mtime_ns, size)) = stat_key(path) else {
         return scan();
     };
     let cache = CACHE.get_or_init(load);
     clear_invalidated(cache);
     if let Some(e) = cache.entries.read().unwrap().get(path) {
-        if e.mtime_ns == mtime_ns && e.size == size {
+        if e.mtime_ns == mtime_ns
+            && e.size == size
+            && e.reads == reads
+            && reads.fresh(&mut crate::source::Probe::default())
+        {
             return e.refs.clone();
         }
     }
@@ -152,12 +164,19 @@ where
                 mtime_ns,
                 size,
                 refs: refs.clone(),
+                reads,
                 dirty: true,
             },
         );
         cache.any_dirty.store(true, Ordering::Relaxed);
     }
     refs
+}
+
+/// Original before-read metadata, never a fresh post-discovery stamp.
+#[cfg(feature = "sqlite")]
+pub(crate) fn captured_reads(path: &Path) -> Option<crate::source::ReadSet> {
+    CACHE.get()?.entries.read().ok()?.get(path).map(|e| e.reads.clone())
 }
 
 /// Single-result convenience over [`cached_scan_many`].
@@ -191,7 +210,7 @@ pub(crate) fn persist(prune: bool) {
         let mut g = cache.entries.write().unwrap();
         {
             let Ok(mut stmt) =
-                tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version) VALUES(?1,?2,?3,?4,?5)")
+                tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads) VALUES(?1,?2,?3,?4,?5,?6)")
             else {
                 return;
             };
@@ -205,7 +224,8 @@ pub(crate) fn persist(prune: bool) {
                         e.mtime_ns as i64,
                         e.size as i64,
                         refs,
-                        INTERPRETATION_VERSION
+                        INTERPRETATION_VERSION,
+                        serde_json::to_string(&e.reads).unwrap()
                     ])
                     .is_ok()
                 {
@@ -359,5 +379,52 @@ mod tests {
         )
         .unwrap();
         assert!(load().entries.read().unwrap().is_empty());
+    }
+    #[test]
+    fn discovery_mutation_keeps_original_identity_and_forces_rescan() {
+        let w = cv_testkit::World::in_process("scan-mutation");
+        let path = w.base.join("raced.jsonl");
+        std::fs::write(&path, "before").unwrap();
+        let r = SessionRef {
+            path: path.clone(),
+            id: "old".into(),
+            harness: crate::Harness::Claude,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 1,
+        };
+        cached_scan(&path, || {
+            std::fs::write(&path, "after!").unwrap();
+            Some(r.clone())
+        })
+        .unwrap();
+        let reads = captured_reads(&path).unwrap();
+        crate::catalog::replace_harness(crate::Harness::Claude, &[r.clone()], &[], &Default::default());
+        let conn = crate::catalog::open_db().unwrap();
+        let json: String = conn
+            .query_row(
+                "SELECT reads FROM primary_sources WHERE path=?1",
+                [path.to_string_lossy()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let published: crate::source::ReadSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(published, reads, "catalog must publish the original captured identity");
+        assert!(
+            !reads.fresh(&mut crate::source::Probe::default()),
+            "publication must retain the before-read identity"
+        );
+        let fresh = cached_scan(&path, || Some(SessionRef { id: "new".into(), ..r })).unwrap();
+        assert_eq!(fresh.id, "new");
+        persist(false);
+        let loaded = load();
+        let entries = loaded.entries.read().unwrap();
+        assert!(entries
+            .get(&path)
+            .unwrap()
+            .reads
+            .fresh(&mut crate::source::Probe::default()));
     }
 }

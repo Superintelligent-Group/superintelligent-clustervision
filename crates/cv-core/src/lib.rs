@@ -83,17 +83,25 @@ pub fn discover_all() -> Vec<SessionRef> {
     // Per-adapter outcome: refs on success, `None` on error (the catalog keeps that harness's
     // previous rows rather than wiping them over a transient failure). Rootless adapters are a
     // successful empty scan — their catalog rows (root deleted since last sync) must clear.
-    fn run(a: &dyn Adapter) -> (Harness, Vec<std::path::PathBuf>, Option<Vec<SessionRef>>) {
+    fn run(
+        a: &dyn Adapter,
+    ) -> (
+        Harness,
+        Vec<std::path::PathBuf>,
+        Option<Vec<SessionRef>>,
+        catalog::PrimaryReads,
+    ) {
         let h = a.harness();
         let roots = a.roots();
         if roots.is_empty() {
-            return (h, roots, Some(Vec::new()));
+            return (h, roots, Some(Vec::new()), Default::default());
         }
+        let before = catalog::capture_primary_reads(a);
         match a.discover() {
-            Ok(refs) => (h, roots, Some(refs)),
+            Ok(refs) => (h, roots, Some(refs), before),
             Err(e) => {
                 eprintln!("cv: discover failed for {h}: {e:#}");
-                (h, roots, None)
+                (h, roots, None, before)
             }
         }
     }
@@ -112,9 +120,9 @@ pub fn discover_all() -> Vec<SessionRef> {
     // Refresh the catalog per harness so `sessions`/`find` can answer without re-scanning the
     // fleet, recording the watch set the freshness probe stats.
     let mut out = Vec::new();
-    for (h, roots, refs) in results {
+    for (h, roots, refs, before) in results {
         let Some(refs) = refs else { continue };
-        catalog::replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs));
+        catalog::replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
         out.extend(refs);
     }
     catalog::stamp_full_sync();
@@ -123,26 +131,19 @@ pub fn discover_all() -> Vec<SessionRef> {
 
 /// Every known session, served from the catalog when it's provably fresh — the **fast read path**
 /// (~ms against a warm catalog, vs ~seconds for [`discover_all`]'s stat-the-fleet scan). This is
-/// what `cv ls`/`stats`, id resolution and `cv adopt` read. A **follower** must not use it:
-/// [`watch::Watcher`] takes [`discover_all`] on every poll, because an in-place append to a session
-/// outside the probe's top 50 (a lane that sat quiet while others ran, then resumed) is invisible
-/// here until the staleness backstop — pinned by
-/// `tests/freshness.rs::a_follower_sees_an_append_the_catalog_probe_misses`.
+/// what `cv ls`/`stats`, id resolution and `cv adopt` read. Followers continue to call
+/// [`discover_all`] each poll, independently of catalog synchronization.
 ///
-/// Freshness model, in order:
-/// 1. **Cold or overaged catalog** (never fully synced, or the last full sync is older than
-///    `CLUSTERVISION_MAX_STALE_SECS`, default 900): transparently runs [`discover_all`] — identical
-///    results, identical cost to today.
-/// 2. **Probe** ([`catalog::probe_stale`]): re-stat the recorded watch set (session-bearing dirs +
-///    their ancestors + sqlite db files) and the top-50 most-recently-updated session files. Any
-///    change scopes a re-discovery to just the affected harnesses, then the catalog is read.
+/// A never-synced or overaged catalog (default 900 seconds, configurable with
+/// `CLUSTERVISION_MAX_STALE_SECS`) runs full discovery. Otherwise [`catalog::probe_stale`]
+/// checks watched directories/DB sidecars, every primary source's captured identity, and
+/// registered roots. Changed inputs scope discovery to affected harnesses. Quiet-session
+/// appends are covered irrespective of their timestamp rank. New uncached primary sources
+/// conservatively require one later scoped pass to establish their before-read baseline.
 ///
-/// The result matches what [`discover_all`] would return — same (harness, id, path) set, same
-/// fields (timestamps at second precision: the catalog's storage granularity) — except for the
-/// probe's documented blind spots (see [`catalog::probe_stale`]): chiefly, an in-place append to a
-/// session outside the top-50 shows a stale `updated_at`/`message_count` until the staleness
-/// backstop, and brand-new sessions are always seen (new files change a watched dir mtime). Set
-/// `CLUSTERVISION_MAX_STALE_SECS=0` (or pass `cv ls --fresh`) to force the full scan.
+/// Directory-watch gaps (a first file in a previously empty deeper directory) remain bounded
+/// by the time backstop. Metadata identities do not hash file contents. `cv ls --fresh` or
+/// `CLUSTERVISION_MAX_STALE_SECS=0` forces full discovery.
 pub fn sessions() -> Vec<SessionRef> {
     sessions_impl().0
 }
@@ -184,15 +185,17 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
 /// On a discover error the previous rows are kept (matching [`discover_all`]'s tolerance).
 fn refresh_harness(h: Harness) {
     let Some(a) = harness::for_harness(h) else { return };
+    let _sources = source::read_scope();
+    let before = catalog::capture_primary_reads(a.as_ref());
     let roots = a.roots();
     if roots.is_empty() {
         // Root gone (harness uninstalled / dir deleted): its sessions vanish from the catalog.
-        catalog::replace_harness(h, &[], &[]);
+        catalog::replace_harness(h, &[], &[], &before);
         return;
     }
     match a.discover() {
         Ok(refs) => {
-            catalog::replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs));
+            catalog::replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
         }
         Err(e) => eprintln!("cv: discover failed for {h}: {e:#}"),
     }

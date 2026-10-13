@@ -13,6 +13,8 @@
 
 - Unchanged full-text refreshes avoid starting Tantivy writers while still completing pending compaction.
 - Codex lazy reads retain giant prompt, reply, reasoning and tool arguments in checked source storage across native and portable transports.
+- Catalog freshness checks every primary source identity, detecting quiet-session appends and timestamp-preserving replacements; discovery caches refresh once.
+
 - Claude discovery reuses validated UTF-8 to reduce initial metadata scanning while preserving strict record acceptance.
 - Doctor reuses checked generated-text lengths, avoiding repeated payload decoding while preserving source-change errors.
 

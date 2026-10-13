@@ -1658,3 +1658,52 @@ arena ownership, Unicode truncation, skipped prefixes, complete output, and sour
 The likely user benefit is faster previews and selective consumers of giant bodies; operations
 that request full bodies still pay their requested decoding/output cost. Positioned prefix
 reads trade mapping for descriptor reads and bounded scratch rather than adding retained state.
+
+
+### All-primary catalog freshness and operation-level latency (2026-10-12)
+
+The top-50 primary-file probe is replaced by identity-aware checks of every cataloged primary
+source, sharing one `source::Probe` across distinct paths. Quiet-file appends no longer wait
+up to the 900-second backstop. Unix inode/ctime changes also reject same-size replacements
+with restored mtime. Discovery-cache interpretation v4 persists the ReadSet captured before
+its scanner; hits require that original identity to match. Catalog publication uses those
+original scanner guards or primary guards captured before a scoped adapter discovery. A
+mutation during the read leaves an old/stale guard; a post-read identity is never substituted.
+New noncached primary paths remain unknown until a later bracketed scoped refresh. Legacy
+metadata caches refresh once. These checks remain metadata checks, not content hashes or a
+replacement for the consumers' full auxiliary dependency inventories.
+
+On the original 6,883-row fleet, deduplicating produces 6,342 primary paths. A direct metadata
+pass costs .193 seconds first and .031 seconds warm median. The production release with all
+primary guards reads the subsequently grown 6,899-row fleet / 6,358 distinct paths: empty
+catalog 5.594 seconds (30.37 CPU), initial bootstrap/fudge refresh 1.044 seconds, then warm
+.195, .184, .068 and .062 seconds. The last three stdout hashes match. The final primary guard
+table has 6,358 rows / 2.383 MB JSON. This retains the 300 ms unchanged-warm budget while
+closing the quiet-session correctness gap. The empty-catalog result is OS-cache warmed and
+has different live inputs from the earlier 9.845-second run; it is not a matched cold speedup.
+Private aggregate evidence: `all-primary-fleet.json` and `all-primary-fleet-cardinality.json`
+under `/Users/ember/dev/cv-worktrees/cold-ls-fleet-home/`.
+
+The already-built native arm64 release CLI is 31,210,576 bytes (29.77 MiB). Five pure
+`cv --version` startup controls have median wall 6.741 ms; three precise child-rusage
+controls give wall 6.23–6.37 ms and CPU 4.855–5.122 ms. This is the built release binary,
+not a stripped/distribution size claim; `cli-startup-control.json` records the controls.
+
+Operation ranking: unchanged warm listing primarily verifies metadata, loads catalog rows,
+and sorts/renders the selected output; it does not reread transcript bodies. Cold listing is
+content extraction: the measured Claude primary files alone contain 6.806 GB, and a later
+Codex source inventory projects 8.565 GB whole-file reads plus 2.888 GB of bounded head/tail
+samples (no compressed files in that fleet). Stat-only enumeration is tens of milliseconds
+once metadata is warm, versus seconds and tens of CPU seconds for initial content scans.
+Catalog verification/publication adds metadata work but cannot explain away that read volume.
+Known per-session counts remain user + assistant turns, never tool records or inferred file-size
+proxies; sampled Codex files above 8 MiB report 0 meaning not counted. Total session cardinality
+comes from discovery and is independent of whether every conversation has been counted.
+
+The architectural latency choices are maintaining an incremental catalog through a resident
+watcher/ingest path, consuming trustworthy native indexes where a harness provides them, or
+explicitly separating quick initial enumeration from deferred count/content enrichment. The
+last changes visible first-run semantics and needs a product/API decision; it is not implemented
+here. Keeping exact known counts and strict acceptance makes a first source scan necessary.
+Further local scanner improvements can reduce its CPU cost, but the warm path is already within
+target and cannot by itself eliminate the first-run content-read floor.

@@ -30,16 +30,14 @@ mod writer;
 use std::path::{Path, PathBuf};
 pub use writer::Writer;
 
+pub(crate) type PrimaryReads = std::collections::HashMap<std::path::PathBuf, crate::source::ReadSet>;
+
 #[cfg(feature = "sqlite")]
 mod imp {
     use super::*;
     use rusqlite::{params, Connection, Row};
     use std::collections::{BTreeSet, HashSet};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-    /// How many of the most-recently-updated session files the probe re-stats to catch in-place
-    /// appends (POSIX directory mtimes don't change when a file inside merely grows).
-    const TOP_K: usize = 50;
 
     /// A directory (or db file) whose recorded mtime is younger than this at record time is stamped
     /// `mtime_ns = 0` ("always stale"): a session file may have landed *between* discovery
@@ -100,6 +98,10 @@ mod imp {
                  mtime_ns INTEGER NOT NULL,
                  PRIMARY KEY(harness, path)
              );
+             CREATE TABLE IF NOT EXISTS primary_sources(
+                 harness TEXT NOT NULL, path TEXT NOT NULL, reads TEXT NOT NULL,
+                 PRIMARY KEY(harness,path)
+             );
              CREATE TABLE IF NOT EXISTS scan_cache(
                  path     TEXT PRIMARY KEY,
                  mtime_ns INTEGER NOT NULL,
@@ -152,6 +154,7 @@ mod imp {
             // Nullable: an older binary's INSERT OR REPLACE omits it and produces a stale row.
             let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN interpretation_version INTEGER;");
         }
+        let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN source_reads TEXT;");
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
         let old: Option<String> = conn
             .query_row(
@@ -174,6 +177,7 @@ mod imp {
                 .ok();
             if old.as_deref() != Some(version.as_str()) {
                 tx.execute("DELETE FROM watched", []).ok()?;
+                tx.execute("DELETE FROM primary_sources", []).ok()?;
                 tx.execute("DELETE FROM catalog_meta WHERE key='last_full_sync'", [])
                     .ok()?;
                 tx.execute(
@@ -272,15 +276,64 @@ mod imp {
         let _ = tx.commit();
     }
 
+    /// Bracket known primary sources before discovery. New uncached paths stay unknown until
+    /// a later scoped pass; never bless an identity sampled after its metadata was read.
+    pub(crate) fn capture_primary_reads(a: &dyn crate::Adapter) -> PrimaryReads {
+        let mut out = std::collections::HashMap::new();
+        let Some(conn) = open() else { return out };
+        let Ok(mut stmt) = conn.prepare(&format!("SELECT {REF_COLUMNS} FROM sessions WHERE harness=?1")) else {
+            return out;
+        };
+        let Ok(rows) = stmt.query_map([a.harness().as_str()], row_to_ref) else {
+            return out;
+        };
+        for r in rows.flatten().flatten() {
+            let path = a.resume_source(&r);
+            out.entry(path).or_insert_with_key(|path| {
+                let mut reads = crate::source::ReadSet::default();
+                reads.record(path);
+                reads
+            });
+        }
+        out
+    }
+
     /// Replace one harness's catalog rows *and* its watch entries in a single transaction — the
     /// post-discovery sync. Deleting first is what makes vanished sessions vanish from
     /// [`all_sessions`]; the transaction keeps concurrent readers from seeing the gap.
-    pub(crate) fn replace_harness(h: Harness, refs: &[SessionRef], watches: &[(PathBuf, i64)]) {
+    pub(crate) fn replace_harness(h: Harness, refs: &[SessionRef], watches: &[(PathBuf, i64)], before: &PrimaryReads) {
+        // Resolve cache guards before acquiring the SQLite writer: cache persistence takes
+        // the cache lock first, so reversing that order here could deadlock.
+        let mut source_rows = Vec::new();
+        let adapter = crate::harness::for_harness(h);
+        let mut seen = HashSet::new();
+        for r in refs {
+            if !seen.insert(&r.path) {
+                continue;
+            }
+            let primary = adapter.as_ref().map_or_else(|| r.path.clone(), |a| a.resume_source(r));
+            let reads = before
+                .get(&primary)
+                .cloned()
+                .or_else(|| crate::discover_cache::captured_reads(&primary));
+            if let Some(reads) = reads {
+                if let Ok(json) = serde_json::to_string(&reads) {
+                    source_rows.push((&r.path, json));
+                }
+            }
+        }
         let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
         let _ = tx.execute("DELETE FROM sessions WHERE harness=?1", params![h.as_str()]);
         let _ = tx.execute("DELETE FROM watched WHERE harness=?1", params![h.as_str()]);
+        let _ = tx.execute("DELETE FROM primary_sources WHERE harness=?1", params![h.as_str()]);
         insert_refs(&tx, refs);
+        for (path, json) in source_rows {
+            let _ = tx.execute(
+                "INSERT INTO primary_sources(harness,path,reads) VALUES(?1,?2,?3)",
+                params![h.as_str(), path.to_string_lossy(), json],
+            );
+        }
         {
             let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO watched(harness,path,mtime_ns) VALUES(?1,?2,?3)")
             else {
@@ -362,30 +415,14 @@ mod imp {
             .collect()
     }
 
-    /// The freshness probe: which harnesses need re-discovery before the catalog can be trusted?
+    /// Stat-only freshness across watched directories/DB sidecars, every primary source,
+    /// and newly installed roots. A shared Probe deduplicates primary paths and compares full
+    /// identities, including inode/ctime on Unix. Missing or legacy primary baselines are stale.
+    /// Unknown new noncached sources bootstrap through one later scoped discovery; the baseline
+    /// must precede that read. SQLite failure returns None for full-discovery fallback.
     ///
-    /// Three checks, all stat-only (a few hundred syscalls, ~ms):
-    /// 1. every `watched` path (dirs + db files) — new/changed/vanished mtime ⇒ stale harness;
-    /// 2. the [`TOP_K`] most-recently-updated session files that have a `scan_cache` entry —
-    ///    an in-place append changes `(mtime, size)` there (active sessions are precisely the
-    ///    recently-updated ones);
-    /// 3. each registered adapter's `roots()` (any at all) vs. whether we hold watch rows for
-    ///    it — a harness installed (or wholly removed) since the last sync is stale — and each of
-    ///    its existing `roots()` vs. a watch row for that path: a root that appeared since
-    ///    the last sync (a new agent seat under a `*` Claude root, a line added to the roots file,
-    ///    or another cv process that syncs with different roots) is stale too.
-    ///
-    /// `None` means the catalog is unusable (sqlite error) and the caller must fall back to a full
-    /// discovery. An empty Vec means "fresh, read away".
-    ///
-    /// Documented gaps (accepted; bounded by the [`crate::sessions`] staleness backstop):
-    /// * an append to a session **outside** the top-K window, or to a session of a harness that
-    ///   doesn't use the scan cache and isn't db-file-watched (e.g. grok/opencode), goes unseen
-    ///   until the backstop — unless the writer rename-installs the file, which bumps the dir;
-    /// * a first session appearing in a previously *empty* pre-existing subdirectory deeper than
-    ///   any watched dir (no watched mtime changes);
-    /// * filesystems with coarse mtime granularity can miss a same-tick change (the classic
-    ///   make(1) race) — APFS/ext4 nanosecond stamps make this vanishingly rare.
+    /// A first session in a previously empty deeper directory can still escape the directory
+    /// watch set until the time backstop. Primary metadata checks do not hash file contents.
     pub(crate) fn probe_stale() -> Option<Vec<Harness>> {
         let conn = open()?;
         let mut stale: Vec<Harness> = Vec::new();
@@ -418,36 +455,27 @@ mod imp {
             }
         }
 
-        // 2. top-K recently-updated session files with scan-cache stats (append detection).
+        // Every primary source, with one identity-aware metadata probe shared across paths.
         {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT s.harness, s.path, c.mtime_ns, c.size
-                     FROM sessions s JOIN scan_cache c ON c.path = s.path
-                     ORDER BY s.updated_at DESC LIMIT ?1",
-                )
-                .ok()?;
+            let mut stmt = conn.prepare("SELECT DISTINCT s.harness,s.path,p.reads FROM sessions s LEFT JOIN primary_sources p ON p.harness=s.harness AND p.path=s.path").ok()?;
             let rows = stmt
-                .query_map(params![TOP_K as i64], |r| {
+                .query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<String>>(2)?,
                     ))
                 })
                 .ok()?;
-            let mut seen: HashSet<String> = HashSet::new();
-            for (h, path, mtime_ns, size) in rows.flatten() {
+            let mut probe = crate::source::Probe::default();
+            for row in rows {
+                let (h, _, json) = row.ok()?;
                 let Some(h) = Harness::parse(&h) else { continue };
-                if stale.contains(&h) || !seen.insert(path.clone()) {
+                if stale.contains(&h) {
                     continue;
                 }
-                let live = std::fs::metadata(Path::new(&path)).ok().and_then(|m| {
-                    let t = m.modified().ok()?;
-                    Some((t.duration_since(UNIX_EPOCH).ok()?.as_nanos() as i64, m.len() as i64))
-                });
-                if live != Some((mtime_ns, size)) {
+                let reads = json.and_then(|s| serde_json::from_str::<crate::source::ReadSet>(&s).ok());
+                if !reads.is_some_and(|reads| reads.fresh(&mut probe)) {
                     mark(&mut stale, h);
                 }
             }
@@ -893,7 +921,8 @@ pub use imp::{
 };
 #[cfg(feature = "sqlite")]
 pub(crate) use imp::{
-    all_sessions, last_full_sync, open_db, probe_stale, replace_harness, stamp_full_sync, watches_for,
+    all_sessions, capture_primary_reads, last_full_sync, open_db, probe_stale, replace_harness, stamp_full_sync,
+    watches_for,
 };
 
 /// No-op fallbacks when sqlite is disabled — `find`/`sessions` simply always take the scan path.
@@ -946,7 +975,18 @@ pub fn lookup(_id: &str, _harness: Option<Harness>) -> Vec<SessionRef> {
     Vec::new()
 }
 #[cfg(not(feature = "sqlite"))]
-pub(crate) fn replace_harness(_h: Harness, _refs: &[SessionRef], _watches: &[(std::path::PathBuf, i64)]) {}
+pub(crate) fn replace_harness(
+    _h: Harness,
+    _refs: &[SessionRef],
+    _watches: &[(std::path::PathBuf, i64)],
+    _before: &PrimaryReads,
+) {
+}
+
+#[cfg(not(feature = "sqlite"))]
+pub(crate) fn capture_primary_reads(_a: &dyn crate::Adapter) -> PrimaryReads {
+    Default::default()
+}
 #[cfg(not(feature = "sqlite"))]
 pub(crate) fn watches_for(
     _h: Harness,
