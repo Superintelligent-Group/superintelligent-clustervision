@@ -53,6 +53,7 @@
 //!   first-class [`Lineage::parent`]; the `Compaction` summary becomes a `CompactionSummary` turn.
 
 mod blob;
+mod source;
 
 use super::store::sqlite::{columns, open_ro};
 use super::wire::anthropic;
@@ -128,10 +129,19 @@ impl Adapter for Zed {
         conn.read(|conn| discover_db(conn, db))
     }
 
-    fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let conn = open_ro(&r.path)?;
-            conn.read(|conn| stream_thread(conn, r, sink))
+            conn.read(|conn| {
+                if opts.spans {
+                    let source = crate::json::JsonSource::capture_with_reads(&r.path, conn.reads())?;
+                    let result = stream_thread_with_source(conn, r, sink, Some(&source));
+                    source.check()?;
+                    result
+                } else {
+                    stream_thread(conn, r, sink)
+                }
+            })
         })
     }
 }
@@ -172,7 +182,7 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let rowid = row.get::<_, Option<i64>>(7).ok().flatten();
         let is_blob = row.get::<_, String>(8).is_ok_and(|kind| kind == "blob");
         let thread = is_blob
-            .then(|| thread_header(conn, &id, rowid, data_type.as_deref(), true))
+            .then(|| thread_header(conn, &id, rowid, data_type.as_deref(), true, None))
             .flatten();
         let count = thread.as_ref().map(|t| t.message_count).unwrap_or(0);
         let cwd = thread.as_ref().and_then(|t| snapshot_cwd(&t.metadata));
@@ -194,6 +204,15 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
 }
 
 fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
+    stream_thread_with_source(conn, r, sink, None)
+}
+
+fn stream_thread_with_source(
+    conn: &Connection,
+    r: &SessionRef,
+    sink: &mut dyn MessageSink,
+    source: Option<&crate::json::JsonSource>,
+) -> Result<Session> {
     let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let rowid = conn.prepare("SELECT _rowid_ FROM threads LIMIT 0").is_ok();
     let cols = columns(conn, "threads");
@@ -227,7 +246,7 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     // document before emitting any message, including malformed ignored fields.
     let is_blob = row.get::<_, String>(9).is_ok_and(|kind| kind == "blob");
     let mut thread = is_blob
-        .then(|| thread_header(conn, &r.id, rowid, data_type.as_deref(), false))
+        .then(|| thread_header(conn, &r.id, rowid, data_type.as_deref(), false, source))
         .flatten();
 
     let mut zed = serde_json::Map::new();
@@ -240,8 +259,8 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     // `parent_id` column when both name one. First-class [`Lineage`], not an extra key.
     let mut parent_thread_id: Option<String> = None;
     if let Some(header) = &mut thread {
-        // Release parsed metadata before body replay; only the final messages-member ordinal
-        // survives once these session facts have been extracted.
+        // Release parsed metadata before replay. Owned reads retain the final messages-member
+        // ordinal; lazy reads retain the checked immutable decoded document.
         let t = std::mem::take(&mut header.metadata);
         // `title` (0.3.0) / `summary` (legacy) — same meaning, renamed across generations.
         blob_title = t
@@ -298,7 +317,11 @@ fn stream_thread(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) 
     sink.meta(&s);
 
     if let Some(t) = &thread {
-        thread_replay(conn, &r.id, rowid, data_type.as_deref(), t, &mut |m| sink.message(m));
+        if let (Some(view), Some(source)) = (&t.checked, source) {
+            view.with_view(|view| source::replay(view, source, &mut |m| sink.message(m)))?;
+        } else {
+            thread_replay(conn, &r.id, rowid, data_type.as_deref(), t, &mut |m| sink.message(m));
+        }
     }
     Ok(s)
 }
@@ -312,11 +335,14 @@ fn thread_header(
     rowid: Option<i64>,
     data_type: Option<&str>,
     count: bool,
+    source: Option<&crate::json::JsonSource>,
 ) -> Option<blob::Header> {
     if let Some(rowid) = rowid {
         if let Ok(data) = conn.blob_open(rusqlite::DatabaseName::Main, "threads", "data", rowid, true) {
             return if count {
                 blob::header_reader(data_type, data, count)
+            } else if let Some(source) = source {
+                blob::prepare_checked_reader(data_type, data, source)
             } else {
                 blob::prepare_reader(data_type, data)
             };
@@ -325,6 +351,8 @@ fn thread_header(
     with_cell(conn, id, rowid, |data| {
         if count {
             blob::header(data_type, data, count)
+        } else if let Some(source) = source {
+            blob::prepare_checked_reader(data_type, data, source)
         } else {
             blob::prepare_reader(data_type, data)
         }
@@ -1461,6 +1489,85 @@ mod tests {
             assert_eq!(r.message_count, ua, "message_count contract for {}", r.id);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checked_stream_matches_owned_modes_and_without_rowid() {
+        let world = cv_testkit::World::new("zed-checked-stream");
+        let path = world.base.join("threads.db");
+        for without_rowid in [false, true] {
+            let schema = if without_rowid {
+                SCHEMA.replace("        );", "        ) WITHOUT ROWID;")
+            } else {
+                SCHEMA.to_string()
+            };
+            let writer = Connection::open(&path).unwrap();
+            writer.execute_batch("DROP TABLE IF EXISTS threads;").unwrap();
+            writer.execute_batch(&schema).unwrap();
+            for (id, value) in [("legacy", legacy_thread()), ("modern", modern_thread())] {
+                insert(&writer, id, id, "zstd", &zstd_blob(&value));
+            }
+            insert(
+                &writer,
+                "invalid",
+                "invalid",
+                "json",
+                br#"{"messages":[{"role":"user","text":"ok"}],"ignored":"\ud800"}"#,
+            );
+            let zed = Zed { db: Some(path.clone()) };
+            for id in ["legacy", "modern", "invalid"] {
+                let mut reference = sref(id);
+                reference.path = path.clone();
+                let expected = zed.parse(&reference).unwrap();
+                for options in [
+                    ParseOptions::lazy(),
+                    ParseOptions::facts(),
+                    ParseOptions::lazy_extra(),
+                    ParseOptions {
+                        spans: true,
+                        ..ParseOptions::complete()
+                    },
+                ] {
+                    let mut sink = crate::stream::CollectSink::default();
+                    let mut actual = zed.stream(&reference, &options, &mut sink).unwrap();
+                    actual.messages = sink.messages;
+                    assert_eq!(
+                        serde_json::to_vec(&actual).unwrap(),
+                        serde_json::to_vec(&expected).unwrap(),
+                        "id={id} without_rowid={without_rowid}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checked_stream_retained_ranges_reject_wal_changes() {
+        let world = cv_testkit::World::new("zed-checked-wal");
+        let path = world.base.join("threads.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        writer.execute_batch(SCHEMA).unwrap();
+        let body = "large checked body\n".repeat(4096);
+        let value = serde_json::json!({"messages":[{"role":"user","text":body}]});
+        insert(&writer, "t", "t", "zstd", &zstd_blob(&value));
+        let zed = Zed { db: Some(path.clone()) };
+        let mut reference = sref("t");
+        reference.path = path;
+        let mut sink = crate::stream::CollectSink::default();
+        zed.stream(&reference, &ParseOptions::lazy(), &mut sink).unwrap();
+        let Block::Text { text } = &sink.messages[0].content[0] else {
+            panic!("text")
+        };
+        assert!(matches!(text, crate::lazy::Text::Source(_)));
+        assert_eq!(
+            text.try_resolve(&crate::lazy::Resolver::new(None)).unwrap().as_ref(),
+            body
+        );
+        writer
+            .execute("UPDATE threads SET summary = 'changed' WHERE id = 't'", [])
+            .unwrap();
+        assert!(text.try_resolve(&crate::lazy::Resolver::new(None)).is_err());
     }
 
     #[test]

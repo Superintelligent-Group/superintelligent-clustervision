@@ -16,6 +16,7 @@ pub(super) struct Header {
     pub last_messages: Option<usize>,
     pub message_count: usize,
     decoded: Option<ByteSource>,
+    pub(super) checked: Option<crate::json::Json>,
 }
 
 pub(super) fn header(data_type: Option<&str>, data: &[u8], count: bool) -> Option<Header> {
@@ -118,7 +119,23 @@ fn parse_decoded(
     pass_reader(Some("json"), decoded.reader().ok()?, count, target, f)
 }
 
-pub(super) fn prepare_reader(data_type: Option<&str>, data: impl std::io::Read) -> Option<Header> {
+const METADATA: &[&str] = &[
+    "title",
+    "summary",
+    "updated_at",
+    "initial_project_snapshot",
+    "model",
+    "version",
+    "profile",
+    "completion_mode",
+    "detailed_summary_state",
+    "detailed_summary",
+    "cumulative_token_usage",
+    "subagent_context",
+    "imported",
+];
+
+fn decode(data_type: Option<&str>, data: impl std::io::Read) -> Option<ByteSource> {
     use std::io::BufRead;
     let mut data = std::io::BufReader::new(data);
     let compressed = match data_type {
@@ -126,14 +143,42 @@ pub(super) fn prepare_reader(data_type: Option<&str>, data: impl std::io::Read) 
         Some("json") => false,
         _ => data.fill_buf().ok()?.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
     };
-    let decoded = if compressed {
-        ByteSource::read(ruzstd::decoding::StreamingDecoder::new(data).ok()?).ok()?
+    if compressed {
+        ByteSource::read(ruzstd::decoding::StreamingDecoder::new(data).ok()?).ok()
     } else {
-        ByteSource::read(data).ok()?
-    };
+        ByteSource::read(data).ok()
+    }
+}
+
+pub(super) fn prepare_reader(data_type: Option<&str>, data: impl std::io::Read) -> Option<Header> {
+    let decoded = decode(data_type, data)?;
     let mut header = parse_decoded(&decoded, false, None, &mut |_| Flow::Continue)?;
     header.decoded = Some(decoded);
     Some(header)
+}
+
+/// Validate the entire decoded document before metadata/callbacks, then retain its checked
+/// source view. Replaying selected children does not deserialize a whole message tree.
+pub(super) fn prepare_checked_reader(
+    data_type: Option<&str>,
+    data: impl std::io::Read,
+    source: &crate::json::JsonSource,
+) -> Option<Header> {
+    let decoded = std::sync::Arc::new(decode(data_type, data)?);
+    let len = decoded.len().ok()?;
+    source
+        .read_backing_value(decoded, 0, len, |view| {
+            let metadata = crate::harness::store::document::Fields::parse(view, METADATA)?
+                .map(|fields| fields.project(METADATA))
+                .transpose()?
+                .unwrap_or_default();
+            Ok(Header {
+                metadata: Value::Object(metadata),
+                checked: Some(view.to_json()?),
+                ..Header::default()
+            })
+        })
+        .ok()
 }
 
 pub(super) fn replay_prepared(header: &Header, f: &mut dyn FnMut(Message) -> Flow) -> bool {
@@ -217,24 +262,7 @@ impl<'de> Visitor<'de> for Root<'_> {
                 }
                 out.message_count = count;
                 member += 1;
-            } else if self.target.is_none()
-                && matches!(
-                    key.as_str(),
-                    "title"
-                        | "summary"
-                        | "updated_at"
-                        | "initial_project_snapshot"
-                        | "model"
-                        | "version"
-                        | "profile"
-                        | "completion_mode"
-                        | "detailed_summary_state"
-                        | "detailed_summary"
-                        | "cumulative_token_usage"
-                        | "subagent_context"
-                        | "imported"
-                )
-            {
+            } else if self.target.is_none() && METADATA.contains(&key.as_str()) {
                 let value = map.next_value::<Value>()?;
                 out.metadata.as_object_mut().unwrap().insert(key, value);
             } else {
