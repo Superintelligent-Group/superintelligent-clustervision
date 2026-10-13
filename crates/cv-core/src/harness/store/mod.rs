@@ -10,6 +10,7 @@ pub(crate) mod bytes;
 pub(crate) mod document;
 pub(crate) mod json;
 pub(crate) mod jsonl;
+pub(crate) mod text;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
