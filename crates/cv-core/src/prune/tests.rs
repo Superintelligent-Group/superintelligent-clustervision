@@ -1361,8 +1361,8 @@ fn source_user_mutation_matches_rich_payload_and_mirror_owned_oracle() {
             {"type":"tool_result","content":[{"unknown":"payload"}]}]},
             "toolUseResult":{"type":"image","body":"mirror"}}),
         serde_json::json!({"message":{"content":"prompt\n"},"toolUseResult":"mirror\nlines\n"}),
-        serde_json::json!({"message":{"content":[{"type":"tool_result","content":"[PRUNED already]"}]},
-            "toolUseResult":"[PRUNED mirror]"}),
+        serde_json::json!({"message":{"content":[{"type":"tool_result","content":"[PRUNED id=already]"}]},
+            "toolUseResult":"[PRUNED id=mirror]"}),
     ];
     for original in cases {
         for drop in [false, true] {
@@ -1433,5 +1433,29 @@ fn source_user_mutation_matches_rich_payload_and_mirror_owned_oracle() {
                 assert_eq!(actual, expected);
             }
         }
+    }
+}
+
+#[test]
+fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
+    for ids in [
+        r#""sessionId":"old","session_id":"other","#,
+        r#""sessionId":"shadow","sessionId":"old","#,
+    ] {
+        let world = cv_testkit::World::new("source-prune-reroot");
+        let raw=format!("{{{ids}\"type\":\"user\",\"parentUuid\":\"parent\",\"ignored\":\"{}\",\"message\":{{\"content\":\"[PRUNED id=existing]\"}}}}","x".repeat(1024*1024));
+        let path = world.base.join("input.jsonl");
+        std::fs::write(&path, &raw).unwrap();
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let spans = source
+            .read_range_value(0, raw.len() as u64, crate::restamp::source_id_spans)
+            .unwrap();
+        let record = source.validated_range(0, raw.len() as u64).unwrap();
+        let expected = crate::restamp_line(&raw, "new").unwrap_or(raw);
+        let mut expected: Value = serde_json::from_str(&expected).unwrap();
+        expected["parentUuid"] = Value::Null;
+        let mut actual = Vec::new();
+        assert!(write_source_reroot(&record, &source, "new", &spans, &mut actual).unwrap());
+        assert_eq!(actual, format!("{expected}\n").as_bytes());
     }
 }

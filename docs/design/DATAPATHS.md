@@ -1555,3 +1555,23 @@ Three alternating clean release controls at 64 MiB give native plain 35.25→31.
 controls stay near baseline. Portable plain pays an explicit 14 ms traversal cost for bounded
 retention. Evidence and the writer capability audit are in the reboot evidence directory
 `goose-legacy-3adb291`; implementation `3adb291`.
+
+### Prune source reroot and decoded statistics (2026-10-12, Codex prune_stream lane)
+
+Nonnull-parent reroot now adds a source-specific null replacement to changed source records;
+otherwise it canonicalizes the untouched source with its originally accepted id spans. This preserves
+the old ordering: an untouched row's duplicate id fields reject restamp before parent normalization,
+whereas a payload-modified row normalizes duplicates before restamp. Native and positioned portable
+regressions compare that order independently. Selected string payload size, line count, marker guard
+and token estimate now share one decoded pass; array classification also calculates its exact token
+estimate while visiting text/image blocks.
+
+Four additional native window+revive controls with actual nonnull parents pass. Mixed mutation plus
+reroot 16/64 MiB peaks at **464,250/464,250 bytes**; an unmodified recent giant result plus reroot
+peaks at **1,316,286/1,316,286 bytes**, against approximately 80/320 MiB owned baseline. Clean
+allocator-free release CPU medians (three alternating trials): mixed 37.75→36.09 ms at 16 MiB and
+125.49→122.22 ms at 64 MiB; unmodified giant 37.60→52.14 and 133.47→179.03 ms. The remaining
+streaming/canonicalization cost is explicit. `PRUNE-REROOT-EVIDENCE.json` contains counters/trials.
+Thirty-seven filtered prune tests pass; source helper/reroot portable tests and scoped clippy pass.
+Owned fallback remains for thinking, declassification, usage corrections, malformed giant records
+and large selected tool-input metadata.

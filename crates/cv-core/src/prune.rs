@@ -629,16 +629,16 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             continue;
         }
-        if range.len >= LARGE_RECORD
-            && is_old
-            && ty == "user"
-            && !opts.declassify
-            && (!needs_root || !facts.get("_prune_parent").and_then(Value::as_bool).unwrap_or(true))
-        {
+        if range.len >= LARGE_RECORD && is_old && ty == "user" && !opts.declassify {
             if needs_root {
                 rooted = true;
             }
-            if let Some(plan) = source_user_prune(&source, *range, opts, &new_id, idx, &tool_names)? {
+            if let Some(mut plan) = source_user_prune(&source, *range, opts, &new_id, idx, &tool_names)? {
+                if needs_root {
+                    if let Some(parent) = source_parent_override(&plan.record)? {
+                        plan.replacements.push(parent);
+                    }
+                }
                 plan.record
                     .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut output))?;
                 output.write_all(b"\n")?;
@@ -658,22 +658,60 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                     output_pruned.push(true);
                 }
             } else {
-                // No mutation was selected; preserve the exact untouched raw record.
-                let mut scan = MarkerWriter::new(&mut output);
-                crate::restamp::write_restamped_spans(
-                    &source,
-                    &file,
-                    range.offset,
-                    range.len,
-                    &new_id,
-                    &mut id_spans.remove(&range.offset).unwrap_or_default(),
-                    &mut scan,
-                )?;
-                scan.write_all(b"\n")?;
-                if opts.revive {
-                    output_pruned.push(scan.found);
-                    output_facts.push(Some(facts));
+                let record = source.validated_range(range.offset, range.len)?;
+                if needs_root && source_parent_override(&record)?.is_some() {
+                    let pruned = write_source_reroot(
+                        &record,
+                        &source,
+                        &new_id,
+                        &id_spans.remove(&range.offset).unwrap_or_default(),
+                        &mut output,
+                    )?;
+                    if opts.revive {
+                        output_pruned.push(pruned);
+                        output_facts.push(Some(facts));
+                    }
+                } else {
+                    // No mutation was selected; preserve the exact untouched raw record.
+                    let mut scan = MarkerWriter::new(&mut output);
+                    crate::restamp::write_restamped_spans(
+                        &source,
+                        &file,
+                        range.offset,
+                        range.len,
+                        &new_id,
+                        &mut id_spans.remove(&range.offset).unwrap_or_default(),
+                        &mut scan,
+                    )?;
+                    scan.write_all(b"\n")?;
+                    if opts.revive {
+                        output_pruned.push(scan.found);
+                        output_facts.push(Some(facts));
+                    }
                 }
+            }
+            continue;
+        }
+        if range.len >= LARGE_RECORD
+            && needs_root
+            && !opts.declassify
+            && !(is_old
+                && ty == "assistant"
+                && opts.thinking
+                && facts.get("_prune_thinking").and_then(Value::as_bool).unwrap_or(true))
+        {
+            rooted = true;
+            let record = source.validated_range(range.offset, range.len)?;
+            let pruned = write_source_reroot(
+                &record,
+                &source,
+                &new_id,
+                &id_spans.remove(&range.offset).unwrap_or_default(),
+                &mut output,
+            )?;
+            if opts.revive {
+                output_facts.push(Some(facts));
+                output_pruned.push(pruned);
             }
             continue;
         }
@@ -1196,20 +1234,37 @@ fn source_user_prune(
             if content.is_null()? {
                 continue;
             }
-            let size = value_byte_size_source(content)?;
-            if size <= opts.min_size {
+            let stats = if content.is_string()? {
+                Some(source_text_stats(content)?)
+            } else {
+                None
+            };
+            let size = match &stats {
+                Some(stats) => stats.bytes,
+                None => value_byte_size_source(content)?,
+            };
+            if size <= opts.min_size
+                || stats
+                    .as_ref()
+                    .is_some_and(|stats| stats.prefix.starts_with(MARKER_PREFIX))
+            {
                 continue;
             }
-            if content.is_string()? && source_text_stats(content)?.prefix.starts_with(MARKER_PREFIX) {
-                continue;
-            }
-            let (kind, line_count, img) = classify_source(content)?;
+            let (kind, line_count, img, original_tokens) = match &stats {
+                Some(stats) => (
+                    "text".into(),
+                    stats.lines(),
+                    0,
+                    crate::ir::est_tokens_bytes(stats.bytes, TEXT_BYTES_PER_TOKEN),
+                ),
+                None => classify_source(content)?,
+            };
             if kind == "none" {
                 continue;
             }
             let (name, input) = source_tool_metadata(source, tuid.as_deref(), tools)?;
             let marker = build_marker(&id, &name, &input, &kind, size, line_count, new_id, opts.drop);
-            saved += est_tokens_source(content)?.saturating_sub(str_tokens(&marker));
+            saved += original_tokens.saturating_sub(str_tokens(&marker));
             images += img;
             let original = content.to_json()?;
             replacements.push((original.clone(), Value::String(marker)));
@@ -1229,11 +1284,14 @@ fn source_user_prune(
         }
         if let Some(mirror) = top.get("toolUseResult") {
             if !mirror.is_null()? {
-                let size = value_byte_size_source(mirror)?;
                 let stats = if mirror.is_string()? {
                     Some(source_text_stats(mirror)?)
                 } else {
                     None
+                };
+                let size = match &stats {
+                    Some(stats) => stats.bytes,
+                    None => value_byte_size_source(mirror)?,
                 };
                 if size > opts.min_size
                     && !stats
@@ -1349,20 +1407,29 @@ fn source_text_stats(value: crate::json::JsonView<'_>) -> Result<SourceTextStats
     })?;
     Ok(stats)
 }
-fn classify_source(value: crate::json::JsonView<'_>) -> Result<(String, usize, usize)> {
+fn classify_source(value: crate::json::JsonView<'_>) -> Result<(String, usize, usize, u64)> {
     use crate::harness::store::document::Fields;
     if value.is_string()? {
-        return Ok(("text".into(), source_text_stats(value)?.lines(), 0));
+        let stats = source_text_stats(value)?;
+        return Ok((
+            "text".into(),
+            stats.lines(),
+            0,
+            crate::ir::est_tokens_bytes(stats.bytes, TEXT_BYTES_PER_TOKEN),
+        ));
     }
     let Some(blocks) = value.array()? else {
-        return Ok(("none".into(), 1, 0));
+        return Ok(("none".into(), 1, 0, 0));
     };
     let mut text = SourceTextStats::default();
     let mut images = 0;
+    let mut tokens = 0;
     let mut any = false;
     for block in blocks {
         any = true;
-        let Some(block) = Fields::parse(block?, &["type", "text"])? else {
+        let original = block?;
+        let Some(block) = Fields::parse(original, &["type", "text"])? else {
+            tokens += crate::ir::est_tokens_bytes(usize::try_from(original.canonical_len()?)?, TEXT_BYTES_PER_TOKEN);
             continue;
         };
         match block.string("type")?.as_deref() {
@@ -1372,15 +1439,23 @@ fn classify_source(value: crate::json::JsonView<'_>) -> Result<(String, usize, u
                         if text.bytes != 0 {
                             text.append("\n");
                         }
+                        let before = text.bytes;
                         value.for_each_str_chunk(|chunk| {
                             text.append(chunk);
                             Ok(())
                         })?;
+                        tokens += crate::ir::est_tokens_bytes(text.bytes - before, TEXT_BYTES_PER_TOKEN);
                     }
                 }
             }
-            Some("image") => images += 1,
-            _ => {}
+            Some("image") => {
+                images += 1;
+                tokens += crate::ir::IMAGE_TOKENS;
+            }
+            _ => {
+                tokens +=
+                    crate::ir::est_tokens_bytes(usize::try_from(original.canonical_len()?)?, TEXT_BYTES_PER_TOKEN);
+            }
         }
     }
     let kind = match (images > 0, text.bytes > 0, any) {
@@ -1389,7 +1464,7 @@ fn classify_source(value: crate::json::JsonView<'_>) -> Result<(String, usize, u
         (false, true, _) | (false, false, true) => "text",
         _ => "none",
     };
-    Ok((kind.into(), text.lines(), images))
+    Ok((kind.into(), text.lines(), images, tokens))
 }
 fn source_tool_metadata(
     source: &crate::json::JsonSource,
@@ -1437,6 +1512,42 @@ fn tur_is_image_source(value: crate::json::JsonView<'_>) -> Result<bool> {
         return Ok(false);
     };
     Ok(file.get("base64").is_some() || file.string("type")?.is_some_and(|ty| ty.starts_with("image/")))
+}
+
+fn source_parent_override(record: &crate::json::Json) -> Result<Option<(crate::json::Json, Value)>> {
+    record.with_view(|view| {
+        let Some(parent) = view.get("parentUuid")? else {
+            return Ok(None);
+        };
+        if parent.is_null()? {
+            return Ok(None);
+        }
+        Ok(Some((parent.to_json()?, Value::Null)))
+    })
+}
+fn write_source_reroot(
+    record: &crate::json::Json,
+    source: &crate::json::JsonSource,
+    new_id: &str,
+    ids: &[(u64, u64)],
+    output: &mut impl Write,
+) -> Result<bool> {
+    let mut replacements = Vec::new();
+    if let Some(parent) = source_parent_override(record)? {
+        replacements.push(parent);
+    }
+    // Rerooting follows restamp of the untouched row: duplicate id fields reject that stamp.
+    // Preserve the captured accepted id roster rather than stamping the normalized object.
+    for &(start, end) in ids {
+        replacements.push((
+            source.validated_range(start, end - start)?,
+            Value::String(new_id.into()),
+        ));
+    }
+    let mut scan = MarkerWriter::new(output);
+    record.with_view(|view| view.write_canonical_replacing(&replacements, &mut scan))?;
+    scan.write_all(b"\n")?;
+    Ok(scan.found)
 }
 
 struct LengthWriter(usize);
