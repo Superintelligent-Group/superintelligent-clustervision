@@ -6,7 +6,7 @@ use crate::{
     },
     harness::{
         store::{bytes::ByteStage, publish_stage, text::generate_string},
-        wire::write::{text, ObjectWriter},
+        wire::write::{append_text, text, ObjectWriter},
     },
     ir_json::PrettyJson,
     lazy::Resolver,
@@ -64,7 +64,7 @@ fn part(w: &mut dyn Write, block: &Block, resolver: &Resolver) -> Result<()> {
             o.field_with("text", |w| {
                 generate_string(w, |b| {
                     b.push("[tool result: ")?;
-                    content.try_for_each_chunk(resolver, 64 * 1024, |s| b.push(s))?;
+                    append_text(b, content, resolver)?;
                     b.push("]")
                 })
             })?;

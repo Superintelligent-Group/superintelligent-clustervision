@@ -1,7 +1,7 @@
 //! Codex's text and argument fields written directly into the shared JSONL stage.
-use crate::harness::store::{
-    text::{self, Builder},
-    JsonlStage,
+use crate::harness::{
+    store::{text, JsonlStage},
+    wire::write::{append_text, text as write_text},
 };
 use crate::{emit::ThinkingMode, lazy::Resolver, Harness, Json, Message, Text};
 use anyhow::Result;
@@ -24,22 +24,6 @@ pub(super) fn record(
         Ok(())
     })
 }
-fn append(builder: &mut Builder<'_>, value: &Text, resolver: &Resolver) -> Result<bool> {
-    if let Text::Source(source) = value {
-        if source.skip == 0 {
-            return source.json().with_view(|view| {
-                anyhow::ensure!(builder.push_string(view)?, "expected source text string");
-                Ok(source.raw_len() != 0)
-            });
-        }
-    }
-    let mut present = false;
-    value.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
-        present |= !chunk.is_empty();
-        builder.push(chunk)
-    })?;
-    Ok(present)
-}
 pub(super) fn message_string(
     writer: &mut dyn Write,
     message: &Message,
@@ -53,7 +37,7 @@ pub(super) fn message_string(
                 if started {
                     builder.push("\n")?;
                 }
-                started |= append(builder, &text, resolver)?;
+                started |= append_text(builder, &text, resolver)?;
             }
         }
         Ok(())
@@ -61,13 +45,11 @@ pub(super) fn message_string(
 }
 pub(super) fn string(writer: &mut dyn Write, value: &Text, resolver: &Resolver, prefix: &str) -> Result<()> {
     if prefix.is_empty() {
-        if let Some(inline) = value.inline_str() {
-            return serde_json::to_writer(writer, inline).map_err(Into::into);
-        }
+        return write_text(writer, value, resolver);
     }
     text::generate_string(writer, |builder| {
         builder.push(prefix)?;
-        append(builder, value, resolver)?;
+        append_text(builder, value, resolver)?;
         Ok(())
     })
 }

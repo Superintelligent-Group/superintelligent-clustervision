@@ -110,7 +110,8 @@ impl<'a> Object<'a> {
         object.finish()
     }
 }
-fn append(builder: &mut text::Builder<'_>, value: &Text, resolver: &Resolver) -> Result<bool> {
+/// Append checked text to a generated string; return whether decoded text was present.
+pub(crate) fn append_text(builder: &mut text::Builder<'_>, value: &Text, resolver: &Resolver) -> Result<bool> {
     let before = builder.decoded_len();
     if let Text::Source(source) = value {
         if source.skip == 0 {
@@ -139,7 +140,7 @@ pub(crate) fn text(writer: &mut dyn Write, value: &Text, resolver: &Resolver) ->
         }
     }
     text::generate_string(writer, |builder| {
-        append(builder, value, resolver)?;
+        append_text(builder, value, resolver)?;
         Ok(())
     })
 }
@@ -155,7 +156,7 @@ pub(crate) fn joined_text<'a>(
             if present {
                 builder.push("\n")?;
             }
-            present |= append(builder, value, resolver)?;
+            present |= append_text(builder, value, resolver)?;
         }
         Ok(())
     })
