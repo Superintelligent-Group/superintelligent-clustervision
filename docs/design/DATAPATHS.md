@@ -3382,8 +3382,11 @@ confined to the clone. Current discovery finds 6,889 references across 13 harnes
 one duplicate copy into 6,888 global indexed IDs. This differs from the historical 5,960-reference
 adapter comparison. Absolute sidecar references embedded in transcripts still name 335 external
 paths: 287 present and 48 absent. Every captured external identity/existence agrees across the
-baseline, corrected and clean-reference catalogs and the final check. Original frozen file and
-symlink identities/inventories are unchanged. This is not an exhaustive filesystem access trace
+baseline, corrected and clean-reference catalogs and the final check. The shared source snapshot's 138,156 original files and
+16 symlink identities/inventories are unchanged; this guard does not assert that the owned clone
+is unchanged. Clone preparation confines copied symlink targets and restores one earlier
+controlled-append baseline. The main 812-byte append modifies an existing cloned transcript,
+not a newly generated source, and remains in place for the independent clean reference. This is not an exhaustive filesystem access trace
 or a claim that every input was frozen; no real store or external sidecar was written.
 
 Actual default-feature release `cv index` cold admission and unchanged reuse run at `1d507ccd`.

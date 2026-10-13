@@ -6,6 +6,8 @@
     "logical_file_bytes": 132873105121,
     "symlinks_confined_in_owned_clone": 16,
     "original_files_and_symlinks_unchanged": true,
+    "identity_inventory_scope": "Shared source snapshot, not the owned clone",
+    "owned_clone_changes": "Sixteen symlink targets confined; one prior controlled append baseline restored; one existing cloned Claude transcript appended by 812 bytes and retained for clean reference",
     "discovered_references": 6889,
     "canonical_global_ids": 6888,
     "harness_reference_counts": {
