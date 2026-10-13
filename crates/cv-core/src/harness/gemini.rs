@@ -42,6 +42,8 @@
 mod emit;
 mod input;
 mod lean;
+#[cfg(not(feature = "mmap"))]
+mod replay;
 pub use emit::emit;
 
 use super::{parse_ts, Adapter};
@@ -843,85 +845,68 @@ fn stream_jsonl_recording(
 #[cfg(not(feature = "mmap"))]
 fn stream_jsonl_ranges(path: &Path, harness: Harness, sink: &mut dyn MessageSink) -> Result<Option<Session>> {
     use super::store::document::range::{Range, RangeSource};
-    use std::io::{BufRead, Read};
-    enum Body {
-        Range(Range),
-        Marker(Value),
-    }
+    use std::io::BufRead;
     let captured = crate::json::JsonSource::capture(path)?;
     let arena = std::sync::Arc::new(super::store::bytes::ByteSource::arena()?);
     let source = RangeSource::from_captured(captured.clone())?;
     let mut cursor = source.cursor(source.range())?;
-    let mut line = Vec::new();
-    let mut replay = RecordingReplay::<Body>::default();
+    let mut recording = RecordingReplay::<replay::RangeBody>::default();
     loop {
-        let base = cursor.position();
-        line.clear();
-        if cursor.read_until(b'\n', &mut line)? == 0 {
+        let offset = cursor.position();
+        loop {
+            let bytes = cursor.fill_buf()?;
+            if bytes.is_empty() {
+                break;
+            }
+            let newline = memchr::memchr(b'\n', bytes);
+            let n = newline.map_or(bytes.len(), |i| i + 1);
+            cursor.consume(n);
+            if newline.is_some() {
+                break;
+            }
+        }
+        let len = cursor.position() - offset;
+        if len == 0 {
             break;
         }
-        // The old buffered reader skipped invalid UTF-8 lines and trimmed Unicode whitespace.
-        let Ok(text) = std::str::from_utf8(&line) else { continue };
-        let text = text.trim();
-        let Ok(raw) = serde_json::from_str::<&crate::lazy::RawValue>(text) else {
+        let Some(range) = replay::trim(&source, Range { offset, len })? else {
             continue;
         };
-        // The endpoint index belongs to this buffer content, not its reused allocation.
-        let index = lean::Index::default();
-        let raw = lean::Raw::new(raw.get(), &index);
-        if lean::accepts_value(raw) {
-            replay.ingest_projected(
-                raw,
-                |raw| {
-                    Body::Range(Range {
-                        offset: base + (raw.get().as_ptr() as usize - line.as_ptr() as usize) as u64,
-                        len: raw.get().len() as u64,
-                    })
-                },
-                Body::Marker,
-            );
+        if source.validate(range)? {
+            replay::ingest(&mut recording, &source, range)?;
         }
     }
-    if !replay.saw_meta && replay.msgs.is_empty() {
+    if !recording.saw_meta && recording.msgs.is_empty() {
         return Ok(None);
     }
-    let mut session = record_metadata(&replay.metadata, harness, Some(path.to_path_buf()));
+    let mut session = record_metadata(&recording.metadata, harness, Some(path.to_path_buf()));
     let summary = session.title.take();
     let mut st = EmitState::default();
-    // An inactive giant line must not keep its intake allocation alive during selected replay.
     drop(cursor);
-    drop(line);
-    let mut line = Vec::new();
     let resolver = crate::lazy::Resolver::new(Some(path.to_path_buf()));
     let mut sink = input::SourceSink::new(Some(&captured), sink);
-    for id in &replay.order {
-        let Some(body) = replay.msgs.remove(id) else { continue };
+    for id in &recording.order {
+        let Some(body) = recording.msgs.remove(id) else {
+            continue;
+        };
         let flow = match body {
-            Body::Range(range) => {
-                line.clear();
-                source.cursor(range)?.read_to_end(&mut line)?;
-                let index = lean::Index::default();
-                let raw = serde_json::from_slice::<&crate::lazy::RawValue>(&line)?;
-                let raw = lean::Raw::new(raw.get(), &index);
-                if !lean::accepts_value(raw) {
-                    continue;
-                }
-                lean::emit(
-                    raw,
-                    lean::Context {
-                        bytes: &line,
-                        base: range.offset,
-                        source: Some(&captured),
-                        arena: Some(&arena),
-                    },
-                    harness,
-                    &mut st,
-                    &resolver,
-                    &mut sink,
-                )?
+            replay::RangeBody::Range(range) => {
+                captured.validated_range(range.offset, range.len)?.with_view(|view| {
+                    lean::emit_view(
+                        view,
+                        lean::output::Output {
+                            source: &captured,
+                            arena: &arena,
+                        },
+                        harness,
+                        &mut st,
+                        &resolver,
+                        &mut sink,
+                    )
+                })?
             }
-            Body::Marker(v) => {
-                let Some(obj) = v.as_object() else { continue };
+            replay::RangeBody::Marker(value) => {
+                let Some(obj) = value.as_object() else { continue };
                 emit_record_message(harness, obj, &mut st, &mut sink)
             }
         };
@@ -930,8 +915,6 @@ fn stream_jsonl_ranges(path: &Path, harness: Harness, sink: &mut dyn MessageSink
         }
     }
     sink.finish()?;
-    // Navigation ranges are replayed from this descriptor even when every argument is small.
-    // One completion check protects that snapshot without per-record metadata calls.
     source.check_identity()?;
     session.model = st.session_model;
     session.title = summary.or(st.title);
@@ -1012,6 +995,7 @@ impl<T> RecordingReplay<T> {
     }
 }
 
+#[cfg(feature = "mmap")]
 impl<T> RecordingReplay<T> {
     fn ingest_projected<'a>(
         &mut self,
@@ -1041,8 +1025,10 @@ impl<T> RecordingReplay<T> {
                                 }
                             }
                         }
-                    } else if let Ok(v) = serde_json::from_str(v.get()) {
-                        self.metadata.insert(k, v);
+                    } else if RECORD_METADATA.contains(&k.as_str()) {
+                        if let Ok(v) = serde_json::from_str(v.get()) {
+                            self.metadata.insert(k, v);
+                        }
                     }
                 }
                 return;
@@ -1057,14 +1043,17 @@ impl<T> RecordingReplay<T> {
         if rec.fields.contains_key("sessionId") && rec.fields.contains_key("projectHash") {
             self.saw_meta = true;
             for (k, v) in rec.fields {
-                if let Ok(v) = serde_json::from_str(v.get()) {
-                    self.metadata.insert(k, v);
+                if RECORD_METADATA.contains(&k.as_str()) {
+                    if let Ok(v) = serde_json::from_str(v.get()) {
+                        self.metadata.insert(k, v);
+                    }
                 }
             }
         }
     }
 }
 
+#[cfg(feature = "mmap")]
 fn raw_replay_key(rec: &lean::Record<'_>) -> Option<String> {
     Some(format!(
         "{}\u{1f}{}",
@@ -1299,6 +1288,15 @@ fn parse_chat_recording(text: &str, harness: Harness, source_path: Option<PathBu
 /// top-level fields. `title` is the record's `summary` when present; the per-message scan fills in a
 /// first-user-turn fallback and the session `model`. `messages` is left empty — the caller streams
 /// them via [`emit_record_message`].
+const RECORD_METADATA: &[&str] = &[
+    "sessionId",
+    "startTime",
+    "lastUpdated",
+    "summary",
+    "directories",
+    "kind",
+];
+
 fn record_metadata(rec: &serde_json::Map<String, Value>, harness: Harness, source_path: Option<PathBuf>) -> Session {
     let id = rec.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
     let created_at = rec.get("startTime").and_then(Value::as_str).and_then(parse_ts);
@@ -2180,7 +2178,8 @@ mod tests {
         let large = serde_json::json!({"payload": "x\nβ".repeat(5000)});
         let record = |id: &str| serde_json::json!({"type":"gemini","id":id,"content":[{"functionCall":{"name":"custom","id":id,"args":large}}]});
         let lines = [
-            serde_json::json!({"sessionId":"source","projectHash":"x"}),
+            serde_json::json!({"sessionId":"source","projectHash":"x","future":large}),
+            serde_json::json!({"$set":{"future":large,"summary":"retained summary"}}),
             record("old"),
             serde_json::json!({"$set":{"messages":[record("keep"),record("replace"),record("drop")]}}),
             serde_json::json!({"type":"user","id":"keep","content":"same id, separate kind"}),

@@ -1,4 +1,4 @@
-//! Positioned projections of independently accepted legacy records. Large strings/arguments
+//! Positioned projections of independently accepted recording messages. Large strings/arguments
 //! use the shared JSON view transport rather than an encoded document or record buffer.
 use super::*;
 use crate::harness::store::document::Fields;
