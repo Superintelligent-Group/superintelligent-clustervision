@@ -103,6 +103,14 @@ fn load_upto(spec: &str, harness: Option<Harness>, upto: usize) -> Result<(Sessi
     Ok((session, reference.path))
 }
 
+/// Findings retain checked bodies for the shared analyzer rather than owning discarded history.
+fn load_findings(spec: &str) -> Result<Session> {
+    let (reference, adapter) = resolve_source(spec, None)?;
+    let (mut session, _) = cv_core::emit::prepare_selected(adapter.as_ref(), &reference, 0, None)?;
+    enrich_path_meta(&mut session, Path::new(spec));
+    Ok(session)
+}
+
 fn enrich_path_meta(s: &mut Session, p: &Path) {
     // A sub-agent transcript read by path: its label lives in the sibling `<stem>.meta.json`
     // (the resolver path reads it through the parent's sub-agent tree instead).
@@ -330,7 +338,7 @@ pub(crate) fn cmd_distill(
         Products::Resume(prepared) => &mut prepared.distilled,
     };
     for other in with {
-        let (o, _) = load(other, None)?;
+        let o = load_findings(other)?;
         d.head_md.push_str(&findings(&o, &opts)?);
         d.head_md.push('\n');
     }
@@ -373,6 +381,37 @@ pub(crate) fn cmd_distill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn findings_loader_retains_checked_ignored_bodies_and_matches_full_output() -> Result<()> {
+        let world = cv_testkit::World::new("findings-loader");
+        let path = world.base.join("peer.jsonl");
+        let rows = [
+            json!({"type":"user","uuid":"u","message":{"role":"user","content":"Read /tmp/input.md."}}),
+            json!({"type":"assistant","uuid":"a","message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":"ignored λ\n".repeat(65536)},
+                {"type":"text","text":"Chose the simple implementation.\n### embedded heading\nUnicode λ"}
+            ]}}),
+        ];
+        std::fs::write(&path, rows.iter().map(|row| format!("{row}\n")).collect::<String>())?;
+        let spec = path.to_str().unwrap();
+        let lazy = load_findings(spec)?;
+        assert!(lazy.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
+            block,
+            cv_core::Block::Thinking {
+                text: cv_core::Text::Source(_),
+                ..
+            }
+        )));
+        let (full, _) = load(spec, None)?;
+        assert_eq!(
+            cv_core::distill::findings(&lazy, &Default::default())?,
+            cv_core::distill::findings(&full, &Default::default())?
+        );
+        std::fs::write(&path, b"changed")?;
+        assert!(cv_core::distill::findings(&lazy, &Default::default()).is_err());
+        Ok(())
+    }
+
     #[test]
     fn distill_sidecar_empty_roster_leaves_existing_artifact_untouched() -> Result<()> {
         let world = cv_testkit::World::new("distill-sidecar-empty");

@@ -1,0 +1,152 @@
+{
+  "operation": "Claude preparation and findings (same analyzer); eight ignored Thinking messages, tiny demanded prose",
+  "fixture": {
+    "messages": 9,
+    "thinking_messages": 8,
+    "total_thinking_mib": [
+      16,
+      64
+    ],
+    "generation": "One user prompt, eight assistant messages each with total/8 bytes of x Thinking and identical small Text; JSONL via json.dumps."
+  },
+  "measurement": "testkit requested Rust heap; complete source preparation plus findings; no timings or RSS claim",
+  "native": [
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 948,
+        "peak_live_bytes": 20968723,
+        "peak_above_baseline_bytes": 20967775,
+        "stage_end_live_bytes": 16980145,
+        "allocation_requests": 6857,
+        "requested_bytes": 28776376
+      },
+      "mib": 16,
+      "mode": "legacy"
+    },
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 950,
+        "peak_live_bytes": 1168684,
+        "peak_above_baseline_bytes": 1167734,
+        "stage_end_live_bytes": 203541,
+        "allocation_requests": 6761,
+        "requested_bytes": 4707712
+      },
+      "mib": 16,
+      "mode": "selected"
+    },
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 948,
+        "peak_live_bytes": 83811091,
+        "peak_above_baseline_bytes": 83810143,
+        "stage_end_live_bytes": 67311793,
+        "allocation_requests": 6859,
+        "requested_bytes": 104129464
+      },
+      "mib": 64,
+      "mode": "legacy"
+    },
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 950,
+        "peak_live_bytes": 1168684,
+        "peak_above_baseline_bytes": 1167734,
+        "stage_end_live_bytes": 203541,
+        "allocation_requests": 6761,
+        "requested_bytes": 4707712
+      },
+      "mib": 64,
+      "mode": "selected"
+    }
+  ],
+  "limits": [
+    "Full distill remains materialized.",
+    "Needed Source text validates before resolution, adding a scan.",
+    "Demanded prose is cached per message; tool results released per block.",
+    "Complete arguments/results fallback and rich extras remain owned where required.",
+    "Findings output itself may scale with demanded own words."
+  ],
+  "portable": [
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 948,
+        "peak_live_bytes": 19083025,
+        "peak_above_baseline_bytes": 19082077,
+        "stage_end_live_bytes": 16980145,
+        "allocation_requests": 7244,
+        "requested_bytes": 71504751
+      },
+      "mib": 16,
+      "mode": "legacy"
+    },
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 950,
+        "peak_live_bytes": 1168684,
+        "peak_above_baseline_bytes": 1167734,
+        "stage_end_live_bytes": 203541,
+        "allocation_requests": 7561,
+        "requested_bytes": 12828020
+      },
+      "mib": 16,
+      "mode": "selected"
+    },
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 948,
+        "peak_live_bytes": 75706129,
+        "peak_above_baseline_bytes": 75705181,
+        "stage_end_live_bytes": 67311793,
+        "allocation_requests": 7260,
+        "requested_bytes": 272831343
+      },
+      "mib": 64,
+      "mode": "legacy"
+    },
+    {
+      "source_messages": 9,
+      "selected_messages": 9,
+      "output_bytes": 500,
+      "sha256": "3c5646fcac70f974f70ee5a4c2c472b8762f5cd1ea698b2d3a25f1ca038e2669",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 950,
+        "peak_live_bytes": 1168684,
+        "peak_above_baseline_bytes": 1167734,
+        "stage_end_live_bytes": 203541,
+        "allocation_requests": 7561,
+        "requested_bytes": 12828020
+      },
+      "mib": 64,
+      "mode": "selected"
+    }
+  ]
+}

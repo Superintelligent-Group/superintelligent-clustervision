@@ -19,7 +19,7 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. One candidate decodes one cached row with 8 or 1,024 unrelated records; inventory enumeration and ranking still scale with fleet size. Required source errors remain fatal. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
-| Transform / export | Verified Codex port retains checked source-backed bodies. Splice retains selected guarded messages. Distill shares one prepared tail, skips unused findings products, materializes only the selected --upto prefix, and stages borrowed sidecars. Pack shares excerpt/event traversal when events are stale. | Hold further Claude emitter work. Full-source distill analysis still owns its input and demanded elisions. Prune/archive/dataset can scan or stage whole output; archive replacement necessarily writes a complete new artifact. |
+| Transform / export | Verified Codex port retains checked source-backed bodies. Splice retains selected guarded messages. Distill shares one prepared tail, resolves findings text on demand, materializes only the selected --upto prefix, and stages borrowed sidecars. Pack shares excerpt/event traversal when events are stale. | Hold further Claude emitter work. Full-source distill analysis still owns its input and demanded elisions. Prune/archive/dataset can scan or stage whole output; archive replacement necessarily writes a complete new artifact. |
 
 ### Measurement correction: count the work (2026-10-12)
 
@@ -162,7 +162,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; ordered usage rows reuse a bounded dependency-validated cache | Cold ledger publication, exact dedup I/O and model roster growth; tiny native sources bypass caching |
 | Reshape/emit | Bounded shared JSONL stage; native Codex ports retain checked lazy bodies; verification reduces compact facts | Message roster/selected metadata, complete carriers, Claude record rewrites and other emitters/materializing thinking transforms |
-| Distill/findings | Shared analysis demand and one prepared tail; findings omit unused output products; --upto loads selected messages; borrowed sidecars use bounded staging | Full-source loader without --upto, demanded facts/timeline text and owned elisions remain; staged sidecar bytes scale with output |
+| Distill/findings | Shared analysis demand and one prepared tail; findings omit unused products and resolve text per message; --upto loads selected messages; borrowed sidecars use bounded staging | Full products still own source text and elisions; findings retain complete argument/result fallbacks, rich extras and output-sized prose; staged sidecar bytes scale with output |
 | Prune/revive | Compact selection facts and source positions; transcript/sidecar staging with sequential record rewrites | Giant changed records remain owned; additional scans/staging currently increase CPU |
 | MCP observe | Retained-message watch callbacks and checked capped searchable prefixes | Other full producer modes, owned metadata and uncapped MCP show windows remain separate |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
@@ -1899,12 +1899,13 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    preparation with original-count validation, final EOF metadata and path-meta enrichment;
    sidecar output borrows the owned elisions into the existing bounded JSONL stage. The full fact scan
    and analyzer's input ownership remain separate work.
-   **Active findings-only follow-up:** `distill --with` currently loads and materializes each peer
-   before extracting findings. Ignored thinking is retained even though this product emits no
-   thinking, tail or elisions. Carry checked sources through the caller and shared analyzer,
-   validate ignored source fields without retaining their decoded text, and keep owned fallback
-   values where analysis requires them. Full distillation's output-sized ownership remains
-   a separate contract; a library-only copy reduction would not fix the existing CLI load.
+   **Findings-only source ownership completed (2026-10-13):** `distill --with` carries checked
+   sources through loading and the shared analyzer. Ignored thinking is validated without keeping
+   decoded strings; demanded text resolves per message and result buffers release per block.
+   Native and portable complete-caller controls retain 1,167,734 requested heap bytes above
+   baseline with either 16 or 64 MiB of ignored thinking and exact findings output. See the
+   findings ownership record below. Full products, rich extras, complete argument/result fallback
+   and demanded output remain separate costs; demanded text also incurs a validation pass.
 2. **Pack stale-event traversal composition completed (2026-10-13).** `cmd/pack.rs::build_source`
    shares its lazy excerpt pass with optional borrowed event observation only when events are stale.
    Warm events retain one excerpt pass and no event extraction/publication. Optional event errors
@@ -2044,8 +2045,9 @@ Tool-result facts borrow already-owned tool inputs rather than first cloning eac
 
 Findings retain the existing rendered-head section extraction (including embedded Markdown edge
 behavior), but skip unused elided-output copies, tail preparation/rendering and token statistics.
-All source materialization and facts scans still happen: demanded findings and original source
-error behavior are preserved. No loader, `--upto`, lazy-carrier, emitter, cache or event policy changed.
+At this milestone all source materialization and facts scans still happened. The later selected
+prefix and findings-source boundaries below remove specific ownership without changing the fact
+engine or emitter, cache or event policy.
 
 Deterministic test-only boundary counters compare frozen pre-refactor orchestration in
 `cv-core/src/distill/legacy_products.rs`: full resumable analysis builds the tail 3 times before,
@@ -2268,3 +2270,34 @@ scan may still open that cache separately. Claude discovery also retains its two
 validation responsibilities: metadata projection checks grammar while avoiding decoded giant
 strings; strict compatibility rejects invalid Unicode, overflowing numbers and excessive depth,
 including ignored or overwritten fields. No acceptance check was removed to claim a saved pass.
+
+
+### Findings source ownership boundary (Sol, 2026-10-13)
+
+`cmd/distill.rs::load_findings` now prepares `--with` sources through existing full-fidelity
+`emit::prepare_selected(0, None)` and the same path-meta enrichment as `load`. EOF metadata,
+all messages, rich extras and source dependencies remain accepted as before. Full distill loading
+and products are unchanged. `distill.rs::analyze` shares its existing facts/timeline engine, but
+findings uses a per-message text reader instead of whole-session materialization. Inline text
+is borrowed, legacy Spans retain their best-effort fallback, and demanded Source fields decode
+through existing checked resolution. Tool-result buffers release after each block; prose used
+again for path facts stays until message end. Complete arguments/results remain fallbacks.
+
+Every checked Source text is decoded with bounded validation before analysis, including ignored
+Thinking; retained Source arguments are identity-checked through their existing validated ranges.
+This preserves prior invalid/mutated-source failure behavior rather than silently skipping it.
+Needed text consequently undergoes validation and later resolution: this is an ownership change,
+not a CPU improvement claim. Findings still renders/extracts the same full head (including
+embedded Markdown behavior); demanded own words can produce output-sized allocations. Rich
+extra fields can remain owned by full-fidelity parsing. Known Write content length projection is
+separate remaining work; no partial Value or second analysis engine was introduced.
+
+The complete caller recipe allocation control has nine Claude messages, with eight ignored
+Thinking fields totaling 16/64 MiB and constant demanded prose. Legacy parse/materialize plus
+findings peaks at 20,967,775 / 83,810,143 requested Rust heap bytes above baseline; selected
+preparation plus findings peaks at 1,167,734 bytes for both. Exact 500-byte findings and SHA-256
+match. Portable preparation also peaks at 1,167,734 bytes for both sizes (legacy
+19,082,077 / 75,705,181); output hashes match native. See `DISTILL-FINDINGS-EVIDENCE.json` and `distill_findings_probe.rs`; no elapsed-time claim.
+Frozen-oracle controls cover Source text/arguments, Inline/Span parity, changed ignored Thinking,
+wrong JSON type, report/findings composition, native output and sidecar schema. CLI loader
+coverage proves checked Thinking is retained and findings matches full loading.

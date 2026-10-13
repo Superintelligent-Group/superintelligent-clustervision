@@ -490,9 +490,117 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Disti
     Ok(prepare_distill(session, opts)?.distilled)
 }
 
+/// Scoped demanded text. Owned blocks borrow directly; lazy fields resolve at most once while
+/// this message is analyzed. Thinking and other unobserved fields never become owned strings.
+struct MessageText<'a> {
+    message: &'a Message,
+    resolver: &'a crate::Resolver,
+    resolved: Option<Vec<Option<String>>>,
+}
+impl<'a> MessageText<'a> {
+    fn new(message: &'a Message, resolver: &'a crate::Resolver) -> Self {
+        Self {
+            message,
+            resolver,
+            resolved: None,
+        }
+    }
+    fn block(&mut self, index: usize) -> anyhow::Result<&str> {
+        let text = match &self.message.content[index] {
+            Block::Text { text } | Block::Thinking { text, .. } => text,
+            Block::ToolResult { content, .. } => content,
+            _ => anyhow::bail!("distill text requested for a non-text block"),
+        };
+        if let Some(text) = text.inline_str() {
+            return Ok(text);
+        }
+        let resolved = self
+            .resolved
+            .get_or_insert_with(|| (0..self.message.content.len()).map(|_| None).collect());
+        if resolved[index].is_none() {
+            // Span's best-effort fallback is the existing materialize_text contract. Source
+            // descriptors remain checked and never substitute empty text on failure.
+            resolved[index] = Some(match text {
+                crate::Text::Source(_) => text.try_resolve(self.resolver)?.into_owned(),
+                _ => text.resolve(self.resolver).into_owned(),
+            });
+        }
+        Ok(resolved[index].as_deref().expect("resolved demanded text"))
+    }
+    fn release(&mut self, index: usize) {
+        if let Some(resolved) = self.resolved.as_mut() {
+            resolved[index] = None;
+        }
+    }
+    fn text(&mut self) -> anyhow::Result<Option<String>> {
+        let mut output = String::new();
+        for index in 0..self.message.content.len() {
+            if matches!(&self.message.content[index], Block::Text { .. }) {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(self.block(index)?);
+            }
+        }
+        Ok((!output.is_empty()).then_some(output))
+    }
+}
+
+fn validate_findings_sources(session: &Session) -> anyhow::Result<()> {
+    let resolver = session.resolver();
+    for message in &session.messages {
+        // Preserve materialize's validation order: text first, then structured arguments.
+        for block in &message.content {
+            let text = match block {
+                Block::Text { text } | Block::Thinking { text, .. } => Some(text),
+                Block::ToolResult { content, .. } => Some(content),
+                _ => None,
+            };
+            if let Some(text @ crate::Text::Source(_)) = text {
+                text.try_for_each_chunk(&resolver, 64 * 1024, |_| Ok(()))?;
+            }
+        }
+        for block in &message.content {
+            if let Block::ToolUse {
+                input: input @ crate::Json::Source(_),
+                ..
+            } = block
+            {
+                input.with_view(|_| Ok(()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn findings_label(session: &Session, resolver: &crate::Resolver) -> anyhow::Result<String> {
+    if let Some(description) = session
+        .harness_extra(crate::Harness::Claude)
+        .and_then(|bag| bag.get("agent_description"))
+        .and_then(Value::as_str)
+    {
+        return Ok(description.to_owned());
+    }
+    let first_user = session
+        .messages
+        .iter()
+        .find(|message| message.role == Role::User)
+        .map(|message| MessageText::new(message, resolver).text())
+        .transpose()?
+        .flatten()
+        .filter(|text| !text.trim().is_empty());
+    Ok(crate::ir::label_from(session.title.as_deref(), first_user.as_deref()))
+}
+
 fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::Result<PreparedDistillation> {
-    let session = crate::emit::materialized_session(session)?;
+    let session = if demand == Demand::Findings {
+        validate_findings_sources(session)?;
+        std::borrow::Cow::Borrowed(session)
+    } else {
+        crate::emit::materialized_session(session)?
+    };
     let session = session.as_ref();
+    let resolver = session.resolver();
     let msgs = &session.messages;
     let retrieve_ref = opts.retrieve_ref.clone().unwrap_or_else(|| session.id.clone());
 
@@ -510,7 +618,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
         if !incoming {
             continue;
         }
-        let t = m.text().unwrap_or_default();
+        let t = MessageText::new(m, &resolver).text()?.unwrap_or_default();
         for c in path_re().captures_iter(&t) {
             referenced.insert(c[1].trim_end_matches(['.', ',', ';', ':', ')', '`', '\'']).to_string());
         }
@@ -567,9 +675,10 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
 
     for (i, m) in msgs.iter().enumerate() {
         let in_tail = i >= tail_start;
+        let mut reader = MessageText::new(m, &resolver);
         match (m.role, m.kind) {
             (Role::User, MessageKind::Prompt) => {
-                let text = m.text().unwrap_or_default();
+                let text = reader.text()?.unwrap_or_default();
                 if text.trim().is_empty() {
                     continue;
                 }
@@ -594,7 +703,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                     idx: i,
                     when: when(m),
                     heading: "compaction summary (the harness's own digest of what came before)".into(),
-                    body: m.text().unwrap_or_default(),
+                    body: reader.text()?.unwrap_or_default(),
                 });
             }
             (_, MessageKind::SubagentReturn) if !in_tail => {
@@ -603,7 +712,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                     when: when(m),
                     heading: "sub-agent returned".into(),
                     body: head_tail(
-                        &m.text().unwrap_or_default(),
+                        &reader.text()?.unwrap_or_default(),
                         opts.note_max,
                         "the full return is in the source transcript",
                     ),
@@ -614,7 +723,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                     idx: i,
                     when: when(m),
                     heading: "harness error".into(),
-                    body: truncate(m.text().unwrap_or_default().trim(), 300),
+                    body: truncate(reader.text()?.unwrap_or_default().trim(), 300),
                 });
             }
             (_, MessageKind::InjectedContext) if !in_tail => {
@@ -624,14 +733,18 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                         idx: i,
                         when: when(m),
                         heading: "message delivered while working".into(),
-                        body: strip_reminder(&m.text().unwrap_or_default()),
+                        body: strip_reminder(&reader.text()?.unwrap_or_default()),
                     });
                 }
             }
             (Role::Assistant, _) => {
-                for b in &m.content {
+                for (index, b) in m.content.iter().enumerate() {
                     match b {
-                        Block::Text { text } if !in_tail && !text.trim().is_empty() => {
+                        Block::Text { .. } if !in_tail => {
+                            let text = reader.block(index)?;
+                            if text.trim().is_empty() {
+                                continue;
+                            }
                             timeline.push(Entry {
                                 idx: i,
                                 when: when(m),
@@ -653,10 +766,9 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                 }
             }
             (Role::Tool, _) | (Role::User, MessageKind::ToolResult) => {
-                for b in &m.content {
+                for (index, b) in m.content.iter().enumerate() {
                     let Block::ToolResult {
                         tool_use_id,
-                        content,
                         is_error,
                         tool_name,
                         ..
@@ -675,7 +787,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                             )
                         });
                     let label = tool_label(&name, &input);
-                    let out: &str = content;
+                    let out = reader.block(index)?;
                     let outcome = scan_result_facts(i, &name, &input, &label, out, *is_error, &mut facts);
                     if let Some(p) = doc_reads.get(tool_use_id.as_str()) {
                         if !in_tail && last_read_of.get(p) == Some(&tool_use_id.as_str()) {
@@ -729,15 +841,17 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                             }
                         }
                     }
+                    // Results are consumed once; do not retain other results in this message.
+                    reader.release(index);
                 }
             }
             _ => {}
         }
         // Paths the agent itself names in prose count toward the path index too.
         if m.role == Role::Assistant {
-            for b in &m.content {
-                if let Block::Text { text } = b {
-                    for c in path_re().captures_iter(text) {
+            for (index, b) in m.content.iter().enumerate() {
+                if let Block::Text { .. } = b {
+                    for c in path_re().captures_iter(reader.block(index)?) {
                         let p = c[1].trim_end_matches(['.', ',', ';', ':', ')', '`']);
                         if note_paths(p) {
                             bump(&mut facts.paths, p);
@@ -749,7 +863,11 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     }
 
     // ── render the head ──
-    let label = session_label(session);
+    let label = if demand == Demand::Findings {
+        findings_label(session, &resolver)?
+    } else {
+        session_label(session)
+    };
     let mut h = String::new();
     let _ = writeln!(h, "# Distilled context — {label}\n");
     let _ = writeln!(
@@ -1659,6 +1777,121 @@ facts text",
         assert_eq!(new_work.tail_preparations, 0);
         assert_eq!(new_work.elided_copy_bytes, 0);
         assert_eq!(new_work.source_estimates, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn findings_checked_sources_match_owned_and_validate_ignored_thinking() -> anyhow::Result<()> {
+        let world = cv_testkit::World::new("findings-demanded-sources");
+        let mut source = lane();
+        source.messages[0].content = vec![text(&"Build the thing on /tmp/input.md. λ\n".repeat(256))];
+        source.messages.push(msg(
+            Role::Tool,
+            MessageKind::ToolResult,
+            vec![result("e1", &"error: demanded result λ\n".repeat(1024), true)],
+        ));
+        source.messages.push(msg(
+            Role::Assistant,
+            MessageKind::Reply,
+            vec![text(&"Chose simple /tmp/notes.md. λ\n".repeat(256))],
+        ));
+        for (mi, message) in source.messages.iter_mut().enumerate() {
+            for (bi, block) in message.content.iter_mut().enumerate() {
+                let path = world.base.join(format!("{mi}-{bi}.json"));
+                match block {
+                    Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => {
+                        let bytes = serde_json::to_vec(text.inline_str().unwrap())?;
+                        std::fs::write(&path, &bytes)?;
+                        *text = crate::Json::source(&path, 0, bytes.len() as u64)?
+                            .with_view(|view| view.source_text())?
+                            .unwrap();
+                    }
+                    Block::ToolUse { input, .. } => {
+                        let bytes = serde_json::to_vec(input.resolve()?.as_ref())?;
+                        std::fs::write(&path, &bytes)?;
+                        *input = crate::Json::source(&path, 0, bytes.len() as u64)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let ignored_path = world.base.join("ignored.json");
+        let bytes = serde_json::to_vec(&"ignored thinking λ\n".repeat(65536))?;
+        std::fs::write(&ignored_path, &bytes)?;
+        let ignored = crate::Json::source(&ignored_path, 0, bytes.len() as u64)?
+            .with_view(|view| view.source_text())?
+            .unwrap();
+        assert!(matches!(ignored, crate::Text::Source(_)));
+        for _ in 0..8 {
+            source.messages.push(msg(
+                Role::Assistant,
+                MessageKind::Reply,
+                vec![Block::Thinking {
+                    text: ignored.clone(),
+                    signature: None,
+                    encrypted: None,
+                    redacted: false,
+                }],
+            ));
+        }
+        let options = DistillOptions::default();
+        assert_eq!(
+            findings(&source, &options)?,
+            legacy_products::findings(&source, &options)?
+        );
+        let owned = crate::emit::materialized_session(&source)?;
+        assert_eq!(findings(&source, &options)?, findings(&owned, &options)?);
+        let argument_path = world.base.join("1-0.json");
+        let original_arguments = std::fs::read(&argument_path)?;
+        std::fs::write(&argument_path, b"changed arguments")?;
+        assert!(findings(&source, &options).is_err());
+        assert!(legacy_products::findings(&source, &options).is_err());
+        // Use a fresh descriptor after restoring bytes; guards intentionally reject old identities.
+        std::fs::write(&argument_path, &original_arguments)?;
+        let Block::ToolUse { input, .. } = &mut source.messages[1].content[0] else {
+            unreachable!()
+        };
+        *input = crate::Json::source(&argument_path, 0, original_arguments.len() as u64)?;
+        let span_path = world.base.join("legacy-span.txt");
+        std::fs::write(&span_path, b"legacy span reply")?;
+        source.messages.push(msg(
+            Role::Assistant,
+            MessageKind::Reply,
+            vec![Block::Text {
+                text: crate::Text::Span(crate::Span {
+                    source: Some(span_path),
+                    offset: 0,
+                    len: 17,
+                    escaped: false,
+                }),
+            }],
+        ));
+        assert_eq!(
+            findings(&source, &options)?,
+            legacy_products::findings(&source, &options)?
+        );
+        let wrong_path = world.base.join("wrong-type.json");
+        std::fs::write(&wrong_path, b"42")?;
+        let crate::Json::Source(range) = crate::Json::source(&wrong_path, 0, 2)? else {
+            unreachable!()
+        };
+        let mut wrong = Session::new("wrong", Harness::Claude);
+        wrong.messages.push(msg(
+            Role::Assistant,
+            MessageKind::Reply,
+            vec![Block::Thinking {
+                text: crate::Text::Source(crate::lazy::SourceText::new(range)),
+                signature: None,
+                encrypted: None,
+                redacted: false,
+            }],
+        ));
+        assert!(findings(&wrong, &options).is_err());
+        assert!(legacy_products::findings(&wrong, &options).is_err());
+        // Even completely ignored source payloads preserve the old failure boundary.
+        std::fs::write(&ignored_path, b"changed")?;
+        assert!(findings(&source, &options).is_err());
+        assert!(legacy_products::findings(&source, &options).is_err());
         Ok(())
     }
 

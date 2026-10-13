@@ -4,6 +4,7 @@
 
 - FTS compaction keeps segments above 8 MiB out of the bottom tier, avoiding repeated cold-segment rewrites during small appends.
 - JSON listing enrichment drops stable inline user history after deriving a title, preserving deferred source resolution and final metadata.
+- Distill findings resolve demanded text per message, avoiding whole-source Thinking retention while preserving checked-source failures and exact findings output.
 
 - Distill sidecars serialize borrowed payloads through bounded staging, avoiding complete output strings while preserving existing destination behavior.
 - Limited affordance queries fetch candidate counts and provenance on demand instead of loading every cached session’s counts.
