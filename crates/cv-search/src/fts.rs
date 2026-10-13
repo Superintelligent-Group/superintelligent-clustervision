@@ -23,6 +23,8 @@
 //!   `updated_at` only on the meta doc (it moves with every append, and a resumed pass keeps the
 //!   body docs it does not replace)
 //! - `mtime`      i64 STORED       — meta doc: file mtime, still used for non-append transcript stores
+//! - `discovery_metadata` STORED — discovery inputs and provenance guarding skip/resume;
+//!   changed body facets require a whole rewrite because body text is not stored.
 //! - `size`       i64 STORED       — meta doc: file size, the primary incremental-index key for
 //!   append-only session logs, which can skip on unchanged size even when mtime was spuriously
 //!   bumped (touch, rsync, restore); non-append stores require both size and mtime to match.
@@ -58,6 +60,7 @@ struct Fields {
     updated_at: Field,
     mtime: Field,
     size: Field,
+    discovery_metadata: Field,
     /// Sub-agent provenance, written only on folded-in sub-agent docs (`cv index --subagents`):
     /// `parent_id` is fielded (`parent_id:<top-level id>` filters to one parent's whole forest),
     /// `agent_id`/`workflow` are stored-only attribution carried onto the hit. NULL/absent on
@@ -81,6 +84,7 @@ fn build_schema() -> Schema {
     b.add_i64_field("created_at", INDEXED | STORED);
     b.add_i64_field("updated_at", INDEXED | STORED);
     b.add_i64_field("mtime", STORED);
+    b.add_text_field("discovery_metadata", STORED); // append reuse guard, not searched
     b.add_i64_field("size", STORED); // primary incremental key for append-only logs
     b.add_text_field("parent_id", STRING | STORED); // fielded: `parent_id:<id>` scopes to a forest
     b.add_text_field("agent_id", STRING | STORED); // stored attribution
@@ -104,6 +108,7 @@ fn fields_of(schema: &Schema) -> Result<Fields> {
         updated_at: get("updated_at")?,
         mtime: get("mtime")?,
         size: get("size")?,
+        discovery_metadata: get("discovery_metadata")?,
         parent_id: get("parent_id")?,
         agent_id: get("agent_id")?,
         workflow: get("workflow")?,
@@ -111,7 +116,7 @@ fn fields_of(schema: &Schema) -> Result<Fields> {
 }
 
 /// Whether an on-disk index carries every field of the current schema. A miss means it was built
-/// by an older `cv` (pre-`path`/`mtime`/`preview`, pre-subagent-provenance, pre-`size`, or one doc
+/// by an older `cv` (pre-`path`/`mtime`/`preview`, pre-subagent-provenance, pre-`size`/discovery-metadata guard, or one doc
 /// kind for everything) and must be rebuilt fresh — one-time on upgrade, from the indexing path only.
 fn schema_current(schema: &Schema) -> bool {
     [
@@ -124,6 +129,7 @@ fn schema_current(schema: &Schema) -> bool {
         "agent_id",
         "workflow",
         "size",
+        "discovery_metadata",
     ]
     .iter()
     .all(|f| schema.get_field(f).is_ok())
@@ -383,6 +389,66 @@ pub(crate) struct Swept {
 }
 
 /// One session a sweep must read, and what for.
+/// Inputs copied into retained body documents. Updated time and file signature live only on
+/// the replaceable meta document; body, preview and first-message boundaries come from the
+/// verified transcript prefix. Keep None distinct from an empty title or path.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct DiscoveryMetadata {
+    id: String,
+    harness: String,
+    path: String,
+    cwd: Option<String>,
+    title: Option<String>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+    parent_id: Option<String>,
+    agent_id: Option<String>,
+    workflow: Option<String>,
+}
+
+impl DiscoveryMetadata {
+    fn new(r: &cv_core::SessionRef, prov: &cv_core::events::Provenance) -> Self {
+        Self {
+            id: r.id.clone(),
+            harness: r.harness.as_str().to_string(),
+            path: r.path.display().to_string(),
+            cwd: r.cwd.as_ref().map(|p| p.display().to_string()),
+            title: r.title.clone(),
+            created_at: r.created_at.map(|t| t.timestamp()),
+            updated_at: r.updated_at.map(|t| t.timestamp()),
+            parent_id: prov.parent_id.clone(),
+            agent_id: prov.agent_id.clone(),
+            workflow: prov.workflow.clone(),
+        }
+    }
+
+    fn same_body(&self, other: &Self) -> bool {
+        // This time is stamped only on the replaceable meta doc, so an ordinary append
+        // may update it while retaining every prefix body document.
+        (
+            &self.id,
+            &self.harness,
+            &self.path,
+            &self.cwd,
+            &self.title,
+            self.created_at,
+            &self.parent_id,
+            &self.agent_id,
+            &self.workflow,
+        ) == (
+            &other.id,
+            &other.harness,
+            &other.path,
+            &other.cwd,
+            &other.title,
+            other.created_at,
+            &other.parent_id,
+            &other.agent_id,
+            &other.workflow,
+        )
+    }
+}
+
 struct Job {
     r: cv_core::SessionRef,
     mtime: i64,
@@ -586,10 +652,10 @@ impl SweepPlanner<'_> {
         // id → (mtime, size) for every live doc — the incremental skip-set — plus the set of ids that
         // are folded-in sub-agent docs (they carry `parent_id`), which the reap below must leave alone
         // on a plain (no --subagents) refresh.
-        let (existing, folded): (HashMap<String, (i64, i64)>, HashSet<String>) = if rebuild {
+        let (existing, folded, metadata) = if rebuild {
             Default::default()
         } else {
-            read_indexed_sigs(index, f).unwrap_or_default()
+            read_indexed_metadata(index, f, true).unwrap_or_default()
         };
         // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
         let event_sync = cv_core::events::SyncTable::load();
@@ -611,7 +677,9 @@ impl SweepPlanner<'_> {
                 &source.dependencies,
                 &mut probe,
             );
-            let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size) && dependencies_fresh;
+            let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size)
+                && dependencies_fresh
+                && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &Default::default()));
             let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
             if fts_fresh && !events && affordances.counts_with_probe(r, &source, &mut probe).is_some() {
@@ -648,16 +716,18 @@ impl SweepPlanner<'_> {
                         &source.dependencies,
                         &mut probe,
                     );
-                    let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size) && dependencies_fresh;
-                    let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
-                    if fts_fresh && !events {
-                        continue;
-                    }
                     let prov = cv_core::events::Provenance {
                         parent_id: Some(r.id.clone()),
                         agent_id: Some(sub.agent_id().to_string()),
                         workflow: sub.workflow.clone(),
                     };
+                    let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size)
+                        && dependencies_fresh
+                        && metadata.get(&sr.id) == Some(&DiscoveryMetadata::new(sr, &prov));
+                    let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
+                    if fts_fresh && !events {
+                        continue;
+                    }
                     jobs.push(Job {
                         r: sr.clone(),
                         mtime,
@@ -1120,7 +1190,7 @@ const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
 
 /// The version of what a mark's `fts` layer and the docs behind it mean, part of every mark's
 /// version: bump it when [`FtsState`], the doc layout or [`CHECKPOINT_EVERY`] changes.
-const RESUME_TAG: &str = "fts1";
+const RESUME_TAG: &str = "fts2";
 
 /// The checkpoint `job` can resume from: the source grew, its sampled mark still matches, and
 /// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's
@@ -1135,8 +1205,15 @@ fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoin
     }
     let cp = cv_core::resume::state(&job.r, head)?;
     cp.messages()?;
-    if job.fts && !(job.existing && cp.state.contains_key(FTS_LAYER)) {
-        return None;
+    if job.fts {
+        let state: FtsState = cp.get(FTS_LAYER)?;
+        if !job.existing
+            || !state
+                .discovery_metadata
+                .same_body(&DiscoveryMetadata::new(&job.r, &job.prov))
+        {
+            return None;
+        }
     }
     if job.events && cv_core::events::EventSink::resume(&cp).is_none() {
         return None;
@@ -1390,6 +1467,7 @@ struct ChunkSink<'w> {
     prov: cv_core::events::Provenance,
     resolver: cv_core::Resolver,
     dependencies: cv_core::source::ReadSet,
+    discovery_metadata: DiscoveryMetadata,
     buf: String,
     /// Messages seen so far: the index of the message being appended.
     msgs: usize,
@@ -1413,6 +1491,7 @@ const FTS_LAYER: &str = "fts";
 /// the index).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FtsState {
+    discovery_metadata: DiscoveryMetadata,
     #[serde(default = "cv_core::source::ReadSet::unrecorded")]
     dependencies: cv_core::source::ReadSet,
     msgs: usize,
@@ -1442,6 +1521,7 @@ impl<'w> ChunkSink<'w> {
         ChunkSink {
             out,
             f,
+            discovery_metadata: DiscoveryMetadata::new(r, &prov),
             id: r.id.clone(),
             harness: r.harness.as_str().to_string(),
             cwd: r.cwd.as_ref().map(|p| p.display().to_string()),
@@ -1483,6 +1563,9 @@ impl<'w> ChunkSink<'w> {
         cp: &cv_core::stream::Checkpoint,
     ) -> Option<Self> {
         let st: FtsState = cp.get(FTS_LAYER)?;
+        if !st.discovery_metadata.same_body(&DiscoveryMetadata::new(r, &prov)) {
+            return None;
+        }
         let mut sink = ChunkSink::new(out, f, r, mtime, size, prov);
         sink.dependencies = st.dependencies;
         sink.msgs = st.msgs;
@@ -1519,6 +1602,13 @@ impl<'w> ChunkSink<'w> {
         doc.add_text(self.f.path, &self.path);
         if let Some(t) = self.created_at {
             doc.add_i64(self.f.created_at, t);
+        }
+        if kind == KIND_META {
+            // This type contains only infallibly serializable scalars.
+            doc.add_text(
+                self.f.discovery_metadata,
+                serde_json::to_string(&self.discovery_metadata).unwrap(),
+            );
         }
         // `updated_at` moves with every append; only the meta doc, rewritten by every pass, has it.
         if let (Some(t), KIND_META) = (self.updated_at, kind) {
@@ -1846,6 +1936,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
         cp.put(
             FTS_LAYER,
             &FtsState {
+                discovery_metadata: self.discovery_metadata.clone(),
                 dependencies: self.dependencies.clone(),
                 msgs: self.msgs,
                 cwd: self.cwd.clone(),
@@ -1918,11 +2009,23 @@ type IndexedSigs = (HashMap<String, (i64, i64)>, HashSet<String>);
 /// Read the [`IndexedSigs`] off every live meta doc in the index (one per session; stored fields
 /// are tiny, so this is cheap).
 fn read_indexed_sigs(index: &Index, f: &Fields) -> Result<IndexedSigs> {
+    let (sigs, folded, _) = read_indexed_metadata(index, f, false)?;
+    Ok((sigs, folded))
+}
+
+type IndexedMetadata = (
+    HashMap<String, (i64, i64)>,
+    HashSet<String>,
+    HashMap<String, DiscoveryMetadata>,
+);
+
+fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Result<IndexedMetadata> {
     use tantivy::collector::DocSetCollector;
     let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
     let mut out = HashMap::new();
     let mut folded = HashSet::new();
+    let mut metadata = HashMap::new();
     let metas = searcher
         .search(&kind_query(f, KIND_META), &DocSetCollector)
         .context("listing meta docs")?;
@@ -1937,10 +2040,19 @@ fn read_indexed_sigs(index: &Index, f: &Fields) -> Result<IndexedSigs> {
             if doc.get_first(f.parent_id).is_some() {
                 folded.insert(id.clone());
             }
+            if read_metadata {
+                if let Some(stamp) = doc
+                    .get_first(f.discovery_metadata)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                {
+                    metadata.insert(id.clone(), stamp);
+                }
+            }
             out.insert(id, (mt, sz));
         }
     }
-    Ok((out, folded))
+    Ok((out, folded, metadata))
 }
 
 /// Matches the docs of one `kind`.
@@ -5439,6 +5551,151 @@ mod tests {
         }
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn discovery_metadata_schema_migration_is_indexing_only() {
+        let dir = tmpdir();
+        let mut old = serde_json::to_value(build_schema()).unwrap();
+        old.as_array_mut()
+            .unwrap()
+            .retain(|field| field["name"] != "discovery_metadata");
+        let old: Schema = serde_json::from_value(old).unwrap();
+        let index = Index::create_in_dir(&dir, old.clone()).unwrap();
+        let mut writer = index.writer(15_000_000).unwrap();
+        let mut doc = TantivyDocument::default();
+        doc.add_text(old.get_field("id").unwrap(), "old");
+        doc.add_text(old.get_field("title").unwrap(), "obsolete");
+        writer.add_document(doc).unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+        drop(index);
+        // A query cannot silently trust old stale postings, and never clears them.
+        assert!(open_existing(&dir).err().unwrap().to_string().contains("cv index"));
+        let existing = Index::open_in_dir(&dir).unwrap();
+        assert_eq!(existing.reader().unwrap().searcher().num_docs(), 1);
+        drop(existing);
+        let (new, _) = open_or_create(&dir).unwrap();
+        assert!(schema_current(&new.schema()));
+        assert_eq!(new.reader().unwrap().searcher().num_docs(), 0);
+        drop(new);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A title-changing append cannot keep prefix title postings: Boolean clauses are
+    /// evaluated within each body document, not joined through the latest meta document.
+    #[test]
+    fn discovery_metadata_title_append_matches_whole_index() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let path = write_claude(&sdir, "titles", &format!("prefixneedle {}", "ordinary ".repeat(1000)));
+        let mut r = sref("titles", "obsolete", path.clone());
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
+        append(
+            &path,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"user", "uuid":"tail", "message":{"role":"user","content":"tailneedle"}
+                })
+            ),
+        );
+        r.title = Some("current".into());
+        r.updated_at = chrono::DateTime::from_timestamp(3, 0);
+        let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed, swept.errors), (1, 0, 0));
+        assert!(text_search(&dir, "title:obsolete", 10).unwrap().is_empty());
+        assert!(text_search(&dir, "title:obsolete AND body:prefixneedle", 10)
+            .unwrap()
+            .is_empty());
+        let hits = text_search(&dir, "title:current AND body:prefixneedle", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title.as_deref(), Some("current"));
+        let words = [
+            "title:obsolete",
+            "title:current",
+            "title:current AND body:prefixneedle",
+            "tailneedle",
+        ]
+        .map(str::to_string);
+        assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r.clone()], &words));
+
+        // The next append changes only replaceable updated_at and retains prefix docs.
+        append(
+            &path,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"user", "uuid":"tail2", "message":{"role":"user","content":"nextneedle"}
+                })
+            ),
+        );
+        r.updated_at = chrono::DateTime::from_timestamp(4, 0);
+        let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed, swept.errors), (1, 1, 0));
+        assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r], &words));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    /// Discovery inputs can change without changing the transcript tuple (sidecar metadata,
+    /// a new parent attribution, or caller-provided metadata). Skip must account for them too.
+    #[test]
+    fn discovery_metadata_guard_covers_static_fields_and_metadata_only_changes() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let path = write_claude(&sdir, "metadata", "bodyneedle");
+        let mut r = sref("metadata", "obsolete", path);
+        sweep(&dir, vec![r.clone()], false, false).unwrap();
+        r.title = Some("current".into());
+        r.cwd = Some("/changed/project".into());
+        r.created_at = chrono::DateTime::from_timestamp(8, 0);
+        r.updated_at = chrono::DateTime::from_timestamp(9, 0);
+        let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed, swept.errors), (1, 0, 0));
+        let words = [
+            "title:obsolete",
+            "title:current AND body:bodyneedle",
+            "cwd:changed AND body:bodyneedle",
+        ]
+        .map(str::to_string);
+        assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r.clone()], &words));
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 0);
+        r.updated_at = chrono::DateTime::from_timestamp(10, 0);
+        let updated = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((updated.changed, updated.resumed, updated.errors), (1, 0, 0));
+        assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r.clone()], &words));
+        let base = DiscoveryMetadata::new(&r, &Default::default());
+        let mut alternatives = Vec::new();
+        for field in 0..9 {
+            let mut changed = base.clone();
+            match field {
+                0 => changed.id.push('x'),
+                1 => changed.harness.push('x'),
+                2 => changed.path.push('x'),
+                3 => changed.cwd = None,
+                4 => changed.title = None,
+                5 => changed.created_at = None,
+                6 => changed.parent_id = Some("parent".into()),
+                7 => changed.agent_id = Some("agent".into()),
+                _ => changed.workflow = Some("workflow".into()),
+            }
+            alternatives.push(changed);
+        }
+        assert!(alternatives.iter().all(|changed| !base.same_body(changed)));
+        let mut empty = base.clone();
+        empty.title = Some(String::new());
+        let mut absent = empty.clone();
+        absent.title = None;
+        assert!(!empty.same_body(&absent));
+        let mut updated = base.clone();
+        updated.updated_at = None;
+        assert_ne!(base, updated);
+        assert!(base.same_body(&updated));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }

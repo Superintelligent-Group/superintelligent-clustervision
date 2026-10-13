@@ -2728,3 +2728,34 @@ fallback/residency questions stay explicit instead of extending a Rust-only flat
 SQLite stores or whole commands. SQLite API semantics are documented in
 [memory accounting](https://www.sqlite.org/c3ref/memory_highwater.html) and
 [status parameters](https://www.sqlite.org/c3ref/c_status_malloc_count.html).
+
+### Incremental search metadata authority (2026-10-13, Codex)
+
+The actual `cv index` append control exposed a correctness boundary before traversal reuse:
+Claude discovery returned a new custom title, while resumed indexing retained prefix body
+documents with the old title postings. `title:initial` falsely matched a session labeled
+“Appended title”, and `title:appended AND body:stablemark00` missed a hit present after a
+full rebuild. Replacing only the meta document cannot fix document-local Boolean queries.
+
+Index metadata now stores a discovery stamp covering ID, harness, source path, CWD, title,
+created time and parent/agent/workflow provenance. Exact `None`/empty distinctions are
+retained. Skip additionally checks updated time; checkpoint reuse ignores only updated time,
+which belongs solely to the replaced meta document. Changed static inputs force a whole
+rewrite; unchanged-title appends still resume. The stamp is retained once by each active sink
+and checkpoint, duplicating small discovery strings rather than transcript payloads.
+Signature-only index consumers do not decode the stamp.
+
+The required schema field causes one indexing-only rebuild of older indexes: body text is
+not stored, so already stale title postings cannot be safely repaired from the index alone.
+Read-only queries refuse that older schema with the existing `cv index` pointer and never
+clear it. Resume tag `fts2` rejects earlier checkpoints. Three focused regressions cover
+metadata-only changes (including updated time alone), title/body conjunctions, hit labels,
+full-index stored-field/events/counts parity, unchanged-title resume and one-time migration.
+The existing six-session resumed/full oracle and timestamp-change rewrite controls pass.
+
+The baseline also confirmed the documented primary `(mtime,size)` limitation: a same-size
+middle edit with mtime restored was skipped by FTS. This is separate from the title fix;
+auxiliary identity guards and discovery fingerprints do not currently strengthen every
+consumer's primary skip authority. A shared primary identity capture, separate from append-safe
+auxiliary dependencies, is the next correctness question. Sampled resume marks still do not
+prove an arbitrary rewritten-and-grown prefix immutable.
