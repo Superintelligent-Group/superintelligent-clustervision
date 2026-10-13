@@ -1,0 +1,35 @@
+{
+  "base": "2a64ebc0",
+  "control": "ranked_metadata_work_is_shared_across_many_segments",
+  "segments": 17,
+  "metadata_backed_ids": 128,
+  "legacy_body_only_ids": 1,
+  "repeated_body_segments": 16,
+  "query": "needle",
+  "filter": {
+    "harness": "codex",
+    "cwd": "current/proj"
+  },
+  "limit": 10,
+  "returned_sessions": 5,
+  "baseline": {
+    "global_metadata_queries": 2069,
+    "initial_metadata_read_requests": 2048,
+    "winner_body_read_requests": 5,
+    "winner_metadata_read_requests": 4
+  },
+  "candidate": {
+    "global_metadata_queries": 129,
+    "initial_metadata_read_requests": 128,
+    "winner_body_read_requests": 5,
+    "winner_metadata_read_requests": 4,
+    "compact_decision_entries": 129
+  },
+  "parity": [
+    "complete serialized Hit values including scores",
+    "top-three cutoff",
+    "legacy different-body-label fallback",
+    "case-sensitive rejection"
+  ],
+  "scope": "Default single-thread Tantivy executor; logical query/stored-document requests, not physical bytes, scans, or elapsed time. Parallel custom executors may duplicate simultaneous misses."
+}

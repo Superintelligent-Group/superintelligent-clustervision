@@ -2324,10 +2324,10 @@ builds were compared for behavior only, with no work or timing inference.
 - Small unqueried JSON listings now heapify borrowed candidates and select in stable rank order;
   the unrequested tail stays unordered. Queried windows and exact text totals keep full sorting.
   The work/memory tradeoff and natural-run controls are recorded below.
-- Filtered ranked search can repeat a global metadata lookup for one ID across index segments.
-  Share compact query-local decisions/addresses; retaining every full metadata document would
-  create a new memory cost proportional to arbitrary title/cwd widths. Preserve legacy body-only
-  fallbacks and stored-document failures. Multiple `text:` needles also repeat reader setup.
+- Filtered ranked search now shares compact query-local decisions/addresses across segments,
+  retaining no title/cwd documents. The ranked-query control below preserves legacy body-only
+  fallbacks and stored-document failures. Multiple `text:` needles still repeat reader setup;
+  shared reader setup for those needles is the next separate change.
 - MCP startup reuse is completed: one parsed clap tree, released after identical tool extraction.
   The operation audit below retains child dispatch and bounded staging; no persistent daemon
   replacement is justified by the current controls.
@@ -2398,3 +2398,32 @@ directly into `Value::Array`, avoiding the previous serialization copy; its exis
 control passes, including sort, filter, row schema and limits. These are scoped checks, not a
 new full convergence run. MCP control scripts/results/logs are also retained outside temporary
 storage at `excellence-evidence/mcp-startup/`.
+
+
+### Ranked query metadata work (Sol, 2026-10-13)
+
+Filtered session ranking previously searched all segments for each demanded session's metadata
+once per segment-local cache miss. That cache retained only 64 decisions and cleared on overflow;
+append-created segments repeating more than 64 IDs paid the same global lookup repeatedly.
+A query-local map now retains ID → current metadata address and predicate decision, or definite
+absence. Metadata documents and their arbitrary-width strings are discarded after filtering;
+only final winners reread metadata at the retained address for display. Legacy body-only filters
+remain segment-local, and metadata lookup/read failures remain retryable with the existing body
+fallback. The winning body document is still read, preserving its existing error behavior.
+
+The actual Writer control has 17 unmerged segments, 128 repeated metadata-backed IDs and one
+legacy ID whose body labels differ between segments. Frozen prior search and candidate produce
+identical complete indexed hits, scores, ties, current labels/dates/previews, and top-three cutoff;
+case-sensitive filters remain unchanged. Global metadata queries fall from 2,069 to 129; initial
+metadata reads fall from 2,048 to 128. Both read five winning body documents and four winning
+metadata documents. Candidate retains 129 compact decisions, without retaining metadata strings.
+See `FTS-QUERY-WORK-CONTROL.json`; these count requests, not decompressed physical document-store
+bytes, input scans, elapsed time, or all query setup work.
+
+The map uses O(distinct demanded IDs) owned ID/address/decision state, trading that memory for
+removed repeated work; it is released after the query. Unfiltered searches demand no such
+predicate map entries. Locks cover lookup/insertion only; expensive search/read runs unlocked.
+Tantivy 0.26.1 defaults to a single-thread executor, as used by production index opens and this
+control. A custom parallel executor may duplicate concurrent cache misses; no once-per-ID
+physical-work claim applies there. Snippet enrichment remains the existing separate selected-hit
+operation. No persistent cache, schema, public query syntax or publication behavior changes.

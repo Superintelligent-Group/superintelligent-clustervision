@@ -1951,8 +1951,12 @@ fn kind_query(f: &Fields, kind: &str) -> tantivy::query::TermQuery {
     )
 }
 
-/// Session `id`'s meta doc.
+/// Session `id`'s meta doc. Preserve best-effort metadata fallback on lookup/read failure.
 fn meta_doc(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Option<TantivyDocument> {
+    searcher.doc(meta_addr(searcher, f, id).ok()??).ok()
+}
+
+fn meta_addr(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Result<Option<tantivy::DocAddress>> {
     use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
     use tantivy::schema::IndexRecordOption;
     let id_q: Box<dyn Query> = Box::new(TermQuery::new(
@@ -1963,9 +1967,105 @@ fn meta_doc(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Option<Tantiv
         (Occur::Must, id_q),
         (Occur::Must, Box::new(kind_query(f, KIND_META))),
     ]);
-    let top = searcher.search(&q, &TopDocs::with_limit(1).order_by_score()).ok()?;
-    let (_, addr) = top.into_iter().next()?;
-    searcher.doc(addr).ok()
+    let top = searcher.search(&q, &TopDocs::with_limit(1).order_by_score())?;
+    Ok(top.into_iter().next().map(|(_, addr)| addr))
+}
+
+#[derive(Clone, Copy)]
+enum MetadataDecision {
+    Present {
+        address: tantivy::DocAddress,
+        accepted: bool,
+    },
+    Missing,
+    Unavailable,
+}
+
+/// Query-local predicate decisions and addresses. Retain no metadata strings/documents: only
+/// matching IDs demand this map, and only final winners reread their metadata for display.
+struct MetadataDecisions {
+    searcher: tantivy::Searcher,
+    fields: Fields,
+    harness: Option<String>,
+    cwd: Option<String>,
+    cache: std::sync::Mutex<HashMap<String, MetadataDecision>>,
+    #[cfg(test)]
+    queries: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    stored_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    winner_body_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    winner_metadata_reads: std::sync::atomic::AtomicUsize,
+}
+impl MetadataDecisions {
+    fn new(searcher: &tantivy::Searcher, fields: &Fields, filter: crate::SearchFilter<'_>) -> Self {
+        Self {
+            searcher: searcher.clone(),
+            fields: fields.clone(),
+            harness: filter.harness.map(str::to_owned),
+            cwd: filter.cwd.map(str::to_owned),
+            cache: Default::default(),
+            #[cfg(test)]
+            queries: Default::default(),
+            #[cfg(test)]
+            stored_reads: Default::default(),
+            #[cfg(test)]
+            winner_body_reads: Default::default(),
+            #[cfg(test)]
+            winner_metadata_reads: Default::default(),
+        }
+    }
+    fn resolve(&self, id: &str) -> MetadataDecision {
+        let cached = self
+            .cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .copied();
+        if let Some(decision) = cached {
+            return decision;
+        }
+        // Errors remain retryable and keep the existing per-body fallback. A definite missing
+        // meta doc is stable in this searcher's snapshot, but its body filter is segment-local.
+        #[cfg(test)]
+        self.queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let decision = match meta_addr(&self.searcher, &self.fields, id) {
+            Ok(Some(address)) => {
+                #[cfg(test)]
+                self.stored_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match self.searcher.doc::<TantivyDocument>(address) {
+                    Ok(doc) => MetadataDecision::Present {
+                        address,
+                        accepted: metadata_matches(&doc, &self.fields, self.harness.as_deref(), self.cwd.as_deref()),
+                    },
+                    Err(_) => return MetadataDecision::Unavailable,
+                }
+            }
+            Ok(None) => MetadataDecision::Missing,
+            Err(_) => return MetadataDecision::Unavailable,
+        };
+        self.cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_owned(), decision);
+        decision
+    }
+    fn cached(&self, id: &str) -> Option<MetadataDecision> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .copied()
+    }
+}
+fn metadata_matches(doc: &TantivyDocument, fields: &Fields, harness: Option<&str>, cwd: Option<&str>) -> bool {
+    harness.is_none_or(|wanted| doc.get_first(fields.harness).and_then(|value| value.as_str()) == Some(wanted))
+        && cwd.is_none_or(|needle| {
+            doc.get_first(fields.cwd)
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.contains(needle))
+        })
 }
 
 /// The newest file mtime (ns) stamped on any indexed doc — how far the index has caught up. `None`
@@ -2164,7 +2264,20 @@ pub fn text_search_indexed_filtered(
     let reader = index.reader().context("opening index reader")?;
     let searcher = reader.searcher();
 
-    let parsed = parse_text_query(&index, &f, query)?;
+    let decisions = std::sync::Arc::new(MetadataDecisions::new(&searcher, &f, filter));
+    ranked_search(&index, &f, &searcher, query, limit, filter, decisions)
+}
+
+fn ranked_search(
+    index: &Index,
+    f: &Fields,
+    searcher: &tantivy::Searcher,
+    query: &str,
+    limit: usize,
+    filter: crate::SearchFilter<'_>,
+    decisions: std::sync::Arc<MetadataDecisions>,
+) -> Result<Vec<Hit>> {
+    let parsed = parse_text_query(index, f, query)?;
 
     // Collect sessions rather than chunks. Each segment's top `limit` sessions contains every
     // possible global winner, even when one session has arbitrarily many matching chunks.
@@ -2173,26 +2286,16 @@ pub fn text_search_indexed_filtered(
         let harness = filter.harness.map(str::to_owned);
         let cwd = filter.cwd.map(str::to_owned);
         let fields = f.clone();
-        let reader = searcher.clone();
+        let shared = decisions.clone();
         collector.filter = Some(std::sync::Arc::new(move |id, store, doc_id| {
             // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
             // describes the returned hit, falling back only for legacy body-only documents.
-            let meta = meta_doc(&reader, &fields, id);
-            let fallback;
-            let doc = if let Some(meta) = meta.as_ref() {
-                meta
-            } else {
-                fallback = store.get::<TantivyDocument>(doc_id)?;
-                &fallback
-            };
-            Ok(harness
-                .as_ref()
-                .is_none_or(|wanted| doc.get_first(fields.harness).and_then(|v| v.as_str()) == Some(wanted.as_str()))
-                && cwd.as_ref().is_none_or(|needle| {
-                    doc.get_first(fields.cwd)
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|value| value.contains(needle))
-                }))
+            match shared.resolve(id) {
+                MetadataDecision::Present { accepted, .. } => return Ok(accepted),
+                MetadataDecision::Missing | MetadataDecision::Unavailable => {}
+            }
+            let fallback = store.get::<TantivyDocument>(doc_id)?;
+            Ok(metadata_matches(&fallback, &fields, harness.as_deref(), cwd.as_deref()))
         }));
     }
     let ranked = searcher.search(&parsed, &collector).context("running search")?;
@@ -2200,6 +2303,10 @@ pub fn text_search_indexed_filtered(
     let mut hits = Vec::with_capacity(ranked.len());
     for candidate in ranked {
         let (score, id) = (candidate.score, candidate.id);
+        #[cfg(test)]
+        decisions
+            .winner_body_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let hit_doc: TantivyDocument = searcher.doc(candidate.addr).context("loading stored doc")?;
         // What describes the session — its current label, dates, preview — is on its meta doc; a
         // body doc carries the label it was written under.
@@ -2207,7 +2314,17 @@ pub fn text_search_indexed_filtered(
         let doc = if is_meta {
             hit_doc
         } else {
-            meta_doc(&searcher, &f, &id).unwrap_or(hit_doc)
+            match decisions.cached(&id) {
+                Some(MetadataDecision::Present { address, .. }) => {
+                    #[cfg(test)]
+                    decisions
+                        .winner_metadata_reads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    searcher.doc(address).unwrap_or(hit_doc)
+                }
+                Some(MetadataDecision::Missing) => hit_doc,
+                _ => meta_doc(searcher, f, &id).unwrap_or(hit_doc),
+            }
         };
         let get_str =
             |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
@@ -3276,6 +3393,173 @@ mod tests {
             text_search_indexed(&dir, "needle", 3).unwrap()[1].snippet,
             "dominant preview"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // Frozen pre-cache implementation: keeps the old segment-local lookup behavior as oracle.
+    fn legacy_ranked_search(
+        dir: &Path,
+        query: &str,
+        limit: usize,
+        filter: crate::SearchFilter<'_>,
+        queries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Result<Vec<Hit>> {
+        if !dir.join("meta.json").exists() {
+            anyhow::bail!("no full-text index at {} — run `index_all` first", dir.display());
+        }
+        // Read-only open: a transient failure here must surface as an error, never as a wiped index.
+        let (index, f) = open_existing(dir)?;
+        let reader = index.reader().context("opening index reader")?;
+        let searcher = reader.searcher();
+
+        let parsed = parse_text_query(&index, &f, query)?;
+
+        // Collect sessions rather than chunks. Each segment's top `limit` sessions contains every
+        // possible global winner, even when one session has arbitrarily many matching chunks.
+        let mut collector = crate::session_collector::TopSessions::new(f.id, limit);
+        if filter.harness.is_some() || filter.cwd.is_some() {
+            let harness = filter.harness.map(str::to_owned);
+            let cwd = filter.cwd.map(str::to_owned);
+            let fields = f.clone();
+            let reader = searcher.clone();
+            let queries = queries.clone();
+            collector.filter = Some(std::sync::Arc::new(move |id, store, doc_id| {
+                // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
+                // describes the returned hit, falling back only for legacy body-only documents.
+                queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let meta = meta_doc(&reader, &fields, id);
+                let fallback;
+                let doc = if let Some(meta) = meta.as_ref() {
+                    meta
+                } else {
+                    fallback = store.get::<TantivyDocument>(doc_id)?;
+                    &fallback
+                };
+                Ok(harness.as_ref().is_none_or(|wanted| {
+                    doc.get_first(fields.harness).and_then(|v| v.as_str()) == Some(wanted.as_str())
+                }) && cwd.as_ref().is_none_or(|needle| {
+                    doc.get_first(fields.cwd)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|value| value.contains(needle))
+                }))
+            }));
+        }
+        let ranked = searcher.search(&parsed, &collector).context("running search")?;
+
+        let mut hits = Vec::with_capacity(ranked.len());
+        for candidate in ranked {
+            let (score, id) = (candidate.score, candidate.id);
+            let hit_doc: TantivyDocument = searcher.doc(candidate.addr).context("loading stored doc")?;
+            // What describes the session — its current label, dates, preview — is on its meta doc; a
+            // body doc carries the label it was written under.
+            let is_meta = hit_doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);
+            let doc = if is_meta {
+                hit_doc
+            } else {
+                queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                meta_doc(&searcher, &f, &id).unwrap_or(hit_doc)
+            };
+            let get_str = |field: Field| -> Option<String> {
+                doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string())
+            };
+            let harness = get_str(f.harness).unwrap_or_default();
+            let snippet = get_str(f.preview).unwrap_or_default();
+
+            hits.push(Hit {
+                id,
+                harness,
+                cwd: get_str(f.cwd),
+                title: get_str(f.title),
+                created_at: doc.get_first(f.created_at).and_then(|v| v.as_i64()),
+                updated_at: doc.get_first(f.updated_at).and_then(|v| v.as_i64()),
+                score,
+                snippet,
+                parent_id: get_str(f.parent_id),
+                agent_id: get_str(f.agent_id),
+                workflow: get_str(f.workflow),
+            });
+        }
+        Ok(hits)
+    }
+
+    #[test]
+    fn ranked_metadata_work_is_shared_across_many_segments() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let _home = IsolatedHome::new();
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        for i in 0..128 {
+            let accepted = i < 4;
+            writer
+                .add_document(tantivy::doc!(f.id => format!("session-{i:03}"), f.kind => KIND_META,
+                f.harness => if accepted { "codex" } else { "claude" },
+                f.cwd => if accepted { "/current/project" } else { "/outside" },
+                f.title => format!("current title {i}"), f.preview => format!("current preview {i}"),
+                f.created_at => 11i64, f.updated_at => 22i64))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        for segment in 0..16 {
+            for i in 0..128 {
+                writer
+                    .add_document(tantivy::doc!(f.id => format!("session-{i:03}"), f.kind => KIND_BODY,
+                    f.body => if i < 4 { "needle padding padding" } else { "needle needle needle" },
+                    f.harness => "old-harness", f.cwd => "/stale", f.preview => "stale preview"))
+                    .unwrap();
+            }
+            // Missing metadata must not share one segment's body decision with another segment.
+            writer.add_document(tantivy::doc!(f.id => "legacy", f.kind => KIND_BODY,
+                f.body => "needle padding padding padding", f.harness => if segment % 2 == 0 { "codex" } else { "claude" },
+                f.cwd => "/current/project", f.preview => "legacy preview")).unwrap();
+            writer.commit().unwrap();
+        }
+        drop(writer);
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.segment_readers().len(), 17);
+        let filter = crate::SearchFilter {
+            harness: Some("codex"),
+            cwd: Some("current/proj"),
+        };
+        let legacy_queries = Arc::new(AtomicUsize::new(0));
+        let expected = legacy_ranked_search(&dir, "needle", 10, filter, legacy_queries.clone()).unwrap();
+        let decisions = Arc::new(MetadataDecisions::new(&searcher, &f, filter));
+        let actual = ranked_search(&index, &f, &searcher, "needle", 10, filter, decisions.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(actual.len(), 5);
+        assert!(actual.iter().any(|hit| hit.id == "legacy"));
+        let queries = decisions.queries.load(Ordering::Relaxed);
+        let reads = decisions.stored_reads.load(Ordering::Relaxed);
+        assert_eq!(queries, 129);
+        assert_eq!(reads, 128);
+        assert_eq!(decisions.winner_body_reads.load(Ordering::Relaxed), 5);
+        assert_eq!(decisions.winner_metadata_reads.load(Ordering::Relaxed), 4);
+        assert_eq!(decisions.cache.lock().unwrap().len(), 129);
+        assert_eq!(legacy_queries.load(Ordering::Relaxed), 16 * 129 + 5);
+        // A top-three cutoff still compares exact scores/ties and current stored previews.
+        let top = text_search_indexed_filtered(&dir, "needle", 3, filter).unwrap();
+        assert_eq!(
+            serde_json::to_value(top).unwrap(),
+            serde_json::to_value(&expected[..3]).unwrap()
+        );
+        assert!(text_search_indexed_filtered(
+            &dir,
+            "needle",
+            3,
+            crate::SearchFilter {
+                harness: Some("codex"),
+                cwd: Some("CURRENT")
+            }
+        )
+        .unwrap()
+        .is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
