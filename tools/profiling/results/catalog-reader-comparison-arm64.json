@@ -1,0 +1,487 @@
+{
+  "before_source": "d14714a6 (78a3f86d + 2a10cfda)",
+  "after_source": "9dd193bd7e8d2249e241489b04402d6971b62677",
+  "compiler": "rustc1.99.0 b940084d7 LLVM23.1.1",
+  "build": "release opt-level3 ThinLTO debuginfo1; default core mmap/sqlite/parallel; no RUSTFLAGS",
+  "platform": "Debian trixie ARM64, Valgrind3.24.0,3CPU/8GiB,Rayon1",
+  "fixture": "8 synthetic sessions,4Claude+4Codex,586452B; no real stores",
+  "controls": {
+    "cli-ls-cold": {
+      "before": {
+        "command": [
+          "/scratch/profile-bin/cv",
+          "ls",
+          "--json",
+          "--limit",
+          "20"
+        ],
+        "binary_sha256": "1e0b1dfe19c44aa645a641d6de1f92b5b55563bd40df0dd984eddc577e73ab16",
+        "input_sha256": "f87c9458870ffaf7c284f9d72dee59384195a5cf08c24473b73c7a2ad6902992",
+        "input_metadata_sha256": "6635ab3c3aee102a3b8c37c44c0a0c03cd13b683b5dba14e9e5e35a44ff4d842",
+        "seed_catalog_sha256": null,
+        "seed_metadata_sha256": null,
+        "output_mode": "bytes",
+        "catalog_home": "/scratch/cli-ls-cold/catalog",
+        "harness_home": "/scratch/cli-fixture/home",
+        "rayon_threads": 1,
+        "runtime_rustflags": "",
+        "catalog_max_stale_secs": "3600",
+        "valgrind": "valgrind-3.24.0",
+        "architecture": "aarch64",
+        "Ir": [
+          23623945,
+          23643712
+        ],
+        "Ir_delta": 19767,
+        "stderr_output": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        "semantic_output": {
+          "sha256": "adde83e6d98baf8c2e538fa26cba9490c02419e0ada259badf659cdd74bd721d",
+          "bytes": 3091
+        },
+        "parity": true,
+        "build": {
+          "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+          "llvm": "23.1.1",
+          "profile": "release opt-level=3 lto=thin debuginfo=1",
+          "core_features": [
+            "default",
+            "mmap",
+            "parallel",
+            "sqlite"
+          ],
+          "rustflags": "",
+          "image_manifest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+          "cpus": 3,
+          "memory_bytes": 8589934592,
+          "source_commit": "d14714a6 (78a3f86d + 2a10cfda)"
+        }
+      },
+      "after": {
+        "command": [
+          "/scratch/profile-bin/cv",
+          "ls",
+          "--json",
+          "--limit",
+          "20"
+        ],
+        "binary_sha256": "e000d8220757cbd75d5513fd093bc5133c2d2aad9b0b12bf3a488e3ca458ed1b",
+        "input_sha256": "f87c9458870ffaf7c284f9d72dee59384195a5cf08c24473b73c7a2ad6902992",
+        "input_metadata_sha256": "6635ab3c3aee102a3b8c37c44c0a0c03cd13b683b5dba14e9e5e35a44ff4d842",
+        "seed_catalog_sha256": null,
+        "seed_metadata_sha256": null,
+        "output_mode": "bytes",
+        "catalog_home": "/scratch/cli-ls-cold/catalog",
+        "harness_home": "/scratch/cli-fixture/home",
+        "rayon_threads": 1,
+        "runtime_rustflags": "",
+        "catalog_max_stale_secs": "3600",
+        "valgrind": "valgrind-3.24.0",
+        "architecture": "aarch64",
+        "Ir": [
+          20420190,
+          20422311
+        ],
+        "Ir_delta": 2121,
+        "stderr_output": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        "semantic_output": {
+          "sha256": "adde83e6d98baf8c2e538fa26cba9490c02419e0ada259badf659cdd74bd721d",
+          "bytes": 3091
+        },
+        "parity": true,
+        "build": {
+          "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+          "llvm": "23.1.1",
+          "profile": "release opt-level=3 lto=thin debuginfo=1",
+          "core_features": [
+            "default",
+            "mmap",
+            "parallel",
+            "sqlite"
+          ],
+          "rustflags": "",
+          "image_manifest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+          "cpus": 3,
+          "memory_bytes": 8589934592,
+          "source_commit": "9dd193bd7e8d2249e241489b04402d6971b62677"
+        }
+      },
+      "comparison": {
+        "before_binary_sha256": "1e0b1dfe19c44aa645a641d6de1f92b5b55563bd40df0dd984eddc577e73ab16",
+        "after_binary_sha256": "e000d8220757cbd75d5513fd093bc5133c2d2aad9b0b12bf3a488e3ca458ed1b",
+        "before_Ir": [
+          23623945,
+          23643712
+        ],
+        "after_Ir": [
+          20420190,
+          20422311
+        ],
+        "mean_instruction_reduction_percent": 13.593134095899861,
+        "matched_control_fields": [
+          "command",
+          "input_sha256",
+          "input_metadata_sha256",
+          "seed_catalog_sha256",
+          "seed_metadata_sha256",
+          "catalog_home",
+          "harness_home",
+          "rayon_threads",
+          "catalog_max_stale_secs",
+          "runtime_rustflags",
+          "valgrind",
+          "architecture",
+          "output_mode",
+          "semantic_output",
+          "stderr_output"
+        ],
+        "build_controls_verified": true,
+        "matched_build_fields": [
+          "rustc",
+          "llvm",
+          "profile",
+          "core_features",
+          "rustflags",
+          "image_manifest",
+          "cpus",
+          "memory_bytes"
+        ]
+      },
+      "file_attribution_before": {
+        "sqlite_c": 7384046,
+        "allocator_sources": 4384046,
+        "loader_sources": 565345,
+        "clap_sources": 89139,
+        "all_file_Ir": 23623945
+      },
+      "file_attribution_after": {
+        "sqlite_c": 5359893,
+        "allocator_sources": 3946257,
+        "loader_sources": 567270,
+        "clap_sources": 89139,
+        "all_file_Ir": 20420190
+      }
+    },
+    "cli-ls-warm": {
+      "before": {
+        "command": [
+          "/scratch/profile-bin/cv",
+          "ls",
+          "--json",
+          "--limit",
+          "20"
+        ],
+        "binary_sha256": "1e0b1dfe19c44aa645a641d6de1f92b5b55563bd40df0dd984eddc577e73ab16",
+        "input_sha256": "f87c9458870ffaf7c284f9d72dee59384195a5cf08c24473b73c7a2ad6902992",
+        "input_metadata_sha256": "6635ab3c3aee102a3b8c37c44c0a0c03cd13b683b5dba14e9e5e35a44ff4d842",
+        "seed_catalog_sha256": "0eff3d8990579e717fe4bfa318cd865c9dd7ae78b020c0d9659ecd6267052118",
+        "seed_metadata_sha256": "af5fcc03e04151f9a7f51381e88536aa22230ad2f4447af5e7b3102f854b77f9",
+        "output_mode": "bytes",
+        "catalog_home": "/scratch/cli-ls-warm/catalog",
+        "harness_home": "/scratch/cli-fixture/home",
+        "rayon_threads": 1,
+        "runtime_rustflags": "",
+        "catalog_max_stale_secs": "3600",
+        "valgrind": "valgrind-3.24.0",
+        "architecture": "aarch64",
+        "Ir": [
+          5581467,
+          5582102
+        ],
+        "Ir_delta": 635,
+        "stderr_output": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        "semantic_output": {
+          "sha256": "adde83e6d98baf8c2e538fa26cba9490c02419e0ada259badf659cdd74bd721d",
+          "bytes": 3091
+        },
+        "parity": true,
+        "build": {
+          "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+          "llvm": "23.1.1",
+          "profile": "release opt-level=3 lto=thin debuginfo=1",
+          "core_features": [
+            "default",
+            "mmap",
+            "parallel",
+            "sqlite"
+          ],
+          "rustflags": "",
+          "image_manifest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+          "cpus": 3,
+          "memory_bytes": 8589934592,
+          "source_commit": "d14714a6 (78a3f86d + 2a10cfda)"
+        }
+      },
+      "after": {
+        "command": [
+          "/scratch/profile-bin/cv",
+          "ls",
+          "--json",
+          "--limit",
+          "20"
+        ],
+        "binary_sha256": "e000d8220757cbd75d5513fd093bc5133c2d2aad9b0b12bf3a488e3ca458ed1b",
+        "input_sha256": "f87c9458870ffaf7c284f9d72dee59384195a5cf08c24473b73c7a2ad6902992",
+        "input_metadata_sha256": "6635ab3c3aee102a3b8c37c44c0a0c03cd13b683b5dba14e9e5e35a44ff4d842",
+        "seed_catalog_sha256": "0eff3d8990579e717fe4bfa318cd865c9dd7ae78b020c0d9659ecd6267052118",
+        "seed_metadata_sha256": "af5fcc03e04151f9a7f51381e88536aa22230ad2f4447af5e7b3102f854b77f9",
+        "output_mode": "bytes",
+        "catalog_home": "/scratch/cli-ls-warm/catalog",
+        "harness_home": "/scratch/cli-fixture/home",
+        "rayon_threads": 1,
+        "runtime_rustflags": "",
+        "catalog_max_stale_secs": "3600",
+        "valgrind": "valgrind-3.24.0",
+        "architecture": "aarch64",
+        "Ir": [
+          3683962,
+          3681027
+        ],
+        "Ir_delta": -2935,
+        "stderr_output": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        "semantic_output": {
+          "sha256": "adde83e6d98baf8c2e538fa26cba9490c02419e0ada259badf659cdd74bd721d",
+          "bytes": 3091
+        },
+        "parity": true,
+        "build": {
+          "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+          "llvm": "23.1.1",
+          "profile": "release opt-level=3 lto=thin debuginfo=1",
+          "core_features": [
+            "default",
+            "mmap",
+            "parallel",
+            "sqlite"
+          ],
+          "rustflags": "",
+          "image_manifest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+          "cpus": 3,
+          "memory_bytes": 8589934592,
+          "source_commit": "9dd193bd7e8d2249e241489b04402d6971b62677"
+        }
+      },
+      "comparison": {
+        "before_binary_sha256": "1e0b1dfe19c44aa645a641d6de1f92b5b55563bd40df0dd984eddc577e73ab16",
+        "after_binary_sha256": "e000d8220757cbd75d5513fd093bc5133c2d2aad9b0b12bf3a488e3ca458ed1b",
+        "before_Ir": [
+          5581467,
+          5582102
+        ],
+        "after_Ir": [
+          3683962,
+          3681027
+        ],
+        "mean_instruction_reduction_percent": 34.026573401391616,
+        "matched_control_fields": [
+          "command",
+          "input_sha256",
+          "input_metadata_sha256",
+          "seed_catalog_sha256",
+          "seed_metadata_sha256",
+          "catalog_home",
+          "harness_home",
+          "rayon_threads",
+          "catalog_max_stale_secs",
+          "runtime_rustflags",
+          "valgrind",
+          "architecture",
+          "output_mode",
+          "semantic_output",
+          "stderr_output"
+        ],
+        "build_controls_verified": true,
+        "matched_build_fields": [
+          "rustc",
+          "llvm",
+          "profile",
+          "core_features",
+          "rustflags",
+          "image_manifest",
+          "cpus",
+          "memory_bytes"
+        ]
+      },
+      "file_attribution_before": {
+        "sqlite_c": 2154531,
+        "allocator_sources": 1227603,
+        "loader_sources": 563957,
+        "clap_sources": 89139,
+        "all_file_Ir": 5581467
+      },
+      "file_attribution_after": {
+        "sqlite_c": 843601,
+        "allocator_sources": 914731,
+        "loader_sources": 565882,
+        "clap_sources": 89139,
+        "all_file_Ir": 3683962
+      }
+    },
+    "cli-index-fixed": {
+      "before": {
+        "command": [
+          "/scratch/profile-bin/cv",
+          "index"
+        ],
+        "binary_sha256": "1e0b1dfe19c44aa645a641d6de1f92b5b55563bd40df0dd984eddc577e73ab16",
+        "input_sha256": "f87c9458870ffaf7c284f9d72dee59384195a5cf08c24473b73c7a2ad6902992",
+        "input_metadata_sha256": "6635ab3c3aee102a3b8c37c44c0a0c03cd13b683b5dba14e9e5e35a44ff4d842",
+        "seed_catalog_sha256": "99a4530b4171b7509e996835d5ab0fe43d6e52611c099d0fa17ac5f7b9f31f17",
+        "seed_metadata_sha256": "5d71ce64513a22fe2c7a4764e9ab085d830b26ace335b5cf18dcb0bb86c6786f",
+        "output_mode": "bytes",
+        "catalog_home": "/scratch/profiled-index-catalog",
+        "harness_home": "/scratch/cli-fixture/home",
+        "rayon_threads": 1,
+        "runtime_rustflags": "",
+        "catalog_max_stale_secs": "3600",
+        "valgrind": "valgrind-3.24.0",
+        "architecture": "aarch64",
+        "Ir": [
+          20051981,
+          20050922
+        ],
+        "Ir_delta": -1059,
+        "stderr_output": {
+          "sha256": "2838ca85c76a74b0812e4abf7812c3731a29210d811400ec3702c17c99466ba4",
+          "bytes": 135
+        },
+        "semantic_output": {
+          "sha256": "b6aafd36666e26849f98b0d9ccc52e7e9fe9d85f58a092136190dc31b4369ca4",
+          "bytes": 157
+        },
+        "parity": true,
+        "build": {
+          "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+          "llvm": "23.1.1",
+          "profile": "release opt-level=3 lto=thin debuginfo=1",
+          "core_features": [
+            "default",
+            "mmap",
+            "parallel",
+            "sqlite"
+          ],
+          "rustflags": "",
+          "image_manifest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+          "cpus": 3,
+          "memory_bytes": 8589934592,
+          "source_commit": "d14714a6 (78a3f86d + 2a10cfda)"
+        }
+      },
+      "after": {
+        "command": [
+          "/scratch/profile-bin/cv",
+          "index"
+        ],
+        "binary_sha256": "e000d8220757cbd75d5513fd093bc5133c2d2aad9b0b12bf3a488e3ca458ed1b",
+        "input_sha256": "f87c9458870ffaf7c284f9d72dee59384195a5cf08c24473b73c7a2ad6902992",
+        "input_metadata_sha256": "6635ab3c3aee102a3b8c37c44c0a0c03cd13b683b5dba14e9e5e35a44ff4d842",
+        "seed_catalog_sha256": "99a4530b4171b7509e996835d5ab0fe43d6e52611c099d0fa17ac5f7b9f31f17",
+        "seed_metadata_sha256": "5d71ce64513a22fe2c7a4764e9ab085d830b26ace335b5cf18dcb0bb86c6786f",
+        "output_mode": "bytes",
+        "catalog_home": "/scratch/profiled-index-catalog",
+        "harness_home": "/scratch/cli-fixture/home",
+        "rayon_threads": 1,
+        "runtime_rustflags": "",
+        "catalog_max_stale_secs": "3600",
+        "valgrind": "valgrind-3.24.0",
+        "architecture": "aarch64",
+        "Ir": [
+          17046383,
+          17051089
+        ],
+        "Ir_delta": 4706,
+        "stderr_output": {
+          "sha256": "2838ca85c76a74b0812e4abf7812c3731a29210d811400ec3702c17c99466ba4",
+          "bytes": 135
+        },
+        "semantic_output": {
+          "sha256": "b6aafd36666e26849f98b0d9ccc52e7e9fe9d85f58a092136190dc31b4369ca4",
+          "bytes": 157
+        },
+        "parity": true,
+        "build": {
+          "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+          "llvm": "23.1.1",
+          "profile": "release opt-level=3 lto=thin debuginfo=1",
+          "core_features": [
+            "default",
+            "mmap",
+            "parallel",
+            "sqlite"
+          ],
+          "rustflags": "",
+          "image_manifest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+          "cpus": 3,
+          "memory_bytes": 8589934592,
+          "source_commit": "9dd193bd7e8d2249e241489b04402d6971b62677"
+        }
+      },
+      "comparison": {
+        "before_binary_sha256": "1e0b1dfe19c44aa645a641d6de1f92b5b55563bd40df0dd984eddc577e73ab16",
+        "after_binary_sha256": "e000d8220757cbd75d5513fd093bc5133c2d2aad9b0b12bf3a488e3ca458ed1b",
+        "before_Ir": [
+          20051981,
+          20050922
+        ],
+        "after_Ir": [
+          17046383,
+          17051089
+        ],
+        "mean_instruction_reduction_percent": 14.97505305289245,
+        "matched_control_fields": [
+          "command",
+          "input_sha256",
+          "input_metadata_sha256",
+          "seed_catalog_sha256",
+          "seed_metadata_sha256",
+          "catalog_home",
+          "harness_home",
+          "rayon_threads",
+          "catalog_max_stale_secs",
+          "runtime_rustflags",
+          "valgrind",
+          "architecture",
+          "output_mode",
+          "semantic_output",
+          "stderr_output"
+        ],
+        "build_controls_verified": true,
+        "matched_build_fields": [
+          "rustc",
+          "llvm",
+          "profile",
+          "core_features",
+          "rustflags",
+          "image_manifest",
+          "cpus",
+          "memory_bytes"
+        ]
+      },
+      "file_attribution_before": {
+        "sqlite_c": 7970781,
+        "allocator_sources": 5056384,
+        "loader_sources": 565789,
+        "clap_sources": 85483,
+        "all_file_Ir": 20051981
+      },
+      "file_attribution_after": {
+        "sqlite_c": 5956846,
+        "allocator_sources": 4568458,
+        "loader_sources": 567714,
+        "clap_sources": 85483,
+        "all_file_Ir": 17046383
+      }
+    }
+  }
+}

@@ -193,3 +193,45 @@ are fixed startup work for this small fixture. These user-space guest instructio
 counts omit kernel/I/O wait costs and do not predict Apple Silicon elapsed time
 or the scaling of a 6,000-session fleet. Known-ID windows and rich queries were
 not profiled in this control.
+
+### Matched catalog-owner comparison
+
+[The comparison artifact](results/catalog-reader-comparison-arm64.json) records
+baseline `d14714a6` and production `9dd193bd` on the **same eight-session fixture**.
+Both binaries used the same recorded compiler, default features, optimized debug
+profile, image and resource limits. Both ran at `/scratch/profile-bin/cv`, with
+identical input inodes/metadata/content, frozen seed bytes/metadata, canonical
+catalog/index and auxiliary paths, one Rayon worker and configured catalog
+backstop of 3,600 seconds. The larger backstop prevents a frozen warm seed aging
+into a cold scan during build/test work; it does not bypass metadata freshness.
+The default-900-second exploratory results above are not the comparison baseline.
+
+| Operation | Before Ir (two runs) | After Ir (two runs) | Mean reduction |
+|---|---:|---:|---:|
+| cold list | 23,623,945 / 23,643,712 | 20,420,190 / 20,422,311 | 13.59% |
+| warm list | 5,581,467 / 5,582,102 | 3,683,962 / 3,681,027 | 34.03% |
+| unchanged index | 20,051,981 / 20,050,922 | 17,046,383 / 17,051,089 | 14.98% |
+
+Both phases independently match native stdout/stderr bytes, and before/after
+outputs also match exactly. Index diagnostics still report eight unchanged,
+zero changed/new, removed or errored sessions. After-repeat spreads are 0.010%,
+0.080% and 0.028%; the small remaining variability is not presented as zero.
+The before/after SQLite-C source attribution falls from 7,384,046 to 5,359,893
+instructions (cold), 2,154,531 to 843,601 (warm), and 7,970,781 to 5,956,846
+(index). Clap attribution is identical; loader attribution increases by 1,925
+instructions in each operation. File attribution is not inclusive call cost.
+The catalog setup reduction accounts for a substantial part of saved work.
+
+`compare.py BEFORE.json AFTER.json` rejects mismatched runtime controls, source
+state and output. When both summaries carry `build` metadata, it also compares
+compiler/LLVM/profile/features/flags/image/resources while allowing source commit
+and binary hash to differ. Raw runner summaries cannot recover their build flags:
+when build metadata is absent the helper explicitly reports that it was not
+verified. This experiment's build metadata was recorded from the build recipe and
+container evidence, then checked separately and included in the durable artifact.
+
+This confirms avoided fixed setup work on a small workload. It does not measure
+kernel/I/O time, native macOS elapsed time, large-fleet costs or a current ranking
+of all system operations. No additional workload matrix was added. Baseline and
+after raw profiles remain under `/scratch/cli-*-reader-before` and `/scratch/cli-*`
+in the retained task-owned volume; the container is stopped after capture.
