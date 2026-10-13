@@ -187,36 +187,35 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 ## Reader inventory
 
-Reconciled against the integrated code on 2026-10-13: most original hot-path fixes are
-implemented, but older formats, discovery and complete-record contracts still have concrete
-payload-ownership gaps. OpenClaw tree replay, Devin selected rows and Kimi/Kimi Code/Qwen
-discovery are active follow-ups; OpenCode complete replay remains in progress. Required
-navigation state and demanded output are not themselves avoidable bloat. The original 300 ms
-first-run listing budget and a uniform 100 MB/1 GB matrix for every store remain unproven;
-the current targeted fixture/heap gates do not establish either claim.
+Reconciled against the integrated 2026-10-13 swarm: checked older-format reads, tree/SQLite
+replay, cold discovery and complete-record retention have landed across the remaining adapters.
+Combined checks are in progress; this table describes implementation, not a blanket performance
+or release claim. Required navigation state and demanded output are not themselves avoidable
+bloat. Earlier first-run listing and uniform scale targets remain unproven; prioritize useful
+operation costs and simple code over satisfying a historical number.
 
-| Store / format | Current traversal and retained state | Main unresolved cost |
+| Store / format | Current traversal and retained state | Remaining costs / limits |
 |---|---|---|
 | Claude JSONL | Typed borrowed mmap records and positioned portable projections; lazy text/arguments, Facts metadata, checkpoints and projected discovery/fork heads | Full details and uncommon fallback records remain owned; native/portable CPU convergence is measured separately |
 | Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; selected prompt/reply/reasoning/arguments/result ranges and checkpoints | Earlier giant-body regressions have subsequent matched controls below; full/unknown metadata remains owned, and discovery retains its small-file full-scan / sampled head-tail policy |
-| Codex legacy JSON / zstd | Compressed modern JSONL decodes once into a shared private arena; legacy JSON remains separate | Legacy whole-document path; decoded disk extent is input-sized; no general compressed incremental marks |
+| Codex legacy JSON / zstd | Legacy reads/discovery use checked document views and selected items/title prefixes; compressed modern JSONL decodes once into shared backing | Demanded rich fallback fields; decoded/staged disk extent; no general compressed incremental marks |
 | Gemini legacy JSON | Checked selected string/canonical/composite results and formatted thoughts; native mmap or portable range projections | Full/complete modes and rich display extras still own required payloads |
 | Gemini JSONL | Native mmap and portable checked-range replay retain compact order/keys; selected composite bodies use one session arena | Must scan complete history for replacements/rewinds; required metadata and rich display extras remain owned |
 | Qwen modern JSONL | Checked selected reading, discovery, complete preparation, export and verification; finalized-record checkpoints | Requested title/metadata ownership; full replay systemPayload bookkeeping remains owned; no local fleet coverage |
 | Kimi | Checked context bodies and cold discovery share positioned rotation handling; pending usage and wire enrichment preserved | Rotated fingerprint/navigation state and mutable trailing usage; requested metadata remains owned |
 | Kimi Code | Selected cold wire/state discovery and checked finalized-step/complete playback; raw envelopes retain shared checked backing | Call/step state, requested title/cwd, unknown complete carriers and output backing extent |
-| Grok | Checked selected reading, complete preparation, export and verification; metadata-projected native discovery and sidecars | Portable discovery fallback buffers a physical line; header/system metadata remains owned; enrichment can revise old messages |
+| Grok | Checked selected reading, complete preparation/export/verification; mapped and positioned discovery/status projection | Rewind/hook portable framing follow-up in progress; header/system metadata remains owned; enrichment can revise old messages |
 | Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
 | Continue | Native/positioned typed header and selected-record source views; lazy payloads, checked encoded arguments and tool-answer dedup | Joined selected text, answer-ID state, rich metadata and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, selected headers/parts and shared payload arena; deduplicated source inventory released before publication | Necessary file inventory grows with part count; native and portable late-query miss gates now pass |
-| OpenCode SQLite | Indexed rows and source-selected parts; strict readable-role discovery counts; guarded original DB/WAL/journal dependencies | Encoded input CPU regression remains; full modes and structural metadata stay owned |
+| OpenCode SQLite | Indexed selected parts and checked complete native records; guarded DB/WAL/journal dependencies and faithful native replay | Encoded input validation/spill costs; demanded metadata; exports do not clone external linked child/shell stores; combined shell oracle repair pending |
 | Cursor SQLite | CLI/ACP reachable-message replay and IDE composer projections; selected strings, Lexical rich text and structured results share private backing | Encoded rich-text CPU cost, owned identifiers/full metadata, WITHOUT ROWID fallback |
-| Devin SQLite | Compact structural forest projection, then per-emitted-row lookup | Selected chat_message String/Value and compaction inspection still own bodies; necessary navigation state grows with nodes |
-| Hermes SQLite | Indexed rows; exact prompt suppression uses one borrowed-key admission per candidate and bounded spill; checked ordinary complete bodies and transactional exports | Multimodal/raw native extras remain owned; giant output rows/FTS dominate native memory; prompt-only CPU still about 50% above original unbounded Vec |
-| Goose SQLite / legacy | Indexed selected rows with guarded backing and typed Facts; legacy discovery streams header/count projections | Full metadata and legacy message streaming remain owned; selected decoding CPU differs by shape |
-| OpenClaw JSONL / SQLite | Flat checked selected reading, complete rehome and export; SQLite row cursors | Tree path still owns the whole transcript as String plus Values; SQLite events and system/custom-role carriers remain owned; branch navigation state is separately required |
-| Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
+| Devin SQLite | Compact forest, incremental checked message/metadata cells, reused compaction backing and bounded history-path inspection | Native SQL evaluation; navigation descriptors; prefix prompts/demanded rich extras; non-rowid owned fallback |
+| Hermes SQLite | Indexed rows, bounded exact prompt suppression, transactional exports and checked ordinary/multimodal complete bodies; sidecars decoded once | Raw native extras remain owned; giant output rows/FTS dominate native memory; prompt-only CPU tradeoff remains documented |
+| Goose SQLite / legacy | Selected rows and framed legacy payload views; lean demand avoids unrelated sidecars | Full demanded metadata and explicit owned output remain; decoding/staging costs differ by shape |
+| OpenClaw JSONL / SQLite | Flat/tree/SQLite checked payload replay shares branch selection; cells copied incrementally, compressed events staged in bounded chunks | O(events) navigation/backing; codec workspace; demanded complete/control/system metadata; native-cell and non-rowid fallbacks |
+| Zed SQLite | Incremental blobs decoded once; lazy messages use checked selected text/arguments and skip discarded attachment bodies | Decoded spill/I/O; requested metadata; discovery count projection follow-up; WITHOUT ROWID native-cell fallback |
 | LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Bounded discovery title prefixes; Harmony decoding and arbitrary demanded output/metadata remain owned |
 | ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text, selected owned output and sender/empty-archive compatibility edges |
 | OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |

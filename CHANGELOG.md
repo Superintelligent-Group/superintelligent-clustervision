@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+- Codex legacy reads and discovery use checked source views, retaining lazy bodies and bounded title prefixes with unchanged output and counts.
+- Kimi and Kimi Code retain checked bodies during lazy and complete reads, preserving usage, rotations, raw records and resume behavior.
+- Goose legacy reads retain checked text and arguments; lean reads omit undemanded native sidecars while preserving usage, model and turn kinds.
+- Hermes complete exports retain large multimodal text in checked sources and avoid duplicate reasoning-sidecar decoding.
+- Zed lazy reads retain checked decoded text and tool arguments, skipping discarded attachment bodies while preserving validation and message order.
 - Devin lazy reads retain checked bodies and arguments in shared backing, preserving chain metadata and compaction while avoiding whole selected-row copies.
-- OpenClaw branch reads retain compact navigation and replay checked payload ranges, preserving visible-path order, complete metadata and source freshness.
+- OpenClaw branch and SQLite reads retain checked payloads, preserving visible-path order, complete metadata and source freshness.
 - OpenCode rehomes preserve checked complete native records and embedded attachments, while edits invalidate stale replay and unavailable external images report fidelity loss.
 - Cold Kimi, Kimi Code, and Qwen discovery projects counts and titles without owning unrelated transcript or state payloads.
 
