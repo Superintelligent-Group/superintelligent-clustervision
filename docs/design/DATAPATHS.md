@@ -4302,3 +4302,16 @@ preparation without preserving shell/skill/compaction/model-change types and unk
 would merely compare equally lossy output against the old owned path. That follow-up must attach
 payload-free native skeletons plus checked overlays and emit each native row once, preserving the
 owned complete/native metadata contract. Native 2.0.26 acceptance is not claimed here.
+
+Native durable-frontier follow-up: independent recovery review found that a two-row continuation
+could mask an absent `event_sequence` watermark behind incidental native startup events. Pinned
+2.0.25's v1 migration seeds `aggregate_id=session id`, `seq=last migrated index`, `owner_id=null`;
+its bus starts from that frontier. The exporter now records it in the same transaction. An
+18-row negative control without the watermark cannot finish native continuation. Existing/fresh/
+migrated positive controls all preserve every imported `(id,type,seq,data)` byte-for-byte, retain
+unique ordered sequence numbers, and start continued messages at **21**, after imported maximum
+**17**. Evidence lives in `native-opencode-v2-sequence-native-{0,1,2}` under the private worktrees
+root. V2 explicit IDs now match native's exact `startsWith("ses")` predicate before a transaction;
+invalid IDs fail without publishing rows. Existing v1 ID behavior is unchanged. Attachment base64
+preservation remains part of the complete native-row replay follow-up, rather than a claimed
+capability of the generic foreign IR attachment projection.

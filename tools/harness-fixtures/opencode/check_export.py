@@ -41,6 +41,7 @@ def main():
     with sqlite3.connect(db) as conn:
         table = "session_v2" if conn.execute("SELECT 1 FROM sqlite_master WHERE name='session_v2'").fetchone() else "session"
         directory = Path(conn.execute(f"SELECT directory FROM {table} WHERE id=?", (session,)).fetchone()[0])
+        original_rows = conn.execute("SELECT id,type,seq,data FROM session_message WHERE session_id=? ORDER BY seq", (session,)).fetchall() if table == "session_v2" else []
     # Only create a project under our own artifact/scratch directory.
     if not directory.is_relative_to(source.parent) and not directory.is_relative_to(scratch):
         raise RuntimeError(f"export directory outside fixture scratch: {directory}")
@@ -110,6 +111,15 @@ def main():
                 time.sleep(.2)
             else:
                 raise RuntimeError("native continuation did not finish")
+            with sqlite3.connect(db) as conn:
+                after_rows=conn.execute("SELECT id,type,seq,data FROM session_message WHERE session_id=? ORDER BY seq", (session,)).fetchall()
+            original_ids={row[0] for row in original_rows}
+            preserved=[row for row in after_rows if row[0] in original_ids]
+            assert preserved == original_rows, "native continuation changed or reordered imported history"
+            continued=[row for row in after_rows if row[0] not in original_ids]
+            assert continued and continued[0][2] > original_rows[-1][2], "native continuation reused imported sequence range"
+            assert len({row[2] for row in after_rows}) == len(after_rows)
+            evidence["sequence"]={"imported_rows":len(original_rows),"imported_max":original_rows[-1][2],"first_continued":continued[0][2],"original_history_preserved":True}
             assert any(r["prior_prompt"] and r["prior_answer"] and r["prior_tool_result"] for r in evidence["requests"]), evidence["requests"]
             (scratch / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
             print(json.dumps({"native_version": evidence["native_version"], "schema_before": table, "get": True, "list": True, "messages": True, "context": True, "continuation": True, "prior_history_in_model_request": True}))

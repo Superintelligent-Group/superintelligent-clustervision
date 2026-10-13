@@ -30,6 +30,7 @@ pub(super) fn write_database(
     cwd: &str,
     conn: &mut Connection,
 ) -> Result<()> {
+    anyhow::ensure!(id.starts_with("ses"), "OpenCode 2.x session IDs must start with 'ses'");
     let resolver = session.resolver();
     let tx = conn.transaction()?;
     let empty: bool = tx.query_row(
@@ -195,6 +196,12 @@ pub(super) fn write_database(
         seq += 1;
     }
     drop(insert);
+    // Native migration and Bus.publish share this durable frontier. Without it, the
+    // first resumed event starts at zero and can collide with imported message seqs.
+    tx.execute(
+        "INSERT INTO event_sequence (aggregate_id,seq,owner_id) VALUES (?1,?2,NULL)",
+        params![id, seq - 1],
+    )?;
     write::check_source_fields(session)?;
     tx.commit()?;
     Ok(())
@@ -435,6 +442,14 @@ mod tests {
             details: Some(json!({"metadata":{"exit":0},"time":{"created":1700000000000_i64}})),
         });
         s.messages.push(result);
+        // More rows than incidental startup events: missing native watermark cannot hide.
+        for index in 0..16 {
+            let mut historical = Message::new(Role::User);
+            historical.content.push(Block::Text {
+                text: format!("fixture historical prompt {index}").into(),
+            });
+            s.messages.push(historical);
+        }
         let opts = EmitOptions {
             new_id: Some("ses_cv_native_v2".into()),
             ..Default::default()
@@ -450,7 +465,7 @@ mod tests {
             [],
             |r| r.get(0),
         )?;
-        assert_eq!(rows, 2);
+        assert_eq!(rows, 18);
         assert!(super::super::emit(&s, &db, &opts).is_err());
         assert_eq!(
             conn.query_row(
@@ -458,7 +473,28 @@ mod tests {
                 [],
                 |r| r.get::<_, i64>(0)
             )?,
-            2
+            18
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT seq FROM event_sequence WHERE aggregate_id='ses_cv_native_v2'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            17
+        );
+        let invalid = EmitOptions {
+            new_id: Some("invalid-native-id".into()),
+            ..Default::default()
+        };
+        assert!(super::super::emit(&s, &db, &invalid).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM session_v2 WHERE id='invalid-native-id'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            0
         );
         let mut malformed = s.clone();
         if let Block::ToolUse { input, .. } = &mut malformed.messages[1].content[1] {
@@ -496,7 +532,7 @@ mod tests {
                 [],
                 |r| r.get::<_, i64>(0)
             )?,
-            2
+            18
         );
         drop(migrated_conn);
         if std::env::var_os("CV_NATIVE_OPENCODE_OUT").is_some() {
