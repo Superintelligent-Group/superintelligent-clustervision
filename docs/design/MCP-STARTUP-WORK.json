@@ -1,0 +1,137 @@
+{
+  "baseline_commit": "2a64ebc0",
+  "scope": "MCP startup tree ownership plus actual stdio operation parity; debug native binary, synthetic 500-message OpenSession inputs only.",
+  "startup": {
+    "old_parent_tree_builds": 2,
+    "new_parent_tree_builds": 1,
+    "commands_schema_matches": true,
+    "generated_roster_matches": true,
+    "ordinary_tree_owner_dropped_before_execution": true,
+    "mcp_tree_owner_dropped_after_extraction": true,
+    "descriptor_introspection_clone_unchanged": true
+  },
+  "limits": [
+    "No timing, retained-heap size, syscall, child adapter callback or source-read-byte measurement.",
+    "One generated CLI child per valid command call remains by unchanged dispatch structure; independent direct CLI oracle children are not server work.",
+    "Private spill extents and EOF work are source-mechanism facts, not observed syscall totals.",
+    "Complete demanded wire/client text and failure/success protocol classification remain unchanged."
+  ],
+  "operations": [
+    {
+      "operation": "initialize",
+      "wire_bytes": 1469,
+      "wire_sha256": "437d87483cf62b01c8bfa440ad8a5bf923db8de57a039364545195980d6608a3",
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {
+            "tools": {}
+          },
+          "serverInfo": {
+            "name": "clustervision",
+            "version": "0.16.1"
+          },
+          "instructions": "clustervision lets you read OTHER agents' sessions across harnesses and time. Start with `ls` (add `cwd` to see what happened \u2014 or is happening \u2014 in the current project, `query` for the filter calculus) and `search` for a past conversation by content; then `show` a transcript (windowed by default: `last` 50 messages, `max_bytes` 200000 \u2014 pass `first`, `last`, `range`, `around`+`context` or `max_bytes` to move the window) and `cat` one tool call's full output by its tool_use_id. `pack` builds task-relevant context out of the whole corpus; `doctor` explains why a session's context window keeps filling; `workflow`, `show` with `tree` or `subagents` open up sub-agent forests, and `show` with `kind` reads only what the person said (`prompt,answer`) or the compaction seams. `prune`, `rewind`, `distill`, `splice` and `port` produce NEW sessions from existing ones without touching the source (`rewind` = an agent as of a past message or commit, resumable). To coordinate with sibling agents live, use `await_omen`/`observe_stream` (watch another agent's output) and the `task_*` tools. Harnesses cv reads: claude, codex, grok, opencode, gemini, hermes, openclaw, cursor, kimi, kimi-code, qwen, lmstudio, cline, roo, continue, goose, zed, devin, chatgpt-export, claude-export, opensession."
+        }
+      }
+    },
+    {
+      "operation": "tools/list",
+      "wire_bytes": 54932,
+      "wire_sha256": "c656bf6bf36bea68e4773edfcebe0ab08a612f00defee02edfc41ed1e0eb1c6e",
+      "tool_count": 51
+    },
+    {
+      "operation": "first",
+      "wire_bytes": 3321,
+      "wire_sha256": "cd2b96b93b2b4acab0ebbe548f599d851088646bbd006173c30c6a6c50878788",
+      "cli_stdout_bytes": 2825,
+      "cli_stdout_sha256": "2e4d0b63e9d15e20a3459159b2036e51d9494d62abe97ca54d9a13d7bbcf236e",
+      "cli_stderr_bytes": 0,
+      "content_blocks": 1,
+      "isError": false,
+      "exact_cli_parity": true,
+      "source_messages": 500
+    },
+    {
+      "operation": "adjacent",
+      "wire_bytes": 3331,
+      "wire_sha256": "5a725247c507e6019533ea5bd63ce840e39ceb1d073e6951ef718032f384244d",
+      "cli_stdout_bytes": 2835,
+      "cli_stdout_sha256": "79dcc3c1d07174e2a74693000eb75b0ab01a8f05ee1315589aff55e38bbefe20",
+      "cli_stderr_bytes": 0,
+      "content_blocks": 1,
+      "isError": false,
+      "exact_cli_parity": true,
+      "source_messages": 500
+    },
+    {
+      "operation": "repeat",
+      "wire_bytes": 3321,
+      "wire_sha256": "2d60174bda5760b96ea7acd2759d222db0832ef68b92362dc2424f93639af124",
+      "cli_stdout_bytes": 2825,
+      "cli_stdout_sha256": "2e4d0b63e9d15e20a3459159b2036e51d9494d62abe97ca54d9a13d7bbcf236e",
+      "cli_stderr_bytes": 0,
+      "content_blocks": 1,
+      "isError": false,
+      "exact_cli_parity": true,
+      "source_messages": 500
+    },
+    {
+      "operation": "budget",
+      "wire_bytes": 1881,
+      "wire_sha256": "cdee05f78a3b505717806ecbe1a02b5cf50903059f73c8920c57fba3791c0a7b",
+      "cli_stdout_bytes": 1518,
+      "cli_stdout_sha256": "c3c639eed64d8bc9862661c791bf74f5ac5d1801114e5e61ff332fcc2bee1f0b",
+      "cli_stderr_bytes": 30,
+      "content_blocks": 2,
+      "isError": false,
+      "exact_cli_parity": true,
+      "source_messages": 500
+    },
+    {
+      "operation": "giant",
+      "wire_bytes": 2097685,
+      "wire_sha256": "d7682c80d3333edc7af1fd10432a1a0fc7a3d90fdba65ad65180603252f5c37b",
+      "cli_stdout_bytes": 2097536,
+      "cli_stdout_sha256": "e3a19c1ad53c6427f7e9cfa678893036526cf4215c532f3dc07f6cdf8d233681",
+      "cli_stderr_bytes": 0,
+      "content_blocks": 1,
+      "isError": false,
+      "exact_cli_parity": true,
+      "source_messages": 500
+    },
+    {
+      "operation": "giant-repeat",
+      "wire_bytes": 2097685,
+      "wire_sha256": "83de5e592c7cadb56909da612fcc55308d9679eb8217123f78e84d49845b6d0d",
+      "cli_stdout_bytes": 2097536,
+      "cli_stdout_sha256": "e3a19c1ad53c6427f7e9cfa678893036526cf4215c532f3dc07f6cdf8d233681",
+      "cli_stderr_bytes": 0,
+      "content_blocks": 1,
+      "isError": false,
+      "exact_cli_parity": true,
+      "source_messages": 500
+    },
+    {
+      "operation": "failure",
+      "wire_bytes": 213,
+      "wire_sha256": "a490cfc4fa730293a3fff018096db03b6fe1326f5ea2cac22fcc9d62330c6db8",
+      "cli_stdout_bytes": 0,
+      "cli_stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "cli_stderr_bytes": 53,
+      "content_blocks": 1,
+      "isError": true,
+      "exact_cli_parity": true,
+      "source_messages": null
+    }
+  ],
+  "tests": [
+    "startup tree build/schema/owner test: pass",
+    "four MCP transport tests: pass",
+    "production bin clippy -D warnings: pass"
+  ],
+  "private_evidence": "/private/tmp/cv-mcp-whole-operation-evidence/"
+}

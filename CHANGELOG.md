@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- MCP startup reuses the parsed command tree and releases parser state before serving requests, preserving generated tools and command results.
+
 - FTS compaction keeps segments above 8 MiB out of the bottom tier, avoiding repeated cold-segment rewrites during small appends.
 - JSON listing enrichment drops stable inline user history after deriving a title, preserving deferred source resolution and final metadata.
 - Session list API responses reuse their completed JSON rows, avoiding a second copy of every returned row.

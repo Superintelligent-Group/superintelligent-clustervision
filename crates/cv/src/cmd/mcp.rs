@@ -63,9 +63,9 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const HANDLER_STACK: usize = 8 * 1024 * 1024;
 
 /// Serve MCP over stdio until stdin closes.
-pub(crate) fn cmd_mcp(tree: &clap::Command) -> anyhow::Result<()> {
+pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
     eprintln!("cv mcp: clustervision MCP server starting (stdio JSON-RPC)");
-    let generated = match CliTools::from_tree(tree) {
+    let generated = match CliTools::from_owned_tree(tree) {
         Ok(c) => {
             eprintln!("cv mcp: generated {} tools from the CLI", c.commands().len());
             Some(c)

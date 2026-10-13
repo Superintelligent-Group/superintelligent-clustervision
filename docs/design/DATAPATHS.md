@@ -571,7 +571,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Limited CLI JSON listings rank first and stop fact reduction after exact top-K selection; text listings retain full filtering and exact totals.
 - [ ] Whole-operation limited-listing costs: discovery, text-index set preparation and rank metadata precede selected fact reduction.
 - [x] Generic generated MCP tools stage child stdout/stderr in bounded storage and stream response envelopes; continuation hints, errors and command semantics remain exact.
-- [ ] MCP whole-operation costs: subprocess startup, complete child/client payloads and spool I/O; persistent read-state reuse remains separate.
+- [x] MCP startup reuses one parsed clap tree and releases it after roster extraction; exact schema, owner lifetime and real operation parity verified.
+- [ ] MCP repeated generated reads still create one CLI child each and retain complete child/client payloads and private spool I/O; persistent read-state reuse remains separate.
 - [x] Bounded retained MCP observation and staged HTTP selected-window payloads; owned-route/browser limits recorded.
 - [x] Native JSONL record/output staging for append-only emitters.
 - [x] Native Codex emission uses original guarded lazy sources and incremental whole-report fidelity verification; actual port controls improve memory and CPU.
@@ -2327,6 +2328,45 @@ builds were compared for behavior only, with no work or timing inference.
   Share compact query-local decisions/addresses; retaining every full metadata document would
   create a new memory cost proportional to arbitrary title/cwd widths. Preserve legacy body-only
   fallbacks and stored-document failures. Multiple `text:` needles also repeat reader setup.
-- MCP startup constructs another clap tree after parsing, and keeps it after deriving tool specs.
-  Reuse and release the parsed tree if the generated roster is identical. Existing evidence does
-  not justify replacing child dispatch and bounded staging with a persistent daemon.
+- MCP startup reuse is completed: one parsed clap tree, released after identical tool extraction.
+  The operation audit below retains child dispatch and bounded staging; no persistent daemon
+  replacement is justified by the current controls.
+
+
+### MCP startup ownership and whole-operation boundary (2026-10-13)
+
+MCP previously built the full clap tree for argument parsing, discarded it, then built another
+for generated tools. The second tree remained borrowed for the entire stdio server lifetime even
+after typed tool specs were extracted. Main now parses one tree with get_matches_mut, retains it
+only for MCP, and transfers ownership to startup extraction. Ordinary CLI commands release their
+parsed tree before execution; MCP releases its tree before serving. Descriptor introspection still
+clones/builds the tree as before. There is no new registry, dispatcher or persistent read cache.
+
+A deterministic startup control counts two old parent builds versus one new build. Full command
+schema and generated roster match after clap's parsed state/default/help processing. A weak
+parser-owner sentinel proves ordinary dispatch drops its tree and owned MCP extraction drops
+original plus intermediate clones. Actual baseline/current stdio servers then match every byte
+size and SHA256 across initialize, tools/list and seven generated show operations: first, adjacent,
+repeat, budget continuation, 2 MiB giant first/repeat and failed lookup. All seven results also match
+the direct CLI stdout/error oracle. The giant selected CLI stdout is 2,097,536 B and MCP wire is
+2,097,685 B each time; repeated output remains demanded output. Startup/transport scoped tests
+and production-bin clippy pass. Aggregate evidence: [MCP-STARTUP-WORK.json](MCP-STARTUP-WORK.json);
+private binaries, fixture generator and exact logs are in /private/tmp/cv-mcp-whole-operation-evidence/.
+
+The actual request path remains one handler, one generated CLI child and concurrent stdout/stderr
+drains, followed by the single JSON-RPC writer. Valid command calls still pay child CLI startup,
+per-command source resolution and CLI-required EOF metadata traversal. CLI JSON frames/final
+documents stage before stdout; parent output stages again until the child exit status is known.
+That retained staging supports replacing failed stdout with the existing trimmed stderr/error
+result, rather than prematurely publishing success content. It also carries successful stderr
+continuation hints. Oversized stages spill privately; the response must still escape and send the
+complete selected text as an MCP string. Native transport staging already bounds parent memory,
+but it does not remove child output, private I/O or client JSON parsing. These structural counts
+are not syscall, child callback/read-byte, retained-heap or timing measurements.
+
+A daemon/persistent dispatcher or direct API substitution is not supported by this control:
+CLI final-EOF metadata, window/budget/default/error semantics and non-read tool side effects are
+part of the generated contract. Retaining a worker or introducing another response transport
+would require a concrete repeated-read operation benefit and its own lifecycle/coherence proof.
+This change removes demonstrated duplicate startup ownership without weakening those contracts
+or promising an end-to-end latency improvement.

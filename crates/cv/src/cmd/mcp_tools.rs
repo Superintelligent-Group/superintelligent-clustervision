@@ -119,6 +119,11 @@ impl CliTools {
         Ok(CliTools { bin, commands })
     }
 
+    /// Extract startup specs and release the command tree before serving requests.
+    pub fn from_owned_tree(tree: clap::Command) -> Result<CliTools> {
+        Self::from_tree(&tree)
+    }
+
     pub fn commands(&self) -> &[CommandSpec] {
         &self.commands
     }

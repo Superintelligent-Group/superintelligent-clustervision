@@ -1075,9 +1075,14 @@ enum ArchiveCmd {
     Path,
 }
 
+#[cfg(test)]
+thread_local! { static CLI_TREE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// The clap tree with the grouped listing attached (`after_help` is computed from the tree itself,
 /// so it can't drift from the commands).
 fn build_cli() -> clap::Command {
+    #[cfg(test)]
+    CLI_TREE_BUILDS.with(|count| count.set(count.get() + 1));
     let cmd = Cli::command();
     let listing = grouped_help(&cmd);
     cmd.after_help(listing)
@@ -1102,12 +1107,20 @@ fn main() {
     }
 }
 
+/// Only MCP retains this parsed tree for startup introspection. Other commands release it
+/// before executing; MCP transfers ownership to extraction, which then releases it.
+fn retain_mcp_tree(tree: clap::Command, cli: &Cli) -> Option<clap::Command> {
+    matches!(&cli.cmd, Cmd::Mcp).then_some(tree)
+}
+
 fn run() -> Result<()> {
-    let matches = build_cli().get_matches();
+    let mut tree = build_cli();
+    let matches = tree.get_matches_mut();
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    let mcp_tree = retain_mcp_tree(tree, &cli);
     // Long-running services scope reuse per request/poll, so cold private snapshots do not
     // survive idle server time. Ordinary commands share one cache across their session reads.
     let _reads = (!matches!(
@@ -1388,7 +1401,7 @@ fn run() -> Result<()> {
             json,
         } => doctor::cmd_doctor(id, harness, recent, json),
         Cmd::Task { action } => task::cmd_task(action),
-        Cmd::Mcp => cmd::mcp::cmd_mcp(&build_cli()),
+        Cmd::Mcp => cmd::mcp::cmd_mcp(mcp_tree.expect("MCP retained its parsed command tree")),
         Cmd::Watch {
             interval,
             harness,
@@ -1602,6 +1615,70 @@ mod tests {
             .expect("spawn")
             .join()
             .expect("test thread panicked");
+    }
+
+    #[test]
+    fn mcp_reuses_one_parsed_tree_with_exact_schema_and_releases_parser_owners() {
+        on_main_sized_stack(|| {
+            use std::sync::Arc;
+            #[derive(Clone)]
+            struct Owner(Arc<()>);
+            impl clap::builder::TypedValueParser for Owner {
+                type Value = String;
+                fn parse_ref(
+                    &self,
+                    _: &clap::Command,
+                    _: Option<&clap::Arg>,
+                    value: &std::ffi::OsStr,
+                ) -> Result<String, clap::Error> {
+                    let _owner = &self.0;
+                    Ok(value.to_string_lossy().into_owned())
+                }
+            }
+            // Independent old startup recipe: argument tree consumed, then a fresh tree for MCP.
+            CLI_TREE_BUILDS.with(|count| count.set(0));
+            let parsed = build_cli().try_get_matches_from(["cv", "mcp"]).unwrap();
+            assert!(matches!(Cli::from_arg_matches(&parsed).unwrap().cmd, Cmd::Mcp));
+            let fresh = build_cli();
+            let expected_schema = cmd::schema::commands_json(&fresh);
+            let expected_tools = cmd::mcp_tools::CliTools::from_tree(&fresh).unwrap().tool_list();
+            assert_eq!(CLI_TREE_BUILDS.with(|count| count.get()), 2);
+            drop(fresh);
+
+            for arguments in [vec!["cv", "mcp"], vec!["cv", "show", "example"]] {
+                CLI_TREE_BUILDS.with(|count| count.set(0));
+                let owner = Arc::new(());
+                let weak = Arc::downgrade(&owner);
+                let mut tree = build_cli().arg(
+                    clap::Arg::new("tree-owner")
+                        .long("tree-owner")
+                        .hide(true)
+                        .value_parser(clap::builder::ValueParser::new(Owner(owner))),
+                );
+                let parsed = tree.try_get_matches_from_mut(arguments).unwrap();
+                let cli = Cli::from_arg_matches(&parsed).unwrap();
+                let retained = retain_mcp_tree(tree, &cli);
+                assert_eq!(CLI_TREE_BUILDS.with(|count| count.get()), 1);
+                if let Some(tree) = retained {
+                    assert!(
+                        weak.upgrade().is_some(),
+                        "MCP owns the original parsed tree until extraction"
+                    );
+                    assert_eq!(cmd::schema::commands_json(&tree), expected_schema);
+                    let generated = cmd::mcp_tools::CliTools::from_owned_tree(tree).unwrap();
+                    assert_eq!(generated.tool_list(), expected_tools);
+                    assert!(
+                        weak.upgrade().is_none(),
+                        "extraction releases original and cloned parser owners"
+                    );
+                } else {
+                    assert!(
+                        weak.upgrade().is_none(),
+                        "ordinary CLI commands release their tree before execution"
+                    );
+                }
+            }
+        });
     }
 
     #[test]
