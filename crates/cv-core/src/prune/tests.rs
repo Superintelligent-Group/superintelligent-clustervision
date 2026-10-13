@@ -1625,7 +1625,7 @@ fn retrieve_giant_unselected_fields_return_only_requested_content() {
     out.write_all(br#""},"size":1,"line_count":1,"kind":"text"}"#).unwrap();
     out.write_all(b"\n").unwrap();
     let chosen = serde_json::json!({"actual":["雪🌙",true,null]});
-    let entry = SidecarEntry {
+    let entry: SidecarEntry = SidecarEntry {
         id: "wanted".into(),
         slot: "content".into(),
         name: "tool".into(),
