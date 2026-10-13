@@ -3110,3 +3110,30 @@ result/toolFormerData remain exactly where the owned codec put them: result text
 but no structured result details or checkpoint count is invented. Counters remain equal.
 These are requested Rust allocation/compatibility controls, excluding SQLite/C, mmap, stacks and
 allocator overhead, without timing or physical-memory claims. Other Cursor formats are unchanged.
+
+### Whole-operation CI memory controls (2026-10-13)
+
+`tools/check-operation-heap.py` reuses
+`prune_probe` and the existing isolated actual `cmd_show` JSON-window hook. One 64 MiB Thinking
+prune with revival, one 64 MiB ASCII declassification, and one unchanged 64 MiB ignored-root
+record requiring usage correction must each remain below 4 MiB requested
+live Rust heap; the Thinking/declassification controls measure 465,226 and 332,650 bytes,
+while the unchanged usage control measures about 1.32 MiB. The Thinking fixture
+adds small recorded usage to both assistants so positive revival and a rewritten usage record
+are required. Snipped count, freed-token lower bound, preserved recent turns and conclusions,
+unchanged input, and complete frozen sidecar SHA/length prevent a skipped mutation from passing.
+The driver hashes sidecars in bounded chunks after measurement; it constructs no giant owned
+oracle tree. Missing/null/noninteger/negative counters fail, and a cheap driver test rejects the
+old 201 MiB ownership peak. The independent unchanged-body case requires exactly one usage
+rewrite, the expected honest/stale token figures, and the frozen full transcript SHA/length; it
+keeps its giant ignored root unchanged instead of removing it before revival.
+
+The same gate runs one 64 MiB unselected-rich forward JSON window each for native Claude and
+Cursor, sharing `tools/profiling/window-extra.py` fixture generation. A mandatory heap marker and
+4 MiB cap apply to the actual command (native Claude/Cursor measure 329,084/328,829 bytes),
+while exact small expected Session JSON checks the selected
+prompt and late title/model/git/extra metadata. Fixture/catalog setup is outside the allocation
+interval. The five cases replace a repeated before/after/size/escape matrix in CI; each synthetic case is
+deleted after verification rather than retaining all large inputs/outputs together. The gates do not
+claim portable CLI coverage, CPU speed, mmap/RSS bounds, or bounded ownership of requested large
+output. Existing exact owned-operation controls remain separate evidence.
