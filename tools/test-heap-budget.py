@@ -108,6 +108,15 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(manifest["selected_payload_bytes"], 257)
                 self.assertGreater(manifest["physical_input_bytes"], 257)
                 self.assertGreaterEqual(manifest["expected_messages"], 5)
+                root = Path(manifest["root"])
+                if Path(manifest["path"]).is_file() and harness not in ("kimi-code", "opencode-files"):
+                    with sqlite3.connect(manifest["path"]) as db:
+                        tables = [name for name, in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+                        sentinel = any(b"gate-final" in str(value).encode() for table in tables
+                                       for row in db.execute(f'SELECT * FROM "{table}"') for value in row)
+                else:
+                    sentinel = any(b"gate-final" in path.read_bytes() for path in root.rglob("*") if path.is_file())
+                self.assertTrue(sentinel, "fixture must contain the late tool sentinel")
 
     def sqlite_driver(self):
         # Import the actual command under Python -I without relying on ambient module paths.

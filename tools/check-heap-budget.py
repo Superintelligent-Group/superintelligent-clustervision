@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sqlite3
+import shutil
 import sys
 import tempfile
 
@@ -25,8 +26,13 @@ CHUNK_GROWTH = MIB // 2
 CHUNK_BYTES = 64 << 10
 
 
-def probe(binary, args, env, mmap):
-    result = subprocess.run([str(binary), *map(str, args)], env=env, text=True, capture_output=True)
+def probe(binary, args, env, mmap, fd_limit=None):
+    def limit_files():
+        import resource
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(fd_limit, hard), hard))
+    result = subprocess.run([str(binary), *map(str, args)], env=env, text=True, capture_output=True,
+                            preexec_fn=limit_files if fd_limit is not None else None)
     if result.returncode:
         raise AssertionError(f"probe failed ({result.returncode}): {result.stderr[-2000:]}")
     try:
@@ -231,9 +237,9 @@ def selected_payloads(binary, root, env, formats=None):
                         command.append("--escaped")
                     manifest = json.loads(subprocess.check_output(command, env=env, text=True))
                     common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
-                    reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, True)
+                    reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, True, fd_limit=64)
                     dataset_reference, _ = probe(binary, ["dataset-collect", *common, "--mode", "full",
-                                                           "--query", "tool:gate-final", "--hash-output"], env, True)
+                                                           "--query", "tool:gate-final", "--hash-output"], env, True, fd_limit=64)
                     for operation in peaks:
                         if operation == "discard":
                             arguments = ["discard", *common, "--mode", "lazy"]
@@ -242,7 +248,7 @@ def selected_payloads(binary, root, env, formats=None):
                         else:
                             query = "tool:gate-final" if operation == "dataset" else "tool:gate-missing"
                             arguments = ["dataset-collect", *common, "--mode", "lazy", "--query", query, "--hash-output"]
-                        row, peak = probe(binary, arguments, env, True)
+                        row, peak = probe(binary, arguments, env, True, fd_limit=64)
                         if operation in ("discard", "doctor"):
                             assert row["messages"] == manifest["expected_messages"], "selected payload messages skipped"
                         if operation == "doctor":
@@ -259,6 +265,7 @@ def selected_payloads(binary, root, env, formats=None):
                         print(json.dumps({"case": f"selected-{format_name}-{shape}-{operation}",
                                           "history": history, "escaped": escaped, "decoded_payload_bytes": size,
                                           "records": records, "peak_live_rust_bytes": peak}), flush=True)
+                    shutil.rmtree(manifest["root"])
                 for operation, values in peaks.items():
                     bound(values, STORE_CEILING, STORE_GROWTH,
                           f"selected {format_name}/{shape} {operation} history={history} escaped={escaped}")
@@ -491,6 +498,10 @@ def main():
     if args.format and args.only not in ("active", "portable-docs", "selected-payloads"):
         parser.error("--format applies only to active/portable-docs/selected-payloads")
     portable_formats = ("cline-sdk", "opensession", "chatgpt-export", "claude-export")
+    if args.only == "active" and any(f not in (*portable_formats, "kimi", "zed") for f in args.format or []):
+        parser.error("active supports document formats, kimi, and zed")
+    if args.only == "selected-payloads" and any(f not in {name for name, _ in SELECTED_PAYLOAD_CASES} for f in args.format or []):
+        parser.error("selected-payloads requires a selected payload case format")
     if args.only == "portable-docs" and any(f not in portable_formats for f in args.format or []):
         parser.error("portable-docs supports only document formats")
     if args.baseline_probe and args.only not in ("active", "doctor", "metadata-facts", "stats"):

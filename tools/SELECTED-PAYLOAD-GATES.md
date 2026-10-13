@@ -12,6 +12,7 @@ structured arguments, and tool results. A tiny final tool call supplies the late
 Each isolated probe exercises lazy discard, Facts doctor, accepted deferred dataset collection,
 and a missing-tool deferred query. Doctor reports must exactly equal a separate full-mode
 report; accepted dataset bytes and SHA256 must equal a separate full-mode collector.
+Each probe runs with a 64-descriptor limit; each generated store is removed after its oracles.
 This catches lost or altered payloads as well as skipped facts/messages. Missing queries must
 emit no record. Every partial consumer has an 8 MiB live Rust ceiling and 2 MiB growth allowance.
 Full references intentionally have no bounded-memory claim.
