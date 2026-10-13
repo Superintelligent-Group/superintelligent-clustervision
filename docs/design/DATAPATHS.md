@@ -3450,7 +3450,8 @@ All initial failures remain recorded. Setup corrections selected the existing na
 and retired only our stale unchanged-version local-registry package sources and compiled metadata,
 preserving them separately; current package archives then verified successfully.
 
-These are local integration results, not a claim that Linux CI has already run. The fleet control
+[Linux CI for `78f77d88`](https://github.com/emberian/cv/actions/runs/38390023332) subsequently
+passed all four jobs, including a fresh full workspace suite and all heap gates. The fleet control
 above additionally verifies production index composition and representative CLI queries. The
 completion audit identified Codex Text/Drop dispatch materializing lazy thinking before mode
 projection despite the checked writer. The follow-up below removes that ownership and records
@@ -3485,3 +3486,12 @@ Native and portable Codex mode/body/report/direct-call/source-error regressions 
 three legacy-oracle controls pass; both library clippy configurations pass. Staging still costs
 output-sized temporary disk writes, source validation still reads discarded reasoning, and owned
 metadata/complete carriers remain demand-dependent. No broad producer or timing matrix was added.
+
+Integrated follow-up `927be0c8` passes 66 emitter composition tests, workspace/all-target clippy,
+formatting, eight driver unit checks and all eight operation heap gates. Existing prune/window
+binaries retain their previously validated implementations; the rebuilt port probe exercises the
+changed shared writer. Integrated 64 MiB Codex peaks are 283,006 B (Text) and 405,746 B (Drop).
+Actual release CLI `port --strict --harness codex` also matches the preceding validated binary's
+Native/Text/Drop records and warnings in a scratch home, normalizing only generated session/turn
+UUIDs and package version; source bytes are unchanged. This does not cover same-harness complete
+carrier ownership, which remains a separate deciding control rather than a claimed bound.
