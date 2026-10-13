@@ -8,6 +8,8 @@
 
 - Prune streams large Thinking and ASCII declassification mutations through checked source projections while preserving exact sidecars and revival estimates.
 
+- Rich lazy Cursor IDE reads retain checked payload ranges, avoiding unused bubble ownership while preserving JSON fields and record acceptance.
+
 - Forward JSON windows avoid constructing unselected Claude rich metadata, preserving record acceptance, selected details and final session metadata.
 - Claude checkpoint counts retain restorable result facts; cached counts from older views are recomputed.
 

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sqlite3
 
 TEST = "cmd::view::tests::whole_command_window_extra_control"
 
@@ -29,6 +30,7 @@ def main():
     parser.add_argument("--before", type=Path, required=True)
     parser.add_argument("--after", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--harness", choices=["claude", "cursor"], default="claude")
     args = parser.parse_args()
     binaries = {name: path.resolve(strict=True) for name, path in
                 [("before", args.before), ("after", args.after)]}
@@ -41,7 +43,8 @@ def main():
                     timestamp="2026-01-01T00:00:00Z", cwd="/tmp/window",
                     message=dict(role=kind, content=content), **extra)
 
-    for kind, mib in [("unselected", 16), ("unselected", 64), ("selected", 0), ("malformed", 0)]:
+    for kind, mib in ([("unselected", 16), ("unselected", 64), ("selected", 0), ("malformed", 0)]
+                      if args.harness == "claude" else []):
         path = root / f"{kind}-{mib}.jsonl"
         rows = [row("user", "u", "selected prompt"),
                 row("assistant", "a", [dict(type="tool_use", id="call", name="Read",
@@ -66,6 +69,31 @@ def main():
             output.write(b'{"type":"custom-title","customTitle":"final title"}\n')
         fixtures.append((kind, mib, path))
 
+    if args.harness == "cursor":
+        fixtures = []
+        for kind, mib in [("unselected", 16), ("unselected", 64), ("selected", 0), ("malformed", 0)]:
+            path = root / f"{kind}-{mib}.vscdb"
+            composer = {"name":"EOF composer title","createdAt":1,"lastUpdatedAt":2,"unifiedMode":"agent",
+                        "modelConfig":{"modelName":"fallback-model"},
+                        "fullConversationHeadersOnly":[{"bubbleId":"u"},{"bubbleId":"a"},{"bubbleId":"last"}]}
+            user = {"bubbleId":"u","type":1,"text":"selected prompt","unifiedMode":99}
+            assistant = {"bubbleId":"a","type":2,"text":"late answer","thinking":{"text":"thought","signature":"sig"},
+                         "modelInfo":{"modelName":"latest-model"},"tokenCount":{"inputTokens":10,"outputTokens":8},
+                         "unifiedMode":1,"toolFormerData":{"name":"run_terminal_cmd","toolCallId":"call",
+                         "rawArgs":'{"command":"true"}',"status":"success","result":"x\n" * (mib*1024*1024//2) if mib else "rich result"}}
+            final = {"bubbleId":"last","type":1,"text":"final prompt","unifiedMode":5}
+            assistant_wire = json.dumps(assistant)
+            if kind == "malformed":
+                assistant_wire = assistant_wire[:-1] + ',"providerOptions":{"ignored":"\\ud800"}}'
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY,value TEXT)")
+                for key, value in [("composerData:window-extra",json.dumps(composer)),
+                                   ("bubbleId:window-extra:u",json.dumps(user)),
+                                   ("bubbleId:window-extra:a",assistant_wire),
+                                   ("bubbleId:window-extra:last",json.dumps(final))]:
+                    db.execute("INSERT INTO cursorDiskKV VALUES(?,?)",(key,value))
+            fixtures.append((kind,mib,path))
+
     results = {}
     for kind, mib, path in fixtures:
         pair = {}
@@ -77,8 +105,8 @@ def main():
                 case.mkdir()
                 env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C",
                        "HOME": str(case / "home"), "CLUSTERVISION_HOME": str(case / "catalog"),
-                       "RAYON_NUM_THREADS": "1", "CV_WINDOW_PROBE_SOURCE": str(path),
-                       "CV_WINDOW_PROBE_RANGE": "2..3" if kind == "selected" else "0..1",
+                       "RAYON_NUM_THREADS": "1", "CV_WINDOW_PROBE_SOURCE": str(path), "CV_WINDOW_PROBE_HARNESS": args.harness,
+                       "CV_WINDOW_PROBE_RANGE": ("1..2" if args.harness == "cursor" else "2..3") if kind == "selected" else "0..1",
                        "CV_WINDOW_PROBE_ORACLE": "1" if oracle else "0"}
                 child = subprocess.run([str(binary), TEST, "--exact", "--ignored", "--nocapture",
                                         "--test-threads=1"], env=env, capture_output=True, check=True)
@@ -97,7 +125,8 @@ def main():
         assert identity(path) == source_identity
         pair["source_sha256"] = source_hash
         results[f"{kind}-{mib}"] = pair
-    report = {"before_source": "7e8d2cd8 production + isolated command hook",
+    report = {"before_source": "f08377be production + isolated command hook" if args.harness == "cursor" else "7e8d2cd8 production + isolated command hook",
+              "harness": args.harness,
               "operation": "actual cmd_show forward JSON window; synthetic catalog setup outside allocation interval",
               "binary_sha256": {name: digest(path.read_bytes()) for name, path in binaries.items()},
               "results": results,

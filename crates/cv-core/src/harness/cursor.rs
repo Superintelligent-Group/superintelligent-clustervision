@@ -202,7 +202,9 @@ impl Adapter for Cursor {
                 if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
                     return stream_legacy(conn, r, legacy_id, sink);
                 }
-                if opts.spans && !opts.wants_full_extra() {
+                // Modern IDE's selected builder retains the complete emitted field roster;
+                // rich lazy output can keep checked carriers without owning every bubble.
+                if opts.spans && !opts.complete {
                     return selected::global_with_reads(conn, r, conn.reads(), sink);
                 }
                 stream_global(conn, r, sink)

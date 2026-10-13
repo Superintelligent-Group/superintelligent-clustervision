@@ -1,4 +1,4 @@
-//! Selected partial reads of modern IDE composers; rich reads keep their existing fidelity path.
+//! Lazy modern IDE reads retain the complete emitted field roster through checked source ranges.
 use super::*;
 use crate::harness::store::{bytes::ByteSource, document::Fields};
 use crate::json::{Json, JsonSource, JsonView};
@@ -486,6 +486,19 @@ mod tests {
             serde_json::to_value(&old.messages).unwrap(),
             serde_json::to_value(&new.messages).unwrap()
         );
+        // Real rich-lazy adapter dispatch must preserve the full owned field roster.
+        let adapter = Cursor::with_user_dir(r.path.parent().unwrap());
+        let mut expected = stream_global(conn, r, &mut CollectSink::default()).unwrap();
+        expected.messages = old.messages.clone();
+        for opts in [ParseOptions::lazy_extra(), ParseOptions::complete()] {
+            let mut actual = crate::stream::collect_with(&adapter, r, &opts).unwrap();
+            actual.materialize().unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{opts:?}"
+            );
+        }
         old.messages
     }
     #[test]
@@ -512,7 +525,7 @@ mod tests {
         let big = "日本語\n".repeat(8192);
         let root = json!({"name":"composer","createdAt":1,"lastUpdatedAt":2,"unifiedMode":"agent","subagentInfo":{"parentComposerId":"parent","toolCallId":"spawn","subagentTypeName":"researcher","ignored":big},"modelConfig":{"modelName":"fallback","ignored":big},"fullConversationHeadersOnly":[{"bubbleId":"user"},{"bubbleId":"assistant"}],"conversation":[{"type":1,"text":"must not emit"}],"ignored":big});
         let user = json!({"bubbleId":"user","type":1,"text":"question","unifiedMode":99});
-        let assistant = json!({"bubbleId":"assistant","type":2,"thinking":{"text":big,"signature":"sig"},"text":big,"modelInfo":{"modelName":"native-model","ignored":big},"tokenCount":{"inputTokens":10,"outputTokens":5,"ignored":big},"unifiedMode":1,"toolFormerData":{"name":"run_terminal_cmd","toolCallId":"call","rawArgs":json!({"command":"cat /scratch/file","content":big}).to_string(),"result":big,"status":"ERROR","error":{"ignored":big}},"providerOptions":{"ignored":big}});
+        let assistant = json!({"bubbleId":"assistant","type":2,"thinking":{"text":big,"signature":"sig"},"text":big,"modelInfo":{"modelName":"native-model","ignored":big},"tokenCount":{"inputTokens":10,"outputTokens":5,"ignored":big},"unifiedMode":1,"toolFormerData":{"name":"run_terminal_cmd","toolCallId":"call","rawArgs":json!({"command":"cat /scratch/file","content":big}).to_string(),"result":big,"status":"ERROR","error":{"ignored":big},"restorable":["not-an-emitted-detail"]},"providerOptions":{"ignored":big}});
         let (conn, r) = fixture(
             &world.base,
             &root.to_string(),
@@ -659,6 +672,30 @@ mod tests {
         }
     }
     #[test]
+    fn rich_lazy_acceptance_omits_invalid_external_fields_without_shifting_owned_output() {
+        let world = cv_testkit::World::in_process("cursor-rich-lazy-validation");
+        let root = r#"{"name":"title","modelConfig":{"modelName":"fallback"},"fullConversationHeadersOnly":[{"bubbleId":"first"},{"bubbleId":"bad-escape"},{"bubbleId":"bad-number"},{"bubbleId":"bad-type"},{"bubbleId":"missing"},{"bubbleId":"last"}]}"#;
+        let (conn,r)=fixture(&world.base,root,&[
+            ("first",br#"{"bubbleId":"first","type":1,"text":"first","unifiedMode":99}"#),
+            ("bad-escape",br#"{"type":2,"text":"must be omitted","providerOptions":{"unused":"\ud800"}}"#),
+            ("bad-number",br#"{"type":2,"text":"must be omitted","providerOptions":{"unused":1e9999}}"#),
+            ("bad-type",br#"{"type":"future","text":false,"thinking":false,"toolFormerData":null,"modelInfo":{"modelName":null},"modelType":"do not fallback","unifiedMode":{}}"#),
+            ("last",br#"{"bubbleId":"last","type":2,"text":"last","modelInfo":{"modelName":"last-model"},"unifiedMode":5}"#),
+        ]);
+        let messages = compare(&conn, &r);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.last().unwrap().model.as_deref(), Some("last-model"));
+        let adapter = Cursor::with_user_dir(&world.base);
+        let mut rich = CollectSink::default();
+        let mut lazy = CollectSink::default();
+        let (_, old) = crate::stream::stream_counting(&adapter, &r, &ParseOptions::full(), &mut rich).unwrap();
+        let (_, new) = crate::stream::stream_counting(&adapter, &r, &ParseOptions::lazy_extra(), &mut lazy).unwrap();
+        let (old, new) = (old.unwrap(), new.unwrap());
+        assert_eq!(old.turns, new.turns);
+        assert_eq!(old.counts, new.counts);
+    }
+
+    #[test]
     fn cold_wal_adapter_preserves_original_sidecars_and_journal_guard() {
         let world = cv_testkit::World::in_process("cursor-ide-cold-wal");
         let root = json!({"conversation":[{"type":1,"text":"日本語\n".repeat(4096)}]});
@@ -670,7 +707,7 @@ mod tests {
         let journal = r.path.with_file_name("state.vscdb-journal");
         assert!(!wal.exists() && !shm.exists());
         let adapter = Cursor::with_user_dir(&world.base);
-        let retained = crate::stream::collect_with(&adapter, &r, &ParseOptions::facts()).unwrap();
+        let retained = crate::stream::collect_with(&adapter, &r, &ParseOptions::lazy_extra()).unwrap();
         assert!(!wal.exists() && !shm.exists());
         let Block::Text {
             text: Text::Source(text),

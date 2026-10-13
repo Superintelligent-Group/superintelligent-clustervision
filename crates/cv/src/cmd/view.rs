@@ -1593,6 +1593,71 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn cursor_rich_lazy_windows_preserve_owned_fields_acceptance_counts_and_eof() -> Result<()> {
+        let world = cv_testkit::World::in_process("cursor-rich-window");
+        let path = world.base.join("state.vscdb");
+        let root = serde_json::json!({"name":"composer title","createdAt":1,"lastUpdatedAt":2,"unifiedMode":"agent",
+            "subagentInfo":{"parentComposerId":"parent","toolCallId":"spawn","subagentTypeName":"researcher"},
+            "modelConfig":{"modelName":"fallback"},"fullConversationHeadersOnly":[{"bubbleId":"u"},{"bubbleId":"a"},{"bubbleId":"bad"},{"bubbleId":"missing"},{"bubbleId":"last"}]});
+        let user = serde_json::json!({"bubbleId":"u","type":1,"text":"first","unifiedMode":99});
+        let assistant = serde_json::json!({"bubbleId":"a","type":2,"thinking":{"text":"thought","signature":"signed"},
+            "text":"","richText":serde_json::json!({"root":{"children":[{"text":"paragraph","children":[{"text":"body"}]}]}}).to_string(),
+            "modelInfo":{"modelName":"assistant-model"},"tokenCount":{"inputTokens":5,"outputTokens":3},"unifiedMode":1,
+            "toolFormerData":{"name":"run_terminal_cmd","toolCallId":"call","rawArgs":r#"{"command":"true"}"#,"status":"error",
+                              "result":{"restorable":["file.rs"],"future":"escaped λ\n\"".repeat(10000)},"restorable":["ignored-not-details"]}});
+        let last = serde_json::json!({"bubbleId":"last","type":2,"text":"last","modelInfo":{"modelName":"last-model"},"unifiedMode":5});
+        let db = rusqlite::Connection::open(&path)?;
+        db.execute_batch("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY,value TEXT)")?;
+        for (key, value) in [
+            ("composerData:window-extra", root.to_string()),
+            ("bubbleId:window-extra:u", user.to_string()),
+            ("bubbleId:window-extra:a", assistant.to_string()),
+            ("bubbleId:window-extra:last", last.to_string()),
+            (
+                "bubbleId:window-extra:bad",
+                r#"{"type":2,"text":"ignored","providerOptions":{"future":"\ud800"}}"#.into(),
+            ),
+        ] {
+            db.execute("INSERT INTO cursorDiskKV VALUES(?1,?2)", rusqlite::params![key, value])?;
+        }
+        drop(db);
+        let r = SessionRef::new("window-extra", Harness::Cursor, &path);
+        let adapter = cv_core::harness::for_harness(Harness::Cursor).unwrap();
+        let mut rich = cv_core::stream::CollectSink::default();
+        let mut lazy = cv_core::stream::CollectSink::default();
+        let (_, old) =
+            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::full(), &mut rich)?;
+        let (_, new) =
+            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy_extra(), &mut lazy)?;
+        let (old, new) = (old.unwrap(), new.unwrap());
+        assert_eq!(old.turns, new.turns);
+        assert_eq!(old.counts, new.counts);
+        assert_eq!(
+            new.counts.get(&cv_core::affordance::Kind::Checkpoint),
+            None,
+            "Cursor does not emit restorable details from toolFormerData/result objects"
+        );
+        for (window, budget) in [
+            (Some(Window::First(1)), None),
+            (Some(Window::Range(1, Some(2))), None),
+            (Some(Window::Range(2, Some(3))), None),
+            (Some(Window::Last(1)), None),
+            (Some(Window::First(0)), None),
+            (None, Some(1)),
+        ] {
+            let (expected, next) = full_json_window(adapter.as_ref(), &r, window, budget);
+            let expected = serde_json::to_vec_pretty(&expected)?;
+            let (actual, actual_next) = staged_session_json(adapter.as_ref(), &r, window, budget, false)?;
+            let mut bytes = Vec::new();
+            actual.copy_to(&mut bytes)?;
+            bytes.pop();
+            assert_eq!(bytes, expected, "{window:?}/{budget:?}");
+            assert_eq!(actual_next, next);
+        }
+        Ok(())
+    }
+
     /// Actual command boundary; fixture/catalog preparation and the independent owned oracle
     /// are outside the allocation interval. Run alone in an explicitly isolated scratch home.
     #[cfg(feature = "probe-heap")]
@@ -1601,7 +1666,9 @@ mod tests {
     fn whole_command_window_extra_control() -> Result<()> {
         let path = PathBuf::from(std::env::var("CV_WINDOW_PROBE_SOURCE")?);
         let range = std::env::var("CV_WINDOW_PROBE_RANGE").unwrap_or_else(|_| "0..1".into());
-        let reference = SessionRef::new("window-extra", Harness::Claude, &path);
+        let harness = std::env::var("CV_WINDOW_PROBE_HARNESS").unwrap_or_else(|_| "claude".into());
+        let harness = Harness::parse(&harness).context("unknown window probe harness")?;
+        let reference = SessionRef::new("window-extra", harness, &path);
         cv_core::catalog::sync(std::slice::from_ref(&reference));
         let budget = std::env::var("CV_WINDOW_PROBE_BUDGET")
             .ok()
@@ -1616,7 +1683,7 @@ mod tests {
             max_bytes: budget,
         };
         if std::env::var("CV_WINDOW_PROBE_ORACLE").as_deref() == Ok("1") {
-            let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
+            let adapter = cv_core::harness::for_harness(harness).unwrap();
             let (session, next) = full_json_window(adapter.as_ref(), &reference, args.window()?, budget);
             let _ = next;
             println!("{}", serde_json::to_string_pretty(&session)?);
@@ -1625,7 +1692,7 @@ mod tests {
         let before = cv_testkit::heap::begin();
         let result = cmd_show(
             "window-extra",
-            Some("claude".into()),
+            Some(harness.as_str().into()),
             true,
             &args,
             ShowView {

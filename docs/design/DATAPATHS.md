@@ -3066,3 +3066,47 @@ checkpoint and 1,358 bytes for the new 679-byte checkpoint. These counts do not 
 kernel/page I/O, CPU or latency. Prefix validation retains the immutable-prefix append
 contract. This follow-up adds composition evidence and temporary diagnostic/reproduction
 artifacts without production changes.
+
+### Rich lazy Cursor IDE window dispatch (2026-10-13)
+
+The modern IDE adapter selected its owned builder whenever static ParseOptions requested full
+extras. Actual `show --json --range 0..1` therefore owned a later giant bubble before discarding
+it. Cursor's selected builder already emits every field its owned builder emits: text/thinking,
+tool arguments/results, model/usage and unified mode. It now serves all modern IDE lazy reads,
+including rich JSON, without a second dynamic projection. Inline/full, complete, legacy and CLI
+adapter branches remain unchanged. Strict Value-compatible cell validation precedes field
+selection; malformed external bubbles are still omitted, while invalid composer roots remain
+errors. Missing/wrong-typed fields, duplicate/array authority and encoded lexical/argument
+fallbacks retain their existing behavior.
+
+The actual command [control](../../tools/profiling/window-extra.py) now accepts `--harness cursor`
+and seeds a native-shaped TEXT cursorDiskKV database. [CURSOR-WINDOW-WORK.json](CURSOR-WINDOW-WORK.json)
+compares frozen f08377be with the changed dispatch, against independent full-parse/slice oracles.
+The allocation interval includes resolution, EOF parsing/count publication, document staging and
+stdout, excluding fixture/catalog/test/clap setup. Unselected 16/64 MiB escaped results change peak
+requested heap above baseline **58,927,568/235,088,338 → 328,778 B** and cumulative requested bytes
+**93,135,908/369,959,976 → 1,213,624/1,213,628 B**. Both 686-byte outputs and small selected-rich/
+malformed-unselected outputs match both command baseline and owned oracles exactly. Generated
+source hashes and identities remain unchanged.
+
+Small-cell source capture/staging is a tradeoff: selected-rich peak stays **328,769 B**, while
+requests increase 1,792 → 1,981 and cumulative requested bytes increase
+855,445 → 1,141,863 (+33.5%). The session shares one capture, transaction and arena; each arena
+append still constructs a fresh 64 KiB BufWriter (composer, three cells and decoded rawArgs here).
+Reusing operation-local append buffers is separate from retaining buffers in long-lived source
+arenas; the latter can increase retained memory across sources. This is not a
+universal CPU/I/O improvement. Complete cells are still copied into a shared checked arena and
+strictly validated, so discarded large bubbles still incur input traversal and private spool
+I/O. Demanded scalar identity/model/signature fields retain owned storage. Requested JSON fields
+can use checked ranges rather than redundant whole-bubble Values; EOF/latest-model/mode metadata
+is still traversed, and no new full source-memory bound is claimed.
+
+Six native and SQLite-without-mmap controls now exercise real rich-lazy/complete adapter dispatch
+against the owned builder, including malformed surrogates/numbers, missing/invalid fields,
+argument/lexical/array authority, counts and original WAL/journal mutation guards. The native
+CLI control preserves first/range/empty/Last/byte-budget windows, selected tool result/arguments,
+thinking/signature/mode/usage, lineage and final model/title. Restorable keys inside Cursor
+result/toolFormerData remain exactly where the owned codec put them: result text can carry them,
+but no structured result details or checkpoint count is invented. Counters remain equal.
+These are requested Rust allocation/compatibility controls, excluding SQLite/C, mmap, stacks and
+allocator overhead, without timing or physical-memory claims. Other Cursor formats are unchanged.

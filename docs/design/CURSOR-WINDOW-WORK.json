@@ -1,0 +1,181 @@
+{
+  "before_source": "f08377be production + isolated command hook",
+  "harness": "cursor",
+  "operation": "actual cmd_show forward JSON window; synthetic catalog setup outside allocation interval",
+  "binary_sha256": {
+    "before": "4d03dcdcce67e4fd4b7a7d2f037e33c5c8458343e36cb4a2b05d4188d4a6f7e9",
+    "after": "f7baee310c4028711ed00ffd1956bfeabfd3c564acb39f11dd9d3452ee524c43"
+  },
+  "results": {
+    "unselected-16": {
+      "before-oracle": {
+        "stdout_sha256": "5dd33036fb70d5b7683c8dac1b7f8176900440577475278782299e3ee12523b3",
+        "stdout_bytes": 685,
+        "messages": 1
+      },
+      "before-actual": {
+        "stdout_sha256": "5dd33036fb70d5b7683c8dac1b7f8176900440577475278782299e3ee12523b3",
+        "stdout_bytes": 685,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4417,
+          "peak_live_bytes": 58931985,
+          "peak_above_baseline_bytes": 58927568,
+          "stage_end_live_bytes": 4417,
+          "allocation_requests": 1811,
+          "requested_bytes": 93135908
+        }
+      },
+      "after-oracle": {
+        "stdout_sha256": "5dd33036fb70d5b7683c8dac1b7f8176900440577475278782299e3ee12523b3",
+        "stdout_bytes": 685,
+        "messages": 1
+      },
+      "after-actual": {
+        "stdout_sha256": "5dd33036fb70d5b7683c8dac1b7f8176900440577475278782299e3ee12523b3",
+        "stdout_bytes": 685,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4432,
+          "peak_live_bytes": 333210,
+          "peak_above_baseline_bytes": 328778,
+          "stage_end_live_bytes": 4432,
+          "allocation_requests": 1983,
+          "requested_bytes": 1213624
+        }
+      },
+      "source_sha256": "44e4d599bca0c76179d2234efcf39653dc447b79bd2988f85e071dae60e940a5"
+    },
+    "unselected-64": {
+      "before-oracle": {
+        "stdout_sha256": "74a2c95d2edac4d0f75cc39f3002a67db924019665d2cb1686122740a0842d03",
+        "stdout_bytes": 685,
+        "messages": 1
+      },
+      "before-actual": {
+        "stdout_sha256": "74a2c95d2edac4d0f75cc39f3002a67db924019665d2cb1686122740a0842d03",
+        "stdout_bytes": 685,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4417,
+          "peak_live_bytes": 235092755,
+          "peak_above_baseline_bytes": 235088338,
+          "stage_end_live_bytes": 4417,
+          "allocation_requests": 1813,
+          "requested_bytes": 369959976
+        }
+      },
+      "after-oracle": {
+        "stdout_sha256": "74a2c95d2edac4d0f75cc39f3002a67db924019665d2cb1686122740a0842d03",
+        "stdout_bytes": 685,
+        "messages": 1
+      },
+      "after-actual": {
+        "stdout_sha256": "74a2c95d2edac4d0f75cc39f3002a67db924019665d2cb1686122740a0842d03",
+        "stdout_bytes": 685,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4432,
+          "peak_live_bytes": 333210,
+          "peak_above_baseline_bytes": 328778,
+          "stage_end_live_bytes": 4432,
+          "allocation_requests": 1983,
+          "requested_bytes": 1213628
+        }
+      },
+      "source_sha256": "93120ea81233efc6c71bb243f7246651b28c26c3841b6ed2523699e68bc5cecf"
+    },
+    "selected-0": {
+      "before-oracle": {
+        "stdout_sha256": "6f31124dddeb53af3977bd3c957b7c04d2632cbdaf3bf304d2579d73a3522ee1",
+        "stdout_bytes": 1337,
+        "messages": 1
+      },
+      "before-actual": {
+        "stdout_sha256": "6f31124dddeb53af3977bd3c957b7c04d2632cbdaf3bf304d2579d73a3522ee1",
+        "stdout_bytes": 1337,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4411,
+          "peak_live_bytes": 333180,
+          "peak_above_baseline_bytes": 328769,
+          "stage_end_live_bytes": 4411,
+          "allocation_requests": 1792,
+          "requested_bytes": 855445
+        }
+      },
+      "after-oracle": {
+        "stdout_sha256": "6f31124dddeb53af3977bd3c957b7c04d2632cbdaf3bf304d2579d73a3522ee1",
+        "stdout_bytes": 1337,
+        "messages": 1
+      },
+      "after-actual": {
+        "stdout_sha256": "6f31124dddeb53af3977bd3c957b7c04d2632cbdaf3bf304d2579d73a3522ee1",
+        "stdout_bytes": 1337,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4426,
+          "peak_live_bytes": 333195,
+          "peak_above_baseline_bytes": 328769,
+          "stage_end_live_bytes": 4426,
+          "allocation_requests": 1981,
+          "requested_bytes": 1141863
+        }
+      },
+      "source_sha256": "6fa183d31a7c9875a437dbc176bb3828629bcd83c74da9c0f51e88c61e969ab3"
+    },
+    "malformed-0": {
+      "before-oracle": {
+        "stdout_sha256": "77a0afcb201ebcb7ffeda32dc0b3133f925a4db46504e5dfbad5e7693901496f",
+        "stdout_bytes": 685,
+        "messages": 1
+      },
+      "before-actual": {
+        "stdout_sha256": "77a0afcb201ebcb7ffeda32dc0b3133f925a4db46504e5dfbad5e7693901496f",
+        "stdout_bytes": 685,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4413,
+          "peak_live_bytes": 333187,
+          "peak_above_baseline_bytes": 328774,
+          "stage_end_live_bytes": 4413,
+          "allocation_requests": 1769,
+          "requested_bytes": 855143
+        }
+      },
+      "after-oracle": {
+        "stdout_sha256": "77a0afcb201ebcb7ffeda32dc0b3133f925a4db46504e5dfbad5e7693901496f",
+        "stdout_bytes": 685,
+        "messages": 1
+      },
+      "after-actual": {
+        "stdout_sha256": "77a0afcb201ebcb7ffeda32dc0b3133f925a4db46504e5dfbad5e7693901496f",
+        "stdout_bytes": 685,
+        "messages": 1,
+        "heap": {
+          "baseline_live_bytes": 4428,
+          "peak_live_bytes": 333202,
+          "peak_above_baseline_bytes": 328774,
+          "stage_end_live_bytes": 4428,
+          "allocation_requests": 1888,
+          "requested_bytes": 1002056
+        }
+      },
+      "source_sha256": "af904b965dd0215de1c36c0a841cb1e342b7608d5fe87214530d9d445130a002"
+    }
+  },
+  "limits": [
+    "requested Rust allocations exclude SQLite/C, stacks, mmap and allocator overhead",
+    "test/fixture/catalog setup and full owned oracle are outside measured command interval",
+    "native default-feature diagnostic; no timing/CPU or total-memory claim",
+    "selected-rich fixture is small; demanded large extras and unknown Last tails remain owned",
+    "malformed/unusual producer fallbacks remain full for compatibility"
+  ],
+  "after_source": "this commit: complete modern IDE field roster uses existing checked builder for lazy rich reads",
+  "checks": [
+    "native/portable selected6: real rich-lazy and complete dispatch against owned builder",
+    "native six-window/Last/budget/EOF/count CLI control",
+    "invalid escapes/numbers/missing/type fields, raw argument/lexical/array-authority compatibility",
+    "retained rich-lazy Source rejects journal mutation; original readonly WAL sidecars remain untouched"
+  ]
+}
