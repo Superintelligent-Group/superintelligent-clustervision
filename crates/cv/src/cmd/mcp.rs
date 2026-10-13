@@ -197,7 +197,13 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
     let mut reader = std::io::stdin().lock();
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        buf.clear();
+        // Reuse ordinary frames, but do not retain the largest request for the server's
+        // lifetime. The completed frame and its borrowed lossy view have left scope here.
+        if buf.capacity() > 64 * 1024 {
+            buf = Vec::new();
+        } else {
+            buf.clear();
+        }
         // Read raw bytes, not into a String: a single non-UTF-8 byte on stdin would make
         // `read_line` error out. Lossy-decode instead so one bad frame is tolerated rather than
         // fatal, and keep transient read errors non-fatal too — only EOF ends the server.

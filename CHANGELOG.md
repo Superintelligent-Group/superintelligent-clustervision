@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- MCP releases oversized request buffers between frames instead of retaining the largest request for the server lifetime.
+
 - MCP bounds concurrent tools and response backlog, preserves control replies, and cancels and reaps work on observed disconnect.
 
 - Prune declassifies Unicode prose with bounded matching while preserving contextual lowercase, token counts, sidecars and source checks.
