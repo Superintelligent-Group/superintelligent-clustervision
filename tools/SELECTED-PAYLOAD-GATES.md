@@ -14,9 +14,8 @@ with plain and escaped text. Payloads occupy selected text, reasoning where supp
 structured arguments, and tool results. Codex adds two fixed-record cases for response user/assistant
 text and event user/agent text, each with reasoning and encoded arguments. Gemini adds paired legacy JSON and modern JSONL
 fixed-record cases combining formatted thoughts, composite results, and object results. These
-representative cases avoid multiplying the growing-history matrix. Gemini currently runs only
-with native mmap; portable JSONL coverage awaits its producer fix. A tiny final tool call supplies
-the late query sentinel.
+representative cases avoid multiplying the growing-history matrix. Both Gemini formats run in native and portable builds. A tiny final tool call supplies the late
+query sentinel.
 
 Each isolated probe exercises lazy discard, Facts doctor, accepted deferred dataset collection,
 and a missing-tool deferred query. Doctor reports must exactly equal a separate full-mode

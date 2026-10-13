@@ -97,19 +97,14 @@ class DriverTests(unittest.TestCase):
         doctor = {"messages": 5, "detail": {"messages": 5}}
         full = {"detail": {"record_written": True, "serialized_record_bytes": 42, "record_sha256": "full"}}
         changed = {"detail": dict(full["detail"], record_sha256="changed")}
-        for mmap in (True, False):
-            with self.subTest(mmap=mmap), patch("builtins.print"), \
+        for format_name, mmap in (("cursor", True), ("cursor", False), ("gemini", False)):
+            with self.subTest(format=format_name, mmap=mmap), patch("builtins.print"), \
                  patch.object(budget.subprocess, "check_output", return_value=json.dumps(manifest)), \
                  patch.object(budget, "probe", side_effect=[(doctor, 0), (full, 0), (doctor, 0), (doctor, 0), (changed, 0)]) as calls:
                 with self.assertRaisesRegex(AssertionError, "dataset differs"):
-                    budget.selected_payloads("unused", Path("unused"), {}, ["cursor"], mmap=mmap)
+                    budget.selected_payloads("unused", Path("unused"), {}, [format_name], mmap=mmap)
                 self.assertEqual(calls.call_args_list[-1].args[1][0], "dataset")
                 self.assertTrue(all(call.args[3] == mmap for call in calls.call_args_list))
-
-    def test_portable_gemini_activation_is_held(self):
-        with patch.object(budget.subprocess, "check_output") as calls:
-            budget.selected_payloads("unused", Path("unused"), {}, ["gemini"], mmap=False)
-        calls.assert_not_called()
 
     def test_selected_codex_and_gemini_distribute_all_requested_bytes(self):
         generator = Path(__file__).with_name("perf-fixture.py")

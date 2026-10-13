@@ -228,8 +228,6 @@ def selected_payloads(binary, root, env, formats=None, operations=None, mmap=Tru
     for format_name, shape in SELECTED_PAYLOAD_CASES:
         if formats and format_name not in formats:
             continue
-        if format_name == "gemini" and not mmap:
-            continue  # Portable Gemini activation awaits JSONL producer evidence.
         for history in ((False,) if format_name in ("codex", "gemini") else (False, True)):
             for escaped in (False, True):
                 peaks = {operation: [] for operation in (operations or ("discard", "doctor", "dataset", "dataset-miss"))}
@@ -511,8 +509,6 @@ def main():
         parser.error("active supports document formats, kimi, and zed")
     if args.only in ("selected-payloads", "portable-selected-payloads") and any(f not in {name for name, _ in SELECTED_PAYLOAD_CASES} for f in args.format or []):
         parser.error("selected-payloads requires a selected payload case format")
-    if args.only == "portable-selected-payloads" and "gemini" in (args.format or []):
-        parser.error("portable Gemini selected cases await JSONL producer evidence")
     if args.only == "portable-docs" and any(f not in portable_formats for f in args.format or []):
         parser.error("portable-docs supports only document formats")
     if args.baseline_probe and args.only not in ("active", "doctor", "metadata-facts", "stats"):
