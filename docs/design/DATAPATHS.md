@@ -468,7 +468,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Devin compact forest metadata and Hermes exact-key prompt spill, with measured native/Rust bounds and output parity.
 - [x] Hermes exact-set CPU/heap controls and corpus parity; remaining prompt-only CPU tradeoff recorded.
 - [x] Kimi Code logical-step/selected payload retention, with native/portable resolved parity, late-query CPU controls and bounded deferred handles.
-- [ ] Cursor inline composers and OpenCode many-part records.
+- [x] Cursor CLI selected text and arguments, strict fused portable validation, and shared reducer facts.
+- [ ] Cursor IDE selected composer payloads and OpenCode many-part CPU convergence.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
 - [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
@@ -476,7 +477,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [x] Byte-capacity document admission held through Tantivy consumption, including release/error behavior and mixed-sweep negative control.
 - [x] Composed giant plain/escaped canonical index-body parity and live-heap proof at production chunk settings.
-- [ ] Transaction batching, final Tantivy merge/query costs and remaining search source activation.
+- [x] Search activation for retained text and original dependency guards; checked labels and semantic cache invalidation.
+- [ ] Transaction batching and final Tantivy merge/query costs.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
@@ -489,7 +491,12 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Final Hermes cached-spill CPU: one borrowed insertion avoids duplicate hashing/copies; bounded-memory tradeoff remains.
 - [x] Actual-model semantic refresh, unchanged reuse, source/model invalidation and clean-build ranking oracle.
 - [x] Matched release controls for streamed native escaped output; adaptive validation and canonical short-escape bypass preserve exact output.
+- [x] Portable/zstd Codex selected payload retention with matched clean release CPU and exact output controls.
+- [x] Shared reducer metadata demand; Claude/Cursor CLI facts preserve doctor, compaction and affordance outputs.
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
+- [ ] Bounded retained MCP observation and staged HTTP/browser response payloads.
+- [ ] Native emission record/output staging and incremental fidelity verification.
+- [ ] Prune compact decision facts, staged rewrites/sidecars and bounded usage repair.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
 - [x] Exact session-ranked search limits and pre-limit CLI/HTTP filters, including tied scores and current metadata.
 - [x] Measure exact search collector stored-document costs; project stored IDs without decoding unrelated metadata, preserving existing indexes.
