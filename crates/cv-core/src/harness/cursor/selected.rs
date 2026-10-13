@@ -176,13 +176,56 @@ fn decoded_argument(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteS
         Err(error) => Err(error),
     }
 }
-fn result_text(view: JsonView<'_>) -> Result<Option<Text>> {
+fn lexical(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) -> Result<Option<Text>> {
+    fn walk(node: JsonView<'_>, out: &mut crate::harness::store::text::Builder<'_>) -> Result<()> {
+        if let Some(text) = node.get("text")? {
+            out.push_string(text)?;
+        }
+        if let Some(children) = node.get("children")?.map(|v| v.array()).transpose()?.flatten() {
+            let mut children = children.peekable();
+            while let Some(child) = children.next() {
+                let child = child?;
+                walk(child, out)?;
+                if children.peek().is_some() && child.get("children")?.is_some() {
+                    out.push("\n")?;
+                }
+            }
+        }
+        Ok(())
+    }
+    let build = |view: JsonView<'_>| -> Result<Option<Text>> {
+        let Some(root) = view.get("root")? else { return Ok(None) };
+        let text = crate::harness::store::text::append(captured, arena, |out| walk(root, out))?;
+        let mut nonblank = false;
+        text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 64 * 1024, |part| {
+            nonblank |= part.chars().any(|c| !c.is_whitespace());
+            Ok(())
+        })?;
+        Ok(nonblank.then_some(text))
+    };
+    if !view.is_string()? {
+        return build(view);
+    }
+    let (offset, length) = arena.append(|out| {
+        view.for_each_str_chunk(|part| {
+            std::io::Write::write_all(out, part.as_bytes())?;
+            Ok(())
+        })?;
+        Ok(())
+    })?;
+    match captured.read_backing_value(arena.clone(), offset, length, build) {
+        Ok(text) => Ok(text),
+        Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+fn result_text(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) -> Result<Option<Text>> {
     if view.is_null()? {
         return Ok(None);
     }
     Ok(Some(match view.text(true)? {
         Some(text) => text,
-        None => view.resolve()?.to_string().into(),
+        None => crate::harness::store::text::append(captured, arena, |out| out.push_json(view))?,
     }))
 }
 fn bubble(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) -> Result<Option<Message>> {
@@ -248,10 +291,8 @@ fn bubble(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) ->
     {
         message.content.push(Block::Text { text });
     } else if let Some(rich) = fields.get("richText") {
-        // Lexical concatenation remains an explicitly owned fallback until a shared composite
-        // text carrier can preserve its paragraph/newline semantics without changing the IR.
-        if let Some(text) = lexical_plain_text(rich.resolve()?.as_ref()).filter(|s| !s.trim().is_empty()) {
-            message.content.push(Block::Text { text: text.into() });
+        if let Some(text) = lexical(rich, captured, arena)? {
+            message.content.push(Block::Text { text });
         }
     }
     if let Some(tool) = fields.get("toolFormerData") {
@@ -308,11 +349,14 @@ fn bubble(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) ->
         let mut content = tf
             .as_ref()
             .and_then(|f| f.get("result"))
-            .map(result_text)
+            .map(|view| result_text(view, captured, arena))
             .transpose()?
             .flatten();
         if content.is_none() {
-            content = error.map(result_text).transpose()?.flatten();
+            content = error
+                .map(|view| result_text(view, captured, arena))
+                .transpose()?
+                .flatten();
         }
         if let Some(content) = content {
             message.content.push(Block::ToolResult {
@@ -509,6 +553,14 @@ mod tests {
             json!({"type":2,"toolFormerData":{"params":"invalid string","result":null,"error":"failure"}}),
             json!({"type":2,"unifiedMode":true}),
             json!({"type":2,"unifiedMode":99}),
+        ]);
+        bubbles.extend([
+            json!({"type":2,"richText":{"root":{"text":"start","children":[{"text":"日本語","children":null},{"text":" next"},{"children":[{"text":"last"}]}]}}}),
+            json!({"type":2,"richText":{"root":{"text":" \n\t","children":[null,17,{"text":false}]}}}),
+            json!({"type":2,"richText":"{broken"}),
+            json!({"type":2,"richText":"{\"root\":{\"text\":\"first\",\"text\":\"last\"}}"}),
+            json!({"type":2,"richText":"{\"root\":{\"text\":\"valid\"},\"ignored\":1e9999}"}),
+            json!({"type":2,"toolFormerData":{"result":[true,null,1.5,{"z":"日本語\n","a":"\\quoted\""}]}}),
         ]);
         let root = json!({"conversation":bubbles,"fullConversationHeadersOnly":false});
         let (conn, r) = fixture(&world.base.join("inline"), &root.to_string(), &[]);

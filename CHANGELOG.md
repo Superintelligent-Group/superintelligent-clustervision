@@ -9,6 +9,8 @@
 
 - Diagnostics and affordance views request selected metadata facts; Claude and Cursor CLI avoid copying unrelated raw sidecars.
 - Lane summaries request response identities for usage deduplication without loading unrelated record metadata.
+- Cursor IDE partial reads stream Lexical rich text and structured tool results without retaining whole payloads.
+
 - Cursor IDE partial reads and doctor facts stream selected string payloads while preserving session modes and checked SQLite snapshot dependencies.
 
 - Cursor CLI discovery and partial reads stream selected message fields with bounded scratch and reject changed SQLite snapshot dependencies.
