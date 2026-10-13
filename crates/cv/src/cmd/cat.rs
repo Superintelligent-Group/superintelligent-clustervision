@@ -48,10 +48,16 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
         ));
     }
 
-    print_result(&parsed, tool_use_id, &sidecar, &mut out)
+    print_result(&parsed, &r.id, tool_use_id, &sidecar, &mut out)
 }
 
-fn print_result(parsed: &cv_core::Session, tool_use_id: &str, sidecar: &Path, mut out: &mut impl Write) -> Result<()> {
+fn print_result(
+    parsed: &cv_core::Session,
+    session_id: &str,
+    tool_use_id: &str,
+    sidecar: &Path,
+    mut out: &mut impl Write,
+) -> Result<()> {
     let resolver = parsed.resolver();
     for m in &parsed.messages {
         for b in &m.content {
@@ -120,8 +126,8 @@ fn print_result(parsed: &cv_core::Session, tool_use_id: &str, sidecar: &Path, mu
     }
     usage(format!(
         "no tool result {tool_use_id:?} in {} — `cv tools {} --timeline` lists its tool calls",
-        short_id(&parsed.id),
-        short_id(&parsed.id)
+        short_id(session_id),
+        short_id(session_id)
     ))
 }
 
@@ -208,17 +214,17 @@ mod tests {
         session.messages = first.hit.into_iter().collect();
         let sidecar = world.base.join("absent.flat.jsonl");
         let mut output = Vec::new();
-        print_result(&session, "call", &sidecar, &mut output).unwrap();
+        print_result(&session, &session.id, "call", &sidecar, &mut output).unwrap();
         assert_eq!(output, format!("{body}\n").as_bytes());
         let mut owned = session.clone();
         let resolver = owned.resolver();
         owned.messages[0].materialize(&resolver).unwrap();
         let mut expected = Vec::new();
-        print_result(&owned, "call", &sidecar, &mut expected).unwrap();
+        print_result(&owned, &owned.id, "call", &sidecar, &mut expected).unwrap();
         assert_eq!(output, expected);
         std::fs::remove_file(path).unwrap();
         let mut rejected = Vec::new();
-        assert!(print_result(&session, "call", &sidecar, &mut rejected).is_err());
+        assert!(print_result(&session, &session.id, "call", &sidecar, &mut rejected).is_err());
         assert!(rejected.is_empty());
     }
 
