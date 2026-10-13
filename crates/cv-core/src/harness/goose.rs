@@ -243,7 +243,7 @@ impl Adapter for Goose {
                 return stream_legacy(&r.id, &r.path, sink);
             }
             let conn = open_ro(&r.path)?;
-            stream_db_opts(&conn, r, opts, sink)
+            conn.read(|conn| stream_db_opts_with_reads(conn, r, opts, sink, conn.reads()))
         })
     }
 
@@ -405,7 +405,18 @@ fn stream_db_opts(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
+    stream_db_opts_with_reads(conn, r, opts, sink, &crate::source::ReadSet::default())
+}
+
+fn stream_db_opts_with_reads(
+    conn: &Connection,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    captured: &crate::source::ReadSet,
+) -> Result<Session> {
     let mut reads = crate::source::ReadSet::default();
+    reads.merge(captured);
     reads.record(&r.path);
     let mut wal = r.path.as_os_str().to_os_string();
     wal.push("-wal");

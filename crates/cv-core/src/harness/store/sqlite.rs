@@ -8,10 +8,138 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Open `path` read-only, never locking the harness's live database.
-pub(crate) fn open_ro(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .with_context(|| format!("opening {}", path.display()))
+/// A reader retains both its private backing (when needed) and the original provenance.
+/// Use `read` around an adapter operation, and carry `reads()` into lazy source captures.
+pub(crate) struct ReadConnection {
+    connection: Connection,
+    reads: crate::source::ReadSet,
+    _snapshot: Option<std::sync::Arc<ColdSnapshot>>,
+}
+
+impl std::ops::Deref for ReadConnection {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+impl ReadConnection {
+    pub(crate) fn reads(&self) -> &crate::source::ReadSet {
+        &self.reads
+    }
+
+    pub(crate) fn read<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        check_reads(&self.reads)?;
+        let result = operation(self);
+        // A mutation takes precedence over a body/SQL failure too.
+        check_reads(&self.reads)?;
+        result
+    }
+}
+
+struct ColdSnapshot {
+    original: std::path::PathBuf,
+    reads: crate::source::ReadSet,
+    directory: std::path::PathBuf,
+    database: std::path::PathBuf,
+}
+
+impl Drop for ColdSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn check_reads(reads: &crate::source::ReadSet) -> Result<()> {
+    anyhow::ensure!(
+        reads.fresh(&mut crate::source::Probe::default()),
+        "SQLite source dependencies changed or unavailable"
+    );
+    Ok(())
+}
+
+fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    name.into()
+}
+
+/// SQLite may create WAL/SHM even with READ_ONLY. Missing WAL auxiliaries therefore use a
+/// checked private copy; existing live auxiliaries keep ordinary SQLite locking/read semantics.
+/// One cached snapshot avoids copying a cold multi-session database once per session. This is
+/// bounded to one idle database, with active connections retaining their own snapshot lifetime.
+pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static COLD: OnceLock<Mutex<Option<Arc<ColdSnapshot>>>> = OnceLock::new();
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut reads = crate::source::ReadSet::default();
+    reads.record(&path);
+    reads.record(&sidecar(&path, "-wal"));
+    reads.record(&sidecar(&path, "-journal"));
+    let mut header = [0; 20];
+    std::fs::File::open(&path)?.read_exact(&mut header)?;
+    check_reads(&reads)?;
+    let cold = &header[..16] == b"SQLite format 3\0"
+        && (header[18] == 2 || header[19] == 2)
+        && (!sidecar(&path, "-wal").exists() || !sidecar(&path, "-shm").exists());
+    let snapshot = if cold {
+        let mut cache = COLD
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite snapshot cache poisoned"))?;
+        if let Some(snapshot) = cache
+            .as_ref()
+            .filter(|s| s.original == path && s.reads.fresh(&mut crate::source::Probe::default()))
+        {
+            Some(Arc::clone(snapshot))
+        } else {
+            let directory = std::env::temp_dir().join(format!("cv-sqlite-snapshot-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&directory)?;
+            let snapshot = ColdSnapshot {
+                original: path.clone(),
+                reads: reads.clone(),
+                database: directory.join("store.db"),
+                directory,
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&snapshot.directory, std::fs::Permissions::from_mode(0o700))?;
+            }
+            // std::fs::copy uses clonefile on APFS and bounded OS copying elsewhere. Never copy
+            // SHM: it contains live coordination state; SQLite rebuilds it only in our directory.
+            std::fs::copy(&path, &snapshot.database)?;
+            for suffix in ["-wal", "-journal"] {
+                let original = sidecar(&path, suffix);
+                if original.exists() {
+                    std::fs::copy(original, sidecar(&snapshot.database, suffix))?;
+                }
+            }
+            check_reads(&reads)?;
+            let snapshot = Arc::new(snapshot);
+            *cache = Some(Arc::clone(&snapshot));
+            Some(snapshot)
+        }
+    } else {
+        None
+    };
+    let backing = snapshot.as_ref().map_or(path.as_path(), |s| s.database.as_path());
+    let connection = Connection::open_with_flags(
+        backing,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening {}", path.display()))?;
+    check_reads(&reads)?;
+    Ok(ReadConnection {
+        connection,
+        reads,
+        _snapshot: snapshot,
+    })
 }
 
 /// Copy a snapshot's immutable TEXT/BLOB cell into an operation-owned arena using bounded
@@ -80,6 +208,89 @@ pub(crate) fn table_exists(conn: &Connection, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static SNAPSHOT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn fixture() -> (std::path::PathBuf, std::path::PathBuf) {
+        let directory = std::env::temp_dir().join(format!("cv-cold-wal-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("sessions.db");
+        (directory, database)
+    }
+
+    #[test]
+    fn cold_wal_is_private_and_reused() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (directory, database) = fixture();
+        {
+            let writer = Connection::open(&database).unwrap();
+            writer
+                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")
+                .unwrap();
+        }
+        assert!(!sidecar(&database, "-wal").exists());
+        assert!(!sidecar(&database, "-shm").exists());
+        let first = open_ro(&database).unwrap();
+        assert_eq!(
+            first
+                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                .unwrap(),
+            7
+        );
+        let second = open_ro(&database).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            first._snapshot.as_ref().unwrap(),
+            second._snapshot.as_ref().unwrap()
+        ));
+        assert!(!sidecar(&database, "-wal").exists());
+        assert!(!sidecar(&database, "-shm").exists());
+        assert!(second.execute("INSERT INTO t VALUES(8)", []).is_err());
+        drop(first);
+        drop(second);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_shm_snapshot_preserves_wal_only_rows_and_rejects_mutation() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (directory, database) = fixture();
+        let writer = Connection::open(&database).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE t(x); PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO t VALUES(7);").unwrap();
+        // Simulate a retained/crashed WAL without its coordination sidecar. The writer remains
+        // alive solely to demonstrate why immutable=1 would incorrectly omit this committed row.
+        std::fs::remove_file(sidecar(&database, "-shm")).unwrap();
+        let reader = open_ro(&database).unwrap();
+        assert_eq!(
+            reader
+                .read(|r| Ok(r.query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0))?))
+                .unwrap(),
+            1
+        );
+        assert!(!sidecar(&database, "-shm").exists());
+        let immutable = Connection::open_with_flags(
+            format!("file:{}?immutable=1", database.display()),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        assert_eq!(
+            immutable
+                .query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(immutable);
+        let failure = reader
+            .read::<()>(|_| {
+                writer.execute("INSERT INTO t VALUES(8)", [])?;
+                anyhow::bail!("body failure")
+            })
+            .unwrap_err();
+        assert!(failure.to_string().contains("dependencies changed"));
+        assert!(crate::json::JsonSource::capture_with_reads(&database, reader.reads()).is_err());
+        drop(reader);
+        drop(writer);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn append_text_and_blob_cells_share_one_backing() {
