@@ -4,6 +4,7 @@
 
 - Unchanged full-text refreshes avoid starting Tantivy writers while still completing pending compaction.
 - Codex lazy reads retain giant prompt, reply, reasoning and tool arguments in checked source storage across native and portable transports.
+- Claude discovery reuses validated UTF-8 to reduce initial metadata scanning while preserving strict record acceptance.
 
 - Guard Devin, Hermes and Zed database reads against source changes during streaming and discovery.
 

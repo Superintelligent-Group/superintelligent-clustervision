@@ -1440,3 +1440,39 @@ Clean release CPU for giant tool-result default is 28.80→27.19 ms (16 MiB), 12
 from heap instrumentation; sample variability precludes a general throughput claim. Full counters
 and trials are in `PRUNE-PAYLOAD-EVIDENCE.json`. Rich array/object tool payloads, mirror payloads,
 thinking, declassification, parent rerooting and usage corrections retain the owned mutation fallback.
+
+
+### Actual fleet discovery cold/warm control (2026-10-12)
+
+A production release `cv ls` at `21683aa7`, reading the installed fleet with a fresh scratch
+`CLUSTERVISION_HOME`, returns 6,883 sessions across 13 nonempty harnesses. Empty-catalog wall
+is 9.845 seconds (28.66 user + 8.09 system CPU); subsequent verified catalog reads are .168
+and .034 seconds. `cv ls --fresh`, retaining the newly persisted discovery metadata cache,
+is .802 seconds. All four runs preserve per-harness cardinalities. Live sources can change
+between reads, so this is fleet orientation rather than an exact immutable-input comparison.
+No real catalog or harness store was written. “Cold” here means empty cv catalog/scan cache,
+not an OS page-cache purge. The earlier 300 ms aspiration is met by unchanged warm reads;
+these measurements do not establish a 300 ms empty-catalog path.
+
+A separate sequential adapter diagnostic attributes the largest extraction wall times to
+Claude (5.159 seconds / 925 refs), Codex (3.548 / 4,397), Gemini (1.201 / 721), Devin
+(.796 / 8), and Kimi (.722 / 174). That process grew one live Codex session since the CLI
+control. Adapter timing is page-cache/load sensitive and cannot be summed into the parallel
+production critical path. Claude's 925 primary discovery files contain 6.806 GB; exact initial
+record counts and strict acceptance require examining their contents. The installed Claude
+projects contain no sessions-index JSON files to supply an independent metadata authority.
+
+APFS clones of only those 925 primary Claude JSONL files provide a fixed-input control,
+excluding nested subagent data and credentials. The scanner already validates each line's
+UTF-8 before extracting fields; it now calls the existing str acceptance helper to avoid a
+second whole-line UTF-8 pass while preserving number, surrogate, and depth checks. Three
+alternating old/new pairs preserve every serialized SessionRef (sorted metadata hash
+`48fa111f7be26bf2`), with median CPU 9.77 to 9.19 seconds, about 6% lower. Wall times span
+2.4–3.3 seconds under shared host load, so no wall-time improvement is claimed. Initial
+exact-count scanning remains the substantial cold-start floor.
+
+Private aggregate evidence lives under
+`/Users/ember/dev/cv-worktrees/cold-ls-fleet-home/`: `actual-first-warm.json`,
+`adapter-cold.json`, `claude-frozen-manifest.json`, and `claude-utf8-paired.json`.
+These are read-only fleet measurements and synthetic-free private snapshots, not new corpus
+captures; no transcript text or session identifiers appear in the reports.

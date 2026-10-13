@@ -182,7 +182,9 @@ impl Scan {
         let Ok(fields) = serde_json::from_str::<Fields<'_>>(text) else {
             return;
         };
-        if !super::super::store::json::value_compatible(text.as_bytes()) {
+        // The line is already UTF-8 validated above; retain all Value scalar/depth checks
+        // without rescanning the same potentially giant body as bytes.
+        if !super::super::store::json::value_compatible_str_at_depth_with(text, 0, |_, _| {}) {
             return;
         }
         let kind = string(fields.kind);
