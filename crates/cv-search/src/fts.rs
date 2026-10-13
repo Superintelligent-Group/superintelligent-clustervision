@@ -677,13 +677,9 @@ impl SweepPlanner<'_> {
                 &source.dependencies,
                 &mut probe,
             );
-            let fts_fresh = fts_is_fresh(
-                r,
-                existing.get(&r.id),
-                mtime,
-                size,
-                dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies),
-            ) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &Default::default()));
+            let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
+                dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
+            }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &Default::default()));
             let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
             if fts_fresh && !events && affordances.counts_with_probe(r, &source, &mut probe).is_some() {
@@ -725,13 +721,9 @@ impl SweepPlanner<'_> {
                         agent_id: Some(sub.agent_id().to_string()),
                         workflow: sub.workflow.clone(),
                     };
-                    let fts_fresh = fts_is_fresh(
-                        sr,
-                        existing.get(&sr.id),
-                        mtime,
-                        size,
-                        dependencies_fresh && dependencies.primary_fresh(sr, &source.dependencies),
-                    ) && metadata.get(&sr.id) == Some(&DiscoveryMetadata::new(sr, &prov));
+                    let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size, || {
+                        dependencies_fresh && dependencies.primary_fresh(sr, &source.dependencies)
+                    }) && metadata.get(&sr.id) == Some(&DiscoveryMetadata::new(sr, &prov));
                     let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
                     if fts_fresh && !events {
                         continue;
@@ -2008,9 +2000,9 @@ fn fts_is_fresh(
     stored: Option<&(i64, i64)>,
     mtime: i64,
     size: i64,
-    source_fresh: bool,
+    source_fresh: impl FnOnce() -> bool,
 ) -> bool {
-    stored.is_some_and(|&stored| cv_core::offsets::sig_is_fresh_with_source(stored, (mtime, size), || source_fresh))
+    stored.is_some_and(|&stored| cv_core::offsets::sig_is_fresh_with_source(stored, (mtime, size), source_fresh))
 }
 
 /// `id → (mtime, size)` for every live doc (the incremental skip-set), plus the set of ids that
@@ -4204,17 +4196,20 @@ mod tests {
             message_count: 1,
         };
 
-        assert!(fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096, true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 8192, true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, false));
-        assert!(fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, true));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, false));
-        assert!(!fts_is_fresh(&append_only, None, 111, 4096, true));
+        assert!(fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, || true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096, || true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096, || panic!(
+            "tuple miss must not check primary identity"
+        )));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 8192, || true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, || false));
+        assert!(fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, || true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, || false));
+        assert!(!fts_is_fresh(&append_only, None, 111, 4096, || true));
 
-        assert!(fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 4096, true));
-        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 222, 4096, true));
-        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 8192, true));
+        assert!(fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 4096, || true));
+        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 222, 4096, || true));
+        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 8192, || true));
     }
 
     #[test]

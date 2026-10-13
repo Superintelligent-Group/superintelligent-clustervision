@@ -3279,8 +3279,8 @@ files: nonzero mtime, size zero and fresh version-3 primary identity guards. The
 reread them despite complete source authority. FTS/event consumers now use a guarded tuple
 comparison; the old tuple-only API remains conservative. No schema or interpretation changes
 are needed. Missing/old source guards, historical NULL event sizes, unreadable `(0, 0)` tuples
-and changed/replaced sources still miss. Source guard evaluation remains lazy after a tuple
-match, preserving the changed-source path's avoided metadata work.
+and changed/replaced sources still miss. Final primary-identity guard evaluation remains lazy after a tuple
+match, preserving the changed-source path's avoided key lookup.
 
 The focused production Kimi `sweep` control seeds a native-layout empty primary and repeats
 unchanged: zero changed sessions, callbacks, document writes, body bytes and writer opens.
