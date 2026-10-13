@@ -210,6 +210,7 @@ mod tests {
     struct Sidecar {
         path: PathBuf,
         mutate: bool,
+        range: Option<(u64, u64)>,
     }
     impl crate::harness::Adapter for Sidecar {
         fn harness(&self) -> Harness {
@@ -227,12 +228,13 @@ mod tests {
             sink.meta(&session);
             sink.dependency(&self.path);
             let len = fs::metadata(&self.path)?.len();
+            let (offset, len) = self.range.unwrap_or((1, len - 1));
             let mut message = Message::new(Role::User);
             message.content.push(Block::Text {
                 text: Text::Span(crate::lazy::Span {
                     source: Some(self.path.clone()),
-                    offset: 1,
-                    len: len - 1,
+                    offset,
+                    len,
                     escaped: false,
                 }),
             });
@@ -255,6 +257,7 @@ mod tests {
         let adapter = Sidecar {
             path: sidecar.clone(),
             mutate: false,
+            range: None,
         };
         let session = super::super::parse_for_emit(&adapter, &reference, Harness::Codex)?;
         assert!(matches!(
@@ -275,12 +278,31 @@ mod tests {
         assert!(super::super::parse_for_emit(
             &Sidecar {
                 path: sidecar,
-                mutate: true
+                mutate: true,
+                range: None,
             },
             &reference,
             Harness::Codex
         )
         .is_err());
+        Ok(())
+    }
+    #[test]
+    fn literal_quoted_text_does_not_become_the_enclosing_json_value() -> Result<()> {
+        let world = cv_testkit::World::new("port-prepare-literal-quotes");
+        let primary = world.base.join("session.jsonl");
+        let sidecar = world.base.join("body.txt");
+        fs::write(&primary, b"{}")?;
+        fs::write(&sidecar, br#"[ "x" ]"#)?;
+        let reference = SessionRef::new("session", Harness::Claude, &primary);
+        let adapter = Sidecar {
+            path: sidecar,
+            mutate: false,
+            range: Some((2, 3)),
+        };
+        let session = super::super::parse_for_emit(&adapter, &reference, Harness::Codex)?;
+        let owned = super::super::materialized_session(&session)?;
+        assert_eq!(owned.messages[0].text().as_deref(), Some("\"x\""));
         Ok(())
     }
 }
