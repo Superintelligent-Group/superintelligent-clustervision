@@ -6243,4 +6243,98 @@ mod tests {
         assert!(fixed.outputs < legacy.outputs, "outputs {fixed:?} versus {legacy:?}");
         eprintln!("append merge bytes: legacy={legacy:?}, fixed={fixed:?}");
     }
+
+    /// Opt-in operation control on a disposable copy of an existing index. The byte-tier
+    /// policy is schema-independent: old indexes are useful geometry controls, but this does
+    /// not exercise their schema migration or claim parity for a newly rebuilt fleet index.
+    #[test]
+    #[ignore = "requires a disposable index copied by tools/profiling/compaction-existing.py"]
+    fn existing_index_compaction_work_control() {
+        let dir = PathBuf::from(std::env::var_os("CV_COMPACTION_CONTROL_INDEX").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cv-compaction-control-copy")).unwrap(),
+            "disposable clone\n"
+        );
+        let index = Index::open_in_dir(&dir).unwrap();
+        let schema = index.schema();
+        let id = schema.get_field("id").unwrap();
+        let body = schema.get_field("body").unwrap();
+        let queries = ["error", "test", "cache"];
+        let query_ids = |term: &str| {
+            let searcher = index.reader().unwrap().searcher();
+            let query = QueryParser::for_index(&index, vec![body]).parse_query(term).unwrap();
+            let addresses = searcher.search(&query, &tantivy::collector::DocSetCollector).unwrap();
+            let mut ids: Vec<String> = addresses
+                .into_iter()
+                .map(|address| {
+                    searcher
+                        .doc::<TantivyDocument>(address)
+                        .unwrap()
+                        .get_first(id)
+                        .and_then(|value| value.as_str())
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect();
+            ids.sort();
+            ids
+        };
+        let before_queries: Vec<_> = queries.iter().map(|term| query_ids(term)).collect();
+        let before = index.searchable_segment_metas().unwrap();
+        let original_large: HashSet<_> = before
+            .iter()
+            .filter(|meta| segment_bytes(&dir, meta) > TIER_FLOOR)
+            .map(|meta| meta.id())
+            .collect();
+        let initial_segments: Vec<_> = before
+            .iter()
+            .map(|meta| {
+                serde_json::json!({
+                    "bytes": segment_bytes(&dir, meta),
+                    "documents": meta.max_doc(), "deleted_documents": meta.num_deleted_docs()
+                })
+            })
+            .collect();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        let mut cold = original_large.clone();
+        let mut steps = Vec::new();
+        for n in 0..16 {
+            let mut doc = TantivyDocument::default();
+            doc.add_text(id, format!("cv-compaction-control-{n}"));
+            doc.add_text(body, format!("zqcvcompactioncontrol{n:08}"));
+            writer.add_document(doc).unwrap();
+            writer.commit().unwrap();
+            let work = measured_compact(&dir, &index, &mut writer, TIER_FLOOR, &mut cold);
+            if work.merges > 0 {
+                for (term, expected) in queries.iter().zip(&before_queries) {
+                    assert_eq!(query_ids(term), *expected, "query multiset changed for {term}");
+                }
+            }
+            for k in 0..=n {
+                assert_eq!(
+                    query_ids(&format!("zqcvcompactioncontrol{k:08}")),
+                    [format!("cv-compaction-control-{k}")]
+                );
+            }
+            steps.push(serde_json::json!({
+                "append": n + 1, "merge_input_bytes": work.inputs,
+                "merge_output_bytes": work.outputs, "merges": work.merges,
+                "original_large_lineage_rewrites": work.cold_rewrites,
+                "segments": index.searchable_segment_ids().unwrap().len()
+            }));
+        }
+        assert!(compaction_candidates(&dir, &index).unwrap().is_none());
+        let final_ids: HashSet<_> = index.searchable_segment_ids().unwrap().into_iter().collect();
+        let report = serde_json::json!({
+            "schema_current": schema_current(&schema), "production_tier_floor": TIER_FLOOR,
+            "initial_segments": initial_segments, "steps": steps,
+            "query_matching_document_counts": queries.into_iter().zip(before_queries.iter().map(Vec::len)).collect::<std::collections::BTreeMap<_, _>>(),
+            "query_multisets_unchanged_after_each_merge": true,
+            "all_synthetic_append_terms_retained": true,
+            "original_large_segments_retained": original_large.is_subset(&final_ids),
+            "final_segments": final_ids.len(), "unchanged_pending_compaction": false
+        });
+        let report_path = std::env::var_os("CV_COMPACTION_CONTROL_REPORT").unwrap();
+        std::fs::write(report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
 }

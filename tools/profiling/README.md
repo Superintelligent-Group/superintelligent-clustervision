@@ -355,3 +355,24 @@ only the retained patch is applied, with all affected crates forced to rebuild.
 Raw profiles, the final additional chunk-bound test patch and logs are retained at
 `/Users/ember/dev/cv-worktrees/keyed-discovery-batch-evidence` and container volume
 `/scratch/keyed-discovery-cpu`. The exclusive container is stopped after capture.
+
+## Existing index compaction geometry
+
+`compaction-existing.py` clones a stable index using macOS APFS copies, verifies its source
+inventory before and after copying, then runs the ignored
+`fts::tests::existing_index_compaction_work_control` in a compiled cv-search test executable.
+Pass `--index`, a new `--scratch` directory and `--test-binary`; the binary can be obtained
+with `cargo test -p cv-search --lib existing_index_compaction_work_control --no-run` using
+the usual isolated target and scratch `CLUSTERVISION_HOME`. The source is never opened for
+index writing. A clone marker is required before the test will mutate anything.
+
+Sixteen direct tiny document commits use the production writer and byte-tier selector. The
+report records logical merge input/output lengths, retained large segments, query ID-multiset
+parity, source identities and binary provenance. The test contains assertions for preserved
+queries and append terms; it records rather than assumes large-segment retention, since a
+different input can legitimately need deletion cleanup or higher-tier merges.
+
+The [3.78 GB control](../../docs/design/FTS-EXISTING-INDEX-COMPACTION.json) uses an older-schema
+fleet index: it tests compaction geometry, not a current-schema rebuild or the indexing sweep.
+It does not measure physical I/O, heap, BM25 score parity or latency. Scratch index contents
+remain private; only aggregate work and parity results belong in the repository.

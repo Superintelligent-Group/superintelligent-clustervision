@@ -549,7 +549,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Composed giant plain/escaped canonical index-body parity and live-heap proof at production chunk settings.
 - [x] Search activation for retained text and original dependency guards; checked labels and semantic cache invalidation.
 - [x] Audit transaction batching and avoid Tantivy writer startup for unchanged refreshes; retain pending compaction.
-- [ ] Large-fleet final Tantivy merge/query measurements beyond the isolated warm-refresh controls.
+- [x] Production byte-tier compaction on a copied 3.78 GB existing fleet index: tiny commits preserve large segments and exact query ID multisets; older-schema geometry, not a current-schema rebuild.
+- [ ] Current-schema full-fleet indexing/merge/query composition beyond existing-index geometry and isolated warm-refresh controls.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
@@ -2863,3 +2864,21 @@ an accepted tradeoff for now, not an unmeasured universal improvement.
 
 Integration at `bd19aee1` passes the selected JSON-window acceptance/EOF/count-map control
 and the shared sink forwarding/union control against the combined source-identity changes.
+
+### Existing fleet index compaction geometry (2026-10-13)
+
+The production byte-tier policy now has an operation control on a stable APFS copy of the
+existing 3,776,877,235-byte index, with seven segments. Sixteen tiny document commits trigger
+two merges: 2,410,825 logical input bytes and 2,368,507 output bytes in total. All five original
+segments above the 8 MiB floor remain unchanged, including the 2.92 GB largest segment.
+`error`, `test` and `cache` preserve exact matching stored-ID multisets after each merge
+(26,318 / 25,784 / 16,320 matching documents); all sixteen new terms remain searchable.
+The final index has nine segments and no pending compaction. The original index's identities
+remain unchanged through cloning and the entire control. No policy change was warranted.
+
+[Recorded results](FTS-EXISTING-INDEX-COMPACTION.json) and the opt-in
+[runner](../../tools/profiling/compaction-existing.py) distinguish this evidence from a fleet
+rebuild: the copied index has the older schema, while the production compactor is schema-independent.
+This establishes useful real segment geometry, not current-schema indexing/migration, BM25 score
+parity, a deleted-byte/fanout bound, physical I/O, heap or latency. The bottom-tier output is
+rewritten by the second merge, as the policy permits; the large cold segments are not.
