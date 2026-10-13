@@ -138,6 +138,7 @@ impl Adapter for Kimi {
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
+        let _cache_scope = crate::discover_cache::read::Context::current().enter();
         let Some(sessions) = &self.sessions else {
             return Ok(vec![]);
         };

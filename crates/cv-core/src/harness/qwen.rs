@@ -94,7 +94,7 @@ impl Adapter for Qwen {
                     .filter(|p| is_session_file(p)),
             );
         }
-        Ok(crate::par_flat_map(paths, |path| {
+        Ok(crate::par_discovery_flat_map(paths, |path| {
             crate::discover_cache::cached_scan_many(&path, || {
                 if is_session_jsonl(&path) {
                     scan_session_jsonl(&path).into_iter().collect()

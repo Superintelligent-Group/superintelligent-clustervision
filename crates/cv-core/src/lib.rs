@@ -83,6 +83,8 @@ pub fn discover_all() -> Vec<SessionRef> {
 
 fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<SessionRef> {
     let _sources = source::read_scope();
+    let _cache_scope = catalog.as_ref().map(catalog::Reader::discovery_scope);
+    let discovery = discover_cache::read::Context::current();
     let adapters = harness::all();
     let mut known = std::collections::HashMap::<Harness, Vec<SessionRef>>::new();
     for r in catalog
@@ -133,10 +135,15 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
     #[cfg(feature = "parallel")]
     let results: Vec<_> = {
         use rayon::prelude::*;
-        jobs.into_par_iter().map(|(a, known)| run(a.as_ref(), known)).collect()
+        jobs.into_par_iter()
+            .map(|(a, known)| discovery.run(|| run(a.as_ref(), known)))
+            .collect()
     };
     #[cfg(not(feature = "parallel"))]
-    let results: Vec<_> = jobs.into_iter().map(|(a, known)| run(a.as_ref(), known)).collect();
+    let results: Vec<_> = jobs
+        .into_iter()
+        .map(|(a, known)| discovery.run(|| run(a.as_ref(), known)))
+        .collect();
 
     // Persist freshly-scanned metadata (pruning vanished files) so the next discovery reuses it.
     if catalog.is_none() {
@@ -229,6 +236,7 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
 fn refresh_harness(h: Harness, catalog: &mut catalog::Reader) {
     let Some(a) = harness::for_harness(h) else { return };
     let _sources = source::read_scope();
+    let _cache_scope = catalog.discovery_scope();
     let before = catalog.capture_primary_reads(a.as_ref());
     let roots = a.roots();
     if roots.is_empty() {
@@ -262,6 +270,27 @@ where
     {
         items.into_iter().filter_map(f).collect()
     }
+}
+
+/// Discovery-only propagation: standalone batches share one lazy connection, while operations
+/// inherit their catalog owner's capability. Ordinary parallel consumers pay no context cost.
+pub(crate) fn par_discovery_filter_map<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> Option<R> + Sync + Send,
+{
+    let context = discover_cache::read::Context::current();
+    par_filter_map(items, |item| context.run(|| f(item)))
+}
+pub(crate) fn par_discovery_flat_map<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> Vec<R> + Sync + Send,
+{
+    let context = discover_cache::read::Context::current();
+    par_flat_map(items, |item| context.run(|| f(item)))
 }
 
 /// Like [`par_filter_map`] but each input may yield zero, one, or many results (e.g. a Gemini

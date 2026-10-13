@@ -18,7 +18,9 @@ use crate::ir::SessionRef;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
+
+pub(crate) mod read;
 
 enum Payload {
     #[cfg(feature = "sqlite")]
@@ -34,8 +36,8 @@ enum Payload {
 impl Payload {
     /// Decode only a demanded row. Invalid persisted metadata remains a cache miss; releasing
     /// encoded strings after either outcome avoids retaining both representations.
+    #[cfg(feature = "sqlite")]
     fn parsed(&mut self) -> Option<(&mut Vec<SessionRef>, &crate::source::ReadSet)> {
-        #[cfg(feature = "sqlite")]
         if let Self::Encoded { refs, reads } = self {
             *self = serde_json::from_str(refs)
                 .and_then(|refs| serde_json::from_str(reads).map(|reads| Self::Parsed { refs, reads }))
@@ -43,7 +45,6 @@ impl Payload {
         }
         match self {
             Self::Parsed { refs, reads } => Some((refs, reads)),
-            #[cfg(feature = "sqlite")]
             _ => None,
         }
     }
@@ -56,15 +57,9 @@ impl Payload {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     fn encoded(&self) -> bool {
-        #[cfg(feature = "sqlite")]
-        {
-            matches!(self, Self::Encoded { .. })
-        }
-        #[cfg(not(feature = "sqlite"))]
-        {
-            false
-        }
+        matches!(self, Self::Encoded { .. })
     }
 }
 
@@ -79,23 +74,57 @@ struct Entry {
 struct Cache {
     entries: RwLock<HashMap<PathBuf, Entry>>,
     any_dirty: AtomicBool,
+    invalidated: AtomicBool,
 }
 
 /// Bump when discovery changes the interpretation of unchanged source bytes.
 #[cfg(feature = "sqlite")]
 pub(crate) const INTERPRETATION_VERSION: u32 = 4;
-static CACHE: OnceLock<Cache> = OnceLock::new();
-static INVALIDATE: AtomicBool = AtomicBool::new(false);
+#[derive(Default)]
+struct CacheStore {
+    // Retain the current catalog as before; other homes survive only while operations use them.
+    current: Option<(PathBuf, Arc<Cache>)>,
+    active: HashMap<PathBuf, std::sync::Weak<Cache>>,
+}
+static CACHE: OnceLock<RwLock<CacheStore>> = OnceLock::new();
+fn cache_for(path: &Path) -> Arc<Cache> {
+    let mut caches = CACHE.get_or_init(Default::default).write().unwrap();
+    caches.active.retain(|_, cache| cache.strong_count() != 0);
+    if let Some(cache) = caches.active.get(path).and_then(std::sync::Weak::upgrade) {
+        caches.current = Some((path.to_path_buf(), cache.clone()));
+        return cache;
+    }
+    let cache = Arc::new(load());
+    caches.active.insert(path.to_path_buf(), Arc::downgrade(&cache));
+    caches.current = Some((path.to_path_buf(), cache.clone()));
+    cache
+}
+#[cfg(all(test, feature = "sqlite"))]
+fn current_cache() -> Arc<Cache> {
+    read::Context::current().cache()
+}
+fn existing_cache(path: &Path) -> Option<Arc<Cache>> {
+    let key = read::catalog_key(path);
+    let caches = CACHE.get()?.read().ok()?;
+    if let Some((path, cache)) = &caches.current {
+        if *path == key {
+            return Some(cache.clone());
+        }
+    }
+    caches.active.get(&key)?.upgrade()
+}
 
 #[cfg(feature = "sqlite")]
-pub(crate) fn invalidate_interpretation() {
-    INVALIDATE.store(true, Ordering::Release);
+pub(crate) fn invalidate_interpretation(path: &Path) {
+    if let Some(cache) = existing_cache(path) {
+        cache.invalidated.store(true, Ordering::Release);
+    }
 }
 
 fn clear_invalidated(cache: &Cache) {
-    if INVALIDATE.load(Ordering::Acquire) {
+    if cache.invalidated.load(Ordering::Acquire) {
         let mut entries = cache.entries.write().unwrap();
-        if INVALIDATE.swap(false, Ordering::AcqRel) {
+        if cache.invalidated.swap(false, Ordering::AcqRel) {
             entries.clear();
             cache.any_dirty.store(false, Ordering::Release);
         }
@@ -115,46 +144,55 @@ fn note_legacy_json() {
     }
 }
 
-/// Bulk-load the persisted scan cache. Only ever runs on the discovery (slow) path — probe-only
-/// commands never touch this module. Keep serialized payloads until a matching path is demanded;
-/// a scoped refresh must not decode every unrelated session. Invalid payloads remain misses.
+/// Start empty. Persisted payloads enter this existing cache only on exact keyed demand.
 fn load() -> Cache {
     note_legacy_json();
-    #[allow(unused_mut)]
-    let mut entries: HashMap<PathBuf, Entry> = HashMap::new();
-    #[cfg(feature = "sqlite")]
-    if let Some(conn) = crate::catalog::open_db() {
-        if let Ok(mut stmt) = conn
-            .prepare("SELECT path, mtime_ns, size, refs, source_reads FROM scan_cache WHERE interpretation_version=?1")
-        {
-            let rows = stmt.query_map([INTERPRETATION_VERSION], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            });
-            if let Ok(rows) = rows {
-                for (path, mtime_ns, size, refs, reads) in rows.flatten() {
-                    entries.insert(
-                        PathBuf::from(path),
-                        Entry {
-                            mtime_ns: mtime_ns as u64,
-                            size: size as u64,
-                            payload: Payload::Encoded { refs, reads },
-                            dirty: false,
-                        },
-                    );
-                }
-            }
-        }
-    }
     Cache {
-        entries: RwLock::new(entries),
+        entries: Default::default(),
         any_dirty: AtomicBool::new(false),
+        invalidated: AtomicBool::new(false),
     }
+}
+
+#[cfg(feature = "sqlite")]
+fn load_entry(conn: &rusqlite::Connection, path: &Path, key: (u64, u64)) -> Option<Entry> {
+    let mut statement = conn.prepare_cached("SELECT refs,source_reads FROM scan_cache WHERE path=?1 AND mtime_ns=?2 AND size=?3 AND interpretation_version=?4").ok()?;
+    let (refs, reads) = statement
+        .query_row(
+            rusqlite::params![
+                path.to_string_lossy(),
+                key.0 as i64,
+                key.1 as i64,
+                INTERPRETATION_VERSION
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()?;
+    Some(Entry {
+        mtime_ns: key.0,
+        size: key.1,
+        payload: Payload::Encoded { refs, reads },
+        dirty: false,
+    })
+}
+
+#[cfg(feature = "sqlite")]
+fn admit_loaded(
+    cache: &Cache,
+    path: &Path,
+    entry: Entry,
+    key: (u64, u64),
+    reads: &crate::source::ReadSet,
+) -> Option<Vec<SessionRef>> {
+    let mut entries = cache.entries.write().unwrap();
+    let entry = entries.entry(path.to_path_buf()).or_insert(entry);
+    if (entry.mtime_ns, entry.size) != key {
+        return None;
+    }
+    entry
+        .payload
+        .known()
+        .and_then(|(refs, captured)| (captured == reads).then(|| refs.clone()))
 }
 
 /// `(mtime_ns, size)` for `path`, or `None` if it can't be stat'd (then callers just scan).
@@ -183,30 +221,42 @@ where
     let Some((mtime_ns, size)) = stat_key(path) else {
         return scan();
     };
-    let cache = CACHE.get_or_init(load);
-    clear_invalidated(cache);
-    let decode = {
+    let context = read::Context::current();
+    let cache = context.cache();
+    clear_invalidated(&cache);
+    let candidate = {
         let entries = cache.entries.read().unwrap();
-        if let Some(e) = entries.get(path).filter(|e| e.mtime_ns == mtime_ns && e.size == size) {
-            if let Some((refs, captured)) = e.payload.known() {
-                if captured == &reads && reads.fresh(&mut crate::source::Probe::default()) {
-                    return refs.clone();
-                }
-            }
-            e.payload.encoded()
-        } else {
-            false
-        }
+        entries
+            .get(path)
+            .filter(|entry| entry.mtime_ns == mtime_ns && entry.size == size)
+            .and_then(|entry| entry.payload.known())
+            .and_then(|(refs, captured)| (captured == &reads).then(|| refs.clone()))
     };
-    if decode {
-        let mut entries = cache.entries.write().unwrap();
-        if let Some(e) = entries.get_mut(path) {
-            // Recheck after upgrading the lock; another scanner may have replaced the row.
-            if e.mtime_ns == mtime_ns && e.size == size {
-                if let Some((refs, captured)) = e.payload.parsed() {
-                    if captured == &reads && reads.fresh(&mut crate::source::Probe::default()) {
-                        return refs.clone();
-                    }
+    if let Some(refs) = candidate {
+        if reads.fresh(&mut crate::source::Probe::default()) {
+            return refs;
+        }
+    }
+    // Do not reload an existing process entry, even when stale or invalid: a fresh scan replaces it.
+    #[cfg(feature = "sqlite")]
+    if !cache.entries.read().unwrap().contains_key(path) {
+        #[cfg(test)]
+        context.note_lookup();
+        let loaded = context
+            .with_connection(|conn| load_entry(conn, path, (mtime_ns, size)))
+            .flatten();
+        // A lazy standalone open may migrate interpretation; clear before retaining this scan.
+        clear_invalidated(&cache);
+        if let Some(mut entry) = loaded {
+            #[cfg(test)]
+            context.note_row();
+            // Decode outside locks, then choose the actual current process entry. A concurrent
+            // scan/count update must win over the older SQL snapshot, including on return.
+            entry.payload.parsed();
+            let candidate = admit_loaded(&cache, path, entry, (mtime_ns, size), &reads);
+            if let Some(refs) = candidate {
+                if reads.fresh(&mut crate::source::Probe::default()) {
+                    return refs;
                 }
             }
         }
@@ -235,7 +285,7 @@ where
 /// Original before-read metadata, never a fresh post-discovery stamp.
 #[cfg(feature = "sqlite")]
 pub(crate) fn captured_reads(path: &Path) -> Option<crate::source::ReadSet> {
-    let cache = CACHE.get()?;
+    let cache = read::Context::current().cached()?;
     {
         let entries = cache.entries.read().ok()?;
         let e = entries.get(path)?;
@@ -261,8 +311,8 @@ where
         .next()
 }
 
-fn persistence_cache(prune: bool) -> Option<&'static Cache> {
-    let cache = CACHE.get()?;
+fn persistence_cache(path: &Path, prune: bool) -> Option<Arc<Cache>> {
+    let cache = existing_cache(path)?;
     (cache.any_dirty.load(Ordering::Relaxed) || prune).then_some(cache)
 }
 
@@ -271,19 +321,21 @@ fn persistence_cache(prune: bool) -> Option<&'static Cache> {
 /// *full* [`crate::discover_all`] (the stat-per-row cost belongs on the slow path; per-harness
 /// probe refreshes skip it). Best-effort: a failed flush just means a re-scan next run.
 pub(crate) fn persist(prune: bool) {
-    if persistence_cache(prune).is_none() {
+    if persistence_cache(&read::Context::current().path(), prune).is_none() {
         return;
     }
     #[cfg(feature = "sqlite")]
-    if let Some(mut conn) = crate::catalog::open_db() {
-        persist_in(&mut conn, prune);
+    {
+        read::Context::current().with_connection_mut(|conn| persist_in(conn, prune));
     }
 }
 
 #[cfg(feature = "sqlite")]
 pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
-    let Some(cache) = persistence_cache(prune) else { return };
-    clear_invalidated(cache);
+    let Some(cache) = persistence_cache(Path::new(conn.path().unwrap_or("")), prune) else {
+        return;
+    };
+    clear_invalidated(&cache);
     // Full discovery still checks every persisted path, including deferred or malformed
     // payloads. Pruning therefore keeps its existing completeness semantics.
     let mut prune_paths: std::collections::HashSet<String> = if prune {
@@ -382,8 +434,8 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
         }
         hit
     };
-    if let Some(cache) = CACHE.get() {
-        clear_invalidated(cache);
+    if let Some(cache) = existing_cache(Path::new(conn.path().unwrap_or(""))) {
+        clear_invalidated(&cache);
         if let Some(e) = cache.entries.write().unwrap().get_mut(path) {
             if let Some((refs, _)) = e.payload.parsed() {
                 fill(refs);
@@ -446,15 +498,12 @@ mod tests {
             ).unwrap();
             expected.push((r, reads));
         }
-        let loaded = load();
-        assert!(loaded.entries.read().unwrap().values().all(|e| e.payload.encoded()));
-        let cache = CACHE.get_or_init(load);
-        clear_invalidated(cache);
-        cache
-            .entries
-            .write()
-            .unwrap()
-            .extend(loaded.entries.into_inner().unwrap());
+        let cache = current_cache();
+        clear_invalidated(&cache);
+        assert!(
+            cache.entries.read().unwrap().is_empty(),
+            "no unrelated persisted payload is loaded"
+        );
         // Count publication may demand an encoded row before discovery does.
         fill_count(&conn, &paths[0], crate::Harness::Claude, "row-0", 2);
         assert_eq!(
@@ -465,13 +514,11 @@ mod tests {
         );
         assert_eq!(captured_reads(&paths[0]).unwrap(), expected[0].1);
         assert!(
-            cache.entries.read().unwrap()[&paths[1]].payload.encoded(),
-            "unrelated malformed payload stays undecoded"
+            !cache.entries.read().unwrap().contains_key(&paths[1]),
+            "unrelated malformed row stays unloaded"
         );
-        assert!(
-            captured_reads(&paths[1]).is_none(),
-            "invalid refs never publish otherwise valid guards"
-        );
+        assert!(captured_reads(&paths[1]).is_none());
+        assert!(cached_scan_many(&paths[1], Vec::new).is_empty());
         assert!(matches!(
             cache.entries.read().unwrap()[&paths[1]].payload,
             Payload::Invalid
@@ -481,8 +528,8 @@ mod tests {
         std::fs::write(&paths[2], "appended content").unwrap();
         let fresh = cached_scan(&paths[2], || {
             assert!(
-                cache.entries.read().unwrap()[&paths[2]].payload.encoded(),
-                "tuple mismatch precedes decoding"
+                !cache.entries.read().unwrap().contains_key(&paths[2]),
+                "tuple mismatch avoids persisted payload loading"
             );
             Some(SessionRef {
                 message_count: 3,
@@ -491,20 +538,19 @@ mod tests {
         })
         .unwrap();
         assert_eq!(fresh.message_count, 3);
+        assert!(cached_scan_many(&paths[3], Vec::new).is_empty());
         assert!(captured_reads(&paths[3]).is_none(), "invalid ReadSet must also miss");
         assert_eq!(
             cached_scan(&paths[3], || Some(expected[3].0.clone())).unwrap().id,
             expected[3].0.id
         );
         persist_in(&mut conn, false);
-        let loaded = load();
-        let mut entries = loaded.entries.write().unwrap();
         for (i, path) in paths.iter().enumerate() {
-            let (refs, reads) = entries.get_mut(path).unwrap().payload.parsed().unwrap();
+            let mut entry = load_entry(&conn, path, stat_key(path).unwrap()).unwrap();
+            let (refs, reads) = entry.payload.parsed().unwrap();
             assert_eq!(refs[0].message_count, [2, 0, 3, 0][i]);
             assert!(reads.fresh(&mut crate::source::Probe::default()));
         }
-        drop(entries);
         std::fs::remove_file(&paths[1]).unwrap();
         persist_in(&mut conn, true);
         assert_eq!(
@@ -559,7 +605,7 @@ mod tests {
         );
         assert!(crate::catalog::last_full_sync().is_none());
         assert!(
-            load().entries.read().unwrap().is_empty(),
+            load_entry(&conn, &path, stat_key(&path).unwrap()).is_none(),
             "old persisted interpretation ignored"
         );
         let current = SessionRef {
@@ -594,8 +640,31 @@ mod tests {
             [path.to_string_lossy()],
         )
         .unwrap();
-        assert!(load().entries.read().unwrap().is_empty());
+        assert!(load_entry(&conn, &path, stat_key(&path).unwrap()).is_none());
     }
+    #[test]
+    fn concurrent_count_update_wins_over_loaded_sql_snapshot() {
+        let world = cv_testkit::World::in_process("scan-admission-count");
+        let path = world.base.join("source");
+        std::fs::write(&path, "metadata").unwrap();
+        let reference = SessionRef::new("counted", crate::Harness::Claude, path.clone());
+        cached_scan(&path, || Some(reference));
+        persist(false);
+        let conn = crate::catalog::open_db().unwrap();
+        let key = stat_key(&path).unwrap();
+        let mut old_sql = load_entry(&conn, &path, key).unwrap();
+        assert_eq!(old_sql.payload.parsed().unwrap().0[0].message_count, 0);
+        fill_count(&conn, &path, crate::Harness::Claude, "counted", 7);
+        let cache = current_cache();
+        let mut reads = crate::source::ReadSet::default();
+        reads.record(&path);
+        let actual = admit_loaded(&cache, &path, old_sql, key, &reads).unwrap();
+        assert_eq!(
+            actual[0].message_count, 7,
+            "newer process count wins on admission AND return"
+        );
+    }
+
     #[test]
     fn failed_flush_retries_and_prunes_newly_vanished_entries() {
         let w = cv_testkit::World::in_process("scan-persist-retry");
@@ -618,10 +687,10 @@ mod tests {
         )
         .unwrap();
         persist(false);
-        assert!(CACHE.get().unwrap().entries.read().unwrap().get(&path).unwrap().dirty);
+        assert!(current_cache().entries.read().unwrap().get(&path).unwrap().dirty);
         conn.execute_batch("DROP TRIGGER reject_cache;").unwrap();
         persist(false);
-        assert!(!CACHE.get().unwrap().entries.read().unwrap().get(&path).unwrap().dirty);
+        assert!(!current_cache().entries.read().unwrap().get(&path).unwrap().dirty);
         assert_eq!(
             conn.query_row(
                 "SELECT count(*) FROM scan_cache WHERE path=?1",
@@ -643,7 +712,7 @@ mod tests {
         // Include a malformed persisted row: pruning must not rely only on loaded entries.
         conn.execute("INSERT INTO scan_cache(path,mtime_ns,size,refs,source_reads) VALUES('missing-malformed',1,1,'broken','broken')", []).unwrap();
         persist(true);
-        assert!(!CACHE.get().unwrap().entries.read().unwrap().contains_key(&vanished));
+        assert!(!current_cache().entries.read().unwrap().contains_key(&vanished));
         assert_eq!(
             conn.query_row(
                 "SELECT count(*) FROM scan_cache WHERE path=?1 OR path='missing-malformed'",
@@ -699,11 +768,8 @@ mod tests {
         let fresh = cached_scan(&path, || Some(SessionRef { id: "new".into(), ..r })).unwrap();
         assert_eq!(fresh.id, "new");
         persist(false);
-        let loaded = load();
-        let mut entries = loaded.entries.write().unwrap();
-        assert!(entries
-            .get_mut(&path)
-            .unwrap()
+        let mut loaded = load_entry(&conn, &path, stat_key(&path).unwrap()).unwrap();
+        assert!(loaded
             .payload
             .parsed()
             .unwrap()

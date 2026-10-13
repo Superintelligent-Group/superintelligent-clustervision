@@ -15,7 +15,7 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 
 | User operation | What we know | Next question / action |
 |---|---|---|
-| List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Catalog setup is shared across listing/discovery read and publication stages; changed-harness refresh now also reuses that owner. Cold discovery still derives counts from content, and first-use metadata-cache loading retains its lazy catalog open. | Matched eight-session whole-CLI controls show 34.03% fewer warm-list instructions and 13.59% fewer cold-list instructions, with identical output; see the [comparison artifact](../../tools/profiling/results/catalog-reader-comparison-arm64.json). This isolates setup work and does not rank the real fleet. The subsequent scoped-refresh control uses one initialization with an already loaded metadata cache. Preserve freshness and exact counts. |
+| List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Catalog setup is shared across listing/discovery read and publication stages; changed-harness refresh now also reuses that owner. Cold discovery still derives counts from content. Persisted metadata is fetched by demanded path/tuple, reusing the operation catalog owner; standalone cached discovery batches initialize lazily once. | Matched eight-session whole-CLI controls show 34.03% fewer warm-list instructions and 13.59% fewer cold-list instructions, with identical output; see the [comparison artifact](../../tools/profiling/results/catalog-reader-comparison-arm64.json). This isolates setup work and does not rank the real fleet. The subsequent scoped-refresh control uses one initialization with an already loaded metadata cache. Preserve freshness and exact counts. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. One candidate decodes one cached row with 8 or 1,024 unrelated records; inventory enumeration and ranking still scale with fleet size. Required source errors remain fatal. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
@@ -2460,7 +2460,7 @@ All four output digests match and the refreshed count is two; stderr is empty. T
 case retains the same 20,706-byte peak. Compiler/features/profile are matched; these are synthetic
 allocation controls, not elapsed-time, native allocation or mapped-page measurements.
 
-Bulk SQL string copying/retention and persistence's map walk remain proportional to cache size.
+At this earlier checkpoint, bulk SQL string copying/retention and persistence's map walk remained proportional to cache size; the keyed-demand follow-up below removes the first cost.
 This change avoids eager nested metadata decoding without a new connection pool or partial-load
 scope protocol; it does not establish bounded first-use cache memory.
 
@@ -2567,3 +2567,52 @@ Thinking, `--upto` selection and exact invalid-count errors. Nondefault `--with`
 three-byte-result-cap/eight-byte-note-cap/no-ledger pack and resume controls match with human
 reports. Strict native clippy and the end-to-end CLI distill/splice/session/sub-agent check pass.
 Full convergence belongs to integration.
+
+### First-process scoped discovery: keyed persisted demand (2026-10-13)
+
+The metadata cache now starts empty and selects persisted refs/read sets only for an absent
+process entry with a matching path, tuple and interpretation version. Serialized payloads are
+decoded outside locks; captured identities are compared before returning refs and revalidated
+outside SQL/cache locks. Malformed requested payloads remain misses, unrelated malformed rows
+stay unloaded, and count updates or newer process entries win over an older loaded SQL candidate.
+Dirty retry, interpretation invalidation and full pruning of vanished persisted paths remain.
+Full pruning still enumerates every persisted path, including unloaded malformed rows.
+
+Discovery receives an operation capability backed by the existing catalog reader connection.
+Only discovery dispatch propagates it through Rayon; unrelated parallel consumers are unchanged.
+Standalone cached batches initialize one connection lazily, while no-cache callbacks initialize
+neither connection nor cache. Capabilities capture their catalog path rather than consulting a
+later home change. Nested scopes restore prior context; non-Send/non-Sync guards and tokens
+prevent cross-thread restoration and an earlier drop removing a newer scope. Overlapping homes
+retain independent capabilities/caches. Globally only the current cache is strongly retained;
+other homes survive through live operation owners, not an accumulating home map. Connections
+drop at operation end. Source scanning and demanded payload freshness checks happen outside
+connection/cache locks; publication guard preparation and primary capture also release SQL first.
+Existing full-prune/stat freshness recipes remain operation-final/pre-discovery work.
+
+The extended [control](../../tools/profiling/discovery-cache.py) and
+[allocation/work artifact](../../tools/profiling/results/discovery-cache-keyed-native.json) compare
+frozen `1377fdc9` production code with this implementation. One changed Claude source and 4,096
+unrelated serialized cache rows reduce allocation requests **13,549 → 1,252**, requested bytes
+**8,627,736 → 151,296**, and peak requested Rust heap above baseline **7,637,031 → 21,504 B**.
+Candidate requested bytes/requests equal its zero-unrelated case; peak differs by 112 B.
+The zero-unrelated case has four additional requests, 186 additional requested bytes and a
+1,159-byte higher peak. Probe discovery bytes/counts and actual installed-baseline/candidate
+`cv ls --json` stdout match exactly, with empty stderr and unchanged source identities/hashes.
+
+Forced full warm discovery is a deliberate tradeoff: every file demands its metadata, so one
+bulk cursor becomes N indexed statement executions plus short mutex/context work. At 64 real
+synthetic files requested bytes rise **2,020,157 → 2,029,038** (+0.44%); at 4,096 files they rise
+**77,683,015 → 78,207,992** (+0.68%), with **236,932 → 241,033** requests and a **1,223-byte**
+higher peak. Full discovery and CLI output remain exact in both sizes. The supplied-owner work
+control opens no additional catalog connection; a standalone batch opens once for 64 initial
+hits, repeats them without SQL, then performs four indexed misses for four uncached empty scans.
+Same-path concurrent misses may duplicate lookup/decode work; this is not a singleflight cache.
+
+Native and SQLite-without-mmap cache/scope controls pass, including concurrent count admission,
+malformed/tuple/version misses, guard mutation, retry/prune, nested/home overlap and Rayon panic
+restoration. Ten catalog controls preserve publication order/failure behavior and owner reuse;
+no-SQL compilation passes. These synthetic requested-allocation/SQL-work controls exclude SQLite
+native allocations, stacks/mapped pages, instruction/time costs and real fleet ranking. They prove
+removal of unrelated serialized ownership, not universally faster full discovery or bounded fleet
+metadata/results. Full discovery still enumerates/stats actual inventory and retains demanded refs.

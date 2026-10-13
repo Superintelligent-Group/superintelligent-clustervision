@@ -183,7 +183,7 @@ impl Adapter for KimiCode {
                 dirs.push((sdir, id.to_string(), fallback_cwd));
             }
         }
-        Ok(crate::par_flat_map(dirs, |(sdir, id, fallback_cwd)| {
+        Ok(crate::par_discovery_flat_map(dirs, |(sdir, id, fallback_cwd)| {
             // Key the freshness check on the transcript (state.json is rewritten too, but the
             // transcript grows on every turn and is what the scan reads).
             let key = main_wire(&sdir);

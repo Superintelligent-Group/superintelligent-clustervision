@@ -6,7 +6,7 @@ use crate::Harness;
 /// this owner has no process-global connection or schema cache.
 pub(crate) struct Reader {
     #[cfg(feature = "sqlite")]
-    conn: rusqlite::Connection,
+    conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
     #[cfg(all(test, feature = "sqlite"))]
     counts_lookups: std::cell::Cell<usize>,
     #[cfg(all(test, feature = "sqlite"))]
@@ -18,7 +18,7 @@ impl Reader {
         #[cfg(feature = "sqlite")]
         {
             super::imp::open_db().map(|conn| Self {
-                conn,
+                conn: std::sync::Arc::new(std::sync::Mutex::new(conn)),
                 #[cfg(test)]
                 counts_lookups: std::cell::Cell::new(0),
                 #[cfg(test)]
@@ -28,6 +28,18 @@ impl Reader {
         #[cfg(not(feature = "sqlite"))]
         {
             None
+        }
+    }
+
+    /// Share this operation's initialized connection with scoped discovery workers.
+    pub(crate) fn discovery_scope(&self) -> crate::discover_cache::read::Scope {
+        #[cfg(feature = "sqlite")]
+        {
+            crate::discover_cache::read::Context::from_connection(self.conn.clone()).enter()
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            crate::discover_cache::read::Context::current().enter()
         }
     }
 
@@ -45,8 +57,8 @@ impl Reader {
             #[cfg(test)]
             self.counts_lookups.set(self.counts_lookups.get() + 1);
             let (a, b, counts, mtime, size, stamp) = {
-                let mut stmt = self
-                    .conn
+                let conn = self.conn.lock().ok()?;
+                let mut stmt = conn
                     .prepare_cached(
                         "SELECT a.sig_a,a.sig_b,a.counts,d.mtime,d.size,d.stamp
                      FROM affordance_counts AS a JOIN source_dependencies AS d
@@ -95,7 +107,7 @@ impl Reader {
     pub(crate) fn last_full_sync(&self) -> Option<i64> {
         #[cfg(feature = "sqlite")]
         {
-            super::imp::last_full_sync_in(&self.conn)
+            super::imp::last_full_sync_in(&self.conn.lock().unwrap())
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -106,7 +118,7 @@ impl Reader {
     pub(crate) fn probe_stale(&self) -> Option<Vec<Harness>> {
         #[cfg(feature = "sqlite")]
         {
-            super::imp::probe_stale_in(&self.conn)
+            super::imp::probe_stale_in(&self.conn.lock().unwrap())
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -117,7 +129,7 @@ impl Reader {
     pub(crate) fn all_sessions(&self) -> Option<Vec<SessionRef>> {
         #[cfg(feature = "sqlite")]
         {
-            super::imp::all_sessions_in(&self.conn)
+            super::imp::all_sessions_in(&self.conn.lock().unwrap())
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -128,7 +140,8 @@ impl Reader {
     pub(crate) fn capture_primary_reads(&self, a: &dyn crate::Adapter) -> super::PrimaryReads {
         #[cfg(feature = "sqlite")]
         {
-            super::imp::capture_primary_reads_in(&self.conn, a)
+            let refs = super::imp::primary_refs_in(&self.conn.lock().unwrap(), a.harness());
+            super::capture_primary_reads_from(a, &refs)
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -145,7 +158,10 @@ impl Reader {
         before: &super::PrimaryReads,
     ) {
         #[cfg(feature = "sqlite")]
-        super::imp::replace_harness_in(&mut self.conn, h, refs, watches, before);
+        {
+            let sources = super::imp::prepare_sources(h, refs, before);
+            super::imp::replace_prepared_in(&mut self.conn.lock().unwrap(), h, refs, watches, &sources);
+        }
         #[cfg(not(feature = "sqlite"))]
         let _ = (h, refs, watches, before);
     }
@@ -153,7 +169,7 @@ impl Reader {
     pub(crate) fn persist_discovery(&mut self, prune: bool) {
         #[cfg(feature = "sqlite")]
         {
-            crate::discover_cache::persist_in(&mut self.conn, prune);
+            crate::discover_cache::persist_in(&mut self.conn.lock().unwrap(), prune);
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -164,7 +180,11 @@ impl Reader {
     pub(crate) fn publish_all(&mut self, rows: &[Publication<'_>]) {
         #[cfg(feature = "sqlite")]
         {
-            super::imp::publish_all_in(&mut self.conn, rows);
+            let sources: Vec<_> = rows
+                .iter()
+                .map(|(h, refs, _, before)| super::imp::prepare_sources(*h, refs, before))
+                .collect();
+            super::imp::publish_all_in(&mut self.conn.lock().unwrap(), rows, &sources);
         }
         #[cfg(not(feature = "sqlite"))]
         {

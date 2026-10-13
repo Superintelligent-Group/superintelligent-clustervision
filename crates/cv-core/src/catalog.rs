@@ -73,7 +73,7 @@ mod imp {
     /// appearance must invalidate discovery even if the database itself has not changed.
     const WATCH_ABSENT: i64 = -1;
 
-    fn db_path() -> Option<PathBuf> {
+    pub(crate) fn db_path() -> Option<PathBuf> {
         // Back-compat: also honor the legacy `$CLAURDVOYANT_HOME` / `claurdvoyant` cache dir so a
         // catalog built before the rename keeps being used.
         let dir = std::env::var_os("CLUSTERVISION_HOME")
@@ -100,9 +100,13 @@ mod imp {
     thread_local! { static OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
     fn open() -> Option<Connection> {
+        open_at(&db_path()?)
+    }
+
+    pub(crate) fn open_at(path: &Path) -> Option<Connection> {
         #[cfg(test)]
         OPEN_COUNT.with(|n| n.set(n.get() + 1));
-        let mut conn = Connection::open(db_path()?).ok()?;
+        let mut conn = Connection::open(path).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
         conn.execute_batch(
@@ -214,7 +218,7 @@ mod imp {
                 )
                 .ok()?;
                 tx.commit().ok()?;
-                crate::discover_cache::invalidate_interpretation();
+                crate::discover_cache::invalidate_interpretation(path);
             }
         }
         Some(conn)
@@ -306,20 +310,16 @@ mod imp {
 
     /// Bracket known primary sources before discovery. New uncached paths stay unknown until
     /// a later scoped pass; never bless an identity sampled after its metadata was read.
-    pub(super) fn capture_primary_reads_in(conn: &Connection, a: &dyn crate::Adapter) -> PrimaryReads {
+    pub(super) fn primary_refs_in(conn: &Connection, h: Harness) -> Vec<SessionRef> {
         let Ok(mut stmt) = conn.prepare(&format!("SELECT {REF_COLUMNS} FROM sessions WHERE harness=?1")) else {
             return Default::default();
         };
-        let Ok(rows) = stmt.query_map([a.harness().as_str()], row_to_ref) else {
+        let Ok(rows) = stmt.query_map([h.as_str()], row_to_ref) else {
             return Default::default();
         };
-        capture_primary_reads_from(
-            a,
-            &rows
-                .filter_map(Result::transpose)
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap_or_default(),
-        )
+        rows.filter_map(Result::transpose)
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap_or_default()
     }
 
     /// Replace one harness's catalog rows *and* its watch entries in a single transaction — the
@@ -332,6 +332,7 @@ mod imp {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn replace_harness_in(
         conn: &mut Connection,
         h: Harness,
@@ -340,8 +341,18 @@ mod imp {
         before: &PrimaryReads,
     ) {
         let sources = prepare_sources(h, refs, before);
+        replace_prepared_in(conn, h, refs, watches, &sources);
+    }
+
+    pub(super) fn replace_prepared_in(
+        conn: &mut Connection,
+        h: Harness,
+        refs: &[SessionRef],
+        watches: &[(PathBuf, i64)],
+        sources: &SourceRows,
+    ) {
         let Ok(tx) = conn.transaction() else { return };
-        if publish_harness_in(&tx, h, refs, watches, &sources, true).is_ok() {
+        if publish_harness_in(&tx, h, refs, watches, sources, true).is_ok() {
             let _ = tx.commit();
         }
     }
@@ -387,16 +398,12 @@ mod imp {
         }
     }
 
-    pub(super) fn publish_all_in(conn: &mut Connection, rows: &[Publication<'_>]) {
-        let sources: Vec<_> = rows
-            .iter()
-            .map(|(h, refs, _, before)| prepare_sources(*h, refs, before))
-            .collect();
+    pub(super) fn publish_all_in(conn: &mut Connection, rows: &[Publication<'_>], sources: &[SourceRows]) {
         let Ok(tx) = conn.transaction() else { return };
         let Ok(equal) = matches_sessions_in(&tx, rows.iter().flat_map(|(_, refs, _, _)| refs.iter())) else {
             return;
         };
-        for ((h, refs, watches, _), sources) in rows.iter().zip(&sources) {
+        for ((h, refs, watches, _), sources) in rows.iter().zip(sources) {
             if publish_harness_in(&tx, *h, refs, watches, sources, !equal).is_err() {
                 return;
             }
@@ -433,9 +440,9 @@ mod imp {
         Ok(())
     }
 
-    type SourceRows = std::collections::HashMap<String, rusqlite::types::Value>;
+    pub(super) type SourceRows = std::collections::HashMap<String, rusqlite::types::Value>;
 
-    fn prepare_sources(h: Harness, refs: &[SessionRef], before: &PrimaryReads) -> SourceRows {
+    pub(super) fn prepare_sources(h: Harness, refs: &[SessionRef], before: &PrimaryReads) -> SourceRows {
         // Resolve cache guards before acquiring the SQLite writer: cache persistence takes
         // the cache lock first, so reversing that order here could deadlock.
         let mut source_rows = std::collections::HashMap::new();
@@ -1315,7 +1322,7 @@ pub use imp::{
     affordance_sig, fill_count, lookup, note_affordances, note_affordances_with_source, sync, AffordanceTable,
 };
 #[cfg(feature = "sqlite")]
-pub(crate) use imp::{all_sessions, open_db, watches_for};
+pub(crate) use imp::{all_sessions, db_path, open_at, open_db, watches_for};
 
 #[cfg(all(feature = "sqlite", test))]
 pub(crate) use imp::replace_harness;

@@ -110,7 +110,7 @@ impl Adapter for Gemini {
             .filter(|e| e.file_type().is_file())
             .map(|e| e.into_path())
             .collect();
-        let refs = crate::par_flat_map(paths, |path| {
+        let refs = crate::par_discovery_flat_map(paths, |path| {
             crate::discover_cache::cached_scan_many(&path, || scan_session_file(&path, Harness::Gemini))
         });
         Ok(dedupe_by_id(refs))

@@ -301,7 +301,7 @@ impl Adapter for Claude {
                     .is_some_and(|n| n.ends_with(".flat.jsonl"))
             })
             .collect();
-        Ok(crate::par_filter_map(paths, |path| {
+        Ok(crate::par_discovery_filter_map(paths, |path| {
             crate::discover_cache::cached_scan(&path, || match scan(&path) {
                 Ok(r) => Some(r),
                 Err(e) => {
@@ -1345,7 +1345,7 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>, ric
             }
         }
     }
-    crate::par_filter_map(paths, |p| {
+    crate::par_discovery_filter_map(paths, |p| {
         let session = if rich {
             scan(&p).ok()?
         } else {
