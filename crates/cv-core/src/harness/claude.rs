@@ -302,13 +302,7 @@ impl Adapter for Claude {
             })
             .collect();
         Ok(crate::par_discovery_filter_map(paths, |path| {
-            crate::discover_cache::cached_scan(&path, || match scan(&path) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    eprintln!("cv: skipping {}: {e:#}", path.display());
-                    None
-                }
-            })
+            cached_metadata(&path, true)
         }))
     }
 
@@ -1351,7 +1345,7 @@ fn agents_in_dir(dir: &std::path::Path, wf: Option<(&str, &JournalResults)>, ric
         } else {
             // Retain the old open-failure exclusion even on a metadata cache hit.
             fs::File::open(&p).ok()?;
-            crate::discover_cache::cached_scan(&p, || scan(&p).ok())?
+            cached_metadata(&p, false)?
         };
         let meta = if rich {
             read_meta(&p.with_extension("meta.json"))
@@ -1569,21 +1563,69 @@ pub fn task_notices(parent_path: &std::path::Path) -> std::collections::HashMap<
 }
 
 /// Cheap metadata-only scan for `discover`.
-fn scan(path: &std::path::Path) -> Result<SessionRef> {
+fn cached_metadata(path: &Path, warn: bool) -> Option<SessionRef> {
+    crate::discover_cache::cached_scan_continued(path, metadata::CONTINUATION_VERSION, |from| {
+        match scan_at(path, from) {
+            Ok((reference, checkpoint)) => {
+                let continuation = checkpoint.and_then(|checkpoint| {
+                    let head = crate::resume::MarkHead::of(path, &checkpoint, metadata::CONTINUATION_VERSION)?;
+                    Some(crate::discover_cache::ScanContinuation {
+                        head,
+                        checkpoint,
+                        dependencies: Default::default(),
+                    })
+                });
+                (Some(reference), continuation)
+            }
+            Err(error) => {
+                if warn {
+                    eprintln!("cv: skipping {}: {error:#}", path.display());
+                }
+                (None, None)
+            }
+        }
+    })
+}
+
+fn scan(path: &Path) -> Result<SessionRef> {
+    Ok(scan_at(path, None)?.0)
+}
+
+fn scan_at(path: &Path, from: Option<&Checkpoint>) -> Result<(SessionRef, Option<Checkpoint>)> {
+    let source = JsonSource::capture(path)?;
     let file = fs::File::open(path)?;
-    let mut scan = metadata::Scan::new(path);
+    source.check_metadata(file.metadata()?)?;
+    let (mut scan, offset) = metadata::Scan::restore(path, from);
+    let _remaining = source
+        .len()
+        .checked_sub(offset)
+        .context("discovery checkpoint outside source")?;
+    #[cfg(test)]
+    metadata::FRAMED.with(|frames| frames.borrow_mut().push((offset, _remaining)));
     #[cfg(feature = "mmap")]
     if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
         #[cfg(unix)]
         let _ = map.advise(memmap2::Advice::Sequential);
-        scan.bytes(&map);
-        return Ok(scan.finish());
+        let bytes = map
+            .get(usize::try_from(offset)?..usize::try_from(source.len())?)
+            .context("discovery offset outside source")?;
+        scan.bytes_at(bytes, offset);
+        source.check_metadata(file.metadata()?)?;
+        let checkpoint = scan.checkpoint();
+        return Ok((scan.finish(), checkpoint));
     }
     #[cfg(not(feature = "mmap"))]
-    scan.positioned(&file, &JsonSource::capture(path)?)?;
+    scan.positioned_at(&file, &source, offset)?;
     #[cfg(feature = "mmap")]
-    scan.reader(BufReader::new(file));
-    Ok(scan.finish())
+    {
+        use std::io::{Seek, SeekFrom};
+        let mut reader = &file;
+        reader.seek(SeekFrom::Start(offset))?;
+        scan.reader_at(BufReader::new(reader), offset);
+    }
+    source.check_metadata(file.metadata()?)?;
+    let checkpoint = scan.checkpoint();
+    Ok((scan.finish(), checkpoint))
 }
 
 /// Turn one record into an IR [`Message`]. Handles `user`/`assistant` (the conversation) and the

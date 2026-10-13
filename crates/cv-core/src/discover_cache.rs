@@ -1,7 +1,7 @@
 //! A persistent cache for the cheap metadata that `discover` produces.
 //!
 //! Discovery's expensive step is reading + JSON-parsing every transcript to extract metadata.
-//! Cache hits require unchanged `(mtime, size)` and captured file identity, rejecting appends,
+//! Exact cache hits require unchanged `(mtime, size)` and captured file identity, rejecting appends,
 //! timestamp-preserving replacements and rewrites. A hit returns stored [`SessionRef`]s without
 //! reading transcript content; full discovery still freshly enumerates each harness's inventory.
 //!
@@ -13,6 +13,8 @@
 //! missing or unreadable cache simply means everything is re-scanned (and the cache rebuilt).
 //! Entries are reused only when interpretation, tuple, and captured file identity match.
 //! Captured source identities also reject replacement or rewrites with restored timestamps.
+//! Opted-in adapters may continue metadata on growth under their immutable-prefix contract,
+//! using independent reducer state and sampled resume guards, never stale published refs.
 
 use crate::ir::SessionRef;
 use std::collections::HashMap;
@@ -63,10 +65,22 @@ impl Payload {
     }
 }
 
+/// A metadata reducer checkpoint, kept in scan_cache rather than consumer resume_marks.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScanContinuation {
+    pub head: crate::resume::MarkHead,
+    pub checkpoint: crate::stream::Checkpoint,
+    #[serde(default = "crate::source::ReadSet::unrecorded")]
+    /// Auxiliary identities only: the growing primary is guarded by head and before/after reads.
+    pub dependencies: crate::source::ReadSet,
+}
+
 struct Entry {
     mtime_ns: u64,
     size: u64,
     payload: Payload,
+    /// Private reducer state, independent of mutable published refs; decode only on append.
+    continuation: Option<String>,
     /// Scanned this run and not yet written back to sqlite.
     dirty: bool,
 }
@@ -156,8 +170,8 @@ fn load() -> Cache {
 
 #[cfg(feature = "sqlite")]
 fn load_entry(conn: &rusqlite::Connection, path: &Path, key: (u64, u64)) -> Option<Entry> {
-    let mut statement = conn.prepare_cached("SELECT refs,source_reads FROM scan_cache WHERE path=?1 AND mtime_ns=?2 AND size=?3 AND interpretation_version=?4").ok()?;
-    let (refs, reads) = statement
+    let mut statement = conn.prepare_cached("SELECT refs,source_reads,continuation FROM scan_cache WHERE path=?1 AND mtime_ns=?2 AND size=?3 AND interpretation_version=?4").ok()?;
+    let (refs, reads, continuation) = statement
         .query_row(
             rusqlite::params![
                 path.to_string_lossy(),
@@ -165,15 +179,28 @@ fn load_entry(conn: &rusqlite::Connection, path: &Path, key: (u64, u64)) -> Opti
                 key.1 as i64,
                 INTERPRETATION_VERSION
             ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .ok()?;
     Some(Entry {
         mtime_ns: key.0,
         size: key.1,
         payload: Payload::Encoded { refs, reads },
+        continuation,
         dirty: false,
     })
+}
+
+#[cfg(feature = "sqlite")]
+fn load_previous(conn: &rusqlite::Connection, path: &Path, size: u64) -> Option<(u64, String)> {
+    conn.prepare_cached("SELECT size,continuation FROM scan_cache WHERE path=?1 AND size<?2 AND interpretation_version=?3 AND continuation IS NOT NULL").ok()?
+        .query_row(rusqlite::params![path.to_string_lossy(),size as i64,INTERPRETATION_VERSION], |row| Ok((row.get::<_, i64>(0)? as u64,row.get(1)?))).ok()
 }
 
 #[cfg(feature = "sqlite")]
@@ -216,10 +243,31 @@ pub(crate) fn cached_scan_many<F>(path: &Path, scan: F) -> Vec<SessionRef>
 where
     F: FnOnce() -> Vec<SessionRef>,
 {
+    cached_scan_inner(path, None, |_| (scan(), None))
+}
+
+/// Opt-in append metadata state. Exact hits retain their existing guards; a continuation is
+/// eligible only under the adapter's immutable-prefix append contract and sampled MarkHead.
+pub(crate) fn cached_scan_continued<F>(path: &Path, version: &str, scan: F) -> Option<SessionRef>
+where
+    F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Option<SessionRef>, Option<ScanContinuation>),
+{
+    cached_scan_inner(path, Some(version), |from| {
+        let (reference, continuation) = scan(from);
+        (reference.into_iter().collect(), continuation)
+    })
+    .into_iter()
+    .next()
+}
+
+fn cached_scan_inner<F>(path: &Path, version: Option<&str>, scan: F) -> Vec<SessionRef>
+where
+    F: FnOnce(Option<&crate::stream::Checkpoint>) -> (Vec<SessionRef>, Option<ScanContinuation>),
+{
     let mut reads = crate::source::ReadSet::default();
     reads.record(path);
     let Some((mtime_ns, size)) = stat_key(path) else {
-        return scan();
+        return scan(None).0;
     };
     let context = read::Context::current();
     let cache = context.cache();
@@ -261,11 +309,65 @@ where
             }
         }
     }
-    let refs = scan();
+    #[allow(unused_mut)] // Persistence may replace the in-process candidate with a demanded row.
+    let mut previous = version.and_then(|_| {
+        let entries = cache.entries.read().unwrap();
+        entries
+            .get(path)
+            .and_then(|entry| entry.continuation.as_ref().map(|state| (entry.size, state.clone())))
+    });
+    #[cfg(feature = "sqlite")]
+    if version.is_some() && !cache.entries.read().unwrap().contains_key(path) {
+        #[cfg(test)]
+        context.note_lookup();
+        previous = context
+            .with_connection(|conn| load_previous(conn, path, size))
+            .flatten();
+        // As with exact demand, a newer in-process row wins over an older SQL snapshot.
+        if let Some(entry) = cache.entries.read().unwrap().get(path) {
+            previous = entry.continuation.as_ref().map(|state| (entry.size, state.clone()));
+        }
+    }
+    let prior = previous.and_then(|(old_size, text)| {
+        if old_size >= size {
+            return None;
+        }
+        let prior: ScanContinuation = serde_json::from_str(&text).ok()?;
+        (prior.head.offset <= old_size
+            && prior.checkpoint.offset == prior.head.offset
+            && prior.dependencies.fresh(&mut crate::source::Probe::default())
+            && prior.head.holds(path, size, version?))
+        .then_some(prior)
+    });
+    if let Some(prior) = &prior {
+        reads.merge(&prior.dependencies);
+    }
+    let (refs, mut continuation) = scan(prior.as_ref().map(|prior| &prior.checkpoint));
+    if let Some(state) = &mut continuation {
+        if let Some(prior) = &prior {
+            state.dependencies.merge(&prior.dependencies);
+        }
+        reads.merge(&state.dependencies);
+    }
+    let continuation = continuation
+        .filter(|state| {
+            Some(state.head.version.as_str()) == version
+                && state.head.offset == state.checkpoint.offset
+                && state.head.offset <= size
+                && reads.fresh(&mut crate::source::Probe::default())
+                && state.dependencies.fresh(&mut crate::source::Probe::default())
+        })
+        .and_then(|state| serde_json::to_string(&state).ok());
     // Only cache hits — empty results are cheap to recompute (a failed name/content check that never
     // read the file) and caching them would bloat the table with every non-transcript path.
     if !refs.is_empty() {
-        cache.entries.write().unwrap().insert(
+        // Keep filesystem probes outside the cache lock. A raced pass cannot publish an
+        // authoritative append state or displace a newer row; its caller still gets its result.
+        if version.is_some() && !reads.fresh(&mut crate::source::Probe::default()) {
+            return refs;
+        }
+        let mut entries = cache.entries.write().unwrap();
+        entries.insert(
             path.to_path_buf(),
             Entry {
                 mtime_ns,
@@ -274,6 +376,7 @@ where
                     refs: refs.clone(),
                     reads,
                 },
+                continuation,
                 dirty: true,
             },
         );
@@ -369,7 +472,7 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
     let Ok(tx) = conn.transaction() else { return };
     let mut written = Vec::new();
     {
-        let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads) VALUES(?1,?2,?3,?4,?5,?6)") else { return };
+        let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads,continuation) VALUES(?1,?2,?3,?4,?5,?6,?7)") else { return };
         for (path, e) in g.iter().filter(|(_, e)| e.dirty) {
             let Some((refs, reads)) = e.payload.known() else {
                 continue;
@@ -387,7 +490,8 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
                     e.size as i64,
                     refs,
                     INTERPRETATION_VERSION,
-                    reads
+                    reads,
+                    e.continuation
                 ])
                 .is_err()
             {
@@ -466,6 +570,85 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn continuation_checks_auxiliary_identity_and_does_not_publish_raced_passes() {
+        let w = cv_testkit::World::in_process("scan-continuation-freshness");
+        let path = w.base.join("s.jsonl");
+        let aux = w.base.join("dependency");
+        std::fs::write(&path, "first\n").unwrap();
+        std::fs::write(&aux, "one").unwrap();
+        let version = "test-discovery/1";
+        let r = SessionRef::new("s", crate::Harness::Claude, &path);
+        let state = || {
+            let cp = crate::stream::Checkpoint::new(std::fs::metadata(&path).unwrap().len());
+            let mut dependencies = crate::source::ReadSet::default();
+            dependencies.record(&aux);
+            ScanContinuation {
+                head: crate::resume::MarkHead::of(&path, &cp, version).unwrap(),
+                checkpoint: cp,
+                dependencies,
+            }
+        };
+        cached_scan_continued(&path, version, |prior| {
+            assert!(prior.is_none());
+            (Some(r.clone()), Some(state()))
+        });
+        std::fs::write(&path, "first\nsecond\n").unwrap();
+        cached_scan_continued(&path, version, |prior| {
+            assert_eq!(prior.unwrap().offset, 6);
+            (Some(r.clone()), Some(state()))
+        });
+        std::fs::write(&aux, "two").unwrap();
+        std::fs::write(&path, "first\nsecond\nthird\n").unwrap();
+        cached_scan_continued(&path, version, |prior| {
+            assert!(prior.is_none(), "changed auxiliary rejects append authority");
+            (Some(r.clone()), Some(state()))
+        });
+        let cache = current_cache();
+        let old_size = cache.entries.read().unwrap()[&path].size;
+        std::fs::write(&path, "first\nsecond\nthird\nfourth\n").unwrap();
+        cached_scan_continued(&path, version, |prior| {
+            assert!(prior.is_some());
+            let continuation = state();
+            std::fs::write(&aux, "new").unwrap();
+            (Some(r.clone()), Some(continuation))
+        });
+        assert_eq!(
+            cache.entries.read().unwrap()[&path].size,
+            old_size,
+            "raced dependency cannot bless a new cache tuple"
+        );
+        let result = cached_scan_continued(&path, version, |_| {
+            std::fs::write(&path, "first\nsecond\nthird\nfourth\nfifth\n").unwrap();
+            let newer = cached_scan_continued(&path, version, |_| {
+                (
+                    Some(SessionRef {
+                        message_count: 9,
+                        ..r.clone()
+                    }),
+                    Some(state()),
+                )
+            })
+            .unwrap();
+            assert_eq!(newer.message_count, 9);
+            (
+                Some(SessionRef {
+                    message_count: 1,
+                    ..r.clone()
+                }),
+                Some(state()),
+            )
+        })
+        .unwrap();
+        assert_eq!(result.message_count, 1);
+        assert_eq!(
+            cache.entries.read().unwrap()[&path].payload.known().unwrap().0[0].message_count,
+            9,
+            "older raced primary pass cannot replace a newer installed row"
+        );
+    }
 
     #[test]
     fn lazy_payload_preserves_demand_guards_count_updates_and_malformed_fallback() {

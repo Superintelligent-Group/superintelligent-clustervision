@@ -187,6 +187,7 @@ mod imp {
             let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN interpretation_version INTEGER;");
         }
         let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN source_reads TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE scan_cache ADD COLUMN continuation TEXT;");
         let version = crate::discover_cache::INTERPRETATION_VERSION.to_string();
         let old: Option<String> = conn
             .query_row(

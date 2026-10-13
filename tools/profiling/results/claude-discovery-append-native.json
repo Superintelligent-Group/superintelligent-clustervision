@@ -1,0 +1,2784 @@
+{
+  "base": "b77d3ad5",
+  "candidate": "perf/claude-discovery-append; source diff retained in commit",
+  "synthetic": true,
+  "identical_fixture_sha256": true,
+  "exact_before_after": {
+    "cold": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "unchanged": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "append": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "append-full": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "stable-append": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "stable-full": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "same-size-rewrite": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "rewrite-full": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    }
+  },
+  "before": {
+    "stable_append_parity": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "stable_appended_bytes": 549,
+    "append_parity": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "rewrite_parity": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "base": "b77d3ad5",
+    "synthetic": true,
+    "initial_bytes": 8404902,
+    "appended_bytes": 884,
+    "rewrite_offset": 2101658,
+    "operations": {
+      "cold": {
+        "source_bytes": 8404902,
+        "source_sha256": "3aeff411ceafdde6f8a770e4f27171f6f3e8994b41b71fd73cf0bf2f8952813a",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 66,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 8273577
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": 0,
+              "last_offset": 8273577
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 65,
+              "bytes": 8404655,
+              "first_offset": 182,
+              "last_offset": 8273577
+            },
+            "fts_message_callback": {
+              "calls": 65,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 3,
+              "bytes": 8388680,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 29567,
+            "peak_above_baseline_bytes": 25508,
+            "stage_end_live_bytes": 20137,
+            "allocation_requests": 8862,
+            "requested_bytes": 1084684
+          }
+        },
+        "parity_sha256": {
+          "metadata": "35d84cc2767050b7843fc2e35069798f0af54238baebea230ebd44081347e093",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "docs": "04b41079ca3df33b670a2591bd6fd9b749a8c4611cd26eecffdc64b0c51b0685",
+          "queries": "530bb87f71772c2e92249099ae8a4bad3da0b3810c7113aac5502721da6d2cd3"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Initial title",
+            1767225600,
+            1767229200,
+            65
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 3,
+        "cache_bytes": [
+          [
+            369,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "unchanged": {
+        "source_bytes": 8404902,
+        "source_sha256": "3aeff411ceafdde6f8a770e4f27171f6f3e8994b41b71fd73cf0bf2f8952813a",
+        "work": {},
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 31719,
+            "peak_above_baseline_bytes": 27660,
+            "stage_end_live_bytes": 20545,
+            "allocation_requests": 7492,
+            "requested_bytes": 1011987
+          }
+        },
+        "parity_sha256": {
+          "metadata": "35d84cc2767050b7843fc2e35069798f0af54238baebea230ebd44081347e093",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "docs": "04b41079ca3df33b670a2591bd6fd9b749a8c4611cd26eecffdc64b0c51b0685",
+          "queries": "530bb87f71772c2e92249099ae8a4bad3da0b3810c7113aac5502721da6d2cd3"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Initial title",
+            1767225600,
+            1767229200,
+            65
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 3,
+        "cache_bytes": [
+          [
+            369,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 0 changed/new (0 read from where the last pass stopped), 0 removed, 1 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "append": {
+        "source_bytes": 8405786,
+        "source_sha256": "bdf97fd9bd68fabc577e0238e5c7890cedaae01eb0d7a150da421f447c5bb867",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "resume_guard_file_read_returned": {
+              "calls": 4,
+              "bytes": 16384,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 69,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 67,
+              "bytes": 8405447,
+              "first_offset": 182,
+              "last_offset": 8405260
+            },
+            "fts_message_callback": {
+              "calls": 67,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388904,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 31313,
+            "peak_above_baseline_bytes": 27254,
+            "stage_end_live_bytes": 20139,
+            "allocation_requests": 8957,
+            "requested_bytes": 1093361
+          }
+        },
+        "parity_sha256": {
+          "metadata": "8b73a9e2ca9ac5d455cab318f9aa9f6ff861cbb16bee6416bfbbf50f5cc88dd8",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "5640683724aa34f4071f3c787a9d1eeeddd4cebb0145b79e62625a74a7664454",
+          "queries": "e5f71c1cb01b315cc21071d705e6dd81c6c63f47957516105504831461393184"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767315600,
+            67
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "append-full": {
+        "source_bytes": 8405786,
+        "source_sha256": "bdf97fd9bd68fabc577e0238e5c7890cedaae01eb0d7a150da421f447c5bb867",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 69,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 67,
+              "bytes": 8405447,
+              "first_offset": 182,
+              "last_offset": 8405260
+            },
+            "fts_message_callback": {
+              "calls": 67,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388904,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 29566,
+            "peak_above_baseline_bytes": 25507,
+            "stage_end_live_bytes": 20137,
+            "allocation_requests": 8927,
+            "requested_bytes": 1088152
+          }
+        },
+        "parity_sha256": {
+          "metadata": "8b73a9e2ca9ac5d455cab318f9aa9f6ff861cbb16bee6416bfbbf50f5cc88dd8",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "5640683724aa34f4071f3c787a9d1eeeddd4cebb0145b79e62625a74a7664454",
+          "queries": "e5f71c1cb01b315cc21071d705e6dd81c6c63f47957516105504831461393184"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767315600,
+            67
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/oracle/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "stable-append": {
+        "source_bytes": 8406335,
+        "source_sha256": "efe8c9644216614e97c631dc80ecc3a840fb4ddd56ea660125158c210a6fec8b",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "resume_guard_file_read_returned": {
+              "calls": 4,
+              "bytes": 16384,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 1433,
+              "first_offset": 8404902,
+              "last_offset": 8404902
+            },
+            "stream_record_input": {
+              "calls": 5,
+              "bytes": 1433,
+              "first_offset": 8404902,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 5,
+              "bytes": 1428,
+              "first_offset": 8404902,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 4,
+              "bytes": 1339,
+              "first_offset": 8404992,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 4,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "fts_document_body": {
+              "calls": 2,
+              "bytes": 279,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 31313,
+            "peak_above_baseline_bytes": 27254,
+            "stage_end_live_bytes": 20139,
+            "allocation_requests": 8999,
+            "requested_bytes": 1095725
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "b0f189007754776417c8d5fee453463788ecf2d49d3e061697e2497a0e5bc4b9"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (1 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "stable-full": {
+        "source_bytes": 8406335,
+        "source_sha256": "efe8c9644216614e97c631dc80ecc3a840fb4ddd56ea660125158c210a6fec8b",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 71,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 69,
+              "bytes": 8405994,
+              "first_offset": 182,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 69,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388959,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4577,
+            "peak_live_bytes": 31828,
+            "peak_above_baseline_bytes": 27251,
+            "stage_end_live_bytes": 20655,
+            "allocation_requests": 8999,
+            "requested_bytes": 1095628
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "b0f189007754776417c8d5fee453463788ecf2d49d3e061697e2497a0e5bc4b9"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 rebuilding full-text index\u2026"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/oracle/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "same-size-rewrite": {
+        "source_bytes": 8406335,
+        "source_sha256": "cd67eef788c45874d7cd62dc0d5ca802fae153ae8fb0a82b71f0b8de4f0e2c29",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 71,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 69,
+              "bytes": 8405994,
+              "first_offset": 182,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 69,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388959,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 31313,
+            "peak_above_baseline_bytes": 27254,
+            "stage_end_live_bytes": 20139,
+            "allocation_requests": 9011,
+            "requested_bytes": 1098678
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "5f00a16f63827e88d1eb3115847dce796659cb557762d77b2c2c37489b2e370d"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "rewrite-full": {
+        "source_bytes": 8406335,
+        "source_sha256": "cd67eef788c45874d7cd62dc0d5ca802fae153ae8fb0a82b71f0b8de4f0e2c29",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 71,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 69,
+              "bytes": 8405994,
+              "first_offset": 182,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 69,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388959,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4577,
+            "peak_live_bytes": 31828,
+            "peak_above_baseline_bytes": 27251,
+            "stage_end_live_bytes": 20655,
+            "allocation_requests": 9011,
+            "requested_bytes": 1098581
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "5f00a16f63827e88d1eb3115847dce796659cb557762d77b2c2c37489b2e370d"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            null
+          ]
+        ],
+        "progress": [
+          "\u2726 rebuilding full-text index\u2026"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/oracle/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      }
+    },
+    "limits": [
+      "Boundary extents and reader returns are separate; not physical I/O.",
+      "Native mmap, one synthetic primary, fixed 4 MiB production checkpoint size.",
+      "Complete stored documents and controlled indexed queries compared; baseline defects are recorded, not accepted as parity."
+    ]
+  },
+  "after": {
+    "stable_append_parity": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "stable_appended_bytes": 549,
+    "append_parity": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "rewrite_parity": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "base": "b77d3ad5",
+    "synthetic": true,
+    "initial_bytes": 8404902,
+    "appended_bytes": 884,
+    "rewrite_offset": 2101658,
+    "operations": {
+      "cold": {
+        "source_bytes": 8404902,
+        "source_sha256": "3aeff411ceafdde6f8a770e4f27171f6f3e8994b41b71fd73cf0bf2f8952813a",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 66,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 8273577
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 66,
+              "bytes": 8404836,
+              "first_offset": 0,
+              "last_offset": 8273577
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 65,
+              "bytes": 8404655,
+              "first_offset": 182,
+              "last_offset": 8273577
+            },
+            "fts_message_callback": {
+              "calls": 65,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8404902,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 3,
+              "bytes": 8388680,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 34978,
+            "peak_above_baseline_bytes": 30919,
+            "stage_end_live_bytes": 21257,
+            "allocation_requests": 8930,
+            "requested_bytes": 1099768
+          }
+        },
+        "parity_sha256": {
+          "metadata": "35d84cc2767050b7843fc2e35069798f0af54238baebea230ebd44081347e093",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "docs": "04b41079ca3df33b670a2591bd6fd9b749a8c4611cd26eecffdc64b0c51b0685",
+          "queries": "530bb87f71772c2e92249099ae8a4bad3da0b3810c7113aac5502721da6d2cd3"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Initial title",
+            1767225600,
+            1767229200,
+            65
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 3,
+        "cache_bytes": [
+          [
+            369,
+            384,
+            628
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "unchanged": {
+        "source_bytes": 8404902,
+        "source_sha256": "3aeff411ceafdde6f8a770e4f27171f6f3e8994b41b71fd73cf0bf2f8952813a",
+        "work": {},
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 32459,
+            "peak_above_baseline_bytes": 28400,
+            "stage_end_live_bytes": 21269,
+            "allocation_requests": 7494,
+            "requested_bytes": 1012762
+          }
+        },
+        "parity_sha256": {
+          "metadata": "35d84cc2767050b7843fc2e35069798f0af54238baebea230ebd44081347e093",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "docs": "04b41079ca3df33b670a2591bd6fd9b749a8c4611cd26eecffdc64b0c51b0685",
+          "queries": "530bb87f71772c2e92249099ae8a4bad3da0b3810c7113aac5502721da6d2cd3"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Initial title",
+            1767225600,
+            1767229200,
+            65
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 3,
+        "cache_bytes": [
+          [
+            369,
+            384,
+            628
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 0 changed/new (0 read from where the last pass stopped), 0 removed, 1 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "append": {
+        "source_bytes": 8405786,
+        "source_sha256": "bdf97fd9bd68fabc577e0238e5c7890cedaae01eb0d7a150da421f447c5bb867",
+        "work": {
+          "discovery": {
+            "resume_guard_file_read_returned": {
+              "calls": 4,
+              "bytes": 16384,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 884,
+              "first_offset": 8404902,
+              "last_offset": 8404902
+            },
+            "metadata_utf8_input": {
+              "calls": 3,
+              "bytes": 881,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 3,
+              "bytes": 881,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 3,
+              "bytes": 881,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "resume_guard_file_read_returned": {
+              "calls": 4,
+              "bytes": 16384,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 69,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 67,
+              "bytes": 8405447,
+              "first_offset": 182,
+              "last_offset": 8405260
+            },
+            "fts_message_callback": {
+              "calls": 67,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388904,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 39310,
+            "peak_above_baseline_bytes": 35251,
+            "stage_end_live_bytes": 21147,
+            "allocation_requests": 7704,
+            "requested_bytes": 1046124
+          }
+        },
+        "parity_sha256": {
+          "metadata": "8b73a9e2ca9ac5d455cab318f9aa9f6ff861cbb16bee6416bfbbf50f5cc88dd8",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "5640683724aa34f4071f3c787a9d1eeeddd4cebb0145b79e62625a74a7664454",
+          "queries": "e5f71c1cb01b315cc21071d705e6dd81c6c63f47957516105504831461393184"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767315600,
+            67
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            630
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "append-full": {
+        "source_bytes": 8405786,
+        "source_sha256": "bdf97fd9bd68fabc577e0238e5c7890cedaae01eb0d7a150da421f447c5bb867",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 69,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 69,
+              "bytes": 8405717,
+              "first_offset": 0,
+              "last_offset": 8405260
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 67,
+              "bytes": 8405447,
+              "first_offset": 182,
+              "last_offset": 8405260
+            },
+            "fts_message_callback": {
+              "calls": 67,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8405786,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388904,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 34865,
+            "peak_above_baseline_bytes": 30806,
+            "stage_end_live_bytes": 21257,
+            "allocation_requests": 8995,
+            "requested_bytes": 1103238
+          }
+        },
+        "parity_sha256": {
+          "metadata": "8b73a9e2ca9ac5d455cab318f9aa9f6ff861cbb16bee6416bfbbf50f5cc88dd8",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "5640683724aa34f4071f3c787a9d1eeeddd4cebb0145b79e62625a74a7664454",
+          "queries": "e5f71c1cb01b315cc21071d705e6dd81c6c63f47957516105504831461393184"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767315600,
+            67
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            630
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/oracle/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "stable-append": {
+        "source_bytes": 8406335,
+        "source_sha256": "efe8c9644216614e97c631dc80ecc3a840fb4ddd56ea660125158c210a6fec8b",
+        "work": {
+          "discovery": {
+            "resume_guard_file_read_returned": {
+              "calls": 4,
+              "bytes": 16384,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 549,
+              "first_offset": 8405786,
+              "last_offset": 8405786
+            },
+            "metadata_utf8_input": {
+              "calls": 2,
+              "bytes": 547,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 2,
+              "bytes": 547,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 2,
+              "bytes": 547,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "resume_guard_file_read_returned": {
+              "calls": 4,
+              "bytes": 16384,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 1433,
+              "first_offset": 8404902,
+              "last_offset": 8404902
+            },
+            "stream_record_input": {
+              "calls": 5,
+              "bytes": 1433,
+              "first_offset": 8404902,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 5,
+              "bytes": 1428,
+              "first_offset": 8404902,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 4,
+              "bytes": 1339,
+              "first_offset": 8404992,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 4,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "fts_document_body": {
+              "calls": 2,
+              "bytes": 279,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 39311,
+            "peak_above_baseline_bytes": 35252,
+            "stage_end_live_bytes": 21259,
+            "allocation_requests": 7683,
+            "requested_bytes": 1045039
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "b0f189007754776417c8d5fee453463788ecf2d49d3e061697e2497a0e5bc4b9"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            630
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (1 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "stable-full": {
+        "source_bytes": 8406335,
+        "source_sha256": "efe8c9644216614e97c631dc80ecc3a840fb4ddd56ea660125158c210a6fec8b",
+        "work": {
+          "discovery": {
+            "resume_guard_file_read_returned": {
+              "calls": 4,
+              "bytes": 16384,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 549,
+              "first_offset": 8405786,
+              "last_offset": 8405786
+            },
+            "metadata_utf8_input": {
+              "calls": 2,
+              "bytes": 547,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 2,
+              "bytes": 547,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 2,
+              "bytes": 547,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 71,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 69,
+              "bytes": 8405994,
+              "first_offset": 182,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 69,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388959,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4577,
+            "peak_live_bytes": 39826,
+            "peak_above_baseline_bytes": 35249,
+            "stage_end_live_bytes": 21775,
+            "allocation_requests": 7683,
+            "requested_bytes": 1044942
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "b0f189007754776417c8d5fee453463788ecf2d49d3e061697e2497a0e5bc4b9"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            630
+          ]
+        ],
+        "progress": [
+          "\u2726 rebuilding full-text index\u2026"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/oracle/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "same-size-rewrite": {
+        "source_bytes": 8406335,
+        "source_sha256": "cd67eef788c45874d7cd62dc0d5ca802fae153ae8fb0a82b71f0b8de4f0e2c29",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 71,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 69,
+              "bytes": 8405994,
+              "first_offset": 182,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 69,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388959,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4059,
+            "peak_live_bytes": 39797,
+            "peak_above_baseline_bytes": 35738,
+            "stage_end_live_bytes": 21147,
+            "allocation_requests": 9078,
+            "requested_bytes": 1114707
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "5f00a16f63827e88d1eb3115847dce796659cb557762d77b2c2c37489b2e370d"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            630
+          ]
+        ],
+        "progress": [
+          "\u2726 updating full-text index\u2026",
+          "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/catalog/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      },
+      "rewrite-full": {
+        "source_bytes": 8406335,
+        "source_sha256": "cd67eef788c45874d7cd62dc0d5ca802fae153ae8fb0a82b71f0b8de4f0e2c29",
+        "work": {
+          "discovery": {
+            "metadata_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "metadata_utf8_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_grammar_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "metadata_strict_input": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          },
+          "index": {
+            "stream_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_framer_input": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "stream_record_input": {
+              "calls": 71,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_grammar_attempt": {
+              "calls": 71,
+              "bytes": 8406264,
+              "first_offset": 0,
+              "last_offset": 8406053
+            },
+            "stream_borrowed_strict_input": {
+              "calls": 69,
+              "bytes": 8405994,
+              "first_offset": 182,
+              "last_offset": 8406053
+            },
+            "fts_message_callback": {
+              "calls": 69,
+              "bytes": 0,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "text_mmap_extent": {
+              "calls": 1,
+              "bytes": 8406335,
+              "first_offset": 0,
+              "last_offset": 0
+            },
+            "text_span_extent": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": 547,
+              "last_offset": 8273693
+            },
+            "text_decoder_consumed": {
+              "calls": 64,
+              "bytes": 8388608,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fts_document_body": {
+              "calls": 4,
+              "bytes": 8388959,
+              "first_offset": null,
+              "last_offset": null
+            },
+            "fork_head_or_candidate_line": {
+              "calls": 2,
+              "bytes": 429,
+              "first_offset": 0,
+              "last_offset": 182
+            },
+            "resume_guard_file_read_returned": {
+              "calls": 2,
+              "bytes": 8192,
+              "first_offset": null,
+              "last_offset": null
+            }
+          }
+        },
+        "heap": {
+          "discovery": {
+            "baseline_live_bytes": 4577,
+            "peak_live_bytes": 40312,
+            "peak_above_baseline_bytes": 35735,
+            "stage_end_live_bytes": 21775,
+            "allocation_requests": 9080,
+            "requested_bytes": 1114722
+          }
+        },
+        "parity_sha256": {
+          "metadata": "7acc25a8e6e5a5166066cc682ee332fb3d296383ee0997064713bb523bc4f8ab",
+          "counts": "276c5650ec73cb6c06a26b95c5301bf9d9b78dafcb876ab66fc051696f3d7594",
+          "events": "00bce6299709c5b558e87b6eebcb5985913244be6fd5587132680cfda9f32c4a",
+          "docs": "829ee88242bf4899116cacfe504305f67c30acdc058161383e3a3c6364abe8fb",
+          "queries": "5f00a16f63827e88d1eb3115847dce796659cb557762d77b2c2c37489b2e370d"
+        },
+        "metadata": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project",
+            "Appended title",
+            1767225600,
+            1767402000,
+            69
+          ]
+        ],
+        "counts": [
+          [
+            "claude",
+            "alpha",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/home/.claude/projects/-work/alpha.jsonl",
+            {
+              "_v": 4
+            }
+          ]
+        ],
+        "events": [
+          [
+            "claude",
+            "alpha",
+            66,
+            1767315600,
+            "file_edit",
+            "Edit",
+            "/Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/project/tracked.rs",
+            null
+          ]
+        ],
+        "mark": [
+          [
+            8404902
+          ]
+        ],
+        "documents": 4,
+        "cache_bytes": [
+          [
+            370,
+            384,
+            630
+          ]
+        ],
+        "progress": [
+          "\u2726 rebuilding full-text index\u2026"
+        ],
+        "stdout": "indexed 1 top-level session(s) \u2192 /Users/ember/dev/cv-worktrees/claude-discovery-append-evidence/index-control/oracle/tantivy\nevents: extracted on the same pass \u2192 try `cv events <id>` / `cv touched <path>`\n"
+      }
+    },
+    "limits": [
+      "Boundary extents and reader returns are separate; not physical I/O.",
+      "Native mmap, one synthetic primary, fixed 4 MiB production checkpoint size.",
+      "Complete stored documents and controlled indexed queries compared; baseline defects are recorded, not accepted as parity."
+    ]
+  },
+  "limits": [
+    "Requested Rust allocator bytes for discover_all including diagnostic work logging; excludes native SQLite heaps, mmap, stacks, allocator overhead and physical I/O.",
+    "Heap comparison uses identical fixed-path and fixed-mtime fixture bytes and identical diagnostic hooks; this is a work/allocation control, not elapsed-time evidence.",
+    "Continuation is private metadata-only state; partial EOF records are replayed from the last LF.",
+    "Sampled MarkHead assumes native immutable-prefix append; arbitrary same-inode prefix rewrite followed by growth is not proved absent.",
+    "Title changes require FTS full traversal to relabel existing chunks. Title-stable append continues FTS from its consumer checkpoint, which may replay earlier EOF records.",
+    "stable-full independently rebuilds FTS but may continue discovery in its oracle catalog; independent before implementation full scans and owned native/portable unit reducers establish metadata parity."
+  ]
+}

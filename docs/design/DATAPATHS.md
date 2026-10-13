@@ -2954,3 +2954,67 @@ existing selection/publication/source-guard tests remain intact. The new no-op l
 retains duplicate-ID raw bytes and framing (leading spaces retained, trailing record whitespace
 trimmed), independently confirmed against the frozen actual operation. Estimation-only block
 rosters/projected clones are retained only with revival enabled.
+
+### Claude discovery metadata continuation (2026-10-13, Codex)
+
+Discovery now reuses its own metadata reducer state on verified native appends. The existing
+`scan_cache` row has one nullable `continuation` column, atomically published beside its original
+before-read tuple, source identities and refs. Exact keyed lookup retains its existing guards and
+keeps continuation JSON encoded; changed-row lookup demands only the prior state for that path.
+Old nullable rows, malformed state, incompatible versions and rejected guards scan whole once.
+No new cache/index, batching API, public IR extra or FTS checkpoint layer is involved.
+
+The private versioned reducer retains discovery's SessionRef plus custom-title precedence.
+It does not reconstruct state from published counts or conversational acceptance: discovery counts
+accepted user/assistant headers even without a usable message body, excludes synthetic assistants,
+and takes cwd/timestamps from metadata-only records. Count publication cannot mutate the reducer.
+Native and portable continuation use the same record acceptance and preserve duplicate fields,
+Unicode/finite/depth validation and title precedence. The saved state stops after the last LF;
+valid or invalid unterminated EOF records remain provisional and are replayed in full on growth.
+This may require replaying a giant tail. Demanded giant metadata strings remain owned.
+
+Growth must pass the same device/inode and sampled MarkHead contract as FTS, with compatible
+version, offsets and fresh auxiliary identities. Before/after checked-source identity and original
+before-read cache stamps reject raced publication; a stale opted-in scan returns its result without
+installing a row or displacing a newer one. New filesystem probes run outside cache entry locks.
+Equal-size restored-mtime rewrites, truncation, replacement and dependency changes scan whole.
+These samples assume the native immutable-prefix append contract; arbitrary same-inode prefix
+rewrite followed by growth can evade them. Metadata discovery reads only the primary today;
+fork, branch, side metadata and consumer dependencies retain their existing independent paths.
+Non-Unix platforms without stable MarkHead identity retain whole scans.
+
+The [bounded whole-command artifact](../../tools/profiling/results/claude-discovery-append-native.json)
+compares `b77d3ad5` with this change, using identical fixed-path/fixed-mtime synthetic primary bytes.
+All eight operations match metadata, counts, events, complete live stored documents and controlled
+query results before/after, and resumed results match whole FTS rebuilds. The unchanged pass has
+no transcript framing or guard reads. The reused [control](../../tools/profiling/index-discovery-work.py)
+and [evidence-only probe patch](../../tools/profiling/results/claude-discovery-append.patch) retain
+separate boundary extents, reader returns, mmap extents and discovery Rust allocation accounting.
+
+| Operation | Before discovery framed | After discovery framed | After FTS framed |
+| --- | ---: | ---: | ---: |
+| Cold | 8,404,902 B | 8,404,902 B | 8,404,902 B |
+| Unchanged | 0 B | 0 B | 0 B |
+| Custom-title append (884 B) | 8,405,786 B | 884 B | 8,405,786 B |
+| Title-stable append (549 B) | 8,406,335 B | 549 B | 1,433 B |
+| Same-size restored-mtime rewrite | 8,406,335 B | 8,406,335 B | 8,406,335 B |
+
+A title change correctly forces FTS to relabel retained prefix chunks through a full read;
+the stable append resumes from its earlier consumer checkpoint and replays 884 previous EOF bytes.
+Discovery append guards return 16,384 B separately; native mmap still maps the entire primary.
+These are requested work extents, not physical I/O or a universal whole-command O(tail) bound.
+
+Encoded metadata state is 628–630 B in this fixture. Cold discovery adds 5,411 B peak above baseline,
+68 Rust allocation requests and 15,084 cumulative requested bytes; unchanged adds 740 B peak,
+two requests and 775 requested bytes. Guard/state ownership adds about 8 KB append peak, while
+custom-title/stable append cumulative requests fall by 1,253/1,316 and requested bytes by
+47,237/50,686 B. The diagnostic hooks and catalog/schema work are included in both sides;
+SQLite's native heap, mmap, stacks and allocator overhead are excluded. There is no timing claim.
+
+Scoped checks pass five metadata and six keyed-cache controls in native and sqlite/no-mmap
+builds, three FTS metadata/migration controls, and native/sqlite-portable library clippy. They cover
+persisted partial/valid EOF replay, malformed input/state, legacy nullable state, missing identity,
+source replacement/rewrites/truncation, auxiliary change, count independence and publication races.
+An exact hit with deliberately corrupt continuation verifies that unchanged demand does not decode
+it. A pure no-feature clippy attempt exposes existing non-sqlite warnings in unrelated adapter/event
+paths and the older cache persist path; this lane adds no corresponding warning.

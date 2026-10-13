@@ -3,7 +3,7 @@
 
 use super::*;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::borrow::Cow;
 use std::fmt;
 
@@ -154,9 +154,23 @@ struct Facts<'a> {
     synthetic: bool,
 }
 
+#[cfg(test)]
+thread_local! { pub(super) static FRAMED: std::cell::RefCell<Vec<(u64,u64)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+pub(super) const CONTINUATION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/claude.discovery/1");
+const LAYER: &str = "claude.discovery";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct State {
+    session: SessionRef,
+    custom_title: bool,
+}
+
 pub(super) struct Scan {
     session: SessionRef,
     custom_title: bool,
+    prefix: Option<(u64, State)>,
+    readable: bool,
 }
 
 impl Scan {
@@ -168,7 +182,47 @@ impl Scan {
                 path,
             ),
             custom_title: false,
+            prefix: None,
+            readable: true,
         }
+    }
+
+    pub(super) fn restore(path: &Path, checkpoint: Option<&Checkpoint>) -> (Self, u64) {
+        let mut scan = Self::new(path);
+        if let Some(cp) = checkpoint {
+            if let Some(state) = cp.get::<State>(LAYER) {
+                if state.session.id == scan.session.id
+                    && state.session.path == scan.session.path
+                    && state.session.harness == Harness::Claude
+                    && state.session.message_count as u64 <= cp.offset
+                {
+                    scan.session = state.session;
+                    scan.custom_title = state.custom_title;
+                    return (scan, cp.offset);
+                }
+            }
+        }
+        (scan, 0)
+    }
+
+    fn save_prefix(&mut self, offset: u64) {
+        self.prefix = Some((
+            offset,
+            State {
+                session: self.session.clone(),
+                custom_title: self.custom_title,
+            },
+        ));
+    }
+
+    pub(super) fn checkpoint(&self) -> Option<Checkpoint> {
+        if !self.readable {
+            return None;
+        }
+        let (offset, state) = self.prefix.as_ref()?;
+        let mut checkpoint = Checkpoint::new(*offset);
+        checkpoint.put(LAYER, state);
+        Some(checkpoint)
     }
 
     pub(super) fn line(&mut self, bytes: &[u8]) {
@@ -239,20 +293,36 @@ impl Scan {
         }
     }
 
-    #[cfg(not(feature = "mmap"))]
+    #[cfg(all(test, not(feature = "mmap")))]
     pub(super) fn positioned(&mut self, file: &fs::File, source: &JsonSource) -> Result<()> {
+        self.positioned_at(file, source, 0)
+    }
+
+    #[cfg(not(feature = "mmap"))]
+    pub(super) fn positioned_at(&mut self, file: &fs::File, source: &JsonSource, offset: u64) -> Result<()> {
         use crate::harness::store::{document::Fields, jsonl::ranges};
         source.check_metadata(file.metadata()?)?;
         let mut rows = ranges::records(
             file,
             ranges::Range {
-                offset: 0,
-                len: source.len(),
+                offset,
+                len: source
+                    .len()
+                    .checked_sub(offset)
+                    .context("discovery offset outside source")?,
             },
         )?;
         rows.keep_small_records(64 * 1024);
+        let mut complete_offset = offset;
+        let mut partial = false;
         while let Some(row) = rows.next() {
-            let (raw, _) = row?;
+            let (raw, complete) = row?;
+            if complete {
+                complete_offset = rows.offset();
+            } else {
+                self.save_prefix(raw.offset);
+                partial = true;
+            }
             if let Some(bytes) = rows.small_record() {
                 self.line(bytes);
                 continue;
@@ -327,26 +397,57 @@ impl Scan {
                 Err(error) => return Err(error),
             }
         }
+        if !partial {
+            self.save_prefix(complete_offset);
+        }
         source.check_metadata(file.metadata()?)
     }
 
-    #[cfg(any(feature = "mmap", test))]
+    #[cfg(test)]
     pub(super) fn reader<R: BufRead>(&mut self, reader: R) {
-        for line in reader.lines() {
-            let Ok(line) = line else {
-                continue;
-            };
-            self.line(line.as_bytes());
+        self.reader_at(reader, 0);
+    }
+
+    #[cfg(any(feature = "mmap", test))]
+    pub(super) fn reader_at<R: BufRead>(&mut self, mut reader: R, mut offset: u64) {
+        let mut bytes = Vec::new();
+        let mut partial = false;
+        loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    self.readable = false;
+                    offset += bytes.len() as u64;
+                    continue;
+                }
+            }
+            if bytes.last() != Some(&b'\n') {
+                self.save_prefix(offset);
+                partial = true;
+            }
+            self.line(&bytes);
+            offset += bytes.len() as u64;
+        }
+        if !partial {
+            self.save_prefix(offset);
         }
     }
 
-    #[cfg(feature = "mmap")]
+    #[cfg(all(test, feature = "mmap"))]
     pub(super) fn bytes(&mut self, bytes: &[u8]) {
+        self.bytes_at(bytes, 0);
+    }
+
+    #[cfg(feature = "mmap")]
+    pub(super) fn bytes_at(&mut self, bytes: &[u8], offset: u64) {
         let mut start = 0;
         for end in memchr::memchr_iter(b'\n', bytes) {
             self.line(&bytes[start..end]);
             start = end + 1;
         }
+        self.save_prefix(offset + start as u64);
         if start < bytes.len() {
             self.line(&bytes[start..]);
         }
@@ -434,6 +535,253 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn continuation_replays_partial_and_valid_unterminated_records() {
+        let world = cv_testkit::World::in_process("claude-metadata-resume-tails");
+        let path = world.base.join("s.jsonl");
+        let prefix = "{\"type\":\"summary\",\"cwd\":\"/metadata\",\"timestamp\":\"2026-02-01T00:00:00Z\"}\n{\"type\":\"ai-title\",\"aiTitle\":\"AI\"}\n";
+        let tails = [
+            (r#"{"type":"user","message":null}"#, "\n{\"type\":\"custom-title\",\"customTitle\":\"renamed\"}\n{\"type\":\"ai-title\",\"aiTitle\":\"blocked\"}\n"),
+            (r#"{"type":"user"}"#, " trailing\n{\"type\":\"assistant\",\"isApiErrorMessage\":true}\n"),
+            (r#"{"type":"custom-title","customTitle":"part"#, "ial\"}\n{\"type\":\"user\",\"timestamp\":\"2025-01-01T00:00:00Z\"}\n"),
+            (r#"{"type":"user","unknown":"\ud800"}"#, "\n{\"type\":\"assistant\",\"message\":{\"model\":\"normal\",\"model\":\"<synthetic>\"}}\n"),
+        ];
+        for (tail, appended) in tails {
+            let old = format!("{prefix}{tail}");
+            fs::write(&path, &old).unwrap();
+            let (before, cp) = scan_at(&path, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(before).unwrap(),
+                serde_json::to_value(owned(&path, old.as_bytes())).unwrap()
+            );
+            let cp = cp.unwrap();
+            assert_eq!(cp.offset, prefix.len() as u64);
+            let grown = format!("{old}{appended}");
+            fs::write(&path, &grown).unwrap();
+            FRAMED.with(|frames| frames.borrow_mut().clear());
+            let (resumed, next) = scan_at(&path, Some(&cp)).unwrap();
+            assert_eq!(
+                serde_json::to_value(resumed).unwrap(),
+                serde_json::to_value(owned(&path, grown.as_bytes())).unwrap()
+            );
+            assert_eq!(
+                FRAMED.with(|frames| frames.borrow().clone()),
+                vec![(cp.offset, (grown.len() - prefix.len()) as u64)]
+            );
+            assert_eq!(next.unwrap().offset, grown.len() as u64);
+            #[cfg(all(feature = "sqlite", unix))]
+            {
+                use std::io::Write;
+                fs::write(&path, &old).unwrap();
+                cached_metadata(&path, false).unwrap();
+                crate::discover_cache::persist(false);
+                let conn = crate::catalog::open_db().unwrap();
+                crate::discover_cache::invalidate_interpretation(Path::new(conn.path().unwrap()));
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(appended.as_bytes())
+                    .unwrap();
+                FRAMED.with(|frames| frames.borrow_mut().clear());
+                assert_eq!(
+                    serde_json::to_value(cached_metadata(&path, false).unwrap()).unwrap(),
+                    serde_json::to_value(owned(&path, grown.as_bytes())).unwrap()
+                );
+                assert_eq!(
+                    FRAMED.with(|frames| frames.borrow().clone()),
+                    vec![(cp.offset, (grown.len() - prefix.len()) as u64)],
+                    "persisted continuation must replay the entire provisional EOF record"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(feature = "sqlite", unix))]
+    #[test]
+    fn cached_continuation_is_persisted_and_rejects_rewrites_replacements_and_corruption() {
+        use std::io::Write;
+        let world = cv_testkit::World::in_process("claude-metadata-cache-resume");
+        let path = world.base.join("s.jsonl");
+        let prefix = format!("{{\"type\":\"summary\",\"cwd\":\"/metadata\"}}\n{{\"type\":\"assistant\",\"message\":{{\"content\":\"{}\"}}}}\n", "ignored".repeat(32768));
+        fs::write(&path, &prefix).unwrap();
+        let check = |expected: &str, extent: Option<(u64, u64)>| {
+            FRAMED.with(|frames| frames.borrow_mut().clear());
+            let actual = cached_metadata(&path, false).unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(owned(&path, expected.as_bytes())).unwrap()
+            );
+            assert_eq!(
+                FRAMED.with(|frames| frames.borrow().clone()),
+                extent.into_iter().collect::<Vec<_>>()
+            );
+        };
+        check(&prefix, Some((0, prefix.len() as u64)));
+        check(&prefix, None);
+        crate::discover_cache::persist(false);
+        let conn = crate::catalog::open_db().unwrap();
+        let saved: String = conn
+            .query_row(
+                "SELECT continuation FROM scan_cache WHERE path=?1",
+                [path.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(serde_json::from_str::<crate::discover_cache::ScanContinuation>(&saved).is_ok());
+        crate::discover_cache::invalidate_interpretation(Path::new(conn.path().unwrap()));
+        let appended = "{\"type\":\"custom-title\",\"customTitle\":\"new title\"}\n{\"type\":\"user\",\"timestamp\":\"2025-01-01T00:00:00Z\"}\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        let mut text = format!("{prefix}{appended}");
+        check(&text, Some((prefix.len() as u64, appended.len() as u64)));
+        check(&text, None);
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        text = text.replace("new title", "bad title");
+        fs::write(&path, &text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
+        check(&text, Some((0, text.len() as u64)));
+        let replacement = world.base.join("replacement");
+        let more = "{\"type\":\"ai-title\",\"aiTitle\":\"still blocked\"}\n";
+        text.push_str(more);
+        fs::write(&replacement, &text).unwrap();
+        fs::rename(replacement, &path).unwrap();
+        check(&text, Some((0, text.len() as u64)));
+        crate::discover_cache::persist(false);
+        conn.execute(
+            "UPDATE scan_cache SET continuation='broken' WHERE path=?1",
+            [path.to_string_lossy()],
+        )
+        .unwrap();
+        crate::discover_cache::invalidate_interpretation(Path::new(conn.path().unwrap()));
+        check(&text, None); // An ordinary exact hit does not decode continuation JSON.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"user\"}\n")
+            .unwrap();
+        text.push_str("{\"type\":\"user\"}\n");
+        check(&text, Some((0, text.len() as u64)));
+    }
+
+    #[cfg(all(feature = "sqlite", unix))]
+    #[test]
+    fn cached_checkpoint_is_independent_of_counts_and_rejects_invalid_states() {
+        use std::io::Write;
+        let world = cv_testkit::World::in_process("claude-metadata-state-guards");
+        let path = world.base.join("s.jsonl");
+        let mut text = String::from("{\"type\":\"ai-title\",\"aiTitle\":\"initial\"}\n");
+        fs::write(&path, &text).unwrap();
+        cached_metadata(&path, false).unwrap();
+        crate::discover_cache::persist(false);
+        let conn = crate::catalog::open_db().unwrap();
+        crate::discover_cache::fill_count(&conn, &path, Harness::Claude, "s", 99);
+        let append = "{\"type\":\"user\"}\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(append.as_bytes())
+            .unwrap();
+        text.push_str(append);
+        assert_eq!(
+            cached_metadata(&path, false).unwrap().message_count,
+            1,
+            "published fallback counts do not alter reducer state"
+        );
+        for mutation in 0..8 {
+            crate::discover_cache::persist(false);
+            let encoded: String = conn
+                .query_row(
+                    "SELECT continuation FROM scan_cache WHERE path=?1",
+                    [path.to_string_lossy()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut state: crate::discover_cache::ScanContinuation = serde_json::from_str(&encoded).unwrap();
+            match mutation {
+                0 => state.head.version = "obsolete".into(),
+                1 => state.checkpoint.offset += 1,
+                2 => {
+                    state.head.offset = text.len() as u64 + 100;
+                    state.checkpoint.offset = state.head.offset;
+                }
+                3 => state.dependencies = crate::source::ReadSet::unrecorded(),
+                4 => state.checkpoint = Checkpoint::new(state.checkpoint.offset),
+                5 => state.checkpoint.put(
+                    LAYER,
+                    &serde_json::json!({"session": "wrong-type", "custom_title": false}),
+                ),
+                6 => state.head.identity = None,
+                _ => {
+                    let mut reducer = state.checkpoint.get::<State>(LAYER).unwrap();
+                    reducer.session.message_count = usize::MAX;
+                    state.checkpoint.put(LAYER, &reducer);
+                }
+            }
+            conn.execute(
+                "UPDATE scan_cache SET continuation=?1 WHERE path=?2",
+                rusqlite::params![serde_json::to_string(&state).unwrap(), path.to_string_lossy()],
+            )
+            .unwrap();
+            crate::discover_cache::invalidate_interpretation(Path::new(conn.path().unwrap()));
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(append.as_bytes())
+                .unwrap();
+            text.push_str(append);
+            FRAMED.with(|frames| frames.borrow_mut().clear());
+            assert_eq!(
+                serde_json::to_value(cached_metadata(&path, false).unwrap()).unwrap(),
+                serde_json::to_value(owned(&path, text.as_bytes())).unwrap()
+            );
+            assert_eq!(
+                FRAMED.with(|frames| frames.borrow().clone()),
+                vec![(0, text.len() as u64)],
+                "invalid state {mutation} falls back to the whole reducer"
+            );
+        }
+        crate::discover_cache::persist(false);
+        conn.execute(
+            "UPDATE scan_cache SET continuation=NULL WHERE path=?1",
+            [path.to_string_lossy()],
+        )
+        .unwrap();
+        crate::discover_cache::invalidate_interpretation(Path::new(conn.path().unwrap()));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(append.as_bytes())
+            .unwrap();
+        text.push_str(append);
+        FRAMED.with(|frames| frames.borrow_mut().clear());
+        cached_metadata(&path, false).unwrap();
+        assert_eq!(
+            FRAMED.with(|frames| frames.borrow().clone()),
+            vec![(0, text.len() as u64)]
+        );
+        fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
+        FRAMED.with(|frames| frames.borrow_mut().clear());
+        assert_eq!(cached_metadata(&path, false).unwrap().message_count, 1);
+        assert_eq!(
+            FRAMED.with(|frames| frames.borrow().clone()),
+            vec![(0, append.len() as u64)]
+        );
     }
 
     #[test]
