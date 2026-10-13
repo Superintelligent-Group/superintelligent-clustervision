@@ -317,3 +317,22 @@ production fleet detection from `HOME`/XDG; its `--root` argument does not restr
 The runner supplies a minimal isolated environment and discards elapsed-time fields. It reports
 exact listing digests, count publication, allocation requests/bytes and peak requested Rust heap;
 SQLite/C heap and retained serialized-row copying are separate limits.
+
+`--sqlite-heap` adds SQLite's own allocator accounting to the same operation stage, independently
+of `probe-heap`. It requires the `sqlite` feature and an isolated process whose SQLite has not yet
+initialized. The option enables MEMSTATUS, initializes SQLite, and proves live-byte/live-allocation
+counters work with a successful 4,096-byte allocation before setup. A failed/disabled counter is an
+error, rather than a reported zero. After optional discovery setup, stage counters reset and report
+baseline/end/peak live bytes, peak above baseline, live/peak allocation counts, and largest single
+allocation request. Counts are simultaneous outstanding allocations; cumulative allocation requests
+and requested bytes are unavailable from SQLite's built-in status API and reported as null.
+
+These counters include SQLite-managed page caches and SQLite's allocator bookkeeping, exclude
+underlying system allocator overhead, and do not measure mapped pages or filesystem residency.
+They are process-global, covering all SQLite connections used by the operation. They neither
+replace the native allocator nor change connection read/provenance policy. See SQLite's
+[memory accounting](https://www.sqlite.org/c3ref/memory_highwater.html) and
+[status parameters](https://www.sqlite.org/c3ref/c_status_malloc_count.html).
+`tools/perf-sqlite-native-heap.py` reuses existing OpenCode, Cursor IDE and Goose selected-payload
+fixtures at two sizes with one giant record versus 64/256 smaller records. It checks exact
+preserved-order message/metadata hashes against an explicitly supplied baseline in separate runs.

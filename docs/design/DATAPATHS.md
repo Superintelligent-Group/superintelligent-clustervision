@@ -2665,3 +2665,66 @@ loads four pages and 768 messages in system Chrome, with exact CLI role/content 
 metadata parity, one events/subagents request each, no page errors and unchanged input hashes.
 The result is recorded in [BROWSER-ENRICHMENT-WORK.json](BROWSER-ENRICHMENT-WORK.json); it
 checks transport/enrichment composition without a timing claim or external rescue request.
+
+### Native SQLite allocation boundary (Codex, 2026-10-13)
+
+The earlier selected-payload gates measured requested Rust allocations; flat Rust curves did not
+prove SQLite avoided copying giant cells into C-owned value buffers. Additive opt-in
+`store_probe --sqlite-heap` now uses the existing rusqlite FFI to enable MEMSTATUS before SQLite
+initialization and verify byte/count accounting with a successful 4,096-byte allocation. Disabled
+or unavailable accounting is an error. Native high-water marks reset at the same operation
+boundary as the Rust stage, after optional discovery setup. Reported native fields cover baseline,
+peak and end live bytes, peak above baseline, outstanding/peak allocation counts, and the largest
+single allocation request. SQLite's built-in status does not expose cumulative allocation requests
+or requested bytes; both are explicitly null, not inferred from its live allocation count.
+
+`tools/perf-sqlite-native-heap.py` reuses existing OpenCode v1 selected, Cursor IDE selected and
+Goose selected-payload generators. Each has one giant record versus 64/256 smaller records, at
+8/32 million decoded payload bytes, with escaped text, reasoning, tool arguments and results.
+Fixture generation is outside the measured process. Each native lazy stream/discard runs in a
+fresh process; SQLite accounting includes connection/statement/cell-read work. A separate empty
+stage proves the enabled counters can report zero work without conflating zero with disabled
+accounting. Baseline and candidate preserved-order message and final session metadata hashes match
+on all 12 fixtures. Hashing materializes demanded output and is separate from heap measurements.
+Database hashes and device/inode/size/mtime/ctime remain unchanged, and private scratch files are
+released. Evidence: `SQLITE-NATIVE-HEAP-EVIDENCE.json`, baseline production revision `7c73b199`.
+
+| Native selected path | Payload records at 8 / 32 MB | Rust peak B at 8 / 32 MB | SQLite peak B at 8 / 32 MB | Largest SQLite request B at 8 / 32 MB |
+| --- | --- | --- | --- | --- |
+| OpenCode giant | 1 / 1 | 340,668 / 340,682 | 912,208 / 2,586,448 | 48,000 / 48,000 |
+| OpenCode rows | 64 / 256 | 277,084 / 277,099 | 1,436,656 / 2,537,456 | 48,000 / 48,000 |
+| Cursor IDE giant | 1 / 1 | 208,025 / 208,047 | 970,896 / 2,633,872 | 48,000 / 86,888 |
+| Cursor IDE rows | 64 / 256 | 142,483 / 142,508 | 1,064,464 / 2,535,952 | 48,000 / 48,000 |
+| Goose giant | 1 / 1 | 140,463 / 140,485 | 902,768 / 2,558,576 | 48,000 / 59,952 |
+| Goose rows | 64 / 256 | 145,567 / 166,864 | 1,087,168 / 2,538,352 | 48,000 / 48,000 |
+
+Payload records are generator units: OpenCode/Goose split a record into multiple native rows,
+and each selected shape also includes a tiny final call. These represented native rowid paths
+use incremental TEXT/BLOB reads via the existing shared
+`append_cell`/`blob_open` machinery. The measured selected reads do not allocate giant cell-sized
+C buffers. SQLite still has substantial working memory, including page caches and connection
+state; its native peak is larger than the Rust peak. Both independent peaks are reported, not
+summed into a falsely simultaneous process peak. SQLite-managed allocator bookkeeping is included;
+underlying system allocator overhead, filesystem cache, mapped source/private-arena pages and
+stacks are not. Input hashing primes filesystem cache outside the stage; there is no cold-I/O,
+RSS, residency or elapsed-time claim. Every native stage ends at zero SQLite live bytes in this
+matrix, and the known accounting allocation is freed before setup/baseline capture.
+
+The largest-request growth is real small navigation metadata, not absent memory. The bundled
+SQLite `accessPayload` implementation retains overflow-page numbers and grows its array with
+`sqlite3Realloc(..., nOvfl * 2 * sizeof(Pgno))`. Cursor's 32 MB decoded fixture has a 44,444,704-byte
+encoded bubble cell; 10,861 overflow pages correspond exactly to its 86,888-byte request. Goose's
+59,952-byte request is consistent with the same array. This source-based attribution is an
+inference; no allocator stack tracing or connection-cache byte decomposition was added. It means
+incremental SQLite cell reads still require O(cell overflow pages) native metadata. Two sizes do
+not establish a universal constant native heap bound. The existing virtual/WITHOUT ROWID/indexed
+fallbacks can retain an entire native cell and are outside these represented-path controls.
+
+No payload-materialization defect appeared in this bounded matrix, so no production allocation,
+cache, schema or read policy was changed. The diagnostic itself passes strict clippy and native
+compilation. Existing scoped OpenCode cold-WAL/original-source freshness, Cursor later-demand and
+intentional-stop guards, and Goose sidecar-creation/early-stop guards pass. The remaining native
+fallback/residency questions stay explicit instead of extending a Rust-only flat-heap claim to all
+SQLite stores or whole commands. SQLite API semantics are documented in
+[memory accounting](https://www.sqlite.org/c3ref/memory_highwater.html) and
+[status parameters](https://www.sqlite.org/c3ref/c_status_malloc_count.html).

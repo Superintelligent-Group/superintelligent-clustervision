@@ -14,6 +14,10 @@ use cv_testkit::heap;
 #[global_allocator]
 static ALLOCATOR: heap::Allocator = heap::Allocator;
 
+#[cfg(feature = "sqlite")]
+#[path = "store_probe/sqlite_heap.rs"]
+mod sqlite_heap;
+
 struct Args {
     operation: String,
     harness: Harness,
@@ -33,6 +37,7 @@ struct Args {
     query: Option<String>,
     resume_from: Option<PathBuf>,
     raw_order: bool,
+    sqlite_heap: bool,
 }
 
 fn args() -> Result<Args> {
@@ -48,12 +53,14 @@ fn args() -> Result<Args> {
     let mut query = None;
     let mut resume_from = None;
     let mut raw_order = false;
+    let mut sqlite_heap = false;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
             "--mode" => mode = argv.next().context("--mode needs lazy|lazy-extra|facts|bulk|full|complete")?,
             "--materialize" => materialize = true,
             "--hash-output" => hash_output = true,
+            "--sqlite-heap" => sqlite_heap = true,
             "--prefix-bytes" => prefix_bytes = argv.next().context("--prefix-bytes needs a byte budget")?.parse()?,
             "--hash-detail" => hash_detail = true,
             "--warm-discover" => warm_discover = true,
@@ -74,7 +81,7 @@ fn args() -> Result<Args> {
             }
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|facts|bulk|full|complete] \
-                 [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
+                 [--materialize] [--sqlite-heap] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
                  OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|dataset|dataset-collect|tools|tools-collect|query|query-collect|hash|discover|sessions|events|events-collected|chunks|checked-chunks|prefix|checked-prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
@@ -122,6 +129,7 @@ fn args() -> Result<Args> {
         query,
         resume_from,
         raw_order,
+        sqlite_heap,
     })
 }
 
@@ -664,6 +672,12 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
 
 fn main() -> Result<()> {
     let a = args()?;
+    #[cfg(feature = "sqlite")]
+    let sqlite_accounting = a.sqlite_heap.then(sqlite_heap::Accounting::enable).transpose()?;
+    #[cfg(not(feature = "sqlite"))]
+    if a.sqlite_heap {
+        bail!("--sqlite-heap requires the sqlite feature");
+    }
     // Production affordance::read can persist counts, and discovery cache initialization opens
     // a writable catalog. Keep composed operations faithful with an explicitly isolated catalog.
     if a.warm_discover
@@ -703,6 +717,8 @@ fn main() -> Result<()> {
     };
     let r = SessionRef::new(&a.id, a.harness, &a.path);
     let physical_bytes = std::fs::metadata(&a.path)?.len();
+    #[cfg(feature = "sqlite")]
+    let sqlite_baseline = sqlite_accounting.as_ref().map(|counter| counter.begin()).transpose()?;
     #[cfg(feature = "probe-heap")]
     let baseline = heap::begin();
     let start = Instant::now();
@@ -712,6 +728,14 @@ fn main() -> Result<()> {
     let requested_rust_heap = Some(heap::end(baseline));
     #[cfg(not(feature = "probe-heap"))]
     let requested_rust_heap: Option<()> = None;
+    #[cfg(feature = "sqlite")]
+    let sqlite_native_heap = sqlite_accounting
+        .as_ref()
+        .zip(sqlite_baseline)
+        .map(|(counter, baseline)| counter.end(baseline))
+        .transpose()?;
+    #[cfg(not(feature = "sqlite"))]
+    let sqlite_native_heap: Option<()> = None;
     println!(
         "{}",
         json!({
@@ -735,7 +759,7 @@ fn main() -> Result<()> {
             "warm_discover": a.warm_discover,
             "setup_discovered_sessions": setup_discovered_sessions,
             "wall_seconds": seconds, "messages": out.messages,
-            "requested_rust_heap": requested_rust_heap, "detail": out.detail,
+            "requested_rust_heap": requested_rust_heap, "sqlite_native_heap": sqlite_native_heap, "detail": out.detail,
         })
     );
     std::hint::black_box((&out.session, &out.rows, &out.resolved));
