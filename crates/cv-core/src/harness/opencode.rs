@@ -1131,7 +1131,7 @@ impl ProjectedPart {
                                     }
                                     text_count += 1;
                                     if let Some(text) = item.get("text")? {
-                                        text.for_each_str_chunk(|chunk| writer.push(chunk))?;
+                                        writer.push_string(text)?;
                                     }
                                     items.push(json!({"type":"text", "text":""}));
                                 } else {

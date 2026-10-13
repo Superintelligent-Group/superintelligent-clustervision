@@ -22,6 +22,51 @@ impl Builder<'_> {
         }
         Ok(())
     }
+    /// Append a string view without decoding and re-encoding its already valid interior.
+    pub(crate) fn push_string(&mut self, view: JsonView<'_>) -> Result<bool> {
+        if !view.is_string()? {
+            return Ok(false);
+        }
+        struct Interior<'a> {
+            writer: &'a mut dyn Write,
+            first: bool,
+            last: Option<u8>,
+        }
+        impl Write for Interior<'_> {
+            fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+                let length = bytes.len();
+                if bytes.is_empty() {
+                    return Ok(0);
+                }
+                if self.first {
+                    if bytes[0] != b'"' {
+                        return Err(std::io::Error::other("missing string quote"));
+                    }
+                    self.first = false;
+                    bytes = &bytes[1..];
+                }
+                if !bytes.is_empty() {
+                    if let Some(last) = self.last.take() {
+                        self.writer.write_all(&[last])?;
+                    }
+                    self.writer.write_all(&bytes[..bytes.len() - 1])?;
+                    self.last = bytes.last().copied();
+                }
+                Ok(length)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.writer.flush()
+            }
+        }
+        let mut interior = Interior {
+            writer: self.0,
+            first: true,
+            last: None,
+        };
+        view.write_canonical(&mut interior)?;
+        anyhow::ensure!(interior.last == Some(b'"'), "missing closing string quote");
+        Ok(true)
+    }
     /// Append a value's canonical JSON document as decoded text.
     pub(crate) fn push_json(&mut self, view: JsonView<'_>) -> Result<()> {
         write_quoted_json(view, self.0)
