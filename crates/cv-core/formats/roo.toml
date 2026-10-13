@@ -21,7 +21,6 @@ commit = "cli-v0.1.17 (Roo Code CLI release, bundled extension; tests/corpus/roo
 date = "2026-10-11"
 
 [types]
-"block.text" = { status = "handled", note = "" }
 "block.thinking" = { status = "handled", note = "" }
 "block.redacted_thinking" = { status = "handled", note = "" }
 "block.tool_use" = { status = "handled", note = "" }

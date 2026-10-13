@@ -19,7 +19,6 @@ commit = "cli-v3.0.70 (npm cline 3.0.70, tests/corpus/cline/3.0.70; the 4.1.23 e
 date = "2026-10-11"
 
 [types]
-"block.text" = { status = "handled", note = "" }
 "block.thinking" = { status = "handled", note = "" }
 "block.redacted_thinking" = { status = "handled", note = "" }
 "block.tool_use" = { status = "handled", note = "" }

@@ -54,9 +54,6 @@ date = "2026-10-11"
 "field.request_id" = { status = "handled", note = "→ extra" }
 "field.num_tokens" = { status = "handled", note = "→ extra" }
 "field.is_user_input" = { status = "handled", note = "true = a typed prompt" }
-"field.is_system_prefix" = { status = "handled", note = "node metadata; marks the system prompt" }
-"field.num_tokens_preceding" = { status = "handled", note = "node metadata → extra" }
-"field.summarized_from" = { status = "handled", note = "node metadata → CompactionSummary (observed live)" }
 "field.telemetry" = { status = "handled", note = "→ extra" }
 "field.metrics" = { status = "handled", note = "→ Usage (input/output/cache_read/cache_creation)" }
 "field.response_dimensions" = { status = "ignored", note = "UI stats" }
