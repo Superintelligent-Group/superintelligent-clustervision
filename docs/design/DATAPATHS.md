@@ -17,7 +17,7 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 |---|---|---|
 | List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Catalog setup is now shared within each listing/discovery operation; verified warm listing initializes one connection instead of three. Cold discovery still derives counts from content. | Matched eight-session whole-CLI controls show 34.03% fewer warm-list instructions and 13.59% fewer cold-list instructions, with identical output; see the [comparison artifact](../../tools/profiling/results/catalog-reader-comparison-arm64.json). This isolates setup work and does not rank the real fleet. Preserve freshness and exact counts. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. One candidate decodes one cached row with 8 or 1,024 unrelated records; inventory enumeration and ranking still scale with fleet size. Required source errors remain fatal. |
-| Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar retrieval still loads unrelated records; remove that work through existing checked projections. Persistent MCP read state remains separate. |
+| Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
 | Transform / export | Verified Codex port retains checked source-backed bodies. Splice retains selected guarded messages. Distill shares one prepared tail, skips unused findings products, materializes only the selected --upto prefix, and stages borrowed sidecars. Pack shares excerpt/event traversal when events are stale. | Hold further Claude emitter work. Full-source distill analysis still owns its input and demanded elisions. Prune/archive/dataset can scan or stage whole output; archive replacement necessarily writes a complete new artifact. |
 
@@ -2097,7 +2097,10 @@ Unicode/escaping/CRLF/empty text/input-order cases, original owned deserializati
 rejection, existing destination links/permissions, and existing prune/retrieve controls. The CLI
 empty-roster regression also preserves a preexisting sidecar; actual CLI `--upto`/resume/`--with` output matches the legacy sidecar fields and bytes. The shared stage's existing
 pre-publication failure mechanism is reused unchanged.
-Bounded prune-sidecar retrieval (2026-10-13): `prune::retrieve`, used by `cv cat`, previously
+
+### Bounded prune-sidecar retrieval (Sol, 2026-10-13)
+
+`prune::retrieve`, used by `cv cat`, previously
 read the complete flat JSONL into one String and deserialized every row's input/content while
 retaining every available ID. It now captures/checks the original sidecar, scans every row for
 ambiguity, and retains only the first selected content descriptor plus at most 20 ID descriptors.
@@ -2135,3 +2138,25 @@ versus the same flat candidate peaks. Reports are `retrieve-{native,portable}-he
 `retrieve-{native,portable}-miss-heap.json` under `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence`;
 that directory also preserves the fixtures in `retrieve-control/` and
 `retrieve_heap_probe.rs`, which records the isolated requested-Rust-allocation control.
+
+### Integrated operation batch validation (2026-10-13)
+
+The catalog-owner/demand-counts, pack traversal, distill boundaries and sidecar retrieval lanes
+are integrated. Root checks pass for 43 prune/schema tests, four portable retrieval tests and
+33 portable JSON/IR checks. Root independently checked the retained 16/64 MiB retrieval reports
+for matching inputs and exact success/error outputs; these are allocation measurements, not CPU
+or latency comparisons.
+
+Pinned fmt, workspace all-target clippy and build, corpus-tool tests (9), heap-gate tooling (11),
+no-default-features core build, standalone wasm check, manual names and manual build pass.
+Portable builds retain the existing feature-dependent unused-code warnings. The workspace test
+pass found one stale assertion expecting invalid source spans to count as zero tokens, contrary
+to the checked-read contract introduced in `021290b0`. Its expectation now requires the bounds
+error; the failed test and all previously unrun workspace integration, search, web-library and
+doc-test targets pass. Already successful test groups were not repeated. Logs are preserved under
+`/Users/ember/dev/cv-worktrees/excellence-evidence/convergence-*.log`.
+
+This is not a release or a claim that every pre-push gate has been rerun. The ignored performance
+matrix, package/dist checks, separate desktop workspace, wasm-pack and browser selftest are
+separate gates; the earlier scoped browser result remains 62/62. No new wall-time comparison or
+instruction-count CI threshold was introduced.
