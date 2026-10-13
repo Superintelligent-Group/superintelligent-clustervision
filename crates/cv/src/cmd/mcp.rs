@@ -439,7 +439,19 @@ fn observe_stream(args: &Value) -> anyhow::Result<String> {
         None => Watcher::with_discovery(filter, false, cv_core::sessions),
     };
 
-    observe_poll(&mut watcher, baseline, max_messages, char_cap, message_text)
+    observe_poll(
+        &mut watcher,
+        baseline,
+        max_messages,
+        char_cap,
+        |message, resolver, room| {
+            let (mut text, truncated) = cv_core::projection::searchable_prefix(message, resolver, room)?;
+            if truncated {
+                text.push('…');
+            }
+            Ok(text)
+        },
+    )
 }
 
 fn observe_poll(
@@ -447,34 +459,30 @@ fn observe_poll(
     baseline: bool,
     max_messages: usize,
     char_cap: usize,
-    mut project: impl FnMut(&cv_core::Message) -> anyhow::Result<String>,
+    mut project: impl FnMut(&cv_core::Message, &cv_core::Resolver, usize) -> anyhow::Result<String>,
 ) -> anyhow::Result<String> {
     let mut out_msgs: Vec<Value> = Vec::new();
     let mut chars_used = 0usize;
     let mut projection_error = None;
     let more_pending = !baseline
-        && watcher.try_poll_bounded(max_messages, |ev| {
+        && watcher.try_poll_bounded_retained(max_messages, |ev| {
             if projection_error.is_some() {
                 return 0;
             }
             let r = &ev.reference;
+            let resolver = cv_core::Resolver::new(Some(r.path.clone()));
             let mut taken = 0;
             for m in &ev.new_messages {
-                let text = match project(m) {
+                let room = char_cap.saturating_sub(chars_used);
+                if room == 0 {
+                    break;
+                }
+                let text = match project(m, &resolver, room) {
                     Ok(text) => text,
                     Err(error) => {
                         projection_error = Some(error);
                         break;
                     }
-                };
-                let room = char_cap.saturating_sub(chars_used);
-                if room == 0 {
-                    break;
-                }
-                let text = if text.len() > room {
-                    format!("{}…", &text[..floor_char(&text, room)])
-                } else {
-                    text
                 };
                 chars_used += text.len();
                 out_msgs.push(json!({
@@ -571,6 +579,141 @@ mod projection_tests {
             .unwrap()
     }
 
+    // Independent pre-change owned observer: whole searchable strings, then truncation.
+    fn owned_observe_oracle(watcher: &mut Watcher, cap: usize) -> anyhow::Result<String> {
+        let mut rows = Vec::new();
+        let mut used = 0usize;
+        let more = watcher.try_poll_bounded(50, |event| {
+            let r=&event.reference; let mut taken=0;
+            for m in event.new_messages {
+                let full=message_text(&m).unwrap(); let room=cap.saturating_sub(used);
+                if room==0 { break; }
+                let text=if full.len()>room {format!("{}…",&full[..floor_char(&full,room)])} else {full};
+                used+=text.len();
+                rows.push(json!({"harness":r.harness.as_str(),"session_id":r.id,"cwd":r.cwd.as_ref().map(|p|p.to_string_lossy().to_string()),"role":cv_core::render::role_label(m.role),"timestamp":m.timestamp.map(|t|t.to_rfc3339()),"text":text}));taken+=1;
+            } taken
+        })?;
+        Ok(serde_json::to_string_pretty(
+            &json!({"baseline":false,"messages":rows,"count":rows.len(),"more_pending":more,"cursor":watcher.to_cursor().encode()}),
+        )?)
+    }
+
+    #[test]
+    #[ignore = "isolated clean release CPU control; CV_OBSERVE_CONTROL=old|new"]
+    fn observe_tiny_actual_consumer_cpu() {
+        let world = cv_testkit::World::in_process("observe-tiny-cpu");
+        world.write_session("observe-tiny", &[json!({"type":"assistant", "sessionId":"observe-tiny", "uuid":"a", "message":{"role":"assistant","content":"tiny 月 text"}})]);
+        let retained = std::env::var("CV_OBSERVE_CONTROL").unwrap() == "new";
+        let start = std::time::Instant::now();
+        for _ in 0..2000 {
+            let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+            if retained {
+                std::hint::black_box(
+                    observe_poll(&mut watcher, false, 50, 16000, |m, r, cap| {
+                        let (mut text, truncated) = cv_core::projection::searchable_prefix(m, r, cap)?;
+                        if truncated {
+                            text.push('…');
+                        }
+                        Ok(text)
+                    })
+                    .unwrap(),
+                );
+            } else {
+                std::hint::black_box(owned_observe_oracle(&mut watcher, 16000).unwrap());
+            }
+        }
+        println!("observe tiny retained={retained} wall={:?}", start.elapsed());
+    }
+
+    #[test]
+    fn retained_observation_rejects_callback_mutation_before_acceptance() {
+        let world = cv_testkit::World::in_process("observe-prefix-mutation");
+        let path = world.write_session("observe-mutation", &[json!({"type":"assistant", "sessionId":"observe-mutation", "uuid":"a", "message":{"role":"assistant","content":"hello"}})]);
+        let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+        let before = watcher.to_cursor().encode();
+        let result = watcher.try_poll_bounded_retained(50, |event| {
+            assert_eq!(event.new_messages.len(), 1);
+            std::fs::write(&path, b"changed").unwrap();
+            1
+        });
+        assert!(result.is_err());
+        assert_eq!(watcher.to_cursor().encode(), before);
+    }
+
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "isolated allocation evidence; run one test thread with probe-heap"]
+    fn observe_giant_actual_consumer_heap() {
+        let world = cv_testkit::World::in_process("observe-giant-heap");
+        for kind in ["text", "arguments"] {
+            for mib in [16, 64] {
+                let body = "x\n月".repeat(mib * 1024 * 1024 / 5);
+                let block = if kind == "text" {
+                    json!({"type":"text","text":body})
+                } else {
+                    json!({"type":"tool_use","id":"c","name":"tool","input":{"payload":body}})
+                };
+                world.write_session("observe-giant", &[json!({"type":"assistant", "sessionId":"observe-giant", "uuid":"a", "message":{"role":"assistant","content":[block]}})]);
+                let mut oracle = None;
+                for retained in [false, true] {
+                    let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+                    let baseline = cv_testkit::heap::begin();
+                    let output = if retained {
+                        observe_poll(&mut watcher, false, 50, 16000, |m, r, cap| {
+                            let (mut text, truncated) = cv_core::projection::searchable_prefix(m, r, cap)?;
+                            if truncated {
+                                text.push('…');
+                            }
+                            Ok(text)
+                        })
+                        .unwrap()
+                    } else {
+                        owned_observe_oracle(&mut watcher, 16000).unwrap()
+                    };
+                    let heap = cv_testkit::heap::end(baseline);
+                    println!(
+                        "{}",
+                        json!({"kind":kind,"mib":mib,"retained":retained,"heap":heap,"output_bytes":output.len()})
+                    );
+                    if retained {
+                        assert!(heap.peak_above_baseline_bytes < 2 * 1024 * 1024);
+                    }
+                    if retained {
+                        assert_eq!(
+                            oracle.as_deref(),
+                            Some(output.as_str()),
+                            "complete giant response oracle"
+                        );
+                    } else {
+                        oracle = Some(output.clone());
+                    }
+                    drop(output);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn observe_retained_prefix_matches_owned_oracle() {
+        let world = cv_testkit::World::in_process("observe-prefix-oracle");
+        let body = "月🌙é\n\"\\".repeat(4000);
+        world.write_session("observe-prefix", &[json!({"type":"assistant", "sessionId":"observe-prefix", "uuid":"a", "message":{"role":"assistant","content":[{"type":"text","text":body},{"type":"tool_use","id":"c","name":"tool","input":{"payload":body}}]}})]);
+        for cap in [1usize, 2, 3, 4, 7, 19, 16000, 200000] {
+            let mut old = Watcher::with_discovery(Filter::default(), true, discover);
+            let oracle = owned_observe_oracle(&mut old, cap).unwrap();
+            let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+            let output = observe_poll(&mut watcher, false, 50, cap, |message, resolver, room| {
+                let (mut text, truncated) = cv_core::projection::searchable_prefix(message, resolver, room)?;
+                if truncated {
+                    text.push('…');
+                }
+                Ok(text)
+            })
+            .unwrap();
+            assert_eq!(output, oracle, "cap={cap}");
+        }
+    }
+
     #[test]
     fn observe_read_failure_returns_error_without_advancing_cursor() {
         let _world = cv_testkit::World::in_process("mcp-unreadable-boundary");
@@ -583,7 +726,7 @@ mod projection_tests {
         }
         let mut watcher = Watcher::with_discovery(Filter::default(), true, unreadable);
         let before = watcher.to_cursor().encode();
-        assert!(observe_poll(&mut watcher, false, 50, 16_000, message_text).is_err());
+        assert!(observe_poll(&mut watcher, false, 50, 16_000, |m, _, _| message_text(m)).is_err());
         assert_eq!(
             watcher.to_cursor().encode(),
             before,
@@ -620,7 +763,7 @@ mod projection_tests {
             }
             let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
             let mut demanded = false;
-            let result = observe_poll(&mut watcher, false, 50, 16_000, |_| {
+            let result = observe_poll(&mut watcher, false, 50, 16_000, |_, _, _| {
                 demanded = true;
                 message_text(&source)
             });

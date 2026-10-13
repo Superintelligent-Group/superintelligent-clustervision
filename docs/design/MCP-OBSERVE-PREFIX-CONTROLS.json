@@ -1,0 +1,88 @@
+{
+  "profile": "release opt-level=3 lto=thin; no probe-heap",
+  "binary_sha256": "eb25e0431b61714e5fe8ebb3a9787ae8321c3eba93ffc4db40e695f3f54a57a3",
+  "measurement": "/usr/bin/time -l process CPU user+sys; each process runs 2000 fresh watcher tiny-message observe operations; three alternating old/new pairs; old observer independent pre-change owned projection, complete output labels/order/cursor matched separately",
+  "runs": [
+    {
+      "pair": 0,
+      "mode": "old",
+      "user": 0.15,
+      "sys": 0.57,
+      "wall": 0.73,
+      "rss_bytes": 12320768,
+      "output": "\nrunning 1 test\ntest cmd::mcp::projection_tests::observe_tiny_actual_consumer_cpu ... observe tiny retained=false wall=725.014625ms\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.73s\n\n"
+    },
+    {
+      "pair": 0,
+      "mode": "new",
+      "user": 0.15,
+      "sys": 0.59,
+      "wall": 0.75,
+      "rss_bytes": 12435456,
+      "output": "\nrunning 1 test\ntest cmd::mcp::projection_tests::observe_tiny_actual_consumer_cpu ... observe tiny retained=true wall=744.568458ms\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.75s\n\n"
+    },
+    {
+      "pair": 1,
+      "mode": "new",
+      "user": 0.15,
+      "sys": 0.59,
+      "wall": 0.77,
+      "rss_bytes": 12435456,
+      "output": "\nrunning 1 test\ntest cmd::mcp::projection_tests::observe_tiny_actual_consumer_cpu ... observe tiny retained=true wall=763.559542ms\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.77s\n\n"
+    },
+    {
+      "pair": 1,
+      "mode": "old",
+      "user": 0.15,
+      "sys": 0.64,
+      "wall": 0.8,
+      "rss_bytes": 12402688,
+      "output": "\nrunning 1 test\ntest cmd::mcp::projection_tests::observe_tiny_actual_consumer_cpu ... observe tiny retained=false wall=801.207916ms\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.80s\n\n"
+    },
+    {
+      "pair": 2,
+      "mode": "old",
+      "user": 0.14,
+      "sys": 0.58,
+      "wall": 0.73,
+      "rss_bytes": 12288000,
+      "output": "\nrunning 1 test\ntest cmd::mcp::projection_tests::observe_tiny_actual_consumer_cpu ... observe tiny retained=false wall=727.763959ms\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.73s\n\n"
+    },
+    {
+      "pair": 2,
+      "mode": "new",
+      "user": 0.15,
+      "sys": 0.61,
+      "wall": 0.77,
+      "rss_bytes": 12369920,
+      "output": "\nrunning 1 test\ntest cmd::mcp::projection_tests::observe_tiny_actual_consumer_cpu ... observe tiny retained=true wall=768.587917ms\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.77s\n\n"
+    }
+  ],
+  "heap_controls": [
+    {
+      "shape": "text",
+      "mib": 16,
+      "old_peak_above_baseline_bytes": 50484114,
+      "new_peak_above_baseline_bytes": 226316
+    },
+    {
+      "shape": "text",
+      "mib": 64,
+      "old_peak_above_baseline_bytes": 201384207,
+      "new_peak_above_baseline_bytes": 226316
+    },
+    {
+      "shape": "arguments",
+      "mib": 16,
+      "old_peak_above_baseline_bytes": 50389632,
+      "new_peak_above_baseline_bytes": 78204
+    },
+    {
+      "shape": "arguments",
+      "mib": 64,
+      "old_peak_above_baseline_bytes": 201384573,
+      "new_peak_above_baseline_bytes": 78203
+    }
+  ],
+  "heap_measurement": "Actual native Claude producer + selected watch read + capped observe projection + full response serialization. probe-heap isolated single test process; requested Rust allocation, excludes mmap/C/RSS. Giant complete pretty response equals independent old observer byte for byte per case."
+}

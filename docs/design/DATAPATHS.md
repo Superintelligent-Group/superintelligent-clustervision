@@ -999,3 +999,24 @@ All outputs match exactly (1,288,891 bytes). Unbuffered times are 1.454593/1.332
 buffered 0.166260/0.158701/0.146978 s (median 8.75x). This measures scalar-heavy syscall
 amortization, not a producer-wide release CPU or heap claim. The private probe source and control
 results are in `encoded-arguments-evidence/append-buffer-{control-probe.rs,canonical-control.json}`.
+### Capped MCP observation retains selected payloads
+
+`observe_stream` requests the retained-message watcher interface; existing owned polling keeps
+its contract. The watcher captures original and auxiliary dependencies, and checks them after
+the callback before accepting a cursor. Shared `projection::searchable_prefix` reads exact
+decoded prefixes through checked text chunks and canonical JSON prefixes, retaining a UTF-8
+truncation witness. The existing byte cap, ellipsis, labels, ordering and cursor JSON are unchanged;
+blocks after an established prefix are not demanded. Giant text and argument complete responses
+match an independent pre-change owned observer byte for byte.
+
+Actual native Claude producer→watch selection→observe→response requested heap controls at
+16/64 MiB: text **50,484,114/201,384,207→226,316/226,316 bytes**; arguments
+**50,389,632/201,384,573→78,204/78,203 bytes**. These are requested Rust allocations above the
+pre-operation baseline, not mmap/C heap or RSS. Clean release opt-level 3/thin LTO without the
+counting allocator runs 2,000 fresh tiny-message observers per process. Three alternating pairs
+give user+system CPU old `[0.72,0.79,0.72]` versus new `[0.74,0.74,0.76]` seconds: medians
+0.72→0.74 s (about 10 μs per observation), including the required post-callback freshness check.
+The retained watcher currently uses lazy-extra producers for Claude/Codex; other providers
+retain their existing full-mode producer contract, and demanded metadata/extra may remain owned.
+Per-pair CPU/RSS and the allocation control recipe are recorded in
+[MCP-OBSERVE-PREFIX-CONTROLS.json](MCP-OBSERVE-PREFIX-CONTROLS.json).

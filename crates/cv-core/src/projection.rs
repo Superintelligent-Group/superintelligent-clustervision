@@ -109,9 +109,147 @@ impl Head {
     }
 }
 
+/// Exact decoded byte prefix of the searchable message projection, with a truncation witness.
+/// Demanded text uses checked chunks; JSON uses the canonical bounded writer. No later block
+/// is demanded after the prefix is established.
+pub fn searchable_prefix(
+    message: &crate::Message,
+    resolver: &Resolver,
+    limit: usize,
+) -> anyhow::Result<(String, bool)> {
+    #[derive(Debug)]
+    struct PrefixComplete;
+    impl std::fmt::Display for PrefixComplete {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("searchable prefix complete")
+        }
+    }
+    impl std::error::Error for PrefixComplete {}
+    // Four witness bytes distinguish an exact fit from the next UTF8 scalar not fitting.
+    let mut head = Head {
+        text: String::with_capacity(limit.saturating_add(4).min(64 * 1024)),
+        limit: limit.saturating_add(4),
+        stopped: false,
+    };
+    for block in &message.content {
+        if head.full() {
+            break;
+        }
+        match block {
+            crate::Block::Text { text }
+            | crate::Block::Thinking { text, .. }
+            | crate::Block::ToolResult { content: text, .. } => {
+                let result = text.try_for_each_chunk(resolver, 4096, |part| {
+                    head.push(part);
+                    if head.full() {
+                        Err(PrefixComplete.into())
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(error) = result {
+                    if !error.is::<PrefixComplete>() {
+                        return Err(error);
+                    }
+                }
+                head.push("\n");
+            }
+            crate::Block::ToolUse { name, input, .. } => {
+                head.push(name);
+                head.push(" ");
+                head.push_json(input)?;
+                head.push("\n");
+            }
+            crate::Block::File { path, source, .. } => {
+                if let Some(path) = path.as_deref().or(source.as_deref()) {
+                    head.push(path);
+                    head.push("\n");
+                }
+            }
+            crate::Block::Image { .. } => {}
+        }
+    }
+    let mut text = head.into_string();
+    let truncated = text.len() > limit;
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    Ok((text, truncated))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn searchable_prefix_checks_escaped_span_and_retained_text() {
+        let dir = cv_testkit::temp_dir("searchable-escaped-prefix");
+        let path = dir.join("text.json");
+        let text = "月🌙é\n\"\\".repeat(4000);
+        let raw = serde_json::to_vec(&text).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let json = crate::Json::source(&path, 0, raw.len() as u64).unwrap();
+        let retained = json.with_view(|view| Ok(view.source_text()?.unwrap())).unwrap();
+        let span = Text::Span(crate::lazy::Span {
+            source: Some(path.clone()),
+            offset: 1,
+            len: raw.len() as u64 - 2,
+            escaped: true,
+        });
+        let resolver = Resolver::new(None);
+        for body in [span, retained] {
+            let mut message = crate::Message::new(crate::Role::Assistant);
+            message.content.push(crate::Block::Text { text: body });
+            let oracle = format!("{text}\n");
+            for cap in [0, 1, 2, 3, 4, 7, 16000, oracle.len(), oracle.len() + 4] {
+                let (actual, truncated) = searchable_prefix(&message, &resolver, cap).unwrap();
+                let mut end = oracle.len().min(cap);
+                while !oracle.is_char_boundary(end) {
+                    end -= 1;
+                }
+                assert_eq!(actual, oracle[..end]);
+                assert_eq!(truncated, oracle.len() > cap);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn searchable_prefix_matches_owned_projection_at_every_unicode_boundary() {
+        let mut message = crate::Message::new(crate::Role::Assistant);
+        message.content = vec![
+            crate::Block::Text {
+                text: "月🌙é\n".into()
+            },
+            crate::Block::ToolUse {
+                id: "c".into(),
+                name: "tool".into(),
+                input: serde_json::json!({"z":"🌙\n\"\\", "a":2}).into(),
+                namespace: None,
+            },
+            crate::Block::ToolResult {
+                tool_use_id: "c".into(),
+                tool_name: None,
+                content: "done月".into(),
+                is_error: false,
+                details: None,
+                status: None,
+            },
+        ];
+        let mut oracle = String::new();
+        message.append_searchable(&mut oracle).unwrap();
+        for cap in 0..=oracle.len() + 4 {
+            let (actual, truncated) = searchable_prefix(&message, &Resolver::new(None), cap).unwrap();
+            let mut end = oracle.len().min(cap);
+            while !oracle.is_char_boundary(end) {
+                end -= 1;
+            }
+            assert_eq!(actual, oracle[..end], "cap={cap}");
+            assert_eq!(truncated, oracle.len() > cap);
+        }
+    }
 
     #[test]
     fn source_text_prefix_preserves_unicode_cutoff_and_zero_budget() {

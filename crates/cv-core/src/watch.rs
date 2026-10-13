@@ -366,7 +366,8 @@ impl Watcher {
     /// leaves (and every message past the budget) stays pending: the next poll re-reads that
     /// session even if its cheap trigger has not moved. Returns whether anything is pending.
     pub fn poll_bounded(&mut self, max_messages: usize, mut take: impl FnMut(SessionEvent) -> usize) -> bool {
-        self.poll_bounded_inner(max_messages, &mut take, false).unwrap_or(false)
+        self.poll_bounded_inner(max_messages, &mut take, false, false)
+            .unwrap_or(false)
     }
 
     /// A demanded bounded read: source/materialization failures are errors, so callers cannot
@@ -377,7 +378,17 @@ impl Watcher {
         max_messages: usize,
         mut take: impl FnMut(SessionEvent) -> usize,
     ) -> anyhow::Result<bool> {
-        self.poll_bounded_inner(max_messages, &mut take, true)
+        self.poll_bounded_inner(max_messages, &mut take, true, false)
+    }
+
+    /// Checked polling retaining source-backed message payloads. The callback must resolve
+    /// demanded content through checked APIs; source changes before acceptance fail the poll.
+    pub fn try_poll_bounded_retained(
+        &mut self,
+        max_messages: usize,
+        mut take: impl FnMut(SessionEvent) -> usize,
+    ) -> anyhow::Result<bool> {
+        self.poll_bounded_inner(max_messages, &mut take, true, true)
     }
 
     fn poll_bounded_inner(
@@ -385,6 +396,7 @@ impl Watcher {
         max_messages: usize,
         take: &mut impl FnMut(SessionEvent) -> usize,
         strict: bool,
+        retained: bool,
     ) -> anyhow::Result<bool> {
         let refs = self.discover();
         // Prune entries for sessions that vanished from discovery (deleted/pruned transcripts),
@@ -430,7 +442,8 @@ impl Watcher {
                 continue;
             };
             let previous = self.seen.get(&key).and_then(|state| state.read.as_ref());
-            let mut pass = match read_tail(adapter.as_ref(), &r, previous, prev_len, room) {
+            let read = if retained { read::read_retained } else { read_tail };
+            let mut pass = match read(adapter.as_ref(), &r, previous, prev_len, room) {
                 Ok(pass) => pass,
                 Err(error) if strict => {
                     return Err(error.context(format!("reading watched {} session {}", r.harness, r.path.display())))
@@ -447,11 +460,17 @@ impl Watcher {
             } else {
                 take(SessionEvent {
                     kind,
-                    reference: r,
+                    reference: r.clone(),
                     new_messages,
                 })
                 .min(offered)
             };
+            if retained {
+                anyhow::ensure!(
+                    pass.accepted(prev_len).fresh_with(adapter.as_ref(), &r),
+                    "watched source changed during retained projection"
+                );
+            }
             consumed += taken;
             let seen_to = prev_len + taken;
             let left = total > seen_to;

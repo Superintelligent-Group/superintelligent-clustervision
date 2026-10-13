@@ -307,7 +307,18 @@ pub fn read(
     skip: usize,
     keep: usize,
 ) -> Result<ReadPass> {
-    read_inner(adapter, r, previous, skip, keep, false, None)
+    read_inner(adapter, r, previous, skip, keep, ReadMode::OwnedTail, None)
+}
+
+/// Checked selected messages retaining source-backed payloads for bounded projections.
+pub(super) fn read_retained(
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    previous: Option<&ReadState>,
+    skip: usize,
+    keep: usize,
+) -> Result<ReadPass> {
+    read_inner(adapter, r, previous, skip, keep, ReadMode::RetainedTail, None)
 }
 
 /// Full session output: on a verified append retain only the checkpoint's stable old prefix,
@@ -318,7 +329,15 @@ pub fn read_session(
     previous: Option<&ReadState>,
     previous_count: usize,
 ) -> Result<ReadPass> {
-    read_inner(adapter, r, previous, previous_count, usize::MAX, true, None)
+    read_inner(
+        adapter,
+        r,
+        previous,
+        previous_count,
+        usize::MAX,
+        ReadMode::OwnedSession,
+        None,
+    )
 }
 
 /// Full-fidelity views through one bounded consumer, preserving final metadata and verified
@@ -332,7 +351,15 @@ pub fn read_session_into(
     previous_count: usize,
     output: &mut dyn stream::MessageSink,
 ) -> Result<ReadPass> {
-    read_inner(adapter, r, previous, previous_count, usize::MAX, true, Some(output))
+    read_inner(
+        adapter,
+        r,
+        previous,
+        previous_count,
+        usize::MAX,
+        ReadMode::StreamSession,
+        Some(output),
+    )
 }
 
 fn record_reads(message: &Message, primary: &std::path::Path, reads: &mut source::ReadSet) {
@@ -373,15 +400,24 @@ fn record_reads(message: &Message, primary: &std::path::Path, reads: &mut source
     }
 }
 
+enum ReadMode {
+    OwnedTail,
+    RetainedTail,
+    OwnedSession,
+    StreamSession,
+}
+
 fn read_inner(
     adapter: &dyn Adapter,
     r: &SessionRef,
     previous: Option<&ReadState>,
     mut skip: usize,
     keep: usize,
-    session_output: bool,
+    mode: ReadMode,
     output: Option<&mut dyn stream::MessageSink>,
 ) -> Result<ReadPass> {
+    let session_output = matches!(mode, ReadMode::OwnedSession | ReadMode::StreamSession);
+    let retained = matches!(mode, ReadMode::RetainedTail | ReadMode::StreamSession);
     let primary = adapter.resume_source(r);
     let captured = source::Probe::default().snapshot_from(r, &primary);
     let cached = previous
@@ -466,7 +502,9 @@ fn read_inner(
     let resolver = done.session.resolver();
     for message in &mut sink.messages {
         record_reads(message, &primary, &mut reads);
-        message.materialize(&resolver)?;
+        if !retained {
+            message.materialize(&resolver)?;
+        }
     }
     let source = captured.with_reads(&reads);
     let version = crate::resume::version(adapter, CONSUMER);
@@ -745,6 +783,8 @@ mod tests {
                     .id
                     .clone();
                 SessionRef::new(id, harness, path)
+            } else if matches!(harness, Harness::Cline | Harness::Roo) {
+                SessionRef::new("fidelity", harness, fixtures.join(rel).parent().unwrap().to_path_buf())
             } else {
                 SessionRef::new("fidelity", harness, fixtures.join(rel))
             };
