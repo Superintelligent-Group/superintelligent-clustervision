@@ -258,9 +258,11 @@ impl Adapter for Goose {
         };
         let data: Option<String> = conn
             .read(|reader| {
-                Ok(reader.query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
-                    row.get(0)
-                })?)
+                Ok(
+                    reader.query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
+                        row.get(0)
+                    })?,
+                )
             })
             .ok()
             .flatten();

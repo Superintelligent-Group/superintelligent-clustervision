@@ -243,7 +243,11 @@ fn until(text: &Text, resolver: &Resolver, mut done: impl FnMut(&str) -> bool) -
         resolver,
         CHUNK,
         |part| {
-            if done(part) { Err(Complete.into()) } else { Ok(()) }
+            if done(part) {
+                Err(Complete.into())
+            } else {
+                Ok(())
+            }
         },
     ) {
         Err(error) if error.is::<Complete>() => Ok(()),

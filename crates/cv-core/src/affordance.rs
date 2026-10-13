@@ -1390,22 +1390,17 @@ pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) ->
     let mut error = None;
     // Request classification facts and tool details while reducing complete content spans into
     // bounded summaries. Only the resulting rows survive each streamed message.
-    let s = crate::stream::stream_counted(
-        adapter,
-        r,
-        &crate::stream::ParseOptions::facts(),
-        &mut |m: Message| {
-            match message_rows(r.harness, &m, index, &resolver) {
-                Ok(rows) => messages.extend(rows),
-                Err(failure) => {
-                    error = Some(failure);
-                    return Flow::Stop;
-                }
+    let s = crate::stream::stream_counted(adapter, r, &crate::stream::ParseOptions::facts(), &mut |m: Message| {
+        match message_rows(r.harness, &m, index, &resolver) {
+            Ok(rows) => messages.extend(rows),
+            Err(failure) => {
+                error = Some(failure);
+                return Flow::Stop;
             }
-            index += 1;
-            Flow::Continue
-        },
-    )?;
+        }
+        index += 1;
+        Flow::Continue
+    })?;
     if let Some(error) = error {
         return Err(error);
     }

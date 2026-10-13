@@ -1250,14 +1250,12 @@ mod tests {
         assert_eq!(crate::MessageSink::message(&mut sink, message), crate::Flow::Stop);
         assert!(crate::MessageSink::take_error(&mut sink).is_some());
         let mut refs = vec![r.clone()];
-        assert!(
-            filter_refs(
-                &mut refs,
-                &SessionQuery::parse("tool:edit").unwrap(),
-                &TextSets::empty()
-            )
-            .is_err()
-        );
+        assert!(filter_refs(
+            &mut refs,
+            &SessionQuery::parse("tool:edit").unwrap(),
+            &TextSets::empty()
+        )
+        .is_err());
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, r.id);
     }

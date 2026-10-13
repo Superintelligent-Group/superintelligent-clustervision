@@ -5,7 +5,7 @@
 
 use crate::util::{dim_cwd, parse_harness, session_row, short_id};
 use anyhow::Result;
-use cv_core::ir::{SessionRef, truncate};
+use cv_core::ir::{truncate, SessionRef};
 use cv_core::sanitize::sanitize_line;
 
 /// Apply a parsed query to a ref list in place. The two-phase filter itself is

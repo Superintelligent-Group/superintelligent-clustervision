@@ -2,10 +2,10 @@
 //! report. Run separate processes for `materialized` and `streamed`, using scratch
 //! CLUSTERVISION_HOME and a worktree-specific CARGO_TARGET_DIR.
 //! Usage: ir_json_probe streamed|materialized json|text|escaped SOURCE [compact] [count]
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use cv_core::{
-    Block, Json, Message, Resolver, Role,
     lazy::{Span, Text},
+    Block, Json, Message, Resolver, Role,
 };
 use std::{
     io::{self, Write},

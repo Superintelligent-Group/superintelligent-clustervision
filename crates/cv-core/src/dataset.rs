@@ -496,7 +496,7 @@ fn write_json_escaped<W: std::io::Write + ?Sized>(w: &mut W, s: &str) -> std::io
 mod tests {
     use super::*;
     use crate::ir::{Harness, Message};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     fn msg(role: Role, blocks: Vec<Block>) -> Message {
         Message {
