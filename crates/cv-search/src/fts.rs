@@ -343,9 +343,15 @@ pub fn index_sessions(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool,
             swept.changed,
             swept.resumed,
             swept.removed,
-            swept.total.saturating_sub(swept.changed),
+            swept.total.saturating_sub(swept.copies + swept.changed),
             swept.errors
         );
+        if swept.copies != 0 {
+            eprintln!(
+                "  ↳ {} discovered copies resolved to their preferred logical session",
+                swept.copies
+            );
+        }
     }
     anyhow::ensure!(
         swept.errors == 0,
@@ -371,6 +377,8 @@ struct SweepWork {
 pub(crate) struct Swept {
     /// Top-level sessions seen.
     pub total: usize,
+    /// Discovered duplicate copies omitted from the global-ID index.
+    pub copies: usize,
     /// Sessions (top-level or folded sub-agents) whose FTS docs were (re)written.
     pub changed: usize,
     /// Sessions whose parse or event publication failed (successful independent work is kept).
@@ -516,6 +524,43 @@ fn source_consumer(dir: &Path) -> Result<String> {
     ))
 }
 
+fn preferred_index_candidates(
+    refs: Vec<(std::borrow::Cow<'_, cv_core::SessionRef>, cv_core::events::Provenance)>,
+) -> Vec<(std::borrow::Cow<'_, cv_core::SessionRef>, cv_core::events::Provenance)> {
+    let mut slots: HashMap<String, usize> = HashMap::new();
+    let mut selected: Vec<(std::borrow::Cow<'_, cv_core::SessionRef>, cv_core::events::Provenance)> = Vec::new();
+    for (r, prov) in refs {
+        if let Some(&slot) = slots.get(&r.id) {
+            let (old, old_prov) = &selected[slot];
+            // Keep source errors meaningful if no live copy exists.
+            if (!r.path.exists())
+                .cmp(&(!old.path.exists()))
+                .then_with(|| r.preferred_copy_cmp(old))
+                .then_with(|| prov.parent_id.cmp(&old_prov.parent_id))
+                .is_lt()
+            {
+                selected[slot] = (r, prov);
+            }
+        } else {
+            slots.insert(r.id.clone(), selected.len());
+            selected.push((r, prov));
+        }
+    }
+    selected
+}
+
+#[cfg(test)]
+fn preferred_index_copies(refs: Vec<cv_core::SessionRef>) -> Vec<cv_core::SessionRef> {
+    preferred_index_candidates(
+        refs.into_iter()
+            .map(|r| (std::borrow::Cow::Owned(r), Default::default()))
+            .collect(),
+    )
+    .into_iter()
+    .map(|(r, _)| r.into_owned())
+    .collect()
+}
+
 /// Bring the index at `dir` up to date with `refs` (the top-level sessions on disk), on every core.
 ///
 /// The main thread plans (the freshness checks), then `available_parallelism` workers each take
@@ -543,6 +588,7 @@ fn source_consumer(dir: &Path) -> Result<String> {
 pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<Swept> {
     let (index, f) = open_or_create(dir)?;
     let total = refs.len();
+    let copies = total - refs.iter().map(|r| &r.id).collect::<HashSet<_>>().len();
     let planner = SweepPlanner {
         index: &index,
         f: &f,
@@ -563,6 +609,7 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         if !rebuild && plan.jobs.is_empty() && plan.missing.is_empty() && !compact {
             return Ok(Swept {
                 total,
+                copies,
                 ..Default::default()
             });
         }
@@ -599,6 +646,7 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
     compact(dir, &index, &mut writer)?;
     Ok(Swept {
         total,
+        copies,
         changed: ran.changed,
         removed,
         resumed: ran.resumed,
@@ -667,7 +715,25 @@ impl SweepPlanner<'_> {
 
         let mut seen: HashSet<String> = HashSet::new();
         let mut jobs: Vec<Job> = Vec::new();
-        for r in refs {
+        let mut candidates: Vec<_> = refs
+            .iter()
+            .map(|r| (std::borrow::Cow::Borrowed(r), cv_core::events::Provenance::default()))
+            .collect();
+        if subagents {
+            for r in refs {
+                for sub in cv_core::subagent_tree_of(r) {
+                    let prov = cv_core::events::Provenance {
+                        parent_id: Some(r.id.clone()),
+                        agent_id: Some(sub.agent_id().to_string()),
+                        workflow: sub.workflow.clone(),
+                    };
+                    candidates.push((std::borrow::Cow::Owned(sub.session), prov));
+                }
+            }
+        }
+        let candidates = preferred_index_candidates(candidates);
+        for (r, prov) in candidates {
+            let r = r.as_ref();
             seen.insert(r.id.clone());
             let source = probe.snapshot(r);
             let (mtime, size) = source.primary;
@@ -679,10 +745,13 @@ impl SweepPlanner<'_> {
             );
             let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
                 dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
-            }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &Default::default()));
+            }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &prov));
             let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
-            if fts_fresh && !events && affordances.counts_with_probe(r, &source, &mut probe).is_some() {
+            if fts_fresh
+                && !events
+                && (prov.parent_id.is_some() || affordances.counts_with_probe(r, &source, &mut probe).is_some())
+            {
                 continue;
             }
             jobs.push(Job {
@@ -695,56 +764,11 @@ impl SweepPlanner<'_> {
                 grew: existing
                     .get(&r.id)
                     .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
-                prov: Default::default(),
+                prov,
                 mark: marks.get(r).cloned(),
                 source,
                 dependencies_fresh,
             });
-        }
-        // The sub-agent forest (opt-in): every claude session's `subagent_tree_of`, tagged with
-        // provenance; `seen` grows so a folded agent still on disk is not reaped.
-        if subagents {
-            for r in refs {
-                for sub in cv_core::subagent_tree_of(r) {
-                    let sr = &sub.session;
-                    seen.insert(sr.id.clone());
-                    let source = probe.snapshot(sr);
-                    let (mtime, size) = source.primary;
-                    let dependencies_fresh = dependencies.auxiliary_fresh_with_probe(
-                        sr,
-                        existing.get(&sr.id).copied().unwrap_or(source.primary),
-                        &source.dependencies,
-                        &mut probe,
-                    );
-                    let prov = cv_core::events::Provenance {
-                        parent_id: Some(r.id.clone()),
-                        agent_id: Some(sub.agent_id().to_string()),
-                        workflow: sub.workflow.clone(),
-                    };
-                    let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size, || {
-                        dependencies_fresh && dependencies.primary_fresh(sr, &source.dependencies)
-                    }) && metadata.get(&sr.id) == Some(&DiscoveryMetadata::new(sr, &prov));
-                    let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
-                    if fts_fresh && !events {
-                        continue;
-                    }
-                    jobs.push(Job {
-                        r: sr.clone(),
-                        mtime,
-                        size,
-                        fts: !fts_fresh,
-                        events,
-                        existing: existing.contains_key(&sr.id),
-                        grew: existing
-                            .get(&sr.id)
-                            .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
-                        prov,
-                        mark: marks.get(sr).cloned(),
-                        source,
-                        dependencies_fresh,
-                    });
-                }
-            }
         }
         jobs.retain(|j| cv_core::harness::for_harness(j.r.harness).is_some());
 
@@ -762,9 +786,8 @@ impl SweepPlanner<'_> {
 /// Retain it until every adapter's parser working set has an independently enforced bound.
 const IN_FLIGHT_BYTES: u64 = 2 << 30;
 
-/// The job queue the workers share: whole groups of jobs (one group per session id, in discovery
-/// order — two files under one id must be read in order, the later one's docs replacing the
-/// earlier's), the transcript bytes now in flight, and whether the writer is draining for a commit.
+/// The worker queue admits logical-session groups, largest first. Planning chooses one
+/// preferred copy per ID; group reservations bound concurrent source bytes.
 struct Queue {
     groups: Vec<Vec<Job>>,
     in_flight: u64,
@@ -2030,6 +2053,7 @@ fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Resu
     let mut out = HashMap::new();
     let mut folded = HashSet::new();
     let mut metadata = HashMap::new();
+    let mut duplicates = HashSet::new();
     let metas = searcher
         .search(&kind_query(f, KIND_META), &DocSetCollector)
         .context("listing meta docs")?;
@@ -2053,8 +2077,13 @@ fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Resu
                     metadata.insert(id.clone(), stamp);
                 }
             }
-            out.insert(id, (mt, sz));
+            if out.insert(id.clone(), (mt, sz)).is_some() && read_metadata {
+                duplicates.insert(id);
+            }
         }
+    }
+    for id in duplicates {
+        metadata.remove(&id);
     }
     Ok((out, folded, metadata))
 }
@@ -4181,6 +4210,86 @@ mod tests {
         std::fs::remove_dir_all(&sdir).ok();
     }
 
+    #[test]
+    fn copied_session_sweep_matches_resolver_authority_and_clean_oracle() {
+        let home = IsolatedHome::new();
+        let dir = tmpdir();
+        let oracle = tmpdir();
+        let older_path = write_claude_msgs(&home.home, "old-copy", &[("user", "sapphire old body")]);
+        let newer_path = write_claude_msgs(&home.home, "new-copy", &[("user", "amber newest body")]);
+        let mut older = sref("shared", "old title", older_path);
+        let mut newer = sref("shared", "new title", newer_path);
+        older.updated_at = chrono::DateTime::from_timestamp(1, 0);
+        newer.updated_at = chrono::DateTime::from_timestamp(2, 0);
+        let stored = |path: &Path| {
+            use tantivy::schema::document::Document;
+            let index = Index::open_in_dir(path).unwrap();
+            let searcher = index.reader().unwrap().searcher();
+            let mut docs = Vec::new();
+            for segment in searcher.segment_readers() {
+                let reader = segment.get_store_reader(0).unwrap();
+                for id in segment.doc_ids_alive() {
+                    let doc: TantivyDocument = reader.get(id).unwrap();
+                    docs.push(doc.to_json(&index.schema()));
+                }
+            }
+            docs.sort();
+            docs
+        };
+        let first = sweep(&dir, vec![older.clone(), newer.clone()], true, false).unwrap();
+        assert_eq!((first.total, first.copies, first.changed), (2, 1, 1));
+        index_refs(&oracle, std::slice::from_ref(&newer), false).unwrap();
+        assert_eq!(stored(&dir), stored(&oracle));
+        assert_eq!(
+            text_search_ids(&dir, "amber").unwrap(),
+            HashSet::from(["shared".to_owned()])
+        );
+        assert!(text_search_ids(&dir, "sapphire").unwrap().is_empty());
+        let before = stored(&dir);
+        let unchanged = sweep(&dir, vec![newer.clone(), older.clone()], false, false).unwrap();
+        assert_eq!((unchanged.changed, unchanged.copies), (0, 1));
+        assert_eq!(stored(&dir), before);
+        // Timestamp ties use the same deterministic path order independent of input order.
+        older.updated_at = newer.updated_at;
+        let preferred = if older.preferred_copy_cmp(&newer).is_lt() {
+            older.clone()
+        } else {
+            newer.clone()
+        };
+        for refs in [vec![older.clone(), newer.clone()], vec![newer.clone(), older.clone()]] {
+            assert_eq!(preferred_index_copies(refs)[0].path, preferred.path);
+        }
+        // Repair a current-schema index with duplicate meta documents even if both carry
+        // exactly the preferred metadata and guards, then skip its next unchanged pass.
+        index_refs(&dir, &[newer.clone(), newer.clone()], true).unwrap();
+        assert_eq!(stored(&dir).len(), 4);
+        assert_eq!(
+            sweep(&dir, vec![older.clone(), newer.clone()], false, false)
+                .unwrap()
+                .changed,
+            1
+        );
+        assert_eq!(stored(&dir), stored(&oracle));
+        assert_eq!(
+            sweep(&dir, vec![newer.clone(), older.clone()], false, false)
+                .unwrap()
+                .changed,
+            0
+        );
+        // A stale supplied ref cannot hide a still-live copy; no live copy must still error.
+        std::fs::remove_file(&newer.path).unwrap();
+        let fallback = sweep(&dir, vec![newer.clone(), older.clone()], false, false).unwrap();
+        assert_eq!(fallback.changed, 1);
+        assert_eq!(
+            text_search_ids(&dir, "sapphire").unwrap(),
+            HashSet::from(["shared".to_owned()])
+        );
+        std::fs::remove_file(&older.path).unwrap();
+        assert_eq!(sweep(&dir, vec![older, newer], false, false).unwrap().errors, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(oracle).unwrap();
+    }
+
     /// Every source requires both mtime and size to match. Unknown or empty sources are stale.
     #[test]
     fn fts_is_fresh_requires_mtime_and_size_for_every_source() {
@@ -4897,8 +5006,12 @@ mod tests {
                 sref(&id, "t", write_claude(&sdir, &id, &format!("zqword{i} common")))
             })
             .collect();
-        refs.push(sref("s0", "t", write_claude(&dup, "s0", "zqdupword common")));
-        index_refs(&seq, &refs, false).unwrap();
+        let mut newer = sref("s0", "t", write_claude(&dup, "s0", "zqdupword common"));
+        newer.updated_at = chrono::DateTime::from_timestamp(3, 0);
+        refs.push(newer.clone());
+        let mut canonical = refs[..40].to_vec();
+        canonical[0] = newer;
+        index_refs(&seq, &canonical, false).unwrap();
         sweep(&par, refs.clone(), true, false).unwrap();
         let docs = |d: &Path| {
             let (index, f) = open_existing(d).unwrap();
@@ -4910,8 +5023,8 @@ mod tests {
         assert_eq!(docs(&seq), docs(&par));
         assert_eq!(
             docs(&par).0,
-            2 * 41,
-            "a body and a meta doc per file: both files under s0 keep theirs, as the sequential path leaves them"
+            2 * 40,
+            "a body and a meta doc per logical ID, from its preferred copy"
         );
         for q in (0..40)
             .map(|i| format!("zqword{i}"))
@@ -5073,6 +5186,63 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    #[test]
+    fn adopted_agent_copies_have_one_stable_authority_and_parent() {
+        let home = IsolatedHome::new();
+        let dir = tmpdir();
+        let a = sref(
+            "parent-a",
+            "parent a",
+            write_claude_msgs(&home.home, "parent-a", &[("user", "parent a")]),
+        );
+        let b = sref(
+            "parent-b",
+            "parent b",
+            write_claude_msgs(&home.home, "parent-b", &[("user", "parent b")]),
+        );
+        write_subagent(a.path.to_str().unwrap(), "shared", "sapphire agent a");
+        write_subagent(b.path.to_str().unwrap(), "shared", "amber agent b");
+        let first = sweep(&dir, vec![b.clone(), a.clone()], true, true).unwrap();
+        assert_eq!(first.changed, 3);
+        let (index, fields) = open_existing(&dir).unwrap();
+        let meta = meta_doc(&index.reader().unwrap().searcher(), &fields, "agent-shared").unwrap();
+        assert_eq!(
+            meta.get_first(fields.parent_id).and_then(|v| v.as_str()),
+            Some("parent-a")
+        );
+        assert!(text_search_ids(&dir, "amber").unwrap().is_empty());
+        assert_eq!(sweep(&dir, vec![a.clone(), b.clone()], false, true).unwrap().changed, 0);
+        let mut top = sref(
+            "agent-shared",
+            "direct copy",
+            write_claude_msgs(&home.home, "direct-copy", &[("user", "topaz direct agent")]),
+        );
+        top.updated_at = chrono::DateTime::from_timestamp(10, 0);
+        assert_eq!(
+            sweep(&dir, vec![a.clone(), b.clone(), top.clone()], false, true)
+                .unwrap()
+                .changed,
+            1
+        );
+        let (index, fields) = open_existing(&dir).unwrap();
+        let meta = meta_doc(&index.reader().unwrap().searcher(), &fields, "agent-shared").unwrap();
+        assert!(meta.get_first(fields.parent_id).is_none());
+        assert_eq!(
+            text_search_ids(&dir, "topaz").unwrap(),
+            HashSet::from(["agent-shared".to_owned()])
+        );
+        assert_eq!(
+            sweep(&dir, vec![top.clone(), b.clone(), a.clone()], false, true)
+                .unwrap()
+                .changed,
+            0
+        );
+        std::fs::remove_file(top.path).unwrap();
+        assert_eq!(sweep(&dir, vec![b, a], false, true).unwrap().changed, 1);
+        assert!(text_search_ids(&dir, "topaz").unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The forest fold also tees sub-agent events into the catalog WITH provenance: a file the

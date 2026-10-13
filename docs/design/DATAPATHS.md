@@ -3289,3 +3289,25 @@ sweep again has zero work and matches an independent full sweep's events/count o
 Core event controls cover NULL historical size, missing/legacy authority and source removal.
 These are work/acceptance controls, not timing or physical-I/O measurements; the separate
 frozen-fleet lane owns the final composed fleet repeat.
+
+### Preferred session copies in the FTS sweep (Sol, 2026-10-13)
+
+The current-schema frozen-store composition control discovered two default OpenClaw roots
+containing the same legacy session ID. Both native JSONL files were byte-identical, but a cold
+production index wrote four live documents while the next unchanged sweep left two. Catalog
+and discovery correctly retained both references; the global-ID FTS schema had no consistent
+copy authority. This was a correctness defect, not only redundant unchanged work.
+
+`SessionRef::preferred_copy_cmp` now shares lookup's existing newest-update-or-creation rule
+with indexing, adding deterministic harness/path tie breaks. The sweep indexes one preferred
+live copy per global ID, including adopted agent copies across parents and top-level/folded
+overlap. Discovery references remain intact. An all-missing copy group still reports its source
+error. Folded provenance belongs to the selected copy. Top-level candidates stay borrowed;
+only discovered subagent references and actual jobs own their metadata.
+
+The existing metadata scan detects repeated valid meta documents and forces one canonical
+rewrite; ordinary multiple body chunks remain valid. Narrow independent clean-index controls
+cover divergent bodies, reversed inputs, timestamp ties, vanished-copy fallback, meaningful
+all-missing errors, duplicate-record repair, and adopted-agent parent provenance. This does not
+expand the existing global-ID namespace into harness-qualified index identities. Full-fleet
+cold/unchanged/append/reference composition remains pending until the corrected CLI is built.
