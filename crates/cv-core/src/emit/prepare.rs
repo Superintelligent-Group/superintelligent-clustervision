@@ -777,3 +777,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod same_target;
