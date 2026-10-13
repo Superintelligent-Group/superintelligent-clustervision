@@ -1034,7 +1034,8 @@ pub fn est_tokens(block: &Block, bytes_per_token: f64) -> anyhow::Result<u64> {
 
 /// The same estimate as [`est_tokens`] after materializing the block, without retaining its
 /// decoded text. Spans are read in bounded chunks; malformed fields retain the resolver's raw
-/// fallback. This is useful for byte-counting consumers such as the compaction doctor.
+/// fallback. Unavailable sources and out-of-bounds spans return errors instead of zero tokens.
+/// This is useful for byte-counting consumers such as the compaction doctor.
 pub fn est_tokens_resolved(
     block: &Block,
     bytes_per_token: f64,
@@ -1250,7 +1251,8 @@ mod tests {
                     escaped: true,
                 }),
             };
-            assert_eq!(est_tokens_resolved(&block, 3.5, &resolver).unwrap(), 0);
+            let error = est_tokens_resolved(&block, 3.5, &resolver).unwrap_err();
+            assert!(error.to_string().contains("Text span is outside source"));
         }
         drop(resolver);
         std::fs::remove_dir_all(dir).unwrap();
