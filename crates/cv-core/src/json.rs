@@ -753,6 +753,25 @@ impl<'a> From<&'a Value> for JsonView<'a> {
         Self(View::Owned(value))
     }
 }
+fn raw_string_may_contain_ascii(raw: &[u8], byte: u8) -> bool {
+    if memchr::memchr(byte, raw).is_some() {
+        return true;
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut escape = [
+        b'\\',
+        b'u',
+        b'0',
+        b'0',
+        HEX[(byte >> 4) as usize],
+        HEX[(byte & 15) as usize],
+    ];
+    if memchr::memmem::find(raw, &escape).is_some() {
+        return true;
+    }
+    escape[5].make_ascii_uppercase();
+    memchr::memmem::find(raw, &escape).is_some()
+}
 impl<'a> JsonView<'a> {
     /// Child records retain their original independent Value-compatible acceptance boundary.
     pub(crate) fn accepted_array(self) -> Result<Option<AcceptedArray<'a>>> {
@@ -945,6 +964,40 @@ impl<'a> JsonView<'a> {
                 .and_then(|record| record.get(key))
                 .map(|raw| Self(View::Source(SourceView { raw, ..source }))),
         })
+    }
+    /// Conservative printable-ASCII presence without decoding a retained JSON string.
+    /// False proves absence; escaped backslashes may create harmless false positives.
+    pub(crate) fn string_may_contain_ascii(self, byte: u8) -> Result<bool> {
+        anyhow::ensure!((0x20..=0x7e).contains(&byte), "expected printable ASCII");
+        match self.0 {
+            View::Owned(value) => Ok(value.as_str().is_some_and(|s| s.as_bytes().contains(&byte))),
+            #[cfg(feature = "mmap")]
+            View::Source(source) => Ok(
+                source.raw.get().starts_with('"') && raw_string_may_contain_ascii(source.raw.get().as_bytes(), byte)
+            ),
+            #[cfg(not(feature = "mmap"))]
+            View::Portable(source) => {
+                use std::io::Read;
+                if source.source.kind(source.value)? != Some(b'"') {
+                    return Ok(false);
+                }
+                let mut cursor = source.source.cursor(source.value)?;
+                let mut buffer = [0u8; 64 * 1024 + 5];
+                let mut overlap = 0;
+                loop {
+                    let n = cursor.read(&mut buffer[overlap..])?;
+                    if n == 0 {
+                        return Ok(false);
+                    }
+                    let end = overlap + n;
+                    if raw_string_may_contain_ascii(&buffer[..end], byte) {
+                        return Ok(true);
+                    }
+                    overlap = end.min(5);
+                    buffer.copy_within(end - overlap..end, 0);
+                }
+            }
+        }
     }
     pub fn is_string(self) -> Result<bool> {
         Ok(match self.0 {

@@ -2,6 +2,14 @@
 //! a second bounded traversal selects the same first prose/task line as the owned codec.
 
 use anyhow::Result;
+#[derive(Debug)]
+struct Selected;
+impl std::fmt::Display for Selected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("prompt metadata selected")
+    }
+}
+impl std::error::Error for Selected {}
 use std::path::PathBuf;
 
 #[derive(Default, Debug)]
@@ -74,6 +82,9 @@ impl FirstLine {
             self.chars = self.chars.saturating_add(1);
             if !c.is_whitespace() {
                 self.last_nonwhite = self.chars;
+                if self.last_nonwhite >= 81 {
+                    self.finish_line();
+                }
             }
         }
     }
@@ -154,7 +165,7 @@ impl Cwd {
     }
 }
 
-pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()>) -> Result<Summary> {
+pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str) -> Result<()>) -> Result<()>) -> Result<Summary> {
     let mut task = Marker::new(b"<task>");
     let mut task_end = Marker::new(b"</task>");
     let mut environment = Marker::new(b"<environment_details>");
@@ -172,6 +183,7 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()
             cwd.feed(c, position + offset as u64);
         }
         position += chunk.len() as u64;
+        Ok(())
     })?;
     let task_range = task
         .found
@@ -186,7 +198,7 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()
     let mut explicit = FirstLine::default();
     let mut prose = FirstLine::default();
     position = 0;
-    visit(&mut |chunk| {
+    let selected = visit(&mut |chunk| {
         for (i, c) in chunk.char_indices() {
             let at = position + i as u64;
             if cwd.result.is_some_and(|(start, end)| start <= at && at < end) {
@@ -198,9 +210,25 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()
             if !environment_range.is_some_and(|(start, end)| start <= at && at < end) {
                 prose.feed(c);
             }
+            let next = at + c.len_utf8() as u64;
+            let task_complete = task_range.is_none_or(|(_, end)| next >= end);
+            if task_complete {
+                explicit.finish_line();
+            }
+            let title_complete = explicit.title.is_some() || (task_complete && prose.title.is_some());
+            let path_complete = cwd.result.is_none_or(|(_, end)| next >= end);
+            if title_complete && path_complete {
+                return Err(Selected.into());
+            }
         }
         position += chunk.len() as u64;
-    })?;
+        Ok(())
+    });
+    if let Err(error) = selected {
+        if !error.is::<Selected>() {
+            return Err(error);
+        }
+    }
     explicit.finish_line();
     prose.finish_line();
     Ok(Summary {
@@ -214,6 +242,54 @@ pub(super) fn summarize(mut visit: impl FnMut(&mut dyn FnMut(&str)) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_prompt_cutoffs_match_owned_and_early_stop_keeps_identity_checks() -> Result<()> {
+        let world = cv_testkit::World::in_process("cline-prompt-cutoffs");
+        let path = world.base.join("prompt.json");
+        for chars in [79, 80, 81, 82] {
+            for padding in [0, 65_530, 65_536] {
+                // Leading whitespace places the title across decoder windows without
+                // changing the owned codec's trimmed first line.
+                let text = format!("{}{}  \nignored", " ".repeat(padding), "é".repeat(chars));
+                for wire in [
+                    serde_json::to_string(&text)?,
+                    serde_json::to_string(&text)?.replace('é', "\\u00e9"),
+                ] {
+                    std::fs::write(&path, wire)?;
+                    let source = crate::json::JsonSource::capture(&path)?;
+                    let summary =
+                        source.read_document(|view| summarize(|feed| view.for_each_str_chunk(feed).map(|_| ())))?;
+                    assert_eq!(
+                        summary.title,
+                        crate::harness::cline::clean_user_title(&text).map(|s| crate::ir::truncate(&s, 80))
+                    );
+                }
+            }
+        }
+        let text = format!("selected title\n{}", "escaped λ ".repeat(8192));
+        let wire = serde_json::to_string(&text)?.replace('λ', "\\u03bb");
+        std::fs::write(&path, wire)?;
+        let source = crate::json::JsonSource::capture(&path)?;
+        let mut passes = 0;
+        let result = source.read_document(|view| {
+            summarize(|feed| {
+                passes += 1;
+                let result = view.for_each_str_chunk(feed).map(|_| ());
+                if passes == 2 {
+                    assert!(result.as_ref().is_err_and(|error| error.is::<Selected>()));
+                    std::fs::write(&path, b"\"changed\"")?;
+                }
+                result
+            })
+        });
+        assert_eq!(passes, 2);
+        assert!(
+            result.is_err(),
+            "source mutation must survive the swallowed stop marker"
+        );
+        Ok(())
+    }
 
     #[test]
     fn bounded_prompt_scan_matches_the_owned_metadata_codec_at_every_split() {
@@ -233,8 +309,8 @@ mod tests {
         for text in cases {
             for at in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
                 let result = summarize(|feed| {
-                    feed(&text[..at]);
-                    feed(&text[at..]);
+                    feed(&text[..at])?;
+                    feed(&text[at..])?;
                     Ok(())
                 })
                 .unwrap();
@@ -252,5 +328,40 @@ mod tests {
                 assert_eq!(result.environment, text.contains("<environment_details>"));
             }
         }
+    }
+    #[test]
+    fn second_pass_stops_only_after_late_title_and_path_are_settled() -> Result<()> {
+        let padding = "x".repeat(8192);
+        for text in [
+            format!("plain\n{padding}"),
+            format!("plain\n{padding}\n# Current Working Directory (/late-path) Files"),
+            format!("plain\n{padding}<task>late title</task>"),
+            format!("<environment_details>{padding}</environment_details>after"),
+            format!("<task> \n </task>\nplain\n{padding}"),
+        ] {
+            let mut visits = 0;
+            let mut bytes = [0usize; 2];
+            let result = summarize(|feed| {
+                let pass = visits;
+                visits += 1;
+                for chunk in text.as_bytes().chunks(64) {
+                    // The only non-ASCII test path is deliberately kept on valid boundaries.
+                    let chunk = std::str::from_utf8(chunk)?;
+                    bytes[pass] += chunk.len();
+                    feed(chunk)?;
+                }
+                Ok(())
+            })?;
+            assert_eq!(bytes[0], text.len());
+            assert_eq!(
+                result.title,
+                crate::harness::cline::clean_user_title(&text).map(|s| crate::ir::truncate(&s, 80))
+            );
+            assert_eq!(result.cwd, crate::harness::cline::extract_cwd(&text));
+            if text == format!("plain\n{padding}") {
+                assert_eq!(bytes[1], 64);
+            }
+        }
+        Ok(())
     }
 }

@@ -653,18 +653,15 @@ fn text_views<'a>(
     Ok(())
 }
 /// Feed the same joined text as text_parts (discovery) or parsed Text blocks (streaming).
-fn visit_text(content: Option<JsonView<'_>>, discovery: bool, feed: &mut dyn FnMut(&str)) -> Result<()> {
+fn visit_text(content: Option<JsonView<'_>>, discovery: bool, feed: &mut dyn FnMut(&str) -> Result<()>) -> Result<()> {
     let mut first = true;
     text_views(content, discovery, |text| {
         if !first {
-            feed("\n");
+            feed("\n")?;
         }
         first = false;
         if let Some(text) = text {
-            text.for_each_str_chunk(|chunk| {
-                feed(chunk);
-                Ok(())
-            })?;
+            text.for_each_str_chunk(|chunk| feed(chunk))?;
         }
         Ok(())
     })

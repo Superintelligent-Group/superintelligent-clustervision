@@ -510,6 +510,11 @@ fn projected_text(view: JsonView<'_>, message: &mut Message, thinking: bool, opt
 /// Harmony markers may cross decoder chunks or be Unicode escaped on disk. Scan decoded bytes
 /// with only the longest marker's overlap; actual Harmony decoding retains its existing owned path.
 fn projected_harmony(view: JsonView<'_>) -> Result<bool> {
+    // Every Harmony marker starts with '<'. Escaped U+003C remains a candidate,
+    // including harmless literal-backslash false positives; accepted source checks stay intact.
+    if !view.string_may_contain_ascii(b'<')? {
+        return Ok(false);
+    }
     const MARKERS: [&[u8]; 3] = [b"<|channel|>", b"<|message|>", b"<|start|>assistant"];
     const OVERLAP: usize = 17;
     let mut tail = Vec::with_capacity(OVERLAP);
@@ -1435,6 +1440,44 @@ mod tests {
                 fs::remove_dir_all(dir).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn harmony_absence_hint_preserves_owned_and_encoded_marker_oracles() -> Result<()> {
+        let world = cv_testkit::World::in_process("lm-harmony-absence");
+        let path = world.base.join("text.json");
+        for marker in [
+            "ordinary λ",
+            "<|channel|>",
+            r"\u003c|message|>",
+            r"\u003C|start|>assistant",
+            r"\\u003c|channel|>",
+            "unrelated < angle",
+        ] {
+            for padding in [0, 65_533, 65_537, 65_540] {
+                let wire = format!("\"{}{marker}\"", "x".repeat(padding));
+                let decoded: String = serde_json::from_str(&wire)?;
+                let expected = super::super::harmony::looks_like_harmony(&decoded);
+                assert_eq!(projected_harmony(JsonView::from(&Value::String(decoded)))?, expected);
+                fs::write(&path, &wire)?;
+                let source = JsonSource::capture(&path)?;
+                assert_eq!(
+                    source.read_document(projected_harmony)?,
+                    expected,
+                    "{marker} at {padding}"
+                );
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&"ordinary λ".repeat(1000))?)?;
+        let source = JsonSource::capture(&path)?;
+        assert!(source
+            .read_document(|view| {
+                assert!(!view.string_may_contain_ascii(b'<')?);
+                fs::write(&path, b"\"changed\"")?;
+                Ok(())
+            })
+            .is_err());
+        Ok(())
     }
 
     #[test]
