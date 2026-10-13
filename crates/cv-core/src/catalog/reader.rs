@@ -125,6 +125,31 @@ impl Reader {
         }
     }
 
+    pub(crate) fn capture_primary_reads(&self, a: &dyn crate::Adapter) -> super::PrimaryReads {
+        #[cfg(feature = "sqlite")]
+        {
+            super::imp::capture_primary_reads_in(&self.conn, a)
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            let _ = a;
+            Default::default()
+        }
+    }
+
+    pub(crate) fn replace_harness(
+        &mut self,
+        h: Harness,
+        refs: &[SessionRef],
+        watches: &[(std::path::PathBuf, i64)],
+        before: &super::PrimaryReads,
+    ) {
+        #[cfg(feature = "sqlite")]
+        super::imp::replace_harness_in(&mut self.conn, h, refs, watches, before);
+        #[cfg(not(feature = "sqlite"))]
+        let _ = (h, refs, watches, before);
+    }
+
     pub(crate) fn persist_discovery(&mut self, prune: bool) {
         #[cfg(feature = "sqlite")]
         {

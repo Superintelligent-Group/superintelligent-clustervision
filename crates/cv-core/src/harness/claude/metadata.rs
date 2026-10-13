@@ -182,8 +182,10 @@ impl Scan {
         let Ok(fields) = serde_json::from_str::<Fields<'_>>(text) else {
             return;
         };
-        // The line is already UTF-8 validated above; retain all Value scalar/depth checks
-        // without rescanning the same potentially giant body as bytes.
+        // Fields validates grammar while skipping unused strings without decoded allocations.
+        // IgnoredAny/RawValue do not enforce Value's Unicode, finite-number or nesting acceptance;
+        // this separate boundary must also reject invalid ignored and overwritten fields.
+        // UTF-8 is already checked above, so reuse it rather than validating the bytes again.
         if !super::super::store::json::value_compatible_str_at_depth_with(text, 0, |_, _| {}) {
             return;
         }

@@ -269,7 +269,7 @@ mod imp {
         }))
     }
 
-    /// Insert (or replace) every ref through `stmt` — shared by [`sync`] and [`replace_harness`].
+    /// Insert (or replace) every ref through `stmt` — shared by [`sync`] and [`Reader::replace_harness`].
     fn insert_refs(tx: &rusqlite::Transaction, refs: &[SessionRef]) -> rusqlite::Result<()> {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO sessions
@@ -294,7 +294,7 @@ mod imp {
     }
 
     /// Upsert every ref in one transaction, deleting nothing — the *additive* sync for callers
-    /// that know about one session (event ingest, tests). Full discovery uses [`replace_harness`]
+    /// that know about one session (event ingest, tests). Full discovery uses [`Reader::replace_harness`]
     /// instead so vanished sessions actually disappear.
     pub fn sync(refs: &[SessionRef]) {
         let Some(mut conn) = open() else { return };
@@ -306,23 +306,40 @@ mod imp {
 
     /// Bracket known primary sources before discovery. New uncached paths stay unknown until
     /// a later scoped pass; never bless an identity sampled after its metadata was read.
-    pub(crate) fn capture_primary_reads(a: &dyn crate::Adapter) -> PrimaryReads {
-        let Some(conn) = open() else { return Default::default() };
+    pub(super) fn capture_primary_reads_in(conn: &Connection, a: &dyn crate::Adapter) -> PrimaryReads {
         let Ok(mut stmt) = conn.prepare(&format!("SELECT {REF_COLUMNS} FROM sessions WHERE harness=?1")) else {
             return Default::default();
         };
         let Ok(rows) = stmt.query_map([a.harness().as_str()], row_to_ref) else {
             return Default::default();
         };
-        capture_primary_reads_from(a, &rows.flatten().flatten().collect::<Vec<_>>())
+        capture_primary_reads_from(
+            a,
+            &rows
+                .filter_map(Result::transpose)
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap_or_default(),
+        )
     }
 
     /// Replace one harness's catalog rows *and* its watch entries in a single transaction — the
     /// post-discovery sync. Deleting first is what makes vanished sessions vanish from
     /// [`all_sessions`]; the transaction keeps concurrent readers from seeing the gap.
+    #[cfg(test)]
     pub(crate) fn replace_harness(h: Harness, refs: &[SessionRef], watches: &[(PathBuf, i64)], before: &PrimaryReads) {
+        if let Some(mut conn) = open() {
+            replace_harness_in(&mut conn, h, refs, watches, before);
+        }
+    }
+
+    pub(super) fn replace_harness_in(
+        conn: &mut Connection,
+        h: Harness,
+        refs: &[SessionRef],
+        watches: &[(PathBuf, i64)],
+        before: &PrimaryReads,
+    ) {
         let sources = prepare_sources(h, refs, before);
-        let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
         if publish_harness_in(&tx, h, refs, watches, &sources, true).is_ok() {
             let _ = tx.commit();
@@ -971,6 +988,26 @@ mod imp {
                 serde_json::to_value(current).unwrap(),
                 serde_json::to_value(legacy).unwrap()
             );
+            // Initial discovery has already warmed the process-local metadata cache. A first-use
+            // scan remains demand-lazy and may independently open it; SQLite-only refreshes must
+            // not bulk-load unrelated transcript metadata just to save an initialization.
+            use std::io::Write;
+            writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                "{{\"type\":\"user\",\"uuid\":\"u2\",\"sessionId\":\"alpha\",\"message\":{{\"role\":\"user\",\"content\":\"second\"}}}}"
+            ).unwrap();
+            let before = count();
+            let (refreshed, full) = crate::sessions_impl();
+            assert!(!full, "one changed primary uses scoped refresh");
+            assert_eq!(
+                count() - before,
+                1,
+                "capture, publication and cache persist reuse the operation connection"
+            );
+            assert_eq!(refreshed[0].message_count, 2);
+            assert_eq!(
+                serde_json::to_value(&refreshed).unwrap(),
+                serde_json::to_value(crate::discover_all()).unwrap()
+            );
         }
 
         #[test]
@@ -1278,7 +1315,10 @@ pub use imp::{
     affordance_sig, fill_count, lookup, note_affordances, note_affordances_with_source, sync, AffordanceTable,
 };
 #[cfg(feature = "sqlite")]
-pub(crate) use imp::{all_sessions, capture_primary_reads, open_db, replace_harness, watches_for};
+pub(crate) use imp::{all_sessions, open_db, watches_for};
+
+#[cfg(all(feature = "sqlite", test))]
+pub(crate) use imp::replace_harness;
 
 #[cfg(all(feature = "sqlite", test))]
 pub(crate) fn last_full_sync() -> Option<i64> {
@@ -1333,19 +1373,6 @@ impl AffordanceTable {
 #[cfg(not(feature = "sqlite"))]
 pub fn lookup(_id: &str, _harness: Option<Harness>) -> Vec<SessionRef> {
     Vec::new()
-}
-#[cfg(not(feature = "sqlite"))]
-pub(crate) fn replace_harness(
-    _h: Harness,
-    _refs: &[SessionRef],
-    _watches: &[(std::path::PathBuf, i64)],
-    _before: &PrimaryReads,
-) {
-}
-
-#[cfg(not(feature = "sqlite"))]
-pub(crate) fn capture_primary_reads(_a: &dyn crate::Adapter) -> PrimaryReads {
-    Default::default()
 }
 #[cfg(not(feature = "sqlite"))]
 pub(crate) fn watches_for(

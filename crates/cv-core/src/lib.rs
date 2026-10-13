@@ -202,7 +202,7 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(900);
-    let catalog = catalog::Reader::open();
+    let mut catalog = catalog::Reader::open();
     let fresh_enough = catalog
         .as_ref()
         .and_then(catalog::Reader::last_full_sync)
@@ -210,10 +210,11 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
     if fresh_enough {
         if let Some(stale) = catalog.as_ref().and_then(catalog::Reader::probe_stale) {
             if !stale.is_empty() {
+                let reader = catalog.as_mut().expect("staleness was read through this owner");
                 for h in stale {
-                    refresh_harness(h);
+                    refresh_harness(h, reader);
                 }
-                discover_cache::persist(false);
+                reader.persist_discovery(false);
             }
             if let Some(rows) = catalog.as_ref().and_then(catalog::Reader::all_sessions) {
                 return (rows, false);
@@ -225,19 +226,19 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
 
 /// Re-discover one harness and replace its catalog rows + watches — the probe's scoped escalation.
 /// On a discover error the previous rows are kept (matching [`discover_all`]'s tolerance).
-fn refresh_harness(h: Harness) {
+fn refresh_harness(h: Harness, catalog: &mut catalog::Reader) {
     let Some(a) = harness::for_harness(h) else { return };
     let _sources = source::read_scope();
-    let before = catalog::capture_primary_reads(a.as_ref());
+    let before = catalog.capture_primary_reads(a.as_ref());
     let roots = a.roots();
     if roots.is_empty() {
         // Root gone (harness uninstalled / dir deleted): its sessions vanish from the catalog.
-        catalog::replace_harness(h, &[], &[], &before);
+        catalog.replace_harness(h, &[], &[], &before);
         return;
     }
     match a.discover() {
         Ok(refs) => {
-            catalog::replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
+            catalog.replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
         }
         Err(e) => eprintln!("cv: discover failed for {h}: {e:#}"),
     }
