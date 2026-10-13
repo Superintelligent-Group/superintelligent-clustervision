@@ -14,7 +14,7 @@ pub(crate) struct ReadConnection {
     connection: Connection,
     reads: crate::source::ReadSet,
     _snapshot: Option<std::sync::Arc<ColdSnapshot>>,
-    _scope: ReadScope,
+    _scope: Option<ReadScope>,
 }
 
 impl std::ops::Deref for ReadConnection {
@@ -39,13 +39,41 @@ impl ReadConnection {
 }
 
 /// Retain at an operation boundary that reads multiple sessions. Dropping the final scope or
-/// reader releases the one cached backing, including its directory; no process-global files
+/// reader releases cached backings, including their directories; no process-global files
 /// survive idle operations. Concurrent/nested scopes share this bounded cache.
 pub(crate) struct ReadScope {
     cache: std::sync::Arc<SnapshotCache>,
 }
 
-struct SnapshotCache(std::sync::Mutex<Option<std::sync::Arc<ColdSnapshot>>>);
+struct SnapshotCache(std::sync::Mutex<SnapshotCacheState>);
+
+#[derive(Default)]
+struct SnapshotCacheState {
+    idle: std::collections::VecDeque<std::sync::Arc<ColdSnapshot>>,
+    idle_bytes: u64,
+    active: std::collections::HashMap<std::path::PathBuf, std::sync::Weak<ColdSnapshot>>,
+}
+
+const IDLE_BUDGET: u64 = 256 * 1024 * 1024;
+
+impl SnapshotCacheState {
+    fn discard_idle(&mut self, snapshot: &std::sync::Arc<ColdSnapshot>) {
+        if let Some(index) = self.idle.iter().position(|s| std::sync::Arc::ptr_eq(s, snapshot)) {
+            self.idle_bytes -= self.idle.remove(index).unwrap().copied_bytes;
+        }
+    }
+
+    fn retain_idle(&mut self, snapshot: &std::sync::Arc<ColdSnapshot>, budget: u64) {
+        self.discard_idle(snapshot);
+        // Permit one oversized backing alone. Its next session reuses it, while selecting any
+        // other database evicts it rather than allowing unbounded idle bytes.
+        while !self.idle.is_empty() && self.idle_bytes.saturating_add(snapshot.copied_bytes) > budget {
+            self.idle_bytes -= self.idle.pop_front().unwrap().copied_bytes;
+        }
+        self.idle_bytes += snapshot.copied_bytes;
+        self.idle.push_back(std::sync::Arc::clone(snapshot));
+    }
+}
 
 pub(crate) fn read_scope() -> ReadScope {
     use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -55,7 +83,7 @@ pub(crate) fn read_scope() -> ReadScope {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cache = active.upgrade().unwrap_or_else(|| {
-        let cache = Arc::new(SnapshotCache(Mutex::new(None)));
+        let cache = Arc::new(SnapshotCache(Mutex::new(SnapshotCacheState::default())));
         *active = Arc::downgrade(&cache);
         cache
     });
@@ -63,10 +91,10 @@ pub(crate) fn read_scope() -> ReadScope {
 }
 
 struct ColdSnapshot {
-    original: std::path::PathBuf,
     reads: crate::source::ReadSet,
     directory: std::path::PathBuf,
     database: std::path::PathBuf,
+    copied_bytes: u64,
 }
 
 impl Drop for ColdSnapshot {
@@ -91,8 +119,10 @@ fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 
 /// SQLite may create WAL/SHM even with READ_ONLY. Missing WAL auxiliaries therefore use a
 /// checked private copy; existing live auxiliaries keep ordinary SQLite locking/read semantics.
-/// One cached snapshot avoids copying a cold multi-session database once per session. This is
-/// bounded to one database per active operation, with readers retaining snapshot lifetime.
+/// Auxiliary existence is sampled: this cannot prevent a different process from deleting live
+/// SHM between that sample and SQLite opening it. cv does not remove harness sidecars.
+/// An operation-local LRU retains at most 256 MiB of copied DB/WAL/journal bytes, or one larger
+/// backing alone. Weak lookup reuses active readers without increasing idle disk retention.
 pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
     open_ro_with_copy_check(path, |_| Ok(()))
 }
@@ -100,7 +130,6 @@ pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
 fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>) -> Result<ReadConnection> {
     use std::io::Read;
     use std::sync::Arc;
-    let scope = read_scope();
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -120,25 +149,32 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
     let cold = &header[..16] == b"SQLite format 3\0"
         && (header[18] == 2 || header[19] == 2)
         && (!sidecar(&path, "-wal").exists() || !sidecar(&path, "-shm").exists());
-    let snapshot = if cold {
+    let scope = cold.then(read_scope);
+    let snapshot = if let Some(scope) = scope.as_ref() {
         let mut cache = scope
             .cache
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite snapshot cache poisoned"))?;
-        if let Some(snapshot) = cache
+        cache.active.retain(|_, snapshot| snapshot.strong_count() > 0);
+        let existing = cache.active.get(&path).and_then(std::sync::Weak::upgrade);
+        if let Some(snapshot) = existing
             .as_ref()
-            .filter(|s| s.original == path && s.reads.fresh(&mut crate::source::Probe::default()))
+            .filter(|s| s.reads.fresh(&mut crate::source::Probe::default()))
         {
+            cache.retain_idle(snapshot, IDLE_BUDGET);
             Some(Arc::clone(snapshot))
         } else {
+            if let Some(stale) = existing {
+                cache.discard_idle(&stale);
+            }
             let directory = std::env::temp_dir().join(format!("cv-sqlite-snapshot-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&directory)?;
-            let snapshot = ColdSnapshot {
-                original: path.clone(),
+            let mut snapshot = ColdSnapshot {
                 reads: reads.clone(),
                 database: directory.join("store.db"),
                 directory,
+                copied_bytes: 0,
             };
             #[cfg(unix)]
             {
@@ -147,17 +183,21 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
             }
             // std::fs::copy uses clonefile on APFS and bounded OS copying elsewhere. Never copy
             // SHM: it contains live coordination state; SQLite rebuilds it only in our directory.
-            std::fs::copy(&path, &snapshot.database)?;
+            snapshot.copied_bytes = std::fs::copy(&path, &snapshot.database)?;
             for suffix in ["-wal", "-journal"] {
                 let original = sidecar(&path, suffix);
                 if original.exists() {
-                    std::fs::copy(original, sidecar(&snapshot.database, suffix))?;
+                    snapshot.copied_bytes = snapshot
+                        .copied_bytes
+                        .checked_add(std::fs::copy(original, sidecar(&snapshot.database, suffix))?)
+                        .context("SQLite snapshot byte size overflow")?;
                 }
             }
             copied(&snapshot.database)?;
             check_reads(&reads)?;
             let snapshot = Arc::new(snapshot);
-            *cache = Some(Arc::clone(&snapshot));
+            cache.active.insert(path.clone(), Arc::downgrade(&snapshot));
+            cache.retain_idle(&snapshot, IDLE_BUDGET);
             Some(snapshot)
         }
     } else {
@@ -299,6 +339,113 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_databases_reuse_active_snapshots_and_cleanup_operation() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (directory, database) = fixture();
+        {
+            let writer = Connection::open(&database).unwrap();
+            writer
+                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x);")
+                .unwrap();
+        }
+        let second_database = directory.join("other.db");
+        std::fs::copy(&database, &second_database).unwrap();
+        let scope = read_scope();
+        let first = open_ro(&database).unwrap();
+        let first_backing = first._snapshot.as_ref().unwrap().directory.clone();
+        let second = open_ro(&second_database).unwrap();
+        let second_backing = second._snapshot.as_ref().unwrap().directory.clone();
+        let again = open_ro_with_copy_check(&database, |_| panic!("active A snapshot duplicated")).unwrap();
+        assert_eq!(again._snapshot.as_ref().unwrap().directory, first_backing);
+        drop(first);
+        drop(again);
+        assert!(first_backing.exists());
+        drop(second);
+        assert!(second_backing.exists()); // Both small backings fit the byte budget.
+        drop(scope);
+        assert!(!first_backing.exists());
+        assert!(!second_backing.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn idle_byte_budget_evicts_lru_and_permits_only_one_oversized_backing() {
+        use std::sync::Arc;
+        fn backing(bytes: u64) -> Arc<ColdSnapshot> {
+            let (directory, database) = fixture();
+            std::fs::File::create(&database).unwrap().set_len(bytes).unwrap();
+            Arc::new(ColdSnapshot {
+                reads: crate::source::ReadSet::default(),
+                directory,
+                database,
+                copied_bytes: bytes,
+            })
+        }
+        let mut cache = SnapshotCacheState::default();
+        let a = backing(100);
+        let b = backing(100);
+        let c = backing(100);
+        cache.retain_idle(&a, 256);
+        cache.retain_idle(&b, 256);
+        cache.retain_idle(&a, 256);
+        cache.retain_idle(&c, 256);
+        assert_eq!(cache.idle_bytes, 200);
+        assert_eq!(Arc::strong_count(&a), 2);
+        assert_eq!(Arc::strong_count(&b), 1); // Active reader survives idle eviction.
+        let b_path = b.directory.clone();
+        drop(b);
+        assert!(!b_path.exists());
+        let oversized = backing(300);
+        cache.retain_idle(&oversized, 256);
+        assert_eq!(cache.idle.len(), 1);
+        assert_eq!(cache.idle_bytes, 300);
+        let tiny = backing(1);
+        cache.retain_idle(&tiny, 256);
+        assert_eq!(cache.idle.len(), 1);
+        assert_eq!(cache.idle_bytes, 1);
+        assert_eq!(Arc::strong_count(&oversized), 1);
+    }
+
+    #[test]
+    fn cached_snapshot_rebuilds_after_source_change() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (directory, database) = fixture();
+        {
+            let writer = Connection::open(&database).unwrap();
+            writer
+                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")
+                .unwrap();
+        }
+        let scope = read_scope();
+        let first = open_ro(&database).unwrap();
+        let old_backing = first._snapshot.as_ref().unwrap().directory.clone();
+        let old_reads = first.reads().clone();
+        drop(first);
+        {
+            let writer = Connection::open(&database).unwrap();
+            writer.execute("UPDATE t SET x=8", []).unwrap();
+        }
+        let mut copied = false;
+        let second = open_ro_with_copy_check(&database, |_| {
+            copied = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(copied);
+        assert!(!old_backing.exists());
+        assert!(!old_reads.fresh(&mut crate::source::Probe::default()));
+        assert_eq!(
+            second
+                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                .unwrap(),
+            8
+        );
+        drop(second);
+        drop(scope);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn copy_race_rejects_source_change_and_removes_private_backing() {
         let _serial = SNAPSHOT_TEST.lock().unwrap();
         let (directory, database) = fixture();
@@ -317,6 +464,27 @@ mod tests {
         });
         assert!(result.err().unwrap().to_string().contains("dependencies changed"));
         assert!(!private.unwrap().exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn live_wal_reads_original_without_copying() {
+        let (directory, database) = fixture();
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(7);")
+            .unwrap();
+        let reader = open_ro_with_copy_check(&database, |_| panic!("live WAL was copied")).unwrap();
+        assert!(reader._snapshot.is_none());
+        assert_eq!(
+            reader
+                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                .unwrap(),
+            7
+        );
+        assert!(reader.reads().fresh(&mut crate::source::Probe::default()));
+        drop(reader);
+        drop(writer);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
