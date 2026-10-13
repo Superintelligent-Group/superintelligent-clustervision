@@ -222,6 +222,7 @@ fn reduce_bodies(value: &mut Value) {
 
 /// Legacy documents are already parsed, but dispatch must not clone giant tool arguments
 /// merely to count the turns. Reuse the same projection over borrowed values.
+#[cfg(test)]
 pub(super) fn count_item(item: &Value, ctx: &mut CodexCtx) -> usize {
     let Ok(value) = (Project {
         shape: Shape::Payload,

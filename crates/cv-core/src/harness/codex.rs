@@ -2229,7 +2229,8 @@ impl CodexScan {
         }
     }
 
-    /// Ingest a legacy single-object `.json` recording.
+    /// Owned legacy discovery oracle retained for the checked-view compatibility tests.
+    #[cfg(test)]
     fn feed_json_object(&mut self, root: &Value) {
         self.id = root
             .pointer("/session/id")
@@ -2333,11 +2334,7 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
             s.message_count = 0;
         }
     } else {
-        // Legacy single-object `.json` recordings are small; read fully.
-        let text = fs::read_to_string(path)?;
-        if let Ok(root) = serde_json::from_str::<Value>(&text) {
-            s.feed_json_object(&root);
-        }
+        s = legacy::scan(path)?;
     }
 
     if s.id.is_empty() {

@@ -61,6 +61,162 @@ fn session(root: JsonView<'_>, s: &mut Session, ctx: &mut CodexCtx) -> Result<()
     Ok(())
 }
 
+/// Discovery deliberately keeps the legacy policy: only session timestamps, no cwd, no event
+/// authority, and turns counted by the same reduced-item dispatcher as the owned scan.
+pub(super) fn scan(path: &Path) -> Result<CodexScan> {
+    Ok(read(path, |_source, root| {
+        let mut scan = CodexScan::default();
+        let meta = root
+            .get("session")?
+            .map(|v| Fields::parse(v, &["id", "timestamp", "agent_path"]))
+            .transpose()?
+            .flatten();
+        let mut ctx = CodexCtx::default();
+        if let Some(meta) = meta {
+            scan.id = meta.string("id")?.unwrap_or_default();
+            scan.created_at = meta.string("timestamp")?.as_deref().and_then(parse_ts);
+            scan.updated_at = scan.created_at;
+            ctx.agent_path = meta.string("agent_path")?;
+        }
+        if let Some(items) = items(root)? {
+            for item in items {
+                let item = item?;
+                let Some(fields) = Fields::parse(
+                    item,
+                    &["type", "role", "author", "content", "summary", "encrypted_content"],
+                )?
+                else {
+                    continue;
+                };
+                let ty = fields.string("type")?.unwrap_or_default();
+                let mut p = Map::new();
+                p.insert("type".into(), ty.clone().into());
+                let role = if ty == "message" { fields.string("role")? } else { None };
+                if let Some(role) = &role {
+                    p.insert("role".into(), role.clone().into());
+                }
+                if ty == "agent_message" {
+                    if let Some(author) = fields.string("author")? {
+                        p.insert("author".into(), author.into());
+                    }
+                }
+                if matches!(ty.as_str(), "message" | "reasoning") {
+                    if let Some(value) = fields.get("content") {
+                        p.insert("content".into(), count_content(value)?);
+                    }
+                }
+                if ty == "reasoning" {
+                    if let Some(value) = fields.get("summary") {
+                        p.insert("summary".into(), count_content(value)?);
+                    }
+                    if let Some(value) = fields.get("encrypted_content") {
+                        if let Some(value) = count_text(value)? {
+                            p.insert("encrypted_content".into(), value.into());
+                        }
+                    }
+                }
+                let mut out = Vec::new();
+                handle_item(Some(&Value::Object(p)), false, None, &mut out, &mut ctx);
+                scan.message_count += out.iter().filter(|m| m.is_turn()).count();
+                if scan.title.is_none() && ty == "message" && role.as_deref().unwrap_or("user") == "user" {
+                    if let Some(content) = fields.get("content") {
+                        scan.consider_title(&title(content)?);
+                    }
+                }
+            }
+        }
+        Ok(scan)
+    })?
+    .unwrap_or_default())
+}
+
+// Match metadata::count_text over a checked source without owning its complete decoded string.
+fn count_text(view: JsonView<'_>) -> Result<Option<String>> {
+    let Some(text) = view.source_text()? else {
+        return Ok(None);
+    };
+    let (head, present) = crate::harness::store::document::text_head(&text, &crate::Resolver::new(None), 96, true)?;
+    Ok(Some(if head.is_empty() && present { " ".into() } else { head }))
+}
+fn count_content(view: JsonView<'_>) -> Result<Value> {
+    if let Some(text) = count_text(view)? {
+        return Ok(text.into());
+    }
+    let Some(parts) = view.array()? else {
+        return Ok(Value::Null);
+    };
+    let mut out = Vec::new();
+    for part in parts {
+        let part = part?;
+        let mut p = Map::new();
+        if let Some(fields) = Fields::parse(part, &["type", "text"])? {
+            if let Some(ty) = fields.string("type")? {
+                p.insert("type".into(), ty.into());
+            }
+            if let Some(text) = fields.get("text").map(count_text).transpose()?.flatten() {
+                p.insert("text".into(), text.into());
+            }
+        }
+        out.push(Value::Object(p));
+    }
+    Ok(Value::Array(out))
+}
+
+/// Value's title is text_parts(content).trim(), then truncate(..., 80). A title can contain
+/// arbitrarily long leading/trailing whitespace, so keep the first 81 characters and the last
+/// nonwhite position until the answer is determined; joined empty parts still add newlines.
+fn title(content: JsonView<'_>) -> Result<String> {
+    let mut head = String::new();
+    let mut chars = 0usize;
+    let mut last_nonwhite = 0usize;
+    let mut feed = |chunk: &str| -> Result<()> {
+        for ch in chunk.chars() {
+            if head.is_empty() && ch.is_whitespace() {
+                continue;
+            }
+            if chars < 81 {
+                head.push(ch);
+                chars += 1;
+            }
+            if !ch.is_whitespace() {
+                last_nonwhite = chars;
+            }
+            if last_nonwhite == 81 {
+                return Err(TitleComplete.into());
+            }
+        }
+        Ok(())
+    };
+    let result = (|| -> Result<()> {
+        if content.is_string()? {
+            content.for_each_str_chunk(&mut feed)?;
+        } else if let Some(parts) = content.array()? {
+            let mut prior = false;
+            for part in parts {
+                if let Some(text) = part?.get("text")? {
+                    if text.is_string()? {
+                        if prior {
+                            feed("\n")?;
+                        }
+                        text.for_each_str_chunk(&mut feed)?;
+                        prior = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Err(error) if error.is::<TitleComplete>() => {}
+        other => other?,
+    }
+    let trimmed: String = head.chars().take(last_nonwhite).collect();
+    Ok(crate::ir::truncate(&trimmed, 80))
+}
+#[derive(Debug, thiserror::Error)]
+#[error("legacy title prefix complete")]
+struct TitleComplete;
+
 pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
     let empty = || Session {
         source_path: Some(r.path.clone()),
@@ -295,6 +451,13 @@ mod tests {
     fn oracle(path: &Path, raw: &str) -> Value {
         serde_json::to_value(parse_str("fallback", raw, false, Some(path.to_path_buf()))).unwrap()
     }
+    fn scan_oracle(raw: &str) -> CodexScan {
+        let mut scan = CodexScan::default();
+        if let Ok(root) = serde_json::from_str::<Value>(raw) {
+            scan.feed_json_object(&root);
+        }
+        scan
+    }
     fn collected(path: &Path, opts: &ParseOptions) -> Session {
         let r = SessionRef::new("fallback", Harness::Codex, path);
         let mut sink = crate::stream::CollectSink::default();
@@ -371,6 +534,7 @@ mod tests {
             let raw = root.to_string();
             fs::write(&path, &raw).unwrap();
             let expected = oracle(&path, &raw);
+            assert_eq!(scan(&path).unwrap(), scan_oracle(&raw));
             for opts in [
                 ParseOptions::lazy(),
                 ParseOptions::lazy_extra(),
@@ -388,6 +552,58 @@ mod tests {
         let mut actual = collected(&path, &ParseOptions::lazy());
         actual.materialize().unwrap();
         assert_eq!(serde_json::to_value(actual).unwrap(), oracle(&path, raw));
+        assert_eq!(scan(&path).unwrap(), scan_oracle(raw));
+    }
+
+    #[test]
+    fn checked_legacy_discovery_titles_and_counts_match_owned_oracle() {
+        let world = cv_testkit::World::in_process("codex-legacy-discovery");
+        let path = world.base.join("rollout-legacy.json");
+        let whitespace = " \t\n\u{2003}".repeat(8192);
+        let tail = "🌙\n\\\"".repeat(8192);
+        let mut bodies = vec![
+            json!(""),
+            json!(&whitespace),
+            json!(format!("{whitespace}# AGENTS.md instructions{tail}")),
+            json!(format!("{whitespace}title{whitespace}")),
+            json!(format!("{}{whitespace}", "x".repeat(80))),
+            json!(format!("{}{whitespace}tail", "x".repeat(80))),
+            json!("🌙".repeat(81)),
+            json!([{"text":""},{"text":whitespace},{"text":" actual"},{"text":tail}]),
+            json!([{"type":"input_image","image_url":"https://image","text":"title"}]),
+            json!([{"type":"audio_url","audio_url":{"url":"file:///sound"}}]),
+        ];
+        bodies.extend([json!({"text":tail}), json!(null), json!(42), json!(true)]);
+        for (case, body) in bodies.into_iter().enumerate() {
+            for role in [
+                json!("user"),
+                json!("assistant"),
+                json!("developer"),
+                json!("unknown"),
+                json!(null),
+                json!(42),
+            ] {
+                let mut entries = vec![json!({"type":"message","role":role,"content":body})];
+                entries.push(json!({"type":"message","content":"next title"}));
+                for encrypted in [json!(null), json!(""), json!(tail), json!({"ignored":tail})] {
+                    entries.push(json!({"type":"reasoning","content":body,"summary":[{"text":""},{"text":"summary"}],"encrypted_content":encrypted}));
+                }
+                entries.push(json!({"type":"unknown","content":tail,"arguments":tail}));
+                let root = json!({"session":{"id":"legacy","timestamp":"2025-05-05T19:24:54Z","cwd":"ignored cwd","agent_path":"/root","ignored":tail},"items":entries});
+                let raw = root.to_string();
+                fs::write(&path, &raw).unwrap();
+                assert_eq!(scan(&path).unwrap(), scan_oracle(&raw), "case={case}, role={role:?}");
+            }
+        }
+        // Body prefix classification and title joining remain distinct, including empty parts.
+        for raw in [
+            r##"{"items":[{"type":"message","content":[{"text":" #"},{"text":" AGENTS.md instructions"}]}]}"##,
+            r##"{"items":[{"type":"message","content":[{"text":""},{"text":" # AGENTS.md instructions"}]}]}"##,
+            r#"{"session":{"id":"first","timestamp":false},"session":{"id":"last","timestamp":"2025-05-05T19:24:54Z"},"items":[{"type":"message","role":"assistant","role":null,"content":"first","content":"winner"}]}"#,
+        ] {
+            fs::write(&path, raw).unwrap();
+            assert_eq!(scan(&path).unwrap(), scan_oracle(raw));
+        }
     }
 
     #[test]
@@ -409,6 +625,7 @@ mod tests {
             fs::write(&path, raw).unwrap();
             let actual = collected(&path, &ParseOptions::lazy());
             assert_eq!(serde_json::to_value(actual).unwrap(), oracle(&path, raw), "{raw}");
+            assert_eq!(scan(&path).unwrap(), scan_oracle(raw), "{raw}");
         }
         let mut bad_utf8 = valid_prefix.as_bytes().to_vec();
         bad_utf8.extend_from_slice(b"\"\xff\"}");
@@ -417,6 +634,7 @@ mod tests {
         let mut sink = crate::stream::CollectSink::default();
         assert!(stream(&r, &ParseOptions::lazy(), &mut sink).is_err());
         assert!(sink.messages.is_empty());
+        assert!(scan(&path).is_err());
 
         let raw = json!({"session":{"id":"legacy","timestamp":"2025-05-05T19:24:54Z"},"items":[
             {"type":"message","content":"body".repeat(8192)}, {"type":"message","content":"second"},
