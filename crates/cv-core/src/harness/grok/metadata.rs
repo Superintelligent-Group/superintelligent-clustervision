@@ -105,11 +105,13 @@ impl<'a> Row<'a> {
                 captured,
             } => Ok(Box::new(context.array(range)?.into_iter().flatten().map(
                 move |range| {
-                    range.map(|range| Self::Positioned {
-                        range,
-                        context,
-                        captured,
-                    })
+                    range
+                        .map(|range| Self::Positioned {
+                            range,
+                            context,
+                            captured,
+                        })
+                        .map_err(Into::into)
                 },
             ))),
         }
@@ -225,14 +227,26 @@ fn scan_selected_with(
     let file = context
         .file()
         .ok_or_else(|| anyhow::anyhow!("JSONL context has no descriptor"))?;
+    let extent = context.range();
+    let framed = ranges::Range {
+        offset: extent.offset,
+        len: extent.len,
+    };
     anyhow::ensure!(
-        context.valid_utf8(context.range())?,
+        ranges::valid_utf8(&mut ranges::reader(file, framed)?)?,
         "JSONL source contains invalid UTF-8"
     );
-    for record in ranges::records(file, context.range())? {
+    for record in ranges::records(file, framed)? {
         let (range, _) = record?;
         let range = ranges::trim(file, range)?;
-        if range.len == 0 || (hooks_only && !contains_hook(file, range)?) || !context.validate(range)? {
+        if range.len == 0 || (hooks_only && !contains_hook(file, range)?) {
+            continue;
+        }
+        let range = Range {
+            offset: range.offset,
+            len: range.len,
+        };
+        if !context.validate(range)? {
             continue;
         }
         let range = context.cursor(range)?.value()?;
@@ -249,7 +263,7 @@ fn scan_selected_with(
 
 const HOOK_LITERAL: &str = "\"hook_execution\"";
 /// Preserve literal encoded-byte selection across fixed read windows; this does not inspect JSON.
-fn contains_hook(file: &std::fs::File, range: Range) -> Result<bool> {
+fn contains_hook(file: &std::fs::File, range: ranges::Range) -> Result<bool> {
     use std::io::Read;
     let mut input = ranges::reader(file, range)?;
     let mut window = [0u8; 64 * 1024 + 16];
@@ -311,7 +325,7 @@ mod tests {
             let file = std::fs::File::open(&path)?;
             assert!(contains_hook(
                 &file,
-                Range {
+                ranges::Range {
                     offset: 0,
                     len: text.len() as u64
                 }
