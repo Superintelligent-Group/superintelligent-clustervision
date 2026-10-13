@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
     parser.add_argument("--entropy", action="store_true", help="Zed only: deterministic low-compressibility payloads")
-    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "legacy", "parts", "usage", "sweep-arguments", "encoded-arguments", "selected", "selected-v2", "selected-ide"], default="history")
+    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "legacy", "parts", "usage", "sweep-arguments", "encoded-arguments", "selected", "selected-v2", "selected-ide", "selected-response", "selected-events", "selected-jsonl"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
@@ -64,6 +64,8 @@ def main():
         args.shape == "tool-arguments" and args.harness in ("claude", "codex")
         or args.shape == "metadata" and args.harness == "claude"
         or args.shape == "encoded-arguments" and args.harness == "continue"
+        or args.shape in ("selected-response", "selected-events") and args.harness == "codex"
+        or args.shape in ("selected", "selected-jsonl") and args.harness == "gemini"
     ):
         parser.error("unsupported harness/shape combination")
     sid = "00000000-0000-4000-8000-000000000001"
@@ -77,7 +79,7 @@ def main():
     elif args.harness == "lmstudio":
         path = root / "conversations" / f"{sid}.conversation.json"
     else:
-        path = root / "tmp" / "perf" / "chats" / "session-perf.json"
+        path = root / "tmp" / "perf" / "chats" / ("session-perf.jsonl" if args.shape == "selected-jsonl" else "session-perf.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     # Both patterns are ASCII; requested decoded byte counts are exact, including short tails.
     pattern = 'line\n"quoted"\t\\end' if args.escaped else "plain payload "
@@ -123,21 +125,58 @@ def main():
             f.write("]}\n")
         elif args.harness == "gemini":
             header = {"sessionId": sid, "projectHash": "perf", "startTime": stamp, "lastUpdated": stamp}
-            f.write(json.dumps(header, separators=(",", ":"))[:-1] + ',"messages":[')
+            modern = args.shape == "selected-jsonl"
+            f.write(json.dumps(header, separators=(",", ":")) + "\n" if modern else
+                    json.dumps(header, separators=(",", ":"))[:-1] + ',"messages":[')
             for i in range(args.records):
-                if i:
+                if i and not modern:
                     f.write(",")
+                if args.shape in ("selected", "selected-jsonl"):
+                    text = payload(i)
+                    cuts = [len(text) * j // 4 for j in range(5)]
+                    parts = [text[cuts[j]:cuts[j + 1]] for j in range(4)]
+                    json.dump({"id": f"m{i}", "timestamp": stamp, "type": "gemini",
+                               "content": "tiny answer", "thoughts": [{"subject": "subject", "description": parts[0]}],
+                               "toolCalls": [{"id": f"c{i}", "name": "Read", "args": {}, "status": "success",
+                                              "result": [None, {"text": parts[1]}, {"functionResponse": {"response": {"output": parts[2]}}}]},
+                                             {"id": f"o{i}", "name": "Read", "args": {}, "status": "success",
+                                              "result": {"z": parts[3], "a": 1}}]}, f, ensure_ascii=False, separators=(",", ":"))
+                    if modern:
+                        f.write("\n")
+                    continue
                 for j, (kind, content) in enumerate([("user", f"prompt {i}"), ("gemini", payload(i))]):
                     if j:
                         f.write(",")
                     json.dump({"id": f"m{i}-{j}", "timestamp": stamp, "type": kind, "content": content}, f,
                               ensure_ascii=False, separators=(",", ":"))
-            f.write("]}\n")
+            if args.shape in ("selected", "selected-jsonl"):
+                if not modern:
+                    f.write(",")
+                json.dump({"id": "final", "timestamp": stamp, "type": "gemini", "content": "done",
+                           "toolCalls": [{"id": "final", "name": "gate-final", "args": {}}]}, f, separators=(",", ":"))
+            f.write("\n" if modern else "]}\n")
         elif args.harness == "codex":
             line(f, {"type": "session_meta", "timestamp": stamp, "payload": {"id": sid, "timestamp": stamp}})
             if args.shape == "tool-arguments":
                 line(f, {"type": "turn_context", "timestamp": stamp, "payload": {"cwd": "/perf", "model": "test"}})
             for i in range(args.records):
+                if args.shape in ("selected-response", "selected-events"):
+                    text = payload(i)
+                    cuts = [len(text) * j // 4 for j in range(5)]
+                    parts = [text[cuts[j]:cuts[j + 1]] for j in range(4)]
+                    if args.shape == "selected-events":
+                        for kind, body in zip(("user_message", "agent_message"), parts[:2]):
+                            line(f, {"type": "event_msg", "timestamp": stamp, "payload": {"type": kind, "message": body}})
+                    else:
+                        for role, kind, body in zip(("user", "assistant"), ("input_text", "output_text"), parts[:2]):
+                            line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                                "type": "message", "role": role, "content": [{"type": kind, "text": body}]}})
+                    line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                        "type": "reasoning", "content": [{"type": "reasoning_text", "text": parts[2]}, {"text": "tail"}], "summary": []}})
+                    line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                        "type": "function_call", "name": "Read", "call_id": f"c{i}",
+                        "arguments": json.dumps({"payload": parts[3]}, separators=(",", ":"))}})
+                    continue
                 if args.shape == "tool-arguments":
                     arguments = {"file_path": f"/perf/file-{i}.rs", "content": payload(i)}
                     line(f, {"type": "response_item", "timestamp": stamp, "payload": {
@@ -149,9 +188,29 @@ def main():
                     ("function_call_output", {"call_id": f"c{i}", "output": payload(i)}),
                 ]:
                     line(f, {"type": "response_item", "timestamp": stamp, "payload": {"type": kind, **fields}})
+            if args.shape in ("selected-response", "selected-events"):
+                line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                    "type": "function_call", "name": "gate-final", "call_id": "final", "arguments": "{}"}})
         else:
             parent = None
             for i in range(args.records):
+                if args.shape in ("selected-response", "selected-events"):
+                    text = payload(i)
+                    cuts = [len(text) * j // 4 for j in range(5)]
+                    parts = [text[cuts[j]:cuts[j + 1]] for j in range(4)]
+                    if args.shape == "selected-events":
+                        for kind, body in zip(("user_message", "agent_message"), parts[:2]):
+                            line(f, {"type": "event_msg", "timestamp": stamp, "payload": {"type": kind, "message": body}})
+                    else:
+                        for role, kind, body in zip(("user", "assistant"), ("input_text", "output_text"), parts[:2]):
+                            line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                                "type": "message", "role": role, "content": [{"type": kind, "text": body}]}})
+                    line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                        "type": "reasoning", "content": [{"type": "reasoning_text", "text": parts[2]}, {"text": "tail"}], "summary": []}})
+                    line(f, {"type": "response_item", "timestamp": stamp, "payload": {
+                        "type": "function_call", "name": "Read", "call_id": f"c{i}",
+                        "arguments": json.dumps({"payload": parts[3]}, separators=(",", ":"))}})
+                    continue
                 if args.shape == "tool-arguments":
                     uuid = f"m{i}"
                     line(f, {"type": "assistant", "uuid": uuid, "parentUuid": parent, "sessionId": sid,
@@ -199,6 +258,9 @@ def main():
                               args.records + 1 if args.harness == "lmstudio" else args.records
                               if args.harness == "continue" else args.records * (3 if args.harness == "claude" else 2)),
     }
+    if args.shape in ("selected-response", "selected-events") or args.harness == "gemini" and args.shape in ("selected", "selected-jsonl"):
+        manifest["selected_payload_bytes"] = args.payload_bytes
+        manifest["expected_messages"] = args.records * 4 + 1 if args.harness == "codex" else args.records * 2 + 1
     if args.shape == "metadata":
         manifest["decoded_metadata_payload_bytes"] = args.payload_bytes
         manifest["payload_location"] = "metadata"

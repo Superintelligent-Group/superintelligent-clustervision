@@ -106,6 +106,42 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(calls.call_args_list[-1].args[1][0], "dataset")
                 self.assertTrue(all(call.args[3] == mmap for call in calls.call_args_list))
 
+    def test_portable_gemini_activation_is_held(self):
+        with patch.object(budget.subprocess, "check_output") as calls:
+            budget.selected_payloads("unused", Path("unused"), {}, ["gemini"], mmap=False)
+        calls.assert_not_called()
+
+    def test_selected_codex_and_gemini_distribute_all_requested_bytes(self):
+        generator = Path(__file__).with_name("perf-fixture.py")
+        with tempfile.TemporaryDirectory(prefix="cv-test-selected-json-") as directory:
+            for harness, shape in (("codex", "selected-response"), ("codex", "selected-events"), ("gemini", "selected"), ("gemini", "selected-jsonl")):
+                manifest = json.loads(subprocess.check_output([
+                    sys.executable, str(generator), harness, str(Path(directory) / shape),
+                    "--shape", shape, "--records", "3", "--payload-bytes", "257", "--escaped"], text=True))
+                raw = Path(manifest["path"]).read_text()
+                if harness == "codex":
+                    payload = 0
+                    for row in map(json.loads, raw.splitlines()):
+                        body = row["payload"]
+                        if "type" not in body:
+                            continue
+                        if body["type"] in ("user_message", "agent_message"):
+                            payload += len(body["message"])
+                        elif body["type"] == "message":
+                            payload += len(body["content"][0]["text"])
+                        elif body["type"] == "reasoning":
+                            payload += len(body["content"][0]["text"])
+                        elif body["type"] == "function_call" and body["name"] == "Read":
+                            payload += len(json.loads(body["arguments"])["payload"])
+                else:
+                    payload = sum(len(row["thoughts"][0]["description"])
+                                  + len(row["toolCalls"][0]["result"][1]["text"])
+                                  + len(row["toolCalls"][0]["result"][2]["functionResponse"]["response"]["output"])
+                                  + len(row["toolCalls"][1]["result"]["z"])
+                                  for row in ([json.loads(line) for line in raw.splitlines()] if shape == "selected-jsonl"
+                                              else json.loads(raw)["messages"]) if "thoughts" in row)
+                self.assertEqual(payload, 257)
+
     def test_selected_fixture_native_shapes_and_late_sentinel(self):
         generator = Path(__file__).with_name("perf-fixture.py")
         with tempfile.TemporaryDirectory(prefix="cv-test-selected-") as directory:
@@ -119,7 +155,7 @@ class DriverTests(unittest.TestCase):
                 self.assertGreater(manifest["physical_input_bytes"], 257)
                 self.assertGreaterEqual(manifest["expected_messages"], 3)
                 root = Path(manifest["root"])
-                if Path(manifest["path"]).is_file() and harness not in ("kimi-code", "opencode-files"):
+                if Path(manifest["path"]).is_file() and harness not in ("kimi-code", "opencode-files", "codex", "gemini"):
                     with sqlite3.connect(manifest["path"]) as db:
                         tables = [name for name, in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
                         sentinel = any(b"gate-final" in str(value).encode() for table in tables

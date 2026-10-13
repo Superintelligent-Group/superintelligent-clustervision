@@ -219,7 +219,8 @@ def metadata_facts(binary, root, env, baseline=None, harnesses=None):
 # allocations are outside these live Rust counters; file/block indexes may grow.
 SELECTED_PAYLOAD_CASES = (("kimi-code", "selected"), ("opencode-files", "selected"),
                           ("opencode", "selected"), ("opencode", "selected-v2"),
-                          ("cursor", "selected"), ("cursor-ide", "selected-ide"), ("goose", "selected"))
+                          ("cursor", "selected"), ("cursor-ide", "selected-ide"), ("goose", "selected"),
+                          ("codex", "selected-response"), ("codex", "selected-events"), ("gemini", "selected"), ("gemini", "selected-jsonl"))
 
 
 def selected_payloads(binary, root, env, formats=None, operations=None, mmap=True):
@@ -227,7 +228,9 @@ def selected_payloads(binary, root, env, formats=None, operations=None, mmap=Tru
     for format_name, shape in SELECTED_PAYLOAD_CASES:
         if formats and format_name not in formats:
             continue
-        for history in (False, True):
+        if format_name == "gemini" and not mmap:
+            continue  # Portable Gemini activation awaits JSONL producer evidence.
+        for history in ((False,) if format_name in ("codex", "gemini") else (False, True)):
             for escaped in (False, True):
                 peaks = {operation: [] for operation in (operations or ("discard", "doctor", "dataset", "dataset-miss"))}
                 for size in SIZES:
@@ -498,7 +501,7 @@ def main():
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
     parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "metadata-facts", "selected-payloads", "portable-selected-payloads", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
     parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/metadata-facts/stats, separately check baseline behavior parity")
-    parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed", "kimi-code", "opencode-files", "opencode", "cursor", "cursor-ide", "goose"),
+    parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed", "kimi-code", "opencode-files", "opencode", "cursor", "cursor-ide", "goose", "codex", "gemini"),
                         help="repeat to focus --only active on selected native formats")
     args = parser.parse_args()
     if args.format and args.only not in ("active", "portable-docs", "selected-payloads", "portable-selected-payloads"):
@@ -508,6 +511,8 @@ def main():
         parser.error("active supports document formats, kimi, and zed")
     if args.only in ("selected-payloads", "portable-selected-payloads") and any(f not in {name for name, _ in SELECTED_PAYLOAD_CASES} for f in args.format or []):
         parser.error("selected-payloads requires a selected payload case format")
+    if args.only == "portable-selected-payloads" and "gemini" in (args.format or []):
+        parser.error("portable Gemini selected cases await JSONL producer evidence")
     if args.only == "portable-docs" and any(f not in portable_formats for f in args.format or []):
         parser.error("portable-docs supports only document formats")
     if args.baseline_probe and args.only not in ("active", "doctor", "metadata-facts", "stats"):

@@ -6,12 +6,17 @@ Both probes must have `probe-heap`; this selector measures the native mmap probe
 That binary must enable SQLite without mmap:
 `cargo build --release -p clustervision-core --example store_probe --no-default-features --features sqlite,probe-heap`.
 The older no-SQLite portable gates keep their separate build; selected SQLite stores require this feature.
-Use repeated `--format` to focus Kimi Code, OpenCode files/SQLite, Cursor CLI/IDE, or Goose.
+Use repeated `--format` to focus Kimi Code, OpenCode files/SQLite, Cursor CLI/IDE, Goose, Codex, or Gemini.
 
 The shared fixture generator creates native-shaped synthetic stores in new scratch directories.
-Each case has a giant selected record and a growing 64→256-turn history at 16→64 MiB,
+The SQLite and Kimi/OpenCode cases have a giant selected record and a growing 64→256-turn history at 16→64 MiB,
 with plain and escaped text. Payloads occupy selected text, reasoning where supported,
-structured arguments, and tool results. A tiny final tool call supplies the late query sentinel.
+structured arguments, and tool results. Codex adds two fixed-record cases for response user/assistant
+text and event user/agent text, each with reasoning and encoded arguments. Gemini adds paired legacy JSON and modern JSONL
+fixed-record cases combining formatted thoughts, composite results, and object results. These
+representative cases avoid multiplying the growing-history matrix. Gemini currently runs only
+with native mmap; portable JSONL coverage awaits its producer fix. A tiny final tool call supplies
+the late query sentinel.
 
 Each isolated probe exercises lazy discard, Facts doctor, accepted deferred dataset collection,
 and a missing-tool deferred query. Doctor reports must exactly equal a separate full-mode
