@@ -104,7 +104,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; ordered usage rows reuse a bounded dependency-validated cache | Cold ledger publication, exact dedup I/O and model roster growth; tiny native sources bypass caching |
-| Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
+| Reshape/emit | Bounded shared JSONL staging; Codex/Grok/OpenClaw/Qwen stream output records | Retained source/materialization, Claude record rewrites, record-local structured Values and complete verification reparse |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
 
 Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,stream}.rs`,
@@ -1074,3 +1074,38 @@ cursor-ide-doctor-{baseline,facts}-reports.json, cursor-ide-doctor-{baseline,fac
 cursor-ide-facts-native-memory.json and cursor-ide-installed-shape.json. Generators and manifests
 are adjacent; committed corpus versions were not regenerated. The remaining structured IDE
 floors above are active work, not covered by the string-result boundedness claim.
+
+
+## Native JSONL export staging (Codex, 2026-10-12)
+
+The shared writer now serializes compact records directly into an operation-owned byte stage:
+1 MiB in memory, then a private spill, with 64 KiB serialization and 256 KiB publication buffers.
+Codex, Grok, OpenClaw and Qwen release each append-only output record immediately. Codex text
+records borrow their strings; Qwen writes fork metadata during first-record construction.
+Claude's later record rewrites still retain its Value history. Serialization completes before
+opening the destination; publication retains the existing inode, permissions, hard links and
+symlink following. Publication I/O errors can leave partial output, matching the earlier writer.
+
+A deterministic synthetic Codex export compares clean release child-process user+system CPU
+with three alternating pairs, separately from debug requested Rust allocations measured after
+constructing the retained input IR. Payloads contain quotes, backslashes, newlines and Unicode.
+
+| Source shape | Exact output bytes | Export heap before → after | CPU median before → after |
+|---|---:|---:|---:|
+| 128 × 256 KiB text messages | 100,695,160 | 168,704,658 → 1,118,658 B | 0.171658 → 0.191652 s (+11.6%) |
+| One 32 MiB text message | 100,663,924 | 234,890,337 → 1,118,658 B | 0.185966 → 0.181290 s (approximately unchanged) |
+
+After-stage heap is also 1,118,658 B at 32 messages, establishing flat scratch as history and a
+single selected text body grow. Exact before/after SHA-256 values are
+`50c79139013fd016eb1a703c9565b323aaadde918a372588dcb3c6b85051e8cd` and
+`522e2d19fa015b581cddb2fe694c0557eb9b83df8bfcc24af7d8daef9a53d6c5`, respectively.
+Native scoped round trips cover Codex, Grok and OpenClaw; native/portable shared tests cover
+spilled bytes, failed serialization, link/mode preservation, borrowed text twins and Qwen's
+first-record fork/empty-session shapes. The probe is `examples/emit_probe.rs`.
+
+This measures plain emission, not end-to-end port or verified emission. The input Session remains
+retained, lazy sources still traverse a materialization clone, and `emit_report` retains the full
+reparsed target. Structured record-local Values can still be payload-sized. Spill disk and write
+traffic scale with output bytes; there is no constant total disk, RSS or whole-port heap claim.
+Evidence is in `resume-emit-evidence/{summary,final-clean-cpu,after-heap}.json` under the durable
+worktree evidence directory; baseline is `621b5977`, implementation `74ab96ec` (integrated `971d8e76`).

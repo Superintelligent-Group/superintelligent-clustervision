@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Goose partial reads stage SQLite payloads in bounded memory; doctor retains typed facts without decoding large native metadata bags.
+- Native JSONL exports stage bounded bytes and stream records for Codex, Grok, OpenClaw and Qwen without retaining complete output histories.
 
 - Doctor rejects unavailable lazy text instead of counting zero tokens; length-only reads avoid copying decoded fragments.
 
