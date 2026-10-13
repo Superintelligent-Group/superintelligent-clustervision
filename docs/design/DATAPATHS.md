@@ -24,7 +24,7 @@ plus guarded, observed-stable external sidecars (see the final fleet evidence be
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. In the frozen 64-session whole-command control, the limited query reduces two bodies versus 63 for the full-filter oracle, with identical output; its warm repeat reduces none. Metadata inventory, rank preparation and text membership still scale with fleet size. Zero-limit JSON validates arguments then skips that work. Required source errors remain fatal. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. Forward CLI JSON windows project discarded Claude message extras after full validation; selected rich output and EOF metadata remain exact. Cursor IDE rich lazy windows now use the existing checked selected builder: the 64 MiB discarded-bubble control falls from 235 MB to 329 KB requested Rust heap. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds; existing controls preserve event/count/search results for unchanged indexed metadata. Changed copied metadata now rejects skip/resume, fixing stale title/body conjunctions; unchanged-title appends retain resume. Older indexes rebuild once to establish that authority. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Verified Claude metadata continuation now frames only the 549-byte stable append in an 8.4 MB source; FTS replays 1,433 bytes from its earlier checkpoint. A changed title correctly forces a full FTS rewrite. Metadata acceptance and provisional EOF records remain exact under the immutable-prefix append contract. A copied 3.78 GB index retains every large segment through sixteen tiny commits; that older-index geometry control remains distinct from the completed current-schema fleet composition. The 6,889-reference cold/unchanged/append/clean-reference control passes; seven fork-dependent siblings remain an accepted append fanout cost. See [fleet evidence](FTS-FLEET-COMPOSITION.json) for scope and unmeasured physical-work limits. |
-| Transform / export | Verified Codex port retains checked source-backed bodies. Splice retains selected guarded messages. Distill retains checked selected sources, analyzes per-message demand, shares one prepared tail, and stages borrowed sidecars; pack-only analysis skips the unused elision roster. Pack shares excerpt/event traversal when events are stale. | Actual verified Claude port now peaks at 1.40 MB for the large Native/Text thinking controls, versus 325 MB before. Prune projects Thinking, ASCII declassification and ordinary usage repair through checked sources; the large Thinking and usage controls fall to 270 KB and 1.32 MB requested live Rust heap. Matched instruction controls improve Thinking+revival 62.2% and usage repair 19.0%. Linked-record tool-input lookup now resolves only the selected input; its 64 MiB control falls from 134 MB to 271 KB, and the existing Thinking CI gate exercises the composition. Selected Unicode fields and demanded oversized metadata remain explicit limits. Requested distill products and staged archive/prune/dataset output still grow with demand. |
+| Transform / export | Verified Codex port retains checked source-backed bodies across Native/Text/Drop thinking modes. Splice retains selected guarded messages. Distill retains checked selected sources, analyzes per-message demand, shares one prepared tail, and stages borrowed sidecars; pack-only analysis skips the unused elision roster. Pack shares excerpt/event traversal when events are stale. | Actual verified Claude port now peaks at 1.40 MB for the large Native/Text thinking controls, versus 325 MB before. Prune projects Thinking, ASCII declassification and ordinary usage repair through checked sources; the large Thinking and usage controls fall to 270 KB and 1.32 MB requested live Rust heap. Matched instruction controls improve Thinking+revival 62.2% and usage repair 19.0%. Linked-record tool-input lookup now resolves only the selected input; its 64 MiB control falls from 134 MB to 271 KB, and the existing Thinking CI gate exercises the composition. Selected Unicode fields and demanded oversized metadata remain explicit limits. Requested distill products and staged archive/prune/dataset output still grow with demand. |
 
 ### Measurement correction: count the work (2026-10-12)
 
@@ -3452,6 +3452,36 @@ preserving them separately; current package archives then verified successfully.
 
 These are local integration results, not a claim that Linux CI has already run. The fleet control
 above additionally verifies production index composition and representative CLI queries. The
-remaining concrete export follow-up is Codex Text/Drop dispatch: it still materializes lazy thinking
-before mode projection despite the checked writer. An isolated actual-port control will determine
-that change's benefit while preserving output, fidelity reports and source-error behavior.
+completion audit identified Codex Text/Drop dispatch materializing lazy thinking before mode
+projection despite the checked writer. The follow-up below removes that ownership and records
+actual-port parity and regression gates.
+
+
+### Checked Codex thinking-mode ownership (2026-10-13)
+
+Sol removed the dispatcher whole-session materialize/clone for Codex Text and Drop. Codex and
+Claude now share checked per-block fate/presence projection: native blocks and retained text stay
+borrowed, conversion borrows the existing text, and only short placeholders are owned. All Codex
+roles and compaction joins consume the projection; Native codec behavior and source prevalidation
+remain unchanged. Discarded changed/unavailable sources still fail before destination publication.
+
+The whole actual Gemini→Codex `parse_for_emit` → staged write → fidelity read-back control grows
+8→32 million escaped/Unicode thought characters. Previous debug instrumented peak requested Rust
+heap grows Drop 8.52→33.69 MB and Text 9.51→34.68 MB; checked peaks remain Drop 401,295→401,302 B
+and Text 278,555→278,562 B. All four complete output files and fidelity reports match frozen
+pre-change binaries. This is ownership evidence, not a release latency, RSS or I/O claim.
+
+The persistent operation gate now has eight cases, adding Codex Text/Drop to the existing six.
+It reuses the 64 MiB Claude Thinking/tool fixture with fixed timestamps/cwd, through the existing
+`claude_port_probe` with an optional final target; default Claude invocation remains unchanged.
+The old dispatcher peaks at 67,401,698 B Text and 67,198,981 B Drop, exceeding the same 4 MiB cap.
+Checked peaks are 283,036 B and 405,776 B. Five source messages, exact frozen fidelity reports,
+complete output hashes and unchanged source hashes are required. Only the package-version field
+in the bounded metadata header is normalized; all remaining output bytes are hashed unchanged.
+Output sizes are 67,118,455 B Text and 9,450 B Drop. The original Claude export gate also retains
+its frozen digest and 1.40 MB peak. Eight driver unit controls pass, including previous Codex
+ownership rejection and version-only digest normalization/content/incomplete-output negatives.
+Native and portable Codex mode/body/report/direct-call/source-error regressions and Claude's
+three legacy-oracle controls pass; both library clippy configurations pass. Staging still costs
+output-sized temporary disk writes, source validation still reads discarded reasoning, and owned
+metadata/complete carriers remain demand-dependent. No broad producer or timing matrix was added.

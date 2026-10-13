@@ -36,6 +36,35 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "exceeds"):
             gate.checked_peak(self.measured(201466250))
 
+    def test_previous_codex_thinking_dispatch_exceeds_cap(self):
+        for peak in (67401698, 67198981):
+            with self.subTest(peak=peak), self.assertRaisesRegex(AssertionError, "exceeds"):
+                gate.checked_peak(self.measured(peak))
+
+    def test_codex_digest_normalizes_only_package_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "output.jsonl"
+            header = dict(type="session_meta", timestamp="fixed", payload=dict(cli_version="0.16.1", id="fixed-id"))
+            body = json.dumps(dict(type="response_item", payload=dict(text="x" * 150000, cli_version="nested-kept"))).encode() + b"\n"
+            normalized = dict(header, payload=dict(header["payload"], cli_version="VERSION"))
+            expected = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode() + b"\n" + body).hexdigest()
+            def write():
+                path.write_bytes(json.dumps(header).encode() + b"\n" + body)
+            write()
+            self.assertEqual(gate.codex_output_digest(path), (expected, 2))
+            header["payload"]["cli_version"] = "future-version"
+            write()
+            self.assertEqual(gate.codex_output_digest(path), (expected, 2))
+            body = body.replace(b"nested-kept", b"nested-lost")
+            write()
+            self.assertNotEqual(gate.codex_output_digest(path)[0], expected)
+            path.write_bytes(path.read_bytes()[:-1])
+            with self.assertRaises(AssertionError):
+                gate.codex_output_digest(path)
+            path.write_bytes(b'{}\n')
+            with self.assertRaises((AssertionError, KeyError)):
+                gate.codex_output_digest(path)
+
     def test_measured_peak_with_platform_slack_passes(self):
         self.assertEqual(gate.checked_peak(self.measured(463595)), 463595)
 

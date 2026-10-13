@@ -125,7 +125,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             writer::record(&mut lines, &ts, "compacted", |out| {
                 out.write_all(b"{\"message\":")?;
                 if msg.kind == MessageKind::CompactionSummary {
-                    writer::message_string(out, msg, &resolver)?;
+                    writer::message_string(out, msg, &resolver, opts.thinking)?;
                 } else {
                     serde_json::to_writer(&mut *out, "")?;
                 }
@@ -137,7 +137,16 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
 
         match msg.role {
             Role::System => {
-                writer::message(&mut lines, &ts, "developer", "input_text", None, msg, &resolver)?;
+                writer::message(
+                    &mut lines,
+                    &ts,
+                    "developer",
+                    "input_text",
+                    None,
+                    msg,
+                    &resolver,
+                    opts.thinking,
+                )?;
             }
             Role::User => {
                 writer::message(
@@ -148,12 +157,22 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                     Some("user_message"),
                     msg,
                     &resolver,
+                    opts.thinking,
                 )?;
             }
             Role::Assistant => {
                 let first_record = lines.len();
                 // Split assistant content into NL text (event_msg) and structured items.
                 for b in &msg.content {
+                    match crate::emit::thinking::fate(b, Harness::Codex, opts.thinking, &resolver)? {
+                        ThinkingFate::Drop => continue,
+                        fate @ (ThinkingFate::AsText | ThinkingFate::Placeholder) => {
+                            let text = crate::emit::thinking::text_with_fate(b, fate).unwrap();
+                            writer::text(&mut lines, &ts, &text, &resolver)?;
+                            continue;
+                        }
+                        ThinkingFate::Keep => {}
+                    }
                     match b {
                         Block::Text { text } => {
                             writer::text(&mut lines, &ts, text, &resolver)?;

@@ -343,86 +343,32 @@ impl Record<'_> {
     }
 }
 
-#[derive(Debug)]
-struct Nonblank;
-impl std::fmt::Display for Nonblank {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("nonblank text found")
-    }
-}
-impl std::error::Error for Nonblank {}
-fn nonblank(text: &crate::Text, resolver: &Resolver) -> Result<bool> {
-    if let Some(inline) = text.inline_str() {
-        return Ok(!inline.trim_start().is_empty());
-    }
-    match text.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
-        if !chunk.trim_start().is_empty() {
-            return Err(Nonblank.into());
-        }
-        Ok(())
-    }) {
-        Ok(()) => Ok(false),
-        Err(error) if error.is::<Nonblank>() => Ok(true),
-        Err(error) => Err(error),
-    }
-}
-
 fn projected<'a>(message: &'a Message, mode: ThinkingMode, resolver: &Resolver) -> Result<Vec<Cow<'a, Block>>> {
     let mut blocks = Vec::with_capacity(message.content.len());
-    for b in &message.content {
-        if let Block::Thinking {
-            text,
-            signature,
-            encrypted,
-            redacted,
-        } = b
-        {
-            if mode == ThinkingMode::Drop {
-                continue;
+    for block in &message.content {
+        match crate::emit::thinking::fate(block, Harness::Claude, mode, resolver)? {
+            crate::emit::ThinkingFate::Drop => {}
+            crate::emit::ThinkingFate::Placeholder => {
+                let Block::Thinking {
+                    signature,
+                    encrypted,
+                    redacted,
+                    ..
+                } = block
+                else {
+                    unreachable!()
+                };
+                blocks.push(Cow::Owned(Block::Text {
+                    text: crate::emit::thinking_placeholder(signature.as_deref(), encrypted.as_deref(), *redacted)
+                        .into(),
+                }));
             }
-            if mode == ThinkingMode::Text {
-                // Signatures/encrypted payloads can establish structural retention alone.
-                if crate::emit::thinking_fate_with_presence(
-                    Harness::Claude,
-                    mode,
-                    false,
-                    signature.as_deref(),
-                    encrypted.as_deref(),
-                    *redacted,
-                ) == crate::emit::ThinkingFate::Keep
-                {
-                    blocks.push(Cow::Borrowed(b));
-                    continue;
-                }
-                let nonblank = nonblank(text, resolver)?;
-                match crate::emit::thinking_fate_with_presence(
-                    Harness::Claude,
-                    mode,
-                    nonblank,
-                    signature.as_deref(),
-                    encrypted.as_deref(),
-                    *redacted,
-                ) {
-                    crate::emit::ThinkingFate::Drop => continue,
-                    crate::emit::ThinkingFate::Placeholder => {
-                        blocks.push(Cow::Owned(Block::Text {
-                            text: crate::emit::thinking_placeholder(
-                                signature.as_deref(),
-                                encrypted.as_deref(),
-                                *redacted,
-                            )
-                            .into(),
-                        }));
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
+            _ => blocks.push(Cow::Borrowed(block)),
         }
-        blocks.push(Cow::Borrowed(b));
     }
     Ok(blocks)
 }
+
 fn resolve_parent(dropped: &HashMap<String, Option<String>>, pid: String) -> Option<String> {
     let mut p = Some(pid);
     for _ in 0..=dropped.len() {

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod fidelity;
 mod prepare;
+pub(crate) mod thinking;
 use fidelity::{diff_features, is_carrier, reparse_features, source_features, target_holds};
 #[cfg(test)]
 use fidelity::{diff_fidelity, reparse_emitted};
@@ -160,18 +161,17 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     // as its `{source,off,len}` struct, shipping garbage into the target file. A lazily-parsed
     // session must be resolved before it hits an emitter; do it here (on a clone, since `emit`
     // takes `&Session`) so no caller can forget. Codex can consume checked lazy fields
-    // directly through its staged writer; native thinking therefore needs no whole-session clone.
-    // Claude's checked writer additionally projects all thinking modes per block, preserving
-    // direct-emitter and dispatch equality without materializing the session.
+    // directly through its staged writer. Both checked writers project all thinking modes
+    // per block, preserving direct-emitter and dispatch equality without materializing the session.
     //
     // [`ThinkingMode`] is applied in the same place and on the same clone, for the same reason: it
     // remains the shared fallback for emitters without a checked block writer. It runs AFTER
     // materialization (it reads `Thinking.text`).
     let mut owned: Option<Session> = None;
-    if target == Harness::Claude {
+    if matches!(target, Harness::Claude | Harness::Codex) {
         return f(session, out_dir, opts);
     }
-    if has_unresolved_spans(session) && !(target == Harness::Codex && opts.thinking == ThinkingMode::Native) {
+    if has_unresolved_spans(session) {
         let mut s = session.clone();
         s.materialize()?;
         owned = Some(s);
@@ -621,7 +621,10 @@ mod tests {
         let source_path = out.join("payload.json");
         fs::write(
             &source_path,
-            r#"{"text":"a\"\\\nλ","input":{"z":0,"a":[true,null,"\u03bb"],"z":1.25}}"#,
+            format!(
+                r#"{{"text":{},"input":{{"z":0,"a":[true,null,"\u03bb"],"z":1.25}}}}"#,
+                serde_json::to_string(&"a\"\\\nλ".repeat(20_000))?
+            ),
         )?;
         let source = crate::Json::source(&source_path, 0, fs::metadata(&source_path)?.len())?;
         let text = source.with_view(|view| Ok(view.get("text")?.unwrap().source_text()?.unwrap()))?;
@@ -645,22 +648,82 @@ mod tests {
         session.messages[1].content.insert(0, Block::Text { text: "".into() });
         session.messages[1].content.push(Block::Text { text: "".into() });
         session.messages[1].content.push(Block::Text { text: text.clone() });
+        for role in [Role::User, Role::System] {
+            let mut message = Message::new(role);
+            message.content.push(Block::Thinking {
+                text: "".into(),
+                signature: Some("signature-only".into()),
+                encrypted: None,
+                redacted: false,
+            });
+            session.messages.push(message);
+        }
+        let mut compact = Message::new(Role::System);
+        compact.kind = MessageKind::CompactionSummary;
+        compact.content.push(Block::Thinking {
+            text: "".into(),
+            signature: None,
+            encrypted: None,
+            redacted: true,
+        });
+        session.messages.push(compact);
         let owned = materialized_session(&session)?;
         let opts = EmitOptions {
             new_id: Some("00000000-0000-0000-0000-000000000001".into()),
             ..Default::default()
         };
-        let (expected, expected_report) = emit_report(&owned, Harness::Codex, &out.join("owned"), &opts)?;
-        let (actual, actual_report) = emit_report(&session, Harness::Codex, &out.join("lazy"), &opts)?;
-        assert_eq!(fs::read(&actual.path)?, fs::read(&expected.path)?);
-        assert_eq!(
-            serde_json::to_value(actual_report)?,
-            serde_json::to_value(expected_report)?
-        );
-        let before = fs::read(&actual.path)?;
+        let mut before = Vec::new();
+        for mode in ThinkingMode::ALL {
+            let opts = EmitOptions {
+                thinking: mode,
+                ..opts.clone()
+            };
+            // Frozen dispatch policy: materialize first, then rewrite the owned IR.
+            let mut legacy = owned.as_ref().clone();
+            apply_thinking_mode(&mut legacy, Harness::Codex, mode);
+            let expected = crate::harness::codex::emit(
+                &legacy,
+                &out.join(format!("owned-{}", mode.as_str())),
+                &EmitOptions {
+                    thinking: ThinkingMode::Native,
+                    ..opts.clone()
+                },
+            )?;
+            let (actual, actual_report) = emit_report(
+                &session,
+                Harness::Codex,
+                &out.join(format!("lazy-{}", mode.as_str())),
+                &opts,
+            )?;
+            let (_, expected_report) = emit_report(
+                &owned,
+                Harness::Codex,
+                &out.join(format!("report-{}", mode.as_str())),
+                &opts,
+            )?;
+            assert_eq!(fs::read(&actual.path)?, fs::read(&expected.path)?, "mode={mode:?}");
+            let direct = crate::harness::codex::emit(&session, &out.join(format!("direct-{}", mode.as_str())), &opts)?;
+            assert_eq!(fs::read(&direct.path)?, fs::read(&actual.path)?, "direct mode={mode:?}");
+            assert_eq!(
+                serde_json::to_value(actual_report)?,
+                serde_json::to_value(expected_report)?
+            );
+            before.push((mode, actual.path.clone(), fs::read(&actual.path)?));
+        }
         fs::write(&source_path, b"{}")?;
-        assert!(emit_report(&session, Harness::Codex, &out.join("lazy"), &opts).is_err());
-        assert_eq!(fs::read(&actual.path)?, before);
+        for (mode, path, bytes) in before {
+            assert!(emit_report(
+                &session,
+                Harness::Codex,
+                &out.join(format!("lazy-{}", mode.as_str())),
+                &EmitOptions {
+                    thinking: mode,
+                    ..opts.clone()
+                }
+            )
+            .is_err());
+            assert_eq!(fs::read(path)?, bytes);
+        }
         fs::remove_dir_all(out)?;
         Ok(())
     }

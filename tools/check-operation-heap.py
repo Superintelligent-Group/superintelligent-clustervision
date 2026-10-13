@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Small process-isolated whole-operation Rust heap gates, without timing thresholds.
 
-Synthetic inputs only. Output validation runs in this driver after the measured operation.
+Synthetic inputs only. Eight cases; output validation runs after the measured operation.
 """
 import argparse
 import hashlib
@@ -40,8 +40,12 @@ def file_digest(path):
     return h.hexdigest()
 
 
-def prune_fixture(path, case):
+def prune_fixture(path, case, timestamp=None, cwd=None):
     def row(role, uuid, content, **extra):
+        if timestamp is not None:
+            extra["timestamp"] = timestamp
+        if cwd is not None:
+            extra["cwd"] = cwd
         return dict(type=role, uuid=uuid, sessionId="old", **extra,
                     message=dict(role=role, content=content))
     rows = [row("user", "u", "prompt"), None, row("user", "v", "recent"),
@@ -247,6 +251,68 @@ def claude_port_gate(binary, root, env):
     shutil.rmtree(directory)
 
 
+
+def codex_output_digest(path):
+    """Hash the entire fixed-clock output, normalizing only the package version in its metadata."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        header = source.readline(128 << 10)
+        assert header.endswith(b"\n"), "missing or oversized Codex metadata record"
+        metadata = json.loads(header)
+        assert metadata["type"] == "session_meta"
+        assert isinstance(metadata["payload"]["cli_version"], str)
+        metadata["payload"]["cli_version"] = "VERSION"
+        digest.update(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
+        rows = 1
+        final = header
+        for chunk in iter(lambda: source.read(64 << 10), b""):
+            digest.update(chunk)
+            rows += chunk.count(b"\n")
+            final = chunk
+        assert final.endswith(b"\n"), "unterminated Codex output"
+    return digest.hexdigest(), rows
+
+
+def codex_thinking_gate(binary, root, env):
+    directory = root / "codex-thinking"
+    directory.mkdir()
+    source = directory / "source.jsonl"
+    # Same 64 MiB reasoning/tool fixture, with a fixed clock so complete wire bytes are stable.
+    prune_fixture(source, "thinking", timestamp="2026-10-12T12:00:00Z", cwd="/synthetic/codex-thinking")
+    original = file_digest(source)
+    assert source.stat().st_size == 67117443
+    assert original == "a18516c6e53acc6a6acce30fa5aeca7e15db9838b69927a71af485874899477a"
+    for mode in ("text", "drop"):
+        child = subprocess.run([str(binary), "claude", str(source), str(directory / mode), mode, "codex"],
+                               env=env, text=True, capture_output=True)
+        assert child.returncode == 0, f"verified Codex {mode} export failed: {child.stderr[-2000:]}"
+        report = json.loads(child.stdout)
+        peak = checked_peak(json.loads(child.stderr))
+        output = Path(report["path"])
+        digest, rows = codex_output_digest(output)
+        # Independent frozen whole-port output/report from the pre-projection dispatcher.
+        expected_digest, expected_rows, expected_report = CODEX_THINKING_EXPECTED[mode]
+        assert digest == expected_digest and rows == expected_rows
+        assert report["messages"] == 5 and report["fidelity"] == expected_report
+        assert file_digest(source) == original, "Codex export modified its source"
+        print(json.dumps(dict(case=f"verified-codex-{mode}-thinking-export", peak_live_rust_bytes=peak,
+                              messages=5, output_bytes=output.stat().st_size,
+                              normalized_sha256=digest)), flush=True)
+    shutil.rmtree(directory)
+
+
+CODEX_THINKING_EXPECTED = {'text': ['cc7670ce4e3e93f0ae3099f76bb771d2ff100c393486ed6302c3cefd4e16aa5d',
+          14,
+          {'deltas': [{'field': 'thinking(signature)', 'before': '1', 'after': '0', 'expected': True},
+                      {'field': 'message ids', 'before': '4', 'after': '0', 'expected': True},
+                      {'field': 'message ids (tool turns)', 'before': '1', 'after': '0', 'expected': True}]}],
+ 'drop': ['cb0d4dd02494a631c0d197a4951f4536fb5d27016d62f39e61dc88b5fd298562',
+          13,
+          {'deltas': [{'field': 'thinking(text)', 'before': '1', 'after': '0', 'expected': True},
+                      {'field': 'thinking(signature)', 'before': '1', 'after': '0', 'expected': True},
+                      {'field': 'message ids', 'before': '4', 'after': '0', 'expected': True},
+                      {'field': 'message ids (tool turns)', 'before': '1', 'after': '0', 'expected': True}]}]}
+
 def window_binary(report_path):
     artifacts = [json.loads(line) for line in report_path.read_text().splitlines()]
     candidates = [item["executable"] for item in artifacts
@@ -315,6 +381,7 @@ def main():
         usage_gate(binary, root, env)
         window_gate(window_binary(args.window_build_report), root, env)
         claude_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
+        codex_thinking_gate(args.claude_port_probe.resolve(strict=True), root, env)
 
 
 if __name__ == "__main__":

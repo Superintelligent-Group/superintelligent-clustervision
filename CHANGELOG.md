@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Codex Text and Drop thinking modes stream checked payloads without materializing discarded reasoning or cloning complete sessions.
+
 - Semantic refresh selects one live copy per harness-qualified session identity, preventing duplicate-store source errors and repairing old duplicate vector rows.
 
 - Event publication acquires write ownership before authority validation, avoiding WAL snapshot-upgrade failures during concurrent updates.

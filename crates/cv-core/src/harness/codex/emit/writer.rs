@@ -3,7 +3,7 @@ use crate::harness::store::{
     text::{self, Builder},
     JsonlStage,
 };
-use crate::{lazy::Resolver, Block, Json, Message, Text};
+use crate::{emit::ThinkingMode, lazy::Resolver, Harness, Json, Message, Text};
 use anyhow::Result;
 use std::io::Write;
 
@@ -40,15 +40,20 @@ fn append(builder: &mut Builder<'_>, value: &Text, resolver: &Resolver) -> Resul
     })?;
     Ok(present)
 }
-pub(super) fn message_string(writer: &mut dyn Write, message: &Message, resolver: &Resolver) -> Result<()> {
+pub(super) fn message_string(
+    writer: &mut dyn Write,
+    message: &Message,
+    resolver: &Resolver,
+    mode: ThinkingMode,
+) -> Result<()> {
     text::generate_string(writer, |builder| {
         let mut started = false;
         for block in &message.content {
-            if let Block::Text { text } = block {
+            if let Some(text) = crate::emit::thinking::text(block, Harness::Codex, mode, resolver)? {
                 if started {
                     builder.push("\n")?;
                 }
-                started |= append(builder, text, resolver)?;
+                started |= append(builder, &text, resolver)?;
             }
         }
         Ok(())
@@ -69,6 +74,7 @@ pub(super) fn string(writer: &mut dyn Write, value: &Text, resolver: &Resolver, 
 pub(super) fn argument(writer: &mut dyn Write, value: &Json) -> Result<()> {
     text::generate_string(writer, |builder| value.with_view(|view| builder.push_json(view)))
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn message(
     lines: &mut JsonlStage,
     timestamp: &str,
@@ -77,12 +83,13 @@ pub(super) fn message(
     event_type: Option<&str>,
     message: &Message,
     resolver: &Resolver,
+    mode: ThinkingMode,
 ) -> Result<()> {
-    let mut texts = message.content.iter().filter_map(|b| match b {
-        Block::Text { text } => Some(text),
-        _ => None,
-    });
-    match (texts.next(), texts.next(), event_type) {
+    let mut texts = message
+        .content
+        .iter()
+        .filter_map(|block| crate::emit::thinking::text(block, Harness::Codex, mode, resolver).transpose());
+    match (texts.next().transpose()?, texts.next().transpose()?, event_type) {
         (Some(value), None, Some(event_type)) if value.inline_str().is_some() => {
             return super::push_text(
                 lines,
@@ -99,7 +106,7 @@ pub(super) fn message(
         _ => {}
     }
     twins(lines, timestamp, role, content_type, event_type, &|writer| {
-        message_string(writer, message, resolver)
+        message_string(writer, message, resolver, mode)
     })
 }
 pub(super) fn text(lines: &mut JsonlStage, timestamp: &str, value: &Text, resolver: &Resolver) -> Result<()> {

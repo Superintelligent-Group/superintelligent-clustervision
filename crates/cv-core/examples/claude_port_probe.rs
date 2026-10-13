@@ -1,4 +1,4 @@
-//! Scratch-only verified Claude port, including native source preparation and read-back checks.
+//! Scratch-only verified native port (Claude by default; optional final target argument).
 use anyhow::{Context, Result};
 use cv_core::{
     emit::{self, EmitOptions, ThinkingMode},
@@ -13,12 +13,16 @@ fn main() -> Result<()> {
     let adapter = cv_core::harness::for_harness(source).context("source adapter")?;
     let reference = SessionRef::new("synthetic-source", source, &args[2]);
     let mode = ThinkingMode::parse(&args[4]).context("unknown thinking mode")?;
+    let target = match args.get(5) {
+        Some(value) => Harness::parse(value).context("unknown target harness")?,
+        None => Harness::Claude,
+    };
     #[cfg(feature = "probe-heap")]
     let baseline = cv_testkit::heap::begin();
-    let session = emit::parse_for_emit(adapter.as_ref(), &reference, Harness::Claude)?;
+    let session = emit::parse_for_emit(adapter.as_ref(), &reference, target)?;
     let (result, report) = emit::emit_report(
         &session,
-        Harness::Claude,
+        target,
         std::path::Path::new(&args[3]),
         &EmitOptions {
             new_id: Some("00000000-0000-0000-0000-000000000001".into()),
