@@ -89,6 +89,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 mod records;
+mod selected;
 
 pub struct Kimi {
     /// `<root>/sessions`, if it exists.
@@ -214,7 +215,7 @@ impl Adapter for Kimi {
             sink.meta(&s);
             let primary = self.resume_source(r);
             let capture = segments.last() == Some(&primary);
-            Ok(stream_context(
+            stream_context(
                 s,
                 &segments,
                 &enrich,
@@ -222,7 +223,7 @@ impl Adapter for Kimi {
                 ContextState::default(),
                 ContextStart { at: None, capture },
                 sink,
-            ))
+            )
         })
     }
 
@@ -304,7 +305,7 @@ impl Adapter for Kimi {
                     capture: true,
                 },
                 &mut spawns,
-            )))
+            )?))
         })
     }
 }
@@ -406,31 +407,45 @@ fn stream_context(
     mut ctx: ContextState,
     start: ContextStart,
     sink: &mut dyn MessageSink,
-) -> Session {
+) -> Result<Session> {
     let mut pending: Option<Message> = None;
     let mut stopped = false;
     let prior_skipped = ctx.skipped;
-    let skipped = for_each_segment_record_at(segments, start.at, |v, starts, position, skipped| {
+    let mut accept = |view: crate::json::JsonView<'_>,
+                      source: Option<&crate::json::JsonSource>,
+                      starts: Option<&str>,
+                      position: Option<u64>,
+                      skipped: u64|
+     -> Result<Flow> {
         if let Some(name) = starts {
             ctx.rotated = Some(name.into());
         }
-        let checkpoint_record = u64::from(v.get("role").and_then(Value::as_str) == Some("_checkpoint"));
+        let role = view
+            .get("role")?
+            .map(|v| v.resolve().map(|v| v.as_str().unwrap_or("").to_owned()))
+            .transpose()?
+            .unwrap_or_default();
+        let checkpoint_record = u64::from(role == "_checkpoint");
         ctx.checkpoints += checkpoint_record;
-        if v.get("role").and_then(Value::as_str) == Some("_usage") {
+        if role == "_usage" {
             if let Some(p) = pending.as_mut() {
-                fold_usage_record(p, &v);
+                selected::fold_usage(p, view)?;
             }
-            return Flow::Continue;
+            return Ok(Flow::Continue);
         }
         // Interpret without applying the current record's call-name/positional state. The anchor
         // below replays this record and must retain only the immutable prefix's state.
-        let Some(mut m) = context_message_inner(&v, enrich, opts.complete, &ctx.call_names) else {
-            return Flow::Continue;
+        let message = match source {
+            Some(source) => selected::message(view, source, enrich, opts.complete, &ctx.call_names)?,
+            None => context_message_inner(view.resolve()?.as_ref(), enrich, opts.complete, &ctx.call_names),
+        };
+        let Some(mut m) = message else {
+            return Ok(Flow::Continue);
         };
         if let Some(prev) = pending.take() {
             if sink.message(prev) == Flow::Stop {
                 stopped = true;
-                return Flow::Stop;
+                return Ok(Flow::Stop);
             }
             if let Some(offset) = position.filter(|_| start.capture) {
                 if sink.wants_checkpoint(offset) {
@@ -482,19 +497,39 @@ fn stream_context(
         }
         if m.kind == MessageKind::CompactionSummary && sink.message(compaction_boundary(m.timestamp)) == Flow::Stop {
             stopped = true;
-            return Flow::Stop;
+            return Ok(Flow::Stop);
         }
         if let Some(segment) = ctx.rotated.take() {
             if m.kind != MessageKind::CompactionSummary
                 && sink.message(rotation_branch(m.timestamp, segment)) == Flow::Stop
             {
                 stopped = true;
-                return Flow::Stop;
+                return Ok(Flow::Stop);
             }
         }
         pending = Some(m);
-        Flow::Continue
-    });
+        Ok(Flow::Continue)
+    };
+    let skipped = if opts.spans {
+        records::visit(segments, start.at, |view, source, starts, position, skipped| {
+            accept(view, Some(source), starts, position, skipped)
+        })?
+    } else {
+        let mut error = None;
+        let skipped = for_each_segment_record_at(segments, start.at, |v, starts, position, skipped| {
+            match accept((&v).into(), None, starts, position, skipped) {
+                Ok(flow) => flow,
+                Err(e) => {
+                    error = Some(e);
+                    Flow::Stop
+                }
+            }
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        skipped
+    };
     if !stopped {
         if let Some(last) = pending {
             sink.message(last);
@@ -504,7 +539,7 @@ fn stream_context(
         crate::affordance::note_checkpoints(s.harness_extra_mut(Harness::Kimi), ctx.checkpoints, []);
     }
     super::note_skipped_lines(&mut s, prior_skipped + skipped);
-    s
+    Ok(s)
 }
 
 #[cfg(test)]
@@ -1152,6 +1187,7 @@ fn classify_user(m: &mut Message) {
 /// `extra["kimi"]["token_count"]` (the record's own fact), and as `usage.input_tokens`
 /// on a `Reply` the wire sidecar gave no usage for (`token_count` is the request's input tokens,
 /// `kimisoul.py:1267`).
+#[cfg(test)]
 fn fold_usage_record(m: &mut Message, v: &Value) {
     let Some(n) = v.get("token_count").filter(|n| n.is_number()) else {
         return;
@@ -1506,8 +1542,8 @@ mod tests {
     use crate::harness::Parse;
 
     #[derive(Default)]
-    struct ResumeKeep {
-        messages: Vec<Message>,
+    pub(super) struct ResumeKeep {
+        pub(super) messages: Vec<Message>,
         checkpoints: Vec<(usize, Checkpoint)>,
     }
     impl MessageSink for ResumeKeep {
@@ -1522,7 +1558,7 @@ mod tests {
             self.checkpoints.push((self.messages.len(), cp.clone()));
         }
     }
-    fn old_context_oracle(adapter: &Kimi, r: &SessionRef, opts: &ParseOptions) -> Session {
+    pub(super) fn old_context_oracle(adapter: &Kimi, r: &SessionRef, opts: &ParseOptions) -> Session {
         let (transcript, wire) = locate_transcript(&r.path, &r.id);
         let segments = transcript_segments(&r.path, &transcript);
         let (s, enrich) = session_header(adapter, r, opts, &segments, wire.as_deref());
