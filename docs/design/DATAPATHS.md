@@ -2165,10 +2165,14 @@ error; the failed test and all previously unrun workspace integration, search, w
 doc-test targets pass. Already successful test groups were not repeated. Logs are preserved under
 `/Users/ember/dev/cv-worktrees/excellence-evidence/convergence-*.log`.
 
-This is not a release or a claim that every pre-push gate has been rerun. The ignored performance
-matrix, package/dist checks, separate desktop workspace, wasm-pack and browser selftest are
-separate gates; the earlier scoped browser result remains 62/62. No new wall-time comparison or
-instruction-count CI threshold was introduced.
+The subsequent convergence pass closes the remaining pre-push gates: all existing heap selectors
+(764 reported allocation observations), SQLite checks, production 100 MB FTS/semantic and CLI JSON
+heap controls, package verification, keyword-only search build, dist plan, wasm-pack, the legacy
+release parse gate, standalone desktop check/five tests and 62 browser selftests pass. Desktop ran
+on macOS; Linux GTK coverage remains CI-specific. No release, new wall-time comparison or new
+instruction-count CI threshold was introduced. The exact scope, recovered test failure, allocation
+results and retained evidence locations are in
+[`CONVERGENCE-2026-10-13.json`](CONVERGENCE-2026-10-13.json).
 
 ### Limited listing operation boundary (2026-10-13 audit)
 
