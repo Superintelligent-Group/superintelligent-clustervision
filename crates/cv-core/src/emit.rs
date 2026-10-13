@@ -3553,7 +3553,7 @@ mod tests {
                 source.messages.push(signed);
                 let opts = EmitOptions {
                     thinking,
-                    new_id: Some(Uuid::new_v4().to_string()),
+                    // Let each native target choose its own valid session identifier.
                     ..Default::default()
                 };
                 let (result, actual) =
