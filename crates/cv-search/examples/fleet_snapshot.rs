@@ -11,6 +11,10 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let path = args.next().context("usage: fleet_snapshot INDEX [QUERY ...]")?;
     let index = Index::open_in_dir(path).context("opening fleet index")?;
+    anyhow::ensure!(
+        index.validate_checksum()?.is_empty(),
+        "index contains corrupt managed files"
+    );
     let schema = index.schema();
     let id = schema.get_field("id")?;
     let fields = ["title", "body", "cwd"]
@@ -49,7 +53,10 @@ fn main() -> Result<()> {
         serde_json::to_writer(&mut out, &serde_json::json!({"query": text, "ids": ids}))?;
         out.write_all(b"\n")?;
     }
-    serde_json::to_writer(&mut out, &serde_json::json!({"live_documents": count}))?;
+    serde_json::to_writer(
+        &mut out,
+        &serde_json::json!({"live_documents": count, "managed_file_checksums_valid": true}),
+    )?;
     out.write_all(b"\n")?;
     out.flush().context("flushing snapshot")
 }
