@@ -9,6 +9,10 @@ import shutil
 import subprocess
 
 
+def overlaps(a, b):
+    return a == b or a in b.parents or b in a.parents
+
+
 def fingerprint(path):
     """Hash file bytes, or sorted directory-relative paths plus bytes (never follow links)."""
     if path.is_file():
@@ -71,9 +75,11 @@ def main():
     catalog_home = args.catalog_home.resolve() if args.catalog_home else None
     if catalog_home and catalog_home.exists():
         parser.error('--catalog-home must initially be absent; this runner owns only new paths')
-    if catalog_home and any(p == catalog_home or catalog_home in p.parents
-                            for p in (fixture, seed, harness_home) if p):
-        parser.error('--catalog-home cannot contain fixture, seed or harness HOME')
+    protected = [p for p in (fixture, seed, harness_home) if p]
+    if catalog_home and any(overlaps(catalog_home, p) for p in protected):
+        parser.error('--catalog-home cannot overlap fixture, seed or harness HOME')
+    if any(overlaps(args.out.resolve(), p) for p in protected):
+        parser.error('output directory cannot overlap fixture, seed or harness HOME')
     if catalog_home and (catalog_home == args.out.resolve() or catalog_home in args.out.resolve().parents):
         parser.error('--catalog-home cannot contain the output directory')
     input_hash = fingerprint(fixture)
@@ -144,6 +150,8 @@ def main():
                'harness_home': str(harness_home) if harness_home else None,
                'rayon_threads': args.threads,
                'runtime_rustflags': os.environ.get('RUSTFLAGS', ''),
+               'catalog_max_stale_secs': env.get('CLUSTERVISION_MAX_STALE_SECS',
+                                                  env.get('CLAURDVOYANT_MAX_STALE_SECS', '900')),
                'valgrind': subprocess.check_output(['valgrind', '--version'], text=True).strip(),
                'architecture': os.uname().machine, 'Ir': counts, 'Ir_delta': counts[1] - counts[0],
                'stderr_output': {'sha256': hashlib.sha256(diagnostics[0]).hexdigest(), 'bytes': len(diagnostics[0])},
