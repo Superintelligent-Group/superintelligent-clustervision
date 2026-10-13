@@ -3,7 +3,6 @@
 //! reader string scratch can grow to the largest decoded string, so this is not a full bound.
 use crate::harness::store::DiscardValue;
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde::Deserialize;
 
 pub(super) struct Messages;
 impl<'de> DeserializeSeed<'de> for Messages {
