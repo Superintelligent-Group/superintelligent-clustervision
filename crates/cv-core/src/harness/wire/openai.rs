@@ -145,30 +145,32 @@ pub(crate) fn part_view(part: crate::json::JsonView<'_>, q: &Quirks) -> anyhow::
         let (media_type, data_ref) = match url {
             None => (None, None),
             Some(url) if q.data_url_as_marker => {
-                let mut prefix = String::new();
-                let mut decided = false;
-                let mut data = false;
-                let mut media_done = false;
-                let mut media = String::new();
-                url.for_each_str_chunk(|chunk| {
-                    for c in chunk.chars() {
-                        if !decided {
-                            prefix.push(c);
-                            if prefix.len() >= 5 {
-                                data = prefix == "data:";
-                                decided = true;
+                let text = url.source_text()?.unwrap();
+                let resolver = crate::lazy::Resolver::new(None);
+                let (prefix, _) = crate::harness::store::document::text_head(&text, &resolver, 5, false)?;
+                if prefix == "data:" {
+                    #[derive(Debug, thiserror::Error)]
+                    #[error("data URL media header complete")]
+                    struct HeaderComplete;
+                    let mut skip = 5;
+                    let mut media = String::new();
+                    match text.try_for_each_chunk(&resolver, 4096, |chunk| {
+                        for c in chunk.chars() {
+                            if skip > 0 {
+                                skip -= 1;
+                                continue;
                             }
-                        } else if data && !media_done {
                             if c == ';' {
-                                media_done = true;
-                            } else {
-                                media.push(c);
+                                return Err(HeaderComplete.into());
                             }
+                            media.push(c);
                         }
+                        Ok(())
+                    }) {
+                        Ok(()) => {}
+                        Err(error) if error.is::<HeaderComplete>() => {}
+                        Err(error) => return Err(error),
                     }
-                    Ok(())
-                })?;
-                if data {
                     (media.contains('/').then_some(media), Some("base64:inline".into()))
                 } else {
                     (None, Some(url.resolve()?.as_str().unwrap().to_owned()))
