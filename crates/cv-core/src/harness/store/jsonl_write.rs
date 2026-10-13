@@ -39,19 +39,25 @@ impl JsonlStage {
     pub(crate) fn publish(self, path: &Path) -> Result<()> {
         anyhow::ensure!(!self.failed, "cannot publish a failed JSONL stage");
         let stage = self.output.into_inner().map_err(|e| e.into_error())?;
-        let source = stage.finish()?;
-        let mut reader = BufReader::with_capacity(256 * 1024, source.reader()?);
-        // Like fs::write, preserve existing inode permissions, links and symlink following.
-        // Serialization errors occur before open; write errors retain fs::write's semantics.
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .with_context(|| format!("writing {}", path.display()))?;
-        std::io::copy(&mut reader, &mut file).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        publish_stage(stage, path)
     }
+}
+
+/// Publish fully produced bytes with fs::write-compatible permissions/link/I/O behavior.
+/// Checked serialization must complete before calling; I/O errors may leave partial output.
+pub(crate) fn publish_stage(stage: ByteStage, path: &Path) -> Result<()> {
+    let source = stage.finish()?;
+    let mut reader = BufReader::with_capacity(256 * 1024, source.reader()?);
+    // Like fs::write, preserve existing inode permissions, links and symlink following.
+    // Serialization errors occur before open; write errors retain fs::write's semantics.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    std::io::copy(&mut reader, &mut file).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]

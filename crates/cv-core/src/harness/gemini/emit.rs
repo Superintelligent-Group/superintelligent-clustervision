@@ -17,218 +17,12 @@ use uuid::Uuid;
 /// (`harness/gemini.rs`) requires the file to live under a `chats/` dir to be picked up by
 /// `discover`, but `parse_all_str` / `parse` will read it directly from any path.
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
-    let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
-    let cwd = effective_cwd(session, opts);
-    let cwd_str = cwd
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    // Gemini's `--resume` / `--list-sessions` only scan `<globalTemp>/<projectIdentifier>/chats/`,
-    // where `out_dir` is `<globalTemp>` (~/.gemini/tmp) and `<projectIdentifier>` is the cwd basename
-    // registered in `<globalTemp>/../projects.json`. Writing to a bare `chats/` (no identifier dir)
-    // makes the session invisible to the installed binary. So register the cwd→slug mapping (matching
-    // gemini's getShortId) and write into the slug's chats dir. (Verified live: with the file in the
-    // right slug dir, `gemini --resume <uuid>` recalls the conversation.)
-    let chats_dir = match gemini_register_project(out_dir, &cwd_str) {
-        Some(slug) => out_dir.join(slug).join("chats"),
-        None => out_dir.join("chats"), // no cwd → fall back to the legacy bare path
-    };
-    fs::create_dir_all(&chats_dir).with_context(|| format!("creating {}", chats_dir.display()))?;
-    let file_path = chats_dir.join(format!("session-{new_id}.json"));
-
-    let start = session
-        .created_at
-        .or(session.updated_at)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339_opts(SecondsFormat::Millis, true);
-    let last = session
-        .updated_at
-        .or(session.created_at)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339_opts(SecondsFormat::Millis, true);
-
-    // Index tool results by tool_use_id so they can be folded into the producing assistant's
-    // `toolCalls[].result` (the canonical legacy shape the reader pairs from).
-    let mut tool_results: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
-    for msg in &session.messages {
-        if msg.role == Role::Tool {
-            for b in &msg.content {
-                if let Block::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                    ..
-                } = b
-                {
-                    tool_results.insert(tool_use_id.clone(), (content.to_string(), *is_error));
-                }
-            }
-        }
-    }
-
-    let called = called_tool_ids(session);
-
-    let mut messages: Vec<Value> = Vec::new();
-    for msg in &session.messages {
-        let ts = msg.timestamp.map(|t| t.to_rfc3339_opts(SecondsFormat::Millis, true));
-        match msg.role {
-            Role::User | Role::System => {
-                let mty = if msg.role == Role::System { "info" } else { "user" };
-                let mut m = Map::new();
-                m.insert("id".into(), json!(Uuid::new_v4().to_string()));
-                m.insert("type".into(), json!(mty));
-                if let Some(t) = &ts {
-                    m.insert("timestamp".into(), json!(t));
-                }
-                m.insert("content".into(), gemini_parts(&msg.content));
-                messages.push(Value::Object(m));
-            }
-            Role::Assistant => {
-                let mut m = Map::new();
-                m.insert("id".into(), json!(Uuid::new_v4().to_string()));
-                m.insert("type".into(), json!("gemini"));
-                if let Some(t) = &ts {
-                    m.insert("timestamp".into(), json!(t));
-                }
-                if let Some(model) = msg.model.as_ref().or(session.model.as_ref()) {
-                    m.insert("model".into(), json!(model));
-                }
-                // Per-message usage → Gemini's `tokens{input, output, cached}` (the parser reads it
-                // back into `Usage`), so token counts survive a port into Gemini.
-                if let Some(u) = &msg.usage {
-                    let mut tokens = Map::new();
-                    // Gemini's `input` includes `cached`; the IR's excludes it.
-                    if let Some(x) = u.input_tokens {
-                        tokens.insert("input".into(), json!(x + u.cache_read_tokens.unwrap_or(0)));
-                    }
-                    if let Some(x) = u.output_tokens {
-                        tokens.insert("output".into(), json!(x));
-                    }
-                    if let Some(x) = u.cache_read_tokens {
-                        tokens.insert("cached".into(), json!(x));
-                    }
-                    if !tokens.is_empty() {
-                        m.insert("tokens".into(), Value::Object(tokens));
-                    }
-                }
-                // Thoughts (thinking) ride in `thoughts[]`, the rest in `content`.
-                let mut thoughts = Vec::new();
-                for b in &msg.content {
-                    if let Block::Thinking { text, .. } = b {
-                        thoughts.push(json!({ "subject": "", "description": text }));
-                    }
-                }
-                if !thoughts.is_empty() {
-                    m.insert("thoughts".into(), Value::Array(thoughts));
-                }
-                m.insert("content".into(), gemini_parts(&msg.content));
-                // Tool calls → toolCalls[] (legacy ToolCallRecord), folding in the paired result so
-                // the reader emits a proper Tool turn for it.
-                let mut calls = Vec::new();
-                for b in &msg.content {
-                    if let Block::ToolUse { id, name, input, .. } = b {
-                        let mut call = Map::new();
-                        call.insert("id".into(), json!(id));
-                        call.insert("name".into(), json!(name));
-                        call.insert("args".into(), input.resolve()?.into_owned());
-                        if let Some((content, is_error)) = tool_results.get(id) {
-                            call.insert("status".into(), json!(if *is_error { "error" } else { "success" }));
-                            call.insert(
-                                "result".into(),
-                                json!([{
-                                    "functionResponse": {
-                                        "id": id,
-                                        "name": name,
-                                        "response": { "output": content },
-                                    }
-                                }]),
-                            );
-                        }
-                        calls.push(Value::Object(call));
-                    }
-                }
-                if !calls.is_empty() {
-                    m.insert("toolCalls".into(), Value::Array(calls));
-                }
-                messages.push(Value::Object(m));
-            }
-            // Tool turns are folded into the assistant's toolCalls[].result above — except an
-            // ORPHAN result ([`called_tool_ids`]), which has no call here to fold onto. It gets a
-            // `gemini` record of its own holding the call shell (no `args`) and the response, so
-            // the output survives instead of vanishing.
-            Role::Tool => {
-                let calls: Vec<Value> = msg
-                    .content
-                    .iter()
-                    .filter_map(|b| match b {
-                        Block::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                            tool_name,
-                            ..
-                        } if !called.contains(tool_use_id.as_str()) => {
-                            let name = tool_name.clone().unwrap_or_else(|| "tool".into());
-                            Some(json!({
-                                "id": tool_use_id,
-                                "name": name,
-                                "status": if *is_error { "error" } else { "success" },
-                                "result": [{
-                                    "functionResponse": {
-                                        "id": tool_use_id,
-                                        "name": name,
-                                        "response": { "output": content.to_string() },
-                                    }
-                                }],
-                            }))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if !calls.is_empty() {
-                    let mut m = Map::new();
-                    m.insert("id".into(), json!(Uuid::new_v4().to_string()));
-                    m.insert("type".into(), json!("gemini"));
-                    if let Some(t) = &ts {
-                        m.insert("timestamp".into(), json!(t));
-                    }
-                    m.insert("toolCalls".into(), Value::Array(calls));
-                    messages.push(Value::Object(m));
-                }
-            }
-        }
-    }
-
-    let mut record = Map::new();
-    record.insert("sessionId".into(), json!(new_id));
-    // gemini keys recordings by an opaque projectHash; synthesize a stable one from the cwd.
-    // (The resume path doesn't validate this value; discovery is by the slug dir computed above.)
-    record.insert("projectHash".into(), json!(short_hash(&cwd_str)));
-    record.insert("startTime".into(), json!(start));
-    record.insert("lastUpdated".into(), json!(last));
-    if let Some(t) = &session.title {
-        record.insert("summary".into(), json!(t));
-    }
-    if let Some(c) = &cwd {
-        record.insert("directories".into(), json!([c.to_string_lossy()]));
-    }
-    record.insert("messages".into(), Value::Array(messages));
-
-    fs::write(&file_path, serde_json::to_string_pretty(&Value::Object(record))?)
-        .with_context(|| format!("writing {}", file_path.display()))?;
-
-    Ok(EmitResult {
-        path: file_path,
-        new_id: new_id.clone(),
-        resume_hint: Some(match &cwd {
-            Some(c) => format!("gemini --resume {new_id}  (run from {})", c.display()),
-            None => format!("gemini --resume {new_id}"),
-        }),
-    })
+    stream::emit(session, out_dir, opts)
 }
+
+#[cfg(test)]
+mod legacy;
+mod stream;
 
 /// Bind `cwd` to a slug dir under gemini's `<globalTemp>` (=`out_dir`), replicating
 /// `ProjectRegistry.getShortId`/`claimNewSlug`. Gemini owns a slug dir via a `.project_root` marker
@@ -300,34 +94,223 @@ fn gemini_register_project(global_tmp: &Path, cwd: &str) -> Option<String> {
     Some(slug)
 }
 
-/// Map IR blocks → a Gemini `Part[]` (`text` / thought `text` / `inlineData`). Tool calls are
-/// emitted separately via `toolCalls[]`, so they're skipped here.
-fn gemini_parts(content: &[Block]) -> Value {
-    let mut out = Vec::new();
-    for b in content {
-        match b {
-            Block::Text { text } => out.push(json!({ "text": text })),
-            Block::Thinking { text, .. } => out.push(json!({ "text": text, "thought": true })),
-            Block::Image { media_type, .. } => {
-                let mut inline = Map::new();
-                if let Some(mt) = media_type {
-                    inline.insert("mimeType".into(), json!(mt));
-                }
-                out.push(json!({ "inlineData": Value::Object(inline) }));
-            }
-            Block::File { mime, path, source } => {
-                let mut fd = Map::new();
-                if let Some(mt) = mime {
-                    fd.insert("mimeType".into(), json!(mt));
-                }
-                if let Some(uri) = source.as_deref().or(path.as_deref()) {
-                    fd.insert("fileUri".into(), json!(uri));
-                }
-                out.push(json!({ "fileData": Value::Object(fd) }));
-            }
-            // Tool use/result handled out of band.
-            Block::ToolUse { .. } | Block::ToolResult { .. } => {}
+#[cfg(test)]
+mod checked_tests {
+    use super::*;
+    use crate::{
+        ir::{Message, Usage},
+        Harness, Json, SessionRef,
+    };
+
+    fn normalized(path: &Path) -> Result<Vec<u8>> {
+        let mut value: Value = serde_json::from_slice(&fs::read(path)?)?;
+        for (i, message) in value["messages"].as_array_mut().unwrap().iter_mut().enumerate() {
+            assert!(Uuid::parse_str(message["id"].as_str().unwrap()).is_ok());
+            message["id"] = json!(format!("generated-{i}"));
+        }
+        Ok(serde_json::to_vec_pretty(&value)?)
+    }
+    fn result(id: &str, body: &str, error: bool) -> Block {
+        Block::ToolResult {
+            tool_use_id: id.into(),
+            content: body.into(),
+            is_error: error,
+            tool_name: None,
+            status: None,
+            details: None,
         }
     }
-    Value::Array(out)
+    #[test]
+    fn checked_gemini_matches_legacy_pretty_all_modes_and_fields() -> Result<()> {
+        let world = cv_testkit::World::in_process("gemini-wire-oracle");
+        let mut session = Session::new("source", Harness::Claude);
+        let ts = "2026-10-12T12:00:00Z".parse()?;
+        session.created_at = Some(ts);
+        session.updated_at = Some(ts);
+        session.cwd = Some("/synthetic/checked-gemini".into());
+        session.title = Some("title λ".into());
+        session.model = Some("session-model".into());
+        let mut user = Message::new(Role::User);
+        user.timestamp = Some(ts);
+        user.content = vec![
+            Block::Text {
+                text: "prompt\n雪".into(),
+            },
+            Block::Image {
+                media_type: Some("image/png".into()),
+                data_ref: None,
+            },
+            Block::Image {
+                media_type: None,
+                data_ref: None,
+            },
+            Block::File {
+                mime: Some("text/plain".into()),
+                path: Some("fallback".into()),
+                source: Some("file://λ".into()),
+            },
+        ];
+        let mut assistant = Message::new(Role::Assistant);
+        assistant.timestamp = Some(ts);
+        assistant.model = Some("per-message-model".into());
+        assistant.usage = Some(Usage {
+            input_tokens: Some(7),
+            output_tokens: Some(3),
+            cache_read_tokens: Some(2),
+            ..Default::default()
+        });
+        assistant.content = vec![
+            Block::Thinking {
+                text: "  reasoning\nλ".into(),
+                signature: Some("sig".into()),
+                encrypted: None,
+                redacted: false,
+            },
+            Block::Thinking {
+                text: " ".into(),
+                signature: Some("only".into()),
+                encrypted: None,
+                redacted: false,
+            },
+            Block::Thinking {
+                text: "".into(),
+                signature: None,
+                encrypted: Some("opaque".into()),
+                redacted: false,
+            },
+            Block::Thinking {
+                text: "".into(),
+                signature: None,
+                encrypted: None,
+                redacted: true,
+            },
+            Block::Text {
+                text: "answer\"\\\t".into(),
+            },
+            Block::ToolUse {
+                id: "paired".into(),
+                name: "tool".into(),
+                namespace: None,
+                input: json!({"β":[1,true,null],"a":{"z":"\""}}).into(),
+            },
+        ];
+        let mut tools = Message::new(Role::Tool);
+        tools.timestamp = Some(ts);
+        tools.content = vec![
+            result("paired", "earlier", false),
+            result("paired", "late error\nλ", true),
+            result("orphan", "orphan output", false),
+        ];
+        let mut thinking_only = Message::new(Role::Assistant);
+        thinking_only.content = vec![Block::Thinking {
+            text: "".into(),
+            signature: None,
+            encrypted: None,
+            redacted: false,
+        }];
+        session.messages = vec![user, assistant, tools, Message::new(Role::System), thinking_only];
+        session
+            .harness_extra_mut(Harness::Claude)
+            .insert("native".into(), json!({"metadata":"retained source"}));
+        for mode in ThinkingMode::ALL {
+            let opts = EmitOptions {
+                new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                thinking: mode,
+                ..Default::default()
+            };
+            let mut projected = session.clone();
+            crate::emit::project_owned_thinking_for_test(&mut projected, Harness::Gemini, mode);
+            let before = legacy::emit(&projected, &world.base.join(format!("legacy-{mode}")), &opts)?;
+            let after = crate::emit::emit(
+                &session,
+                Harness::Gemini,
+                &world.base.join(format!("checked-{mode}")),
+                &opts,
+            )?;
+            assert_eq!(normalized(&before.path)?, normalized(&after.path)?, "{mode}");
+            // Original serialized order/whitespace is already serde's pretty normalization.
+            let raw = fs::read(&after.path)?;
+            let parsed: Value = serde_json::from_slice(&raw)?;
+            assert_eq!(raw, serde_json::to_vec_pretty(&parsed)?);
+            assert!(!raw.ends_with(b"\n"));
+            assert_eq!(
+                session.harness_extra(Harness::Claude).unwrap()["native"]["metadata"],
+                "retained source"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn checked_gemini_guarded_text_json_fail_before_transcript_publication() -> Result<()> {
+        let world = cv_testkit::World::in_process("gemini-guarded-publication");
+        for text_leaf in [true, false] {
+            let source = world.base.join(format!("leaf-{text_leaf}.json"));
+            let wire = if text_leaf {
+                json!("guarded λ\n".repeat(10000))
+            } else {
+                json!({"argument":"guarded λ\n".repeat(10000)})
+            };
+            let raw = serde_json::to_vec(&wire)?;
+            fs::write(&source, &raw)?;
+            let json = Json::source(&source, 0, raw.len() as u64)?;
+            let mut message = Message::new(Role::Assistant);
+            message.content.push(if text_leaf {
+                Block::Text {
+                    text: json.with_view(|v| v.source_text())?.unwrap(),
+                }
+            } else {
+                Block::ToolUse {
+                    id: "id".into(),
+                    name: "name".into(),
+                    namespace: None,
+                    input: json,
+                }
+            });
+            let mut session = Session::new("source", Harness::Claude);
+            session.messages.push(message);
+            let out = world.base.join(format!("target-{text_leaf}"));
+            fs::create_dir_all(out.join("chats"))?;
+            let path = out.join("chats/session-fixed.json");
+            fs::write(&path, "original transcript")?;
+            fs::write(&source, "changed source")?;
+            assert!(emit(
+                &session,
+                &out,
+                &EmitOptions {
+                    new_id: Some("fixed".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+            assert_eq!(fs::read_to_string(&path)?, "original transcript");
+            assert!(!out.parent().unwrap().join("projects.json").exists());
+        }
+        Ok(())
+    }
+    #[test]
+    fn checked_gemini_cross_harness_preparation_preserves_full_metadata_and_owned_defaults() -> Result<()> {
+        let world = cv_testkit::World::in_process("gemini-preparation");
+        let source = world.base.join("source.jsonl");
+        let wire = json!({"type":"assistant","uuid":"a","sessionId":"source","timestamp":"2026-10-12T12:00:00Z","cwd":"/synthetic/gemini",
+            "message":{"role":"assistant","model":"source-model","content":[{"type":"text","text":"metadata body λ".repeat(2000)}],"usage":{"input_tokens":7,"output_tokens":3}},
+            "gitBranch":"branch","custom":"unknown native metadata"});
+        fs::write(&source, format!("{wire}\n"))?;
+        let adapter = crate::harness::claude::Claude::detect();
+        let reference = SessionRef::new("source", Harness::Claude, &source);
+        let mut prepared = crate::emit::parse_for_emit(&adapter, &reference, Harness::Gemini)?;
+        assert!(prepared.messages[0]
+            .content
+            .iter()
+            .any(|block| matches!(block,Block::Text {text} if text.is_span())));
+        prepared.materialize()?;
+        let full = crate::stream::collect_with(&adapter, &reference, &crate::ParseOptions::full())?;
+        assert_eq!(serde_json::to_value(&prepared)?, serde_json::to_value(&full)?);
+        let complete = crate::stream::collect_with(&adapter, &reference, &crate::ParseOptions::complete())?;
+        assert!(complete.messages[0]
+            .content
+            .iter()
+            .all(|block| !matches!(block,Block::Text {text} if text.is_span())));
+        // Same-harness Gemini uses the existing complete/owned compatibility path.
+        Ok(())
+    }
 }

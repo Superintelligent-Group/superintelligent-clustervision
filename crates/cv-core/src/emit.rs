@@ -146,6 +146,11 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
     })
 }
 
+/// Targets whose native writer consumes guarded lazy leaves without owning their payloads.
+pub(crate) fn checked_target(target: Harness) -> bool {
+    matches!(target, Harness::Claude | Harness::Codex | Harness::Gemini)
+}
+
 /// Emit `session` into `target`'s native format under `out_dir` (the target harness's storage root,
 /// or any directory for a dry run). Returns where it was written + how to resume it.
 pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
@@ -168,7 +173,7 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     // remains the shared fallback for emitters without a checked block writer. It runs AFTER
     // materialization (it reads `Thinking.text`).
     let mut owned: Option<Session> = None;
-    if matches!(target, Harness::Claude | Harness::Codex) {
+    if checked_target(target) {
         return f(session, out_dir, opts);
     }
     if has_unresolved_spans(session) {
@@ -182,6 +187,11 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
         owned = Some(s);
     }
     f(owned.as_ref().unwrap_or(session), out_dir, opts)
+}
+
+#[cfg(test)]
+pub(crate) fn project_owned_thinking_for_test(session: &mut Session, target: Harness, mode: ThinkingMode) {
+    apply_thinking_mode(session, target, mode);
 }
 
 /// Rewrite every [`Block::Thinking`] in `session` as [`EmitOptions::thinking`] asks, for `target`.
@@ -489,7 +499,7 @@ pub fn prepare_selected(
 }
 
 /// Parse at native emission fidelity. Same-harness ports retain complete records; cross-harness
-/// Codex and Claude ports retain full metadata with guarded lazy payloads consumed directly by
+/// Codex, Claude and cross-harness Gemini ports retain full metadata with guarded lazy payloads consumed directly by
 /// their staged writers. Same-harness complete records retain their existing parser contract.
 pub fn parse_for_emit(
     adapter: &dyn crate::harness::Adapter,
@@ -501,15 +511,15 @@ pub fn parse_for_emit(
     } else {
         ParseOptions::full()
     };
-    if matches!(target, Harness::Codex | Harness::Claude) && reference.harness != target {
+    if checked_target(target) && reference.harness != target {
         options.spans = true;
     }
-    let mut session = if matches!(target, Harness::Codex | Harness::Claude) && reference.harness != target {
+    let mut session = if checked_target(target) && reference.harness != target {
         prepare::parse(adapter, reference, &options)?
     } else {
         crate::stream::collect_with(adapter, reference, &options)?
     };
-    if !matches!(target, Harness::Codex | Harness::Claude) || reference.harness == target {
+    if !checked_target(target) || reference.harness == target {
         session.materialize()?;
     }
     Ok(session)

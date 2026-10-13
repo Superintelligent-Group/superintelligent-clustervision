@@ -40,7 +40,7 @@ def file_digest(path):
     return h.hexdigest()
 
 
-def prune_fixture(path, case, timestamp=None, cwd=None):
+def prune_fixture(path, case, timestamp=None, cwd=None, payload_bytes=None):
     def row(role, uuid, content, **extra):
         if timestamp is not None:
             extra["timestamp"] = timestamp
@@ -63,10 +63,11 @@ def prune_fixture(path, case, timestamp=None, cwd=None):
                 cache_read_input_tokens=0, cache_creation_input_tokens=0)
         rows.insert(2, row("user", "result", [dict(type="tool_result", tool_use_id="linked",
             content="small result\n" * 512)]))
-    write_rows(path, rows, "" if case == "thinking" else "ALPHA beta ")
+    write_rows(path, rows, "" if case == "thinking" else "ALPHA beta ", payload_bytes=payload_bytes)
 
 
-def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n"):
+def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n", payload_bytes=None):
+    payload_bytes = PAYLOAD if payload_bytes is None else payload_bytes
     with path.open("wb") as output:
         for row in rows:
             output.write(row_prefix)
@@ -75,7 +76,7 @@ def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n"):
                 before, after = wire.split(b'MARKER')
                 output.write(before)
                 output.write(payload_prefix.encode())
-                for _ in range(PAYLOAD // (64 << 10)):
+                for _ in range(payload_bytes // (64 << 10)):
                     output.write(b"x" * (64 << 10))
                 output.write(after)
             else:
@@ -313,6 +314,46 @@ CODEX_THINKING_EXPECTED = {'text': ['cc7670ce4e3e93f0ae3099f76bb771d2ff100c39348
                       {'field': 'message ids', 'before': '4', 'after': '0', 'expected': True},
                       {'field': 'message ids (tool turns)', 'before': '1', 'after': '0', 'expected': True}]}]}
 
+
+def gemini_output_digest(path):
+    """Fixed pretty fixture: normalize only validated messages[].id lines, not payload/tool IDs."""
+    pattern = re.compile(rb'(      "id": ")([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(",\n)')
+    digest = hashlib.sha256()
+    ids = 0
+    with path.open("rb") as source:
+        for line in iter(lambda: source.readline(64 << 10), b""):
+            match = pattern.fullmatch(line)
+            if match:
+                line = match[1] + b"00000000-0000-4000-8000-000000000000" + match[3]
+                ids += 1
+            digest.update(line)
+    return digest.hexdigest(), ids
+
+
+def gemini_port_gate(binary, root, env):
+    directory = root / "gemini-port"
+    directory.mkdir()
+    source = directory / "source.jsonl"
+    prune_fixture(source, "ascii-declass", timestamp="2026-10-12T12:00:00Z", cwd="/synthetic/export", payload_bytes=32 * MIB)
+    original = file_digest(source)
+    assert source.stat().st_size == 33555239
+    assert original == "a2859c7a05a72e86e52f0cd359c9222ec3c4bb949ef36eb36c3531d71be602fb"
+    child = subprocess.run([str(binary), "claude", str(source), str(directory / "output"), "native", "gemini"],
+                           env=env, text=True, capture_output=True)
+    assert child.returncode == 0, f"verified Gemini export failed: {child.stderr[-2000:]}"
+    report = json.loads(child.stdout)
+    peak = checked_peak(json.loads(child.stderr))
+    assert report["messages"] == 4 and report["fidelity"] == dict(deltas=[])
+    output = Path(report["path"])
+    assert output.stat().st_size == 33555582
+    digest, ids = gemini_output_digest(output)
+    assert ids == 4 and digest == "567c3d0e0fc2568b6d56e2a1e1fcf9319787e8df9515c2365c525899da17c2a0"
+    assert file_digest(source) == original, "Gemini export modified its source"
+    print(json.dumps(dict(case="verified-gemini-export", peak_live_rust_bytes=peak,
+                          messages=4, output_bytes=output.stat().st_size, normalized_sha256=digest)), flush=True)
+    shutil.rmtree(directory)
+
+
 def window_binary(report_path):
     artifacts = [json.loads(line) for line in report_path.read_text().splitlines()]
     candidates = [item["executable"] for item in artifacts
@@ -382,6 +423,7 @@ def main():
         window_gate(window_binary(args.window_build_report), root, env)
         claude_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
         codex_thinking_gate(args.claude_port_probe.resolve(strict=True), root, env)
+        gemini_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
 
 
 if __name__ == "__main__":
