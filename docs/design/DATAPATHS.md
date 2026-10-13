@@ -483,7 +483,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Dataset filter/output staging preserves late selection and byte fidelity with bounded history retention.
 - [x] Matched-query dataset spool CPU: bounded slice decoding preserves exact output and flat heap.
 - [x] Ordered usage-row reuse: clean large/tiny CPU controls, exact totals and bounded warm heap.
-- [ ] Final Hermes cached-spill CPU and full semantic end-to-end evidence.
+- [ ] Final Hermes cached-spill CPU.
+- [x] Actual-model semantic refresh, unchanged reuse, source/model invalidation and clean-build ranking oracle.
 - [x] Matched release controls for streamed native escaped output; adaptive validation and canonical short-escape bypass preserve exact output.
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
@@ -774,3 +775,16 @@ parse (1.2% difference), cold 1.131421. Both compare exact JSON totals. Separate
 32,000/64,000-row runs retain exactly 843,101 bytes of peak Rust heap above baseline. Eleven
 native and seven portable scoped tests cover ordering, dependency changes, corruption and budgets.
 These are synthetic controlled workloads; real-fleet token-stat latency remains unmeasured.
+
+
+The actual semantic model was exercised offline against ten frozen sessions (65,211,860 source
+bytes) with a 30,920,629-byte model copied into isolated scratch storage. Release refresh took
+277 ms initially; 100 unchanged calls had median 0.779 ms / p95 0.969 ms and performed zero
+adapter reads, model loads or index saves. One changed source metadata tuple cost 21.9 ms; one
+changed demanded body 24.1 ms; query 14.8 ms. Only the changed body's vector changes. Model and
+projection identity changes rebuild all ten entries. Incremental and clean builds agree exactly
+on vectors, score bits, ranked identities, snippets and metadata. The oracle exposed tie ordering
+that depended on vector row position; ties now use session ID then harness so refreshing one
+source cannot reorder equal scores or change the cutoff. Twelve focused semantic tests pass.
+This is a warm-OS-cache local fixture, not a fleet latency or scaling claim. Production unchanged
+model freshness checks use metadata identities, not repeated model-weight hashing.
