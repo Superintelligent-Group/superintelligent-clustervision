@@ -1530,6 +1530,15 @@ fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink
         // change which rows the second pass emits. A deferred read transaction writes no store data.
         let snapshot = conn.unchecked_transaction()?;
         let facts = sqlite_key_facts(&snapshot, &r.id)?;
+        // Incremental cell access requires a rowid. Historical WITHOUT ROWID stores keep
+        // the explicit owned compatibility path rather than guessing a different SQL contract.
+        if opts.spans
+            && snapshot
+                .prepare("SELECT _rowid_ FROM transcript_events LIMIT 0")
+                .is_ok()
+        {
+            return selected::sqlite(&snapshot, conn.reads(), r, &facts, opts, sink);
+        }
         let mut reader = EventReader::new(&snapshot)?;
         let mut navigation = reader.rows(&r.id, navigation_line)?;
         let mut has_leaf = false;
@@ -2128,6 +2137,142 @@ mod tests {
         let mut point = EventReader::point(&conn).unwrap();
         point.at(&r.id, 0).unwrap();
         assert_eq!(point.stmt.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        fs::remove_dir_all(agents.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn selected_sqlite_cells_match_owned_branches_complete_and_retained_wal_guards() {
+        for branch in [false, true] {
+            let agents = tmp_agents();
+            let mut events: Vec<String> = fixture_text(if branch { "branchy-v4.jsonl" } else { "v3-full.jsonl" })
+                .lines()
+                .map(str::to_string)
+                .collect();
+            for event in &mut events {
+                let mut value: Value = serde_json::from_str(event).unwrap();
+                if matches!(value["id"].as_str(), Some("u1" | "a2" | "m1" | "m4")) {
+                    value["message"]["content"] =
+                        serde_json::json!([{"type":"text","text":"selected λ\n".repeat(131072)}]);
+                    *event = serde_json::to_string(&value).unwrap();
+                }
+            }
+            events.extend([
+                "malformed".into(), "{\"ignored\":1e999}".into(), "{\"ignored\":\"\\ud800\"}".into(),
+                "\u{2003}{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"Unicode wrapper\"}}\u{2003}".into(),
+                "{\"type\":\"future\",\"payload\":{\"unknown\":[true,42]}}".into(),
+            ]);
+            let db = write_store(&agents, "checked", &events);
+            let writer = rusqlite::Connection::open(&db).unwrap();
+            writer.execute_batch("ALTER TABLE transcript_events RENAME TO old_events;
+                CREATE TABLE transcript_events (session_id TEXT NOT NULL,seq INTEGER NOT NULL,event_json TEXT,event_zstd BLOB,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,seq)) STRICT;
+                INSERT INTO transcript_events (session_id,seq,event_json,created_at) SELECT session_id,seq,event_json,created_at FROM old_events;
+                DROP TABLE old_events; PRAGMA journal_mode=WAL;").unwrap();
+            // One giant inactive branch is compressed, while the giant user cell stays TEXT.
+            for (seq, event) in events.iter().enumerate() {
+                if serde_json::from_str::<Value>(event)
+                    .ok()
+                    .is_some_and(|v| matches!(v["id"].as_str(), Some("a2" | "m4")))
+                {
+                    let compressed = ruzstd::encoding::compress_to_vec(
+                        event.as_bytes(),
+                        ruzstd::encoding::CompressionLevel::Fastest,
+                    );
+                    writer.execute("UPDATE transcript_events SET event_json=NULL,event_zstd=?1 WHERE session_id='checked' AND seq=?2", rusqlite::params![compressed, seq as i64]).unwrap();
+                }
+            }
+            writer.execute("INSERT INTO transcript_events (session_id,seq,event_json,event_zstd,created_at) VALUES ('checked',999,NULL,?1,1)", [b"invalid compressed frame".as_slice()]).unwrap();
+            let r = discover_sqlite(&db).unwrap().remove(0);
+            for complete in [false, true] {
+                let options = ParseOptions {
+                    complete,
+                    ..ParseOptions::full()
+                };
+                let mut owned_sink = crate::stream::CollectSink::default();
+                let mut owned = stream_sqlite(&r, &options, &mut owned_sink).unwrap();
+                owned.messages = owned_sink.messages;
+                let mut checked_sink = crate::stream::CollectSink::default();
+                let mut checked =
+                    stream_sqlite(&r, &ParseOptions { spans: true, ..options }, &mut checked_sink).unwrap();
+                checked.messages = checked_sink.messages;
+                if branch {
+                    assert!(checked.messages.iter().any(|m| m.content.iter().any(|b| matches!(
+                        b,
+                        Block::Text {
+                            text: crate::Text::Source(_)
+                        }
+                    ))));
+                }
+                let mut materialized = checked.clone();
+                materialized.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(owned).unwrap(),
+                    serde_json::to_value(materialized).unwrap(),
+                    "branch={branch}/complete={complete}"
+                );
+            }
+            let mut sink = crate::stream::CollectSink::default();
+            let mut retained = stream_sqlite(
+                &r,
+                &ParseOptions {
+                    spans: true,
+                    ..ParseOptions::complete()
+                },
+                &mut sink,
+            )
+            .unwrap();
+            retained.messages = sink.messages;
+            writer
+                .execute(
+                    "UPDATE transcript_events SET event_json='{}' WHERE session_id='checked' AND seq=1",
+                    [],
+                )
+                .unwrap();
+            assert!(
+                retained.materialize().is_err(),
+                "retained DB/WAL guard must survive connection release"
+            );
+            drop(writer);
+            fs::remove_dir_all(agents.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn selected_sqlite_without_rowid_keeps_owned_compatibility() {
+        let agents = tmp_agents();
+        let db = write_store(&agents, "compat", &branchy_events());
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer.execute_batch("ALTER TABLE transcript_events RENAME TO old_events;
+            CREATE TABLE transcript_events (session_id TEXT NOT NULL,seq INTEGER NOT NULL,event_json TEXT,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,seq)) WITHOUT ROWID;
+            INSERT INTO transcript_events SELECT session_id,seq,event_json,created_at FROM old_events;
+            DROP TABLE old_events;").unwrap();
+        drop(writer);
+        let r = discover_sqlite(&db).unwrap().remove(0);
+        let mut owned_sink = crate::stream::CollectSink::default();
+        let mut owned = stream_sqlite(&r, &ParseOptions::complete(), &mut owned_sink).unwrap();
+        owned.messages = owned_sink.messages;
+        let mut sink = crate::stream::CollectSink::default();
+        let mut actual = stream_sqlite(
+            &r,
+            &ParseOptions {
+                spans: true,
+                ..ParseOptions::complete()
+            },
+            &mut sink,
+        )
+        .unwrap();
+        actual.messages = sink.messages;
+        assert!(!actual.messages.iter().any(|m| m.content.iter().any(|b| matches!(
+            b,
+            Block::Text {
+                text: crate::Text::Source(_)
+            }
+        ))));
+        assert_eq!(
+            serde_json::to_value(owned).unwrap(),
+            serde_json::to_value(actual).unwrap()
+        );
         fs::remove_dir_all(agents.parent().unwrap()).unwrap();
     }
 

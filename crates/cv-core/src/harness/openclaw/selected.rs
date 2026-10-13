@@ -155,6 +155,185 @@ pub(super) fn tree(
     result
 }
 
+/// SQLite cells use one immutable operation arena and the same navigation/replay contract.
+/// Source descriptors retain the ReadConnection's original DB/WAL dependency authority.
+#[cfg(feature = "sqlite")]
+pub(super) fn sqlite(
+    conn: &rusqlite::Connection,
+    reads: &crate::source::ReadSet,
+    r: &SessionRef,
+    facts: &KeyFacts,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    use super::super::store::{bytes::ByteSource, sqlite as sql};
+    use std::sync::Arc;
+    let source = JsonSource::capture_with_reads(&r.path, reads)?;
+    let arena = Arc::new(ByteSource::arena()?);
+    let compressed = sql::columns(conn, "transcript_events").contains("event_zstd");
+    // typeof reads cell headers without asking SQLite to materialize the encoded payload.
+    let mut statement = conn.prepare(&format!(
+        "SELECT _rowid_, seq, typeof(event_json), {} FROM transcript_events WHERE session_id = ?1 ORDER BY seq ASC",
+        if compressed { "typeof(event_zstd)" } else { "'null'" },
+    ))?;
+    let result = (|| {
+        let mut rows = statement.query([&r.id])?;
+        let mut descriptors = Vec::new();
+        let mut records = Vec::new();
+        let mut flat_records = Vec::new();
+        let mut skipped = 0;
+        while let Some(row) = rows.next()? {
+            let rowid: i64 = row.get(0)?;
+            let _: i64 = row.get(1)?;
+            let text_kind: String = row.get(2)?;
+            let compressed_kind: String = row.get(3)?;
+            // The preceding decoder checks both cells' SQL types before choosing TEXT.
+            anyhow::ensure!(
+                matches!(text_kind.as_str(), "text" | "null"),
+                "OpenClaw event_json cell is not TEXT or NULL"
+            );
+            anyhow::ensure!(
+                matches!(compressed_kind.as_str(), "blob" | "null"),
+                "OpenClaw event_zstd cell is not BLOB or NULL"
+            );
+            let range = if text_kind == "text" {
+                let range = sql::append_cell(conn, "transcript_events", "event_json", rowid, &arena)?;
+                // as_str_or_null made invalid UTF-8 in a SQL TEXT cell fatal, unlike a
+                // compressed payload's tolerant UTF-8 rejection. Preserve that distinction.
+                let file = arena.file()?;
+                anyhow::ensure!(
+                    ranges::valid_utf8(&mut ranges::reader(
+                        &file,
+                        ranges::Range {
+                            offset: range.0,
+                            len: range.1
+                        }
+                    )?)?,
+                    "OpenClaw event_json TEXT cell contains invalid UTF-8"
+                );
+                Some(range)
+            } else if compressed_kind == "blob" {
+                let encoded = sql::append_cell(conn, "transcript_events", "event_zstd", rowid, &arena)?;
+                decoded_cell(&arena, encoded)?
+            } else {
+                None
+            };
+            let Some((offset, len)) = range else {
+                skipped += 1;
+                continue;
+            };
+            match source.read_backing_value(Arc::clone(&arena), offset, len, navigation_descriptor) {
+                Ok(descriptor) => {
+                    descriptors.push(descriptor);
+                    records.push((offset, len));
+                    flat_records.push((offset, len));
+                }
+                Err(error) if error.is::<InvalidJson>() => {
+                    skipped += 1;
+                    // The legacy navigation pass is strict; flat payload parsing additionally
+                    // trims Unicode whitespace. Such rows count as skipped navigation yet
+                    // still emit on a flat history, and are absent from a selected tree.
+                    let file = arena.file()?;
+                    let trimmed = ranges::trim(&file, ranges::Range { offset, len })?;
+                    if (trimmed.offset, trimmed.len) != (offset, len) {
+                        match source.read_backing_value(Arc::clone(&arena), trimmed.offset, trimmed.len, |_| Ok(())) {
+                            Ok(()) => flat_records.push((trimmed.offset, trimmed.len)),
+                            Err(error) if error.is::<InvalidJson>() => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let navigation = if descriptors.iter().any(is_leaf_control) {
+            select_navigation(&descriptors, opts.complete)
+        } else {
+            records = flat_records;
+            (0..records.len())
+                .map(|index| NavigationRow {
+                    index,
+                    active: true,
+                    parent: None,
+                })
+                .collect()
+        };
+        drop(descriptors);
+        let rows = navigation.into_iter().map(|navigation| {
+            let (offset, len) = records[navigation.index];
+            source.read_backing_value(Arc::clone(&arena), offset, len, |view| {
+                Ok(project(view, &source)?.map(|mut row| {
+                    row.active = navigation.active;
+                    row.parent = navigation.parent;
+                    row
+                }))
+            })
+        });
+        let mut session = consume(rows, r, facts, opts, sink)?;
+        super::super::note_skipped_lines(&mut session, skipped);
+        Ok(session)
+    })();
+    source.check()?;
+    result
+}
+
+/// Stream compressed cells into the arena, keeping codec rejection distinct from backing I/O.
+#[cfg(feature = "sqlite")]
+fn decoded_cell(arena: &crate::harness::store::bytes::ByteSource, encoded: (u64, u64)) -> Result<Option<(u64, u64)>> {
+    use std::{cell::RefCell, io::Read};
+    struct CheckedRead<'a, R> {
+        inner: R,
+        failure: &'a RefCell<Option<std::io::Error>>,
+    }
+    impl<R: Read> Read for CheckedRead<'_, R> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(bytes).inspect_err(|error| {
+                *self.failure.borrow_mut() = Some(std::io::Error::new(error.kind(), error.to_string()));
+            })
+        }
+    }
+    let file = arena.file()?;
+    let input = ranges::reader(
+        &file,
+        ranges::Range {
+            offset: encoded.0,
+            len: encoded.1,
+        },
+    )?;
+    let failure = RefCell::new(None);
+    let mut decoder = match ruzstd::decoding::StreamingDecoder::new(CheckedRead {
+        inner: input,
+        failure: &failure,
+    }) {
+        Ok(decoder) => decoder,
+        Err(_) => {
+            if let Some(error) = failure.borrow_mut().take() {
+                return Err(error.into());
+            }
+            return Ok(None);
+        }
+    };
+    let mut invalid = false;
+    let decoded = arena.append(|writer| {
+        let mut chunk = [0; 64 * 1024];
+        loop {
+            match decoder.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => writer.write_all(&chunk[..n])?,
+                Err(_) => {
+                    if let Some(error) = failure.borrow_mut().take() {
+                        return Err(error.into());
+                    }
+                    invalid = true;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok((!invalid).then_some(decoded))
+}
+
 fn navigation_descriptor(view: JsonView<'_>) -> Result<Value> {
     const KEYS: &[&str] = &[
         "type",
