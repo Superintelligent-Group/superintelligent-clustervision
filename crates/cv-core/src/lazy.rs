@@ -1110,7 +1110,7 @@ pub(crate) fn validate_json_body_syntax(reader: &mut impl std::io::BufRead) -> R
 /// Transactional streaming preflight needs acceptance, not decoded text. Strings without
 /// Unicode escapes have identical RawValue/Value acceptance and need no decode scratch.
 /// Unicode windows retain serde's strict string decoder, including surrogate pairing.
-fn validate_value_json_body(reader: &mut impl std::io::BufRead) -> Result<bool, ()> {
+pub(crate) fn validate_value_json_body(reader: &mut impl std::io::BufRead) -> Result<bool, ()> {
     json_body_windows(reader, &mut |quoted| {
         if memchr::memmem::find(quoted, b"\\u").is_some() {
             let mut decoder = serde_json::Deserializer::from_slice(quoted);

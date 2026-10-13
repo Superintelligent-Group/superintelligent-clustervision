@@ -29,6 +29,8 @@ pub(crate) struct RangeSource {
     memory: Option<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
     captured: crate::json::JsonSource,
     decoded_len: Option<u64>,
+    // Reuse the native bounded long-string endpoint index only within this source operation.
+    index: super::Index,
 }
 impl RangeSource {
     #[cfg(test)]
@@ -42,6 +44,7 @@ impl RangeSource {
             memory: None,
             captured,
             decoded_len: None,
+            index: super::Index::default(),
         };
         source.check_identity()?;
         Ok(source)
@@ -62,6 +65,7 @@ impl RangeSource {
             memory,
             captured,
             decoded_len,
+            index: super::Index::default(),
         };
         source.check_identity()?;
         Ok(source)
@@ -90,6 +94,7 @@ impl RangeSource {
                 Some(bytes) => Backing::Bytes(bytes.memory_bytes().unwrap(), 0),
                 None => Backing::File(self.file.as_ref().unwrap()),
             },
+            index: Some(&self.index),
             range,
             position: range.offset,
             window: Vec::new(),
@@ -105,6 +110,7 @@ enum Backing<'a> {
 }
 pub(crate) struct Cursor<'a> {
     backing: Backing<'a>,
+    index: Option<&'a super::Index>,
     range: Range,
     position: u64,
     window: Vec<u8>,
@@ -121,6 +127,7 @@ impl<'a> Cursor<'a> {
         range.end()?;
         Ok(Self {
             backing: Backing::Bytes(bytes, base),
+            index: None,
             range,
             position: base,
             window: Vec::new(),
@@ -160,6 +167,20 @@ impl<'a> Cursor<'a> {
         if self.peek()? != Some(b'"') {
             return Err(invalid("expected JSON string"));
         }
+        // Absolute source offsets share the native index representation where they fit.
+        // A narrower child cursor never jumps beyond its own accepted extent.
+        if let (Some(index), Ok(key)) = (self.index, usize::try_from(start)) {
+            if let Some(end) = index.get(key) {
+                let end = end as u64;
+                if end > start && end <= self.range.end()? {
+                    self.position = end;
+                    return Ok(Range {
+                        offset: start,
+                        len: end - start,
+                    });
+                }
+            }
+        }
         self.consume(1);
         // Only quotes can end a string. Carry slash parity across refill boundaries so
         // dense escaped bodies remain vectorized rather than visiting every backslash.
@@ -184,6 +205,13 @@ impl<'a> Cursor<'a> {
             let escaped = (slashes % 2 != 0) ^ (slashes == n && trailing_odd);
             self.consume(n + 1);
             if !escaped {
+                if self.position - start > crate::lazy::INLINE_MAX as u64 {
+                    if let (Some(index), Ok(start), Ok(end)) =
+                        (self.index, usize::try_from(start), usize::try_from(self.position))
+                    {
+                        index.remember(start, end);
+                    }
+                }
                 return Ok(Range {
                     offset: start,
                     len: self.position - start,
@@ -333,6 +361,7 @@ struct SyntaxReader<'a> {
     plain_left: usize,
     quotes_left: usize,
     invalid_string: bool,
+    strict_strings: bool,
 }
 impl<'a> SyntaxReader<'a> {
     fn new(source: &'a RangeSource, range: Range) -> io::Result<Self> {
@@ -342,6 +371,7 @@ impl<'a> SyntaxReader<'a> {
             plain_left: 0,
             quotes_left: 0,
             invalid_string: false,
+            strict_strings: false,
         })
     }
 }
@@ -373,12 +403,17 @@ impl Read for SyntaxReader<'_> {
                 };
                 let valid = if let Some(bytes) = self.cursor.borrow_range(string) {
                     serde_json::from_slice::<&serde_json::value::RawValue>(bytes).is_ok()
+                        && (!self.strict_strings || super::super::json::value_compatible(bytes))
                 } else {
                     let mut body = self.source.cursor(Range {
                         offset: string.offset + 1,
                         len: string.len - 2,
                     })?;
-                    let valid = crate::lazy::validate_json_body_syntax(&mut body).is_ok();
+                    let valid = if self.strict_strings {
+                        crate::lazy::validate_value_json_body(&mut body).is_ok()
+                    } else {
+                        crate::lazy::validate_json_body_syntax(&mut body).is_ok()
+                    };
                     if let Some(kind) = body.read_error {
                         return Err(io::Error::new(kind, "reading JSON string syntax"));
                     }
@@ -405,9 +440,13 @@ impl RangeSource {
     /// Validate grammar and whole-range UTF-8 once. Export archives use this boundary before
     /// validating individual conversations with Value's independently reset recursion budget.
     pub fn syntax(&self, range: Range) -> Result<bool> {
+        self.syntax_with_strings(range, false)
+    }
+    fn syntax_with_strings(&self, range: Range, strict_strings: bool) -> Result<bool> {
         use serde::Deserialize;
         self.check_identity()?;
         let mut reader = SyntaxReader::new(self, range)?;
+        reader.strict_strings = strict_strings;
         let result = {
             let mut decoder = serde_json::Deserializer::from_reader(&mut reader);
             serde::de::IgnoredAny::deserialize(&mut decoder).and_then(|_| decoder.end())
@@ -432,7 +471,10 @@ impl RangeSource {
     pub fn accepts_value(&self, range: Range) -> Result<bool> {
         self.accepts_value_at_depth(range, 0)
     }
-    pub fn accepts_value_at_depth(&self, range: Range, mut depth: usize) -> Result<bool> {
+    pub fn accepts_value_at_depth(&self, range: Range, depth: usize) -> Result<bool> {
+        self.accepts_value_parts(range, depth, false)
+    }
+    fn accepts_value_parts(&self, range: Range, mut depth: usize, strings_accepted: bool) -> Result<bool> {
         let mut cursor = self.cursor(range)?;
         loop {
             cursor.whitespace()?;
@@ -440,6 +482,9 @@ impl RangeSource {
                 None => break,
                 Some(b'"') => {
                     let string = cursor.string()?;
+                    if strings_accepted {
+                        continue;
+                    }
                     let valid = if let Some(bytes) = cursor.borrow_range(string) {
                         super::super::json::value_compatible(bytes)
                     } else {
@@ -448,7 +493,7 @@ impl RangeSource {
                             len: string.len - 2,
                         };
                         let mut body = self.cursor(body)?;
-                        let valid = crate::lazy::decode_json_body(&mut body, &mut |_| {}).is_ok();
+                        let valid = crate::lazy::validate_value_json_body(&mut body).is_ok();
                         if let Some(kind) = body.read_error {
                             return Err(io::Error::new(kind, "reading JSON string").into());
                         }
@@ -490,9 +535,13 @@ impl RangeSource {
         Ok(true)
     }
     pub fn validate(&self, range: Range) -> Result<bool> {
-        let result = self
-            .syntax(range)
-            .and_then(|syntax| if syntax { self.accepts_value(range) } else { Ok(false) });
+        let result = self.syntax_with_strings(range, true).and_then(|syntax| {
+            if syntax {
+                self.accepts_value_parts(range, 0, true)
+            } else {
+                Ok(false)
+            }
+        });
         self.check_identity()?;
         result
     }
@@ -832,6 +881,12 @@ mod acceptance_tests {
             std::fs::write(&path, &case).unwrap();
             let source = RangeSource::open(&path).unwrap();
             assert_eq!(
+                source.syntax(source.range()).unwrap() && source.accepts_value(source.range()).unwrap(),
+                serde_json::from_str::<serde_json::Value>(&case).is_ok(),
+                "separate acceptance: {} bytes",
+                case.len()
+            );
+            assert_eq!(
                 source.validate(source.range()).unwrap(),
                 serde_json::from_str::<serde_json::Value>(&case).is_ok(),
                 "{} bytes",
@@ -866,6 +921,24 @@ mod acceptance_tests {
 #[cfg(test)]
 mod io_tests {
     use super::*;
+    #[test]
+    fn cached_endpoint_never_extends_a_requested_range() {
+        let path = std::env::temp_dir().join(format!("cv-range-cache-{}", uuid::Uuid::new_v4()));
+        let text = format!("  \"{}\"  ", "\\n\\\"".repeat(WINDOW));
+        std::fs::write(&path, &text).unwrap();
+        let source = RangeSource::open(&path).unwrap();
+        assert!(source.validate(source.range()).unwrap());
+        let expected = source.cursor(source.range()).unwrap().value().unwrap();
+        assert!(source.index.get(expected.offset as usize).is_some());
+        assert_eq!(source.cursor(source.range()).unwrap().value().unwrap(), expected);
+        let bounded = Range {
+            offset: expected.offset,
+            len: expected.len - 1,
+        };
+        assert!(source.cursor(bounded).unwrap().string().is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn a_late_refill_failure_is_a_read_error_not_an_invalid_scalar_or_success() {
         let path = std::env::temp_dir().join(format!("cv-range-refill-{}", uuid::Uuid::new_v4()));
