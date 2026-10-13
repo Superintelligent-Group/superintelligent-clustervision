@@ -1,0 +1,608 @@
+{
+  "baseline_commit": "0a0379b4",
+  "changed_commit": "ccb92b61",
+  "platform": "macOS aarch64",
+  "toolchain": "Rust 1.99.0",
+  "operation": "store_probe discard codex portable INPUT --root PROBES --mode lazy",
+  "measurement": "/usr/bin/time -l; CPU is process user+sys, maximum resident set size is bytes; three alternating old/new pairs per case after excluded warm runs; output hashes measured separately",
+  "fixture_recipe": "Tool/assistant escaped text repeats raw x,backslash,n for 8192*2048 units; session_meta precedes and late model/cwd follows. Assistant includes held token_count usage. Native control has 200000 ordinary function_call_output records.",
+  "builds": [
+    {
+      "variant": "old",
+      "path": "/Users/ember/dev/cv-worktrees/codex-cpu-baseline/target/release/examples/store_probe-portable-clean",
+      "sha256": "3c69a63669537d7aea6c6138ec96f89478a98750f54415244b775aa646ce863c",
+      "profile": "release opt-level=3 lto=thin",
+      "features": "--no-default-features --features sqlite; no probe-heap"
+    },
+    {
+      "variant": "new",
+      "path": "/Users/ember/dev/cv-worktrees/codex-portable-records/target/release/examples/store_probe-portable-clean",
+      "sha256": "7653ff2a76b722791ae35e678149b46c7739584df07438f4b3a62c0c6690ada0",
+      "profile": "release opt-level=3 lto=thin",
+      "features": "--no-default-features --features sqlite; no probe-heap"
+    },
+    {
+      "variant": "old",
+      "path": "/Users/ember/dev/cv-worktrees/codex-cpu-baseline/target/release/examples/store_probe",
+      "sha256": "a994dc0acf12624de2d3840a426ae345c14d5efd9db3d7649bae3f233a30f908",
+      "profile": "release opt-level=3 lto=thin",
+      "features": "default; no probe-heap"
+    },
+    {
+      "variant": "new",
+      "path": "/Users/ember/dev/cv-worktrees/codex-portable-records/target/release/examples/store_probe",
+      "sha256": "eae3481738fcea0f9fe2127e82097adbae38669f8ff2d3064ed1ac8b3cfe075d",
+      "profile": "release opt-level=3 lto=thin",
+      "features": "default; no probe-heap"
+    }
+  ],
+  "cpu_runs": [
+    {
+      "shape": "tool",
+      "transport": "plain",
+      "pair": 0,
+      "variant": "old",
+      "user_seconds": 0.23,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.26,
+      "max_rss_bytes": 146014208,
+      "physical_bytes": 50331915,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "plain",
+      "pair": 0,
+      "variant": "new",
+      "user_seconds": 0.19,
+      "sys_seconds": 0.03,
+      "wall_seconds": 0.22,
+      "max_rss_bytes": 8192000,
+      "physical_bytes": 50331915,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "plain",
+      "pair": 1,
+      "variant": "new",
+      "user_seconds": 0.19,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.22,
+      "max_rss_bytes": 8568832,
+      "physical_bytes": 50331915,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "plain",
+      "pair": 1,
+      "variant": "old",
+      "user_seconds": 0.23,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.26,
+      "max_rss_bytes": 143884288,
+      "physical_bytes": 50331915,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "plain",
+      "pair": 2,
+      "variant": "old",
+      "user_seconds": 0.23,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.25,
+      "max_rss_bytes": 146014208,
+      "physical_bytes": 50331915,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "plain",
+      "pair": 2,
+      "variant": "new",
+      "user_seconds": 0.19,
+      "sys_seconds": 0.03,
+      "wall_seconds": 0.22,
+      "max_rss_bytes": 8470528,
+      "physical_bytes": 50331915,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "zstd",
+      "pair": 0,
+      "variant": "old",
+      "user_seconds": 0.33,
+      "sys_seconds": 0.01,
+      "wall_seconds": 0.34,
+      "max_rss_bytes": 150470656,
+      "physical_bytes": 4813,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "zstd",
+      "pair": 0,
+      "variant": "new",
+      "user_seconds": 0.23,
+      "sys_seconds": 0.06,
+      "wall_seconds": 0.3,
+      "max_rss_bytes": 16449536,
+      "physical_bytes": 4813,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "zstd",
+      "pair": 1,
+      "variant": "new",
+      "user_seconds": 0.24,
+      "sys_seconds": 0.07,
+      "wall_seconds": 0.32,
+      "max_rss_bytes": 16433152,
+      "physical_bytes": 4813,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "zstd",
+      "pair": 1,
+      "variant": "old",
+      "user_seconds": 0.32,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.33,
+      "max_rss_bytes": 152584192,
+      "physical_bytes": 4813,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "zstd",
+      "pair": 2,
+      "variant": "old",
+      "user_seconds": 0.33,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.34,
+      "max_rss_bytes": 150454272,
+      "physical_bytes": 4813,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "tool",
+      "transport": "zstd",
+      "pair": 2,
+      "variant": "new",
+      "user_seconds": 0.24,
+      "sys_seconds": 0.06,
+      "wall_seconds": 0.31,
+      "max_rss_bytes": 16285696,
+      "physical_bytes": 4813,
+      "decompressed_bytes": 50331915,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "plain",
+      "pair": 0,
+      "variant": "old",
+      "user_seconds": 0.24,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.26,
+      "max_rss_bytes": 143933440,
+      "physical_bytes": 50331972,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "plain",
+      "pair": 0,
+      "variant": "new",
+      "user_seconds": 0.19,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.22,
+      "max_rss_bytes": 8142848,
+      "physical_bytes": 50331972,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "plain",
+      "pair": 1,
+      "variant": "new",
+      "user_seconds": 0.19,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.22,
+      "max_rss_bytes": 7995392,
+      "physical_bytes": 50331972,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "plain",
+      "pair": 1,
+      "variant": "old",
+      "user_seconds": 0.24,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.27,
+      "max_rss_bytes": 143917056,
+      "physical_bytes": 50331972,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "plain",
+      "pair": 2,
+      "variant": "old",
+      "user_seconds": 0.23,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.26,
+      "max_rss_bytes": 143917056,
+      "physical_bytes": 50331972,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "plain",
+      "pair": 2,
+      "variant": "new",
+      "user_seconds": 0.19,
+      "sys_seconds": 0.02,
+      "wall_seconds": 0.22,
+      "max_rss_bytes": 7995392,
+      "physical_bytes": 50331972,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "zstd",
+      "pair": 0,
+      "variant": "old",
+      "user_seconds": 0.32,
+      "sys_seconds": 0.01,
+      "wall_seconds": 0.34,
+      "max_rss_bytes": 150519808,
+      "physical_bytes": 4834,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "zstd",
+      "pair": 0,
+      "variant": "new",
+      "user_seconds": 0.24,
+      "sys_seconds": 0.06,
+      "wall_seconds": 0.3,
+      "max_rss_bytes": 16138240,
+      "physical_bytes": 4834,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "zstd",
+      "pair": 1,
+      "variant": "new",
+      "user_seconds": 0.24,
+      "sys_seconds": 0.06,
+      "wall_seconds": 0.31,
+      "max_rss_bytes": 16449536,
+      "physical_bytes": 4834,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "zstd",
+      "pair": 1,
+      "variant": "old",
+      "user_seconds": 0.33,
+      "sys_seconds": 0.01,
+      "wall_seconds": 0.34,
+      "max_rss_bytes": 152616960,
+      "physical_bytes": 4834,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "zstd",
+      "pair": 2,
+      "variant": "old",
+      "user_seconds": 0.32,
+      "sys_seconds": 0.01,
+      "wall_seconds": 0.34,
+      "max_rss_bytes": 152616960,
+      "physical_bytes": 4834,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "agent",
+      "transport": "zstd",
+      "pair": 2,
+      "variant": "new",
+      "user_seconds": 0.24,
+      "sys_seconds": 0.06,
+      "wall_seconds": 0.31,
+      "max_rss_bytes": 16465920,
+      "physical_bytes": 4834,
+      "decompressed_bytes": 50331972,
+      "build_features": {
+        "mmap": false,
+        "probe_heap": false
+      },
+      "messages": 1
+    },
+    {
+      "shape": "ordinary-small-records",
+      "transport": "native",
+      "pair": 0,
+      "variant": "old",
+      "user_seconds": 0.29,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.3,
+      "max_rss_bytes": 33603584,
+      "physical_bytes": 26289038,
+      "decompressed_bytes": 26289038,
+      "build_features": {
+        "mmap": true,
+        "probe_heap": false
+      },
+      "messages": 200000
+    },
+    {
+      "shape": "ordinary-small-records",
+      "transport": "native",
+      "pair": 0,
+      "variant": "new",
+      "user_seconds": 0.3,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.3,
+      "max_rss_bytes": 33652736,
+      "physical_bytes": 26289038,
+      "decompressed_bytes": 26289038,
+      "build_features": {
+        "mmap": true,
+        "probe_heap": false
+      },
+      "messages": 200000
+    },
+    {
+      "shape": "ordinary-small-records",
+      "transport": "native",
+      "pair": 1,
+      "variant": "new",
+      "user_seconds": 0.3,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.31,
+      "max_rss_bytes": 33685504,
+      "physical_bytes": 26289038,
+      "decompressed_bytes": 26289038,
+      "build_features": {
+        "mmap": true,
+        "probe_heap": false
+      },
+      "messages": 200000
+    },
+    {
+      "shape": "ordinary-small-records",
+      "transport": "native",
+      "pair": 1,
+      "variant": "old",
+      "user_seconds": 0.3,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.31,
+      "max_rss_bytes": 33636352,
+      "physical_bytes": 26289038,
+      "decompressed_bytes": 26289038,
+      "build_features": {
+        "mmap": true,
+        "probe_heap": false
+      },
+      "messages": 200000
+    },
+    {
+      "shape": "ordinary-small-records",
+      "transport": "native",
+      "pair": 2,
+      "variant": "old",
+      "user_seconds": 0.3,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.31,
+      "max_rss_bytes": 33636352,
+      "physical_bytes": 26289038,
+      "decompressed_bytes": 26289038,
+      "build_features": {
+        "mmap": true,
+        "probe_heap": false
+      },
+      "messages": 200000
+    },
+    {
+      "shape": "ordinary-small-records",
+      "transport": "native",
+      "pair": 2,
+      "variant": "new",
+      "user_seconds": 0.3,
+      "sys_seconds": 0.0,
+      "wall_seconds": 0.31,
+      "max_rss_bytes": 33685504,
+      "physical_bytes": 26289038,
+      "decompressed_bytes": 26289038,
+      "build_features": {
+        "mmap": true,
+        "probe_heap": false
+      },
+      "messages": 200000
+    }
+  ],
+  "exact_materialized_oracles": [
+    {
+      "case": "tool-plain",
+      "detail": {
+        "algorithm": "sha256",
+        "canonical_json_version": null,
+        "messages_sha256": "2897e42eaf4a10cb814fd96a31b4bb1359d7cca296624b27df481117a2ea965f",
+        "metadata_sha256": "50ba0cbe78bd14630b7a64073c8a2e64776b79bca44c1f6870046be560d49f05",
+        "serialized_message_bytes": 50331871,
+        "serialization_order": "preserved"
+      }
+    },
+    {
+      "case": "tool-zstd",
+      "detail": {
+        "algorithm": "sha256",
+        "canonical_json_version": null,
+        "messages_sha256": "2897e42eaf4a10cb814fd96a31b4bb1359d7cca296624b27df481117a2ea965f",
+        "metadata_sha256": "50ba0cbe78bd14630b7a64073c8a2e64776b79bca44c1f6870046be560d49f05",
+        "serialized_message_bytes": 50331871,
+        "serialization_order": "preserved"
+      }
+    },
+    {
+      "case": "agent-plain",
+      "detail": {
+        "algorithm": "sha256",
+        "canonical_json_version": null,
+        "messages_sha256": "78c74826777babd4bc729fac1c25a0419545aea23132dc51bc67b09775228f99",
+        "metadata_sha256": "50ba0cbe78bd14630b7a64073c8a2e64776b79bca44c1f6870046be560d49f05",
+        "serialized_message_bytes": 50331805,
+        "serialization_order": "preserved"
+      }
+    },
+    {
+      "case": "agent-zstd",
+      "detail": {
+        "algorithm": "sha256",
+        "canonical_json_version": null,
+        "messages_sha256": "78c74826777babd4bc729fac1c25a0419545aea23132dc51bc67b09775228f99",
+        "metadata_sha256": "50ba0cbe78bd14630b7a64073c8a2e64776b79bca44c1f6870046be560d49f05",
+        "serialized_message_bytes": 50331805,
+        "serialization_order": "preserved"
+      }
+    },
+    {
+      "case": "native",
+      "detail": {
+        "algorithm": "sha256",
+        "canonical_json_version": null,
+        "messages_sha256": "40f0c6c50d39dfc3d7eab1f48b3d3c4416e5c1f8f89dd02419c5d698aaf0aac7",
+        "metadata_sha256": "50ba0cbe78bd14630b7a64073c8a2e64776b79bca44c1f6870046be560d49f05",
+        "serialized_message_bytes": 38088890,
+        "serialization_order": "preserved"
+      }
+    }
+  ]
+}

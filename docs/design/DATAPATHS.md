@@ -883,3 +883,16 @@ and in-session detection propagate failures. The public Rust `into_boundaries` a
 while CLI/HTTP `detect` remains fallible with its existing signature. Scoped native/portable
 oracles cover full inline/escaped-Span/retained-Source summaries, multiline concatenation,
 whitespace-only omission, source mutation/missing files, stopped sinks, and count-only no-demand.
+Clean matched release controls (`0a0379b4` shared-source baseline versus `ccb92b61` adapter change)
+use Rust 1.99.0, release opt-level 3/thin LTO, without `probe-heap`. Three alternating process
+pairs after excluded warm runs give median user+system CPU old→new: tool plain **0.25→0.22 s**,
+tool zstd **0.33→0.30 s**, assistant plain **0.26→0.21 s**, assistant zstd **0.33→0.30 s**.
+Median maximum RSS is respectively 146,014,208→8,470,528; 150,470,656→16,433,152;
+143,917,056→7,995,392; 152,616,960→16,449,536 bytes. Zstd physical inputs are 4,813/4,834 bytes,
+representing 50,331,915/50,331,972 decoded bytes; the private decoded disk extent remains linear.
+The ordinary native control (200,000 small records, 26,289,038 bytes) keeps median CPU **0.30 s**
+both sides, with median RSS 33,636,352→33,685,504 bytes. Separate preserved-order materialized
+message and final metadata SHA-256 oracles match exactly in all five cases.
+Full per-pair process timings, build hashes and output digests are retained in
+[CODEX-POSITIONED-RELEASE-CONTROLS.json](CODEX-POSITIONED-RELEASE-CONTROLS.json). These are scoped
+controls of the stated input shapes, not a claim that the documented owned fallbacks are bounded.
