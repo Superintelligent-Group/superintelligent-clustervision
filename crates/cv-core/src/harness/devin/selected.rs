@@ -150,6 +150,12 @@ fn metadata(view: JsonView<'_>) -> Result<Value> {
 }
 fn nonempty_text(view: Option<JsonView<'_>>) -> Result<Option<crate::Text>> {
     let Some(view) = view else { return Ok(None) };
+    // The accepted source string includes both quotes. Only the two-byte string is
+    // empty: every valid escape encodes at least one decoded scalar. Avoid a second
+    // full-body traversal merely to distinguish empty content from present content.
+    if let Some((_, len)) = view.source_range()? {
+        return if len == 2 { Ok(None) } else { view.source_text() };
+    }
     let Some(text) = view.source_text()? else {
         return Ok(None);
     };
@@ -241,16 +247,30 @@ pub(super) fn compaction(view: JsonView<'_>) -> Result<serde_json::Map<String, V
     }
     if let Some(content) = view.get("content")? {
         let mut scan = HistoryPath::default();
-        content.for_each_str_chunk(|chunk| {
+        let scanned = content.for_each_str_chunk(|chunk| {
             scan.push(chunk);
+            if scan.ended {
+                return Err(HistoryComplete.into());
+            }
             Ok(())
-        })?;
+        });
+        if let Err(error) = scanned {
+            if error.downcast_ref::<HistoryComplete>().is_none() {
+                return Err(error);
+            }
+        }
+        // The enclosing checked cell read revalidates original source/backing guards,
+        // including after this local successful cutoff. Whole-cell acceptance ran first.
         if let Some(path) = scan.finish() {
             out.insert("history_path".into(), json!(path));
         }
     }
     Ok(out)
 }
+#[derive(Debug, thiserror::Error)]
+#[error("history path complete")]
+struct HistoryComplete;
+
 #[derive(Default)]
 struct HistoryPath {
     matched: usize,
@@ -346,6 +366,17 @@ mod tests {
             session.materialize()?;
             selected = session.messages.remove(0);
             assert_eq!(serde_json::to_value(selected)?, serde_json::to_value(old)?, "{role}");
+        }
+        for raw in [r#""""#, r#""\u0000""#, r#""\n""#, r#""λ""#, "null", "12", "[]"] {
+            std::fs::write(&path, raw)?;
+            let source = JsonSource::capture(&path)?;
+            let present = source.read_range_value(0, source.len(), |view| nonempty_text(Some(view)))?;
+            let owned: Value = serde_json::from_str(raw)?;
+            assert_eq!(
+                present.is_some(),
+                owned.as_str().is_some_and(|text| !text.is_empty()),
+                "{raw}"
+            );
         }
         for content in [
             "Full conversation history saved at /a/b.md.",

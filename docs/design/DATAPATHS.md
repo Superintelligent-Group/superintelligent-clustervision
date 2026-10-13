@@ -4407,6 +4407,9 @@ metadata remains owned. Public owned parsing and non-rowid schema fallback keep 
 
 The compaction inspection pass reads only demanded sidecars and scans decoded chunks for the
 existing history-path sentence. It retains the demanded path token, not the entire summary body.
+Validated quoted-string extent decides empty/present content without another decoded-body
+scan. History-path inspection stops source decoding once its token (or second delimiter) settles;
+whole-cell acceptance and enclosing freshness checks remain authoritative.
 One operation-local cell-range cache lets compaction inspection and row replay share backing;
 its descriptors grow with selected rows/columns. This is reuse under one checked read snapshot,
 not a new persistent cache or schema policy. Original DB/WAL guards follow retained Text/Json
