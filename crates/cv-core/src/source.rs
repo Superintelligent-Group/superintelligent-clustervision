@@ -24,6 +24,14 @@ pub(crate) fn cursor_cli_metadata(r: &SessionRef) -> Option<PathBuf> {
         .flatten()
 }
 
+fn sqlite_sidecars(path: &Path) -> [PathBuf; 2] {
+    ["-wal", "-journal"].map(|suffix| {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        PathBuf::from(sidecar)
+    })
+}
+
 // Preserve the path spelling: canonicalize cannot represent missing files and would hide a
 // symlink's later retargeting. Relative reads belong to the cwd of the pass that consulted them.
 fn absolute(path: &Path) -> Option<PathBuf> {
@@ -316,7 +324,7 @@ impl Probe {
     }
 
     /// Collect the currently declared session-local dependencies. Plain file transcripts have
-    /// an empty set; shared databases depend on WAL even when it is absent.
+    /// an empty set; shared databases depend on WAL and rollback journals even when absent.
     pub fn dependencies(&mut self, r: &SessionRef) -> Option<Stamp> {
         self.dependencies_from(r, &primary_path(r))
     }
@@ -336,9 +344,7 @@ impl Probe {
         let mut directories = Vec::new();
         let ext = r.path.extension().and_then(|e| e.to_str());
         if ext.is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3" | "vscdb")) {
-            let mut wal = r.path.as_os_str().to_os_string();
-            wal.push("-wal");
-            files.push(PathBuf::from(wal));
+            files.extend(sqlite_sidecars(&r.path));
         }
         if let Some(metadata) = cursor_cli_metadata(r) {
             files.push(metadata);
@@ -406,10 +412,8 @@ impl Probe {
                         if let Some(data) = dir.parent().and_then(Path::parent) {
                             for name in ["sessions.db", "cron.db", "teams.db"] {
                                 let db = data.join("db").join(name);
-                                let mut wal = db.as_os_str().to_os_string();
-                                wal.push("-wal");
+                                files.extend(sqlite_sidecars(&db));
                                 files.push(db);
-                                files.push(PathBuf::from(wal));
                             }
                         }
                     }
@@ -483,10 +487,8 @@ impl Probe {
                 if let Some(state) = r.path.ancestors().nth(4) {
                     if ext.is_some_and(|e| matches!(e, "db" | "sqlite" | "sqlite3")) {
                         let db = state.join("state/openclaw.sqlite");
-                        files.push(db.clone());
-                        let mut wal = db.into_os_string();
-                        wal.push("-wal");
-                        files.push(PathBuf::from(wal));
+                        files.extend(sqlite_sidecars(&db));
+                        files.push(db);
                     } else {
                         if let Some(dir) = r.path.parent() {
                             files.push(dir.join("sessions.json"));
@@ -798,6 +800,42 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     #[test]
+    fn sqlite_journal_creation_rewrite_and_removal_invalidate_inventory() {
+        let world = cv_testkit::World::in_process("source-sqlite-journal");
+        let db = world.base.join("sessions.db");
+        std::fs::write(&db, "fixture").unwrap();
+        let journal = world.base.join("sessions.db-journal");
+        let r = SessionRef::new("s", Harness::Hermes, &db);
+        let absent = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        let records = absent.dependencies.as_ref().unwrap().records().unwrap();
+        assert!(records
+            .entries
+            .iter()
+            .any(|entry| entry.path == journal && entry.state.is_none()));
+        let mut legacy_records = records;
+        legacy_records.entries.retain(|entry| entry.path != journal);
+        let legacy = Snapshot {
+            dependencies: Stamp::serialize(&legacy_records),
+            ..absent.clone()
+        };
+        assert!(
+            !unchanged(&r, &legacy),
+            "old inventories reread once without a version change"
+        );
+        assert!(unchanged(&r, &absent));
+        std::fs::write(&journal, "before").unwrap();
+        assert!(!unchanged(&r, &absent));
+        let present = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        assert_eq!(present.primary, absent.primary);
+        assert!(unchanged(&r, &present));
+        std::fs::write(&journal, "after!").unwrap();
+        assert!(!unchanged(&r, &present), "same-size journal rewrite");
+        let rewritten = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        std::fs::remove_file(&journal).unwrap();
+        assert!(!unchanged(&r, &rewritten));
+    }
+
+    #[test]
     fn typed_publication_matches_serialized_inventory_and_preserves_wire() {
         let world = cv_testkit::World::in_process("source-typed-publication");
         let storage = world.base.join("storage");
@@ -1071,8 +1109,8 @@ mod tests {
         );
         assert_eq!(
             probe.entries.len(),
-            2,
-            "one main DB and one absent WAL probe shared by both sessions"
+            3,
+            "one main DB and absent WAL/journal probes shared by both sessions"
         );
         assert!(!Table::load("counts").fresh(&r, before.primary, &before.dependencies));
         update("counts", &[(r.clone(), before.clone())]);

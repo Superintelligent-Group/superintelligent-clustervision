@@ -20,6 +20,8 @@
 - Cursor IDE partial reads and doctor facts stream selected string payloads while preserving session modes and checked SQLite snapshot dependencies.
 
 - Cursor CLI discovery and partial reads stream selected message fields with bounded scratch and reject changed SQLite snapshot dependencies.
+- SQLite source freshness tracks rollback journal creation, edits, and removal alongside WAL dependencies.
+
 - Shared payload staging copies bounded chunks before appending, preventing mapped-source writes from hanging on macOS.
 - Browser message windows stage checked JSON responses without copying selected payloads into complete response trees.
 
