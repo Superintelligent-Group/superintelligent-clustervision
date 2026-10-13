@@ -2,7 +2,6 @@
 use super::*;
 use crate::json::{JsonSource, JsonView};
 use anyhow::Result;
-use std::io::BufRead;
 
 fn join(view: Option<JsonView<'_>>, source: &JsonSource) -> Result<Text> {
     let Some(view) = view else { return Ok(Text::default()) };
@@ -130,13 +129,13 @@ pub(super) fn message(
 }
 
 pub(super) fn for_each(
-    reader: impl BufRead,
+    file: &fs::File,
     offset: u64,
     source: &JsonSource,
     enrich: &HashMap<String, ToolEnrich>,
     accept: &mut impl FnMut(bool, Option<Message>, u64, bool, u64) -> Flow,
 ) -> Result<u64> {
-    super::super::store::checked_lines::for_each(reader, offset, source, |view, offset, complete, skipped| {
+    super::super::store::checked_lines::for_each(file, offset, source, |view, offset, complete, skipped| {
         let (reasoning, message) = message(view, source, enrich)?;
         Ok(accept(reasoning, message, offset, complete, skipped))
     })

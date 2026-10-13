@@ -4361,3 +4361,11 @@ and its focused rerun passes. The portable SQLite configuration passes all 98 co
 These are scoped export/prepare/fidelity checks, not full repository convergence or a release.
 The subsequent shared prefix repair at `078b14ff` has its own native/portable classification and
 frozen-output controls; faithful OpenCode complete replay remains in progress.
+History recovery found the positioned JSONL primitive already integrated before the reboot
+(`f064996b`, transcript message 7927). Grok/Qwen's checked acceptance wrapper now reuses
+`store::jsonl::ranges` for framing, offsets, partial EOF and Unicode boundary trimming,
+removing its duplicate framer/trim implementation. It keeps strict Value acceptance, malformed
+JSON/UTF-8 skipping, checkpoint offsets after physical records, and original-source/I/O errors.
+Unicode trim retries remain limited to rejected records. Existing native/portable complete
+producer, frozen wire/fidelity, source mutation and checkpoint controls pass; no new allocation
+or timing campaign was run for this consolidation.

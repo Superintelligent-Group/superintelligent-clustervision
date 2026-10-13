@@ -114,11 +114,8 @@ pub(super) fn stream(path: &Path, sink: &mut dyn MessageSink) -> Result<Session>
     let mut state = ReplayState::default();
     let mut stopped = false;
     let file = std::fs::File::open(path)?;
-    let skipped = super::super::store::checked_lines::for_each(
-        BufReader::new(file),
-        0,
-        &source,
-        |view, offset, complete, skipped| {
+    let skipped =
+        super::super::store::checked_lines::for_each(&file, 0, &source, |view, offset, complete, skipped| {
             if !view.is_object()? {
                 return Ok(Flow::Continue);
             }
@@ -173,8 +170,7 @@ pub(super) fn stream(path: &Path, sink: &mut dyn MessageSink) -> Result<Session>
             }
             // Like the owned replay, continue through EOF for final session facts after sink stop.
             Ok(Flow::Continue)
-        },
-    )?;
+        })?;
     session.model = state.session_model.take();
     session.title = state.title.take().or(state.first_prompt.take());
     super::super::note_skipped_lines(&mut session, skipped);

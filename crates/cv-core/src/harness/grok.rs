@@ -113,16 +113,7 @@ impl Adapter for Grok {
                 .transpose()?;
             let file = fs::File::open(self.resume_source(r))
                 .with_context(|| format!("reading chat_history in {}", r.path.display()))?;
-            stream_history_at(
-                BufReader::new(file),
-                &self.resume_source(r),
-                0,
-                s,
-                &enrich,
-                0,
-                sink,
-                source.as_ref(),
-            )
+            stream_history_at(file, &self.resume_source(r), 0, s, &enrich, 0, sink, source.as_ref())
         })
     }
 
@@ -158,7 +149,7 @@ impl Adapter for Grok {
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
             spawns.meta(&s);
             Ok(Some(stream_history_at(
-                BufReader::new(file),
+                file,
                 &wire,
                 from.offset,
                 s,
@@ -363,7 +354,7 @@ struct HistoryCheckpoint {
 }
 
 fn stream_history_at(
-    reader: impl std::io::BufRead,
+    file: fs::File,
     wire: &Path,
     at: u64,
     mut s: Session,
@@ -421,9 +412,9 @@ fn stream_history_at(
         flow
     };
     let skipped = if let Some(source) = source {
-        selected::for_each(reader, at, source, enrich, &mut accept)?
+        selected::for_each(&file, at, source, enrich, &mut accept)?
     } else {
-        super::for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
+        super::for_each_json_line_at(BufReader::new(file), at, |v, offset, complete, skipped| {
             accept(
                 v.get("type").and_then(Value::as_str) == Some("reasoning"),
                 chat_message(&v, enrich),
