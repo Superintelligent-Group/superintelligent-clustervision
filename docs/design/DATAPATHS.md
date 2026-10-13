@@ -4122,3 +4122,32 @@ complete+spans preservation, retained replay and stop-time mutation. Native and 
 SQLite-enabled lib/tests clippy and pinned formatting pass; the no-default test build retains
 four existing unrelated warnings. No complete-mode, unknown-record, metadata-cardinality,
 output-stage, CPU, RSS or physical-I/O bound follows from this selected ordinary-body control.
+
+### Hermes complete preparation: ordinary bodies (Sol, 2026-10-13)
+
+Same-target parse_for_emit previously selected complete rows but Hermes ignored spans: each
+SQLite content cell became an owned String, ordinary content was copied into Text, and the
+collector retained the whole session body. Complete checked preparation now quotes large
+ordinary text/tool-result cells from borrowed SQLite row bytes into the existing shared text
+arena, retaining source descriptors guarded by the original database/WAL read set. No new
+reader or source representation is introduced. SQLite still owns the current row; private
+quoted-arena writes and later decoded reads are additional I/O, not native zero-copy.
+
+A complete owned oracle compares all materialized IR, logical database/FTS rows and the entire
+fidelity report. It includes compression-lineage replay, copied generations, rewound and
+compacted rows, tool results, native raw reasoning, multimodal sentinel content and failed-turn
+classification (including large whitespace prefixes). Main-file changes and WAL-only changes
+reject retained arena sources. Complete mode keeps all rows and bypasses both display and
+replay dedup. Small content, multimodal/provider wrappers, raw reasoning and other Hermes
+extras retain their existing owned contracts; large native extras remain outstanding ownership.
+
+[HERMES-COMPLETE-EVIDENCE.json](HERMES-COMPLETE-EVIDENCE.json) records one actual same-target
+parse_for_emit → emit_report operation with an ordinary 8,650,752-byte body, against the
+already improved transactional writer. Logical output digests and complete fidelity match
+(empty deltas). Rust peak above baseline falls from 25,965,187 to 17,316,715 bytes; stage-end
+retained live allocation falls from 8,655,429 to 6,977 bytes. Cumulative requested allocation
+rises from 68,492,967 to 86,168,179 bytes because the shared quoted carrier is constructed and
+decoded. SQLite native peak remains about 129.5 MB: the giant output row and FTS dominate
+this one-row operation. This is a concrete retained-body improvement with an allocation/I/O
+tradeoff, not a speed claim or an operation-wide constant-memory result. Required row-sized
+output staging, SQLite/FTS native memory and owned raw extras remain future work.

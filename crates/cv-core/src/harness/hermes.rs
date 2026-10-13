@@ -261,7 +261,7 @@ impl Adapter for Hermes {
             // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
             // what lets one Hermes adapter span many profile DBs without id collisions.
             let conn = open_ro(&r.path)?;
-            conn.read(|conn| stream_conn(conn, r, opts, sink))
+            conn.read(|conn| stream_conn_with_reads(conn, r, opts, sink, conn.reads()))
         })
     }
 
@@ -604,7 +604,25 @@ fn compression_child(conn: &Connection, id: &str) -> Option<String> {
     found
 }
 
+#[cfg(test)]
 fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    stream_conn_with_reads(conn, r, opts, sink, &crate::source::ReadSet::default())
+}
+
+fn stream_conn_with_reads(
+    conn: &Connection,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    reads: &crate::source::ReadSet,
+) -> Result<Session> {
+    let checked_source = (opts.complete && opts.spans)
+        .then(|| crate::json::JsonSource::capture_with_reads(&r.path, reads))
+        .transpose()?;
+    let arena = checked_source
+        .as_ref()
+        .map(|_| super::store::bytes::ByteSource::arena().map(std::sync::Arc::new))
+        .transpose()?;
     // session-level metadata (guard optional columns for historical schemas).
     let scols = columns(conn, "sessions");
     let expr = |col: &str| {
@@ -780,10 +798,41 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
             };
             let get_i64 =
                 |name: &str| -> Option<i64> { idx(name).and_then(|i| row.get::<_, Option<i64>>(i).ok().flatten()) };
+            // Complete preparation keeps ordinary bodies in the existing checked arena.
+            // Multimodal/provider wrappers and failed-turn classification retain their parser.
+            let content_source = if let Some(source) = &checked_source {
+                match row.get_ref(idx("content").unwrap())? {
+                    rusqlite::types::ValueRef::Text(bytes) => {
+                        let raw = std::str::from_utf8(bytes).ok();
+                        if let Some(raw) = raw.filter(|raw| {
+                            raw.len() > crate::lazy::INLINE_MAX
+                                && !raw.starts_with(MULTIMODAL_SENTINEL)
+                                && !FAILED_TURN_NOTICES.contains(&raw.trim())
+                        }) {
+                            Some(
+                                super::store::text::append(source, arena.as_ref().unwrap(), |builder| {
+                                    builder.push(raw)
+                                })
+                                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+                            )
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             Ok(MsgRow {
                 id: get_i64("id").unwrap_or(0),
                 role: get_str("role").unwrap_or_default(),
-                content: get_str("content"),
+                content: if content_source.is_some() {
+                    None
+                } else {
+                    get_str("content")
+                },
+                content_source,
                 tool_call_id: get_str("tool_call_id"),
                 tool_calls: get_str("tool_calls"),
                 tool_name: get_str("tool_name"),
@@ -812,7 +861,11 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
         })?;
 
         for row in rows.by_ref() {
-            let Ok(row) = row else { continue };
+            let row = match row {
+                Ok(row) => row,
+                Err(error) if checked_source.is_some() => return Err(error.into()),
+                Err(_) => continue,
+            };
             if dedup_generations && !seen_generations.insert(row.generation_key()) {
                 continue;
             }
@@ -977,6 +1030,7 @@ struct MsgRow {
     id: i64,
     role: String,
     content: Option<String>,
+    content_source: Option<crate::Text>,
     tool_call_id: Option<String>,
     tool_calls: Option<String>,
     tool_name: Option<String>,
@@ -1203,7 +1257,9 @@ impl MsgRow {
         if role == Role::Tool {
             m.content.push(Block::ToolResult {
                 tool_use_id: self.tool_call_id.unwrap_or_default(),
-                content: self.content.unwrap_or_default().into(),
+                content: self
+                    .content_source
+                    .unwrap_or_else(|| self.content.unwrap_or_default().into()),
                 is_error: false,
                 tool_name: self.tool_name,
                 status: None,
@@ -1213,7 +1269,9 @@ impl MsgRow {
         }
 
         // text / multimodal content
-        if let Some(raw) = &self.content {
+        if let Some(text) = self.content_source {
+            m.content.push(Block::Text { text });
+        } else if let Some(raw) = &self.content {
             for b in decode_content(raw) {
                 m.content.push(b);
             }
@@ -1426,6 +1484,88 @@ mod tests {
             .stream(&reference, &ParseOptions::default(), &mut MutatingSink(&writer))
             .unwrap_err();
         assert!(failure.to_string().contains("dependencies changed"), "{failure:#}");
+    }
+
+    #[test]
+    fn complete_checked_preparation_preserves_owned_rows_and_fidelity() -> Result<()> {
+        let world = cv_testkit::World::in_process("hermes-complete-preparation");
+        let path = world.base.join("state.db");
+        let writer = Connection::open(&path)?;
+        writer.execute_batch(&fixture("schema-v14.sql"))?;
+        writer.execute_batch(
+            "ALTER TABLE messages ADD active INTEGER DEFAULT 1; ALTER TABLE messages ADD compacted INTEGER DEFAULT 0;",
+        )?;
+        insert_session(&writer, "root", None, Some("compression"), 900.0, Some(999.0));
+        insert_session(&writer, "s", Some("root"), None, 1000.0, None);
+        let body = "ordinary λ\nquoted \"body\"".repeat(20000);
+        writer.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES('root','user',?1,1001)",
+            [&body],
+        )?;
+        for (role, active, compacted) in [("user", 1, 0), ("user", 0, 0), ("assistant", 0, 1), ("tool", 1, 0)] {
+            writer.execute("INSERT INTO messages(session_id,role,content,timestamp,active,compacted,reasoning,reasoning_content,reasoning_details,tool_call_id,tool_name) VALUES('s',?1,?2,1001,?3,?4,' raw reasoning ','second','[{\"type\":\"thinking\",\"text\":\"third\"}]','call','Read')", rusqlite::params![role,body,active,compacted])?;
+        }
+        let failed = format!("{}{}", " ".repeat(4096), FAILED_TURN_NOTICES[0]);
+        writer.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES('s','assistant',?1,1002)",
+            [failed],
+        )?;
+        let multimodal = format!(
+            "{MULTIMODAL_SENTINEL}{}",
+            serde_json::json!([{"type":"text","text":body}])
+        );
+        writer.execute(
+            "INSERT INTO messages(session_id,role,content,timestamp) VALUES('s','user',?1,1003)",
+            [multimodal],
+        )?;
+        drop(writer);
+        let adapter = Hermes::with_db(path.clone());
+        let reference = adapter.discover()?.remove(0);
+        let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let checked = crate::emit::parse_for_emit(&adapter, &reference, Harness::Hermes)?;
+        assert_eq!(
+            checked.messages.len(),
+            7,
+            "complete keeps lineage replay, rewound and copied generations"
+        );
+        assert!(checked
+            .messages
+            .iter()
+            .take(5)
+            .all(|message| message.content.iter().any(|block| matches!(
+                block,
+                Block::Text {
+                    text: crate::Text::Source(_)
+                } | Block::ToolResult {
+                    content: crate::Text::Source(_),
+                    ..
+                }
+            ))));
+        assert_eq!(checked.messages[5].kind, owned.messages[5].kind);
+        let mut materialized = checked.clone();
+        materialized.materialize()?;
+        assert_eq!(serde_json::to_value(&materialized)?, serde_json::to_value(&owned)?);
+        let options = crate::emit::EmitOptions {
+            new_id: Some("fixed".into()),
+            ..Default::default()
+        };
+        let (old, old_report) = crate::emit::emit_report(&owned, Harness::Hermes, &world.base.join("old"), &options)?;
+        let (new, new_report) = crate::emit::emit_report(&checked, Harness::Hermes, &world.base.join("new"), &options)?;
+        assert_eq!(serde_json::to_value(old_report)?, serde_json::to_value(new_report)?);
+        assert_eq!(
+            super::super::store::sqlite::export_tests::logical(&Connection::open(old.path)?, Harness::Hermes)?,
+            super::super::store::sqlite::export_tests::logical(&Connection::open(new.path)?, Harness::Hermes)?
+        );
+        // A retained arena body still guards its producer, not just its private backing.
+        let writer = Connection::open(&path)?;
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let wal_checked = crate::emit::parse_for_emit(&adapter, &reference, Harness::Hermes)?;
+        let before_main = std::fs::read(&path)?;
+        writer.execute("UPDATE messages SET content='changed' WHERE id=1", [])?;
+        assert_eq!(std::fs::read(&path)?, before_main, "mutation is WAL-only");
+        assert!(crate::emit::emit(&wal_checked, Harness::Hermes, &world.base.join("stale-wal"), &options).is_err());
+        assert!(crate::emit::emit(&checked, Harness::Hermes, &world.base.join("stale"), &options).is_err());
+        Ok(())
     }
 
     #[test]

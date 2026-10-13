@@ -1,0 +1,73 @@
+{
+  "source_sha256": "fc992aa3f3c07f92de47bed54267233081e863b45fcf7770ea7603e624149c47",
+  "body_bytes": 8650752,
+  "baseline_source": "fd5400f7 (checked transactional rows; owned same-target preparation)",
+  "results": [
+    {
+      "label": "before",
+      "binary_sha256": "a5c787fbe0459fba7ef1548104a8022953fd328def10bc3f99e7bbbd73e6fe5a",
+      "api": {
+        "messages": 1,
+        "fidelity": {
+          "deltas": []
+        }
+      },
+      "logical_sha256": "a7fa74484776525b453f20a03781454db56de5bd6f8bbaaa2671e6b10079181f",
+      "rust_requested_heap": {
+        "baseline_live_bytes": 1294,
+        "peak_live_bytes": 25966481,
+        "peak_above_baseline_bytes": 25965187,
+        "stage_end_live_bytes": 8655429,
+        "allocation_requests": 1887,
+        "requested_bytes": 68492967
+      },
+      "sqlite_native_heap": {
+        "accounting_enabled_and_verified": true,
+        "verified_allocation_bytes": 4096,
+        "baseline_live_bytes": 0,
+        "peak_live_bytes": 129489072,
+        "peak_above_baseline_bytes": 129489072,
+        "stage_end_live_bytes": 0,
+        "baseline_live_allocations": 0,
+        "peak_live_allocations": 1027,
+        "stage_end_live_allocations": 0,
+        "largest_allocation_request_bytes": 8650815,
+        "cumulative_allocation_requests": null,
+        "cumulative_requested_bytes": null
+      }
+    },
+    {
+      "label": "after",
+      "binary_sha256": "3b656c60f09dfce34487f531bea3f2aade3f48374ff7915074837fcf9e69b516",
+      "api": {
+        "messages": 1,
+        "fidelity": {
+          "deltas": []
+        }
+      },
+      "logical_sha256": "a7fa74484776525b453f20a03781454db56de5bd6f8bbaaa2671e6b10079181f",
+      "rust_requested_heap": {
+        "baseline_live_bytes": 1300,
+        "peak_live_bytes": 17318015,
+        "peak_above_baseline_bytes": 17316715,
+        "stage_end_live_bytes": 6977,
+        "allocation_requests": 4214,
+        "requested_bytes": 86168179
+      },
+      "sqlite_native_heap": {
+        "accounting_enabled_and_verified": true,
+        "verified_allocation_bytes": 4096,
+        "baseline_live_bytes": 0,
+        "peak_live_bytes": 129505456,
+        "peak_above_baseline_bytes": 129505456,
+        "stage_end_live_bytes": 0,
+        "baseline_live_allocations": 0,
+        "peak_live_allocations": 1027,
+        "stage_end_live_allocations": 0,
+        "largest_allocation_request_bytes": 8650815,
+        "cumulative_allocation_requests": null,
+        "cumulative_requested_bytes": null
+      }
+    }
+  ]
+}

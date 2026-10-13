@@ -5,6 +5,8 @@
 - Cline, Roo, Continue and LM Studio rehomes retain checked complete payloads while preserving native output and public complete parsing.
 
 - OpenCode v2 shell reads retain checked command and output payloads, preserving native fallback formatting, metadata and source freshness.
+- Hermes rehomes keep large ordinary bodies in checked shared backing while preserving complete row visibility and native metadata.
+
 - OpenCode v1 and Hermes exports resolve checked fields per row, reuse prepared inserts, and roll back failed exports atomically.
 - Grok and Qwen exports stream guarded JSONL payloads while preserving native output, thinking modes, and fidelity reports.
 - OpenClaw exports stream guarded payloads and bounded fallback titles, preserving native transcript, index and fidelity behavior.
