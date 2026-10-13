@@ -1388,12 +1388,12 @@ pub fn read(adapter: &dyn crate::harness::Adapter, r: &crate::ir::SessionRef) ->
     let mut messages = Vec::new();
     let mut index = 0;
     let mut error = None;
-    // Retain full metadata and tool details while reducing complete content spans into bounded
-    // summaries. Only the resulting rows survive each streamed message.
+    // Request classification facts and tool details while reducing complete content spans into
+    // bounded summaries. Only the resulting rows survive each streamed message.
     let s = crate::stream::stream_counted(
         adapter,
         r,
-        &crate::stream::ParseOptions::lazy_extra(),
+        &crate::stream::ParseOptions::facts(),
         &mut |m: Message| {
             match message_rows(r.harness, &m, index, &resolver) {
                 Ok(rows) => messages.extend(rows),

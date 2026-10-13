@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Diagnostics and affordance views request selected metadata facts; Claude and Cursor CLI avoid copying unrelated raw sidecars.
+- Lane summaries request response identities for usage deduplication without loading unrelated record metadata.
+
 - Compaction summary scans propagate lazy source read failures and preserve full summary text.
 
 - Affordance rows and counts propagate source text read failures instead of classifying incomplete content.

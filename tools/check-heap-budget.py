@@ -156,7 +156,7 @@ def doctors(binary, root, env, baseline=None):
                     command.append("--escaped")
                 manifest = json.loads(subprocess.check_output(command, env=env, text=True))
                 common = [harness, manifest["id"], manifest["path"], "--root", manifest["root"]]
-                row, peak = probe(binary, ["doctor", *common, "--mode", "lazy-extra"], env, True)
+                row, peak = probe(binary, ["doctor", *common, "--mode", "facts"], env, True)
                 assert row["messages"] == manifest["expected_messages"], "doctor skipped or truncated source"
                 peaks.append(peak)
                 # Full-mode reference is a separate process and outside the bounded consumer claim.

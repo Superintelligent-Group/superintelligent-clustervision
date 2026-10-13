@@ -245,7 +245,7 @@ mod tests {
         pass.finish().unwrap();
         serde_json::json!({
             "doctor": report.to_json(),
-            "compactions": compactions.into_boundaries(),
+            "compactions": compactions.into_boundaries().unwrap(),
             "affordances": crate::affordance::of_session(session).unwrap(),
             "counts": counts.finish(session, &[]),
             "usage_keys": session.messages.iter().map(|m| crate::stats::usage_key(Harness::Claude, m)).collect::<Vec<_>>(),

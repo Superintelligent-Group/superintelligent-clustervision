@@ -68,9 +68,9 @@ pub struct Report {
 
 impl Report {
     /// Start folding one session into the report. Stream its messages into the returned sink (a
-    /// [`ParseOptions::lazy_extra`](crate::ParseOptions::lazy_extra) pass: attribution counts
+    /// [`ParseOptions::facts`](crate::ParseOptions::facts) pass: attribution counts
     /// decoded text in bounded chunks, and attachment/compaction metadata live in `extra`), then
-    /// call [`SessionPass::finish`]. Rich metadata still follows the adapter's allocation policy.
+    /// call [`SessionPass::finish`]. Adapters without a facts projection retain their full metadata.
     pub fn session(&mut self, source: Option<std::path::PathBuf>) -> SessionPass<'_> {
         self.sessions += 1;
         SessionPass {

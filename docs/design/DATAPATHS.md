@@ -58,8 +58,8 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
 | Claude JSONL | Parallel metadata discovery; mmap typed borrowed conversational records including rich reads; large lazy tool inputs use Json source ranges; checkpoints | Demanded full arguments/details and uncommon fallback records remain owned; portable transport retains one line |
-| Codex JSONL | mmap line scan and bounded event-authority prepass; giant output spans through shared dispatch; checkpoints | Repeated JSON scans; buffered/zstd input still retains the largest raw line |
-| Codex legacy JSON / zstd | Separate whole-document/decompression paths | No general incremental marks; audit heap and semantic parity separately |
+| Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; selected giant outputs/assistant text retain checked ranges; checkpoints | Function arguments, nonstring outputs, body-dependent user classification and unknown shapes retain owned fallbacks |
+| Codex legacy JSON / zstd | Compressed modern JSONL decodes once into a shared private arena; legacy JSON remains separate | Legacy whole-document path; decoded disk extent is input-sized; no general compressed incremental marks |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
 | Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
 | Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery counts without collecting; direct project JSONL resumes finalized records; record text remains owned |
@@ -93,8 +93,8 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Full discovery | Scans + cache persistence + catalog replacement/watch construction | Metadata reducers instead of collect-to-count; dependency-aware caching |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
 | JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP collects selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP selected payloads |
-| Affordance view | Lazy full-extras stream into classified rows; bounded text summaries | Rich extras, side stores and result rows; escaped validation still traverses the whole field |
-| Doctor | Lazy-extra stream; resolved text lengths and JSON writer counts | Attribution state, adapter rich/fallback parsing and structured arguments |
+| Affordance view | Facts projection into classified rows; checked bounded text summaries | Unprojected adapters retain rich extras; side stores and result rows; escaped validation still traverses the whole field |
+| Doctor | Facts projection; checked text lengths and JSON writer counts | Attribution state, unsupported adapter rich/fallback parsing and demanded structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
 | FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep | Writer arenas coexist with admitted documents; giant escaped-body composition proof pending |
@@ -203,7 +203,8 @@ live edits occurring after the freeze are excluded from the comparison.
 The giant Codex gate found a hidden full-Value allocation in event-authority detection before the
 mapped stream. Detection now projects only discriminants from strictly validated raw records and
 reuses the mapping. Tool-only histories therefore stay bounded even when no natural-language
-record allows an early exit. Buffered/zstd traversal still retains a largest-line buffer.
+record allows an early exit. Positioned buffered/zstd replay now removes the largest-line buffer for selected known payloads;
+owned fallback shapes remain explicit in the Codex section below.
 
 Event publication now spills ordered rows above a 256 KiB charged-memory budget to an owned
 private temporary file, then reads that file once inside the existing SQL transaction. Corrupt,
@@ -896,3 +897,32 @@ message and final metadata SHA-256 oracles match exactly in all five cases.
 Full per-pair process timings, build hashes and output digests are retained in
 [CODEX-POSITIONED-RELEASE-CONTROLS.json](CODEX-POSITIONED-RELEASE-CONTROLS.json). These are scoped
 controls of the stated input shapes, not a claim that the documented owned fallbacks are bounded.
+
+### Demand-specific metadata and checked consumers
+
+`ParseOptions::facts()` requests the shared reducer metadata contract while retaining lazy text and
+usage identity. Doctor, affordance reads and compaction detection now use it. Claude and Cursor CLI
+project those facts before unrelated rich sidecars are allocated; other adapters conservatively
+keep their existing full metadata until individually projected. Full/complete wire output is
+unchanged. Lane summaries use the narrower existing usage-identity request, preserve response
+deduplication and propagate assistant-report read errors.
+
+On Claude synthetic input containing two independently enlarged sidecars (each 16/64 MiB; source
+roughly 32/128 MiB), doctor facts retain **5,622 requested Rust heap bytes** at both sizes, versus
+33,559,369/134,222,665 bytes for rich metadata. Cursor CLI's 16/64 MiB escaped-result fixture retains
+**380,059 bytes** at both sizes instead of approximately 67.3/268.6 MB. Both reports match the rich
+reference exactly. These are allocation controls, not CPU benchmarks or process-RSS bounds.
+Claude corpus reducers (25 transcripts), malformed/duplicate/type controls, Cursor CLI reducer
+parity, streamed compaction metadata and full requested summaries pass scoped tests. The doctor
+heap gate uses the production facts request and compares its complete report with a separate
+full-mode reference. Demanded unusual bodies, attachment snapshots and unsupported format metadata
+remain explicit allocation boundaries.
+
+Consumer composition now preserves retained text through archive framing, commit-evidence scans,
+FTS and semantic extraction, and deferred dataset transport. Watch/search merge each original
+captured read set, including absent sidecars; a later source or dependency change fails unread
+demands instead of silently yielding empty text. Archive frame bytes and first-user labels match
+owned text, and source-backed subagent launch receipts use checked bounded marker scans.
+Compaction keeps full requested summaries (which may be large) and propagates read failures;
+count-only passes do not read summary bodies. These checks concern output fidelity and source
+identity, not a universal bound on requested output size.
