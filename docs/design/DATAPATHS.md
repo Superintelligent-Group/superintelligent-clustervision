@@ -3850,3 +3850,16 @@ binary/source hashes and exact final counters in
 [CONTINUE-LM-EMIT-EVIDENCE.json](CONTINUE-LM-EMIT-EVIDENCE.json). This is allocation evidence,
 not a timing, RSS or physical-I/O claim. Source message/block rosters, demanded owned metadata,
 merged index cardinality, output-sized private staging and verification work remain.
+
+### Matched Cline port instruction control (2026-10-13, mcp_finish)
+
+[matched actual-port control](../../tools/profiling/results/cline-port-cpu/README.md)
+retains baseline 56e94da5, rejected checked writer 87f6322d (+12.46%) and isolated
+shared canonical-string repair 7a54dc49 (+5.68%) for one mixed escaped 8 MiB Claude
+Text → Cline Native operation. Six instruction-only Cachegrind children and native
+oracles preserve exact CLI warnings and all three output files, with no
+normalization and unchanged source/catalog identity. Strict baseline/intermediate
+rejections retain the verifier's unexpected timestamp/ID losses; this lane does
+not change fidelity policy. The unused counting pass is removed; strict source
+acceptance/publication costs remain. This is a scoped CPU tradeoff, not a speed
+claim; separate operation gates establish memory ownership.

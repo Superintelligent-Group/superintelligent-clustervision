@@ -1,0 +1,200 @@
+{
+  "baseline": "56e94da5",
+  "intermediate": "87f6322d",
+  "final_source": "87f6322d plus only wire/write.rs from 7a54dc49; excludes unrelated merged root changes",
+  "scope": "One actual CLI Claude→Cline Native port with 8 MiB decoded Text (4 MiB ordinary,4 MiB escaped); includes discovery/selection, checked source preparation, staged publication, target reparsing and fidelity report. Setup/reset/hash checks outside instrumented children.",
+  "platform": {
+    "architecture": "aarch64 Linux",
+    "compiler": "rustc1.99.0 b940084d7, LLVM23.1.1",
+    "valgrind": "3.24.0",
+    "docker_image": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+    "cpu_cap": 3,
+    "memory_bytes": 8589934592,
+    "build_jobs": 1,
+    "build": "default features, release opt3 ThinLTO debug1; no probe-heap/RUSTFLAGS; common CV_BUILD_SHA=cpu-control; forced Rust input mtimes on each own export"
+  },
+  "fixture": {
+    "decoded_payload_bytes": 8388608,
+    "ordinary_bytes": 4194304,
+    "escaped_bytes": 4194304,
+    "source_bytes": 9507884,
+    "sha256": "212ed6645407fc8532d0459ec0a32a0f910ad5bffd70f24eef53bcf0b4a8c869",
+    "shape": "four fixed-timestamp Claude messages; one giant Text field; no real-store input"
+  },
+  "command": [
+    "/scratch/cline-port-cpu-control/run/cv",
+    "port",
+    "claude:old",
+    "--harness",
+    "cline",
+    "--out",
+    "/scratch/cline-port-cpu-control/run/output",
+    "--no-context",
+    "--thinking",
+    "native"
+  ],
+  "environment": {
+    "PATH": "/usr/bin:/bin",
+    "HOME": "/scratch/cline-port-cpu-control/run/home",
+    "CLUSTERVISION_HOME": "/scratch/cline-port-cpu-control/run/catalog",
+    "XDG_CONFIG_HOME": "/scratch/cline-port-cpu-control/run/config",
+    "XDG_DATA_HOME": "/scratch/cline-port-cpu-control/run/data",
+    "XDG_CACHE_HOME": "/scratch/cline-port-cpu-control/run/cache",
+    "TMPDIR": "/scratch/cline-port-cpu-control/run/tmp",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "RAYON_NUM_THREADS": "1",
+    "CLUSTERVISION_MAX_STALE_SECS": "3600",
+    "NO_COLOR": "1",
+    "TERM": "dumb"
+  },
+  "source_identity_sha256": "92b1fbc733f45ee1c782ba7205d4b909526cf519094fca25beb4295a0d1f5e00",
+  "frozen_seed_sha256": "8ae0b190615721edc239e717c161329cd735aaa3cc04096e49a91a10eb2bf2b9",
+  "counts": {
+    "baseline": [
+      990571017,
+      990536761
+    ],
+    "rejected_intermediate": [
+      1113952373,
+      1113924021
+    ],
+    "final": [
+      1046771904,
+      1046787523
+    ]
+  },
+  "instruction_change_percent": {
+    "rejected_intermediate": 12.456092431736444,
+    "final": 5.676200469694992
+  },
+  "fidelity": {
+    "stdout_sha256": "8d0408a6df2222320e52f982f7075902231918f09dd9657f8d41881cb937b0db",
+    "stderr_sha256": "d672ed484518e384da173a29abdab229f98af047a088a129631fe4f8de4f0833",
+    "generated": {
+      "tasks/1791806400000/api_conversation_history.json": {
+        "bytes": 9507799,
+        "sha256": "daa96199f459aef558342a5e1aa07fb6889756e79a59bc1aff8e3ef2315b4b48"
+      },
+      "tasks/1791806400000/task_metadata.json": {
+        "bytes": 58,
+        "sha256": "862aa2776b8e6dc3df0f1b435e4aa4c2f6f6e83418e97179ec8bc22b7d8a195b"
+      },
+      "tasks/1791806400000/ui_messages.json": {
+        "bytes": 89,
+        "sha256": "f6a41742990f6eba4165b270afc88296d9b9331705772b22aaa353f76584af87"
+      }
+    },
+    "roles": [
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ],
+    "giant_payload_bytes": 8388608,
+    "fidelity_warnings": "  ⚠ lossy: timestamps: 4 → 1\n  ⚠ lossy: message ids: 4 → 0\n",
+    "normalization": "none; fixed source timestamp determines task ID"
+  },
+  "strict_diagnostic": {
+    "baseline_exit": 1,
+    "candidate_exit": 1,
+    "stdout_exact": true,
+    "stderr_exact": true,
+    "output_files_exact": true,
+    "verifier_classification": "unexpected losses, pre-existing and unchanged",
+    "stderr": "Error: --strict: 2 unexpected fidelity loss(es) porting to cline: timestamps: 4 → 1; message ids: 4 → 0\n"
+  },
+  "exact_parity": "All three revisions native/profiled stdout,stderr and all three output files match without normalization; source bytes/metadata and frozen seed hashes unchanged. Strict diagnostic checked baseline vs intermediate; normal final warnings preserve the same verifier classification.",
+  "attribution": {
+    "method": "disjoint fn blocks across files; totals equal PROGRAM TOTALS",
+    "totals": {
+      "before": 990571017,
+      "after": 1113952373,
+      "fixed": 1046771904
+    },
+    "largest_positive_deltas": [
+      {
+        "function": "core::str::converts::from_utf8",
+        "before": 180522811,
+        "after": 325367307,
+        "fixed": 325367307,
+        "fixed_delta": 144844496
+      },
+      {
+        "function": "<serde_json::read::SliceRead as serde_json::read::Read>::ignore_str",
+        "before": 137025506,
+        "after": 164428310,
+        "fixed": 164428310,
+        "fixed_delta": 27402804
+      },
+      {
+        "function": "<cv_core::ir_json::PrettyJson<alloc::io::buffered::bufwriter::BufWriter<cv_core::harness::store::bytes::ByteStage>> as core::io::write::Write>::write",
+        "before": 0,
+        "after": 24612004,
+        "fixed": 24611885,
+        "fixed_delta": 24611885
+      },
+      {
+        "function": "memchr::memmem::searcher::searcher_kind_neon",
+        "before": 21399177,
+        "after": 42790260,
+        "fixed": 42790260,
+        "fixed_delta": 21391083
+      },
+      {
+        "function": "cv_core::harness::store::json::value_compatible_str_at_depth_with::<cv_core::harness::store::document::accepts_value_at_depth::{closure#0}>",
+        "before": 19783153,
+        "after": 39557610,
+        "fixed": 39557610,
+        "fixed_delta": 19774457
+      },
+      {
+        "function": "<memchr::arch::aarch64::neon::memchr::One>::find_raw",
+        "before": 0,
+        "after": 14430966,
+        "fixed": 14430966,
+        "fixed_delta": 14430966
+      },
+      {
+        "function": "cv_core::json::write_raw::<&mut dyn core::io::write::Write>",
+        "before": 0,
+        "after": 0,
+        "fixed": 3670148,
+        "fixed_delta": 3670148
+      },
+      {
+        "function": "core::slice::memchr::memchr_aligned",
+        "before": 0,
+        "after": 3670100,
+        "fixed": 3670100,
+        "fixed_delta": 3670100
+      },
+      {
+        "function": "cv_core::harness::claude::stream_bytes_at",
+        "before": 0,
+        "after": 2822976,
+        "fixed": 2822976,
+        "fixed_delta": 2822976
+      },
+      {
+        "function": "cv_core::harness::store::document::string_end",
+        "before": 7565659,
+        "after": 8405134,
+        "fixed": 8405134,
+        "fixed_delta": 839475
+      }
+    ],
+    "removed_pass": "StringCount::feed: 67,170,074 Ir in intermediate, absent in final. Final operation removes about 67.16M Ir from intermediate.",
+    "remaining_work": "Strict captured-range UTF8/JSON acceptance and existing source_features validation at both verified-emission and direct-writer boundaries; exact pretty-format publication. No validation authority/state or acceptance policy changed."
+  },
+  "source_binary_hashes": [
+    "cc5da98001ab6a624c99684c371ceb2a258b0aebf32114e5bd9b7f89677421fb  cv-before",
+    "37f4496a38b44929fed568332ee861e0e282565bc6a2a51d5148e43fb37d072b  cv-after",
+    "e4c6e13281daaa99e876c1aca23aa2265d3a50df2e6dd925555c1990a63e8cc4  cv-fixed",
+    "34629b959c932fae21395b0cc3b24223c04bae08e56e6109318c8829da9ecfcb  before.tar",
+    "e2a88489a9d5487e6457b3cefa74b881fa5e7767cbbdaa666310af71dee3773b  after.tar",
+    "677a89f1d7dc262265fa70489e03b591b0da172fa02b27150fec51c854feb1ab  fixed-wire-write.rs"
+  ],
+  "controls": "Two matched repeats per revision: six Cachegrind children, three successful normal native oracles. Initial strict preflight failed before instrumentation; retained baseline diagnostic and matching intermediate strict exit 1/output. Candidate exports immutable; fixed source differs from 87f6322d only in wire/write.rs.",
+  "conclusion": "Final mixed escaped workload uses 5.68% more guest instructions than baseline. Accepted scoped CPU tradeoff alongside separate bounded-memory operation gates; not a speed claim, no timing/RSS/syscall claim. No broader workload matrix."
+}
