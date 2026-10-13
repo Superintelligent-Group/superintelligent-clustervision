@@ -1,5 +1,5 @@
-//! Selected flat JSONL reads retain checked payload ranges; complete/tree/custom rows keep their
-//! existing owned policy. One captured descriptor/context serves the entire operation.
+//! Selected flat JSONL reads retain checked payload ranges, including complete ordinary messages.
+//! Complete unknown/control rows and tree/custom roles keep their existing owned policy. One captured descriptor/context serves the entire operation.
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
 use crate::json::{InvalidJson, JsonSource, JsonView};

@@ -499,6 +499,7 @@ pub fn parse_for_emit(
                     | Harness::Continue
                     | Harness::LmStudio
                     | Harness::Hermes
+                    | Harness::OpenClaw
             ));
     if checked {
         options.spans = true;

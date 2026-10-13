@@ -9,6 +9,8 @@
 
 - OpenCode v1 and Hermes exports resolve checked fields per row, reuse prepared inserts, and roll back failed exports atomically.
 - Grok and Qwen exports stream guarded JSONL payloads while preserving native output, thinking modes, and fidelity reports.
+- Flat OpenClaw rehomes retain guarded message payloads through complete preparation while preserving control carriers, rich metadata and fidelity.
+
 - OpenClaw exports stream guarded payloads and bounded fallback titles, preserving native transcript, index and fidelity behavior.
 
 - Prune streams malformed JSON rows without owning their bodies, preserving exact bytes and fatal invalid UTF-8 behavior.

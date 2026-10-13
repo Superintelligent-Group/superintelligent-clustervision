@@ -246,7 +246,7 @@ impl Adapter for OpenClaw {
                     sink,
                 ));
             }
-            if opts.spans && !opts.complete {
+            if opts.spans {
                 return selected::stream(r, &facts, opts, sink);
             }
             // `filter_map`, not `map_while`: a single undecodable line (stray non-UTF8 bytes) must be

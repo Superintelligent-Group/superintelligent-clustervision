@@ -366,3 +366,75 @@ fn checked_openclaw_late_source_failure_cannot_publish_staged_records() -> Resul
     assert_eq!(fs::read_to_string(&destination)?, "original transcript");
     Ok(())
 }
+
+#[test]
+fn checked_openclaw_complete_preparation_preserves_ir_wire_report_and_late_failure() -> Result<()> {
+    use crate::stream::ParseOptions;
+    let world = cv_testkit::World::in_process("openclaw-complete-preparation");
+    let source = world.base.join("source.jsonl");
+    let rows = [
+        json!({"type":"session","version":4,"cwd":"/synthetic","timestamp":"2026-10-12T12:00:00Z","parentSession":"parent"}),
+        json!({"type":"session_info","id":"info","name":"explicit"}),
+        json!({"type":"message","id":"u","message":{"role":"user","content":"λ\n".repeat(10000),"provenance":{"kind":"internal_system","sourceTool":"cron"}}}),
+        json!({"type":"message","id":"a","parentId":"u","message":{"role":"assistant","model":"m","content":[{"type":"thinking","thinking":"reasoning".repeat(1000),"thinkingSignature":"sig"},{"type":"toolCall","id":"call","name":"run","arguments":{"command":"echo λ"}},{"type":"unknown","text":"ignored"}],"provider":"p","usage":{"input":3,"output":2,"cost":{"total":0.1}},"diagnostics":{"rich":true}}}),
+        json!({"type":"message","id":"t","message":{"role":"toolResult","toolCallId":"call","content":[{"text":"first"},{"type":"other","text":"λ".repeat(10000)}],"details":{"structured":true}}}),
+        json!({"type":"message","message":{"role":"system","content":"owned system prompt"}}),
+        json!({"type":"message","message":{"role":"custom","content":"custom body","display":true}}),
+        json!({"type":"future_record","id":"future","payload":{"unknown":[true,"keep all"]}}),
+        json!({"type":"label","id":"label","targetId":"u","label":"first"}),
+    ];
+    let mut bytes = Vec::new();
+    for row in rows {
+        serde_json::to_writer(&mut bytes, &row)?;
+        bytes.push(b'\n');
+    }
+    fs::write(&source, &bytes)?;
+    let reference = crate::SessionRef::new("complete", Harness::OpenClaw, &source);
+    let adapter = crate::harness::for_harness(Harness::OpenClaw).unwrap();
+    let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &ParseOptions::complete())?;
+    let checked = crate::emit::parse_for_emit(adapter.as_ref(), &reference, Harness::OpenClaw)?;
+    assert!(checked.messages.iter().any(|m| m.content.iter().any(|b| matches!(
+        b,
+        Block::Text {
+            text: crate::Text::Source(_)
+        }
+    ))));
+    let mut materialized = checked.clone();
+    materialized.materialize()?;
+    assert_eq!(serde_json::to_value(&owned)?, serde_json::to_value(&materialized)?);
+    assert!(owned.messages.iter().any(|m| m.kind == MessageKind::Carrier));
+    for mode in ThinkingMode::ALL {
+        let checked = crate::emit::parse_for_emit(adapter.as_ref(), &reference, Harness::OpenClaw)?;
+        let opts = EmitOptions {
+            new_id: Some("fixed".into()),
+            thinking: mode,
+            ..Default::default()
+        };
+        let (before, before_report) = crate::emit::emit_report(
+            &owned,
+            Harness::OpenClaw,
+            &world.base.join(format!("owned-{mode}")),
+            &opts,
+        )?;
+        let out = world.base.join(format!("checked-{mode}"));
+        let (after, after_report) = crate::emit::emit_report(&checked, Harness::OpenClaw, &out, &opts)?;
+        assert_eq!(normalized(&before.path)?, normalized(&after.path)?);
+        assert_eq!(
+            serde_json::to_value(before_report)?,
+            serde_json::to_value(after_report)?
+        );
+        let index = after.path.parent().unwrap().join("sessions.json");
+        assert_eq!(
+            fs::read(before.path.parent().unwrap().join("sessions.json"))?,
+            fs::read(&index)?
+        );
+        let transcript = fs::read(&after.path)?;
+        let index_bytes = fs::read(&index)?;
+        fs::write(&source, b"late replacement")?;
+        assert!(crate::emit::emit_report(&checked, Harness::OpenClaw, &out, &opts).is_err());
+        assert_eq!(fs::read(&after.path)?, transcript);
+        assert_eq!(fs::read(&index)?, index_bytes);
+        fs::write(&source, &bytes)?;
+    }
+    Ok(())
+}
