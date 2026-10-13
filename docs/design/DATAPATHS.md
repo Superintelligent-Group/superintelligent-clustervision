@@ -3364,3 +3364,10 @@ expands all parents' forests before selecting one live/newest deterministic copy
 identity; direct attribution wins identical-copy ties. Owned duplicate-parent fixtures preserve
 and actually ingest disjoint adopted children; missing-preferred and all-missing cases preserve
 live fallback and meaningful source errors. No extra fleet reread or latency claim is implied.
+
+A combined-suite contention failure exposed a WAL read→write upgrade race introduced by
+reading authority in a deferred transaction before its first INSERT. Event publication now
+acquires an `Immediate` transaction before authority validation. A deterministic two-connection
+control reproduces the old `SQLITE_BUSY_SNAPSHOT`, then exercises the production transaction
+owner to establish write ownership before output mutation and preserve mismatch rejection.
+This changes lock acquisition, not busy timeouts or retry policy.

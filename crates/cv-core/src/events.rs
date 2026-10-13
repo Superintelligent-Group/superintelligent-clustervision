@@ -945,6 +945,120 @@ mod db {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // Acquire write ownership before reading authority. A deferred WAL transaction can read
+    // the old output, lose a race to another publication and fail its read→write upgrade.
+    fn publication_transaction<'a>(
+        conn: &'a mut Connection,
+        r: &SessionRef,
+        from: usize,
+        prov: &Provenance,
+    ) -> Result<rusqlite::Transaction<'a>> {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if from > 0 && !authority_matches(&tx, r, prov)? {
+            anyhow::bail!("event prefix belongs to another or unknown output authority");
+        }
+        Ok(tx)
+    }
+
+    #[cfg(test)]
+    mod authority_lock_tests {
+        use super::*;
+        #[test]
+        fn publication_owns_writer_before_authority_read_and_rejects_intervening_change() {
+            let world = cv_testkit::World::in_process("event-authority-lock");
+            let path = world.base.join("source.jsonl");
+            std::fs::write(&path, "source").unwrap();
+            let r = SessionRef::new("lock", crate::Harness::Claude, path);
+            let source = crate::source::Probe::default()
+                .snapshot(&r)
+                .with_reads(&Default::default());
+            record_from_with_source(&r, 0, &[], &source, &Provenance::default());
+            let mut first = open().unwrap();
+            let second = open().unwrap();
+            assert_eq!(
+                first
+                    .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "wal"
+            );
+            second.busy_timeout(std::time::Duration::ZERO).unwrap();
+            // This is the former production sequence: the read admits a WAL snapshot, then
+            // another connection commits before the initial INSERT. Waiting cannot fix it.
+            let deferred = first.transaction().unwrap();
+            assert!(authority_matches(&deferred, &r, &Provenance::default()).unwrap());
+            second
+                .execute(
+                    "UPDATE event_sessions SET workflow='intervening' WHERE session_id='lock'",
+                    [],
+                )
+                .unwrap();
+            let error = deferred
+                .execute(
+                    "INSERT OR IGNORE INTO event_sessions(harness,session_id) VALUES('claude','lock')",
+                    [],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_BUSY_SNAPSHOT)
+            );
+            deferred.rollback().unwrap();
+            let before: Option<String> = second
+                .query_row(
+                    "SELECT workflow FROM event_sessions WHERE session_id='lock'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(publication_transaction(&mut first, &r, 1, &Provenance::default()).is_err());
+            assert_eq!(
+                second
+                    .query_row(
+                        "SELECT workflow FROM event_sessions WHERE session_id='lock'",
+                        [],
+                        |row| row.get::<_, Option<String>>(0)
+                    )
+                    .unwrap(),
+                before
+            );
+            let provenance = Provenance {
+                workflow: Some("intervening".into()),
+                ..Default::default()
+            };
+            // Exercise the production transaction owner before its first output mutation.
+            let immediate = publication_transaction(&mut first, &r, 1, &provenance).unwrap();
+            let error = second
+                .execute(
+                    "UPDATE event_sessions SET workflow='racing' WHERE session_id='lock'",
+                    [],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DatabaseBusy)
+            );
+            immediate
+                .execute(
+                    "INSERT OR IGNORE INTO event_sessions(harness,session_id) VALUES('claude','lock')",
+                    [],
+                )
+                .unwrap();
+            immediate.commit().unwrap();
+            assert_eq!(
+                second
+                    .query_row(
+                        "SELECT workflow FROM event_sessions WHERE session_id='lock'",
+                        [],
+                        |row| row.get::<_, Option<String>>(0)
+                    )
+                    .unwrap(),
+                before
+            );
+            let count: i64 = second
+                .query_row("SELECT COUNT(*) FROM event_sync WHERE id='lock'", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "authority rejection preserves the published stamp");
+        }
+    }
+
     fn record_from_in<E: std::borrow::Borrow<Event>>(
         conn: &mut Connection,
         r: &SessionRef,
@@ -956,11 +1070,8 @@ mod db {
         prov: &Provenance,
         source: &crate::source::Snapshot,
     ) -> Result<()> {
-        let tx = conn.transaction()?;
+        let tx = publication_transaction(conn, r, from, prov)?;
         let harness = r.harness.as_str();
-        if from > 0 && !authority_matches(&tx, r, prov)? {
-            anyhow::bail!("event prefix belongs to another or unknown output authority");
-        }
         tx.execute(
             "INSERT OR IGNORE INTO event_sessions(harness, session_id) VALUES(?1,?2)",
             params![harness, r.id],

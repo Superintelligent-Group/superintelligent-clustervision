@@ -4,6 +4,8 @@
 
 - Semantic refresh selects one live copy per harness-qualified session identity, preventing duplicate-store source errors and repairing old duplicate vector rows.
 
+- Event publication acquires write ownership before authority validation, avoiding WAL snapshot-upgrade failures during concurrent updates.
+
 - Event caches bind published rows to source copy, attribution and working directory, preventing stale copied-session reuse and incompatible append prefixes.
 
 - Indexing skips unchanged empty transcripts when captured source guards are fresh; missing files and historical unknown signatures still invalidate.
