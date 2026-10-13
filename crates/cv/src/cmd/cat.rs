@@ -26,7 +26,6 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
     };
     let mut parsed = cv_core::stream::stream_counted(adapter.as_ref(), &r, &ParseOptions::lazy(), &mut found)?;
     parsed.messages = found.hit.into_iter().collect();
-    let resolver = parsed.resolver();
     let sidecar = sidecar_path(&r.path);
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
 
@@ -49,6 +48,11 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
         ));
     }
 
+    print_result(&parsed, tool_use_id, &sidecar, &mut out)
+}
+
+fn print_result(parsed: &cv_core::Session, tool_use_id: &str, sidecar: &Path, mut out: &mut impl Write) -> Result<()> {
+    let resolver = parsed.resolver();
     for m in &parsed.messages {
         for b in &m.content {
             let Block::ToolResult {
@@ -80,11 +84,13 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
                 }
                 eprintln!("⚠ persisted output {p} is missing — printing the transcript's stub instead");
             }
-            let text = content.resolve(&resolver);
+            let text = content
+                .try_resolve(&resolver)
+                .context("reading transcript tool result")?;
             // 2. A prune marker: the original lives in the sidecar next to the transcript.
             if text.trim_start().starts_with(cv_core::prune::MARKER_PREFIX) {
                 if sidecar.is_file() {
-                    if let Ok(v) = cv_core::prune::retrieve(&sidecar, tool_use_id) {
+                    if let Ok(v) = cv_core::prune::retrieve(sidecar, tool_use_id) {
                         eprintln!("✦ from prune sidecar {}", sidecar.display());
                         return print_value(&mut out, &v);
                     }
@@ -107,15 +113,15 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
     // Not in the transcript at all: a sidecar can still carry it (e.g. a `toolUseResult`-only
     // stash from a prune of a session whose result block was itself dropped).
     if sidecar.is_file() {
-        if let Ok(v) = cv_core::prune::retrieve(&sidecar, tool_use_id) {
+        if let Ok(v) = cv_core::prune::retrieve(sidecar, tool_use_id) {
             eprintln!("✦ from prune sidecar {}", sidecar.display());
             return print_value(&mut out, &v);
         }
     }
     usage(format!(
         "no tool result {tool_use_id:?} in {} — `cv tools {} --timeline` lists its tool calls",
-        short_id(&r.id),
-        short_id(&r.id)
+        short_id(&parsed.id),
+        short_id(&parsed.id)
     ))
 }
 
@@ -168,6 +174,53 @@ fn print_value(out: &mut impl Write, v: &serde_json::Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_result_prints_exact_text_and_rejects_source_failure_without_output() {
+        use cv_core::{Block, Flow, Harness, Message, MessageSink, Role, Session};
+        let world = cv_testkit::World::in_process("cat-retained-result");
+        let path = world.base.join("result.json");
+        let body = "actual🌙\n\"\\".repeat(1024);
+        let wire = serde_json::to_vec(&body).unwrap();
+        std::fs::write(&path, &wire).unwrap();
+        let content = cv_core::Json::source(&path, 0, wire.len() as u64)
+            .unwrap()
+            .with_view(|view| view.source_text())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(content, cv_core::Text::Source(_)));
+        let mut message = Message::new(Role::Tool);
+        message.content.push(Block::ToolResult {
+            tool_use_id: "call".into(),
+            content,
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: None,
+        });
+        let mut first = First {
+            id: "call",
+            input: false,
+            hit: None,
+        };
+        assert_eq!(first.message(message), Flow::Stop);
+        let mut session = Session::new("cat", Harness::Codex);
+        session.messages = first.hit.into_iter().collect();
+        let sidecar = world.base.join("absent.flat.jsonl");
+        let mut output = Vec::new();
+        print_result(&session, "call", &sidecar, &mut output).unwrap();
+        assert_eq!(output, format!("{body}\n").as_bytes());
+        let mut owned = session.clone();
+        let resolver = owned.resolver();
+        owned.messages[0].materialize(&resolver).unwrap();
+        let mut expected = Vec::new();
+        print_result(&owned, "call", &sidecar, &mut expected).unwrap();
+        assert_eq!(output, expected);
+        std::fs::remove_file(path).unwrap();
+        let mut rejected = Vec::new();
+        assert!(print_result(&session, "call", &sidecar, &mut rejected).is_err());
+        assert!(rejected.is_empty());
+    }
 
     #[test]
     fn sidecar_sits_next_to_the_transcript() {

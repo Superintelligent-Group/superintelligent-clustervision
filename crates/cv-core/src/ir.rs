@@ -666,6 +666,23 @@ impl Message {
         Ok(())
     }
 
+    /// Own demanded text while preserving lazy structured arguments, propagating source errors.
+    /// Fallible renderers use this instead of the legacy best-effort `materialize_text` helper.
+    pub fn try_materialize_text(&mut self, resolver: &crate::lazy::Resolver) -> anyhow::Result<()> {
+        for block in &mut self.content {
+            let text = match block {
+                Block::Text { text } | Block::Thinking { text, .. } => text,
+                Block::ToolResult { content, .. } => content,
+                _ => continue,
+            };
+            if text.is_span() {
+                let owned = text.try_resolve(resolver)?.into_owned();
+                *text = crate::lazy::Text::Inline(owned);
+            }
+        }
+        Ok(())
+    }
+
     /// Own text fields while leaving complete structured arguments available for explicit
     /// projection. Renderers with argument previews need no whole argument tree.
     pub fn materialize_text(&mut self, resolver: &crate::lazy::Resolver) {
@@ -1118,6 +1135,58 @@ pub fn home_rel(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_text_materialization_preserves_lazy_arguments_and_reports_failed_text() {
+        let world = cv_testkit::World::in_process("checked-message-text");
+        let path = world.base.join("text.json");
+        let body = "exact🌙\n\"".repeat(1024);
+        let wire = serde_json::to_vec(&body).unwrap();
+        std::fs::write(&path, &wire).unwrap();
+        let source = crate::Json::source(&path, 0, wire.len() as u64).unwrap();
+        let text = source.with_view(|view| view.source_text()).unwrap().unwrap();
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::Text { text });
+        message.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "tool".into(),
+            namespace: None,
+            input: source,
+        });
+        message.content.push(Block::Thinking {
+            text: crate::Text::Span(crate::Span {
+                source: Some(path.clone()),
+                offset: 1,
+                len: wire.len() as u64 - 2,
+                escaped: true,
+            }),
+            signature: None,
+            encrypted: None,
+            redacted: false,
+        });
+        let original = message.clone();
+        message.try_materialize_text(&crate::Resolver::new(None)).unwrap();
+        assert!(matches!(&message.content[0], Block::Text { text: crate::Text::Inline(value) } if value == &body));
+        assert!(matches!(
+            &message.content[1],
+            Block::ToolUse {
+                input: crate::Json::Source(_),
+                ..
+            }
+        ));
+        assert!(
+            matches!(&message.content[2], Block::Thinking { text: crate::Text::Inline(value), .. } if value == &body)
+        );
+        std::fs::remove_file(path).unwrap();
+        let mut failed = original;
+        assert!(failed.try_materialize_text(&crate::Resolver::new(None)).is_err());
+        assert!(matches!(
+            &failed.content[0],
+            Block::Text {
+                text: crate::Text::Source(_)
+            }
+        ));
+    }
 
     #[test]
     fn resolved_token_estimate_matches_materialized_fields() {

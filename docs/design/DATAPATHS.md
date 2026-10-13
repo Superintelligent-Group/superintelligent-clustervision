@@ -1920,3 +1920,23 @@ are writer-call counts, not timing or syscall measurements. Two sequential stagi
 bounded scratch (64 KiB each during their respective phases); private spool I/O and client payload
 sizes are unchanged. Scoped tests cover exact plain/document windows and continuations, rejected
 giant-frame extent/rollback, late-source validation, and deferred flush/finish errors.
+Retained-text consumer audit (2026-10-12): `cat` lazily selects the requested tool result, then
+previously called best-effort `Text::resolve`, which converted a failed Source demand to an
+empty successful result. It now uses checked resolution before printing any transcript bytes.
+Its existing `--input` Json serde path already propagates source failures and emits the actual
+requested JSON value; requested full input ownership there is unchanged. Rendered CLI views
+previously called best-effort `Message::materialize_text`; an unavailable Source remained lazy
+and reached a renderer's inline dereference, causing a panic. The shared fallible
+`try_materialize_text` owns demanded inline/span/Source text with checked errors while leaving
+structured Json arguments lazy. The existing fallible view sink records its failure and stops.
+Owned/lazy exact output, Source deletion with no body output, and retained argument identity
+regressions pass. Legacy best-effort helpers retain their existing compatibility contracts.
+
+The audit distinguishes intentional legacy policies from disconnected carriers: events' error
+detail remains explicitly inline-only, with lazy span/Source errors still contributing the
+error event; that policy was not broadened. Dataset, watch dependency recording, semantic/FTS
+heads, archive framing, and fidelity validation have checked Source paths. Direct render/text
+helpers still require materialized messages, as before for Span. Adapter title summaries often
+run inside checked captured-source callbacks; their best-effort helper is not a new carrier
+omission. Cursor's inline-only selected identity/model helpers need a separate correctness
+fix, since their decoded backing can produce Source metadata strings.

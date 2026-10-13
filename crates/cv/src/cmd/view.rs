@@ -1320,7 +1320,10 @@ pub(crate) fn stream_session_render<W: std::io::Write>(
 
             // In-window: resolve this message's lazy content spans (peak = one message) and render.
             let mut m = m;
-            m.materialize_text(&self.resolver);
+            if let Err(error) = m.try_materialize_text(&self.resolver) {
+                self.result = Err(std::io::Error::other(error));
+                return Flow::Stop;
+            }
             if self.first_user.is_none() && m.role == Role::User {
                 if let Some(t) = m.text() {
                     if !t.trim().is_empty() {
@@ -1577,6 +1580,78 @@ mod tests {
         assert_eq!(emitted, output.len() as u64 + 1);
         assert!(streamed.peak_above_baseline_bytes < 8 * 1024 * 1024);
         assert!(materialized.peak_above_baseline_bytes > 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rendered_source_text_matches_owned_and_returns_source_error_before_rendering() {
+        let world = cv_testkit::World::in_process("render-checked-source-text");
+        let path = world.base.join("text.json");
+        let body = "actual🌙\n".repeat(1024);
+        let wire = serde_json::to_vec(&body).unwrap();
+        std::fs::write(&path, &wire).unwrap();
+        let text = cv_core::Json::source(&path, 0, wire.len() as u64)
+            .unwrap()
+            .with_view(|view| view.source_text())
+            .unwrap()
+            .unwrap();
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::Text { text });
+        let mut session = Session::new("render-source", Harness::Codex);
+        session.messages.push(message);
+        struct Replay(Session);
+        impl Adapter for Replay {
+            fn harness(&self) -> Harness {
+                Harness::Codex
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                _: &SessionRef,
+                _: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                cv_core::stream::replay(self.0.clone(), sink)
+            }
+        }
+        let r = SessionRef::new("render-source", Harness::Codex, &path);
+        let mut expected = session.clone();
+        expected.materialize().unwrap();
+        let expected = show_message(&expected.messages[0]).unwrap();
+        let adapter = Replay(session);
+        let mut output = Vec::new();
+        stream_session_render(
+            &adapter,
+            &r,
+            &mut output,
+            |_| String::new(),
+            show_message,
+            RenderOpts {
+                range: None,
+                max_bytes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(output, expected.as_bytes());
+        std::fs::remove_file(path).unwrap();
+        let mut failed_output = Vec::new();
+        let result = stream_session_render(
+            &adapter,
+            &r,
+            &mut failed_output,
+            |_| String::new(),
+            show_message,
+            RenderOpts {
+                range: None,
+                max_bytes: None,
+            },
+        );
+        assert!(result.is_err());
+        assert!(failed_output.is_empty());
     }
 
     #[test]
