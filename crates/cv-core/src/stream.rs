@@ -17,6 +17,41 @@ use crate::ir::{Message, Session, SessionRef};
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+/// The metadata requested when [`ParseOptions::extra`] is enabled.
+///
+/// Facts are a shared projection for read-only reducers, not a separate output schema. Adapters
+/// without a projection implementation may return full extras; consumers must not depend on the
+/// absence of unrelated fields. Existing full, bulk and lazy constructors retain their behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExtraProjection {
+    /// Existing harness metadata and structured tool-result details, without field filtering.
+    #[default]
+    Full,
+    /// Only the common reducer facts, selected before decoding unrelated large metadata.
+    ///
+    /// The fixed union is:
+    /// - message attachment type and `compactMetadata` / `compact_metadata` fields `trigger`,
+    ///   `preTokens`, `durationMs` (doctor, compaction and text labels);
+    /// - Claude `message.id`, with the same precedence as full extras (usage deduplication);
+    /// - Kimi Code `origin_kind`, Hermes `display_kind`, Codex `item_type`, OpenCode
+    ///   `metadata.source` (affordance classification);
+    /// - OpenCode `patches[].hash/files`, `snapshot.start/files` and Devin tool-result
+    ///   `details.restorable` (checkpoint affordances);
+    /// - session `permission_modes`, Devin `agent_mode`, OpenCode permission rules
+    ///   (`permission`, `pattern`, `action`) and `revert.messageID/snapshot`, and common
+    ///   `checkpoints.count/tag/files`.
+    ///
+    /// Facts preserve their existing harness bags / tool-detail locations and value semantics.
+    /// Kind, origin, usage, model, IDs and other first-class IR fields remain independent of this
+    /// projection. Session facts written at EOF must still be returned, even after a selected
+    /// message window. Format-complete demand always overrides this projection with Full.
+    ///
+    /// This mode is intended for internal reducers. It must not replace full metadata on JSON
+    /// output, conversion, redaction or watch paths, or silently add extras to existing lean
+    /// output. Source validation and dependency/provenance checks remain mandatory.
+    Facts,
+}
+
 /// Knobs controlling how much of each message an adapter materializes. Everything off (the
 /// [`Default`]) is the cheapest faithful pass; full-fidelity callers opt back in.
 ///
@@ -44,6 +79,9 @@ pub struct ParseOptions {
     /// turn and can dwarf the visible transcript. Bulk text consumers (index/search/dataset) never
     /// read it; only full-fidelity paths (json export, cross-harness convert/port, round-trips) do.
     pub extra: bool,
+    /// Select the metadata projection when `extra` is enabled. Ignored when `extra` is false;
+    /// `complete` always demands full metadata. Unsupported adapters may retain full extras.
+    pub extra_projection: ExtraProjection,
     /// Request provider response identity needed to deduplicate usage, without unrelated rich
     /// extras. Claude retains its string `message.id`; other harnesses may ignore this demand.
     /// Full `extra` remains authoritative when both are requested.
@@ -117,6 +155,29 @@ impl ParseOptions {
             extra: true,
             ..Default::default()
         }
+    }
+
+    /// Internal reducer pass: lazy content and the shared metadata facts projection.
+    /// Adapters that do not implement projection keep their established full-extra behavior.
+    pub fn facts() -> Self {
+        ParseOptions {
+            extra: true,
+            extra_projection: ExtraProjection::Facts,
+            usage_identity: true,
+            ..Self::lazy()
+        }
+    }
+
+    /// Whether an adapter should project the shared facts instead of full rich metadata.
+    pub fn facts_only(&self) -> bool {
+        self.extra && !self.complete && self.extra_projection == ExtraProjection::Facts
+    }
+
+    /// Whether full metadata is demanded, including the overriding format-complete mode.
+    /// Projection-aware producers use this for large sidecars; producers without a facts path
+    /// continue to honor `extra` and may return full metadata for Facts requests.
+    pub fn wants_full_extra(&self) -> bool {
+        self.complete || (self.extra && self.extra_projection == ExtraProjection::Full)
     }
 
     /// Usage aggregation: lazy content and response identity, without large rich sidecars.
@@ -850,6 +911,35 @@ fn note_turns(r: &SessionRef, turns: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_projection_preserves_existing_modes_and_complete_precedence() {
+        for opts in [
+            ParseOptions::full(),
+            ParseOptions::lazy_extra(),
+            ParseOptions::complete(),
+        ] {
+            assert!(opts.wants_full_extra());
+            assert!(!opts.facts_only());
+        }
+        for opts in [ParseOptions::bulk(), ParseOptions::lazy(), ParseOptions::usage()] {
+            assert!(!opts.wants_full_extra());
+            assert!(!opts.facts_only());
+        }
+        let facts = ParseOptions::facts();
+        assert!(facts.extra && facts.spans && facts.usage_identity);
+        assert!(facts.facts_only());
+        assert!(!facts.wants_full_extra());
+        let complete = ParseOptions {
+            complete: true,
+            ..facts.clone()
+        };
+        assert!(complete.wants_full_extra());
+        assert!(!complete.facts_only());
+        let disabled = ParseOptions { extra: false, ..facts };
+        assert!(!disabled.facts_only());
+        assert!(!disabled.wants_full_extra());
+    }
+
     use super::*;
     use crate::ir::{Block, Role};
 
