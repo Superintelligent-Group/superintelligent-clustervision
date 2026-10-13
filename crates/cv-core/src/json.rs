@@ -238,6 +238,21 @@ impl JsonSource {
         self.backing_range(backing, offset, len)?
             .with_validation(Validation::Syntax, f)
     }
+    /// Only for store::text::Builder's successfully completed quoted JSON-string output.
+    /// Its checked string/canonical writers guarantee strict UTF8/escape validity before this
+    /// call; arbitrary decoded JSON and external source ranges must use validated readers.
+    pub(crate) fn generated_string_text(
+        &self,
+        backing: Arc<crate::harness::store::bytes::ByteSource>,
+        offset: u64,
+        len: u64,
+    ) -> Result<crate::lazy::Text> {
+        self.backing_range(backing, offset, len)?
+            .with_validation(Validation::Cached, |view| {
+                view.source_text()?.context("constructed JSON string")
+            })
+    }
+
     fn backing_range(
         &self,
         backing: Arc<crate::harness::store::bytes::ByteSource>,

@@ -1020,3 +1020,13 @@ The retained watcher currently uses lazy-extra producers for Claude/Codex; other
 retain their existing full-mode producer contract, and demanded metadata/extra may remain owned.
 Per-pair CPU/RSS and the allocation control recipe are recorded in
 [MCP-OBSERVE-PREFIX-CONTROLS.json](MCP-OBSERVE-PREFIX-CONTROLS.json).
+
+Trusted generated-string publication (2026-10-12): shared `store::text::Builder` now publishes its
+successfully completed quoted JSON string through a specifically named internal cached-view
+helper, retaining range bounds, original provenance, and backing ownership. This avoids a second
+whole-string syntax/escape scan; it is not a skip-validation API for arbitrary decoded JSON or
+external ranges. Small strings still decode through the checked normal path. Builder string views
+use the strict canonical string writer; scoped native/portable tests verify lone high/low
+surrogates from syntax-only views fail before publication, producer/writer failures propagate,
+published prefixes remain valid, and full composed text matches the existing codec. Producer-wide
+CPU measurements remain the consuming adapter lanes' work.
