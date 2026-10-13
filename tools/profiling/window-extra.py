@@ -25,26 +25,21 @@ def identity(path):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--before", type=Path, required=True)
-    parser.add_argument("--after", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--harness", choices=["claude", "cursor"], default="claude")
-    args = parser.parse_args()
-    binaries = {name: path.resolve(strict=True) for name, path in
-                [("before", args.before), ("after", args.after)]}
-    root = args.output.resolve()
-    root.mkdir(parents=True, exist_ok=False)
-    fixtures = []
+def generate_fixture(root, harness, kind, mib):
+    """Create one owned synthetic fixture, shared by comparison controls and focused CI gates."""
+    root = Path(root)
+    if harness not in ("claude", "cursor") or kind not in ("unselected", "selected", "malformed") or mib < 0:
+        raise ValueError("unsupported window fixture")
+    suffix = "jsonl" if harness == "claude" else "vscdb"
+    if (root / f"{kind}-{mib}.{suffix}").exists():
+        raise FileExistsError("window fixture already exists")
 
     def row(kind, uuid, content, **extra):
         return dict(type=kind, uuid=uuid, sessionId="window-extra",
                     timestamp="2026-01-01T00:00:00Z", cwd="/tmp/window",
                     message=dict(role=kind, content=content), **extra)
 
-    for kind, mib in ([("unselected", 16), ("unselected", 64), ("selected", 0), ("malformed", 0)]
-                      if args.harness == "claude" else []):
+    if harness == "claude":
         path = root / f"{kind}-{mib}.jsonl"
         rows = [row("user", "u", "selected prompt"),
                 row("assistant", "a", [dict(type="tool_use", id="call", name="Read",
@@ -67,32 +62,43 @@ def main():
             output.write(b'"}}\n')
             output.write((json.dumps(tail, separators=(",", ":")) + "\n").encode())
             output.write(b'{"type":"custom-title","customTitle":"final title"}\n')
-        fixtures.append((kind, mib, path))
+    else:
+        path = root / f"{kind}-{mib}.vscdb"
+        composer = {"name":"EOF composer title","createdAt":1,"lastUpdatedAt":2,"unifiedMode":"agent",
+                    "modelConfig":{"modelName":"fallback-model"},
+                    "fullConversationHeadersOnly":[{"bubbleId":"u"},{"bubbleId":"a"},{"bubbleId":"last"}]}
+        user = {"bubbleId":"u","type":1,"text":"selected prompt","unifiedMode":99}
+        assistant = {"bubbleId":"a","type":2,"text":"late answer","thinking":{"text":"thought","signature":"sig"},
+                     "modelInfo":{"modelName":"latest-model"},"tokenCount":{"inputTokens":10,"outputTokens":8},
+                     "unifiedMode":1,"toolFormerData":{"name":"run_terminal_cmd","toolCallId":"call",
+                     "rawArgs":'{"command":"true"}',"status":"success","result":"x\n" * (mib*1024*1024//2) if mib else "rich result"}}
+        final = {"bubbleId":"last","type":1,"text":"final prompt","unifiedMode":5}
+        assistant_wire = json.dumps(assistant)
+        if kind == "malformed":
+            assistant_wire = assistant_wire[:-1] + ',"providerOptions":{"ignored":"\\ud800"}}'
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY,value TEXT)")
+            for key, value in [("composerData:window-extra",json.dumps(composer)),
+                               ("bubbleId:window-extra:u",json.dumps(user)),
+                               ("bubbleId:window-extra:a",assistant_wire),
+                               ("bubbleId:window-extra:last",json.dumps(final))]:
+                db.execute("INSERT INTO cursorDiskKV VALUES(?,?)",(key,value))
+    return path
 
-    if args.harness == "cursor":
-        fixtures = []
-        for kind, mib in [("unselected", 16), ("unselected", 64), ("selected", 0), ("malformed", 0)]:
-            path = root / f"{kind}-{mib}.vscdb"
-            composer = {"name":"EOF composer title","createdAt":1,"lastUpdatedAt":2,"unifiedMode":"agent",
-                        "modelConfig":{"modelName":"fallback-model"},
-                        "fullConversationHeadersOnly":[{"bubbleId":"u"},{"bubbleId":"a"},{"bubbleId":"last"}]}
-            user = {"bubbleId":"u","type":1,"text":"selected prompt","unifiedMode":99}
-            assistant = {"bubbleId":"a","type":2,"text":"late answer","thinking":{"text":"thought","signature":"sig"},
-                         "modelInfo":{"modelName":"latest-model"},"tokenCount":{"inputTokens":10,"outputTokens":8},
-                         "unifiedMode":1,"toolFormerData":{"name":"run_terminal_cmd","toolCallId":"call",
-                         "rawArgs":'{"command":"true"}',"status":"success","result":"x\n" * (mib*1024*1024//2) if mib else "rich result"}}
-            final = {"bubbleId":"last","type":1,"text":"final prompt","unifiedMode":5}
-            assistant_wire = json.dumps(assistant)
-            if kind == "malformed":
-                assistant_wire = assistant_wire[:-1] + ',"providerOptions":{"ignored":"\\ud800"}}'
-            with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY,value TEXT)")
-                for key, value in [("composerData:window-extra",json.dumps(composer)),
-                                   ("bubbleId:window-extra:u",json.dumps(user)),
-                                   ("bubbleId:window-extra:a",assistant_wire),
-                                   ("bubbleId:window-extra:last",json.dumps(final))]:
-                    db.execute("INSERT INTO cursorDiskKV VALUES(?,?)",(key,value))
-            fixtures.append((kind,mib,path))
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--before", type=Path, required=True)
+    parser.add_argument("--after", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--harness", choices=["claude", "cursor"], default="claude")
+    args = parser.parse_args()
+    binaries = {name: path.resolve(strict=True) for name, path in
+                [("before", args.before), ("after", args.after)]}
+    root = args.output.resolve()
+    root.mkdir(parents=True, exist_ok=False)
+    fixtures = [(kind, mib, generate_fixture(root, args.harness, kind, mib))
+                for kind, mib in [("unselected", 16), ("unselected", 64), ("selected", 0), ("malformed", 0)]]
 
     results = {}
     for kind, mib, path in fixtures:
