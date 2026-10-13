@@ -5,9 +5,33 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use tantivy::collector::{Collector, SegmentCollector};
-use tantivy::schema::{Field, Value};
+use tantivy::schema::document::{DeserializeError, DocumentDeserialize, DocumentDeserializer};
+use tantivy::schema::{Field, OwnedValue, Value};
 use tantivy::store::StoreReader;
 use tantivy::{DocAddress, DocId, Score, SegmentReader, TantivyDocument};
+
+/// cv emits id first. Read only that value, falling back for compatible indexes with a
+/// different stored-field order. Tantivy still decompresses the same bounded store block.
+struct FirstStoredField(Option<(Field, OwnedValue)>);
+impl DocumentDeserialize for FirstStoredField {
+    fn deserialize<'de, D: DocumentDeserializer<'de>>(mut deserializer: D) -> Result<Self, DeserializeError> {
+        Ok(Self(deserializer.next_field()?))
+    }
+}
+fn stored_id(store: &StoreReader, doc: DocId, id: Field) -> tantivy::Result<Option<String>> {
+    let first: FirstStoredField = store.get(doc)?;
+    if let Some((field, value)) = first.0 {
+        if field == id {
+            return Ok(if let OwnedValue::Str(id) = value {
+                Some(id)
+            } else {
+                None
+            });
+        }
+    }
+    let full: TantivyDocument = store.get(doc)?;
+    Ok(full.get_first(id).and_then(|v| v.as_str()).map(str::to_owned))
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
@@ -91,10 +115,12 @@ impl Winners {
     }
 }
 
-type SessionFilter = std::sync::Arc<dyn Fn(&str, &TantivyDocument) -> bool + Send + Sync>;
+type SessionFilter = std::sync::Arc<dyn Fn(&str, &StoreReader, DocId) -> tantivy::Result<bool> + Send + Sync>;
 
 pub(crate) struct TopSessions {
     pub(crate) filter: Option<SessionFilter>,
+    #[cfg(test)]
+    pub(crate) full_documents: bool,
     id: Field,
     limit: usize,
 }
@@ -104,6 +130,8 @@ impl TopSessions {
             id,
             limit,
             filter: None,
+            #[cfg(test)]
+            full_documents: false,
         }
     }
 }
@@ -113,6 +141,8 @@ impl Collector for TopSessions {
     fn for_segment(&self, ordinal: u32, segment: &SegmentReader) -> tantivy::Result<Self::Child> {
         Ok(SessionSegment {
             filter: self.filter.clone(),
+            #[cfg(test)]
+            full_documents: self.full_documents,
             filter_cache: HashMap::new(),
             id: self.id,
             ordinal,
@@ -157,6 +187,8 @@ impl Collector for TopSessions {
 }
 
 pub(crate) struct SessionSegment {
+    #[cfg(test)]
+    full_documents: bool,
     filter: Option<SessionFilter>,
     filter_cache: HashMap<String, bool>,
     id: Field,
@@ -171,18 +203,32 @@ impl SegmentCollector for SessionSegment {
         if self.error.is_some() || !self.winners.competitive_score(score) {
             return;
         }
-        match self.store.get::<TantivyDocument>(doc) {
-            Ok(stored) => {
-                let id = stored
-                    .get_first(self.id)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
+        let identity = {
+            #[cfg(test)]
+            if self.full_documents {
+                self.store
+                    .get::<TantivyDocument>(doc)
+                    .map(|stored| stored.get_first(self.id).and_then(|v| v.as_str()).map(str::to_owned))
+            } else {
+                stored_id(&self.store, doc, self.id)
+            }
+            #[cfg(not(test))]
+            stored_id(&self.store, doc, self.id)
+        };
+        match identity {
+            Ok(id) => {
+                let id = id.unwrap_or_default();
                 if let Some(filter) = &self.filter {
                     let accepted = if let Some(accepted) = self.filter_cache.get(&id) {
                         *accepted
                     } else {
-                        let accepted = filter(&id, &stored);
+                        let accepted = match filter(&id, &self.store, doc) {
+                            Ok(accepted) => accepted,
+                            Err(error) => {
+                                self.error = Some(error);
+                                return;
+                            }
+                        };
                         // A bounded metadata cache avoids repeated meta lookups for adjacent
                         // chunks. Clearing it changes only lookup cost, never selection.
                         if self.filter_cache.len() == 64 {
@@ -250,15 +296,15 @@ impl SegmentCollector for IdSegment {
         if self.error.is_some() {
             return;
         }
-        match self.store.get::<TantivyDocument>(doc) {
-            Ok(stored) => {
-                if let Some(id) = stored.get_first(self.id).and_then(|v| v.as_str()) {
-                    self.ids.insert(id.to_owned());
-                }
+        match stored_id(&self.store, doc, self.id) {
+            Ok(Some(id)) => {
+                self.ids.insert(id);
             }
+            Ok(None) => {}
             Err(error) => self.error = Some(error),
         }
     }
+
     fn harvest(self) -> Self::Fruit {
         if let Some(error) = self.error {
             Err(error)
@@ -271,6 +317,34 @@ impl SegmentCollector for IdSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_projection_handles_field_order_missing_ids_and_numeric_heads() {
+        let mut schema = tantivy::schema::Schema::builder();
+        let id = schema.add_text_field("id", tantivy::schema::STRING | tantivy::schema::STORED);
+        let title = schema.add_text_field("title", tantivy::schema::STORED);
+        let number = schema.add_i64_field("number", tantivy::schema::STORED);
+        let index = tantivy::Index::create_in_ram(schema.build());
+        let mut writer = index.writer_with_num_threads(1, 15_000_000).unwrap();
+        for document in [
+            tantivy::doc!(id => "first", title => "title"),
+            tantivy::doc!(title => "title", id => "later"),
+            tantivy::doc!(number => 23i64, id => "numeric-head"),
+            tantivy::doc!(title => "missing"),
+            TantivyDocument::default(),
+        ] {
+            writer.add_document(document).unwrap();
+        }
+        writer.commit().unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let store = searcher.segment_reader(0).get_store_reader(1).unwrap();
+        for (doc, expected) in [Some("first"), Some("later"), Some("numeric-head"), None, None]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(stored_id(&store, doc as DocId, id).unwrap().as_deref(), expected);
+        }
+    }
 
     #[test]
     fn bounded_winners_match_exhaustive_sessions_in_every_order() {

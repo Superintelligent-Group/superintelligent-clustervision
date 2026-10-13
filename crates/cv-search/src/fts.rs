@@ -1991,19 +1991,25 @@ pub fn text_search_indexed_filtered(
         let cwd = filter.cwd.map(str::to_owned);
         let fields = f.clone();
         let reader = searcher.clone();
-        collector.filter = Some(std::sync::Arc::new(move |id, fallback| {
+        collector.filter = Some(std::sync::Arc::new(move |id, store, doc_id| {
             // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
             // describes the returned hit, falling back only for legacy body-only documents.
             let meta = meta_doc(&reader, &fields, id);
-            let doc = meta.as_ref().unwrap_or(fallback);
-            harness
+            let fallback;
+            let doc = if let Some(meta) = meta.as_ref() {
+                meta
+            } else {
+                fallback = store.get::<TantivyDocument>(doc_id)?;
+                &fallback
+            };
+            Ok(harness
                 .as_ref()
                 .is_none_or(|wanted| doc.get_first(fields.harness).and_then(|v| v.as_str()) == Some(wanted.as_str()))
                 && cwd.as_ref().is_none_or(|needle| {
                     doc.get_first(fields.cwd)
                         .and_then(|v| v.as_str())
                         .is_some_and(|value| value.contains(needle))
-                })
+                }))
         }));
     }
     let ranked = searcher.search(&parsed, &collector).context("running search")?;
@@ -2849,6 +2855,82 @@ mod tests {
         drop(writer);
         std::fs::remove_dir_all(dir).ok();
         std::fs::remove_dir_all(sdir).ok();
+    }
+
+    /// Run in an isolated process. Prepare once, then compare full/head modes under `/usr/bin/time`.
+    #[test]
+    #[ignore = "manual CPU and docstore I/O probe"]
+    fn session_identity_lookup_probe() {
+        let dir = PathBuf::from(std::env::var_os("CV_SEARCH_ID_PROBE_DIR").expect("isolated probe dir"));
+        let mode = std::env::var("CV_SEARCH_ID_PROBE_MODE").unwrap_or_else(|_| "head".into());
+        if !dir.join("meta.json").exists() {
+            assert_eq!(mode, "prepare", "prepare an isolated fixture before benchmarking");
+            let (index, f) = open_or_create(&dir).unwrap();
+            let mut writer = open_writer(&index, 15_000_000).unwrap();
+            for i in 0..32_000 {
+                writer.add_document(tantivy::doc!(
+                    f.id => format!("session-{:04}", i / 64), f.kind => KIND_BODY,
+                    f.harness => "claude", f.cwd => "/Users/example/dev/project/subdirectory/".repeat(3),
+                    f.title => "Representative session label describing a coding task and its context",
+                    f.path => format!("/Users/example/.claude/projects/example-project/session-{:04}.jsonl", i / 64),
+                    f.created_at => 123i64, f.first_msg => i as i64,
+                    f.body => "needle identical query body"
+                )).unwrap();
+                if i % 8_000 == 7_999 {
+                    writer.commit().unwrap();
+                }
+            }
+            // Giant searchable text cannot enter the docstore: only its tiny metadata is stored.
+            writer.add_document(tantivy::doc!(f.id => "giant", f.kind => KIND_BODY, f.body => format!("giantproof {}", "z".repeat(8 << 20)))).unwrap();
+            writer.commit().unwrap();
+        }
+        let (index, f) = open_existing(&dir).unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        if mode == "prepare" {
+            let mut logical_bytes = 0;
+            let mut store_bytes = 0;
+            for segment in searcher.segment_readers() {
+                let store = segment.get_store_reader(1).unwrap();
+                store_bytes += store.space_usage().total().get_bytes();
+                for doc in 0..segment.max_doc() {
+                    logical_bytes += store.get_document_bytes(doc).unwrap().len();
+                }
+            }
+            let giant = parse_text_query(&index, &f, "giantproof").unwrap();
+            let addr = searcher
+                .search(&giant, &TopDocs::with_limit(1).order_by_score())
+                .unwrap()[0]
+                .1;
+            let doc: TantivyDocument = searcher.doc(addr).unwrap();
+            assert!(doc.get_first(f.body).is_none());
+            let store = searcher.segment_reader(addr.segment_ord).get_store_reader(1).unwrap();
+            let giant_stored_bytes = store.get_document_bytes(addr.doc_id).unwrap().len();
+            println!("probe docs={} logical_stored_bytes={logical_bytes} compressed_store_bytes={store_bytes} giant_body_bytes={} giant_stored_bytes={giant_stored_bytes} fast_fields={:?}", searcher.num_docs(), 8 << 20,
+                index.schema().fields().filter(|(_, field)| field.is_fast()).map(|(_, field)| field.name().to_owned()).collect::<Vec<_>>());
+            return;
+        }
+        let query_text = std::env::var("CV_SEARCH_ID_PROBE_QUERY").unwrap_or_else(|_| "needle".into());
+        let query = parse_text_query(&index, &f, &query_text).unwrap();
+        let matched = searcher.search(&query, &tantivy::collector::Count).unwrap();
+        let mut full = crate::session_collector::TopSessions::new(f.id, 20);
+        full.full_documents = true;
+        let head = crate::session_collector::TopSessions::new(f.id, 20);
+        let expected = searcher.search(&query, &full).unwrap();
+        assert_eq!(searcher.search(&query, &head).unwrap(), expected);
+        let collector = if mode == "full" { &full } else { &head };
+        let iterations: usize = std::env::var("CV_SEARCH_ID_PROBE_REPEATS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            assert_eq!(searcher.search(&query, collector).unwrap(), expected);
+        }
+        println!(
+            "probe mode={mode} query={query_text:?} queries={iterations} matching_documents={matched} returned_sessions={} limit=20 elapsed_ms={}",
+            expected.len(),
+            start.elapsed().as_millis()
+        );
     }
 
     #[test]
