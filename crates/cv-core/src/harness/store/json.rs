@@ -13,10 +13,21 @@ pub(crate) fn value_compatible_with(b: &[u8], mut string: impl FnMut(usize, usiz
     value_compatible_at_depth_with(b, 0, &mut string)
 }
 
-pub(crate) fn value_compatible_at_depth_with(b: &[u8], mut depth: usize, mut string: impl FnMut(usize, usize)) -> bool {
-    if std::str::from_utf8(b).is_err() {
+pub(crate) fn value_compatible_at_depth_with(b: &[u8], depth: usize, string: impl FnMut(usize, usize)) -> bool {
+    let Ok(text) = std::str::from_utf8(b) else {
         return false;
-    }
+    };
+    value_compatible_str_at_depth_with(text, depth, string)
+}
+
+/// The source view already owns a UTF-8-validated str. Keep byte-slice entry points strict,
+/// without rescanning the whole borrowed document at this stronger boundary.
+pub(crate) fn value_compatible_str_at_depth_with(
+    text: &str,
+    mut depth: usize,
+    mut string: impl FnMut(usize, usize),
+) -> bool {
+    let b = text.as_bytes();
     let mut i = 0;
     while i < b.len() {
         match b[i] {
@@ -156,6 +167,11 @@ mod tests {
                 value_compatible(raw.get().as_bytes()),
                 serde_json::from_str::<serde_json::Value>(&input).is_ok(),
                 "{input}"
+            );
+            assert_eq!(
+                value_compatible_str_at_depth_with(raw.get(), 0, |_, _| {}),
+                serde_json::from_str::<serde_json::Value>(&input).is_ok(),
+                "validated str: {input}"
             );
         }
     }

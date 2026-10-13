@@ -186,7 +186,7 @@ pub(crate) fn accepts_value(raw: Raw<'_>) -> bool {
 
 pub(crate) fn accepts_value_at_depth(raw: Raw<'_>, depth: usize) -> bool {
     let b = raw.get().as_bytes();
-    super::json::value_compatible_at_depth_with(b, depth, |start, end| {
+    super::json::value_compatible_str_at_depth_with(raw.get(), depth, |start, end| {
         if end - start > INLINE_MAX {
             raw.1.remember(b.as_ptr() as usize + start, b.as_ptr() as usize + end);
         }

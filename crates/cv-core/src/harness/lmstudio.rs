@@ -842,10 +842,7 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
     let mut scan = Scan::default();
     if let Some(name) = fields.get("name") {
         let mut head = TitleHead::default();
-        name.for_each_str_chunk(|text| {
-            head.push(text, true);
-            Ok(())
-        })?;
+        head.read(name, true)?;
         let name = head.finish(true);
         scan.name = name.filter(|name| name != "Untitled" && !name.starts_with("Untitled -"));
     }
@@ -886,10 +883,7 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
         let mut head = TitleHead::default();
         if let Some(content) = version.get("content") {
             if content.is_string()? {
-                content.for_each_str_chunk(|text| {
-                    head.push(text, false);
-                    Ok(())
-                })?;
+                head.read(content, false)?;
             } else if let Some(parts) = content.array()? {
                 let mut first = true;
                 for part in parts {
@@ -899,10 +893,7 @@ fn scan_view(view: JsonView<'_>) -> Result<Scan> {
                             head.push("\n", false);
                         }
                         first = false;
-                        text.for_each_str_chunk(|text| {
-                            head.push(text, false);
-                            Ok(())
-                        })?;
+                        head.read(text, false)?;
                     }
                 }
             }
@@ -921,9 +912,32 @@ struct TitleHead {
     chars: usize,
     nonwhite: usize,
 }
+#[derive(Debug, thiserror::Error)]
+#[error("LM Studio title prefix complete")]
+struct TitleComplete;
+
 impl TitleHead {
+    // Called only inside read_document, after whole-source Value validation. A prefix stop
+    // still passes its enclosing source-identity check; only this local marker is swallowed.
+    fn read(&mut self, view: JsonView<'_>, trim: bool) -> Result<()> {
+        let result = view.for_each_str_chunk(|text| {
+            self.push(text, trim);
+            if self.complete(trim) {
+                Err(TitleComplete.into())
+            } else {
+                Ok(())
+            }
+        });
+        match result {
+            Err(error) if error.downcast_ref::<TitleComplete>().is_some() => Ok(()),
+            result => result.map(|_| ()),
+        }
+    }
+    fn complete(&self, trim: bool) -> bool {
+        self.chars == 81 && (self.nonwhite == 81 || (!trim && self.nonwhite > 0))
+    }
     fn push(&mut self, text: &str, trim: bool) {
-        if self.chars == 81 && (self.nonwhite == 81 || (!trim && self.nonwhite > 0)) {
+        if self.complete(trim) {
             return;
         }
         for c in text.chars() {
@@ -936,6 +950,9 @@ impl TitleHead {
             self.chars = (self.chars + 1).min(81);
             if !c.is_whitespace() {
                 self.nonwhite = self.chars;
+            }
+            if self.complete(trim) {
+                return;
             }
         }
     }
@@ -1814,7 +1831,7 @@ mod tests {
         ];
         for text in texts {
             let chars: Vec<_> = text.chars().collect();
-            for width in 1..19 {
+            for width in (1..19).chain(std::iter::once(chars.len().max(1))) {
                 for trim in [false, true] {
                     let mut head = TitleHead::default();
                     for chunk in chars.chunks(width) {
@@ -1828,6 +1845,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn title_prefix_stop_keeps_enclosing_source_identity_check() {
+        let dir = std::env::temp_dir().join(format!("cv-lm-title-prefix-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("title.conversation.json");
+        let original = serde_json::to_vec(&serde_json::json!({"name": "text\n".repeat(40_000)})).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let source = JsonSource::capture(&path).unwrap();
+        let result = source.read_document(|view| {
+            let mut head = TitleHead::default();
+            head.read(view.get("name")?.unwrap(), true)?;
+            assert!(head.complete(true));
+            // A prefix stop must not bypass the enclosing check when the unread tail changes.
+            std::fs::write(&path, b"{}").unwrap();
+            Ok(head.finish(true))
+        });
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
