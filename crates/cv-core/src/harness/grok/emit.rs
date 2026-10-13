@@ -3,13 +3,21 @@
 //! (`EmitOptions`, `effective_cwd`, the fidelity table) is in [`crate::emit`].
 
 use crate::emit::*;
-use crate::harness::store::JsonlStage;
+use crate::harness::{
+    store::JsonlStage,
+    wire::write::{self as wire, ObjectWriter},
+};
+use crate::lazy::{Resolver, Text};
+use std::borrow::Cow;
+
+#[cfg(test)]
+pub(crate) mod legacy;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, Role, Session};
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Map};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
@@ -18,8 +26,8 @@ use uuid::Uuid;
 const GROK_ENCODE: &AsciiSet = &CONTROLS.add(b'/').add(b' ').add(b'.').add(b'%').add(b':').add(b'\\');
 
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
+    crate::emit::validate_native_source(session, Harness::Grok, opts.thinking)?;
+    let resolver = session.resolver();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::now_v7().to_string());
     let cwd = effective_cwd(session, opts);
     let cwd_str = cwd
@@ -29,7 +37,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     let enc_cwd = utf8_percent_encode(&cwd_str, GROK_ENCODE).to_string();
 
     let session_dir = out_dir.join(&enc_cwd).join(&new_id);
-    fs::create_dir_all(&session_dir).with_context(|| format!("creating {}", session_dir.display()))?;
 
     let created = session
         .created_at
@@ -82,8 +89,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     }
     summary.insert("session_summary".into(), json!(session.title.as_deref().unwrap_or("")));
     let summary_path = session_dir.join("summary.json");
-    fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
-        .with_context(|| format!("writing {}", summary_path.display()))?;
 
     // chat_history.jsonl, plus an updates.jsonl sidecar carrying each tool call's terminal status.
     // chat_history alone cannot express a failed tool result — the Grok parser derives
@@ -93,83 +98,95 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     let mut updates = JsonlStage::new();
     for msg in &session.messages {
         match msg.role {
-            Role::System => {
-                let text = grok_concat_text(msg);
-                lines.push(json!({ "type": "system", "content": text }))?;
-            }
-            Role::User => {
-                let text = grok_concat_text(msg);
-                lines.push(json!({
-                    "type": "user",
-                    "content": [{ "type": "text", "text": text }],
-                }))?;
-            }
-            Role::Assistant => {
-                let mut line = Map::new();
-                line.insert("type".into(), json!("assistant"));
-                line.insert("content".into(), json!(grok_concat_text(msg)));
-                if let Some(model) = msg.model.as_ref().or(session.model.as_ref()) {
-                    line.insert("model_id".into(), json!(model));
-                }
-                for b in &msg.content {
-                    if let Block::Thinking { text, encrypted, .. } = b {
-                        let mut r = Map::new();
-                        r.insert("text".into(), json!(text));
-                        // `encrypted` reasoning blobs are provider/account-bound. Carrying one
-                        // from a foreign harness (e.g. OpenAI's `encrypted_content`) makes Grok's
-                        // backend fail with "Could not decrypt the provided encrypted_content".
-                        // Only preserve it for a Grok→Grok port.
-                        if let Some(enc) = encrypted {
-                            if session.harness == Harness::Grok {
-                                r.insert("encrypted".into(), json!(enc));
-                            }
+            Role::System | Role::User | Role::Assistant => {
+                let (texts, thinking) = projected(msg, opts.thinking, &resolver)?;
+                lines.push_with(|writer| {
+                    let mut line = ObjectWriter::new(writer)?;
+                    line.field(
+                        "type",
+                        match msg.role {
+                            Role::System => "system",
+                            Role::User => "user",
+                            _ => "assistant",
+                        },
+                    )?;
+                    line.field_with("content", |writer| {
+                        if msg.role == Role::User {
+                            writer.write_all(b"[")?;
+                            let mut block = ObjectWriter::new(writer)?;
+                            block.field("type", "text")?;
+                            block.field_with("text", |w| {
+                                wire::joined_text(w, texts.iter().map(Cow::as_ref), &resolver)
+                            })?;
+                            block.finish()?;
+                            writer.write_all(b"]")?;
+                            Ok(())
+                        } else {
+                            wire::joined_text(writer, texts.iter().map(Cow::as_ref), &resolver)
                         }
-                        line.insert("reasoning".into(), Value::Object(r));
-                        break;
+                    })?;
+                    if msg.role == Role::Assistant {
+                        if let Some(model) = msg.model.as_ref().or(session.model.as_ref()) {
+                            line.field("model_id", model)?;
+                        }
+                        if let Some(Block::Thinking { text, encrypted, .. }) = thinking {
+                            line.field_with("reasoning", |writer| {
+                                let mut reason = ObjectWriter::new(writer)?;
+                                reason.field_with("text", |w| wire::text(w, text, &resolver))?;
+                                if session.harness == Harness::Grok {
+                                    if let Some(encrypted) = encrypted {
+                                        reason.field("encrypted", encrypted)?;
+                                    }
+                                }
+                                reason.finish()
+                            })?;
+                        }
+                        if msg.content.iter().any(|b| matches!(b, Block::ToolUse { .. })) {
+                            line.field_with("tool_calls", |writer| {
+                                writer.write_all(b"[")?;
+                                let mut first = true;
+                                for block in &msg.content {
+                                    if let Block::ToolUse { id, name, input, .. } = block {
+                                        if !first {
+                                            writer.write_all(b",")?;
+                                        }
+                                        first = false;
+                                        let mut call = ObjectWriter::new(writer)?;
+                                        call.field("id", id)?;
+                                        call.field("name", name)?;
+                                        call.field_with("arguments", |w| {
+                                            crate::harness::store::text::generate_string(w, |builder| {
+                                                input.with_view(|view| builder.push_json(view))
+                                            })
+                                        })?;
+                                        call.finish()?;
+                                    }
+                                }
+                                writer.write_all(b"]")?;
+                                Ok(())
+                            })?;
+                        }
                     }
-                }
-                // Emit assistant tool calls. The Grok parser reads `tool_calls[]` with
-                // `arguments` as a JSON-encoded *string*, so re-encode the structured input.
-                let calls: Vec<Value> = msg
-                    .content
-                    .iter()
-                    .filter_map(|b| match b {
-                        Block::ToolUse { id, name, input, .. } => Some((|| {
-                            Ok::<_, anyhow::Error>(json!({
-                                "id": id,
-                                "name": name,
-                                "arguments": serde_json::to_string(input.resolve()?.as_ref())?,
-                            }))
-                        })()),
-                        _ => None,
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                if !calls.is_empty() {
-                    line.insert("tool_calls".into(), Value::Array(calls));
-                }
-                lines.push(Value::Object(line))?;
+                    line.finish()
+                })?;
             }
-            // Tool turns map to `tool_result` lines (the parser turns these back into Role::Tool).
             Role::Tool => {
-                for b in &msg.content {
+                for block in &msg.content {
                     if let Block::ToolResult {
                         tool_use_id,
                         content,
                         is_error,
                         status,
                         ..
-                    } = b
+                    } = block
                     {
-                        lines.push(json!({
-                            "type": "tool_result",
-                            "tool_call_id": tool_use_id,
-                            "content": content,
-                        }))?;
-                        // ACP-style status entry: the source status verbatim when it has one,
-                        // else derived from `is_error` (Grok's own terminal states).
-                        let status = status
-                            .clone()
-                            .unwrap_or_else(|| if *is_error { "failed" } else { "completed" }.into());
+                        lines.push_with(|writer| {
+                            let mut line = ObjectWriter::new(writer)?;
+                            line.field("type", "tool_result")?;
+                            line.field("tool_call_id", tool_use_id)?;
+                            line.field_with("content", |w| wire::text(w, content, &resolver))?;
+                            line.finish()
+                        })?;
                         updates.push(json!({
                             "timestamp": epoch_ms(msg.timestamp.or(session.updated_at)),
                             "method": "session/update",
@@ -178,7 +195,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                 "update": {
                                     "sessionUpdate": "tool_call_update",
                                     "toolCallId": tool_use_id,
-                                    "status": status,
+                                    "status": status.as_deref().unwrap_or(if *is_error { "failed" } else { "completed" }),
                                 },
                             },
                         }))?;
@@ -187,6 +204,10 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             }
         }
     }
+    // Checked source production completes before any destination file or directory is touched.
+    fs::create_dir_all(&session_dir).with_context(|| format!("creating {}", session_dir.display()))?;
+    fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
+        .with_context(|| format!("writing {}", summary_path.display()))?;
     let chat_path = session_dir.join("chat_history.jsonl");
     lines.publish(&chat_path)?;
     if !updates.is_empty() {
@@ -200,18 +221,25 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     })
 }
 
-/// Concatenate a message's text blocks (Grok chat_history carries plain text only).
-fn grok_concat_text(msg: &crate::ir::Message) -> String {
-    let mut s = String::new();
-    for b in &msg.content {
-        if let Block::Text { text } = b {
-            if !s.is_empty() {
-                s.push('\n');
-            }
-            s.push_str(text);
+/// Project each block once; retained text and the first retained thinking stay borrowed.
+fn projected<'a>(
+    message: &'a crate::ir::Message,
+    mode: ThinkingMode,
+    resolver: &Resolver,
+) -> Result<(Vec<Cow<'a, Text>>, Option<&'a Block>)> {
+    let mut texts = Vec::new();
+    let mut thinking = None;
+    for block in &message.content {
+        let fate = crate::emit::thinking::fate(block, Harness::Grok, mode, resolver)?;
+        if let Block::Text { text } = block {
+            texts.push(Cow::Borrowed(text));
+        } else if let Some(text) = crate::emit::thinking::text_with_fate(block, fate) {
+            texts.push(text);
+        } else if thinking.is_none() && fate == ThinkingFate::Keep && matches!(block, Block::Thinking { .. }) {
+            thinking = Some(block);
         }
     }
-    s
+    Ok((texts, thinking))
 }
 
 /// The model id [`emit_grok`] records in `summary.json` as `current_model_id` — the session's own

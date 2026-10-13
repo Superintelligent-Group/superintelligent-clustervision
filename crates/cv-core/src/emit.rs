@@ -159,6 +159,8 @@ pub(crate) fn checked_target(target: Harness) -> bool {
             | Harness::LmStudio
             | Harness::OpenCode
             | Harness::Hermes
+            | Harness::Grok
+            | Harness::Qwen
     )
 }
 
@@ -548,6 +550,9 @@ pub fn parse_for_emit(
     }
     Ok(session)
 }
+
+#[cfg(test)]
+mod grok_qwen_tests;
 
 #[cfg(test)]
 mod tests {

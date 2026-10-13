@@ -6,6 +6,7 @@
 
 - OpenCode v2 shell reads retain checked command and output payloads, preserving native fallback formatting, metadata and source freshness.
 - OpenCode v1 and Hermes exports resolve checked fields per row, reuse prepared inserts, and roll back failed exports atomically.
+- Grok and Qwen exports stream guarded JSONL payloads while preserving native output, thinking modes, and fidelity reports.
 
 - Prune streams malformed JSON rows without owning their bodies, preserving exact bytes and fatal invalid UTF-8 behavior.
 - Cline and Roo exports stream guarded Anthropic history, preserving native files and fidelity without whole-session payload copies.

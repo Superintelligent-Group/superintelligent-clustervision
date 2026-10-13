@@ -10,7 +10,15 @@
 //! (`--out ~/.qwen`, or a scratch dir: the file goes to its `projects/`).
 
 use crate::emit::*;
-use crate::harness::store::JsonlStage;
+use crate::harness::{
+    store::JsonlStage,
+    wire::write::{self as wire, ObjectWriter},
+};
+use crate::lazy::{Resolver, Text};
+use std::{borrow::Cow, io::Write};
+
+#[cfg(test)]
+pub(crate) mod legacy;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, Message, MessageKind, Origin, Role, Session};
 use anyhow::{Context, Result};
@@ -36,58 +44,118 @@ fn projects_dir(out_dir: &Path) -> PathBuf {
     }
 }
 
-/// Gemini `Part`s for a message's content: text, thoughts, images, files and calls. Results are
-/// written by the tool-turn arm, one record each.
-fn parts(content: &[Block]) -> Vec<Value> {
+/// Borrowed parts after the existing per-block thinking projection.
+enum Part<'a> {
+    Text(Cow<'a, Text>),
+    Thinking { text: &'a Text, signature: Option<&'a str> },
+    Other(&'a Block),
+}
+fn parts<'a>(content: &'a [Block], mode: ThinkingMode, resolver: &Resolver) -> Result<Vec<Part<'a>>> {
     let mut out = Vec::new();
-    for b in content {
-        match b {
-            Block::Text { text } if !text.is_empty() => out.push(json!({ "text": text })),
-            Block::Thinking { text, signature, .. } if !text.is_empty() => {
-                let mut p = Map::new();
-                p.insert("text".into(), json!(text));
-                p.insert("thought".into(), json!(true));
-                if let Some(s) = signature {
-                    p.insert("thoughtSignature".into(), json!(s));
-                }
-                out.push(Value::Object(p));
+    for block in content {
+        let fate = crate::emit::thinking::fate(block, Harness::Qwen, mode, resolver)?;
+        if fate == ThinkingFate::Drop {
+            continue;
+        }
+        let text = match block {
+            Block::Text { text } => Some(Cow::Borrowed(text)),
+            _ => crate::emit::thinking::text_with_fate(block, fate),
+        };
+        if let Some(text) = text {
+            if crate::emit::thinking::first_character(&text, resolver, false)?.is_some() {
+                out.push(Part::Text(text));
             }
-            Block::Image { media_type, .. } => {
-                let mut inline = Map::new();
-                if let Some(mt) = media_type {
-                    inline.insert("mimeType".into(), json!(mt));
+            continue;
+        }
+        match block {
+            Block::Thinking { text, signature, .. } => {
+                if crate::emit::thinking::first_character(text, resolver, false)?.is_some() {
+                    out.push(Part::Thinking {
+                        text,
+                        signature: signature.as_deref(),
+                    });
                 }
-                out.push(json!({ "inlineData": inline }));
             }
-            Block::File { mime, path, source } => {
-                let mut fd = Map::new();
-                if let Some(mt) = mime {
-                    fd.insert("mimeType".into(), json!(mt));
+            Block::Image { .. } | Block::File { .. } | Block::ToolUse { .. } => out.push(Part::Other(block)),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+fn write_parts(writer: &mut dyn Write, parts: &[Part<'_>], resolver: &Resolver) -> Result<()> {
+    writer.write_all(b"[")?;
+    for (i, part) in parts.iter().enumerate() {
+        if i != 0 {
+            writer.write_all(b",")?;
+        }
+        let mut row = ObjectWriter::new(writer)?;
+        match part {
+            Part::Text(text) => row.field_with("text", |w| wire::text(w, text, resolver))?,
+            Part::Thinking { text, signature } => {
+                row.field_with("text", |w| wire::text(w, text, resolver))?;
+                row.field("thought", true)?;
+                if let Some(signature) = signature {
+                    row.field("thoughtSignature", signature)?;
+                }
+            }
+            Part::Other(Block::Image { media_type, .. }) => row.field_with("inlineData", |w| {
+                let mut data = ObjectWriter::new(w)?;
+                if let Some(mime) = media_type {
+                    data.field("mimeType", mime)?;
+                }
+                data.finish()
+            })?,
+            Part::Other(Block::File { mime, path, source }) => row.field_with("fileData", |w| {
+                let mut data = ObjectWriter::new(w)?;
+                if let Some(mime) = mime {
+                    data.field("mimeType", mime)?;
                 }
                 if let Some(uri) = source.as_deref().or(path.as_deref()) {
-                    fd.insert("fileUri".into(), json!(uri));
+                    data.field("fileUri", uri)?;
                 }
-                out.push(json!({ "fileData": fd }));
-            }
-            Block::ToolUse {
+                data.finish()
+            })?,
+            Part::Other(Block::ToolUse {
                 id,
                 name,
                 input,
                 namespace,
-            } => {
-                // A deferred tool is invoked through `tool_call {name, arguments}` (the reader's
-                // `namespace: tool_call`).
-                let call = if namespace.as_deref() == Some(super::TOOL_CALL) {
-                    json!({ "id": id, "name": super::TOOL_CALL, "args": { "name": name, "arguments": input } })
-                } else {
-                    json!({ "id": id, "name": name, "args": input })
-                };
-                out.push(json!({ "functionCall": call }));
-            }
-            _ => {}
+            }) => row.field_with("functionCall", |w| {
+                let mut call = ObjectWriter::new(w)?;
+                call.field("id", id)?;
+                let deferred = namespace.as_deref() == Some(super::TOOL_CALL);
+                call.field("name", if deferred { super::TOOL_CALL } else { name.as_str() })?;
+                call.field_with("args", |w| {
+                    if deferred {
+                        let mut args = ObjectWriter::new(w)?;
+                        args.field("name", name)?;
+                        args.field_with("arguments", |w| input.write_canonical(&mut &mut *w))?;
+                        args.finish()
+                    } else {
+                        input.write_canonical(&mut &mut *w)
+                    }
+                })?;
+                call.finish()
+            })?,
+            Part::Other(_) => unreachable!("selected part"),
         }
+        row.finish()?;
     }
-    out
+    writer.write_all(b"]")?;
+    Ok(())
+}
+fn projected_texts<'a>(message: &'a Message, mode: ThinkingMode, resolver: &Resolver) -> Result<Vec<Cow<'a, Text>>> {
+    message
+        .content
+        .iter()
+        .filter_map(
+            |b| match crate::emit::thinking::text(b, Harness::Qwen, mode, resolver) {
+                Ok(Some(text)) => Some(Ok(text)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            },
+        )
+        .collect()
 }
 
 fn usage_metadata(m: &Message) -> Option<Value> {
@@ -143,58 +211,79 @@ struct Writer<'a> {
 }
 
 impl Writer<'_> {
-    fn push(&mut self, ts: Option<String>, ty: &str, fields: Map<String, Value>) -> Result<()> {
+    fn push(
+        &mut self,
+        ts: Option<String>,
+        ty: &str,
+        fields: impl FnOnce(&mut ObjectWriter<'_>) -> Result<()>,
+    ) -> Result<()> {
         let uuid = Uuid::new_v4().to_string();
-        let mut r = Map::new();
-        r.insert("uuid".into(), json!(uuid));
-        r.insert("parentUuid".into(), json!(self.last_uuid));
-        r.insert("sessionId".into(), json!(self.session_id));
-        r.insert(
-            "timestamp".into(),
-            json!(ts.unwrap_or_else(|| self.fallback_ts.clone())),
-        );
-        r.insert("type".into(), json!(ty));
-        r.insert("cwd".into(), json!(self.cwd));
-        if let Some(v) = &self.version {
-            r.insert("version".into(), json!(v));
-        }
-        if let Some(b) = &self.branch {
-            r.insert("gitBranch".into(), json!(b));
-        }
-        r.extend(fields);
-        if self.lines.is_empty() {
-            if let Some(from) = self.forked_from {
-                r.insert("forkedFrom".into(), json!({ "sessionId": from }));
+        let first = self.lines.is_empty();
+        self.lines.push_with(|writer| {
+            let mut row = ObjectWriter::new(writer)?;
+            row.field("uuid", &uuid)?;
+            row.field("parentUuid", &self.last_uuid)?;
+            row.field("sessionId", self.session_id)?;
+            row.field("timestamp", ts.as_deref().unwrap_or(&self.fallback_ts))?;
+            row.field("type", ty)?;
+            row.field("cwd", &self.cwd)?;
+            if let Some(version) = &self.version {
+                row.field("version", version)?;
             }
-        }
-        self.lines.push(Value::Object(r))?;
+            if let Some(branch) = &self.branch {
+                row.field("gitBranch", branch)?;
+            }
+            fields(&mut row)?;
+            if first {
+                if let Some(from) = self.forked_from {
+                    row.field("forkedFrom", json!({ "sessionId": from }))?;
+                }
+            }
+            row.finish()
+        })?;
         self.last_uuid = Some(uuid);
         Ok(())
     }
-
-    fn system(&mut self, ts: Option<String>, subtype: &str, payload: Value) -> Result<()> {
-        let mut f = Map::new();
-        f.insert("subtype".into(), json!(subtype));
-        f.insert("provenance".into(), json!("system"));
-        f.insert("systemPayload".into(), payload);
-        self.push(ts, "system", f)
+    fn system(
+        &mut self,
+        ts: Option<String>,
+        subtype: &str,
+        payload: impl FnOnce(&mut dyn Write) -> Result<()>,
+    ) -> Result<()> {
+        self.push(ts, "system", |row| {
+            row.field("subtype", subtype)?;
+            row.field("provenance", "system")?;
+            row.field_with("systemPayload", payload)
+        })
     }
-
-    fn user(&mut self, ts: Option<String>, subtype: Option<&str>, provenance: &str, parts: Vec<Value>) -> Result<()> {
-        let mut f = Map::new();
-        if let Some(s) = subtype {
-            f.insert("subtype".into(), json!(s));
-        }
-        f.insert("provenance".into(), json!(provenance));
-        f.insert("message".into(), json!({ "role": "user", "parts": parts }));
-        self.push(ts, "user", f)
+    fn user(
+        &mut self,
+        ts: Option<String>,
+        subtype: Option<&str>,
+        provenance: &str,
+        parts: &[Part<'_>],
+        resolver: &Resolver,
+    ) -> Result<()> {
+        self.push(ts, "user", |row| {
+            if let Some(subtype) = subtype {
+                row.field("subtype", subtype)?;
+            }
+            row.field("provenance", provenance)?;
+            row.field_with("message", |w| message_parts(w, "user", parts, resolver))
+        })
     }
+}
+fn message_parts(writer: &mut dyn Write, role: &str, parts: &[Part<'_>], resolver: &Resolver) -> Result<()> {
+    let mut message = ObjectWriter::new(writer)?;
+    message.field("role", role)?;
+    message.field_with("parts", |w| write_parts(w, parts, resolver))?;
+    message.finish()
 }
 
 /// Emit Qwen Code 0.25 session JSONL under `out_dir` (see the module doc for what it may be).
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
+    crate::emit::validate_native_source(session, Harness::Qwen, opts.thinking)?;
+    let resolver = session.resolver();
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     let cwd = effective_cwd(session, opts);
     let cwd_str = cwd
@@ -202,7 +291,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         .map(|p| p.to_string_lossy().to_string())
         .context("a Qwen Code session is filed under its cwd; this session has none (pass --cwd)")?;
     let chats = projects_dir(out_dir).join(sanitize_cwd(&cwd_str)).join("chats");
-    fs::create_dir_all(&chats).with_context(|| format!("creating {}", chats.display()))?;
     let path = chats.join(format!("{new_id}.jsonl"));
 
     let stamp = |t: Option<chrono::DateTime<Utc>>| t.map(|t| t.to_rfc3339_opts(SecondsFormat::Millis, true));
@@ -229,109 +317,172 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         let ts = stamp(m.timestamp);
         i += 1;
         match (m.role, m.kind) {
-            (_, MessageKind::SystemPrompt) => {} // Qwen Code rebuilds its system prompt; none is stored
+            (_, MessageKind::SystemPrompt) => {}
             (Role::Assistant, _) => {
-                let p = parts(&m.content);
-                if p.is_empty() {
+                let parts = parts(&m.content, opts.thinking, &resolver)?;
+                if parts.is_empty() {
                     continue;
                 }
-                let mut f = Map::new();
-                f.insert("provenance".into(), json!("assistant_output"));
-                if let Some(model) = m.model.as_ref().or(session.model.as_ref()) {
-                    f.insert("model".into(), json!(model));
-                }
-                f.insert("message".into(), json!({ "role": "model", "parts": p }));
-                if let Some(u) = usage_metadata(m) {
-                    f.insert("usageMetadata".into(), u);
-                }
-                w.push(ts, "assistant", f)?;
+                w.push(ts, "assistant", |row| {
+                    row.field("provenance", "assistant_output")?;
+                    if let Some(model) = m.model.as_ref().or(session.model.as_ref()) {
+                        row.field("model", model)?;
+                    }
+                    row.field_with("message", |w| message_parts(w, "model", &parts, &resolver))?;
+                    if let Some(usage) = usage_metadata(m) {
+                        row.field("usageMetadata", usage)?;
+                    }
+                    Ok(())
+                })?;
             }
             (Role::Tool, _) => {
-                for b in &m.content {
+                for block in &m.content {
                     let Block::ToolResult {
                         tool_use_id,
                         content,
                         is_error,
                         tool_name,
                         ..
-                    } = b
+                    } = block
                     else {
                         continue;
                     };
                     let key = if *is_error { "error" } else { "output" };
                     let name = tool_name.as_deref().unwrap_or("tool");
                     let status = if *is_error { "error" } else { "success" };
-                    let mut f = Map::new();
-                    f.insert("provenance".into(), json!("tool_result"));
-                    f.insert(
-                        "message".into(),
-                        json!({ "role": "user", "parts": [{ "functionResponse": {
-                            "id": tool_use_id, "name": name, "response": { key: content.to_string() } } }] }),
-                    );
-                    f.insert(
-                        "toolCallResult".into(),
-                        json!({ "callId": tool_use_id, "status": status, "resultDisplay": "" }),
-                    );
-                    w.push(ts.clone(), "tool_result", f)?;
+                    w.push(ts.clone(), "tool_result", |row| {
+                        row.field("provenance", "tool_result")?;
+                        row.field_with("message", |writer| {
+                            let mut message = ObjectWriter::new(writer)?;
+                            message.field("role", "user")?;
+                            message.field_with("parts", |writer| {
+                                writer.write_all(b"[")?;
+                                let mut part = ObjectWriter::new(writer)?;
+                                part.field_with("functionResponse", |writer| {
+                                    let mut response = ObjectWriter::new(writer)?;
+                                    response.field("id", tool_use_id)?;
+                                    response.field("name", name)?;
+                                    response.field_with("response", |writer| {
+                                        let mut content_row = ObjectWriter::new(writer)?;
+                                        content_row.field_with(key, |w| wire::text(w, content, &resolver))?;
+                                        content_row.finish()
+                                    })?;
+                                    response.finish()
+                                })?;
+                                part.finish()?;
+                                writer.write_all(b"]")?;
+                                Ok(())
+                            })?;
+                            message.finish()
+                        })?;
+                        row.field(
+                            "toolCallResult",
+                            json!({ "callId": tool_use_id, "status": status, "resultDisplay": "" }),
+                        )?;
+                        Ok(())
+                    })?;
                 }
             }
             (Role::User, MessageKind::Prompt) => {
-                let p = parts(&m.content);
-                if !p.is_empty() {
-                    w.user(ts, None, "real_user", p)?;
+                let parts = parts(&m.content, opts.thinking, &resolver)?;
+                if !parts.is_empty() {
+                    w.user(ts, None, "real_user", &parts, &resolver)?;
                 }
             }
             (_, MessageKind::CompactionBoundary) => {
-                // The boundary carries the summary that seeds the next window, when one follows.
-                let mut payload = Map::new();
-                let info: Map<String, Value> = m
-                    .harness_extra(Harness::Qwen)
-                    .map(|e| {
-                        e.iter()
-                            .filter(|(k, _)| k.as_str() != "subtype")
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                payload.insert("info".into(), Value::Object(info));
-                if let Some(next) = msgs.get(i).filter(|n| n.kind == MessageKind::CompactionSummary) {
-                    payload.insert(
-                        "compressedHistory".into(),
-                        json!([{ "role": "user", "parts": parts(&next.content) }]),
-                    );
+                let next = msgs.get(i).filter(|n| n.kind == MessageKind::CompactionSummary);
+                let compressed = next.map(|n| parts(&n.content, opts.thinking, &resolver)).transpose()?;
+                if next.is_some() {
                     i += 1;
                 }
-                w.system(ts, "chat_compression", Value::Object(payload))?;
+                w.system(ts, "chat_compression", |writer| {
+                    let mut payload = ObjectWriter::new(writer)?;
+                    payload.field_with("info", |writer| {
+                        let mut info = ObjectWriter::new(writer)?;
+                        if let Some(extra) = m.harness_extra(Harness::Qwen) {
+                            for (key, value) in extra {
+                                if key != "subtype" {
+                                    info.field(key, value)?;
+                                }
+                            }
+                        }
+                        info.finish()
+                    })?;
+                    if let Some(parts) = &compressed {
+                        payload.field_with("compressedHistory", |writer| {
+                            writer.write_all(b"[")?;
+                            message_parts(writer, "user", parts, &resolver)?;
+                            writer.write_all(b"]")?;
+                            Ok(())
+                        })?;
+                    }
+                    payload.finish()
+                })?;
             }
             (_, MessageKind::ModelChange) => {
                 if let Some(model) = &m.model {
-                    w.system(ts, "session_model", json!({ "model": model }))?;
+                    w.system(ts, "session_model", |writer| {
+                        let mut payload = ObjectWriter::new(writer)?;
+                        payload.field("model", model)?;
+                        payload.finish()
+                    })?;
                 }
             }
             (_, MessageKind::Error) => {
-                let text = m.text().unwrap_or_default();
-                w.system(ts, "turn_result", json!({ "error": { "message": text } }))?;
+                let texts = projected_texts(m, opts.thinking, &resolver)?;
+                w.system(ts, "turn_result", |writer| {
+                    let mut payload = ObjectWriter::new(writer)?;
+                    payload.field_with("error", |writer| {
+                        let mut error = ObjectWriter::new(writer)?;
+                        error.field_with("message", |w| {
+                            wire::joined_text(w, texts.iter().map(Cow::as_ref), &resolver)
+                        })?;
+                        error.finish()
+                    })?;
+                    payload.finish()
+                })?;
             }
-            (_, MessageKind::Branch) => w.system(ts, "rewind", json!({}))?,
+            (_, MessageKind::Branch) => w.system(ts, "rewind", |writer| {
+                writer.write_all(b"{}")?;
+                Ok(())
+            })?,
             (_, MessageKind::Notice) => {
-                if let Some(text) = m.text().filter(|t| !t.is_empty()) {
-                    w.system(ts, "notification", json!({ "text": text }))?;
+                let texts = projected_texts(m, opts.thinking, &resolver)?;
+                let mut present = false;
+                for text in &texts {
+                    if crate::emit::thinking::first_character(text, &resolver, false)?.is_some() {
+                        present = true;
+                        break;
+                    }
+                }
+                if present {
+                    w.system(ts, "notification", |writer| {
+                        let mut payload = ObjectWriter::new(writer)?;
+                        payload.field_with("text", |w| {
+                            wire::joined_text(w, texts.iter().map(Cow::as_ref), &resolver)
+                        })?;
+                        payload.finish()
+                    })?;
                 }
             }
-            // Everything else the model saw (injected context, a summary without its boundary, a
-            // sub-agent's or scheduler's turn): a harness-written user record.
             _ => {
-                let p = parts(&m.content);
-                if !p.is_empty() {
-                    let sub = injected_subtype(m);
-                    w.user(ts, Some(&sub), "system", p)?;
+                let parts = parts(&m.content, opts.thinking, &resolver)?;
+                if !parts.is_empty() {
+                    let subtype = injected_subtype(m);
+                    w.user(ts, Some(&subtype), "system", &parts, &resolver)?;
                 }
             }
         }
     }
-    if let Some(t) = &session.title {
-        w.system(stamp(session.updated_at), "custom_title", json!({ "title": t }))?;
+    if let Some(title) = &session.title {
+        w.system(stamp(session.updated_at), "custom_title", |writer| {
+            let mut payload = ObjectWriter::new(writer)?;
+            payload.field("title", title)?;
+            payload.finish()
+        })?;
     }
+    // Complete all checked record production before creating or opening the destination.
+    fs::create_dir_all(&chats).with_context(|| format!("creating {}", chats.display()))?;
     if w.lines.is_empty() {
         // The original Qwen writer emits one blank line even for an empty session.
         fs::write(&path, b"\n").with_context(|| format!("writing {}", path.display()))?;

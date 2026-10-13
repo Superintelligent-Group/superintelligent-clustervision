@@ -4052,3 +4052,38 @@ allocation counters, exact output hashes and fidelity reports. Original external
 untouched; repair artifacts live in `same-target-repair-evidence`. No timing, RSS, native allocator,
 portable operation-heap or universal scaling claim follows. Continue's unaffected operation was
 not repeated.
+### Grok/Qwen checked JSONL exports (2026-10-13, finish_grok_qwen)
+
+Grok history and updates and Qwen ChatRecords now write borrowed checked text and tool
+arguments through the shared staged JSONL writer. All record production and captured-source
+validation precede destination publication, including omitted blocks and discarded reasoning.
+Thinking projection remains per block; Grok model pinning/encrypted reasoning and Qwen fork,
+provenance, system payload and parent UUID behavior retain their existing semantics.
+Frozen pre-change emitters are test-only independent wire/fidelity oracles.
+
+Scoped native and no-default-features controls each passed three tests: exact wire and fidelity
+for all thinking modes over owned/captured synthetic sessions and the committed Grok 1.0.50
+and Qwen 0.25.1 corpora, plus failed captured sources preserving every existing destination
+and leaving absent destinations absent. Qwen UUIDs alone normalize after validating UUID v4
+and parent chains. No local Qwen fleet was available; this is supported export/corpus evidence,
+not a Qwen fleet parsing claim.
+
+Actual parse-for-emit + verified export of the preserved 8 MiB scratch Claude transcript
+matched baseline message counts, fidelity classifications, and payload output. Grok summary
+normalization accounts only for the process home path; frozen tests compare exact summary bytes.
+Shared allocator counters (bytes, not RSS):
+
+| Target | Peak above baseline, old → checked | Requested bytes, old → checked | Stage-end live, old → checked |
+| --- | ---: | ---: | ---: |
+| Grok | 50,287,629 → 41,899,424 | 151,306,778 → 76,139,732 | 8,395,167 → 6,811 |
+| Qwen | 41,678,671 → 33,290,423 | 109,002,837 → 50,494,498 | 8,394,884 → 6,528 |
+
+The actual candidate `cv port claude:old --harness grok/qwen --out <scratch> --no-context`
+operations also completed, matching baseline payloads after generated UUID/session-id
+normalization and retaining the same Grok loss warnings; Qwen remained clean.
+
+Evidence stays outside the repository at `../grok-qwen-export-evidence`: preserved baseline
+binaries/results, candidate probe/CLI logs, and native/portable test logs. Same-harness complete
+preparation outside the existing Claude/Codex/Gemini eligibility remains unchanged pending
+reader-contract proof; this step removes checked export ownership, not every parser/fidelity
+allocation. No broad gates or release were run in this lane.

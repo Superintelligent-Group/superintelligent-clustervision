@@ -27,7 +27,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-mod emit;
+pub(crate) mod emit;
 pub use emit::emit;
 
 pub struct Qwen {
