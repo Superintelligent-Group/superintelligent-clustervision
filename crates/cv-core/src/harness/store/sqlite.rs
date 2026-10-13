@@ -14,6 +14,46 @@ pub(crate) fn open_ro(path: &Path) -> Result<Connection> {
         .with_context(|| format!("opening {}", path.display()))
 }
 
+/// Copy a snapshot's immutable TEXT/BLOB cell into an operation-owned arena using bounded
+/// scratch. Table and column are adapter-owned identifiers, never user selectors. Blob access
+/// may be unavailable for virtual tables; the fallback retains one encoded cell in SQLite.
+pub(crate) fn append_cell(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    rowid: i64,
+    arena: &super::bytes::ByteSource,
+) -> Result<(u64, u64)> {
+    if let Ok(mut blob) = conn.blob_open(rusqlite::DatabaseName::Main, table, column, rowid, true) {
+        return arena.append(|writer| {
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let read = std::io::Read::read(&mut blob, &mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                writer.write_all(&buffer[..read])?;
+            }
+            Ok(())
+        });
+    }
+    conn.query_row(
+        &format!("SELECT {column} FROM {table} WHERE rowid = ?1"),
+        [rowid],
+        |row| {
+            Ok(arena.append(|writer| {
+                match row.get_ref(0)? {
+                    rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+                        writer.write_all(bytes)?
+                    }
+                    _ => anyhow::bail!("SQLite source cell is not TEXT or BLOB"),
+                }
+                Ok(())
+            }))
+        },
+    )?
+}
+
 /// The columns present on `table` (`PRAGMA table_info`). Every SQLite-backed harness grows its
 /// schema by `ALTER TABLE` across versions, so an adapter probes before it selects; an unknown
 /// table yields the empty set.
@@ -40,6 +80,19 @@ pub(crate) fn table_exists(conn: &Connection, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_text_and_blob_cells_share_one_backing() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE payload(data); INSERT INTO payload VALUES('text'); INSERT INTO payload VALUES(X'626C6F62'); INSERT INTO payload VALUES(NULL);").unwrap();
+        let arena = super::super::bytes::ByteSource::arena().unwrap();
+        assert_eq!(append_cell(&connection, "payload", "data", 1, &arena).unwrap(), (0, 4));
+        assert_eq!(append_cell(&connection, "payload", "data", 2, &arena).unwrap(), (4, 4));
+        assert!(append_cell(&connection, "payload", "data", 3, &arena).is_err());
+        let mut output = Vec::new();
+        arena.copy_to(&mut output).unwrap();
+        assert_eq!(output, b"textblob");
+    }
 
     #[test]
     fn probes_and_read_only_open() {
