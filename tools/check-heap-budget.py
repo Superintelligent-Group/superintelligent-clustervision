@@ -168,6 +168,44 @@ def doctors(binary, root, env, baseline=None):
                                   "full_reference_peak_live_rust_bytes": reference["requested_rust_heap"]["peak_above_baseline_bytes"]}), flush=True)
             bound(peaks, STORE_CEILING, STORE_GROWTH, f"doctor {harness} escaped={escaped}")
 
+    metadata_facts(binary, root, env, baseline)
+
+
+def metadata_facts(binary, root, env, baseline=None):
+    """Actual doctor reducers must not decode unrelated rich sidecars to keep tiny facts.
+
+    Full report references run in separate processes; their allocation is intentionally outside
+    the facts budget. Both sizes hold record count and all demanded content/facts constant.
+    """
+    generator = Path(__file__).with_name("perf-fixture.py")
+    for harness in ("claude", "cursor"):
+        for escaped in (False, True):
+            peaks = []
+            reports = []
+            for size in SIZES:
+                command = [sys.executable, str(generator), harness,
+                           str(root / f"facts-{harness}-{size}-{escaped}"),
+                           "--payload-bytes", str(size), "--records", "4", "--shape", "metadata"]
+                if escaped:
+                    command.append("--escaped")
+                manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
+                row, peak = probe(binary, ["doctor", *common, "--mode", "facts"], env, True)
+                reference, reference_peak = probe(baseline or binary, ["doctor", *common, "--mode", "full"], env, True)
+                assert row["messages"] == reference["messages"] == manifest["expected_messages"], "facts doctor skipped source"
+                assert row["detail"] == reference["detail"], "facts doctor report changed from full metadata"
+                assert row["detail"]["compactions"] == manifest["expected_compactions"], "facts lost compaction metadata"
+                assert row["detail"]["conversational"]["tool_results"] > 0, "fixture did not exercise tool attribution"
+                reports.append(row["detail"])
+                peaks.append(peak)
+                print(json.dumps({"case": f"doctor-facts-{manifest.get('format', harness)}-{'escaped' if escaped else 'plain'}",
+                                  "decoded_metadata_payload_bytes": manifest["decoded_metadata_payload_bytes"],
+                                  "physical_input_bytes": manifest["physical_input_bytes"],
+                                  "messages": row["messages"], "peak_live_rust_bytes": peak,
+                                  "full_reference_peak_live_rust_bytes": reference_peak}), flush=True)
+            assert reports[0] == reports[1], "unused metadata changed the demanded doctor report"
+            bound(peaks, MIB, MIB // 4, f"doctor metadata facts {harness} escaped={escaped}")
+
 
 def queries(binary, root, env):
     """Exercise retained rich histories, while leaving giant argument obligations explicit."""
@@ -388,8 +426,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
-    parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/stats, separately check baseline behavior parity")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "metadata-facts", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
+    parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/metadata-facts/stats, separately check baseline behavior parity")
     parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
                         help="repeat to focus --only active on selected native formats")
     args = parser.parse_args()
@@ -398,8 +436,8 @@ def main():
     portable_formats = ("cline-sdk", "opensession", "chatgpt-export", "claude-export")
     if args.only == "portable-docs" and any(f not in portable_formats for f in args.format or []):
         parser.error("portable-docs supports only document formats")
-    if args.baseline_probe and args.only not in ("active", "doctor", "stats"):
-        parser.error("--baseline-probe applies only to active/doctor/stats checks")
+    if args.baseline_probe and args.only not in ("active", "doctor", "metadata-facts", "stats"):
+        parser.error("--baseline-probe applies only to active/doctor/metadata-facts/stats checks")
     with tempfile.TemporaryDirectory(prefix="cv-heap-budget-") as temporary:
         root = Path(temporary)
         catalog = root / "catalog"
@@ -407,6 +445,8 @@ def main():
         env = dict(os.environ, CLUSTERVISION_HOME=str(catalog))
         if args.only == "doctor":
             doctors(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
+        elif args.only == "metadata-facts":
+            metadata_facts(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
         elif args.only == "query":
             queries(args.probe.resolve(), root, env)
         elif args.only == "events":

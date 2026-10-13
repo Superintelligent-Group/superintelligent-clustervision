@@ -3,6 +3,7 @@
 Synthetic payloads and IDs only; never copies or rewrites corpus versions. Each row is
 inserted separately, so generation itself need not retain a logical session in memory.
 """
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -16,9 +17,11 @@ REPO = Path(__file__).resolve().parent.parent
 def generate_sqlite(harness, root, size, records, escaped, shape):
     allowed = {"devin": ("history", "metadata", "unselected"),
                "hermes": ("history", "prompt-only"), "goose": ("history",),
-               "opencode": ("history", "parts"), "cursor": ("history", "inline", "legacy")}
+               "opencode": ("history", "parts"), "cursor": ("history", "inline", "legacy", "metadata")}
     if shape not in allowed[harness]:
         raise ValueError(f"{harness} supports shapes {allowed[harness]}")
+    if harness == "cursor" and shape == "metadata":
+        return generate_cursor_cli_metadata(root, size, records, escaped)
     name = {"devin": "sessions.db", "hermes": "state.db", "goose": "sessions.db",
             "opencode": "opencode.db", "cursor": "globalStorage/state.vscdb"}[harness]
     if harness == "cursor" and shape == "legacy": name = "workspaceStorage/perf/state.vscdb"
@@ -99,3 +102,63 @@ def generate_sqlite(harness, root, size, records, escaped, shape):
             "requested_payload_bytes": size, "records": records, "expected_messages": count,
             "escaped": escaped, "physical_input_bytes": path.stat().st_size,
             "synthetic": True, "provenance": "adapter-supported native schema; made-up IDs and payloads"}
+
+
+def generate_cursor_cli_metadata(root, size, records, escaped):
+    """Native CLI blobs/meta with tiny visible bodies and large unused provider sidecars.
+
+    Entirely synthetic records use the installed wire shapes; no corpus store is copied.
+    Payload bytes count sidecars once, distinct from encoded JSON/SQLite source size.
+    """
+    path = root / "chats" / "perf" / SID / "store.db"
+    path.parent.mkdir(parents=True)
+    pattern = 'line\n"quoted"\t\\end' if escaped else "plain payload "
+
+    def encode(number):
+        result = bytearray()
+        while number > 127:
+            result.append((number & 127) | 128)
+            number >>= 7
+        result.append(number)
+        return bytes(result)
+
+    def field(number, value):
+        return encode(number << 3 | 2) + encode(len(value)) + value
+
+    with sqlite3.connect(path) as db:
+        db.executescript("CREATE TABLE blobs(id TEXT PRIMARY KEY,data BLOB); CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);")
+        ids = []
+
+        def message(value):
+            raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+            key = hashlib.sha256(raw).hexdigest()
+            db.execute("INSERT INTO blobs VALUES(?,?)", (key, raw))
+            ids.append(key)
+
+        message({"role": "user", "content": "injected context",
+                 "providerOptions": {"cursor": {"requestContextCompleteness": False}}})
+        for i in range(records):
+            length = size // records + (i < size % records)
+            payload = (pattern * ((length + len(pattern) - 1) // len(pattern)))[:length]
+            split = length // 2
+            message({"role": "assistant", "content": [{"type": "tool-call", "toolCallId": f"c{i}",
+                     "toolName": "Bash", "args": {"command": "true"}}], "providerOptions": {"cursor": {
+                     "systemPromptFingerprint": {"model": "test"}, "ignoredPayload": payload[:split]}}})
+            message({"role": "tool", "content": [{"type": "tool-result", "toolCallId": f"c{i}",
+                     "toolName": "Bash", "result": f"result {i}"}], "providerOptions": {"cursor": {
+                     "highLevelToolCallResult": {"isError": True, "output": payload[split:]}}}})
+        message({"role": "assistant", "content": "native summary",
+                 "providerOptions": {"cursor": {"isSummary": True}}})
+        native_root = b"".join(field(1, bytes.fromhex(key)) for key in ids)
+        native_root += field(9, b"file:///perf") + encode(10 << 3) + encode(1)
+        key = hashlib.sha256(native_root).hexdigest()
+        db.execute("INSERT INTO blobs VALUES(?,?)", (key, native_root))
+        meta = {"agentId": SID, "latestRootBlobId": key, "name": "facts scale fixture",
+                "mode": "default", "createdAt": 1}
+        db.execute("INSERT INTO meta VALUES('0',?)", (json.dumps(meta, separators=(",", ":")).encode().hex(),))
+    return {"harness": "cursor", "format": "cursor-cli", "id": "cli:" + SID,
+            "path": str(path), "root": str(root), "shape": "metadata", "records": records,
+            "expected_messages": records * 2 + 2, "expected_compactions": 0,
+            "decoded_metadata_payload_bytes": size, "decoded_payload_bytes": size, "payload_location": "metadata",
+            "physical_input_bytes": path.stat().st_size, "escaped": escaped,
+            "synthetic": True, "provenance": "synthetic native CLI blobs/meta schema"}

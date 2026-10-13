@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Create deterministic synthetic sessions in a NEW explicit directory, never a corpus version.
 
-Payload size is decoded UTF-8 bytes across all result/reply records. Encoded JSON file size
+Payload size is decoded UTF-8 bytes across variable result/reply records or unused metadata
+sidecars (--shape metadata). Encoded JSON file size
 is reported separately. Generation is deliberately outside the measured probe process.
 """
 
@@ -61,6 +62,7 @@ def main():
         return
     if args.shape != "history" and not (
         args.shape == "tool-arguments" and args.harness in ("claude", "codex")
+        or args.shape == "metadata" and args.harness == "claude"
         or args.shape == "encoded-arguments" and args.harness == "continue"
     ):
         parser.error("unsupported harness/shape combination")
@@ -161,21 +163,46 @@ def main():
                 for j, (kind, content) in enumerate([
                     ("user", f"prompt {i}"),
                     ("assistant", [{"type": "tool_use", "id": f"c{i}", "name": "Bash", "input": {"command": "true"}}]),
-                    ("user", [{"type": "tool_result", "tool_use_id": f"c{i}", "content": payload(i)}]),
+                    ("user", [{"type": "tool_result", "tool_use_id": f"c{i}", "content": f"result {i}" if args.shape == "metadata" else payload(i)}]),
                 ]):
                     uuid = f"m{i}-{j}"
-                    line(f, {"type": kind, "uuid": uuid, "parentUuid": parent, "sessionId": sid,
-                             "timestamp": stamp, "message": {"role": kind, "content": content}})
+                    row = {"type": kind, "uuid": uuid, "parentUuid": parent, "sessionId": sid,
+                           "timestamp": stamp, "message": {"role": kind, "content": content}}
+                    if args.shape == "metadata":
+                        if kind == "assistant":
+                            row["message"].update(id=f"response-{i}", model="test",
+                                                  usage={"input_tokens": 100, "output_tokens": 2})
+                        if j == 2:
+                            text = payload(i)
+                            row["toolUseResult"] = {"stdout": text[:len(text) // 3]}
+                    line(f, row)
                     parent = uuid
+                if args.shape == "metadata":
+                    text = payload(i)
+                    split, end = len(text) // 3, 2 * len(text) // 3
+                    boundary = f"boundary-{i}"
+                    line(f, {"type": "system", "uuid": boundary, "parentUuid": parent,
+                             "timestamp": stamp, "subtype": "compact_boundary",
+                             "compactMetadata": {"trigger": "auto", "preTokens": 42 + i,
+                                                 "durationMs": 7, "unusedPayload": text[split:end]}})
+                    parent = f"attachment-{i}"
+                    line(f, {"type": "attachment", "uuid": parent, "parentUuid": boundary,
+                             "timestamp": stamp, "attachment": {"type": "hook_success",
+                             "unusedPayload": text[end:]}, "rendered": [{"content": "hook output"}]})
     manifest = {
         "harness": args.harness, "id": sid, "path": str(path),
         "root": str(path.parent if args.harness == "lmstudio" else root),
         "decoded_payload_bytes": args.payload_bytes, "physical_input_bytes": path.stat().st_size,
         "records": args.records, "escaped": args.escaped, "shape": args.shape,
-        "expected_messages": (args.records if args.shape == "tool-arguments" else
+        "expected_messages": (args.records * 5 if args.shape == "metadata" else
+                              args.records if args.shape == "tool-arguments" else
                               args.records + 1 if args.harness == "lmstudio" else args.records
                               if args.harness == "continue" else args.records * (3 if args.harness == "claude" else 2)),
     }
+    if args.shape == "metadata":
+        manifest["decoded_metadata_payload_bytes"] = args.payload_bytes
+        manifest["payload_location"] = "metadata"
+        manifest["expected_compactions"] = args.records
     (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest))
 

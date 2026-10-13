@@ -5,6 +5,9 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import subprocess
+import sqlite3
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -37,6 +40,50 @@ class DriverTests(unittest.TestCase):
     def test_size_dependent_growth_is_rejected(self):
         with self.assertRaisesRegex(AssertionError, "grows with source size"):
             budget.bound([budget.MIB, 4 * budget.MIB], 8 * budget.MIB, 2 * budget.MIB, "source")
+
+    def test_facts_gate_rejects_changed_full_report(self):
+        manifest = {"harness": "claude", "id": "fixture", "path": "source", "root": "root",
+                    "expected_messages": 20, "expected_compactions": 4, "decoded_metadata_payload_bytes": 16,
+                    "physical_input_bytes": 32}
+        report = {"compactions": 4, "conversational": {"tool_results": 2}}
+        facts = {"messages": 20, "detail": report}
+        full = {"messages": 20, "detail": dict(report, compactions=0)}
+        with patch.object(budget.subprocess, "check_output", return_value=json.dumps(manifest)), \
+             patch.object(budget, "probe", side_effect=[(facts, 1024), (full, 4096)]):
+            with self.assertRaisesRegex(AssertionError, "report changed"):
+                budget.metadata_facts("unused", Path("unused"), {})
+
+    def test_metadata_fixture_payload_budgets_and_native_cli_references(self):
+        generator = Path(__file__).with_name("perf-fixture.py")
+        with tempfile.TemporaryDirectory(prefix="cv-test-facts-") as directory:
+            for harness in ("claude", "cursor"):
+                for escaped in (False, True):
+                    command = [sys.executable, str(generator), harness,
+                               str(Path(directory) / f"{harness}-{escaped}"), "--shape", "metadata",
+                               "--records", "3", "--payload-bytes", "257"]
+                    if escaped:
+                        command.append("--escaped")
+                    manifest = json.loads(subprocess.check_output(command, text=True))
+                    self.assertEqual(manifest["decoded_metadata_payload_bytes"], 257)
+                    if harness == "claude":
+                        rows = [json.loads(line) for line in Path(manifest["path"]).read_text().splitlines()]
+                        self.assertEqual(len(rows), manifest["expected_messages"])
+                        payload = sum(len(row.get("toolUseResult", {}).get("stdout", ""))
+                                      + len(row.get("compactMetadata", {}).get("unusedPayload", ""))
+                                      + len(row.get("attachment", {}).get("unusedPayload", "")) for row in rows)
+                    else:
+                        with sqlite3.connect(manifest["path"]) as db:
+                            metadata = json.loads(bytes.fromhex(db.execute("SELECT value FROM meta WHERE key='0'").fetchone()[0]))
+                            native_root = db.execute("SELECT data FROM blobs WHERE id=?", (metadata["latestRootBlobId"],)).fetchone()[0]
+                            rows = []
+                            for raw, in db.execute("SELECT data FROM blobs WHERE id!=?", (metadata["latestRootBlobId"],)):
+                                rows.append(json.loads(raw))
+                            self.assertEqual(len(rows), manifest["expected_messages"])
+                            self.assertTrue(native_root.endswith(bytes([80, 1])))
+                            payload = sum(len(row.get("providerOptions", {}).get("cursor", {}).get("ignoredPayload", ""))
+                                          + len(row.get("providerOptions", {}).get("cursor", {}).get("highLevelToolCallResult", {}).get("output", ""))
+                                          for row in rows)
+                    self.assertEqual(payload, 257)
 
     def sqlite_driver(self):
         # Import the actual command under Python -I without relying on ambient module paths.

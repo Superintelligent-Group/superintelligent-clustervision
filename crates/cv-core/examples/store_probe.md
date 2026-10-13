@@ -177,10 +177,20 @@ Kimi wire bodies. Every 16/64 MiB discovery probe gets a fresh catalog, preventi
 masking scan work. `--format FORMAT` narrows this campaign; `--baseline-probe HEAP_PROBE` also checks
 small resolved-message/metadata and fresh discovery digests in separate fidelity runs. Selected
 giant outputs and whole selected ChatGPT mappings are not included in these bounded claims.
-`--only doctor` checks giant Claude/Codex/Gemini decoded attribution in lazy-extra mode against
+
+`--only metadata-facts` runs actual doctor in Facts mode on synthetic Claude and Cursor CLI
+unused metadata at 16/64 MiB, with plain and escaped payloads. Visible content and demanded facts
+stay fixed; every full report must match a separate full-mode process and remain identical across
+sizes. A 1 MiB heap cap and 256 KiB growth allowance reject rich-sidecar allocation. Fixture
+`--shape metadata` reports decoded metadata payload separately from physical JSON/SQLite bytes.
+The existing doctor gate includes these checks. Full references intentionally allocate demanded
+metadata outside the Facts budget. These are native Rust heap promises, excluding SQLite/native
+allocations, mapped pages and generation; no throughput or portable Cursor bound is claimed.
+
+`--only doctor` checks giant Claude/Codex/Gemini decoded attribution in Facts mode against
 separate full-mode processes, optionally using the supplied old baseline. Default CI's suite
 includes stores/chunks, the five native active formats and the composed doctor pass. The doctor
-gate compares lazy-extra with the full report oracle in separate processes. Portable resolver promises are checked separately. CI also runs `--only portable-docs`:
+gate compares Facts with the full report oracle in separate processes. Portable resolver promises are checked separately. CI also runs `--only portable-docs`:
 Cline SDK, OpenSession, and both account archives have a distinct 2 MiB heap ceiling and
 256 KiB growth allowance on the same 16/64 MiB plain/escaped cold inputs. Each discovery uses
 a fresh catalog. Separate small lazy/full and discovery digests compare portable output with
