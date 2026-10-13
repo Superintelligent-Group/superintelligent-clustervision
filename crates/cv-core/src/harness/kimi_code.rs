@@ -1203,7 +1203,7 @@ impl<'a> Ctx<'a> {
                         let mut out = ObjectWriter::new(writer)?;
                         out.field("type", "context.append_loop_event")?;
                         out.field_with("event", |mut writer| event.write_canonical(&mut writer))?;
-                        out.field("time", &ts.map(|t| t.timestamp_millis()))?;
+                        out.field("time", ts.map(|t| t.timestamp_millis()))?;
                         out.finish()
                     })?;
                     let raw = source.read_backing_syntax(arena, offset, len, |view| view.to_json())?;

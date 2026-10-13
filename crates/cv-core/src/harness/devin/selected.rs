@@ -5,10 +5,12 @@ use crate::harness::store::bytes::ByteSource;
 use crate::json::{JsonSource, JsonView};
 use std::sync::Arc;
 
+type CellRanges = HashMap<(i64, &'static str), (u64, u64)>;
+
 pub(super) struct Selected {
     source: JsonSource,
     arena: Arc<ByteSource>,
-    cells: std::cell::RefCell<HashMap<(i64, &'static str), (u64, u64)>>,
+    cells: std::cell::RefCell<CellRanges>,
 }
 impl Selected {
     pub(super) fn new(path: &Path, reads: &crate::source::ReadSet) -> Result<Self> {

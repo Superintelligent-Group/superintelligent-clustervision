@@ -10,7 +10,7 @@ pub(super) fn stream(name: &str, path: &Path, opts: &ParseOptions, sink: &mut dy
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
     source.check_metadata(metadata.clone())?;
-    let mut records = ranges::records(
+    let records = ranges::records(
         &file,
         ranges::Range {
             offset: 0,
@@ -26,7 +26,7 @@ pub(super) fn stream(name: &str, path: &Path, opts: &ParseOptions, sink: &mut dy
     session.source_path = Some(path.to_path_buf());
     let mut tools = HashMap::new();
     let mut header = true;
-    while let Some(record) = records.next() {
+    for record in records {
         let (range, _) = record?;
         // Empty lines are still headers when first; subsequent empty lines are ignored.
         let result = if range.len == 0 {

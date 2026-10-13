@@ -130,8 +130,7 @@ fn discovery_payload(payload: JsonView<'_>, subtype: Option<&str>) -> Result<Val
                 .map(|v| v.array())
                 .transpose()?
                 .flatten()
-                .map(|mut values| values.next())
-                .flatten()
+                .and_then(|mut values| values.next())
                 .transpose()?;
             let parts = first
                 .map(|v| v.get("parts"))

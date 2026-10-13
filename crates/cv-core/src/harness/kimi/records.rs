@@ -52,13 +52,13 @@ pub(super) fn visit(
             .len()
             .checked_sub(offset)
             .context("context offset beyond source")?;
-        let mut rows = ranges::records(&file, ranges::Range { offset, len })?;
+        let rows = ranges::records(&file, ranges::Range { offset, len })?;
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
         let mut cur = Vec::new();
         let mut line_index = 0;
         let mut shared = at.is_none() && index > 0;
         let mut announce = shared;
-        while let Some(row) = rows.next() {
+        for row in rows {
             let (raw, complete) = row?;
             let range = ranges::trim(&file, raw)?;
             let mut fingerprint = Fingerprint {

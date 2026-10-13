@@ -354,6 +354,7 @@ struct HistoryCheckpoint {
     skipped: u64,
 }
 
+#[allow(clippy::too_many_arguments)] // Existing replay state plus its optional checked source.
 fn stream_history_at(
     file: fs::File,
     wire: &Path,
