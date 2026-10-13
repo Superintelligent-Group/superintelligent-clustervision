@@ -376,3 +376,17 @@ The [3.78 GB control](../../docs/design/FTS-EXISTING-INDEX-COMPACTION.json) uses
 fleet index: it tests compaction geometry, not a current-schema rebuild or the indexing sweep.
 It does not measure physical I/O, heap, BM25 score parity or latency. Scratch index contents
 remain private; only aggregate work and parity results belong in the repository.
+
+### Actual limited listing operation
+
+`limited-list-operation.py --cv DEFAULT_CV --diagnostic-cv DIAGNOSTIC_CV --output NEW_DIR`
+creates a synthetic64-session source/index/catalog, freezes seeds, restores each
+child's canonical catalog and compares exact default/diagnostic output. Build the
+diagnostic binary in a separate checkout/target after applying
+[the temporary patch](results/limited-list-operation-diagnostic.patch) to `bc58198a`
+(or `f08377be` plus that fix). The patch provides counters and existing full-filter/
+legacy-zero control switches only; none ship in the product. Use two build jobs,
+scratch CLUSTERVISION_HOME and fresh targets or touch exported inputs to avoid
+Cargo source-mtime reuse. The whole-operation artifact is in
+`docs/design/QUERY-WORKFLOW-EVIDENCE.json`; raw synthetic inputs, outputs, logs and
+counter files remain at `/Users/ember/dev/cv-worktrees/limited-list-operation-evidence`.

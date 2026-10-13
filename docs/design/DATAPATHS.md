@@ -2882,3 +2882,43 @@ rebuild: the copied index has the older schema, while the production compactor i
 This establishes useful real segment geometry, not current-schema indexing/migration, BM25 score
 parity, a deleted-byte/fanout bound, physical I/O, heap or latency. The bottom-tier output is
 rewritten by the second merge, as the policy permits; the large cold segments are not.
+
+### Limited listings across the whole CLI operation (Sol, 2026-10-13)
+
+The earlier QUERY-WORKFLOW-EVIDENCE component controls excluded discovery. The new
+`whole_cli_limited_listing_2026_10_13` object records actual `cmd_ls` from a frozen
+64-session synthetic Claude catalog/index/source set, ordinary default-feature CLI
+versus a separately built temporary diagnostic control. No timings or real-store writes.
+
+For `ls --json --harness claude --limit 1 -q 'text:needle AND has:plan'`, warm
+metadata still requires 64 primary guards, two watched rows, 21 registered-adapter
+checks, 64 decoded metadata rows and 64 rank candidates. One text-index batch
+prepares all 63 matching IDs. Only three ranked candidates are evaluated: text
+rejects the first; the next two demand counts. Empty counts require two keyed
+misses and two body reductions/four message callbacks; their warm repeat reads two
+joined count rows and no bodies. The actual full-filter oracle evaluates all 64,
+reduces 63 bodies/126 callbacks, and emits byte-identical one-row JSON. These are
+operation counts, not storage/CPU/complete decoded-byte measurements.
+
+Forced full warm discovery adds 64 exact keyed scan-cache lookups/encoded rows,
+no Claude metadata scans, and 128 metadata decoder invocations across existing
+known-inventory/publication boundaries. One controlled lower-ranked source append
+causes one scoped refresh: 64 cache lookups/63 hits, exactly one metadata scan
+navigating 679 physical bytes/four records; selected output and two body demands
+stay unchanged. This establishes the complete current boundary before the separate
+append-reuse lane; it does not claim limit bounds freshness or discovery work.
+
+Boolean metadata-OR settles the first candidate with no count/body work but still
+prepares 63 indexed IDs globally. Metadata-false AND counted touches no counts or
+bodies; indexed-text OR counted reduces only the required text-missing first
+candidate. Lazy index preparation would need a separately justified query-owner
+change; this pass retains the existing eager index contract and stable ranking.
+
+A concrete zero-window fix now returns `[]` after harness/query validation before
+inventory acquisition, text preparation or enrichment. A diagnostic original-route
+control proves identical zero-row output previously demanded full warm discovery,
+64 cache lookups and 128 metadata row decodes; the fixed command has zero counters.
+The CLI test also proves no catalog creation with `--fresh --enrich`, while invalid
+harness/query inputs still fail. Production CLI clippy passes. Diagnostic counters,
+full-filter and legacy-zero switches remain only in a retained reproducible patch;
+no general telemetry, persistent cache, parser or query framework was added.
