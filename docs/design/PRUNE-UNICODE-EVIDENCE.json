@@ -74,5 +74,35 @@
     }
   ],
   "validation": "exact source, transcript, sidecar and all non-path result fields equal; native 50 scoped prune tests, portable three focused Unicode tests, clippy; 64 MiB CI cap 4 MiB",
-  "limits": "Sigma-sensitive rosters with capital Sigma replay checked decoding and contextual matching; CPU evidence pending independent instruction control."
+  "limits": "The matcher is bounded by caller token overlap and fixed lowercase chunks; pathological token rosters and long ignorable runs still demand matching/context work. No universal latency claim.",
+  "cpu_control": {
+    "metric": "deterministic whole-CLI ARM64 instructions; optimized ThinLTO, no heap instrumentation; two repeats, not elapsed timings",
+    "baseline_revision": "5e366e96",
+    "initial_revision": "60ca75bb",
+    "batched_revision": "f03ef337",
+    "final_revision": "0d44f4e0",
+    "late_greek_baseline": [
+      102716521,
+      102716572
+    ],
+    "late_greek_initial": [
+      872842748,
+      872842356
+    ],
+    "late_greek_batched": [
+      116812744,
+      116812741
+    ],
+    "late_greek_final": [
+      100957686,
+      100958195
+    ],
+    "final_fewer_instructions_percent": 1.71,
+    "ordinary_ascii_fewer_instructions_percent": 25.0,
+    "emoji_fewer_instructions_percent": 77.7,
+    "parity": "Native and both profiled stdout/stderr/transcript/sidecar byte hashes equal; source and seed identities unchanged.",
+    "scope": "Greek alpha/\u03bf\u03c2 roster, alpha near start and \u039f\u03a3 at end of 8 MiB x run; ordinary controls demand alpha/beta near start. ASCII/emoji paths unchanged by final contextual repair.",
+    "ordinary_control_revision": "60ca75bb; retained measurements, unchanged insensitive path, not rerun on final binary",
+    "reproduction": "../../tools/profiling/results/prune-unicode-cli/README.md"
+  }
 }

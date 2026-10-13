@@ -3571,13 +3571,15 @@ Preserved actual reports and comparison script: `/Users/ember/dev/cv-worktrees/e
 
 `prune::source_declassify_stats` no longer resolves and lowercases the entire field when
 any Unicode appears. UTF-8 bounded std lowercase pieces feed one shared substring matcher;
-only caller needles containing σ or ς demand contextual replay when capital Σ occurs.
-That replay uses std-derived Cased/Case_Ignorable behavioral probes and two private pending
+only caller needles containing σ or ς demand the contextual matcher. It consumes the same
+checked statistics traversal directly, using std-derived Cased/Case_Ignorable behavioral
+probes and two private pending
 match states, so long ignorable runs and overlapping Unicode properties retain exact
 `str::to_lowercase().contains()` semantics. Empty tokens, duplicates and original-case
 caller tokens retain their previous meanings; source decoding/guards and decoded statistics
-continue even after all matches are known. Contextual replay adds a source pass and can do
-more CPU work; this is a bounded ownership claim, pending the independent instruction control.
+continue even after all matches are known. Sigma-free runs use bounded std lowercase pieces;
+only their first/last non-ignorable original characters carry context, including across callbacks.
+All-ignorable runs feed both private branches from each single lowered piece.
 
 One emoji before `ALPHA beta` previously made actual native prune hold 16.913/67.245/134.354 MB
 of requested live Rust heap for 8/32/64 MiB payloads. It now requests peak 270,110/270,116/270,116 B,
@@ -3588,6 +3590,22 @@ requests, not RSS or timings; see `PRUNE-UNICODE-EVIDENCE.json` for frozen hashe
 Σ/EOF, titlecase, Cased+Ignorable overlap, long ignorable runs, escaped UTF-16, branch-private
 hits and insensitive needles; clippy passes. `check-operation-heap.py` adds one 64 MiB emoji
 declassification control under the existing 4 MiB cap with frozen source/output/sidecar hashes.
+
+
+The independent optimized/no-heap whole-CLI ARM64 instruction control refuted the initial
+contextual implementation: a demanded Greek `ος` after an 8 MiB ordinary run took
+872,842,748/872,842,356 instructions versus the owned baseline's 102,716,521/102,716,572.
+Batching sigma-free runs reduced that to 116,812,744/116,812,741, exposing the remaining
+duplicate whole-source scan and first fold. Feeding the contextual matcher during statistics
+removed that replay: final `0d44f4e0` takes 100,957,686/100,958,195 (1.71% fewer). Exact native
+and profiled stdout/stderr/transcript/sidecar hashes and source/seed identities match. The
+ordinary ASCII/emoji prefix-demand paths use 25.0%/77.7% fewer instructions in the retained
+`60ca75bb` measurement; those paths are unchanged by the repairs and were not rerun on the
+final binary. The reproduction and detailed counts are in
+[`prune-unicode-cli/README.md`](../../tools/profiling/results/prune-unicode-cli/README.md). These are narrow deterministic instruction controls, not universal latency
+claims; long ignorable runs and large caller token rosters still demand real work. Native
+51 scoped prune tests, four portable Unicode/context controls and clippy pass. Root composed
+54 prune tests and the four prune operation heap gates also pass after run batching.
 
 
 ### Current integration and lifecycle follow-up (2026-10-13, Codex)
