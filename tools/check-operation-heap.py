@@ -23,8 +23,11 @@ NEW_ID = "22222222-2222-4222-8222-222222222222"
 def checked_peak(heap):
     assert isinstance(heap, dict), "heap instrumentation/counters missing"
     peak = heap.get("peak_above_baseline_bytes")
-    assert type(peak) is int and peak >= 0, "invalid live Rust heap counter"
+    assert type(peak) is int and peak > 0, "invalid or inactive live Rust heap counter"
     assert peak <= CEILING, f"whole-operation live Rust heap {peak} exceeds {CEILING} bytes"
+    for name in ("allocation_requests", "requested_bytes"):
+        value = heap.get(name)
+        assert type(value) is int and value > 0, f"invalid or inactive {name} counter"
     return peak
 
 

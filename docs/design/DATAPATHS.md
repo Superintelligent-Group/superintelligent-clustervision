@@ -3123,7 +3123,8 @@ adds small recorded usage to both assistants so positive revival and a rewritten
 are required. Snipped count, freed-token lower bound, preserved recent turns and conclusions,
 unchanged input, and complete frozen sidecar SHA/length prevent a skipped mutation from passing.
 The driver hashes sidecars in bounded chunks after measurement; it constructs no giant owned
-oracle tree. Missing/null/noninteger/negative counters fail, and a cheap driver test rejects the
+oracle tree. Missing/null/noninteger/negative/zero peak or allocation-request counters fail,
+proving the allocator instrumentation is active; a cheap driver test rejects the
 old 201 MiB ownership peak. The independent unchanged-body case requires exactly one usage
 rewrite, the expected honest/stale token figures, and the frozen full transcript SHA/length; it
 keeps its giant ignored root unchanged instead of removing it before revival.
