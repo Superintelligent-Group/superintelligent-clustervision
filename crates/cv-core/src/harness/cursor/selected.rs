@@ -177,30 +177,49 @@ fn decoded_argument(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteS
     }
 }
 fn lexical(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) -> Result<Option<Text>> {
-    fn walk(node: JsonView<'_>, out: &mut crate::harness::store::text::Builder<'_>) -> Result<()> {
-        if let Some(text) = node.get("text")? {
+    fn walk(node: JsonView<'_>, out: &mut crate::harness::store::text::Builder<'_>) -> Result<bool> {
+        let Some(fields) = Fields::parse(node, &["text", "children"])? else {
+            return Ok(false);
+        };
+        if let Some(text) = fields.get("text") {
             out.push_string(text)?;
         }
-        if let Some(children) = node.get("children")?.map(|v| v.array()).transpose()?.flatten() {
-            let mut children = children.peekable();
-            while let Some(child) = children.next() {
-                let child = child?;
-                walk(child, out)?;
-                if children.peek().is_some() && child.get("children")?.is_some() {
+        let children = fields.get("children");
+        if let Some(array) = children.map(|v| v.array()).transpose()?.flatten() {
+            let mut array = array.peekable();
+            while let Some(child) = array.next() {
+                let has_children = walk(child?, out)?;
+                if array.peek().is_some() && has_children {
                     out.push("\n")?;
                 }
             }
         }
-        Ok(())
+        Ok(children.is_some())
     }
+    #[derive(Debug)]
+    struct Nonblank;
+    impl std::fmt::Display for Nonblank {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("nonblank text found")
+        }
+    }
+    impl std::error::Error for Nonblank {}
     let build = |view: JsonView<'_>| -> Result<Option<Text>> {
         let Some(root) = view.get("root")? else { return Ok(None) };
-        let text = crate::harness::store::text::append(captured, arena, |out| walk(root, out))?;
-        let mut nonblank = false;
-        text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 64 * 1024, |part| {
-            nonblank |= part.chars().any(|c| !c.is_whitespace());
+        let text = crate::harness::store::text::append(captured, arena, |out| walk(root, out).map(|_| ()))?;
+        // The quoted builder output is complete and validated. Stop at the first nonblank
+        // chunk; checked demands still give source mutations precedence over this sentinel.
+        let check = text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 1024, |part| {
+            if part.chars().any(|c| !c.is_whitespace()) {
+                return Err(anyhow::Error::new(Nonblank));
+            }
             Ok(())
-        })?;
+        });
+        let nonblank = match check {
+            Ok(()) => false,
+            Err(error) if error.downcast_ref::<Nonblank>().is_some() => true,
+            Err(error) => return Err(error),
+        };
         Ok(nonblank.then_some(text))
     };
     if !view.is_string()? {
@@ -562,6 +581,8 @@ mod tests {
             json!({"type":2,"richText":"{\"root\":{\"text\":\"valid\"},\"ignored\":1e9999}"}),
             json!({"type":2,"toolFormerData":{"result":[true,null,1.5,{"z":"日本語\n","a":"\\quoted\""}]}}),
         ]);
+        bubbles.push(json!({"type":2,"richText":{"root":{"text":format!("{}日本語", " ".repeat(2048))}}}));
+        bubbles.push(json!({"type":2,"richText":{"root":{"text":"\u{2003}".repeat(2048)}}}));
         let root = json!({"conversation":bubbles,"fullConversationHeadersOnly":false});
         let (conn, r) = fixture(&world.base.join("inline"), &root.to_string(), &[]);
         compare(&conn, &r);
