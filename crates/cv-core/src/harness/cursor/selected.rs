@@ -489,6 +489,24 @@ mod tests {
         old.messages
     }
     #[test]
+    fn retained_giant_identity_and_model_match_owned_ide_without_dropping_bubble() {
+        let world = cv_testkit::World::in_process("cursor-giant-metadata");
+        let id = "bubble-🌙".repeat(crate::lazy::INLINE_MAX);
+        let model = "native-model-🌙".repeat(crate::lazy::INLINE_MAX);
+        assert!(id.len() > crate::lazy::INLINE_MAX && model.len() > crate::lazy::INLINE_MAX);
+        let root = json!({"fullConversationHeadersOnly":[{"bubbleId":id}]});
+        let bubble = json!({"bubbleId":id,"type":2,"text":"retained message","modelInfo":{"modelName":model}});
+        let (conn, r) = fixture(&world.base, &root.to_string(), &[(&id, bubble.to_string().as_bytes())]);
+        let messages = compare(&conn, &r);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id.as_deref(), Some(id.as_str()));
+        assert_eq!(messages[0].model.as_deref(), Some(model.as_str()));
+        let mut sink = CollectSink::default();
+        let captured = global(&conn, &r, &mut sink).unwrap();
+        assert_eq!(captured.model.as_deref(), Some(model.as_str()));
+    }
+
+    #[test]
     fn facts_match_owned_ide_messages_doctor_modes_and_affordances() {
         let world = cv_testkit::World::in_process("cursor-ide-facts");
         let big = "日本語\n".repeat(8192);

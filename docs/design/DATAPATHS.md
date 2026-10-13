@@ -1938,5 +1938,7 @@ error event; that policy was not broadened. Dataset, watch dependency recording,
 heads, archive framing, and fidelity validation have checked Source paths. Direct render/text
 helpers still require materialized messages, as before for Span. Adapter title summaries often
 run inside checked captured-source callbacks; their best-effort helper is not a new carrier
-omission. Cursor's inline-only selected identity/model helpers need a separate correctness
-fix, since their decoded backing can produce Source metadata strings.
+omission. The initial Cursor identity/model concern was refuted: `JsonView::text(false)`
+explicitly owns metadata, including decoded-backed strings above the inline threshold. Native
+owned/selected IDE producer oracle with 44–68 KiB IDs/models preserves the bubble/model
+exactly; existing retained source failure checks are unchanged. No production metadata conversion change is needed.
