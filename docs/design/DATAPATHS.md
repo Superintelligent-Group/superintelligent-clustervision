@@ -26,7 +26,11 @@ Unicode regression; batching ordinary runs and removing the second source traver
 The final late-Greek control executes 1.71% fewer instructions than baseline with exact output
 parity. MCP admission is now bounded through response publication, with composed protocol and
 lease checks passing. Full convergence remains deferred while the demonstrated SQLite
-snapshot-lifetime defect below is addressed and composed with MCP cancellation. Changes must preserve complete output, metadata, acceptance and source-error
+snapshot-lifetime defect below is addressed and composed with MCP cancellation. A completion
+audit also found remaining whole-document copies in Cline/Roo and Continue/LM Studio emission,
+owned ordinary bodies in Gemini complete rehome, and whole-line ownership for malformed prune
+passthrough. These have targeted operation-control/implementation owners; the final gate batch
+waits for this source work to settle. Changes must preserve complete output, metadata, acceptance and source-error
 semantics; shared checked readers/writers take priority over new format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
 This changes priority, not the correctness or fidelity requirements.
 
@@ -530,7 +534,6 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Native selected-payload gates for Kimi Code, OpenCode files/v1/v2, Cursor CLI/IDE and Goose, with independent full-output oracles and FD64.
 - [x] Portable selected-payload gates for the same seven formats: 224 checks retain native bounds and independent full-output/dataset oracles.
 - [x] Additional Codex response/event text, reasoning and encoded-argument gates; Gemini legacy/JSONL composite results and formatted thoughts, native and portable, with exact full-output oracles and unchanged heap limits.
-- [ ] Remaining store-format coverage: prioritize demonstrated whole-operation regressions rather than expanding the selected-payload matrix by default.
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [x] Claude metadata discovery and fork-head projections, including giant first records.
@@ -546,7 +549,6 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] LM Studio selected records and variants use schema projections in native/portable readers; lazy ordinary text and thinking retain source spans.
 - [x] Continue selected-record projections with native/portable typed acceptance and source-mutation checks.
 - [x] Supported native/portable encoded arguments and selected composite payloads have checked-source retention and independent resolved/full-output compatibility controls.
-- [ ] Giant serialization and compatibility coverage outside the represented producer shapes, including demanded rich metadata and explicit legacy fallbacks.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
@@ -556,7 +558,6 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Cursor CLI selected text and arguments, strict fused portable validation, and shared reducer facts.
 - [x] Cursor IDE selected strings, rich text and structured results with exact owned-output controls.
 - [x] OpenCode file-store late predicates pass unchanged heap gates after source inventory path/lifetime reductions.
-- [ ] Cursor/OpenCode selected-path CPU convergence beyond the measured direct-result and generated-length improvements.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
 - [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
@@ -582,7 +583,6 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Matched release controls for streamed native escaped output; adaptive validation and canonical short-escape bypass preserve exact output.
 - [x] Portable/zstd Codex selected payload retention with matched clean release CPU and exact output controls.
 - [x] Shared reducer metadata demand; Claude/Cursor CLI facts preserve doctor, compaction and affordance outputs.
-- [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
 - [x] Guard cold SQLite snapshots with operation-scoped byte-budgeted reuse and original DB/WAL/journal dependencies.
 - [x] Goose legacy discovery uses bounded strict header/count projections; whole-history rewrites deliberately decline resume.
 - [x] Catalog freshness for every primary, including quiet sessions and same-size replacements; guarded scanner cache publication.
@@ -596,22 +596,34 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Native JSONL record/output staging for append-only emitters.
 - [x] Native Codex emission uses original guarded lazy sources and incremental whole-report fidelity verification; actual port controls improve memory and CPU.
 - [x] Claude checked output records, per-block Native/Text/Drop handling and streamed strict resumability verification; actual port allocation/fidelity and native/portable compatibility controls pass.
-- [ ] Other emitters and same-harness complete parsing: requested metadata/carrier contracts and remaining ownership outside the Claude cross-harness control need operation-specific evidence.
+- [x] Same-harness Claude/Codex complete preparation retains checked ordinary payloads while preserving complete carriers; checked Gemini emission preserves the frozen writer's output. Composed export/rehome controls pass; see the operation-specific evidence below.
+- [ ] Remaining emitters and same-harness Gemini complete preparation: distinguish required metadata ownership from avoidable ordinary-payload materialization using actual operations.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
 - [x] Prune Thinking, ASCII declassification and ordinary usage-record projections, with whole-operation output parity and CI heap caps.
 - [x] Prune linked-record tool-input lookup reuses checked selected metadata, preserving exact output and flat heap; the existing Thinking gate now includes the linked-result composition.
 - [x] Unicode declassification retains bounded contextual lowercase matching with exact transcript/sidecar/source controls through 64 MiB; see PRUNE-UNICODE-EVIDENCE.json.
 - [x] Repair the demonstrated contextual Unicode CPU regression: batched single-pass matching executes 101.0M instructions versus 102.7M baseline on the late Greek-term control, preserving exact output; the initial 872.8M regression and intermediate repair are retained in the evidence.
-- [ ] Malformed prune fallbacks and demanded oversized metadata remain outside the proven bounds.
+- [ ] Malformed prune passthrough: test and remove avoidable whole-line ownership while preserving exact bytes and the fatal invalid-UTF-8 contract. Demanded oversized metadata remains a separate ownership limit.
 - [x] Matched whole-operation Thinking+revival and usage-correction instruction controls, including attribution and repair of the initial usage framing regression.
-- [ ] Broader prune CPU claims remain unproven: required source validation/canonicalization and staged copying retain shape-dependent costs outside those two controls.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
 - [x] Exact session-ranked search limits and pre-limit CLI/HTTP filters, including tied scores and current metadata.
 - [x] Measure exact search collector stored-document costs; project stored IDs without decoding unrelated metadata, preserving existing indexes.
 - [x] Single-pass selected escaped materialization and decoded lengths; rollback preserves malformed raw fallback.
 - [x] Frozen Claude/Codex/Gemini fleet parity: 5,960 references in lazy/bulk/full modes; representative complete-mode checks.
 - [x] First implementation integrated; complete CI gates and final detector fidelity checks passed. Remaining workloads stay listed above.
+
+Measurement and ownership boundaries (2026-10-13 completion audit): these are limits on the
+claims, not requirements to prove every possible input optimal. Native/portable gates establish
+the represented producer contracts, not universal serialization or uncommon-carrier bounds.
+Requested complete metadata and explicit owned APIs may grow with their requested output.
+Cursor/OpenCode direct-result and generated-length improvements are measured; escaped encoded
+inputs still require decoding, validation and spill, and the older 1.37× comparison used an
+allocation-instrumented probe. It is not an unconditional CPU-convergence target. Portable
+whole-operation cold admission/escaped-doctor CPU remains unmeasured; further work needs a
+specific operation cost to attribute. Prune's instruction improvements apply to the recorded
+controls; required validation, canonicalization and staged copying retain shape-dependent costs.
+Add further controls when a concrete operation demonstrates waste or a compatibility gap.
 
 Validation of the implementation through `17a9cd1`: 910 workspace tests, the release corpus parse
 budget, live-heap gates in both configurations, fmt/clippy, workspace/no-default/wasm builds,
@@ -3662,3 +3674,9 @@ Root integration of MCP admission at `debf6b63` passes all three actual admissio
 checks and six lease/publication unit checks. The SQLite lease composition remains pending;
 no final full-repository gate run or push has occurred. Root logs are retained under
 `excellence-evidence/lifecycle-integration` outside the repository.
+
+The follow-up at `56e94da5` releases a previous input frame's buffer when its capacity exceeds
+64 KiB, before blocking for the next frame. Ordinary buffers remain reusable; accepted frame
+sizes and protocol behavior are unchanged. All 11 MCP protocol integration tests pass on this
+composition. This removes lifetime retention of an unusually large prior request; it does not
+bound the current request's size or claim an absolute server heap ceiling.
