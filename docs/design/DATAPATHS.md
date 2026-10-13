@@ -3251,3 +3251,20 @@ lookup tests cover compact/full rosters, duplicate IDs, index order, missing/arr
 repeated/unknown/nonstring result IDs and changed original metadata failure. Requested input
 metadata itself remains owned if unusually large; this is an owner-retention improvement,
 not a CPU/RSS claim or a reason to skip existing validation/error checks.
+
+Linked prune-input CI composition (2026-10-13): the existing 64 MiB Thinking/revival case now
+keeps a tiny indexed Bash tool_use in the giant Thinking assistant and a later old 6,656-byte
+linked tool_result. This refutes `materialize_tool_inputs` owning the complete earlier assistant
+just to extract its small input. It stays one of the same six cases under the unchanged 4 MiB
+ceiling, with strict positive peak, allocation-request and requested-byte counters.
+
+The usage-enriched fixture requires two snipped payloads, the intact linked tool_use and useful
+command/description in the result marker, two usage rewrites, and exact honest/stale figures
+168/2000. It also pins source size/hash, the complete 1,521-byte transcript SHA, and the complete
+67,116,376-byte sidecar SHA; unchanged source and preserved recent turns/conclusion still apply.
+Frozen old/fixed warm native probes produce identical results and hashes: requested peak drops
+from 134,377,301 to 467,782 bytes. The changed case passes its isolated gate at about 468 KB;
+unchanged cases were not rerun. No Rust build, new case/matrix, timing or physical-memory claim
+was added. The paired control is preserved at
+`/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/prune-linked-revival-ci-control.json`;
+its exact fixture is reproducible with the checked-in operation gate generator.

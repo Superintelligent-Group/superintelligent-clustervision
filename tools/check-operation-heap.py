@@ -52,9 +52,13 @@ def prune_fixture(path, case):
         block["signature"] = "sig"
     rows[1] = row("assistant", "a", [block, dict(type="text", text="conclusion")], parentUuid="u")
     if case == "thinking":
+        rows[1]["message"]["content"].append(dict(type="tool_use", id="linked", name="Bash",
+            input=dict(command="printf useful", description="linked control")))
         for index, tokens in ((1, 1000), (3, 2000)):
             rows[index]["message"]["usage"] = dict(input_tokens=tokens,
                 cache_read_input_tokens=0, cache_creation_input_tokens=0)
+        rows.insert(2, row("user", "result", [dict(type="tool_result", tool_use_id="linked",
+            content="small result\n" * 512)]))
     write_rows(path, rows, "" if case == "thinking" else "ALPHA beta ")
 
 
@@ -75,19 +79,23 @@ def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n"):
             output.write(row_suffix)
 
 
-def prune_gate(binary, root, env):
-    # Frozen native operation sidecars from PRUNE-TURN-EVIDENCE.json. The hashes cover the
+def prune_gate(binary, root, env, cases=("thinking", "ascii-declass")):
+    # Frozen native sidecars from PRUNE-TURN/PRUNE-LINKED-INPUT-EVIDENCE.json. Hashes cover the
     # full decoded payload and metadata, without building a second giant owned Value tree.
     expected = {
-        "thinking": ("a#think0", 67109038, "38fe030f5e91bab5281bff81d7013943fe7efdae113847a315217770cac801d0"),
+        "thinking": ("a#think0", 67116376, "68c8fcaf6c42fa65fcd367f4eca3e8334dfb412f08637b2a206a97cfa3ad4822"),
         "ascii-declass": ("a#declass0", 67109028, "e02a472d3c4aa721b5199b991ef3c3aa1b1c73420f1885adaa73d1574a9c0b1f"),
     }
-    for case, (stash_id, sidecar_size, sidecar_hash) in expected.items():
+    for case in cases:
+        stash_id, sidecar_size, sidecar_hash = expected[case]
         directory = root / case
         directory.mkdir()
         source = directory / "source.jsonl"
         prune_fixture(source, case)
         original = file_digest(source)
+        if case == "thinking":
+            assert source.stat().st_size == 67117078
+            assert original == "aa73756329ab751759a30b8c22fd0113728c9153b27a092634a3523cbb60407b"
         flags = ["thinking", "revive"] if case == "thinking" else ["declassify"]
         child = subprocess.run([str(binary), str(source), *flags], env=env,
                                text=True, capture_output=True)
@@ -95,19 +103,33 @@ def prune_gate(binary, root, env):
         report = json.loads(child.stdout)
         peak = checked_peak(report.get("heap"))
         result = report["result"]
-        assert result["snipped_payloads"] == 1 and result["tokens_freed"] > PAYLOAD // 8
+        assert result["snipped_payloads"] == (2 if case == "thinking" else 1)
+        assert result["tokens_freed"] > PAYLOAD // 8
         assert result["before_bytes"] > PAYLOAD and result["after_bytes"] < 2048
         if case == "thinking":
-            assert type(report["revive_tokens"]) is int and report["revive_tokens"] > 0
-            assert report["usage_rewritten"] > 0
-        output = [json.loads(line) for line in Path(result["new_path"]).read_text().splitlines()]
-        assert len(output) == 4 and all(row["sessionId"] == NEW_ID for row in output)
-        assert [row["uuid"] for row in output] == ["u", "a", "v", "z"]
+            assert report["revive_tokens"] == 168 and report["revive_old_tokens"] == 2000
+            assert report["usage_rewritten"] == 2
+        output_path = Path(result["new_path"])
+        if case == "thinking":
+            assert output_path.stat().st_size == 1521
+            assert file_digest(output_path) == "a22fa06f173a2222433de567d4548e1d62fc8c09133759e8070a8ea3c9d943b5"
+        output = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert all(row["sessionId"] == NEW_ID for row in output)
+        assert [row["uuid"] for row in output] == (["u", "a", "result", "v", "z"]
+                                                 if case == "thinking" else ["u", "a", "v", "z"])
         assert output[0]["message"]["content"] == "prompt"
-        assert output[2]["message"]["content"] == "recent"
-        assert output[3]["message"]["content"] == [dict(type="text", text="recent answer")]
+        assert output[-2]["message"]["content"] == "recent"
+        assert output[-1]["message"]["content"] == [dict(type="text", text="recent answer")]
         changed = output[1]["message"]["content"]
-        assert len(changed) == 2 and changed[1] == dict(type="text", text="conclusion")
+        assert len(changed) == (3 if case == "thinking" else 2)
+        assert changed[1] == dict(type="text", text="conclusion")
+        if case == "thinking":
+            assert changed[2] == dict(type="tool_use", id="linked", name="Bash",
+                input=dict(command="printf useful", description="linked control"))
+            result_block = output[2]["message"]["content"]
+            assert len(result_block) == 1 and result_block[0]["type"] == "tool_result"
+            assert result_block[0]["tool_use_id"] == "linked"
+            assert "id=linked tool=Bash command=printf useful, description=linked control |" in result_block[0]["content"]
         assert f"id={stash_id} " in changed[0]["text"] and "[PRUNED " in changed[0]["text"]
         sidecar = Path(result["sidecar_path"])
         assert sidecar.stat().st_size == sidecar_size and file_digest(sidecar) == sidecar_hash
