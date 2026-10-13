@@ -57,6 +57,10 @@ impl Head {
         self.stopped |= end < text.len();
     }
     pub fn push_text(&mut self, text: &Text, resolver: &Resolver) {
+        if matches!(text, Text::Source(_)) {
+            let _ = self.try_push_text(text, resolver);
+            return;
+        }
         if self.full() {
             return;
         }
@@ -69,6 +73,12 @@ impl Head {
     /// shares the remaining byte budget; selected raw prefixes keep their existing behavior.
     pub fn try_push_text(&mut self, text: &Text, resolver: &Resolver) -> anyhow::Result<()> {
         if !self.full() {
+            if let Text::Source(source) = text {
+                let (prefix, truncated) = source.try_prefix_with_truncation(self.remaining())?;
+                self.push(&prefix);
+                self.stopped |= truncated;
+                return Ok(());
+            }
             let prefix = text.try_resolve_prefix(resolver, self.remaining() as u64)?;
             self.push(&prefix);
         }
@@ -102,6 +112,37 @@ impl Head {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_text_prefix_preserves_unicode_cutoff_and_zero_budget() {
+        let dir = cv_testkit::temp_dir("source-text-head");
+        let path = dir.join("source.json");
+        let decoded = format!("abé{}", "x".repeat(20_000));
+        std::fs::write(&path, serde_json::to_vec(&decoded).unwrap()).unwrap();
+        let value = crate::json::Json::source(&path, 0, std::fs::metadata(&path).unwrap().len()).unwrap();
+        let text = value.with_view(|view| Ok(view.source_text()?.unwrap())).unwrap();
+        let Text::Source(source) = &text else {
+            panic!("retained source")
+        };
+        assert_eq!(source.try_prefix_with_truncation(0).unwrap(), (String::new(), true));
+        assert_eq!(source.try_prefix_with_truncation(3).unwrap(), ("ab".into(), true));
+        assert_eq!(
+            source.try_prefix_with_truncation(decoded.len()).unwrap(),
+            (decoded.clone(), false)
+        );
+        for checked in [true, false] {
+            let mut head = Head::new(3);
+            if checked {
+                head.try_push_text(&text, &Resolver::new(None)).unwrap();
+            } else {
+                head.push_text(&text, &Resolver::new(None));
+            }
+            head.push("\n");
+            assert_eq!(head.as_str(), "ab");
+            assert!(head.full());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn checked_text_head_propagates_selected_source_failure() {

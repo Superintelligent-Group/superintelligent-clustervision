@@ -83,6 +83,11 @@ impl SourceText {
     }
     /// A decoded UTF8 byte prefix; unlike raw Span caps, this carrier has strict JSON semantics.
     pub fn try_prefix(&self, cap: usize) -> Result<String> {
+        self.try_prefix_with_truncation(cap).map(|(text, _)| text)
+    }
+    /// Retain whether the next scalar did not fit, even when UTF8 rounding leaves unused bytes.
+    /// Revalidate the full source guard before treating the internal prefix cutoff as success.
+    pub fn try_prefix_with_truncation(&self, cap: usize) -> Result<(String, bool)> {
         let mut output = String::with_capacity(cap.min(64 * 1024));
         let result = self.try_for_each_chunk(64 * 1024, |part| {
             let mut end = part.len().min(cap - output.len());
@@ -99,11 +104,14 @@ impl SourceText {
             }
             Ok(())
         });
-        match result {
-            Err(error) if error.downcast_ref::<PrefixComplete>().is_some() => {}
-            other => other?,
-        }
-        Ok(output)
+        let truncated = match result {
+            Err(error) if error.downcast_ref::<PrefixComplete>().is_some() => true,
+            other => {
+                other?;
+                false
+            }
+        };
+        Ok((output, truncated))
     }
     pub fn try_decoded_len(&self) -> Result<usize> {
         let mut len = 0usize;
