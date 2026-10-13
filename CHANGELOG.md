@@ -11,6 +11,8 @@
 - Grok subagent preparation recognizes missing metadata beneath sibling files and invalidates that absence when a child later appears.
 
 - Grok and Qwen exports stream guarded JSONL payloads while preserving native output, thinking modes, and fidelity reports.
+- OpenClaw JSONL reads reject source replacement across registry and branch selection, including owned reads, tree reads and callback failures.
+
 - Flat OpenClaw rehomes retain guarded message payloads through complete preparation while preserving control carriers, rich metadata and fidelity.
 
 - OpenClaw exports stream guarded payloads and bounded fallback titles, preserving native transcript, index and fidelity behavior.

@@ -41,8 +41,8 @@ pub(super) fn stream(
     facts: &KeyFacts,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
+    source: &JsonSource,
 ) -> Result<Session> {
-    let source = JsonSource::capture(&r.path)?;
     let file = fs::File::open(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     source.check_metadata(file.metadata()?)?;
     let result = (|| {
@@ -63,14 +63,14 @@ pub(super) fn stream(
                 source.read_borrowed_range_value(
                     at + (trimmed.as_ptr() as usize - text.as_ptr() as usize) as u64,
                     trimmed,
-                    |view| project(view, &source),
+                    |view| project(view, source),
                 )
             });
             consume(rows, r, facts, opts, sink)
         }
         #[cfg(not(feature = "mmap"))]
         {
-            let context = crate::harness::store::document::range::RangeSource::from_captured(source.clone())?;
+            let context = crate::harness::store::document::range::RangeSource::from_captured((*source).clone())?;
             let extent = ranges::Range {
                 offset: 0,
                 len: source.len(),
@@ -80,7 +80,7 @@ pub(super) fn stream(
                 if range.len == 0 {
                     return Ok(None);
                 }
-                source.read_positioned_range_value(&context, range.offset, range.len, |view| project(view, &source))
+                source.read_positioned_range_value(&context, range.offset, range.len, |view| project(view, source))
             });
             consume(rows, r, facts, opts, sink)
         }
@@ -417,6 +417,72 @@ mod tests {
         }
         let error = adapter.stream(&r, &opts, &mut Mutate(&path)).unwrap_err();
         assert!(format!("{error:#}").contains("source changed"));
+        Ok(())
+    }
+
+    #[test]
+    fn checked_openclaw_selection_keeps_original_identity_and_race_error() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-selection-identity");
+        let path = world.base.join("source.jsonl");
+        let flat = b"{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"original\"}}\n";
+        let tree = b"{\"type\":\"leaf\",\"leafId\":\"new\"}\n{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"replacement\"}}\n";
+        for parser_error in [false, true] {
+            fs::write(&path, flat)?;
+            let r = SessionRef::new("identity", Harness::OpenClaw, &path);
+            let error = with_jsonl_source(&path, |source| {
+                let facts = jsonl_key_facts(&path, &r.id);
+                assert!(!has_leaf_controls(&path)?);
+                // Deterministically replace the primary after selection, before opening payloads.
+                fs::write(&path, tree)?;
+                if parser_error {
+                    anyhow::bail!("callback diagnostic");
+                }
+                let mut sink = crate::stream::CollectSink::default();
+                stream(&r, &facts, &ParseOptions::complete(), &mut sink, source)
+            })
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("source changed"), "{error:#}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn checked_openclaw_owned_and_tree_stop_reject_original_source_replacement() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-owned-tree-identity");
+        let path = world.base.join("source.jsonl");
+        for tree in [false, true] {
+            let mut bytes =
+                b"{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"original\"}}\n"
+                    .to_vec();
+            if tree {
+                bytes.extend_from_slice(b"{\"type\":\"leaf\",\"leafId\":\"u\"}\n");
+            }
+            for spans in [false, true] {
+                fs::write(&path, &bytes)?;
+                // Use a fallible callback so its diagnostic cannot hide the primary-source race.
+                struct MutateFallible<'a>(&'a Path);
+                impl MessageSink for MutateFallible<'_> {
+                    fn message(&mut self, _: Message) -> Flow {
+                        unreachable!()
+                    }
+                    fn try_message(&mut self, _: Message) -> Result<Flow> {
+                        fs::write(self.0, b"replacement")?;
+                        anyhow::bail!("callback diagnostic")
+                    }
+                }
+                let adapter = OpenClaw { roots: vec![] };
+                let r = SessionRef::new("identity", Harness::OpenClaw, &path);
+                let options = ParseOptions {
+                    spans,
+                    ..ParseOptions::complete()
+                };
+                let error = adapter.stream(&r, &options, &mut MutateFallible(&path)).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("source changed"),
+                    "tree={tree}/spans={spans}: {error:#}"
+                );
+            }
+        }
         Ok(())
     }
 }

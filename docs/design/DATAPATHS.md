@@ -4182,3 +4182,23 @@ duplicate-key behavior. Native and portable SQLite-enabled library/tests clippy 
 formatting pass. Carrier bodies, demanded system prompts, tree/store paths, message/cardinality
 metadata and private output staging remain explicit ownership costs. No CPU, RSS or physical-I/O
 claim follows from this allocation control.
+
+
+### OpenClaw primary freshness across selection (Sol, 2026-10-13)
+
+Direct OpenClaw JSONL streaming previously captured selected payload provenance only after
+reading registry facts and detecting leaf controls. A flat source replaced with a tree between
+those passes could be recaptured as fresh and interpreted with stale selection. JSONL streaming
+now captures the primary JsonSource before either prepass, validates it after selection, passes
+that same source to selected parsing, and validates original identity on every return. Owned
+flat and tree paths use the same outer guard. Source replacement takes precedence over a
+simultaneous parser or callback error; unchanged-source callback errors retain their existing
+checked-boundary behavior. The SQLite route and the existing preparation ReadSet dependency
+contract are unchanged; this repair is a primary-source scope, not a new registry snapshot policy.
+
+Deterministic controls replace an originally flat file with a tree after prepass selection and
+exercise original-source mutation from fallible callbacks on both flat owned and tree routes,
+with spans enabled and disabled. Every case rejects with source-changed rather than a callback
+diagnostic. All 29 native OpenClaw tests and ten no-default checked controls pass. Native and
+portable SQLite-enabled library/tests clippy and pinned formatting pass. No operation allocation
+control was repeated for this freshness repair.
