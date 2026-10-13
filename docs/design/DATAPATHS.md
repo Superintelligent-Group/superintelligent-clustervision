@@ -39,9 +39,17 @@ source validation; no further validation-state machinery is justified by this co
 not a speed claim or a pending permission decision. Gemini complete rehome is also integrated,
 with native/portable frozen-output controls and a 277 KB peak for the 32 MiB operation.
 Continue/LM Studio checked emission and direct-source guards are integrated, with exact native
-and portable output/failure controls. Runtime source work for this batch has settled; the final
-gate batch follows the completed evidence update. Changes must preserve complete output, metadata, acceptance and source-error
-semantics; shared checked readers/writers take priority over new format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
+and portable output/failure controls. That settled batch completed local convergence at
+`2a2d35f9`; the evidence below records the scoped corrections needed to finish its gates.
+The post-restart batch completes Grok/Qwen/OpenClaw checked exports, SQLite row transactions,
+and the native OpenCode 2.x compatibility gap. SQLite v1/Hermes transactions and the shared
+short-string allocation repair are integrated at `0af1dc87`; Cline/LM Studio redundant decoding
+is repaired at `927917a6`. Same-target preparation remains a separate producer-contract check,
+not an automatic consequence of a checked writer. Run focused composition checks while these
+changes land, then one convergence batch. Changes must preserve complete output, metadata,
+acceptance and source-error semantics; shared checked readers/writers take priority over new
+format machinery. Qwen has no local data, so fleet evidence remains unavailable; its supported
+export still receives synthetic and committed-corpus compatibility checks.
 This changes priority, not the correctness or fidelity requirements.
 
 | User operation | What we know | Next question / action |
@@ -613,7 +621,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Gemini complete rehome retains checked payloads in both recording formats; exact metadata/replay/acceptance oracles and the actual modern rehome gate preserve the complete contract.
 - [x] Continue/LM Studio checked export and bounded title fallback preserve frozen output and direct captured-source failures, including discarded fields and LM whitespace-thinking projection.
 - [ ] Remaining JSONL emitters: Grok, OpenClaw and Qwen still own ordinary session payloads and construct payload-bearing records. Reuse checked writers; preserve native output, thinking, sidecars and source-error behavior. Qwen local-store absence limits fleet evidence, not supported export scope.
-- [ ] SQLite exports (OpenCode/Hermes): retain checked session leaves and construct only demanded rows; reuse prepared inserts and publish an export in one transaction. Current per-row autocommits and whole-session ownership are avoidable. Test exact logical rows/FTS and rollback; row-sized native/contiguous TEXT costs remain explicit.
+- [x] SQLite exports (OpenCode v1/Hermes): checked session leaves, current-row ownership, reused prepared inserts and one export transaction. Native/portable logical-row, FTS and late-failure rollback controls pass; actual operation evidence records Rust/native allocation separately. Largest-row and SQLite cache costs remain explicit; native OpenCode 2.x is tracked separately.
 - [x] Same-harness complete Cline/Roo/Continue/LM Studio preparation retains checked bodies, with independent native/portable complete IR, wire/fidelity, LM variant and late-source controls. Four actual reader-contract controls establish peak-memory savings; higher cumulative allocation on Cline task directories and LM remains an explicit cost under attribution.
 - [ ] Same-harness complete preparation for remaining checked writers: establish metadata/carrier/variant and wire/fidelity parity for OpenClaw/Grok/Qwen/OpenCode/Hermes as their writers become checked.
 - [ ] Native OpenCode 2.x export compatibility: the current writer emits v1 tables; pinned native 2.0.25 get/list reads only v2 tables, and its completed historical migration does not import newly emitted v1 rows. Implement explicit v2 output and native isolated acceptance; do not reset migration markers or use our reader alone as resumability proof.
