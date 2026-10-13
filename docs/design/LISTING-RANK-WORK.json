@@ -1,0 +1,280 @@
+{
+  "date": "2026-10-13",
+  "author": "Sol",
+  "base": "2a64ebc0",
+  "toolchain": "1.99.0",
+  "build": "debug; no timing measurements",
+  "implementation": "crates/cv/src/cmd/browse.rs::ranked_json_rows",
+  "activation": "Only unqueried JSON windows with 8 * limit < inventory size; saturating multiplication. This is a conservative window-size heuristic, not a measured CPU crossover.",
+  "contract": "Metadata rank keys and original ordinals reproduce stable ties. Descending applies the existing existence filter while pulling ranked candidates; ascending selects newest K then reverses before that filter. Queried JSON, text exact totals and wide windows retain full sorting.",
+  "controls": {
+    "inventory": "20,000 / 100,000 synthetic refs to one tiny existing file; message-count sort; window=20",
+    "shapes": {
+      "shuffled": "(ordinal * 2654435761) % 10007, with ties",
+      "sorted": "count - ordinal",
+      "reverse": "ordinal",
+      "tied": "7"
+    },
+    "comparison_baseline": "Prior stable sort_by_key over owned SessionRef values; key calls / 2 count comparator invocations.",
+    "heap_baseline": "Prior select_refs plus json_rows, including actual full-sort scratch; inventory creation/cloning excluded.",
+    "output_oracle": "Exact selected serde_json rows; separate presence/tie test covers all three keys, both directions, missing files, 0/1/3/20/full/unlimited limits."
+  },
+  "work": [
+    {
+      "shape": "shuffled",
+      "refs": 20000,
+      "window": 20,
+      "stable_comparisons": 282658,
+      "heap_comparisons": 37749,
+      "heap_entry_bytes": 32
+    },
+    {
+      "shape": "sorted",
+      "refs": 20000,
+      "window": 20,
+      "stable_comparisons": 19999,
+      "heap_comparisons": 20286,
+      "heap_entry_bytes": 32
+    },
+    {
+      "shape": "reverse",
+      "refs": 20000,
+      "window": 20,
+      "stable_comparisons": 19999,
+      "heap_comparisons": 40282,
+      "heap_entry_bytes": 32
+    },
+    {
+      "shape": "tied",
+      "refs": 20000,
+      "window": 20,
+      "stable_comparisons": 19999,
+      "heap_comparisons": 20286,
+      "heap_entry_bytes": 32
+    },
+    {
+      "shape": "shuffled",
+      "refs": 100000,
+      "window": 20,
+      "stable_comparisons": 1709691,
+      "heap_comparisons": 187666,
+      "heap_entry_bytes": 32
+    },
+    {
+      "shape": "sorted",
+      "refs": 100000,
+      "window": 20,
+      "stable_comparisons": 99999,
+      "heap_comparisons": 100333,
+      "heap_entry_bytes": 32
+    },
+    {
+      "shape": "reverse",
+      "refs": 100000,
+      "window": 20,
+      "stable_comparisons": 99999,
+      "heap_comparisons": 200319,
+      "heap_entry_bytes": 32
+    },
+    {
+      "shape": "tied",
+      "refs": 100000,
+      "window": 20,
+      "stable_comparisons": 99999,
+      "heap_comparisons": 100333,
+      "heap_entry_bytes": 32
+    }
+  ],
+  "requested_rust_heap": [
+    {
+      "refs": 20000,
+      "window": 20,
+      "shape": "shuffled",
+      "stable": {
+        "baseline_live_bytes": 9943906,
+        "peak_live_bytes": 12663906,
+        "peak_above_baseline_bytes": 2720000,
+        "stage_end_live_bytes": 9982235,
+        "allocation_requests": 366,
+        "requested_bytes": 2786409
+      },
+      "heap": {
+        "baseline_live_bytes": 9982235,
+        "peak_live_bytes": 10660604,
+        "peak_above_baseline_bytes": 678369,
+        "stage_end_live_bytes": 10020564,
+        "allocation_requests": 366,
+        "requested_bytes": 706409
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    },
+    {
+      "refs": 20000,
+      "window": 20,
+      "shape": "sorted",
+      "stable": {
+        "baseline_live_bytes": 9943970,
+        "peak_live_bytes": 12663970,
+        "peak_above_baseline_bytes": 2720000,
+        "stage_end_live_bytes": 9982240,
+        "allocation_requests": 366,
+        "requested_bytes": 2786350
+      },
+      "heap": {
+        "baseline_live_bytes": 9982240,
+        "peak_live_bytes": 10660550,
+        "peak_above_baseline_bytes": 678310,
+        "stage_end_live_bytes": 10020510,
+        "allocation_requests": 366,
+        "requested_bytes": 706350
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    },
+    {
+      "refs": 20000,
+      "window": 20,
+      "shape": "reverse",
+      "stable": {
+        "baseline_live_bytes": 9943970,
+        "peak_live_bytes": 12663970,
+        "peak_above_baseline_bytes": 2720000,
+        "stage_end_live_bytes": 9982310,
+        "allocation_requests": 366,
+        "requested_bytes": 2786420
+      },
+      "heap": {
+        "baseline_live_bytes": 9982310,
+        "peak_live_bytes": 10660690,
+        "peak_above_baseline_bytes": 678380,
+        "stage_end_live_bytes": 10020650,
+        "allocation_requests": 366,
+        "requested_bytes": 706420
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    },
+    {
+      "refs": 20000,
+      "window": 20,
+      "shape": "tied",
+      "stable": {
+        "baseline_live_bytes": 9943970,
+        "peak_live_bytes": 12663970,
+        "peak_above_baseline_bytes": 2720000,
+        "stage_end_live_bytes": 9982240,
+        "allocation_requests": 366,
+        "requested_bytes": 2786350
+      },
+      "heap": {
+        "baseline_live_bytes": 9982240,
+        "peak_live_bytes": 10660550,
+        "peak_above_baseline_bytes": 678310,
+        "stage_end_live_bytes": 10020510,
+        "allocation_requests": 366,
+        "requested_bytes": 706350
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    },
+    {
+      "refs": 100000,
+      "window": 20,
+      "shape": "shuffled",
+      "stable": {
+        "baseline_live_bytes": 49783970,
+        "peak_live_bytes": 57783898,
+        "peak_above_baseline_bytes": 7999928,
+        "stage_end_live_bytes": 49822307,
+        "allocation_requests": 366,
+        "requested_bytes": 8066345
+      },
+      "heap": {
+        "baseline_live_bytes": 49822307,
+        "peak_live_bytes": 53060684,
+        "peak_above_baseline_bytes": 3238377,
+        "stage_end_live_bytes": 49860644,
+        "allocation_requests": 366,
+        "requested_bytes": 3266417
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    },
+    {
+      "refs": 100000,
+      "window": 20,
+      "shape": "sorted",
+      "stable": {
+        "baseline_live_bytes": 49783970,
+        "peak_live_bytes": 57783898,
+        "peak_above_baseline_bytes": 7999928,
+        "stage_end_live_bytes": 49822240,
+        "allocation_requests": 366,
+        "requested_bytes": 8066278
+      },
+      "heap": {
+        "baseline_live_bytes": 49822240,
+        "peak_live_bytes": 53060550,
+        "peak_above_baseline_bytes": 3238310,
+        "stage_end_live_bytes": 49860510,
+        "allocation_requests": 366,
+        "requested_bytes": 3266350
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    },
+    {
+      "refs": 100000,
+      "window": 20,
+      "shape": "reverse",
+      "stable": {
+        "baseline_live_bytes": 49783970,
+        "peak_live_bytes": 57783898,
+        "peak_above_baseline_bytes": 7999928,
+        "stage_end_live_bytes": 49822310,
+        "allocation_requests": 366,
+        "requested_bytes": 8066348
+      },
+      "heap": {
+        "baseline_live_bytes": 49822310,
+        "peak_live_bytes": 53060690,
+        "peak_above_baseline_bytes": 3238380,
+        "stage_end_live_bytes": 49860650,
+        "allocation_requests": 366,
+        "requested_bytes": 3266420
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    },
+    {
+      "refs": 100000,
+      "window": 20,
+      "shape": "tied",
+      "stable": {
+        "baseline_live_bytes": 49783970,
+        "peak_live_bytes": 57783898,
+        "peak_above_baseline_bytes": 7999928,
+        "stage_end_live_bytes": 49822240,
+        "allocation_requests": 366,
+        "requested_bytes": 8066278
+      },
+      "heap": {
+        "baseline_live_bytes": 49822240,
+        "peak_live_bytes": 53060550,
+        "peak_above_baseline_bytes": 3238310,
+        "stage_end_live_bytes": 49860510,
+        "allocation_requests": 366,
+        "requested_bytes": 3266350
+      },
+      "scope": "rank and selected row projection; inventory construction and final serialization excluded"
+    }
+  ],
+  "limitations": [
+    "Reverse-sorted input roughly doubles comparison work; sorted and all-tied input add only selected heap pops but still retain a work tradeoff.",
+    "Missing-heavy inventories may consume most of the ranked tail; no worst-case throughput improvement is claimed.",
+    "Heap construction remains O(inventory) with 32-byte entries. Discovery, catalog loading, index preparation and final serialization are unchanged.",
+    "Heap snapshots exclude inventory construction, C/native memory, mapped pages, stacks, allocator overhead and physical memory. They are rank/projection controls, not complete CLI memory or latency.",
+    "No CPU or elapsed-time threshold is a test gate."
+  ],
+  "commands": [
+    "cargo +1.99.0 fmt --all --check",
+    "cargo test -p clustervision --bin cv cmd::browse -- --nocapture",
+    "cargo test -p clustervision --bin cv --features probe-heap listing_rank_heap_control -- --ignored --test-threads=1 --nocapture",
+    "cargo clippy -p clustervision --bin cv --tests -- -D warnings"
+  ],
+  "environment": "Scratch CLUSTERVISION_HOME, exclusive CARGO_TARGET_DIR, CARGO_BUILD_JOBS=2, CARGO_PROFILE_DEV_DEBUG=0"
+}

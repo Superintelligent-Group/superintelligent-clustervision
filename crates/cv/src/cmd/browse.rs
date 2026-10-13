@@ -27,6 +27,71 @@ fn json_rows<'a>(refs: impl Iterator<Item = &'a SessionRef>, limit: usize) -> Ve
         .collect()
 }
 
+/// Rank metadata without sorting the unrequested tail. Original ordinals reproduce stable ties.
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
+enum RankKey {
+    Time(Option<chrono::DateTime<chrono::Utc>>),
+    Messages(usize),
+}
+struct RankedRef<'a> {
+    key: RankKey,
+    ordinal: usize,
+    reference: &'a SessionRef,
+}
+impl PartialEq for RankedRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for RankedRef<'_> {}
+impl PartialOrd for RankedRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+#[cfg(test)]
+thread_local! { static RANK_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+impl Ord for RankedRef<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        #[cfg(test)]
+        RANK_COMPARISONS.with(|count| count.set(count.get() + 1));
+        self.key.cmp(&other.key).then_with(|| other.ordinal.cmp(&self.ordinal))
+    }
+}
+fn ranked_json_rows<'a>(
+    refs: &'a [SessionRef],
+    limit: usize,
+    sort_by: &str,
+    asc: bool,
+) -> Vec<(&'a SessionRef, serde_json::Value)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let entries: Vec<_> = refs
+        .iter()
+        .enumerate()
+        .map(|(ordinal, reference)| RankedRef {
+            key: match sort_by {
+                "created" => RankKey::Time(reference.created_at.or(reference.updated_at)),
+                "messages" => RankKey::Messages(reference.message_count),
+                _ => RankKey::Time(reference.updated_at.or(reference.created_at)),
+            },
+            ordinal,
+            reference,
+        })
+        .collect();
+    let mut heap = std::collections::BinaryHeap::from(entries);
+    let ranked = std::iter::from_fn(move || heap.pop().map(|entry| entry.reference));
+    if asc {
+        // Ascending selects the newest K before the existence filter, then reverses them.
+        let selected: Vec<_> = ranked.take(limit).collect();
+        json_rows(selected.into_iter().rev(), limit)
+    } else {
+        // Descending keeps ranked tail candidates available if an earlier file is missing.
+        json_rows(ranked, limit)
+    }
+}
+
 /// Reduce the stable inline prefix with the existing title policy. Once lazy text appears,
 /// preserve deferred user collection: resolution needs EOF source metadata and may fail after
 /// a source mutation, allowing a later user turn to become the title.
@@ -157,7 +222,14 @@ pub(crate) fn cmd_ls(
             Some(c) => r.cwd.as_ref().is_some_and(|p| p.to_string_lossy().contains(c)),
         })
         .collect();
-    let total = select_refs(&mut refs, &query, limit, sort_by, asc, json)?;
+    // Queried windows still require ordered predicate/error evaluation; text needs exact totals.
+    // Heapify only a small unqueried machine window, preserving the existing row stat seam.
+    let heap_window = json && query.is_none() && limit.saturating_mul(8) < refs.len();
+    let total = if heap_window {
+        refs.len()
+    } else {
+        select_refs(&mut refs, &query, limit, sort_by, asc, json)?
+    };
     if json {
         // Machine-readable listing: the SAME rows the table below would print (same filters, sort,
         // exists() guard, and limit), as one JSON array on stdout — no header/footer, so it pipes
@@ -167,7 +239,12 @@ pub(crate) fn cmd_ls(
         // `--enrich` (git + display_title) is opt-in because it costs one transcript parse per
         // emitted row — O(limit), not O(fleet), but not the catalog-cheap default `ls --json`
         // promises. See the perf note in the flag's help.
-        let rows: Vec<serde_json::Value> = json_rows(refs.iter(), limit)
+        let ranked_rows = if heap_window {
+            ranked_json_rows(&refs, limit, sort_by, asc)
+        } else {
+            json_rows(refs.iter(), limit)
+        };
+        let rows: Vec<serde_json::Value> = ranked_rows
             .into_iter()
             .map(|(r, mut obj)| {
                 if enrich {
@@ -356,6 +433,134 @@ tokens ({} session(s) + {} sub-agent transcript(s){}{}):",
 #[cfg(test)]
 mod window_tests {
     use super::*;
+
+    #[test]
+    fn heap_machine_windows_match_stable_rank_presence_and_ties() {
+        let world = cv_testkit::World::in_process("heap_json_windows");
+        let present = world.base.join("present");
+        std::fs::write(&present, "fixture").unwrap();
+        let refs: Vec<_> = (0..65)
+            .map(|i| {
+                let path = if i % 5 == 0 {
+                    world.base.join("missing")
+                } else {
+                    present.clone()
+                };
+                let mut r = SessionRef::new(format!("row-{i}"), cv_core::Harness::Claude, path);
+                r.message_count = i % 7;
+                r.created_at = chrono::DateTime::from_timestamp(100 + (i % 4) as i64, 0);
+                r.updated_at = if i % 3 == 0 {
+                    None
+                } else {
+                    chrono::DateTime::from_timestamp(200 + (i % 5) as i64, 0)
+                };
+                r
+            })
+            .collect();
+        for sort in ["created", "updated", "messages"] {
+            for asc in [false, true] {
+                for limit in [0, 1, 3, 20, 65, usize::MAX] {
+                    let mut baseline = refs.clone();
+                    select_refs(&mut baseline, &None, limit, sort, asc, true).unwrap();
+                    let expected: Vec<_> = json_rows(baseline.iter(), limit)
+                        .into_iter()
+                        .map(|(_, row)| row)
+                        .collect();
+                    let actual: Vec<_> = ranked_json_rows(&refs, limit, sort, asc)
+                        .into_iter()
+                        .map(|(_, row)| row)
+                        .collect();
+                    assert_eq!(actual, expected, "sort={sort},asc={asc},limit={limit}");
+                }
+            }
+        }
+    }
+
+    fn inventory_refs(present: &std::path::Path, count: usize, shape: &str) -> Vec<SessionRef> {
+        (0..count)
+            .map(|i| {
+                let mut reference = SessionRef::new(i.to_string(), cv_core::Harness::Claude, present.to_path_buf());
+                reference.message_count = match shape {
+                    "sorted" => count - i,
+                    "reverse" => i,
+                    "tied" => 7,
+                    _ => ((i as u64 * 2_654_435_761) % 10_007) as usize,
+                };
+                reference
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "isolated diagnostic; run with --test-threads=1 and --nocapture"]
+    fn listing_rank_heap_control() {
+        let world = cv_testkit::World::in_process("listing_rank_heap");
+        let present = world.base.join("present");
+        std::fs::write(&present, "fixture").unwrap();
+        for count in [20_000, 100_000] {
+            for shape in ["shuffled", "sorted", "reverse", "tied"] {
+                let refs = inventory_refs(&present, count, shape);
+                let mut baseline_refs = refs.clone();
+                let start = cv_testkit::heap::begin();
+                select_refs(&mut baseline_refs, &None, 20, "messages", false, true).unwrap();
+                let expected: Vec<_> = json_rows(baseline_refs.iter(), 20)
+                    .into_iter()
+                    .map(|(_, row)| row)
+                    .collect();
+                let stable = cv_testkit::heap::end(start);
+                let start = cv_testkit::heap::begin();
+                let actual: Vec<_> = ranked_json_rows(&refs, 20, "messages", false)
+                    .into_iter()
+                    .map(|(_, row)| row)
+                    .collect();
+                let heap = cv_testkit::heap::end(start);
+                assert_eq!(actual, expected);
+                eprintln!(
+                    "listing rank heap {}",
+                    serde_json::json!({"refs":count,"window":20,"shape":shape,
+                    "stable":stable,"heap":heap,"scope":"rank and selected row projection; inventory construction and final serialization excluded"})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn small_heap_window_reports_shuffled_and_natural_run_work() {
+        let world = cv_testkit::World::in_process("heap_inventory_work");
+        let present = world.base.join("present");
+        std::fs::write(&present, "fixture").unwrap();
+        for count in [20_000, 100_000] {
+            for shape in ["shuffled", "sorted", "reverse", "tied"] {
+                let refs = inventory_refs(&present, count, shape);
+                let comparisons = std::cell::Cell::new(0usize);
+                let mut baseline = refs.clone();
+                baseline.sort_by_key(|reference| {
+                    // sort_by_key evaluates both keys once per comparator invocation.
+                    comparisons.set(comparisons.get() + 1);
+                    std::cmp::Reverse(reference.message_count)
+                });
+                assert_eq!(comparisons.get() % 2, 0);
+                comparisons.set(comparisons.get() / 2);
+                let expected: Vec<_> = json_rows(baseline.iter(), 20).into_iter().map(|(_, row)| row).collect();
+                RANK_COMPARISONS.with(|value| value.set(0));
+                let actual: Vec<_> = ranked_json_rows(&refs, 20, "messages", false)
+                    .into_iter()
+                    .map(|(_, row)| row)
+                    .collect();
+                let heap_comparisons = RANK_COMPARISONS.with(|value| value.get());
+                assert_eq!(actual, expected);
+                if shape == "shuffled" {
+                    assert!(heap_comparisons * 3 < comparisons.get(), "rank work did not improve");
+                }
+                eprintln!(
+                "rank control shape={shape},refs={count},window=20,stable_comparisons={},heap_comparisons={heap_comparisons},heap_entry_bytes={}",
+                comparisons.get(),
+                std::mem::size_of::<RankedRef<'_>>()
+            );
+            }
+        }
+    }
 
     #[test]
     fn machine_windows_match_full_filter_sort_limit_with_missing_paths_and_ties() {
