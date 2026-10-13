@@ -1,0 +1,119 @@
+{
+  "question": "Can an uncached full-fleet has:plan query complete correctly, and what do unchanged and one-source-change queries cost?",
+  "measurement_kind": "Clean release production core query::facts::filter_refs over explicit frozen SessionRefs; discovery and CLI row formatting excluded.",
+  "setup": "APFS file clones, original harness stores read-only; SQLite main+present WAL/journal copied with stable before/after identities; copied SHM omitted. Frozen primary roots include nested data; companion stores outside copied roots may be absent. All phases use scratch catalogs and read scopes under a read-only-source sandbox.",
+  "probe_process_overhead": "Process time includes loading refs, catalog::sync setup and result serialization. Filter timer excludes setup; process warm total is not warm CLI latency.",
+  "source_revision_before": "043af983569d8d78a54629e7c49a9d4da7eeaa1b",
+  "source_revision_current": "4b0c5c0557da37d2102b98605e4f529c272f3da4",
+  "current_composition": [
+    "606c686 base",
+    "c1dd6af1 bounded ordered parallel queries",
+    "c8c9f002 Cursor empty-editor fallback",
+    "31f71861 bounded source prefixes",
+    "08e3dfa2 native Codex mapping reuse"
+  ],
+  "workload": {
+    "refs": 6883,
+    "by_harness": {
+      "claude": 925,
+      "codex": 4396,
+      "grok": 19,
+      "opencode": 328,
+      "gemini": 721,
+      "openclaw": 2,
+      "kimi": 174,
+      "kimi-code": 47,
+      "lmstudio": 54,
+      "hermes": 14,
+      "cursor": 186,
+      "zed": 9,
+      "devin": 8
+    },
+    "unique_primary_files": 6342,
+    "unique_primary_logical_bytes": 97274848369,
+    "full_cloned_roots_logical_bytes": 132622024398
+  },
+  "parallel": {
+    "default_features": [
+      "sqlite",
+      "parallel",
+      "mmap"
+    ],
+    "available_hardware_cpus": 12,
+    "active_hardware_cpus": 12,
+    "rayon_num_threads": 12,
+    "batch_source_bytes": 2147483648,
+    "batch_width": "available_parallelism;12 on this host",
+    "pressure_note": "Primary-source bytes are conservative pressure, not an allocated-memory estimate; SQLite repeats the whole DB size per session."
+  },
+  "serial_before_failed": {
+    "process_wall_seconds": 316.76,
+    "user_seconds": 128.52,
+    "sys_seconds": 43.95,
+    "peak_rss_bytes": 794247168,
+    "peak_physical_footprint_bytes": 103023216,
+    "page_faults": 5892176,
+    "block_inputs_reported": 0,
+    "block_outputs_reported": 0,
+    "error": "backing range out of bounds; first needed Cursor empty encoded richText"
+  },
+  "initial_current": {
+    "filter_seconds": 133.407182083,
+    "matches": 330,
+    "process_wall_seconds": 134.79,
+    "user_seconds": 188.84,
+    "sys_seconds": 68.74,
+    "peak_rss_bytes": 1681014784,
+    "peak_physical_footprint_bytes": 130515592,
+    "page_faults": 5892221,
+    "block_inputs_reported": 0,
+    "block_outputs_reported": 0
+  },
+  "unchanged_current": {
+    "filter_seconds": 0.593297959,
+    "matches": 330,
+    "process_wall_seconds": 2.02,
+    "user_seconds": 0.45,
+    "sys_seconds": 1.54,
+    "peak_rss_bytes": 41893888,
+    "peak_physical_footprint_bytes": 35111416,
+    "page_faults": 1,
+    "block_inputs_reported": 0,
+    "block_outputs_reported": 0
+  },
+  "one_append_current": {
+    "filter_seconds": 0.82593875,
+    "matches": 331,
+    "process_wall_seconds": 2.2,
+    "user_seconds": 0.6,
+    "sys_seconds": 1.74,
+    "peak_rss_bytes": 77283328,
+    "peak_physical_footprint_bytes": 38568464,
+    "page_faults": 3495,
+    "block_inputs_reported": 0,
+    "block_outputs_reported": 0
+  },
+  "validation": {
+    "common_persisted_count_maps": 6714,
+    "differences": 0,
+    "current_counted_refs": 6883,
+    "initial_unchanged_ordered_output_sha256": "01dc30723d179be4a90e3c4b4ca69f64dde240989e529f5edf1b95ec1f67c7c6",
+    "unchanged_output_byte_identical": true,
+    "append_original_bytes": 258,
+    "append_bytes": 246,
+    "append_effect": "Only changed Claude ref added; plan count absent->1,330->331 matches. No other selected ref removed.",
+    "scoped_query_facts_tests": 9
+  },
+  "host_load": {
+    "before": "22:46  up  3:35, 7 users, load averages: 21.95 28.92 43.55",
+    "after": "22:50  up  3:39, 7 users, load averages: 16.46 24.06 38.40"
+  },
+  "interpretation": [
+    "Current complete operation succeeds; prior revision fails before returning a query result. This is not an isolated parallelism comparison.",
+    "CPU and RSS rise with the combined revision and additional tail work; physical footprint remains modest. Mapped RSS is distinct from footprint.",
+    "Darwin reported zero block I/O counters; page faults are available, but these counters do not prove zero storage I/O.",
+    "Full selection must finish before first result; no partial output is emitted after a fallible read.",
+    "The historical60s CountsOnly index budget is a different workload; full index and parallel CountsOnly remain unmeasured here.",
+    "Limited machine requests still incur full-fleet filtering before sorting and truncation; rank-aware window selection is the next work-avoidance opportunity."
+  ]
+}
