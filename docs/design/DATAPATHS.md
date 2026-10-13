@@ -4504,3 +4504,12 @@ assistant row in `ses_ed362eed1ffebZR2VGSZEwUk4J`: guarded replay declines and g
 native streamed/completed timing and reasoning state. This remains an explicit fidelity blocker;
 the smaller tools/image/compact/skill controls and edit/source/group controls pass. Do not infer
 all-v2 complete replay coverage from those passing controls.
+
+The background-subagent blocker above is now repaired: shared `AffordanceSink` refinement changed
+Reply to SubagentSpawn after the raw witness was captured. Native v2 groups now apply that same
+refinement before witness capture and codec comparison, preserving its classification rather than
+weakening replay guards. Final focused batch: **4 passed**, including exact row replay across all
+16 native2 corpus sessions in checked/owned/public-IR/materialized forms and all thinking modes,
+plus the legacy producer, attachment and transformed/group/source controls. Final native edited
+user-text/image evidence is `native-opencode-v2-rich-native-final`; imported PNG bytes appear in
+the actual native model request, and edited text is present in the imported native row.

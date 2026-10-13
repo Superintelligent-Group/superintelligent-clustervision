@@ -247,6 +247,7 @@ pub(super) fn build_projected(
             return Err(());
         }
     }
+    crate::affordance::refine_complete_group(Harness::OpenCode, &mut out).map_err(|_| ())?;
     Ok(out)
 }
 

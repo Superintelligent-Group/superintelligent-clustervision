@@ -599,6 +599,15 @@ fn source_contains(source: &crate::lazy::SourceText, marker: &str) -> Result<boo
     }
 }
 
+/// Apply the same native spawn classification before capturing a complete row witness.
+pub(crate) fn refine_complete_group(harness: Harness, messages: &mut [Message]) -> Result<()> {
+    let mut open = std::collections::HashMap::new();
+    for message in messages {
+        refine_spawn(harness, message, &mut open)?;
+    }
+    Ok(())
+}
+
 fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMap<String, Returns>) -> Result<()> {
     match (m.role, m.kind) {
         (Role::Assistant, MessageKind::Reply) => {
