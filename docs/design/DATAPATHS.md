@@ -44,8 +44,13 @@ labels, but optimize repeatable work on identical inputs and verify identical us
 Instruction count is a cost model, not a latency guarantee. Cachegrind's simplified cache simulation
 does not describe Apple Silicon caches; instruction-only profiles are the initial target. Its
 [manual](https://valgrind.org/docs/manual/cg-manual.html) explains these limits. ARM64 Linux is
-[supported](https://valgrind.org/info/platforms.html), ARM64 Darwin is not. Local Docker Desktop
-provides an ARM64 Linux route; a small executable probe is being established before adding gates.
+[supported](https://valgrind.org/info/platforms.html), ARM64 Darwin is not. The executable Linux
+route is now in [`tools/profiling/README.md`](../../tools/profiling/README.md): a default-feature,
+optimized Rust 1.99.0 `store_probe` with debug information, isolated in a capped ARM64 container.
+Two fixed-worker Claude count controls returned 1,871,091 and 1,870,995 instructions (0.0051%
+variation), with identical count output and unchanged hot parser function counts. This establishes
+a usable comparison method, not a performance improvement or a whole-IR fidelity proof. The
+fixture, binary, environment and attribution are recorded alongside the runner; no new CI gate yet.
 Do not build a general telemetry framework or replace existing production paths with benchmark-only
 implementations. Elapsed/CPU times may remain coarse observations, never evidence by themselves of
 a small improvement. Avoid claiming one process's byte permits bound total machine memory.
