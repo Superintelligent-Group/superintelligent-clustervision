@@ -208,6 +208,11 @@ pub(crate) fn cmd_ls(
 ) -> Result<()> {
     let want = parse_harness(&harness)?;
     let query = crate::cmd::query::build(query)?;
+    // An empty machine window requires no inventory or enrichment; still validate inputs.
+    if json && limit == 0 {
+        println!("[]");
+        return Ok(());
+    }
     let all = if fresh {
         cv_core::discover_all()
     } else {

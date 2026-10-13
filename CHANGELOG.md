@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- JSON listings with `--limit 0` return an empty array after argument validation without loading inventory, querying indexes, or enriching transcripts.
+
 - Forward JSON windows avoid constructing unselected Claude rich metadata, preserving record acceptance, selected details and final session metadata.
 - Claude checkpoint counts retain restorable result facts; cached counts from older views are recomputed.
 

@@ -183,6 +183,33 @@ fn ls_json_emits_the_same_rows_machine_readably() {
 }
 
 #[test]
+fn ls_json_zero_limit_validates_inputs_without_creating_a_catalog() {
+    let w = World::new("ls-json-zero");
+    standard_corpus(&w);
+    assert!(!w.cv_home.join("catalog.db").exists());
+    let (out, err) = w.cv_ok(&[
+        "ls",
+        "--json",
+        "--limit",
+        "0",
+        "--fresh",
+        "--enrich",
+        "-q",
+        "text:needle AND has:plan",
+    ]);
+    assert_eq!(out.trim(), "[]");
+    assert!(err.is_empty());
+    assert!(
+        !w.cv_home.join("catalog.db").exists(),
+        "empty window must not discover/publish inventory"
+    );
+    let (_, err) = w.cv_fails(&["ls", "--json", "--limit", "0", "--harness", "invalid"]);
+    assert!(err.contains("unknown harness"));
+    let (_, err) = w.cv_fails(&["ls", "--json", "--limit", "0", "-q", "("]);
+    assert!(!err.is_empty());
+}
+
+#[test]
 fn ls_json_enrich_adds_git_branch_and_synthesized_title() {
     let w = World::new("lsjsonenrich");
     // A session with a recorded git branch and NO explicit title — so display_title must be
