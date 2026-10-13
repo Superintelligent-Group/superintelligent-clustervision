@@ -145,6 +145,15 @@ fn string(raw: Option<&RawValue>) -> Option<Cow<'_, str>> {
     }
 }
 
+struct Facts<'a> {
+    ty: &'a str,
+    custom_title: Option<Cow<'a, str>>,
+    ai_title: Option<Cow<'a, str>>,
+    cwd: Option<Cow<'a, str>>,
+    at: Option<DateTime<Utc>>,
+    synthetic: bool,
+}
+
 pub(super) struct Scan {
     session: SessionRef,
     custom_title: bool,
@@ -178,32 +187,145 @@ impl Scan {
         }
         let kind = string(fields.kind);
         let ty = kind.as_deref().unwrap_or("");
-        if ty == "custom-title" {
-            if let Some(title) = string(fields.custom_title) {
+        self.note(Facts {
+            ty,
+            custom_title: if ty == "custom-title" {
+                string(fields.custom_title)
+            } else {
+                None
+            },
+            ai_title: if ty == "ai-title" && !self.custom_title {
+                string(fields.ai_title)
+            } else {
+                None
+            },
+            cwd: if self.session.cwd.is_none() {
+                string(fields.cwd)
+            } else {
+                None
+            },
+            at: string(fields.timestamp).as_deref().and_then(parse_ts),
+            synthetic: ty == "assistant"
+                && (fields.api_error.is_some_and(|v| v.get() == "true")
+                    || string(fields.message.model).as_deref() == Some(SYNTHETIC_MODEL)),
+        });
+    }
+
+    fn note(&mut self, facts: Facts<'_>) {
+        if facts.ty == "custom-title" {
+            if let Some(title) = facts.custom_title {
                 self.session.title = Some(title.into_owned());
                 self.custom_title = true;
             }
         }
-        if ty == "ai-title" && !self.custom_title {
-            if let Some(title) = string(fields.ai_title) {
+        if facts.ty == "ai-title" && !self.custom_title {
+            if let Some(title) = facts.ai_title {
                 self.session.title = Some(title.into_owned());
             }
         }
         if self.session.cwd.is_none() {
-            self.session.cwd = string(fields.cwd).map(|cwd| PathBuf::from(cwd.as_ref()));
+            self.session.cwd = facts.cwd.map(|cwd| PathBuf::from(cwd.as_ref()));
         }
-        if let Some(ts) = string(fields.timestamp).as_deref().and_then(parse_ts) {
+        if let Some(ts) = facts.at {
             self.session.created_at = Some(self.session.created_at.map_or(ts, |old| old.min(ts)));
             self.session.updated_at = Some(self.session.updated_at.map_or(ts, |old| old.max(ts)));
         }
-        let synthetic = ty == "assistant"
-            && (fields.api_error.is_some_and(|v| v.get() == "true")
-                || string(fields.message.model).as_deref() == Some(SYNTHETIC_MODEL));
-        if matches!(ty, "user" | "assistant") && !synthetic {
+        if matches!(facts.ty, "user" | "assistant") && !facts.synthetic {
             self.session.message_count += 1;
         }
     }
 
+    #[cfg(not(feature = "mmap"))]
+    pub(super) fn positioned(&mut self, file: &fs::File, source: &JsonSource) -> Result<()> {
+        use crate::harness::store::{document::Fields, jsonl::ranges};
+        let mut rows = ranges::records(
+            file,
+            ranges::Range {
+                offset: 0,
+                len: source.len(),
+            },
+        )?;
+        rows.keep_small_records(64 * 1024);
+        while let Some(row) = rows.next() {
+            let (raw, _) = row?;
+            if let Some(bytes) = rows.small_record() {
+                self.line(bytes);
+                continue;
+            }
+            // Discovery historically uses str::trim, unlike the conversational byte driver.
+            let range = ranges::trim(file, raw)?;
+            if range.len == 0 {
+                continue;
+            }
+            let result = source.read_range_value(range.offset, range.len, |view| {
+                let Some(fields) = Fields::parse(
+                    view,
+                    &[
+                        "type",
+                        "cwd",
+                        "timestamp",
+                        "customTitle",
+                        "aiTitle",
+                        "isApiErrorMessage",
+                        "message",
+                    ],
+                )?
+                else {
+                    return Ok(());
+                };
+                let kind = fields.string("type")?;
+                let ty = kind.as_deref().unwrap_or("");
+                let model = fields
+                    .get("message")
+                    .map(|v| Fields::parse(v, &["model"]))
+                    .transpose()?
+                    .flatten();
+                let synthetic = ty == "assistant"
+                    && (fields
+                        .get("isApiErrorMessage")
+                        .map(|v| v.as_bool())
+                        .transpose()?
+                        .flatten()
+                        == Some(true)
+                        || model
+                            .as_ref()
+                            .map(|m| m.string("model"))
+                            .transpose()?
+                            .flatten()
+                            .as_deref()
+                            == Some(SYNTHETIC_MODEL));
+                self.note(Facts {
+                    ty,
+                    custom_title: if ty == "custom-title" {
+                        fields.string("customTitle")?.map(Cow::Owned)
+                    } else {
+                        None
+                    },
+                    ai_title: if ty == "ai-title" && !self.custom_title {
+                        fields.string("aiTitle")?.map(Cow::Owned)
+                    } else {
+                        None
+                    },
+                    cwd: if self.session.cwd.is_none() {
+                        fields.string("cwd")?.map(Cow::Owned)
+                    } else {
+                        None
+                    },
+                    at: fields.string("timestamp")?.as_deref().and_then(parse_ts),
+                    synthetic,
+                });
+                Ok(())
+            });
+            match result {
+                Ok(()) => {}
+                Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        source.check_metadata(file.metadata()?)
+    }
+
+    #[cfg(any(feature = "mmap", test))]
     pub(super) fn reader<R: BufRead>(&mut self, reader: R) {
         for line in reader.lines() {
             let Ok(line) = line else {
@@ -277,6 +399,25 @@ mod tests {
             "{}",
             path.display()
         );
+        #[cfg(not(feature = "mmap"))]
+        {
+            let world = cv_testkit::World::in_process("claude-discovery-positioned-oracle");
+            let captured_path = world.base.join("rows.jsonl");
+            fs::write(&captured_path, bytes).unwrap();
+            let mut positioned = Scan::new(path);
+            positioned
+                .positioned(
+                    &fs::File::open(&captured_path).unwrap(),
+                    &JsonSource::capture(&captured_path).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(positioned.finish()).unwrap(),
+                expected,
+                "{}",
+                path.display()
+            );
+        }
         #[cfg(feature = "mmap")]
         {
             let mut mapped = Scan::new(path);

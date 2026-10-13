@@ -20,6 +20,15 @@ pub(super) fn parse(slice: &[u8]) -> serde_json::Result<Value> {
     Ok(v)
 }
 
+/// The positioned transport does not retain a physical line beside the owned fallback payload.
+#[cfg(not(feature = "mmap"))]
+pub(super) fn parse_reader(reader: impl std::io::Read) -> serde_json::Result<Value> {
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    let v = Top.deserialize(&mut de)?;
+    de.end()?;
+    Ok(v)
+}
+
 struct Top;
 
 impl<'de> DeserializeSeed<'de> for Top {

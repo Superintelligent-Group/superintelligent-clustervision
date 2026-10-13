@@ -16,13 +16,18 @@
 //! never chosen; a fork of a fork resolves to the original.
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "mmap")]
 use serde::Deserialize;
+#[cfg(feature = "mmap")]
 use serde_json::value::RawValue;
 #[cfg(test)]
 use serde_json::Value;
+#[cfg(feature = "mmap")]
 use std::borrow::Cow;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
+#[cfg(any(feature = "mmap", test))]
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// How far a head read goes before giving up on finding the first `uuid` record.
@@ -40,6 +45,7 @@ struct Head {
 
 /// Only the fields used to recognize a copy. Raw values skip giant message payloads; the
 /// last occurrence wins, exactly as Value's object map does (including non-string values).
+#[cfg(feature = "mmap")]
 #[derive(Default)]
 struct Fields<'a> {
     uuid: Option<&'a RawValue>,
@@ -48,6 +54,7 @@ struct Fields<'a> {
     parent: Option<&'a RawValue>,
 }
 
+#[cfg(feature = "mmap")]
 impl<'de> Deserialize<'de> for Fields<'de> {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         struct Projection;
@@ -75,6 +82,7 @@ impl<'de> Deserialize<'de> for Fields<'de> {
     }
 }
 
+#[cfg(feature = "mmap")]
 fn string(raw: Option<&RawValue>) -> Option<Cow<'_, str>> {
     let raw = raw?.get();
     if let Ok(s) = serde_json::from_str::<&str>(raw) {
@@ -88,6 +96,7 @@ fn string(raw: Option<&RawValue>) -> Option<Cow<'_, str>> {
 /// mapping keeps a giant first record out of the private heap; the portable transport retains
 /// just one physical line. Both preserve the head's physical-line budget, including malformed
 /// and empty records, and do not Unicode-trim JSON.
+#[cfg(feature = "mmap")]
 fn lines(path: &Path, limit: usize, mut visit: impl FnMut(&str) -> bool) -> Option<()> {
     let file = fs::File::open(path).ok()?;
     #[cfg(feature = "mmap")]
@@ -109,6 +118,7 @@ fn lines(path: &Path, limit: usize, mut visit: impl FnMut(&str) -> bool) -> Opti
     Some(())
 }
 
+#[cfg(feature = "mmap")]
 fn head(path: &Path) -> Option<Head> {
     let mut newest: Option<DateTime<Utc>> = None;
     let mut found = None;
@@ -147,6 +157,7 @@ fn modified(path: &Path) -> Option<DateTime<Utc>> {
 }
 
 /// Whether `path` holds `needle` anywhere (line by line, so peak memory is one line).
+#[cfg(feature = "mmap")]
 fn holds(path: &Path, needle: &str) -> bool {
     let mut found = false;
     lines(path, usize::MAX, |line| {
@@ -330,4 +341,149 @@ mod tests {
         assert_eq!(source(&src), None, "the source's head is not a copy");
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+#[cfg(not(feature = "mmap"))]
+fn head(path: &Path) -> Option<Head> {
+    use crate::{
+        harness::store::{
+            document::{
+                range::{Range, RangeSource},
+                Fields,
+            },
+            jsonl::ranges,
+        },
+        json::{InvalidJson, JsonSource},
+    };
+    let source = JsonSource::capture(path).ok()?;
+    let file = fs::File::open(path).ok()?;
+    source.check_metadata(file.metadata().ok()?).ok()?;
+    let utf8 = RangeSource::from_captured(source.clone()).ok()?;
+    let frames = ranges::records(
+        &file,
+        ranges::Range {
+            offset: 0,
+            len: source.len(),
+        },
+    )
+    .ok()?;
+    let mut newest: Option<DateTime<Utc>> = None;
+    for row in frames.take(HEAD_LINES) {
+        let (raw, _) = row.ok()?;
+        if !utf8
+            .valid_utf8(Range {
+                offset: raw.offset,
+                len: raw.len,
+            })
+            .ok()?
+        {
+            break;
+        }
+        if raw.len == 0 {
+            continue;
+        }
+        let facts = source.read_range_value(raw.offset, raw.len, |view| {
+            let Some(fields) = Fields::parse(view, &["uuid", "timestamp", "subtype", "parentUuid"])? else {
+                return Ok(None);
+            };
+            let uuid = fields.string("uuid")?;
+            let at = fields.string("timestamp")?.as_deref().and_then(super::parse_ts);
+            let boundary = fields.string("subtype")?.as_deref() == Some("compact_boundary")
+                && fields
+                    .get("parentUuid")
+                    .map(|v| v.is_null())
+                    .transpose()?
+                    .unwrap_or(true);
+            Ok(Some((uuid, at, boundary)))
+        });
+        let facts = match facts {
+            Ok(Some(facts)) => facts,
+            Ok(None) => continue,
+            Err(error) if error.downcast_ref::<InvalidJson>().is_some() => continue,
+            Err(_) => return None,
+        };
+        let (uuid, at, boundary) = facts;
+        if let Some(uuid) = uuid {
+            let copied = boundary || matches!((at,newest), (Some(a),Some(n)) if a<n);
+            return Some(Head {
+                uuid,
+                at,
+                boundary,
+                copied,
+            });
+        }
+        if let Some(at) = at {
+            newest = Some(newest.map_or(at, |n| n.max(at)));
+        }
+    }
+    None
+}
+
+#[cfg(not(feature = "mmap"))]
+fn holds(path: &Path, needle: &str) -> bool {
+    use crate::{
+        harness::store::{
+            document::range::{Range, RangeSource},
+            jsonl::ranges,
+        },
+        json::JsonSource,
+    };
+    let run = || -> anyhow::Result<bool> {
+        let source = JsonSource::capture(path)?;
+        let file = fs::File::open(path)?;
+        source.check_metadata(file.metadata()?)?;
+        let utf8 = RangeSource::from_captured(source.clone())?;
+        let frames = ranges::records(
+            &file,
+            ranges::Range {
+                offset: 0,
+                len: source.len(),
+            },
+        )?;
+        let mut pending = Vec::new();
+        let mut bridge = Vec::new();
+        for row in frames {
+            let (mut raw, complete) = row?;
+            if !utf8.valid_utf8(Range {
+                offset: raw.offset,
+                len: raw.len,
+            })? {
+                break;
+            }
+            // BufRead::lines removes CR only when followed by LF.
+            if complete && raw.len > 0 {
+                let mut last = [0];
+                ranges::read_exact_at(&file, &mut last, raw.offset + raw.len - 1)?;
+                if last[0] == b'\r' {
+                    raw.len -= 1;
+                }
+            }
+            if needle.is_empty() {
+                return Ok(true);
+            }
+            pending.clear();
+            let mut reader = ranges::reader(&file, raw)?;
+            loop {
+                let bytes = reader.fill_buf()?;
+                if bytes.is_empty() {
+                    break;
+                }
+                bridge.clear();
+                bridge.extend_from_slice(&pending);
+                bridge.extend_from_slice(bytes);
+                if memchr::memmem::find(&bridge, needle.as_bytes()).is_some() {
+                    source.check_metadata(file.metadata()?)?;
+                    return Ok(true);
+                }
+                let keep = bridge.len().min(needle.len() - 1);
+                pending.clear();
+                pending.extend_from_slice(&bridge[bridge.len() - keep..]);
+                let n = bytes.len();
+                reader.consume(n);
+            }
+        }
+        source.check_metadata(file.metadata()?)?;
+        Ok(false)
+    };
+    run().unwrap_or(false)
 }

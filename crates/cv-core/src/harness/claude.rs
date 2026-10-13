@@ -17,6 +17,8 @@ mod facts;
 mod fork;
 mod lean;
 mod metadata;
+#[cfg(not(feature = "mmap"))]
+mod portable;
 /// The sidecar tree beside a transcript (`subagents/`, `workflows/`, `journal.jsonl`): every path
 /// spelled once, and the one journal parser.
 pub mod sidecar;
@@ -336,6 +338,16 @@ impl Adapter for Claude {
                     return Ok(with_fork_source(s, &r.path, sink));
                 }
             }
+            #[cfg(not(feature = "mmap"))]
+            let s = portable::stream(
+                new_session_for(&r.id, Some(r.path.clone()), opts),
+                &file,
+                inputs.as_ref(),
+                0,
+                opts,
+                sink,
+            )?;
+            #[cfg(feature = "mmap")]
             let s = stream_reader_at(
                 new_session_for(&r.id, Some(r.path.clone()), opts),
                 BufReader::new(&file),
@@ -363,12 +375,15 @@ impl Adapter for Claude {
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
+            #[cfg(feature = "mmap")]
             use std::io::{Seek as _, SeekFrom};
             let Some(session) = from.get::<Session>(ADAPTER_LAYER) else {
                 return Ok(None);
             };
             let inputs = JsonInputs::capture(&r.path, opts)?;
-            let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+            #[cfg(feature = "mmap")]
+            let mut file = file;
             if let Some(inputs) = &inputs {
                 inputs.check_opened(&file)?;
             }
@@ -386,8 +401,12 @@ impl Adapter for Claude {
                     return Ok(Some(with_fork_source(s, &r.path, sink)));
                 }
             }
+            #[cfg(not(feature = "mmap"))]
+            let s = portable::stream(session, &file, inputs.as_ref(), from.offset, opts, sink)?;
+            #[cfg(feature = "mmap")]
             file.seek(SeekFrom::Start(from.offset))
                 .with_context(|| format!("seeking {}", r.path.display()))?;
+            #[cfg(feature = "mmap")]
             let s = stream_reader_at(session, BufReader::new(&file), from.offset, opts, sink, inputs.as_ref());
             finish_inputs(inputs.as_ref(), &file)?;
             Ok(Some(with_fork_source(s, &r.path, sink)))
@@ -1560,6 +1579,9 @@ fn scan(path: &std::path::Path) -> Result<SessionRef> {
         scan.bytes(&map);
         return Ok(scan.finish());
     }
+    #[cfg(not(feature = "mmap"))]
+    scan.positioned(&file, &JsonSource::capture(path)?)?;
+    #[cfg(feature = "mmap")]
     scan.reader(BufReader::new(file));
     Ok(scan.finish())
 }
@@ -1567,7 +1589,23 @@ fn scan(path: &std::path::Path) -> Result<SessionRef> {
 /// Turn one record into an IR [`Message`]. Handles `user`/`assistant` (the conversation) and the
 /// content-bearing `system` lines (compaction notices, away/error summaries, slash-command output).
 /// Returns `None` for line types with no conversational payload.
+struct ConversationContent {
+    blocks: Vec<Block>,
+    user: (MessageKind, Origin),
+    slash_command: bool,
+}
+
 fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx>) -> Option<Message> {
+    parse_message_projected(ty, v, opts, span, None)
+}
+
+fn parse_message_projected(
+    ty: &str,
+    v: &Value,
+    opts: &ParseOptions,
+    span: Option<&SpanCtx>,
+    projected: Option<ConversationContent>,
+) -> Option<Message> {
     if ty == "system" {
         return parse_system_message(v, opts, span);
     }
@@ -1585,32 +1623,39 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
     let model = msg.get("model").and_then(Value::as_str).map(str::to_string);
     let usage = msg.get("usage").map(parse_usage);
 
-    let mut blocks = Vec::new();
-    match msg.get("content") {
-        Some(Value::String(s)) => {
-            // Bare-string content: span it (the whole `message.content` string) when large.
-            let text = match span {
-                Some(ctx) if s.len() > INLINE_MAX => raw_msg_content_string_span(ctx)
-                    .inspect(|sp| debug_assert_span(sp, ctx, s))
-                    .map(Text::Span)
-                    .unwrap_or_else(|| Text::Inline(s.clone())),
-                _ => Text::Inline(s.clone()),
-            };
-            blocks.push(Block::Text { text });
-        }
-        Some(Value::Array(items)) => {
-            // Raw items are the *same* JSON array as `items`, so they align 1:1 by index — giving
-            // each block its source field's byte span for free.
-            let raw_items = span.and_then(|ctx| raw_msg_content_items(ctx.slice));
-            for (i, item) in items.iter().enumerate() {
-                let raw = raw_items.as_ref().and_then(|r| r.get(i).copied());
-                if let Some(b) = parse_block(item, raw.zip(span)) {
-                    blocks.push(b);
+    let facts = projected.as_ref().map(|p| (p.user, p.slash_command));
+    let mut blocks = if let Some(projected) = projected {
+        projected.blocks
+    } else {
+        let mut blocks = Vec::new();
+        match msg.get("content") {
+            Some(Value::String(s)) => {
+                // Bare-string content: span it (the whole `message.content` string) when large.
+                let text = match span {
+                    Some(ctx) if s.len() > INLINE_MAX => raw_msg_content_string_span(ctx)
+                        .inspect(|sp| debug_assert_span(sp, ctx, s))
+                        .map(Text::Span)
+                        .unwrap_or_else(|| Text::Inline(s.clone())),
+                    _ => Text::Inline(s.clone()),
+                };
+                blocks.push(Block::Text { text });
+            }
+            Some(Value::Array(items)) => {
+                // Raw items are the *same* JSON array as `items`, so they align 1:1 by index — giving
+                // each block its source field's byte span for free.
+                let raw_items = span.and_then(|ctx| raw_msg_content_items(ctx.slice));
+                for (i, item) in items.iter().enumerate() {
+                    let raw = raw_items.as_ref().and_then(|r| r.get(i).copied());
+                    if let Some(b) = parse_block(item, raw.zip(span)) {
+                        blocks.push(b);
+                    }
                 }
             }
+            _ => {}
         }
-        _ => {}
-    }
+
+        blocks
+    };
 
     // INTERFACE-V2 §4: `toolUseResult` — the structured sidecar Claude writes *next to* the
     // `tool_result` block (structuredPatch, oldTodos/newTodos, stdout/stderr, file contents,
@@ -1638,8 +1683,8 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
         api_error: synthetic && v.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false),
         compact_summary: v.get("isCompactSummary").and_then(Value::as_bool) == Some(true),
         sync_agent_return: is_sync_agent_return(v),
-        slash_command: is_slash_command_record(msg),
-        user: user_kind(v, msg),
+        slash_command: facts.map_or_else(|| is_slash_command_record(msg), |f| f.1),
+        user: facts.map_or_else(|| user_kind(v, msg), |f| f.0),
     };
     let (role, kind, origin) = classify_conversation(role, class, opts.complete);
     let model = if synthetic && !opts.complete { None } else { model };

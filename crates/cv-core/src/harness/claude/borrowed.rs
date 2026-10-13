@@ -1339,3 +1339,55 @@ mod tests {
         assert!(matches!(parsed.uuid.unwrap().0, Cow::Borrowed(_)));
     }
 }
+
+#[cfg(not(feature = "mmap"))]
+#[derive(Debug, thiserror::Error)]
+#[error("Claude prefix complete")]
+struct PrefixComplete;
+
+/// The same bounded head/summary reducer for source views as for native borrowed strings.
+#[cfg(not(feature = "mmap"))]
+pub(super) fn view_prefix(view: crate::json::JsonView<'_>, trim: bool) -> Result<String> {
+    let mut prefix = String::new();
+    let result = view.for_each_str_chunk(|part| {
+        for c in part.chars() {
+            if trim && prefix.is_empty() && c.is_whitespace() {
+                continue;
+            }
+            prefix.push(c);
+            if prefix.len() >= 64 {
+                return Err(PrefixComplete.into());
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok(_) => {}
+        Err(error) if error.downcast_ref::<PrefixComplete>().is_some() => {}
+        Err(error) => return Err(error),
+    }
+    Ok(prefix)
+}
+
+#[cfg(not(feature = "mmap"))]
+pub(super) fn classification_view(
+    view: crate::json::JsonView<'_>,
+    origin: Origin,
+) -> Result<(String, (MessageKind, Origin))> {
+    let prefix = view_prefix(view, true)?;
+    let user = if origin == Origin::Harness && prefix.starts_with("<task-notification>") {
+        let mut summary = NotificationSummary::default();
+        view.for_each_str_chunk(|part| {
+            summary.push(part);
+            Ok(())
+        })?;
+        if summary.complete && ((summary.agent_possible && summary.agent == 6) || summary.workflow_found) {
+            (MessageKind::SubagentReturn, Origin::Subagent)
+        } else {
+            (MessageKind::InjectedContext, Origin::Harness)
+        }
+    } else {
+        user_kind_from_head(origin, &prefix)
+    };
+    Ok((prefix, user))
+}
