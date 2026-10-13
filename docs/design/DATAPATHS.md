@@ -226,10 +226,12 @@ verification. The initial suite will distinguish direct adapter discard/count, d
 views, windows, full output, incremental index/watch, and writer costs. Measure tiny records, giant
 escaped/unescaped text, tool arguments, many records, replay controls and database WAL changes.
 
-Record wall/CPU, decoded or traversed bytes, messages, peak live allocations, RSS and (on macOS)
-footprint. Allocation instrumentation and output hashing are separate runs from throughput timing.
-Use explicit-root adapters and frozen scratch sources; never mutate the real stores. Cold/warm
-means which cache is cold, not an unsupported claim that the OS page cache was evicted.
+For new comparisons, record instructions, decoded or traversed bytes, messages, allocation requests,
+peak live allocations and staged bytes. Keep output hashing outside measured work. Historical
+wall/CPU, RSS and macOS footprint observations below explain earlier investigations; they do not
+override the work-counting method above. Use explicit-root adapters and frozen scratch sources;
+never mutate the real stores. Cold/warm identifies application state, not an unsupported claim
+that the OS page cache was evicted.
 
 Historical baseline confirmation: a release direct lazy count on the frozen 313.8 MB Gemini
 recording emitted 199 messages at best-of-three 0.944 s (332 MB/s). The process also performed
