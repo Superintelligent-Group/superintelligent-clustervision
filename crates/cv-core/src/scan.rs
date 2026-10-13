@@ -49,9 +49,10 @@ impl CapSink {
         }
     }
 
-    fn push_text(&mut self, text: &Text) {
-        self.hay.push_text(text, &self.resolver);
+    fn push_text(&mut self, text: &Text) -> Result<()> {
+        self.hay.try_push_text(text, &self.resolver)?;
         self.hay.push("\n");
+        Ok(())
     }
 }
 
@@ -68,7 +69,17 @@ impl MessageSink for CapSink {
         if self.first_user.is_none() && m.role == Role::User {
             for b in &m.content {
                 if let Block::Text { text } = b {
-                    if let Some(t) = text.inline_str().filter(|t| !t.trim().is_empty()) {
+                    // Inline text keeps its full non-whitespace test; lazy labels select the
+                    // same checked 512-raw-byte head used by indexed and semantic search.
+                    let t = match text.try_resolve_prefix(&self.resolver, 512) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            self.error = Some(error);
+                            self.failed = true;
+                            return Flow::Stop;
+                        }
+                    };
+                    if !t.trim().is_empty() {
                         self.first_user = Some(t.chars().take(73).collect());
                         break;
                     }
@@ -76,17 +87,12 @@ impl MessageSink for CapSink {
             }
         }
         for b in &m.content {
-            match b {
+            let result = match b {
                 Block::Text { text } | Block::Thinking { text, .. } => self.push_text(text),
                 Block::ToolUse { name, input, .. } => {
                     self.hay.push(name);
                     self.hay.push(" ");
-                    if let Err(error) = self.hay.push_json(input) {
-                        self.error = Some(error);
-                        self.failed = true;
-                        return Flow::Stop;
-                    }
-                    self.hay.push("\n");
+                    self.hay.push_json(input).map(|()| self.hay.push("\n"))
                 }
                 Block::ToolResult { content, .. } => self.push_text(content),
                 Block::File { path, source, .. } => {
@@ -94,8 +100,14 @@ impl MessageSink for CapSink {
                         self.hay.push(p);
                         self.hay.push("\n");
                     }
+                    Ok(())
                 }
-                Block::Image { .. } => {}
+                Block::Image { .. } => Ok(()),
+            };
+            if let Err(error) = result {
+                self.error = Some(error);
+                self.failed = true;
+                return Flow::Stop;
             }
         }
         if self.hay.full() && self.first_user.is_some() {
@@ -212,6 +224,56 @@ mod tests {
         assert_eq!(sink.hay.as_str(), &complete[..floor_char(&complete, LIVE_HAY_BYTES)]);
         assert_eq!(sink.first_user.as_deref(), Some("prompt"));
         assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
+    }
+
+    #[test]
+    fn failed_text_demand_stays_latched_for_body_and_label() {
+        let dir = cv_testkit::temp_dir("live-head-text-error");
+        let path = dir.join("absent");
+        for role in [Role::User, Role::Assistant] {
+            let mut sink = CapSink::new(&path);
+            let mut message = Message::new(role);
+            message.content.push(Block::Text {
+                text: Text::Span(crate::Span {
+                    source: Some(path.clone()),
+                    offset: 0,
+                    len: 8192,
+                    escaped: false,
+                }),
+            });
+            assert!(sink.try_message(message).is_err());
+            assert_eq!(sink.message(Message::new(Role::User)), Flow::Stop);
+            assert!(sink.take_error().is_some());
+            assert!(sink.hay.is_empty());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lazy_label_uses_prefix_policy_and_inline_checks_full_whitespace() {
+        let dir = cv_testkit::temp_dir("live-head-lazy-label");
+        let path = dir.join("text");
+        let content = format!("{}late meaningful text", " ".repeat(1024));
+        std::fs::write(&path, &content).unwrap();
+        let mut lazy = CapSink::new(&path);
+        let mut message = Message::new(Role::User);
+        message.content.push(Block::Text {
+            text: Text::Span(crate::Span {
+                source: Some(path.clone()),
+                offset: 0,
+                len: content.len() as u64,
+                escaped: false,
+            }),
+        });
+        assert_eq!(lazy.message(message), Flow::Continue);
+        assert!(lazy.first_user.is_none());
+        assert!(lazy.hay.as_str().contains("late meaningful text"));
+        let mut inline = CapSink::new(&path);
+        let mut message = Message::new(Role::User);
+        message.content.push(Block::Text { text: content.into() });
+        inline.message(message);
+        assert_eq!(inline.first_user.as_deref(), Some(" ".repeat(73).as_str()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
