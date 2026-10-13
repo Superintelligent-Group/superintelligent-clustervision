@@ -597,9 +597,6 @@ fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
         let Ok(conn) = open_ro(&db.join(file)) else {
             continue;
         };
-        if !table_exists(&conn, runs) || !table_exists(&conn, specs) {
-            continue;
-        }
         type Row = (
             Option<String>,
             Option<String>,
@@ -608,12 +605,16 @@ fn schedule_fires(db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
             Option<String>,
         );
         let rows: Vec<Row> = conn
-            .prepare(sql)
-            .and_then(|mut st| {
-                st.query_map([sid], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-                })?
-                .collect()
+            .read(|conn| {
+                if !table_exists(conn, runs) || !table_exists(conn, specs) {
+                    return Ok(Vec::new());
+                }
+                Ok(conn.prepare(sql).and_then(|mut st| {
+                    st.query_map([sid], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                    })?
+                    .collect()
+                })?)
             })
             .unwrap_or_default();
         for (name, cron, prompt, status, at) in rows {
@@ -648,14 +649,17 @@ fn team_runs(teams_db: &Path, sid: &str) -> Vec<crate::affordance::Affordance> {
     let Ok(conn) = open_ro(teams_db) else {
         return Vec::new();
     };
-    if !table_exists(&conn, "team_events") {
-        return Vec::new();
-    }
     let events: Vec<(String, String, String)> = conn
-        .prepare("SELECT ts, event_type, payload_json FROM team_events WHERE team_name = ?1 ORDER BY id")
-        .and_then(|mut st| {
-            st.query_map([sid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect()
+        .read(|conn| {
+            if !table_exists(conn, "team_events") {
+                return Ok(Vec::new());
+            }
+            Ok(conn
+                .prepare("SELECT ts, event_type, payload_json FROM team_events WHERE team_name = ?1 ORDER BY id")
+                .and_then(|mut st| {
+                    st.query_map([sid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                        .collect()
+                })?)
         })
         .unwrap_or_default();
     /// One team run as its events tell it: the last status and result win.

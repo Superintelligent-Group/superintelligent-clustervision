@@ -67,11 +67,13 @@ fn session_key(r: &SessionRef) -> Option<String> {
 #[cfg(feature = "sqlite")]
 fn sqlite_session_key(r: &SessionRef) -> Option<String> {
     let conn = super::open_ro(&r.path).ok()?;
-    conn.query_row(
-        "SELECT session_key FROM session_windows WHERE session_id = ?1",
-        [&r.id],
-        |row| row.get(0),
-    )
+    conn.read(|conn| {
+        Ok(conn.query_row(
+            "SELECT session_key FROM session_windows WHERE session_id = ?1",
+            [&r.id],
+            |row| row.get(0),
+        )?)
+    })
     .ok()
 }
 
@@ -117,52 +119,55 @@ fn sqlite_registries(state: &Path, key: &str) -> (Vec<Value>, Vec<Run>) {
     let Ok(conn) = super::open_ro(&state.join("state").join("openclaw.sqlite")) else {
         return Default::default();
     };
-    let parse = |t: String| serde_json::from_str::<Value>(&t).ok();
-    let jobs = if table_exists(&conn, "cron_jobs") {
-        // Decode and filter each row before retaining it. Payload ownership remains authoritative:
-        // migrated projections can disagree, and SQLite's JSON duplicate-key rules differ from
-        // serde_json's. Unrelated bodies live only until the next cursor row.
-        conn.prepare("SELECT job_json, state_json FROM cron_jobs ORDER BY sort_order, updated_at, job_id")
-            .and_then(|mut st| {
-                st.query_map([], |row| {
-                    let job: String = row.get(0)?;
-                    let state: String = row.get(1)?;
-                    let Some(mut job) = parse(job).filter(|job| job_belongs(job, key)) else {
-                        return Ok(None);
-                    };
-                    // The runtime state rides in its own column; fold it back where the 1.29
-                    // entry kept it, but only decode state for matching jobs.
-                    if let (Some(o), Some(state)) = (job.as_object_mut(), parse(state)) {
-                        o.insert("state".into(), state);
-                    }
-                    Ok(Some(job))
-                })?
-                .filter_map(|row| row.transpose())
-                .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let runs = if table_exists(&conn, "subagent_runs") {
-        conn.prepare("SELECT payload_json FROM subagent_runs ORDER BY created_at, run_id")
-            .and_then(|mut st| {
-                st.query_map([], |row| {
-                    let payload: String = row.get(0)?;
-                    let Some(payload) = parse(payload) else {
-                        return Ok(None);
-                    };
-                    let keys = run_keys(&payload);
-                    Ok(keys.iter().any(|by| by == key).then_some((keys, payload)))
-                })?
-                .filter_map(|row| row.transpose())
-                .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    (jobs, runs)
+    conn.read(|conn| {
+        let parse = |t: String| serde_json::from_str::<Value>(&t).ok();
+        let jobs = if table_exists(&conn, "cron_jobs") {
+            // Decode and filter each row before retaining it. Payload ownership remains authoritative:
+            // migrated projections can disagree, and SQLite's JSON duplicate-key rules differ from
+            // serde_json's. Unrelated bodies live only until the next cursor row.
+            conn.prepare("SELECT job_json, state_json FROM cron_jobs ORDER BY sort_order, updated_at, job_id")
+                .and_then(|mut st| {
+                    st.query_map([], |row| {
+                        let job: String = row.get(0)?;
+                        let state: String = row.get(1)?;
+                        let Some(mut job) = parse(job).filter(|job| job_belongs(job, key)) else {
+                            return Ok(None);
+                        };
+                        // The runtime state rides in its own column; fold it back where the 1.29
+                        // entry kept it, but only decode state for matching jobs.
+                        if let (Some(o), Some(state)) = (job.as_object_mut(), parse(state)) {
+                            o.insert("state".into(), state);
+                        }
+                        Ok(Some(job))
+                    })?
+                    .filter_map(|row| row.transpose())
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let runs = if table_exists(&conn, "subagent_runs") {
+            conn.prepare("SELECT payload_json FROM subagent_runs ORDER BY created_at, run_id")
+                .and_then(|mut st| {
+                    st.query_map([], |row| {
+                        let payload: String = row.get(0)?;
+                        let Some(payload) = parse(payload) else {
+                            return Ok(None);
+                        };
+                        let keys = run_keys(&payload);
+                        Ok(keys.iter().any(|by| by == key).then_some((keys, payload)))
+                    })?
+                    .filter_map(|row| row.transpose())
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Ok((jobs, runs))
+    })
+    .unwrap_or_default()
 }
 
 #[cfg(not(feature = "sqlite"))]

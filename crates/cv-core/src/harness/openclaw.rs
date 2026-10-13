@@ -1264,69 +1264,71 @@ fn snake(s: &str) -> String {
 #[cfg(feature = "sqlite")]
 fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
     let conn = open_ro(db)?;
-    let mut windows = conn.prepare(
-        "SELECT w.session_id, w.created_at, w.updated_at, w.transcript_updated_at, w.display_name, \
+    conn.read(|conn| {
+        let mut windows = conn.prepare(
+            "SELECT w.session_id, w.created_at, w.updated_at, w.transcript_updated_at, w.display_name, \
          n.label, n.display_name, n.entry_json \
          FROM session_windows w LEFT JOIN session_nodes n ON n.session_key = w.session_key \
          ORDER BY w.updated_at DESC",
-    )?;
-    type WindowRow = (
-        String,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let rows = windows.query_map([], |row| -> rusqlite::Result<WindowRow> {
-        Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-            row.get(7)?,
-        ))
-    })?;
-    let mut events = EventReader::new(&conn)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (session_id, created, updated, transcript_updated, w_display, n_label, n_display, entry_json) = row?;
-        let mut acc = ScanAcc::default();
-        let mut entries = events.rows(&session_id, parse_line)?;
-        for (_, v) in entries.by_ref() {
-            acc.feed(&v);
+        )?;
+        type WindowRow = (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let rows = windows.query_map([], |row| -> rusqlite::Result<WindowRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })?;
+        let mut events = EventReader::new(&conn)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (session_id, created, updated, transcript_updated, w_display, n_label, n_display, entry_json) = row?;
+            let mut acc = ScanAcc::default();
+            let mut entries = events.rows(&session_id, parse_line)?;
+            for (_, v) in entries.by_ref() {
+                acc.feed(&v);
+            }
+            entries.finish()?;
+            let entry: Option<Value> = entry_json.as_deref().and_then(|e| serde_json::from_str(e).ok());
+            let title = n_label
+                .or(n_display)
+                .or(w_display)
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| crate::ir::truncate(&t, 80))
+                .or_else(|| entry_title(entry.as_ref()))
+                .or(acc.session_name)
+                .or(acc.first_user);
+            let cwd = acc.cwd.or_else(|| entry_cwd(entry.as_ref()));
+            out.push(SessionRef {
+                id: session_id,
+                harness: Harness::OpenClaw,
+                path: db.to_path_buf(),
+                cwd,
+                title,
+                created_at: acc.created_at.or_else(|| created.and_then(ts_from_epoch)),
+                updated_at: transcript_updated
+                    .and_then(ts_from_epoch)
+                    .or_else(|| updated.and_then(ts_from_epoch))
+                    .or(acc.updated_at),
+                message_count: acc.message_count,
+            });
         }
-        entries.finish()?;
-        let entry: Option<Value> = entry_json.as_deref().and_then(|e| serde_json::from_str(e).ok());
-        let title = n_label
-            .or(n_display)
-            .or(w_display)
-            .filter(|t| !t.trim().is_empty())
-            .map(|t| crate::ir::truncate(&t, 80))
-            .or_else(|| entry_title(entry.as_ref()))
-            .or(acc.session_name)
-            .or(acc.first_user);
-        let cwd = acc.cwd.or_else(|| entry_cwd(entry.as_ref()));
-        out.push(SessionRef {
-            id: session_id,
-            harness: Harness::OpenClaw,
-            path: db.to_path_buf(),
-            cwd,
-            title,
-            created_at: acc.created_at.or_else(|| created.and_then(ts_from_epoch)),
-            updated_at: transcript_updated
-                .and_then(ts_from_epoch)
-                .or_else(|| updated.and_then(ts_from_epoch))
-                .or(acc.updated_at),
-            message_count: acc.message_count,
-        });
-    }
-    Ok(out)
+        Ok(out)
+    })
 }
 
 /// Reads one window's `transcript_events` in `seq` order. Since OpenClaw added payload compression
@@ -1511,64 +1513,66 @@ fn discover_sqlite(_db: &Path) -> Result<Vec<SessionRef>> {
 #[cfg(feature = "sqlite")]
 fn stream_sqlite(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
     let conn = open_ro(&r.path)?;
-    // Navigation and payload reads must see the same history: a concurrent leaf update cannot
-    // change which rows the second pass emits. A deferred read transaction writes no store data.
-    let snapshot = conn.unchecked_transaction()?;
-    let facts = sqlite_key_facts(&snapshot, &r.id)?;
-    let mut reader = EventReader::new(&snapshot)?;
-    let mut navigation = reader.rows(&r.id, navigation_line)?;
-    let mut has_leaf = false;
-    for (_, v) in navigation.by_ref() {
-        has_leaf |= is_leaf_control(&v);
-    }
-    // Match the original whole-transcript diagnostics even if the sink stops at its first turn.
-    let skipped = navigation.finish()?;
-    let mut s = if has_leaf {
-        // Retain navigation fields only, never the message/tool payloads on abandoned branches.
-        // The selector is shared with JSONL, including complete-mode carriers and normalized parents.
+    conn.read(|conn| {
+        // Navigation and payload reads must see the same history: a concurrent leaf update cannot
+        // change which rows the second pass emits. A deferred read transaction writes no store data.
+        let snapshot = conn.unchecked_transaction()?;
+        let facts = sqlite_key_facts(&snapshot, &r.id)?;
+        let mut reader = EventReader::new(&snapshot)?;
         let mut navigation = reader.rows(&r.id, navigation_line)?;
-        let mut entries = Vec::new();
-        for (seq, mut v) in navigation.by_ref() {
-            if !v.is_object() {
-                v = Value::Object(Default::default());
-            }
-            v.as_object_mut().unwrap().insert("cv_sql_seq".into(), seq.into());
-            entries.push(v);
+        let mut has_leaf = false;
+        for (_, v) in navigation.by_ref() {
+            has_leaf |= is_leaf_control(&v);
         }
-        navigation.finish()?;
-        let mut selected = rows_from_values(entries, opts.complete).into_iter();
-        let mut payloads = EventReader::point(&snapshot)?;
-        let mut error = None;
-        let rows = std::iter::from_fn(|| loop {
-            let mut row = selected.next()?;
-            let seq = row.v["cv_sql_seq"]
-                .as_i64()
-                .expect("navigation row has its source sequence");
-            match payloads.at(&r.id, seq) {
-                Ok(Some(v)) => {
-                    row.v = v;
-                    return Some(row);
+        // Match the original whole-transcript diagnostics even if the sink stops at its first turn.
+        let skipped = navigation.finish()?;
+        let mut s = if has_leaf {
+            // Retain navigation fields only, never the message/tool payloads on abandoned branches.
+            // The selector is shared with JSONL, including complete-mode carriers and normalized parents.
+            let mut navigation = reader.rows(&r.id, navigation_line)?;
+            let mut entries = Vec::new();
+            for (seq, mut v) in navigation.by_ref() {
+                if !v.is_object() {
+                    v = Value::Object(Default::default());
                 }
-                Ok(None) => continue,
-                Err(e) => {
-                    error = Some(e);
-                    return None;
-                }
+                v.as_object_mut().unwrap().insert("cv_sql_seq".into(), seq.into());
+                entries.push(v);
             }
-        });
-        let s = stream_rows(rows, r, &facts, opts, sink);
-        if let Some(e) = error {
-            return Err(e);
-        }
-        s
-    } else {
-        let mut events = reader.rows(&r.id, parse_line)?;
-        let s = stream_rows(events.by_ref().map(|(_, v)| Row::active(v)), r, &facts, opts, sink);
-        events.finish()?;
-        s
-    };
-    super::note_skipped_lines(&mut s, skipped);
-    Ok(s)
+            navigation.finish()?;
+            let mut selected = rows_from_values(entries, opts.complete).into_iter();
+            let mut payloads = EventReader::point(&snapshot)?;
+            let mut error = None;
+            let rows = std::iter::from_fn(|| loop {
+                let mut row = selected.next()?;
+                let seq = row.v["cv_sql_seq"]
+                    .as_i64()
+                    .expect("navigation row has its source sequence");
+                match payloads.at(&r.id, seq) {
+                    Ok(Some(v)) => {
+                        row.v = v;
+                        return Some(row);
+                    }
+                    Ok(None) => continue,
+                    Err(e) => {
+                        error = Some(e);
+                        return None;
+                    }
+                }
+            });
+            let s = stream_rows(rows, r, &facts, opts, sink);
+            if let Some(e) = error {
+                return Err(e);
+            }
+            s
+        } else {
+            let mut events = reader.rows(&r.id, parse_line)?;
+            let s = stream_rows(events.by_ref().map(|(_, v)| Row::active(v)), r, &facts, opts, sink);
+            events.finish()?;
+            s
+        };
+        super::note_skipped_lines(&mut s, skipped);
+        Ok(s)
+    })
 }
 
 #[cfg(not(feature = "sqlite"))]
@@ -2094,6 +2098,35 @@ mod tests {
         let mut point = EventReader::point(&conn).unwrap();
         point.at(&r.id, 0).unwrap();
         assert_eq!(point.stmt.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        fs::remove_dir_all(agents.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn cold_sqlite_stream_preserves_store_and_checks_original_dependencies() {
+        let agents = tmp_agents();
+        let db = write_store(&agents, "cold", &branchy_events());
+        {
+            let writer = rusqlite::Connection::open(&db).unwrap();
+            writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        }
+        let sidecar = |suffix: &str| {
+            let mut path = db.as_os_str().to_os_string();
+            path.push(suffix);
+            PathBuf::from(path)
+        };
+        let r = discover_sqlite(&db).unwrap().remove(0);
+        let mut expected = crate::stream::CollectSink::default();
+        stream_sqlite(&r, &ParseOptions::full(), &mut expected).unwrap();
+        assert!(!expected.messages.is_empty());
+        assert!(!sidecar("-wal").exists());
+        assert!(!sidecar("-shm").exists());
+        let mut mutate = |_: Message| {
+            fs::write(sidecar("-journal"), b"changed during callback").unwrap();
+            Flow::Stop
+        };
+        let error = stream_sqlite(&r, &ParseOptions::lazy(), &mut mutate).unwrap_err();
+        assert!(error.to_string().contains("dependencies changed"), "{error:#}");
         fs::remove_dir_all(agents.parent().unwrap()).unwrap();
     }
 
