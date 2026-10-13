@@ -121,7 +121,7 @@ fn sqlite_registries(state: &Path, key: &str) -> (Vec<Value>, Vec<Run>) {
     };
     conn.read(|conn| {
         let parse = |t: String| serde_json::from_str::<Value>(&t).ok();
-        let jobs = if table_exists(&conn, "cron_jobs") {
+        let jobs = if table_exists(conn, "cron_jobs") {
             // Decode and filter each row before retaining it. Payload ownership remains authoritative:
             // migrated projections can disagree, and SQLite's JSON duplicate-key rules differ from
             // serde_json's. Unrelated bodies live only until the next cursor row.
@@ -147,7 +147,7 @@ fn sqlite_registries(state: &Path, key: &str) -> (Vec<Value>, Vec<Run>) {
         } else {
             Vec::new()
         };
-        let runs = if table_exists(&conn, "subagent_runs") {
+        let runs = if table_exists(conn, "subagent_runs") {
             conn.prepare("SELECT payload_json FROM subagent_runs ORDER BY created_at, run_id")
                 .and_then(|mut st| {
                     st.query_map([], |row| {

@@ -1293,7 +1293,7 @@ fn discover_sqlite(db: &Path) -> Result<Vec<SessionRef>> {
                 row.get(7)?,
             ))
         })?;
-        let mut events = EventReader::new(&conn)?;
+        let mut events = EventReader::new(conn)?;
         let mut out = Vec::new();
         for row in rows {
             let (session_id, created, updated, transcript_updated, w_display, n_label, n_display, entry_json) = row?;
