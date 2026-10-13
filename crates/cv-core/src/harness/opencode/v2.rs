@@ -33,6 +33,17 @@ use serde_json::{json, Map, Value};
 /// `ToolResult`, a completed compaction gets its summary). `Err(())` means an unknown `type`, which
 /// the caller tallies; it is still carried under `complete`.
 pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Result<Vec<Message>, ()> {
+    build_projected(id, ty, data, opts, None, None)
+}
+
+pub(super) fn build_projected(
+    id: &str,
+    ty: &str,
+    data: &Value,
+    opts: &ParseOptions,
+    text: Option<&crate::lazy::Text>,
+    parts: Option<&[super::ProjectedPart]>,
+) -> Result<Vec<Message>, ()> {
     let ts = data.pointer("/time/created").and_then(super::super::ts_from_value);
     let new = |role: Role, kind: MessageKind, origin: Origin| {
         let mut m = Message::of_kind(role, kind, origin);
@@ -48,7 +59,7 @@ pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Re
             let mut bag = Map::new();
             if let Some(t) = text_of("text") {
                 m.content.push(Block::Text {
-                    text: t.to_string().into(),
+                    text: text.cloned().unwrap_or_else(|| t.to_string().into()),
                 });
             }
             for f in data.get("files").and_then(Value::as_array).into_iter().flatten() {
@@ -84,7 +95,7 @@ pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Re
                 };
             if let Some(t) = text_of("text") {
                 m.content.push(Block::Text {
-                    text: t.to_string().into(),
+                    text: text.cloned().unwrap_or_else(|| t.to_string().into()),
                 });
             }
             let mut bag = Map::new();
@@ -121,7 +132,11 @@ pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Re
             finish(&mut m, bag);
             out.push(m);
         }
-        "assistant" => out.extend(assistant(new(Role::Assistant, MessageKind::Reply, Origin::Model), data)),
+        "assistant" => out.extend(assistant(
+            new(Role::Assistant, MessageKind::Reply, Origin::Model),
+            data,
+            parts,
+        )),
         "compaction" => {
             let mut b = new(Role::System, MessageKind::CompactionBoundary, Origin::Harness);
             let mut bag = Map::new();
@@ -139,7 +154,7 @@ pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Re
                 s.id = Some(format!("{id}#summary"));
                 if let Some(t) = text_of("summary") {
                     s.content.push(Block::Text {
-                        text: t.to_string().into(),
+                        text: text.cloned().unwrap_or_else(|| t.to_string().into()),
                     });
                 }
                 s.model = data.pointer("/model/id").and_then(Value::as_str).map(str::to_string);
@@ -201,16 +216,25 @@ pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Re
     Ok(out)
 }
 
-fn assistant(mut m: Message, data: &Value) -> Vec<Message> {
+fn assistant(mut m: Message, data: &Value, projected: Option<&[super::ProjectedPart]>) -> Vec<Message> {
     m.model = data.pointer("/model/id").and_then(Value::as_str).map(str::to_string);
     m.usage = super::parse_usage(data);
     let mut results = Vec::new();
-    for c in data.get("content").and_then(Value::as_array).into_iter().flatten() {
+    for (index, c) in data
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let part = projected.and_then(|parts| parts.get(index));
         match c.get("type").and_then(Value::as_str).unwrap_or("") {
             "text" => {
                 if let Some(t) = c.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
                     m.content.push(Block::Text {
-                        text: t.to_string().into(),
+                        text: part
+                            .and_then(|p| p.text.clone())
+                            .unwrap_or_else(|| t.to_string().into()),
                     });
                 }
             }
@@ -221,7 +245,9 @@ fn assistant(mut m: Message, data: &Value) -> Vec<Message> {
                     .map(str::to_string);
                 if !t.is_empty() || signature.is_some() {
                     m.content.push(Block::Thinking {
-                        text: t.to_string().into(),
+                        text: part
+                            .and_then(|p| p.text.clone())
+                            .unwrap_or_else(|| t.to_string().into()),
                         signature,
                         encrypted: None,
                         redacted: false,
@@ -229,7 +255,7 @@ fn assistant(mut m: Message, data: &Value) -> Vec<Message> {
                 }
             }
             "tool" => {
-                let (u, r) = tool_blocks(c);
+                let (u, r) = tool_blocks(c, part);
                 m.content.push(u);
                 results.extend(r);
             }
@@ -289,7 +315,7 @@ fn assistant(mut m: Message, data: &Value) -> Vec<Message> {
 /// A 2.x `tool` content item: `{id, name, state{status, input, content[]?, error?, metadata?}, time}`.
 /// `content[]` is `text` and `file` items; a `file` result becomes an Image/File block after the
 /// result, as a 1.x `state.attachments[]` does.
-fn tool_blocks(c: &Value) -> (Block, Vec<Block>) {
+fn tool_blocks(c: &Value, projected: Option<&super::ProjectedPart>) -> (Block, Vec<Block>) {
     let id = c.get("id").and_then(Value::as_str).unwrap_or("").to_string();
     let name = c.get("name").and_then(Value::as_str).unwrap_or("").to_string();
     let status = c.pointer("/state/status").and_then(Value::as_str).unwrap_or("");
@@ -302,7 +328,7 @@ fn tool_blocks(c: &Value) -> (Block, Vec<Block>) {
     let use_block = Block::ToolUse {
         id: id.clone(),
         name: name.clone(),
-        input: input.into(),
+        input: projected.and_then(|p| p.input.clone()).unwrap_or_else(|| input.into()),
         namespace: None,
     };
     let mut text = Vec::new();
@@ -346,7 +372,9 @@ fn tool_blocks(c: &Value) -> (Block, Vec<Block>) {
     if !text.is_empty() || is_error || status == "completed" {
         out.push(Block::ToolResult {
             tool_use_id: id,
-            content: text.join("\n").into(),
+            content: projected
+                .and_then(|p| p.output.clone())
+                .unwrap_or_else(|| text.join("\n").into()),
             is_error,
             tool_name: (!name.is_empty()).then_some(name),
             status: (!status.is_empty()).then(|| status.to_string()),

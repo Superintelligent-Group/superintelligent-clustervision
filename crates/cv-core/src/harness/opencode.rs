@@ -320,9 +320,14 @@ impl Adapter for OpenCode {
                     continue;
                 };
                 let msg_id = mv.get("id").and_then(Value::as_str).unwrap_or("");
-                let parts = self.load_parts(msg_id);
-                for mut built in build_messages(&mv, &parts) {
-                    fold_into_session(&mut s, &mut built);
+                let built = if _opts.spans {
+                    let parts = self.load_projected_parts(msg_id)?;
+                    build_projected(&mv, &parts)
+                } else {
+                    build_messages(&mv, &self.load_parts(msg_id))
+                };
+                for mut built in built {
+                    fold_into_session(&mut s, &mut built)?;
                     if sink.message(built) == Flow::Stop {
                         return Ok(s);
                     }
@@ -346,7 +351,7 @@ impl Adapter for OpenCode {
 /// Session facts a message reveals as it streams past: the session model (the first one seen when
 /// the store gave none), the system prompt (a `system` record), and the IR diet — `Message::model`
 /// stays set only when it differs from the session's.
-fn fold_into_session(s: &mut Session, m: &mut Message) {
+fn fold_into_session(s: &mut Session, m: &mut Message) -> Result<()> {
     if s.model.is_none() {
         s.model = m.model.clone();
     }
@@ -354,8 +359,11 @@ fn fold_into_session(s: &mut Session, m: &mut Message) {
         m.model = None;
     }
     if m.kind == MessageKind::SystemPrompt && s.system_prompt.is_none() {
+        // System prompts are required as owned session metadata even for bounded readers.
+        m.materialize(&s.resolver())?;
         s.system_prompt = m.text();
     }
+    Ok(())
 }
 
 /// Count a session's conversational turns: message records whose `role` is `user`/`assistant`.
@@ -379,6 +387,38 @@ fn count_turns(dir: &std::path::Path) -> usize {
 }
 
 impl OpenCode {
+    fn load_projected_parts(&self, mid: &str) -> Result<Vec<ProjectedPart>> {
+        let Some(dir) = self.part_dir(mid) else {
+            return Ok(Vec::new());
+        };
+        let mut paths = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                paths.push((entry.file_name().to_string_lossy().into_owned(), entry.path()));
+            }
+        }
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut parts = Vec::new();
+        let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
+        for (_, path) in paths {
+            let Ok(source) = crate::json::JsonSource::capture(&path) else {
+                continue;
+            };
+            match source.read_syntax(|view| {
+                if !view.accepts_value()? || !view.is_object()? {
+                    return Ok(None);
+                }
+                Ok(Some(ProjectedPart::read(view, &source, &arena)?))
+            }) {
+                Ok(Some(part)) => parts.push(part),
+                Ok(None) => {}
+                Err(error) if error.is::<crate::json::InvalidJson>() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(parts)
+    }
+
     fn load_parts(&self, mid: &str) -> Vec<Value> {
         let Some(pdir) = self.part_dir(mid) else {
             return vec![];
@@ -585,7 +625,25 @@ mod db {
     /// Stream one db-backed session: the `session` row → [`Session`] metadata + `extra`, then each
     /// `message` row with its `part` rows hydrated and mapped one message at a time.
     pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+        let mut reads = crate::source::ReadSet::default();
+        let mut wal = r.path.clone().into_os_string();
+        wal.push("-wal");
+        reads.record(&PathBuf::from(wal));
+        let source = crate::json::JsonSource::capture_with_reads(&r.path, &reads)?;
+        let result = stream_snapshot(r, opts, sink, &source);
+        source.check()?;
+        result
+    }
+
+    fn stream_snapshot(
+        r: &SessionRef,
+        opts: &ParseOptions,
+        sink: &mut dyn MessageSink,
+        source: &crate::json::JsonSource,
+    ) -> Result<Session> {
         let conn = open_ro(&r.path)?;
+        let _transaction = conn.unchecked_transaction()?;
+        let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
         // The 2.x tables win for a session in both (a migrated database; module doc of `v2`).
         let v2 = has_table(&conn, "session_v2")
             && conn
@@ -664,11 +722,24 @@ mod db {
         }
         sink.meta(&s);
         if v2 {
-            return stream_v2(&conn, s, opts, sink);
+            return stream_v2(&conn, s, opts, sink, source, &arena);
         }
 
         let mut msgs = conn.prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")?;
-        let mut parts = conn.prepare("SELECT id, data FROM part WHERE message_id = ?1 ORDER BY id")?;
+        let (mut parts, part_rowid) = if opts.spans {
+            match conn.prepare("SELECT rowid, id, typeof(data) FROM part WHERE message_id = ?1 ORDER BY id") {
+                Ok(statement) => (statement, true),
+                Err(_) => (
+                    conn.prepare("SELECT id, data FROM part WHERE message_id = ?1 ORDER BY id")?,
+                    false,
+                ),
+            }
+        } else {
+            (
+                conn.prepare("SELECT id, data FROM part WHERE message_id = ?1 ORDER BY id")?,
+                false,
+            )
+        };
         let mut rows = msgs.query(rusqlite::params![r.id])?;
         while let Some(row) = rows.next()? {
             let mid: String = row.get(0)?;
@@ -678,20 +749,64 @@ mod db {
             };
             mv.insert("id".into(), json!(mid));
             mv.insert("sessionID".into(), json!(r.id));
-            let part_rows = parts.query_map(rusqlite::params![mid], |pr| {
-                Ok((pr.get::<_, String>(0)?, pr.get::<_, String>(1)?))
-            })?;
-            let mut pv: Vec<Value> = Vec::new();
-            for (pid, pdata) in part_rows.flatten() {
-                if let Ok(Value::Object(mut po)) = serde_json::from_str::<Value>(&pdata) {
+            let mut part_rows = parts.query(rusqlite::params![mid])?;
+            let mut pv = Vec::new();
+            let mut projected = Vec::new();
+            while let Some(pr) = part_rows.next()? {
+                let Ok(pid) = pr.get::<_, String>(if part_rowid { 1 } else { 0 }) else {
+                    continue;
+                };
+                if part_rowid && pr.get::<_, String>(2)? != "text" {
+                    continue;
+                }
+                if !part_rowid && pr.get_ref(1)?.as_str().is_err() {
+                    continue;
+                }
+                if opts.spans {
+                    let (offset, len) = if part_rowid {
+                        crate::harness::store::sqlite::append_cell(&conn, "part", "data", pr.get(0)?, &arena)?
+                    } else {
+                        let pdata = pr.get_ref(1)?.as_str()?;
+                        arena.append(|writer| {
+                            writer.write_all(pdata.as_bytes())?;
+                            Ok(())
+                        })?
+                    };
+                    if len == 0 {
+                        continue;
+                    }
+                    let part = source.read_backing_syntax(arena.clone(), offset, len, |view| {
+                        if !view.accepts_value()? || !view.is_object()? {
+                            return Ok(None);
+                        }
+                        Ok(Some(ProjectedPart::read(view, source, &arena)?))
+                    });
+                    match part {
+                        Ok(Some(mut part)) => {
+                            let po = part.value.as_object_mut().unwrap();
+                            po.insert("id".into(), json!(pid));
+                            po.insert("messageID".into(), json!(mid));
+                            po.insert("sessionID".into(), json!(r.id));
+                            projected.push(part);
+                        }
+                        Ok(None) => {}
+                        Err(error) if error.is::<crate::json::InvalidJson>() => {}
+                        Err(error) => return Err(error),
+                    }
+                } else if let Ok(Value::Object(mut po)) = serde_json::from_str::<Value>(pr.get_ref(1)?.as_str()?) {
                     po.insert("id".into(), json!(pid));
                     po.insert("messageID".into(), json!(mid));
                     po.insert("sessionID".into(), json!(r.id));
                     pv.push(Value::Object(po));
                 }
             }
-            for mut built in build_messages(&Value::Object(mv), &pv) {
-                fold_into_session(&mut s, &mut built);
+            let built = if opts.spans {
+                build_projected(&Value::Object(mv), &projected)
+            } else {
+                build_messages(&Value::Object(mv), &pv)
+            };
+            for mut built in built {
+                fold_into_session(&mut s, &mut built)?;
                 if sink.message(built) == Flow::Stop {
                     return Ok(s);
                 }
@@ -700,34 +815,175 @@ mod db {
         Ok(s)
     }
 
+    // Owned SQLite String reads reject invalid UTF-8 before JSON parsing. Preserve that failure
+    // policy on malformed rows without adding a second traversal to valid payloads.
+    fn backing_utf8(arena: &crate::harness::store::bytes::ByteSource, offset: u64, len: u64) -> Result<bool> {
+        if let Some(valid) =
+            arena.with_bytes(|bytes| std::str::from_utf8(&bytes[offset as usize..(offset + len) as usize]).is_ok())?
+        {
+            return Ok(valid);
+        }
+        use std::io::{Read, Seek};
+        let mut file = arena.file()?;
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        let mut input = file.take(len);
+        let mut bytes = [0u8; 64 * 1024 + 3];
+        let mut pending = 0;
+        loop {
+            let read = input.read(&mut bytes[pending..])?;
+            if read == 0 {
+                return Ok(pending == 0);
+            }
+            let end = pending + read;
+            match std::str::from_utf8(&bytes[..end]) {
+                Ok(_) => pending = 0,
+                Err(error) if error.error_len().is_none() => {
+                    pending = end - error.valid_up_to();
+                    bytes.copy_within(error.valid_up_to()..end, 0);
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+    }
+
     /// The 2.x `session_message` rows of one session, in `seq` order (module doc of `v2`).
     fn stream_v2(
         conn: &rusqlite::Connection,
         mut s: Session,
         opts: &ParseOptions,
         sink: &mut dyn MessageSink,
+        source: &crate::json::JsonSource,
+        arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
     ) -> Result<Session> {
-        let mut stmt = conn.prepare("SELECT id, type, data FROM session_message WHERE session_id = ?1 ORDER BY seq")?;
+        let (mut stmt, rowid) = if opts.spans {
+            match conn
+                .prepare("SELECT id, type, rowid, typeof(data) FROM session_message WHERE session_id = ?1 ORDER BY seq")
+            {
+                Ok(statement) => (statement, true),
+                Err(_) => (
+                    conn.prepare("SELECT id, type, data FROM session_message WHERE session_id = ?1 ORDER BY seq")?,
+                    false,
+                ),
+            }
+        } else {
+            (
+                conn.prepare("SELECT id, type, data FROM session_message WHERE session_id = ?1 ORDER BY seq")?,
+                false,
+            )
+        };
         let mut rows = stmt.query(rusqlite::params![s.id])?;
         let mut unknown: std::collections::BTreeMap<String, u64> = Default::default();
         let mut unreadable = 0u64;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let ty: String = row.get(1)?;
-            let data: String = row.get(2)?;
-            let Ok(data) = serde_json::from_str::<Value>(&data) else {
-                unreadable += 1;
-                continue;
-            };
-            let built = match v2::build(&id, &ty, &data, opts) {
-                Ok(b) => b,
-                Err(()) => {
-                    *unknown.entry(ty).or_default() += 1;
-                    Vec::new()
+            if rowid && row.get::<_, String>(3)? != "text" {
+                anyhow::bail!("OpenCode SQLite message data is not TEXT");
+            }
+            let built = if opts.spans
+                && matches!(
+                    ty.as_str(),
+                    "user" | "synthetic" | "system" | "skill" | "assistant" | "compaction"
+                ) {
+                let (offset, len) = if rowid {
+                    crate::harness::store::sqlite::append_cell(conn, "session_message", "data", row.get(2)?, arena)?
+                } else {
+                    let bytes = row.get_ref(2)?.as_str()?;
+                    arena.append(|writer| {
+                        writer.write_all(bytes.as_bytes())?;
+                        Ok(())
+                    })?
+                };
+                if len == 0 {
+                    unreadable += 1;
+                    continue;
+                }
+                let result = source.read_backing_syntax(arena.clone(), offset, len, |view| {
+                    if !view.accepts_value()? {
+                        return Ok(None);
+                    }
+                    let mut data = Map::new();
+                    let mut parts = Vec::new();
+                    let mut text = None;
+                    view.for_each_entry(|key, value| {
+                        if ((key == "text" && ty != "assistant") || (key == "summary" && ty == "compaction"))
+                            && value.is_string()?
+                        {
+                            text = value.source_text()?;
+                            data.insert(
+                                key.to_owned(),
+                                json!(if value.source_range()?.is_some_and(|(_, len)| len > 2) {
+                                    "x"
+                                } else {
+                                    ""
+                                }),
+                            );
+                        } else if key == "content" && ty == "assistant" && value.is_array()? {
+                            for item in value.array()?.unwrap() {
+                                parts.push(ProjectedPart::read_inner(item?, source, arena, true)?);
+                            }
+                            data.insert(
+                                key.to_owned(),
+                                Value::Array(parts.iter().map(|p| p.value.clone()).collect()),
+                            );
+                        } else {
+                            data.insert(key.to_owned(), value.resolve()?.into_owned());
+                        }
+                        Ok(())
+                    })?;
+                    Ok(Some(v2::build_projected(
+                        &id,
+                        &ty,
+                        &Value::Object(data),
+                        opts,
+                        text.as_ref(),
+                        Some(&parts),
+                    )))
+                });
+                match result {
+                    Ok(Some(Ok(built))) => built,
+                    Ok(Some(Err(()))) => {
+                        *unknown.entry(ty).or_default() += 1;
+                        Vec::new()
+                    }
+                    Ok(None) => {
+                        unreadable += 1;
+                        continue;
+                    }
+                    Err(error) if error.is::<crate::json::InvalidJson>() => {
+                        anyhow::ensure!(
+                            backing_utf8(arena, offset, len)?,
+                            "OpenCode SQLite message data is not UTF-8"
+                        );
+                        unreadable += 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                let data = if rowid {
+                    conn.query_row(
+                        "SELECT data FROM session_message WHERE rowid = ?1",
+                        rusqlite::params![row.get::<_, i64>(2)?],
+                        |row| row.get::<_, String>(0),
+                    )?
+                } else {
+                    row.get::<_, String>(2)?
+                };
+                let Ok(data) = serde_json::from_str::<Value>(&data) else {
+                    unreadable += 1;
+                    continue;
+                };
+                match v2::build(&id, &ty, &data, opts) {
+                    Ok(b) => b,
+                    Err(()) => {
+                        *unknown.entry(ty).or_default() += 1;
+                        Vec::new()
+                    }
                 }
             };
             for mut m in built {
-                fold_into_session(&mut s, &mut m);
+                fold_into_session(&mut s, &mut m)?;
                 if sink.message(m) == Flow::Stop {
                     return Ok(s);
                 }
@@ -748,6 +1004,196 @@ mod db {
 /// trailing `Role::Tool` message (mirroring the Claude adapter) so conversions re-encode them
 /// correctly. Returns 0–2 messages.
 fn build_messages(mv: &Value, parts: &[Value]) -> Vec<Message> {
+    build_parts(mv, parts.iter().map(|v| (v, None)))
+}
+
+fn json_text(
+    view: crate::json::JsonView<'_>,
+    source: &crate::json::JsonSource,
+    arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
+) -> Result<crate::lazy::Text> {
+    crate::harness::store::text::append(source, arena, |writer| writer.push_json(view))
+}
+
+fn decoded_input(
+    view: crate::json::JsonView<'_>,
+    source: &crate::json::JsonSource,
+    arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
+) -> Result<crate::json::Json> {
+    if !view
+        .source_range()?
+        .is_some_and(|(_, len)| len > crate::lazy::INLINE_MAX as u64)
+    {
+        let value = view.resolve()?.into_owned();
+        return Ok(match serde_json::from_str::<Value>(value.as_str().unwrap()) {
+            Ok(decoded) => decoded.into(),
+            Err(_) => value.into(),
+        });
+    }
+    let (offset, len) = arena.append(|writer| {
+        view.for_each_str_chunk(|chunk| {
+            writer.write_all(chunk.as_bytes())?;
+            Ok(())
+        })?;
+        Ok(())
+    })?;
+    if len != 0 {
+        match source.read_backing_syntax(arena.clone(), offset, len, |decoded| {
+            if decoded.accepts_value()? {
+                Ok(Some(decoded.argument(true)?))
+            } else {
+                Ok(None)
+            }
+        }) {
+            Ok(Some(decoded)) => return Ok(decoded),
+            Ok(None) => {}
+            Err(error) if error.is::<crate::json::InvalidJson>() => {}
+            Err(error) => return Err(error),
+        }
+    }
+    view.argument(true)
+}
+
+struct ProjectedPart {
+    value: Value,
+    text: Option<crate::lazy::Text>,
+    input: Option<crate::json::Json>,
+    output: Option<crate::lazy::Text>,
+    error: Option<crate::lazy::Text>,
+}
+
+impl ProjectedPart {
+    fn read(
+        view: crate::json::JsonView<'_>,
+        source: &crate::json::JsonSource,
+        arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
+    ) -> Result<Self> {
+        Self::read_inner(view, source, arena, false)
+    }
+    fn read_inner(
+        view: crate::json::JsonView<'_>,
+        source: &crate::json::JsonSource,
+        arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
+        v2: bool,
+    ) -> Result<Self> {
+        let mut part = Self {
+            value: Value::Null,
+            text: None,
+            input: None,
+            output: None,
+            error: None,
+        };
+        if !view.is_object()? {
+            part.value = view.resolve()?.into_owned();
+            return Ok(part);
+        }
+        let ty = view
+            .get("type")?
+            .map(|v| v.resolve().map(|v| v.as_str().unwrap_or("").to_owned()))
+            .transpose()?
+            .unwrap_or_default();
+        let mut object = Map::new();
+        view.for_each_entry(|key, value| {
+            if key == "text" && matches!(ty.as_str(), "text" | "reasoning") && value.is_string()? {
+                part.text = value.source_text()?;
+                object.insert(
+                    key.to_owned(),
+                    json!(if value.source_range()?.is_some_and(|(_, len)| len > 2) {
+                        "x"
+                    } else {
+                        ""
+                    }),
+                );
+            } else if key == "state" && ty == "tool" && value.is_object()? {
+                let mut state = Map::new();
+                value.for_each_entry(|key, value| {
+                    if key == "input" {
+                        part.input = Some(if v2 && value.is_string()? {
+                            // 2.x accepts encoded scalars and preserves empty/partial strings.
+                            // Its established scalar policy differs from OpenAI's helper.
+                            decoded_input(value, source, arena)?
+                        } else {
+                            value.argument(true)?
+                        });
+                        state.insert(key.to_owned(), Value::Null);
+                    } else if key == "content" && v2 && value.is_array()? {
+                        let mut items = Vec::new();
+                        let mut text_count = 0usize;
+                        let output = crate::harness::store::text::append(source, arena, |writer| {
+                            for item in value.array()?.unwrap() {
+                                let item = item?;
+                                let is_text = item
+                                    .get("type")?
+                                    .is_some_and(|v| v.resolve().is_ok_and(|v| v.as_str() == Some("text")));
+                                if is_text {
+                                    if text_count > 0 {
+                                        writer.push("\n")?;
+                                    }
+                                    text_count += 1;
+                                    if let Some(text) = item.get("text")? {
+                                        text.for_each_str_chunk(|chunk| writer.push(chunk))?;
+                                    }
+                                    items.push(json!({"type":"text", "text":""}));
+                                } else {
+                                    let is_file = item
+                                        .get("type")?
+                                        .map(|v| v.resolve().map(|v| v.as_str() == Some("file")))
+                                        .transpose()?
+                                        .unwrap_or(false);
+                                    if !is_file {
+                                        if text_count > 0 {
+                                            writer.push("\n")?;
+                                        }
+                                        text_count += 1;
+                                        writer.push_json(item)?;
+                                        items.push(Value::Null);
+                                    } else {
+                                        items.push(item.resolve()?.into_owned());
+                                    }
+                                }
+                            }
+                            Ok(())
+                        })?;
+                        if text_count > 0 {
+                            part.output = Some(output);
+                        }
+                        state.insert(key.to_owned(), Value::Array(items));
+                    } else if !v2 && matches!(key, "output" | "error") {
+                        let text = if value.is_string()? {
+                            value.source_text()?
+                        } else {
+                            Some(json_text(value, source, arena)?)
+                        };
+                        if key == "output" {
+                            part.output = text;
+                        } else {
+                            part.error = text;
+                        }
+                        state.insert(key.to_owned(), json!(""));
+                    } else {
+                        state.insert(key.to_owned(), value.resolve()?.into_owned());
+                    }
+                    Ok(())
+                })?;
+                object.insert(key.to_owned(), Value::Object(state));
+            } else {
+                object.insert(key.to_owned(), value.resolve()?.into_owned());
+            }
+            Ok(())
+        })?;
+        part.value = Value::Object(object);
+        Ok(part)
+    }
+}
+
+fn build_projected(mv: &Value, parts: &[ProjectedPart]) -> Vec<Message> {
+    build_parts(mv, parts.iter().map(|p| (&p.value, Some(p))))
+}
+
+fn build_parts<'a>(
+    mv: &Value,
+    parts: impl IntoIterator<Item = (&'a Value, Option<&'a ProjectedPart>)>,
+) -> Vec<Message> {
     let role = match mv.get("role").and_then(Value::as_str) {
         Some("assistant") => Role::Assistant,
         Some("system") => Role::System,
@@ -777,13 +1223,15 @@ fn build_messages(mv: &Value, parts: &[Value]) -> Vec<Message> {
     let mut spawn = false;
 
     let mut tool_results: Vec<Block> = Vec::new();
-    for part in parts {
+    for (part, projected) in parts {
         match part.get("type").and_then(Value::as_str).unwrap_or("") {
             "text" => {
                 if let Some(t) = part.get("text").and_then(Value::as_str) {
                     if !t.is_empty() {
                         m.content.push(Block::Text {
-                            text: t.to_string().into(),
+                            text: projected
+                                .and_then(|p| p.text.clone())
+                                .unwrap_or_else(|| t.to_string().into()),
                         });
                     }
                 }
@@ -803,7 +1251,9 @@ fn build_messages(mv: &Value, parts: &[Value]) -> Vec<Message> {
                     // usage, timestamps and ids.
                     if !t.is_empty() || signature.is_some() {
                         m.content.push(Block::Thinking {
-                            text: t.to_string().into(),
+                            text: projected
+                                .and_then(|p| p.text.clone())
+                                .unwrap_or_else(|| t.to_string().into()),
                             signature,
                             encrypted: None,
                             redacted: false,
@@ -812,7 +1262,7 @@ fn build_messages(mv: &Value, parts: &[Value]) -> Vec<Message> {
                 }
             }
             "tool" => {
-                let (use_block, results) = tool_blocks(part);
+                let (use_block, results) = tool_blocks_projected(part, projected);
                 m.content.push(use_block);
                 tool_results.extend(results);
             }
@@ -909,7 +1359,7 @@ fn build_messages(mv: &Value, parts: &[Value]) -> Vec<Message> {
 /// completed tool handed back — a `read` of an image, a screenshot — same shape as a `file` part).
 /// The state's `title`/`metadata`/`time` ride in the result's `details`. Tolerant of the
 /// `completed`/`error`/`running`/`pending` state shapes.
-fn tool_blocks(part: &Value) -> (Block, Vec<Block>) {
+fn tool_blocks_projected(part: &Value, projected: Option<&ProjectedPart>) -> (Block, Vec<Block>) {
     let call_id = part
         .get("callID")
         .or_else(|| part.get("id"))
@@ -925,7 +1375,9 @@ fn tool_blocks(part: &Value) -> (Block, Vec<Block>) {
     let use_block = Block::ToolUse {
         id: call_id.clone(),
         name,
-        input: part.pointer("/state/input").cloned().unwrap_or(Value::Null).into(),
+        input: projected
+            .and_then(|p| p.input.clone())
+            .unwrap_or_else(|| part.pointer("/state/input").cloned().unwrap_or(Value::Null).into()),
         namespace: None,
     };
 
@@ -933,7 +1385,9 @@ fn tool_blocks(part: &Value) -> (Block, Vec<Block>) {
     let result = match status {
         "completed" | "running" | "pending" => part.pointer("/state/output").map(|out| Block::ToolResult {
             tool_use_id: call_id.clone(),
-            content: coerce_text(out).into(),
+            content: projected
+                .and_then(|p| p.output.clone())
+                .unwrap_or_else(|| coerce_text(out).into()),
             is_error: false,
             tool_name: tool_name.clone(),
             status: status_field.clone(),
@@ -947,7 +1401,15 @@ fn tool_blocks(part: &Value) -> (Block, Vec<Block>) {
                 .unwrap_or_default();
             Some(Block::ToolResult {
                 tool_use_id: call_id.clone(),
-                content: content.into(),
+                content: projected
+                    .and_then(|p| {
+                        if part.pointer("/state/error").is_some() {
+                            p.error.clone()
+                        } else {
+                            p.output.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| content.into()),
                 is_error: true,
                 tool_name: tool_name.clone(),
                 status: status_field.clone(),
@@ -957,7 +1419,9 @@ fn tool_blocks(part: &Value) -> (Block, Vec<Block>) {
         // Unknown status but an output is present — still surface it.
         _ => part.pointer("/state/output").map(|out| Block::ToolResult {
             tool_use_id: call_id.clone(),
-            content: coerce_text(out).into(),
+            content: projected
+                .and_then(|p| p.output.clone())
+                .unwrap_or_else(|| coerce_text(out).into()),
             is_error: false,
             tool_name: tool_name.clone(),
             status: status_field.clone(),
@@ -1312,6 +1776,91 @@ mod tests {
     }
 
     #[test]
+    fn projected_parts_preserve_resolved_payloads_and_errors() {
+        let dir = std::env::temp_dir().join(format!("cv-opencode-projection-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("parts.json");
+        let payload = "line\n\"quoted\"\t\\tail".repeat(9000);
+        let parts = json!([
+            {"type":"text", "text":payload},
+            {"type":"reasoning", "text":payload, "metadata":{"anthropic":{"signature":"SIG"}}},
+            {"type":"reasoning", "text":"", "metadata":{"anthropic":{"signature":"ONLY"}}},
+            {"type":"tool", "callID":"one", "tool":"read", "state":{"status":"completed", "input":{"payload":payload}, "output":payload, "metadata":{"exit":0}}},
+            {"type":"tool", "callID":"two", "tool":"read", "state":{"status":"error", "input":null, "error":{"message":"structured"}, "output":payload}},
+            {"type":"tool", "callID":"three", "tool":"read", "state":{"status":"error", "input":true, "error":payload}},
+            {"type":"tool", "callID":"four", "tool":"read", "state":{"status":"completed", "input":null, "output":{"payload":payload}}},
+            {"type":"future", "payload":"preserved"}
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&parts).unwrap()).unwrap();
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+        let projected = source
+            .read_syntax(|view| {
+                view.array()?
+                    .unwrap()
+                    .map(|part| ProjectedPart::read(part?, &source, &arena))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        let mv = json!({"id":"message", "role":"assistant", "modelID":"model", "tokens":{"input":1}});
+        let expected = build_messages(&mv, parts.as_array().unwrap());
+        let mut actual = build_projected(&mv, &projected);
+        let resolver = crate::lazy::Resolver::new(Some(dir.join("wrong-primary")));
+        for message in &mut actual {
+            message.materialize(&resolver).unwrap();
+        }
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn projected_v2_tools_keep_join_order_and_scalar_arguments() {
+        let dir = std::env::temp_dir().join(format!("cv-opencode-projection-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("content.json");
+        let payload = "escaped\n\"text\"".repeat(9000);
+        let content = json!([
+            {"type":"text", "text":payload},
+            {"type":"reasoning", "text":payload, "state":{"signature":"SIG"}},
+            {"type":"tool", "id":"one", "name":"read", "state":{"status":"completed", "input":{"payload":payload}, "content":[{"type":"text", "text":payload},{"type":"file", "mime":"text/plain", "url":"file:///x"},{"type":"text", "text":""},{"future":payload}]}},
+            {"type":"tool", "id":"two", "name":"read", "state":{"status":"completed", "input":"42", "content":[]}},
+            {"type":"tool", "id":"three", "name":"read", "state":{"status":"error", "input":"", "error":{"message":"failure"}}},
+            {"type":"tool", "id":"four", "name":"read", "state":{"status":"running", "input":serde_json::to_string(&json!({"payload":payload})).unwrap()}},
+            {"type":"tool", "id":"five", "name":"read", "state":{"status":"running", "input":format!("true{}", " ".repeat(50000))}},
+            {"type":"tool", "id":"six", "name":"read", "state":{"status":"running", "input":serde_json::to_string(&payload).unwrap()}},
+            {"type":"tool", "id":"seven", "name":"read", "state":{"status":"running", "input":format!("{{partial {payload}")}}
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&content).unwrap()).unwrap();
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+        let projected = source
+            .read_syntax(|view| {
+                view.array()?
+                    .unwrap()
+                    .map(|part| ProjectedPart::read_inner(part?, &source, &arena, true))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        let original =
+            json!({"content":content,"model":{"id":"model"},"tokens":{"input":1},"metadata":{"preserve":true}});
+        let skeleton = json!({"content":projected.iter().map(|p|p.value.clone()).collect::<Vec<_>>(),"model":{"id":"model"},"tokens":{"input":1},"metadata":{"preserve":true}});
+        let opts = ParseOptions::lazy();
+        let expected = v2::build("message", "assistant", &original, &opts).unwrap();
+        let mut actual = v2::build_projected("message", "assistant", &skeleton, &opts, None, Some(&projected)).unwrap();
+        for message in &mut actual {
+            message.materialize(&crate::lazy::Resolver::new(None)).unwrap();
+        }
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn system_record_is_the_system_prompt() {
         let mv: Value = serde_json::from_str(r#"{"id":"s","role":"system","time":{"created":1}}"#).unwrap();
         let out = build_messages(&mv, &parts(&[r#"{"type":"text","text":"You are opencode."}"#]));
@@ -1321,18 +1870,18 @@ mod tests {
             (Role::System, MessageKind::SystemPrompt, Origin::Harness)
         );
         let mut s = Session::new("x", Harness::OpenCode);
-        fold_into_session(&mut s, &mut m);
+        fold_into_session(&mut s, &mut m).unwrap();
         assert_eq!(s.system_prompt.as_deref(), Some("You are opencode."));
         // the IR diet: a message model equal to the session's is dropped, a different one kept
         let mut a: Value =
             serde_json::from_str(r#"{"id":"a","role":"assistant","time":{"created":2},"modelID":"m1"}"#).unwrap();
         let mut first = build_messages(&a, &parts(&[r#"{"type":"text","text":"hi"}"#])).remove(0);
-        fold_into_session(&mut s, &mut first);
+        fold_into_session(&mut s, &mut first).unwrap();
         assert_eq!(s.model.as_deref(), Some("m1"));
         assert_eq!(first.model, None);
         a["modelID"] = json!("m2");
         let mut second = build_messages(&a, &parts(&[r#"{"type":"text","text":"hi"}"#])).remove(0);
-        fold_into_session(&mut s, &mut second);
+        fold_into_session(&mut s, &mut second).unwrap();
         assert_eq!(second.model.as_deref(), Some("m2"));
     }
 
@@ -1525,6 +2074,60 @@ mod tests {
             "msg_asst01",
             r#"{"type":"tool","callID":"c1","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"a\nb","title":"ls","metadata":{"exit":0},"time":{"start":1,"end":2}}}"#,
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn v2_projection_preserves_malformed_cell_failure_policy() {
+        let dir = std::env::temp_dir().join(format!("cv-opencode-cell-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,data); INSERT INTO session_v2 VALUES('session','/tmp','test',1,1); INSERT INTO session_message VALUES('message','session','assistant',1,'{broken');").unwrap();
+        let adapter = OpenCode::with_db(db);
+        let reference = adapter.discover().unwrap().remove(0);
+        for expression in ["'{broken'", "CAST(X'FF' AS TEXT)", "X'7B7D'", "NULL"] {
+            connection
+                .execute_batch(&format!("UPDATE session_message SET data = {expression}"))
+                .unwrap();
+            let expected = adapter.stream(&reference, &ParseOptions::bulk(), &mut |_| Flow::Continue);
+            let actual = adapter.stream(&reference, &ParseOptions::lazy(), &mut |_| Flow::Continue);
+            assert_eq!(expected.is_err(), actual.is_err(), "{expression}");
+            if let (Ok(expected), Ok(actual)) = (expected, actual) {
+                assert_eq!(
+                    serde_json::to_value(expected).unwrap(),
+                    serde_json::to_value(actual).unwrap()
+                );
+            }
+        }
+        drop(connection);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_snapshot_rejects_wal_mutation_even_after_sink_failure() {
+        let dir = std::env::temp_dir().join(format!("cv-opencode-wal-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let writer = make_db(&db, false);
+        writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        seed_session(&writer, "session", false);
+        let adapter = OpenCode::with_db(db);
+        let reference = adapter.discover().unwrap().remove(0);
+        let mut sink = crate::stream::TryFnSink::new(|_message| {
+            writer
+                .execute("UPDATE session SET title = 'changed' WHERE id = 'session'", [])
+                .unwrap();
+            anyhow::bail!("consumer cap")
+        });
+        let error = adapter
+            .stream(&reference, &ParseOptions::lazy(), &mut sink)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("changed"), "{error:#}");
+        assert!(!format!("{error:#}").contains("consumer cap"));
+        drop(writer);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "sqlite")]
