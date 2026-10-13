@@ -18,7 +18,7 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 | List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Catalog setup is shared across listing/discovery read and publication stages; changed-harness refresh now also reuses that owner. Cold discovery still derives counts from content. Persisted metadata is fetched by demanded path/tuple, reusing the operation catalog owner; standalone cached discovery batches initialize lazily once. | Matched eight-session whole-CLI controls show 34.03% fewer warm-list instructions and 13.59% fewer cold-list instructions, with identical output; see the [comparison artifact](../../tools/profiling/results/catalog-reader-comparison-arm64.json). This isolates setup work and does not rank the real fleet. The subsequent scoped-refresh control uses one initialization with an already loaded metadata cache. Preserve freshness and exact counts. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. One candidate decodes one cached row with 8 or 1,024 unrelated records; inventory enumeration and ranking still scale with fleet size. Required source errors remain fatal. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
-| Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds; existing controls preserve event/count/search results for unchanged indexed metadata. A newly confirmed title-change case leaves stale body-document terms; its metadata guard and migration are in progress. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
+| Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds; existing controls preserve event/count/search results for unchanged indexed metadata. Changed copied metadata now rejects skip/resume, fixing stale title/body conjunctions; unchanged-title appends retain resume. Older indexes rebuild once to establish that authority. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
 | Transform / export | Verified Codex port retains checked source-backed bodies. Splice retains selected guarded messages. Distill retains checked selected sources, analyzes per-message demand, shares one prepared tail, and stages borrowed sidecars; pack-only analysis skips the unused elision roster. Pack shares excerpt/event traversal when events are stale. | Hold further Claude emitter work. Requested distill text, tails, notes and sidecar content still impose output-dependent ownership; ignored source payloads no longer become a whole-session tree. Prune/archive/dataset can scan or stage whole output; archive replacement necessarily writes a complete new artifact. |
 
 ### Measurement correction: count the work (2026-10-12)
@@ -184,11 +184,12 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
    Known adapter-local sidecars, directory members and WAL files are covered. Consumers capture
    conditional Claude fork siblings and resolved external output paths before reading them, including
    absent files. Complete read sets survive prefix checkpoints and are revalidated at publication.
-   Version-1 dependency baselines reread once through normal refresh without an index rebuild.
+   Source records older than version 3 reread once through normal refresh to capture primary identity; that source migration needs no additional index rebuild.
 3. Current resume marks sample the first 4 KiB and the 4 KiB preceding the mark. This is not a
    proof that the entire prefix is unchanged. FTS now requires growth before using a mark, so
    same-size rewrites take a whole pass; inode replacement also rejects reuse. A rewrite followed by
-   growth can still escape the samples, and a primary rewrite restoring size/mtime can evade freshness.
+   growth can still escape the samples. Unix unchanged reuse now additionally checks inode/ctime,
+   rejecting same-size restored-mtime rewrites; platforms without that identity retain length/mtime guards.
    Unconditional detection of arbitrary prefix edits requires reading that prefix or a trusted
    writer/filesystem change signal; do not promise both zero prefix reads and such detection.
 4. Lazy/full equivalence must compare **resolved content** and metadata. The existing stream dump
@@ -2755,9 +2756,9 @@ The existing six-session resumed/full oracle and timestamp-change rewrite contro
 
 The baseline also confirmed the documented primary `(mtime,size)` limitation: a same-size
 middle edit with mtime restored was skipped by FTS. This is separate from the title fix;
-auxiliary identity guards and discovery fingerprints do not currently strengthen every
-consumer's primary skip authority. A shared primary identity capture, separate from append-safe
-auxiliary dependencies, is the next correctness question. Sampled resume marks still do not
+at that checkpoint, auxiliary identity guards and discovery fingerprints did not strengthen every
+consumer's primary skip authority. The shared primary-identity change below addresses this
+for Unix without invalidating ordinary append reuse. Sampled resume marks still do not
 prove an arbitrary rewritten-and-grown prefix immutable.
 
 
@@ -2790,3 +2791,8 @@ resume. The real FTS rewrite control changes a middle tool from Read to Edit and
 TodoWrite classification: postings, events and affordance counts match an independent full
 sweep. A fake-embedder semantic control rereads exactly the one restored-mtime changed source
 and requires no model/network. The six-session resumed/full corpus oracle remains exact.
+
+Combined-branch checks pass the three metadata/migration regressions at `8c24dbe7` and the
+restored-mtime FTS/events/counts full-rebuild oracle at `684bac7`. The integrated SQLite probe
+also verifies its allocator self-test and reports 912,208 B native peak / 48,000 B largest request
+for the retained 8 MB OpenCode control. These scoped checks supplement the lane evidence.
