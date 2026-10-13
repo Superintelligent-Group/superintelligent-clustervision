@@ -1,0 +1,170 @@
+{
+  "baseline_source": "2a2d35f9",
+  "candidate_source": "e1b5a7ce",
+  "operation": "same-target complete parse_for_emit -> emit_report, including preparation, native staging and fidelity verification",
+  "configuration": "native debug probe-heap, two Rayon workers, no timing claim",
+  "binaries": {
+    "baseline-probe": "aae8f352dbe076708fff4632a2050bed00cc922dc05ede3c1ce39b9c6fb4b35f",
+    "final-probe": "81270bcd3588edd9ce61020e73b26c57d4de7015a9baf232fa0bc0336a75bd83"
+  },
+  "cases": {
+    "cline-task": {
+      "harness": "cline",
+      "source_bytes": 16777444,
+      "source_sha256": "17c699e8d2f0756c9372dcf4a2181d55490aedf75afb5ec98a1146ad02bb75e8",
+      "messages": 4,
+      "source_unchanged": true,
+      "native_files": {
+        "tasks/00000000-0000-0000-0000-000000000001/api_conversation_history.json": {
+          "bytes": 10067080,
+          "sha256": "3b11b43bf576599b556a0ceddff60b12597a84decf340f4a6ba2f4c42b768685"
+        },
+        "tasks/00000000-0000-0000-0000-000000000001/task_metadata.json": {
+          "bytes": 63,
+          "sha256": "616f46ed6eb098021b9a8b7f04119b9b90f6a00ff020e445909c446853b9fe23"
+        },
+        "tasks/00000000-0000-0000-0000-000000000001/ui_messages.json": {
+          "bytes": 206,
+          "sha256": "c1e0fccf1d5e36dad9763365f3ef8afa729c60fc53abf38689ca604ea0ad4668"
+        }
+      },
+      "wire_exact": true,
+      "whole_fidelity_exact": true,
+      "baseline_heap": {
+        "baseline_live_bytes": 1193,
+        "peak_live_bytes": 33561767,
+        "peak_above_baseline_bytes": 33560574,
+        "stage_end_live_bytes": 8395968,
+        "allocation_requests": 4896,
+        "requested_bytes": 74672217
+      },
+      "candidate_heap": {
+        "baseline_live_bytes": 1187,
+        "peak_live_bytes": 1392104,
+        "peak_above_baseline_bytes": 1390917,
+        "stage_end_live_bytes": 7681,
+        "allocation_requests": 16700,
+        "requested_bytes": 99190768
+      }
+    },
+    "cline-sdk": {
+      "harness": "cline",
+      "source_bytes": 16777530,
+      "source_sha256": "3f191bda4841d48dcdb3c0c2766ae956d9b5189e3cfd0d50b7b4a02a1564988b",
+      "messages": 2,
+      "source_unchanged": true,
+      "native_files": {
+        "tasks/00000000-0000-0000-0000-000000000001/api_conversation_history.json": {
+          "bytes": 10066815,
+          "sha256": "424dba1100241811fa44189a022035ac75dfdde49aa929704afeceb923f2c200"
+        },
+        "tasks/00000000-0000-0000-0000-000000000001/task_metadata.json": {
+          "bytes": 117,
+          "sha256": "290f52fbad152fd0accd93678a308607cc1cf6ab22943b5809777dc5adb805f4"
+        },
+        "tasks/00000000-0000-0000-0000-000000000001/ui_messages.json": {
+          "bytes": 197,
+          "sha256": "3be93576aff42756538e3020d4f422584aefcf54c34a24c21689de59f11ae4ba"
+        }
+      },
+      "wire_exact": true,
+      "whole_fidelity_exact": true,
+      "baseline_heap": {
+        "baseline_live_bytes": 1252,
+        "peak_live_bytes": 17309962,
+        "peak_above_baseline_bytes": 17308710,
+        "stage_end_live_bytes": 8394814,
+        "allocation_requests": 4837,
+        "requested_bytes": 57891383
+      },
+      "candidate_heap": {
+        "baseline_live_bytes": 1246,
+        "peak_live_bytes": 1390911,
+        "peak_above_baseline_bytes": 1389665,
+        "stage_end_live_bytes": 6527,
+        "allocation_requests": 8326,
+        "requested_bytes": 48711365
+      }
+    },
+    "continue": {
+      "harness": "continue",
+      "source_bytes": 16777502,
+      "source_sha256": "6ddbd3fb098222fd7d3095ad9e1b538b68962aa683e6f50701ecb1a404e63419",
+      "messages": 2,
+      "source_unchanged": true,
+      "native_files": {
+        "00000000-0000-0000-0000-000000000001.json": {
+          "bytes": 10066974,
+          "sha256": "4806e730bc448047c5fba88f319371336858778fdd6742257158c54e70097449"
+        },
+        "sessions.json": {
+          "bytes": 177,
+          "sha256": "558a676721e025a9388f56cb1b2f5d584e33c2fa87bf57ae388efd0d42f1dc31"
+        }
+      },
+      "wire_exact": true,
+      "whole_fidelity_exact": true,
+      "baseline_heap": {
+        "baseline_live_bytes": 1083,
+        "peak_live_bytes": 17305730,
+        "peak_above_baseline_bytes": 17304647,
+        "stage_end_live_bytes": 8392722,
+        "allocation_requests": 3777,
+        "requested_bytes": 57527487
+      },
+      "candidate_heap": {
+        "baseline_live_bytes": 1077,
+        "peak_live_bytes": 1389605,
+        "peak_above_baseline_bytes": 1388528,
+        "stage_end_live_bytes": 4377,
+        "allocation_requests": 7002,
+        "requested_bytes": 48299553
+      }
+    },
+    "lmstudio": {
+      "harness": "lmstudio",
+      "source_bytes": 16777861,
+      "source_sha256": "0426be6659853be39b409311e5499829f227068a6a2f75e7a4dc712597b0f0c2",
+      "messages": 3,
+      "source_unchanged": true,
+      "native_files": {
+        "conversations/00000000-0000-0000-0000-000000000001.conversation.json": {
+          "bytes": 10068042,
+          "sha256": "a3eea589363fc962e94f5738267e3cc2d531aa5cb5dd0d24b77749268342f4c1"
+        }
+      },
+      "wire_exact": true,
+      "whole_fidelity_exact": true,
+      "baseline_heap": {
+        "baseline_live_bytes": 1153,
+        "peak_live_bytes": 17305246,
+        "peak_above_baseline_bytes": 17304093,
+        "stage_end_live_bytes": 8395434,
+        "allocation_requests": 3796,
+        "requested_bytes": 49209211
+      },
+      "candidate_heap": {
+        "baseline_live_bytes": 1147,
+        "peak_live_bytes": 1392791,
+        "peak_above_baseline_bytes": 1391644,
+        "stage_end_live_bytes": 7153,
+        "allocation_requests": 10475,
+        "requested_bytes": 73835678
+      }
+    }
+  },
+  "compatibility_controls": {
+    "native_and_portable": "four independent owned-complete controls, with Cline/Roo sharing task-directory reader",
+    "serialized_ir_exact": true,
+    "public_default_complete_owned": true,
+    "all_thinking_modes_wire_and_fidelity_exact": true,
+    "lm_alternate_versions": "two Branch rows, variant indices 0 and 2",
+    "cline_roo_carriers": "existing complete-mode typed/unknown-record acceptance retained; no new raw-carrier policy",
+    "late_source_errors": "mutation after successful prepared emission preserves every destination file"
+  },
+  "limits": [
+    "One 8 MiB Native actual operation per distinct reader contract; not a scale matrix or universal bound",
+    "Allocation counters cover requested Rust heap, not mmap/RSS/SQLite C or physical I/O",
+    "Explicit metadata/system prompts, message/block rosters and output-sized staging retain their existing contracts"
+  ]
+}

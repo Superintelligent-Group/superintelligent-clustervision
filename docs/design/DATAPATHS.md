@@ -3901,3 +3901,30 @@ projection; its body can use the existing Text/source contract without a metadat
 Message/block rosters, complete variants, requested owned APIs and output staging retain their
 cardinality or output costs. Further optimization of the named metadata requires a concrete
 consumer demand and counterexample, rather than an obligation to prove every input optimal.
+
+### Same-target complete checked preparation (Sol, 2026-10-13)
+
+`e1b5a7ce` extends only native-emission preparation eligibility to Cline, Roo, Continue and
+LM Studio rehomes. Their existing readers accept complete+spans and their checked writers
+already consume guarded bodies; no codec, carrier policy or output schema changes. Public
+`ParseOptions::complete()` keeps its default owned representation.
+
+Independent owned-complete collection is the oracle for four reader contracts: shared Cline/Roo
+task directories, Cline SDK messages, Continue history and LM Studio versions. Resolved prepared
+IR is byte-identical, including complete extras and metadata. LM Studio keeps two alternate
+Branch messages and original variant indices 0/2; Cline/Roo retain their existing complete-mode
+carrier/unknown-record acceptance rather than introducing new raw carriers. Native/Text/Drop
+emission files and complete fidelity reports match. Mutating the retained primary after preparation
+and successful emission fails before changing any destination file. All four controls pass native
+and portable SQLite configurations, with pinned formatting and both library clippy checks.
+
+One actual Native complete preparation→emission→verification operation per distinct reader
+contract uses an ordinary 8 MiB prompt, frozen input and independent `2a2d35f9` outputs. Peak
+requested heap above baseline changes: Cline task directory 33,560,574→1,390,917 B; Cline SDK
+17,308,710→1,389,665 B; Continue 17,304,647→1,388,528 B; LM Studio 17,304,093→1,391,644 B.
+Every generated file and complete fidelity report is exact; LM's actual operation also includes
+an alternate version. Binary/source/output hashes and all allocation counters are in
+[SAME-TARGET-PREPARE-EVIDENCE.json](SAME-TARGET-PREPARE-EVIDENCE.json). This is not a timing,
+physical-I/O, portable operation-heap or universal scale-bound claim. Owned system prompts and
+rich metadata, structural rosters, fallback carriers and private output staging remain explicit.
+This closes the named same-target eligibility gap for these represented reader contracts.
