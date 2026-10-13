@@ -267,8 +267,6 @@ fn optional_string(view: Option<JsonView<'_>>) -> Result<Option<String>> {
 /// The parser backfills `cwd`/`title` from the transcript itself, so writing the index is for
 /// `discover()` fidelity, not correctness; we still write it.
 pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) -> Result<super::EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
     use anyhow::Context;
 
     let new_id = opts.new_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -281,30 +279,17 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
 
     // ── transcript: <sessionId>.json ──
-    let title = session
-        .title
-        .clone()
-        .or_else(|| session.first_user_text())
-        .map(|t| crate::ir::truncate(&t, 80));
-
-    let mut history: Vec<Value> = Vec::new();
-    for msg in &session.messages {
-        history.push(history_item(msg, session.model.as_deref())?);
-    }
-
-    let mut transcript = Map::new();
-    transcript.insert("sessionId".into(), json!(new_id));
-    if let Some(t) = &title {
-        transcript.insert("title".into(), json!(t));
-    }
-    if let Some(c) = &cwd_str {
-        transcript.insert("workspaceDirectory".into(), json!(c));
-    }
-    transcript.insert("history".into(), Value::Array(history));
-
+    let resolver = crate::lazy::Resolver::new(session.source_path.clone());
+    let title = super::wire::write::fallback_title(session, Harness::Continue, opts.thinking, &resolver)?;
     let file_path = out_dir.join(format!("{new_id}.json"));
-    fs::write(&file_path, serde_json::to_string_pretty(&Value::Object(transcript))?)
-        .with_context(|| format!("writing {}", file_path.display()))?;
+    emit::transcript(
+        session,
+        &new_id,
+        title.as_deref(),
+        cwd_str.as_deref(),
+        &file_path,
+        opts.thinking,
+    )?;
 
     // ── index: sessions.json (merge-or-create) ──
     let index_path = out_dir.join("sessions.json");
@@ -341,6 +326,9 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
     })
 }
 
+mod emit;
+
+#[cfg(test)]
 /// Build one `history` item (`{message, contextItems}`) from an IR message.
 fn history_item(msg: &Message, session_model: Option<&str>) -> Result<Value> {
     let role_str = match msg.role {
@@ -454,6 +442,7 @@ fn file_name_of(p: &str) -> String {
 }
 
 /// Pull `(toolCallId, content)` from a Tool turn's first ToolResult block.
+#[cfg(test)]
 fn tool_result_of(content: &[Block]) -> (String, String) {
     for b in content {
         if let Block::ToolResult {

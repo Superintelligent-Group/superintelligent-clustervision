@@ -161,6 +161,115 @@ pub(crate) fn joined_text<'a>(
     })
 }
 
+#[derive(Debug)]
+struct TitleReady;
+impl std::fmt::Display for TitleReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("title prefix selected")
+    }
+}
+impl std::error::Error for TitleReady {}
+
+/// The emitters' existing first-user-text fallback, retaining only the truncated label.
+/// Unlike synth_title this considers only the first user and applies no prompt filtering.
+pub(crate) fn fallback_title(
+    session: &crate::ir::Session,
+    target: crate::Harness,
+    mode: crate::emit::ThinkingMode,
+    resolver: &Resolver,
+) -> Result<Option<String>> {
+    if let Some(title) = &session.title {
+        return Ok(Some(crate::ir::truncate(title, 80)));
+    }
+    let Some(message) = session.messages.iter().find(|m| m.role == crate::ir::Role::User) else {
+        return Ok(None);
+    };
+    let mut prefix = String::new();
+    let mut chars = 0;
+    let mut present = false;
+    let mut meaningful = false;
+    for block in &message.content {
+        let text = if mode == crate::emit::ThinkingMode::Native {
+            match block {
+                crate::ir::Block::Text { text } => Some(std::borrow::Cow::Borrowed(text)),
+                _ => None,
+            }
+        } else {
+            crate::emit::thinking::text(block, target, mode, resolver)?
+        };
+        if let Some(text) = text {
+            if present && chars < 81 {
+                prefix.push('\n');
+                chars += 1;
+            }
+            let result = text.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
+                present |= !chunk.is_empty();
+                meaningful = meaningful || chunk.chars().any(|c| !c.is_whitespace());
+                for c in chunk.chars().take(81 - chars) {
+                    prefix.push(c);
+                    chars += 1;
+                }
+                if chars == 81 && meaningful {
+                    return Err(TitleReady.into());
+                }
+                Ok(())
+            });
+            match result {
+                Err(error) if error.is::<TitleReady>() => break,
+                Err(error) => return Err(error),
+                Ok(()) => {}
+            }
+        }
+    }
+    Ok(meaningful.then(|| crate::ir::truncate(&prefix, 80)))
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+    #[test]
+    fn checked_fallback_title_matches_first_user_text_policy() -> Result<()> {
+        use crate::ir::{Block, Message, Role, Session};
+        for parts in [
+            vec![],
+            vec![""],
+            vec![" ", "\n"],
+            vec!["", "prompt"],
+            vec!["first", "", "tail"],
+            vec!["\r\nλ", "tail"],
+            vec![
+                "                                                                               ",
+                "late",
+            ],
+            vec![
+                "                                                                                ",
+                "late",
+            ],
+        ] {
+            let mut session = Session::new("synthetic", crate::Harness::Continue);
+            let mut message = Message::new(Role::User);
+            message.content = parts.iter().map(|s| Block::Text { text: (*s).into() }).collect();
+            session.messages.push(message);
+            let mut later = Message::new(Role::User);
+            later.content = vec![Block::Text {
+                text: "later meaningful turn".into(),
+            }];
+            session.messages.push(later);
+            let expected = session.first_user_text().map(|s| crate::ir::truncate(&s, 80));
+            assert_eq!(
+                fallback_title(
+                    &session,
+                    crate::Harness::Continue,
+                    crate::emit::ThinkingMode::Native,
+                    &Resolver::new(None)
+                )?,
+                expected
+            );
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod text_publication_tests {
     use super::*;

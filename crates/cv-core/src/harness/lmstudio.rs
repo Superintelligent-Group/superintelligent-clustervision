@@ -557,55 +557,10 @@ fn projected_harmony(view: JsonView<'_>) -> Result<bool> {
 /// LM Studio is a chat app with no working directory, so `opts.new_cwd` / `session.cwd` are not
 /// written into the file; we surface the chosen cwd only in the resume hint.
 pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) -> Result<EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
-    let created = session.created_at.or(session.updated_at).unwrap_or_else(Utc::now);
-    let created_ms = created.timestamp_millis();
-
-    // The id (filename stem) is the ms-epoch createdAt unless explicitly overridden.
-    let new_id = opts.new_id.clone().unwrap_or_else(|| created_ms.to_string());
-
-    let conv_dir = out_dir.join("conversations");
-    fs::create_dir_all(&conv_dir).with_context(|| format!("creating {}", conv_dir.display()))?;
-    let file_path = conv_dir.join(format!("{new_id}.conversation.json"));
-
-    let mut messages: Vec<Value> = Vec::new();
-    for msg in &session.messages {
-        if let Some(version) = emit_version(session, msg, created)? {
-            messages.push(json!({
-                "versions": [version],
-                "currentlySelected": 0,
-            }));
-        }
-    }
-
-    let mut root = Map::new();
-    let title = session
-        .title
-        .clone()
-        .or_else(|| session.first_user_text())
-        .map(|t| crate::ir::truncate(&t, 80))
-        .unwrap_or_else(|| "Untitled".to_string());
-    root.insert("name".into(), json!(title));
-    root.insert("createdAt".into(), json!(created_ms));
-    root.insert("messages".into(), Value::Array(messages));
-    root.insert("tokenCount".into(), json!(0));
-    root.insert("pinned".into(), json!(false));
-
-    // Preserve any system prompt the source carried (parse puts it on `Session::system_prompt`).
-    if let Some(sp) = &session.system_prompt {
-        root.insert("systemPrompt".into(), json!(sp));
-    }
-
-    fs::write(&file_path, serde_json::to_string_pretty(&Value::Object(root))?)
-        .with_context(|| format!("writing {}", file_path.display()))?;
-
-    Ok(EmitResult {
-        path: file_path,
-        new_id,
-        resume_hint: Some("open the chat in LM Studio".to_string()),
-    })
+    emit::emit(session, out_dir, opts)
 }
+mod emit;
+#[cfg(test)]
 
 /// Build the single `version` object for one IR message turn (the parser only reads the
 /// `currentlySelected` version, so we emit exactly one). Returns `None` for empty turns.
@@ -643,6 +598,7 @@ fn emit_version(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Re
 
 /// Map an assistant message's blocks into LM Studio `steps[]` (`contentBlock`s). Model + usage ride
 /// on the first step's `genInfo`; the `stepIdentifier` prefix carries the step timestamp.
+#[cfg(test)]
 fn emit_assistant_steps(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Result<Vec<Value>> {
     let ts = msg.timestamp.unwrap_or(fallback);
     let step_id = format!("{}-0.{}", ts.timestamp_millis(), "0000000000000000");
@@ -716,6 +672,7 @@ fn emit_assistant_steps(session: &Session, msg: &Message, fallback: DateTime<Utc
 }
 
 /// Map a (user/system/tool) message's blocks into a `content[]` parts array (`text` / `file`).
+#[cfg(test)]
 fn emit_content_parts(blocks: &[Block]) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for b in blocks {
@@ -742,6 +699,7 @@ fn emit_content_parts(blocks: &[Block]) -> Result<Vec<Value>> {
 }
 
 /// A `content[]` array holding a single `text` part.
+#[cfg(test)]
 fn text_parts(text: &str) -> Value {
     json!([{ "type": "text", "text": text }])
 }

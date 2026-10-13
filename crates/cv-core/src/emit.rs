@@ -150,7 +150,13 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
 pub(crate) fn checked_target(target: Harness) -> bool {
     matches!(
         target,
-        Harness::Claude | Harness::Codex | Harness::Gemini | Harness::Cline | Harness::Roo
+        Harness::Claude
+            | Harness::Codex
+            | Harness::Gemini
+            | Harness::Cline
+            | Harness::Roo
+            | Harness::Continue
+            | Harness::LmStudio
     )
 }
 
