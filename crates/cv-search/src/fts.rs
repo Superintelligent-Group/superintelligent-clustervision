@@ -746,7 +746,7 @@ impl SweepPlanner<'_> {
             let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
                 dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
             }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
-            let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
+            let events = event_sync.needs_ingest_with_provenance(r, &source, prov, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
             if fts_fresh
                 && !events
@@ -764,7 +764,8 @@ impl SweepPlanner<'_> {
                 grew: !duplicate_meta.contains(&r.id)
                     && existing
                         .get(&r.id)
-                        .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
+                        .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size)
+                    && (!events || event_sync.can_resume(r, prov)),
                 prov: prov.clone(),
                 mark: marks.get(r).cloned(),
                 source,
@@ -4369,6 +4370,88 @@ mod tests {
         std::fs::remove_dir_all(oracle).unwrap();
     }
 
+    #[test]
+    fn incompatible_event_copy_authority_forces_full_append_replay() {
+        let home = IsolatedHome::new();
+        let dir = tmpdir();
+        let oracle = tmpdir();
+        let path = home.home.join("canonical.jsonl");
+        let edit = |id: &str, target: &str| {
+            serde_json::json!({"type":"assistant","uuid":id,
+            "sessionId":"copy-events","message":{"role":"assistant","content":[{"type":"tool_use",
+                "id":id,"name":"Edit","input":{"file_path":target,"old_string":"a","new_string":"b"}}]}})
+            .to_string()
+        };
+        let mut bytes = edit("prefix", "/copy-authority/prefix.rs") + "\n";
+        for n in 0..8 {
+            bytes.push_str(
+                &serde_json::json!({"type":"user","uuid":format!("u{n}"),"sessionId":"copy-events",
+                "message":{"role":"user","content":"sapphire ".repeat(1024)}})
+                .to_string(),
+            );
+            bytes.push('\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let r = sref("copy-events", "same title", path.to_string_lossy().into_owned());
+        sweep(&dir, vec![r.clone()], true, false).unwrap();
+        let other_path = home.home.join("foreign.jsonl");
+        std::fs::write(&other_path, edit("foreign", "/copy-authority/foreign.rs") + "\n").unwrap();
+        let other = cv_core::SessionRef {
+            path: other_path,
+            ..r.clone()
+        };
+        cv_core::events::ingest_ref(&other).unwrap();
+        assert!(!cv_core::events::SyncTable::load().can_resume(&r, &Default::default()));
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&r.path).unwrap(),
+            "{}",
+            edit("tail", "/copy-authority/tail.rs")
+        )
+        .unwrap();
+        let marks = cv_core::resume::MarkTable::load();
+        let head = marks.get(&r).unwrap();
+        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
+        let version = cv_core::resume::version(adapter.as_ref(), RESUME_TAG).unwrap();
+        assert!(head.holds(&r.path, std::fs::metadata(&r.path).unwrap().len(), &version));
+        let replay = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((replay.changed, replay.resumed, replay.errors), (1, 0, 0));
+        let events = || {
+            cv_core::events::events_for("claude", "copy-events", None)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.msg_idx,
+                        e.kind,
+                        e.tool,
+                        e.target,
+                        e.detail,
+                        e.parent_id,
+                        e.agent_id,
+                        e.workflow,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let actual = events();
+        assert_eq!(actual.len(), 2);
+        assert!(actual
+            .iter()
+            .all(|e| e.3.as_deref() != Some("/copy-authority/foreign.rs")));
+        index_refs(&oracle, std::slice::from_ref(&r), true).unwrap();
+        assert_eq!(
+            actual,
+            events(),
+            "whole replay must replace foreign events and restore canonical prefix"
+        );
+        assert_eq!(
+            text_search_ids(&dir, "sapphire").unwrap(),
+            text_search_ids(&oracle, "sapphire").unwrap()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(oracle).unwrap();
+    }
+
     /// Every source requires both mtime and size to match. Unknown or empty sources are stale.
     #[test]
     fn fts_is_fresh_requires_mtime_and_size_for_every_source() {
@@ -5189,9 +5272,17 @@ mod tests {
             &parent,
             cv_core::offsets::file_sig(&parent.path).0
         ));
-        assert!(!cv_core::events::needs_ingest(
+        let child_source = cv_core::source::Probe::default().snapshot(&child);
+        let child_provenance = cv_core::events::Provenance {
+            parent_id: Some(parent.id.clone()),
+            agent_id: Some("kid2".into()),
+            workflow: None,
+        };
+        assert!(!cv_core::events::SyncTable::load().needs_ingest_with_provenance(
             &child,
-            cv_core::offsets::file_sig(&child.path).0
+            &child_source,
+            &child_provenance,
+            &mut cv_core::source::Probe::default()
         ));
 
         assert_eq!(
@@ -5321,6 +5412,83 @@ mod tests {
         std::fs::remove_file(top.path).unwrap();
         assert_eq!(sweep(&dir, vec![b, a], false, true).unwrap().changed, 1);
         assert!(text_search_ids(&dir, "topaz").unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn same_path_folded_and_direct_authority_refresh_event_parent_both_ways() {
+        let home = IsolatedHome::new();
+        let dir = tmpdir();
+        let parent = sref(
+            "parent",
+            "parent",
+            write_claude_msgs(&home.home, "parent", &[("user", "parent prompt")]),
+        );
+        let child = write_subagent(parent.path.to_str().unwrap(), "shared", "placeholder");
+        std::fs::write(
+            &child,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"assistant","uuid":"edit","sessionId":"agent-shared",
+                    "timestamp":"2026-01-01T00:00:00Z","cwd":"/copy-authority",
+                    "message":{"role":"assistant","model":"test","content":[{"type":"tool_use",
+                        "id":"edit","name":"Edit","input":{"file_path":"/copy-authority/touched.rs",
+                            "old_string":"before","new_string":"after"}}]}
+                })
+            ),
+        )
+        .unwrap();
+        let direct = cv_core::subagent_tree_of(&parent).pop().unwrap().session;
+        let attribution = || -> Option<String> {
+            rusqlite::Connection::open(home.home.join("catalog.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT parent_id FROM event_sessions WHERE harness='claude' AND session_id='agent-shared'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        sweep(&dir, vec![parent.clone()], true, true).unwrap();
+        assert_eq!(attribution().as_deref(), Some("parent"));
+        assert_eq!(cv_core::events::events_for("claude", "agent-shared", None).len(), 1);
+        assert_eq!(
+            sweep(&dir, vec![parent.clone(), direct.clone()], false, true)
+                .unwrap()
+                .changed,
+            1
+        );
+        assert_eq!(
+            attribution(),
+            None,
+            "direct authority must remove folded attribution on the same source"
+        );
+        assert_eq!(
+            sweep(&dir, vec![direct.clone(), parent.clone()], false, true)
+                .unwrap()
+                .changed,
+            0
+        );
+        assert_eq!(sweep(&dir, vec![parent.clone()], false, true).unwrap().changed, 1);
+        assert_eq!(
+            attribution().as_deref(),
+            Some("parent"),
+            "folded authority must restore its parent"
+        );
+        assert_eq!(sweep(&dir, vec![parent.clone()], false, true).unwrap().changed, 0);
+        assert_eq!(cv_core::events::events_for("claude", "agent-shared", None).len(), 1);
+        // Another actual producer can publish direct attribution without touching FTS.
+        cv_core::events::ingest_ref(&direct).unwrap();
+        assert_eq!(attribution(), None);
+        let restored = sweep(&dir, vec![parent.clone()], false, true).unwrap();
+        assert_eq!(restored.changed, 0, "event-only authority repair preserves FTS");
+        assert!(restored.work.callbacks > 0);
+        assert_eq!(attribution().as_deref(), Some("parent"));
+        assert_eq!(
+            sweep(&dir, vec![parent], false, true).unwrap().work,
+            SweepWork::default()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
