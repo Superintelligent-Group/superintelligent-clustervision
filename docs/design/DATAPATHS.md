@@ -825,3 +825,12 @@ exact ChatML and Message JSON bytes versus owned text, producer-owner drops, and
 failure. A synthetic adapter with a final assistant model fact exercises actual `model:present`
 deferred replay and minimum-message staging, including misses. These are composition tests;
 producer-specific compressed/SQLite heap bounds and CLI Session framing remain integration work.
+Affordance source-text demands (2026-10-12): checked text reductions now feed record markers,
+permission-denial details, and row summaries through the existing Result-returning `of_session`,
+streamed `read`, and `Counter::note` call graphs. Marker reducers can stop after deciding, but
+captured-source failure takes precedence over their internal stop signal. Full summaries scan
+complete decoded text to preserve late wrappers and whitespace-tail semantics. Metadata-only
+counts do not demand summary bodies. Scoped native/portable oracles compare existing inline and
+Span semantics (including malformed escaped-body raw fallback), retained-backed text rows/counts,
+mutation errors, and unchanged counts when a demanded classification fails. This closes swallowed
+read errors; it is not a new allocation-performance claim.

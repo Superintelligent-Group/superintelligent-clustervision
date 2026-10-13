@@ -2,13 +2,15 @@
 
 ## Unreleased
 
+- Affordance rows and counts propagate source text read failures instead of classifying incomplete content.
+
+- Staged dataset and JSON output retain checked source-backed text without copying decoded payloads into private transport.
 - Commit evidence scans tool results in bounded chunks and reports unreadable lazy sources instead of silently losing matches.
 - Search indexes source-backed text and retains complete database, WAL and sidecar freshness guards in semantic caches.
 
 - Live search resolves lazy labels and reports demanded text failures instead of returning incomplete matches.
 
 - Warm token statistics reuse bounded, dependency-validated usage rows while preserving response deduplication and exact cost totals.
-- Staged dataset and JSON output retain checked source-backed text without copying decoded payloads into private transport.
 
 - Cursor CLI discovery and partial reads stream selected message fields with bounded scratch and reject changed SQLite snapshot dependencies.
 - LM Studio discovery projects source metadata and bounded titles without loading whole documents, including portable builds.

@@ -1,6 +1,7 @@
 //! Bounded reductions over complete decoded content, shared by affordance counts and rows.
 use crate::ir::Harness;
 use crate::lazy::{Resolver, Text};
+use anyhow::Result;
 
 const CHUNK: usize = 64 * 1024;
 const SUMMARY_CHARS: usize = 120;
@@ -220,84 +221,73 @@ impl Facts {
     }
 }
 
-fn chunks(text: &Text, resolver: &Resolver, mut visit: impl FnMut(&str)) {
-    match text {
-        Text::Span(span) => resolver.for_each_chunk(span, CHUNK, visit),
-        Text::Source(source) => {
-            let _ = source.try_for_each_chunk(CHUNK, |part| {
-                visit(part);
-                Ok(())
-            });
-        }
-        Text::Inline(text) => {
-            let mut rest = text.as_str();
-            while !rest.is_empty() {
-                let mut end = rest.len().min(CHUNK);
-                while !rest.is_char_boundary(end) {
-                    end += 1;
-                }
-                visit(&rest[..end]);
-                rest = &rest[end..];
-            }
-        }
+fn chunks(text: &Text, resolver: &Resolver, mut visit: impl FnMut(&str)) -> Result<()> {
+    text.try_for_each_chunk(resolver, CHUNK, |part| {
+        visit(part);
+        Ok(())
+    })
+}
+
+#[derive(Debug)]
+struct Complete;
+impl std::fmt::Display for Complete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("text reduction complete")
+    }
+}
+impl std::error::Error for Complete {}
+
+// Checked readers validate the captured source even when the callback stops traversal.
+fn until(text: &Text, resolver: &Resolver, mut done: impl FnMut(&str) -> bool) -> Result<()> {
+    match text.try_for_each_chunk(
+        resolver,
+        CHUNK,
+        |part| {
+            if done(part) { Err(Complete.into()) } else { Ok(()) }
+        },
+    ) {
+        Err(error) if error.is::<Complete>() => Ok(()),
+        result => result,
     }
 }
 
-pub(super) fn facts(text: &Text, resolver: &Resolver) -> Facts {
+pub(super) fn facts(text: &Text, resolver: &Resolver) -> Result<Facts> {
     let mut facts = Facts::default();
-    chunks(text, resolver, |chunk| facts.push(chunk));
-    facts
+    chunks(text, resolver, |chunk| facts.push(chunk))?;
+    Ok(facts)
 }
 
-/// Most record heads decide from a small source prefix. Only a long whitespace run or an
-/// incomplete decoded prefix needs the chunk path; it retains only the wanted ASCII head.
-pub(super) fn starts_with(text: &Text, resolver: &Resolver, wanted: &str) -> bool {
+/// Most record heads decide from a small checked source prefix. Only a long whitespace run or
+/// an incomplete decoded prefix needs the chunk path; it retains only the wanted ASCII head.
+pub(super) fn starts_with(text: &Text, resolver: &Resolver, wanted: &str) -> Result<bool> {
     if let Text::Inline(text) = text {
-        return text.trim_start().starts_with(wanted);
+        return Ok(text.trim_start().starts_with(wanted));
     }
-    if let Text::Source(source) = text {
-        let mut head = String::new();
-        let mut started = false;
-        let _ = source.try_for_each_chunk(CHUNK, |mut part| {
-            if !started {
-                part = part.trim_start();
-                started = !part.is_empty();
+    if let Text::Span(span) = text {
+        let prefix = text.try_resolve_prefix(resolver, 256)?;
+        if span.len <= 256 {
+            return Ok(prefix.trim_start().starts_with(wanted));
+        }
+        let decoded = prefix_decision(&prefix, wanted, span.escaped);
+        // Malformed escaped bodies fall back to their entire raw text. An early answer must
+        // agree with both interpretations, even if malformed data occurs beyond this prefix.
+        let raw = crate::lazy::Span {
+            escaped: false,
+            ..span.clone()
+        };
+        let raw_prefix = resolver.try_resolve_prefix(&raw, 256)?;
+        if let Some(answer) = decoded {
+            if prefix_decision(&raw_prefix, wanted, false) == Some(answer) {
+                return Ok(answer);
             }
-            for ch in part
-                .chars()
-                .take(wanted.chars().count().saturating_sub(head.chars().count()))
-            {
-                head.push(ch);
-            }
-            Ok(())
-        });
-        return head.starts_with(wanted);
-    }
-    let span = text.as_span().unwrap();
-    let prefix = text.resolve_prefix(resolver, 256);
-    if span.len <= 256 {
-        return prefix.trim_start().starts_with(wanted);
-    }
-    let decoded = prefix_decision(&prefix, wanted, span.escaped);
-    // Full resolution of a malformed escaped body falls back to its *entire raw text*. A valid
-    // head alone cannot prove that decoding succeeds later. Early answers must agree with both
-    // interpretations; otherwise the bounded decoder validates and selects the whole-body mode.
-    let raw = crate::lazy::Span {
-        escaped: false,
-        ..span.clone()
-    };
-    let raw_prefix = resolver.resolve_prefix(&raw, 256);
-    if let Some(answer) = decoded {
-        if prefix_decision(&raw_prefix, wanted, false) == Some(answer) {
-            return answer;
         }
     }
     let mut head = String::with_capacity(wanted.len());
     let mut remaining = wanted.chars().count();
     let mut started = false;
-    chunks(text, resolver, |mut chunk| {
+    until(text, resolver, |mut chunk| {
         if remaining == 0 {
-            return;
+            return true;
         }
         if !started {
             chunk = chunk.trim_start();
@@ -307,8 +297,9 @@ pub(super) fn starts_with(text: &Text, resolver: &Resolver, wanted: &str) -> boo
             head.push(ch);
             remaining -= 1;
         }
-    });
-    head.starts_with(wanted)
+        remaining == 0
+    })?;
+    Ok(head.starts_with(wanted))
 }
 
 fn prefix_decision(prefix: &str, wanted: &str, escaped: bool) -> Option<bool> {
@@ -329,45 +320,93 @@ fn prefix_decision(prefix: &str, wanted: &str, escaped: bool) -> Option<bool> {
     }
 }
 
-pub(super) fn contains(text: &Text, resolver: &Resolver, needle: &'static str) -> bool {
+pub(super) fn contains(text: &Text, resolver: &Resolver, needle: &'static str) -> Result<bool> {
     if let Text::Inline(text) = text {
-        return text.contains(needle);
+        return Ok(text.contains(needle));
     }
     let mut search = Contains::new(needle);
-    chunks(text, resolver, |chunk| search.push(chunk));
-    search.found
+    until(text, resolver, |chunk| {
+        search.push(chunk);
+        search.found
+    })?;
+    Ok(search.found)
 }
 
-pub(super) fn denied(text: &Text, resolver: &Resolver, harness: Harness) -> bool {
-    match harness {
+pub(super) fn denied(text: &Text, resolver: &Resolver, harness: Harness) -> Result<bool> {
+    Ok(match harness {
         Harness::Claude => {
-            (starts_with(text, resolver, "Permission to use ") && contains(text, resolver, " denied"))
-                || starts_with(text, resolver, "The user doesn't want to proceed with this tool use")
+            (starts_with(text, resolver, "Permission to use ")? && contains(text, resolver, " denied")?)
+                || starts_with(text, resolver, "The user doesn't want to proceed with this tool use")?
         }
         Harness::OpenCode => {
             starts_with(
                 text,
                 resolver,
                 "The user has specified a rule which prevents you from using this specific tool call",
-            ) || starts_with(
+            )? || starts_with(
                 text,
                 resolver,
                 "The user rejected permission to use this specific tool call",
-            )
+            )?
         }
         _ => false,
-    }
+    })
 }
 
-pub(super) fn plain_summary(text: &Text, resolver: &Resolver) -> String {
+pub(super) fn plain_summary(text: &Text, resolver: &Resolver) -> Result<String> {
     let mut summary = Trimmed::default();
-    chunks(text, resolver, |chunk| summary.push(chunk));
-    summary.summary()
+    chunks(text, resolver, |chunk| summary.push(chunk))?;
+    Ok(summary.summary())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_source_reductions_match_inline_and_fail_after_early_stop_mutation() {
+        let world = cv_testkit::World::in_process("affordance-source-reductions");
+        let path = world.base.join("source.json");
+        let body = format!(
+            "{}Permission to use Bash {} denied<summary>α🌙\nsummary</summary>",
+            "\u{2003}".repeat(30000),
+            "x".repeat(CHUNK - 4)
+        );
+        let wire = serde_json::to_vec(&body).unwrap();
+        std::fs::write(&path, &wire).unwrap();
+        let source = crate::Json::source(&path, 0, wire.len() as u64)
+            .unwrap()
+            .with_view(|view| view.source_text())
+            .unwrap()
+            .unwrap();
+        let inline = Text::Inline(body.clone());
+        let resolver = Resolver::new(None);
+        assert_eq!(facts(&source, &resolver).unwrap().summary(), original_summary(&body));
+        assert_eq!(
+            plain_summary(&source, &resolver).unwrap(),
+            plain_summary(&inline, &resolver).unwrap()
+        );
+        assert!(starts_with(&source, &resolver, "Permission to use ").unwrap());
+        assert!(contains(&source, &resolver, " denied").unwrap());
+        assert!(denied(&source, &resolver, Harness::Claude).unwrap());
+        let mut visits = 0;
+        until(&source, &resolver, |_| {
+            visits += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(visits, 1);
+        let error = until(&source, &resolver, |_| {
+            std::fs::write(&path, "mutated").unwrap();
+            true
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("changed"), "{error:#}");
+        assert!(facts(&source, &resolver).is_err());
+        assert!(starts_with(&source, &resolver, "absent").is_err());
+        assert!(contains(&source, &resolver, " denied").is_err());
+        assert!(denied(&source, &resolver, Harness::Claude).is_err());
+    }
 
     fn original_summary(text: &str) -> String {
         let inner = |tag: &str| {
@@ -489,11 +528,11 @@ mod tests {
                     len: raw.len() as u64 - 2 * u64::from(escaped),
                     escaped,
                 });
-                let reduced = facts(&span, &resolver);
+                let reduced = facts(&span, &resolver).unwrap();
                 assert_eq!(reduced.summary(), original_summary(body));
                 assert_eq!(reduced.plain_summary(), crate::ir::truncate(body.trim(), 120));
                 assert_eq!(reduced.requires_approval(), body.contains("requires approval"));
-                let full = facts(&Text::Inline(body.clone()), &resolver);
+                let full = facts(&Text::Inline(body.clone()), &resolver).unwrap();
                 assert_eq!(reduced.denied(Harness::Claude), full.denied(Harness::Claude));
                 assert_eq!(
                     reduced.starts_with("<task-notification>"),
@@ -530,11 +569,14 @@ mod tests {
             let full = span.resolve(&resolver);
             let inline = Text::Inline(full.to_string());
             assert_eq!(
-                starts_with(&span, &resolver, "<task-notification>"),
+                starts_with(&span, &resolver, "<task-notification>").unwrap(),
                 full.trim_start().starts_with("<task-notification>")
             );
             for harness in [Harness::Claude, Harness::OpenCode] {
-                assert_eq!(denied(&span, &resolver, harness), denied(&inline, &resolver, harness));
+                assert_eq!(
+                    denied(&span, &resolver, harness).unwrap(),
+                    denied(&inline, &resolver, harness).unwrap()
+                );
             }
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -560,7 +602,7 @@ mod tests {
             });
             assert!(span.resolve_prefix(&resolver, 256).trim().is_empty());
             assert_eq!(
-                starts_with(&span, &resolver, "<task-notification>"),
+                starts_with(&span, &resolver, "<task-notification>").unwrap(),
                 full.trim_start().starts_with("<task-notification>")
             );
         }

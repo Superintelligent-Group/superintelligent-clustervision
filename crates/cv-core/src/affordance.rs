@@ -869,7 +869,11 @@ fn call_summary(kind: Kind, view: JsonView<'_>, items: &[Item]) -> Result<String
 }
 
 /// Record-shaped affordances: messages the harness wrote that no `MessageKind` names.
-fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(Kind, &'static str, &'static str)> {
+fn record(
+    h: Harness,
+    m: &Message,
+    resolver: &crate::lazy::Resolver,
+) -> Result<Option<(Kind, &'static str, &'static str)>> {
     use Harness as H;
     let bag = m.harness_extra(h);
     let bag_str = |k: &str| bag.and_then(|b| b.get(k)).and_then(Value::as_str);
@@ -877,19 +881,24 @@ fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(
         Some(Block::Text { text }) => Some(text),
         _ => None,
     };
-    let starts_with = |prefix| head.is_some_and(|head| text::starts_with(head, resolver, prefix));
-    match h {
-        H::Claude if m.kind == MessageKind::InjectedContext && starts_with("<task-notification>") => {
+    let starts_with = |prefix| -> Result<bool> {
+        Ok(head
+            .map(|head| text::starts_with(head, resolver, prefix))
+            .transpose()?
+            .unwrap_or(false))
+    };
+    Ok(match h {
+        H::Claude if m.kind == MessageKind::InjectedContext && starts_with("<task-notification>")? => {
             Some((Kind::BackgroundJob, "complete", "task-notification"))
         }
-        H::Kimi if starts_with("<notification") => Some((Kind::BackgroundJob, "complete", "notification")),
-        H::KimiCode => match bag_str("origin_kind")? {
+        H::Kimi if starts_with("<notification")? => Some((Kind::BackgroundJob, "complete", "notification")),
+        H::KimiCode => match bag_str("origin_kind").unwrap_or("") {
             "task" | "background_task" => Some((Kind::BackgroundJob, "complete", "task")),
             "skill_activation" => Some((Kind::Skill, "load", "skill_activation")),
             "hook_result" => Some((Kind::Hook, "output", "hook_result")),
             _ => None,
         },
-        H::Hermes => match bag_str("display_kind")? {
+        H::Hermes => match bag_str("display_kind").unwrap_or("") {
             "process_complete" => Some((Kind::BackgroundJob, "complete", "process_complete")),
             "skill_invocation" => Some((Kind::Skill, "load", "skill_invocation")),
             _ => None,
@@ -897,7 +906,10 @@ fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(
         // An MCP call Codex refused because the approval policy could not ask (`never`).
         H::Codex
             if bag_str("item_type") == Some("McpToolCall")
-                && head.is_some_and(|head| text::contains(head, resolver, "requires approval")) =>
+                && head
+                    .map(|head| text::contains(head, resolver, "requires approval"))
+                    .transpose()?
+                    .unwrap_or(false) =>
         {
             Some((Kind::Approval, "deny", "McpToolCall"))
         }
@@ -911,12 +923,12 @@ fn record(h: Harness, m: &Message, resolver: &crate::lazy::Resolver) -> Option<(
             Some((Kind::BackgroundJob, "complete", "synthetic"))
         }
         _ => None,
-    }
+    })
 }
 
 /// A message's one-line summary from its complete first text or tool output. The reducer searches
 /// for the first complete summary/reminder wrapper and keeps only enough text for the final row.
-fn text_head(m: &Message, resolver: &crate::lazy::Resolver) -> String {
+fn text_head(m: &Message, resolver: &crate::lazy::Resolver) -> Result<String> {
     m.content
         .iter()
         .find_map(|b| match b {
@@ -924,8 +936,9 @@ fn text_head(m: &Message, resolver: &crate::lazy::Resolver) -> String {
             Block::ToolResult { content, .. } => Some(content),
             _ => None,
         })
-        .map(|body| text::facts(body, resolver).summary())
-        .unwrap_or_default()
+        .map(|body| text::facts(body, resolver).map(|facts| facts.summary()))
+        .transpose()
+        .map(|head| head.unwrap_or_default())
 }
 
 /// What one message contributes: a tool call the table names, or the message itself (a kind, a
@@ -976,7 +989,7 @@ fn detail_hits<'a>(
     resolver: &crate::lazy::Resolver,
     summaries: bool,
     out: &mut Vec<Hit<'a>>,
-) {
+) -> Result<()> {
     for b in &m.content {
         let Block::ToolResult {
             tool_use_id,
@@ -989,14 +1002,14 @@ fn detail_hits<'a>(
         else {
             continue;
         };
-        if *is_error && text::denied(content, resolver, h) {
+        if *is_error && text::denied(content, resolver, h)? {
             out.push(Hit::Detail {
                 kind: Kind::Approval,
                 action: "deny",
                 tool: tool_name.as_deref(),
                 tool_use_id: Some(tool_use_id),
                 summary: if summaries {
-                    text::plain_summary(content, resolver)
+                    text::plain_summary(content, resolver)?
                 } else {
                     String::new()
                 },
@@ -1017,10 +1030,10 @@ fn detail_hits<'a>(
         }
     }
     if h != Harness::OpenCode {
-        return;
+        return Ok(());
     }
     let Some(bag) = m.harness_extra(h) else {
-        return;
+        return Ok(());
     };
     for p in bag.get("patches").and_then(Value::as_array).into_iter().flatten() {
         let hash = p.get("hash").and_then(Value::as_str).unwrap_or("");
@@ -1042,6 +1055,7 @@ fn detail_hits<'a>(
             summary: crate::ir::truncate(&format!("{} · {}", short(hash), joined(snap.get("files"))), 120),
         });
     }
+    Ok(())
 }
 
 fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summaries: bool) -> Result<Vec<Hit<'a>>> {
@@ -1079,7 +1093,7 @@ fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summar
     };
     let message = match by_kind {
         Some((kind, action)) => Some((kind, action, None)),
-        None => record(h, m, resolver)
+        None => record(h, m, resolver)?
             .map(|(kind, action, tool)| (kind, action, Some(tool)))
             .or(match m.origin {
                 Origin::Hook => Some((Kind::Hook, "output", None)),
@@ -1090,7 +1104,7 @@ fn hits<'a>(h: Harness, m: &'a Message, resolver: &crate::lazy::Resolver, summar
     if let Some((kind, action, tool)) = message {
         out.push(Hit::Message { kind, action, tool });
     }
-    detail_hits(h, m, resolver, summaries, &mut out);
+    detail_hits(h, m, resolver, summaries, &mut out)?;
     Ok(out)
 }
 
@@ -1248,7 +1262,7 @@ fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy:
                 tool_use_id: None,
                 summary: match (kind, &m.model) {
                     (Kind::ModelChange, Some(model)) => model.clone(),
-                    _ => text_head(m, resolver),
+                    _ => text_head(m, resolver)?,
                 },
                 items: Vec::new(),
                 source: Source::Message,
@@ -1480,6 +1494,107 @@ mod tests {
         assert!(actual.iter().any(|a| a.summary == "late closing tag"));
         assert!(actual.iter().any(|a| a.kind == Kind::Checkpoint));
         std::fs::remove_file(text_path).unwrap();
+    }
+
+    #[test]
+    fn source_text_rows_and_counts_propagate_demands_atomically() {
+        struct Fixture(Message);
+        impl crate::harness::Adapter for Fixture {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<crate::SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &crate::SessionRef,
+                _: &crate::ParseOptions,
+                sink: &mut dyn crate::MessageSink,
+            ) -> Result<Session> {
+                sink.try_message(self.0.clone())?;
+                Ok(Session::new(&r.id, r.harness))
+            }
+        }
+        let world = cv_testkit::World::in_process("affordance-source-text-rows");
+        let path = world.base.join("original");
+        for case in 0..3 {
+            std::fs::write(&path, "snapshot provenance").unwrap();
+            let body = match case {
+                0 => format!(
+                    "{}<task-notification><summary>finished🌙</summary></task-notification>",
+                    "\u{2003}".repeat(30000)
+                ),
+                1 => format!(
+                    "{}Permission to use Bash {} denied",
+                    "\n".repeat(70000),
+                    "x".repeat(70000)
+                ),
+                _ => format!("{}<summary>returned🌙</summary>", "x".repeat(70000)),
+            };
+            let capture = crate::json::JsonSource::capture(&path).unwrap();
+            let backing = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+            let wire = serde_json::to_vec(&body).unwrap();
+            let (offset, len) = backing
+                .append(|out| {
+                    out.write_all(&wire)?;
+                    Ok(())
+                })
+                .unwrap();
+            let text = capture
+                .read_backing_value(backing, offset, len, |view| view.source_text())
+                .unwrap()
+                .unwrap();
+            let make = |text| {
+                let mut message = Message::new(Role::Assistant);
+                match case {
+                    0 => {
+                        message.kind = MessageKind::InjectedContext;
+                        message.content.push(Block::Text { text });
+                    }
+                    1 => message.content.push(Block::ToolResult {
+                        tool_use_id: "call".into(),
+                        tool_name: None,
+                        content: text,
+                        is_error: true,
+                        status: None,
+                        details: None,
+                    }),
+                    _ => {
+                        message.kind = MessageKind::SubagentReturn;
+                        message.content.push(Block::Text { text });
+                    }
+                }
+                message
+            };
+            let lazy_message = make(text);
+            let mut lazy = Session::new("source-text", Harness::Claude);
+            lazy.messages.push(lazy_message.clone());
+            let mut owned = Session::new("source-text", Harness::Claude);
+            owned.messages.push(make(body.into()));
+            assert_eq!(
+                serde_json::to_value(of_session(&lazy).unwrap()).unwrap(),
+                serde_json::to_value(of_session(&owned).unwrap()).unwrap()
+            );
+            let reference = crate::SessionRef::new("source-text", Harness::Claude, &path);
+            let mut counter = Counter::new(&reference);
+            counter.note(&lazy_message).unwrap();
+            let previous = counter.counts().clone();
+            assert_eq!(previous.values().sum::<u32>(), 1);
+            std::fs::write(&path, "changed snapshot").unwrap();
+            assert!(of_session(&lazy).is_err());
+            assert!(read(&Fixture(lazy_message.clone()), &reference).is_err());
+            if case < 2 {
+                assert!(counter.note(&lazy_message).is_err());
+                assert_eq!(counter.counts(), &previous);
+            } else {
+                // Counted kind comes from metadata; summaries alone demand this text.
+                counter.note(&lazy_message).unwrap();
+            }
+        }
     }
 
     #[test]
