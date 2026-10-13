@@ -3722,3 +3722,25 @@ can remain if initialization or final empty-directory cleanup itself is interrup
 copied payload is created before owner publication, and its marker survives payload cleanup.
 The controls measure logical named extents, not RSS, APFS physical blocks or universal disk
 bounds. Other required output stages retain their existing lifetime contracts.
+
+### Malformed prune passthrough (Sol, 2026-10-13)
+
+`prune_session` previously resolved an entire large rejected JSON row in its `InvalidJson`
+fallback and resolved it again when writing a `None` decision. Strict Value-compatible
+`JsonSource::read_range_value` already decides complete JSON acceptance. Its rejected-row
+branch now uses the existing bounded `ranges::valid_utf8` check and retains no body; invalid
+UTF-8 still fails with the same `InvalidData` error before destination publication. Passthrough
+copies the captured range directly into the existing stage; revival's existing `MarkerWriter`
+recognizes markers across copy boundaries. Captured identity checks still precede publication.
+Global `trim_end`, CRLF, untouched malformed bytes and one LF per retained row stay unchanged.
+
+Actual native malformed+revive controls at 8/32 MiB peak at 1,314,481/1,314,486 requested live
+Rust bytes, versus 8,588,784/33,754,613 in the preserved owned consumer. Allocation requests
+are 331 versus 328; cumulative requests become a flat 4.825 MB rather than 19.570/69.902 MB.
+The remaining ~1.31 MB is existing revival-stage backing, not malformed-row ownership.
+Frozen source/transcript hashes, all non-path result/revival fields and the fatal invalid-UTF-8
+message match; see `PRUNE-MALFORMED-EVIDENCE.json`. Native 53 scoped prune tests and two focused
+portable controls cover independent owned framing/acceptance, nonfinite numbers, rejected
+surrogates/depth, valid records, split markers, Unicode trailing trim, source preservation and
+leaving a pre-existing destination intact on UTF-8 failure. This is ownership evidence, not a
+latency claim; no parser/staging framework, publication policy or changed-payload path changed.

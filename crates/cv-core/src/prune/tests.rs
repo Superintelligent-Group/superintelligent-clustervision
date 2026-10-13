@@ -2244,3 +2244,102 @@ fn sigma_context_batches_long_ordinary_runs_without_changing_matches() {
         }
     }
 }
+
+#[test]
+fn malformed_large_rows_preserve_owned_passthrough_and_fatal_utf8() -> Result<()> {
+    let dir = tmpdir();
+    let source = dir.join("source.jsonl");
+    let prefix = " malformed sessionId=old ";
+    let malformed = format!(
+        "{prefix}{}[PRUNED id=ignored] {}🙂  \r",
+        "x".repeat(65535 - prefix.len() - 5),
+        "x".repeat(2 << 20)
+    );
+    let valid = r#" {"sessionId":"old","type":"user","uuid":"u","message":{"content":"kept"}} "#;
+    let text = format!("{malformed}\n{valid}\r\n\u{2003} \r\n");
+    std::fs::write(&source, &text)?;
+    // Frozen legacy acceptance/framing: global trim_end, per-line serde Value acceptance,
+    // invalid JSON passthrough, id surgery only on valid rows, one LF per retained record.
+    let expected: String = text
+        .trim_end()
+        .split('\n')
+        .map(|line| {
+            let line = if serde_json::from_str::<Value>(line).is_ok() {
+                crate::restamp_line(line, "new").unwrap()
+            } else {
+                line.to_owned()
+            };
+            line + "\n"
+        })
+        .collect();
+    for revive in [false, true] {
+        let result = prune_session(
+            &source,
+            &PruneOptions {
+                new_id: Some("new".into()),
+                revive,
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(std::fs::read_to_string(&result.new_path)?, expected);
+        assert_eq!(result.source_id, "old");
+        assert_eq!(result.pruned_count, 0);
+        assert!(result.sidecar_path.is_none());
+        assert_eq!(std::fs::read_to_string(&source)?, text);
+    }
+    let previous = std::fs::read(dir.join("new.jsonl"))?;
+    let mut invalid = text.into_bytes();
+    invalid[1 << 20] = 0xff;
+    std::fs::write(&source, invalid)?;
+    let error = prune_session(
+        &source,
+        &PruneOptions {
+            new_id: Some("new".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(error.to_string(), "stream did not contain valid UTF-8");
+    assert_eq!(std::fs::read(dir.join("new.jsonl"))?, previous);
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn rejected_large_json_keeps_strict_owned_value_acceptance() -> Result<()> {
+    let dir = tmpdir();
+    let path = dir.join("source.jsonl");
+    let padding = " ".repeat(LARGE_RECORD as usize);
+    for raw in [
+        "{bad}".to_owned(),
+        "1e400".to_owned(),
+        r#"{"sessionId":"old","ignored":1e400}"#.to_owned(),
+        r#""\ud800""#.to_owned(),
+        r#"{"sessionId":"old","ignored":"\ud800"}"#.to_owned(),
+        format!("{}0{}", "[".repeat(130), "]".repeat(130)),
+        r#"{"sessionId":"old","type":"user","message":{"content":"kept"}}"#.to_owned(),
+    ] {
+        let row = format!("{padding}{raw}\n");
+        std::fs::write(&path, &row)?;
+        let accepted = serde_json::from_str::<Value>(&row).is_ok();
+        let result = prune_session(
+            &path,
+            &PruneOptions {
+                new_id: Some("new".into()),
+                ..Default::default()
+            },
+        )?;
+        let expected = if accepted {
+            crate::restamp_line(row.trim_end(), "new").unwrap() + "\n"
+        } else {
+            row.clone()
+        };
+        assert_eq!(std::fs::read_to_string(result.new_path)?, expected);
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prune streams malformed JSON rows without owning their bodies, preserving exact bytes and fatal invalid UTF-8 behavior.
+
 - MCP releases oversized request buffers between frames instead of retaining the largest request for the server lifetime.
 - Cold SQLite snapshots reclaim abandoned copies on later reads and after MCP child cancellation, preserving live readers and producer stores.
 

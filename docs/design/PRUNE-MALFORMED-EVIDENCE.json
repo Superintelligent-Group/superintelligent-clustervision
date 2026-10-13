@@ -1,0 +1,60 @@
+{
+  "operation": "actual native prune_probe with revive on two valid turns following a giant malformed row",
+  "integration_base": "56e94da5",
+  "baseline": "preserved optimized probe from 60ca75bb; malformed planning/output consumers unchanged at integration base",
+  "metric": "requested live Rust heap, not RSS or timing",
+  "fixture": "malformed prefix, x payload, marker crossing a framing boundary, Unicode suffix and CRLF; small valid user plus assistant usage1000; invalid UTF-8 control overwrites byte at 1 MiB with0xff",
+  "cases": [
+    {
+      "payload_mib": 8,
+      "source_bytes": 8388846,
+      "source_sha256": "f50af5fdf84d64270d65e230466a3c21a5f1898ddae95d3b9722086ed6664053",
+      "transcript_sha256": "07c9c1e8655c4dcf3d4d471d1c310892b8fdd0f80d7d9d5a233b57292954ca80",
+      "sidecar_sha256": null,
+      "baseline_heap": {
+        "baseline_live_bytes": 929,
+        "peak_live_bytes": 8589713,
+        "peak_above_baseline_bytes": 8588784,
+        "stage_end_live_bytes": 1136,
+        "allocation_requests": 328,
+        "requested_bytes": 19570295
+      },
+      "candidate_heap": {
+        "baseline_live_bytes": 929,
+        "peak_live_bytes": 1315410,
+        "peak_above_baseline_bytes": 1314481,
+        "stage_end_live_bytes": 1136,
+        "allocation_requests": 331,
+        "requested_bytes": 4824633
+      },
+      "invalid_utf8_error": "Error: stream did not contain valid UTF-8"
+    },
+    {
+      "payload_mib": 32,
+      "source_bytes": 33554670,
+      "source_sha256": "b87907aa7b7adf6a1976f26ba4e23efee7d3afe5abe859e2edea1b23664fed1d",
+      "transcript_sha256": "29ab8bd2e5dcbf95b98dc8367d7e4ca69397a6d7632515dc5def44c18005c4ae",
+      "sidecar_sha256": null,
+      "baseline_heap": {
+        "baseline_live_bytes": 930,
+        "peak_live_bytes": 33755543,
+        "peak_above_baseline_bytes": 33754613,
+        "stage_end_live_bytes": 1139,
+        "allocation_requests": 328,
+        "requested_bytes": 69901954
+      },
+      "candidate_heap": {
+        "baseline_live_bytes": 930,
+        "peak_live_bytes": 1315416,
+        "peak_above_baseline_bytes": 1314486,
+        "stage_end_live_bytes": 1139,
+        "allocation_requests": 331,
+        "requested_bytes": 4824644
+      },
+      "invalid_utf8_error": "Error: stream did not contain valid UTF-8"
+    }
+  ],
+  "parity": "exact source/transcript hashes, all non-path prune/result/revival fields and error message; sidecar absent; usage_rewritten1 and honest_tokens4",
+  "scope": "Malformed records no longer demand owned line text; small valid records and other genuinely changed payload fallbacks remain unchanged. Initial UTF-8 scan and source identity guards remain, and revival keeps its existing staged backing.",
+  "tests": "53 scoped native prune tests; two focused portable controls; strict nonfinite/surrogate/depth/valid-row owned acceptance, raw framing, source preservation and prior-destination preservation on fatal invalid UTF-8"
+}

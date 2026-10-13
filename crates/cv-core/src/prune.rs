@@ -452,12 +452,16 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }) {
                 Ok(facts) => Some(facts),
                 Err(e) if e.is::<crate::json::InvalidJson>() => {
-                    // Preserve malformed-row passthrough and the historical fatal UTF-8 policy.
-                    let line = read_line(&file, range)?;
-                    serde_json::from_str::<Value>(&line)
-                        .ok()
-                        .as_ref()
-                        .map(|v| decision_facts(v, opts.window.is_some()))
+                    // Value-compatible validation already rejected this row. Malformed JSON
+                    // passes through, but invalid UTF-8 remains fatal even in ignored fields.
+                    if !ranges::valid_utf8(&mut ranges::reader(&file, range)?)? {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "stream did not contain valid UTF-8",
+                        )
+                        .into());
+                    }
+                    None
                 }
                 Err(e) => return Err(e),
             }
@@ -561,12 +565,17 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
 
     for (idx, (facts, range)) in parsed.into_iter().zip(lines.iter()).enumerate() {
         let Some(facts) = facts else {
-            let line = read_line(&file, *range)?;
-            writeln!(output, "{line}")?;
+            // Keep malformed/blank records byte-identical without owning their bodies.
+            // Planning validated UTF-8; captured source guards cover this staged copy too.
             if opts.revive {
+                let mut scan = MarkerWriter::new(&mut output);
+                std::io::copy(&mut ranges::reader(&file, *range)?, &mut scan)?;
                 output_facts.push(None);
-                output_pruned.push(line.contains(MARKER_PREFIX));
+                output_pruned.push(scan.found);
+            } else {
+                std::io::copy(&mut ranges::reader(&file, *range)?, &mut output)?;
             }
+            output.write_all(b"\n")?;
             continue;
         };
         let ty = facts.get("type").and_then(Value::as_str).unwrap_or("");
