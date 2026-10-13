@@ -1013,11 +1013,10 @@ impl<'a> Ctx<'a> {
                 let (content, path) = match output {
                     Some(output) if output.is_string()? => (output.source_text()?.unwrap(), output_path_view(output)?),
                     Some(output) if output.array()?.is_some() => {
-                        // Flattened parts need owned bytes. One append arena per wire capture
+                        // Flattened parts share checked encoded backing. One arena per wire capture
                         // keeps deferred descriptor registries bounded in file handles.
                         let backing = source.decoded_backing()?;
-                        let (offset, len) = backing.append(|writer| {
-                            writer.write_all(b"\"")?;
+                        let content = super::store::text::append(source, &backing, |writer| {
                             let mut first = true;
                             for part in output.array()?.unwrap() {
                                 let part = part?;
@@ -1033,25 +1032,23 @@ impl<'a> Ctx<'a> {
                                     continue;
                                 }
                                 if !first {
-                                    writer.write_all(b"\\n")?;
+                                    writer.push("\n")?;
                                 }
                                 first = false;
                                 if image {
-                                    writer.write_all(b"[image]")?;
+                                    writer.push("[image]")?;
                                 } else {
-                                    text.unwrap().for_each_str_chunk(|chunk| {
-                                        let encoded = serde_json::to_vec(chunk)?;
-                                        writer.write_all(&encoded[1..encoded.len() - 1])?;
-                                        Ok(())
-                                    })?;
+                                    writer.push_string(text.unwrap())?;
                                 }
                             }
-                            writer.write_all(b"\"")?;
                             Ok(())
                         })?;
-                        source.read_backing_syntax(backing, offset, len, |text| {
-                            Ok((text.source_text()?.unwrap(), output_path_view(text)?))
-                        })?
+                        let path = match &content {
+                            Text::Inline(text) => output_path(text),
+                            Text::Source(text) => text.range.with_view(output_path_view)?,
+                            Text::Span(_) => unreachable!("generated text has no external span"),
+                        };
+                        (content, path)
                     }
                     _ => (Text::default(), None),
                 };
@@ -1888,6 +1885,39 @@ mod tests {
         let mut lazy = crate::stream::collect_with(&adapter, &r, &ParseOptions::lazy()).unwrap();
         fs::write(adapter.resume_source(&r), "{}\n").unwrap();
         assert!(lazy.materialize().is_err());
+    }
+
+    #[test]
+    fn giant_two_part_results_match_owned_dispatch() {
+        let world = cv_testkit::World::in_process("kimi_code_giant_composite");
+        let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
+        for bytes in [2 * 1024 * 1024, 8 * 1024 * 1024] {
+            for escaped in [false, true] {
+                let unit = if escaped { "雪\n\"\\" } else { "x" };
+                let body = unit.repeat(bytes / unit.len());
+                let records = [
+                    serde_json::json!({"type":"metadata","protocol_version":"2"}),
+                    serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.result","stepUuid":"s","toolCallId":"c","result":{"output":[{"type":"text","text":body},{"text":format!("{body}\noutput_path: /scratch/final.log")}]}}}),
+                    serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.end","uuid":"s"}}),
+                ];
+                let wire = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+                let session = resume_fixture(&world, wire.as_bytes());
+                let expected = old_wire_oracle(&session, &ParseOptions::lazy());
+                let mut actual = crate::stream::collect_with(&adapter, &session, &ParseOptions::lazy()).unwrap();
+                assert!(actual.messages.iter().flat_map(|m| &m.content).any(|block| matches!(
+                    block,
+                    Block::ToolResult {
+                        content: Text::Source(_),
+                        ..
+                    }
+                )));
+                actual.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+        }
     }
 
     #[test]
