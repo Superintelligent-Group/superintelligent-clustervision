@@ -123,6 +123,11 @@ pub struct Distilled {
 }
 
 impl Distilled {
+    /// The accepted source label shared by the pack and resume description.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
     /// The standalone markdown context pack: a fresh agent's first message (candidate c).
     pub fn pack(&self) -> String {
         let mut s = self.head_md.clone();
@@ -169,6 +174,7 @@ impl PreparedDistillation {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Demand {
     Full,
+    Pack,
     Findings,
 }
 
@@ -397,6 +403,7 @@ fn block_est(b: &Block) -> anyhow::Result<u64> {
     est_tokens(b, BYTES_PER_TOKEN)
 }
 
+#[cfg(test)]
 fn message_est(m: &Message) -> anyhow::Result<u64> {
     #[cfg(test)]
     note_work(|work| work.source_estimates += 1);
@@ -406,6 +413,95 @@ fn message_est(m: &Message) -> anyhow::Result<u64> {
     m.content
         .iter()
         .try_fold(0u64, |sum, block| Ok(sum + block_est(block)?))
+}
+
+// Count decoded model-visible bodies without retaining them for the analysis lifetime.
+fn message_est_resolved(m: &Message, resolver: &crate::Resolver) -> anyhow::Result<u64> {
+    #[cfg(test)]
+    note_work(|work| work.source_estimates += 1);
+    if !m.is_model_visible() {
+        return Ok(0);
+    }
+    m.content.iter().try_fold(0u64, |sum, block| {
+        // Public callers can still supply legacy, best-effort spans. Preserve their old
+        // materialize fallback independently of the checked Source carrier contract.
+        let legacy_span = match block {
+            Block::Text { text } | Block::Thinking { text, .. } => matches!(text, crate::Text::Span(_)),
+            Block::ToolResult { content, .. } => matches!(content, crate::Text::Span(_)),
+            _ => false,
+        };
+        let tokens = if legacy_span {
+            let mut owned = Message::new(m.role);
+            owned.content.push(block.clone());
+            owned.materialize(resolver)?;
+            block_est(&owned.content[0])?
+        } else {
+            crate::ir::est_tokens_resolved(block, BYTES_PER_TOKEN, resolver)?
+        };
+        Ok(sum + tokens)
+    })
+}
+
+/// Facts and labels demand just these Write fields; code content contributes its decoded
+/// length. Notes, tail turns and sidecars still demand their complete original values.
+struct ToolInput<'a> {
+    fields: std::borrow::Cow<'a, Value>,
+    write_bytes: Option<usize>,
+}
+impl<'a> ToolInput<'a> {
+    fn new(name: &str, input: &'a crate::Json, notes: bool, label: bool) -> anyhow::Result<Self> {
+        if name != "Write" || matches!(input, crate::Json::Owned(_)) {
+            return Ok(Self {
+                fields: input.resolve()?,
+                write_bytes: None,
+            });
+        }
+        input.with_view(|view| {
+            let mut fields = serde_json::Map::new();
+            for key in ["file_path", "path", "notebook_path", "command"] {
+                if let Some(value) = view.get(key)? {
+                    if value.is_string()? {
+                        fields.insert(key.to_owned(), value.resolve()?.into_owned());
+                    }
+                }
+            }
+            let note = notes
+                && fields
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_note_path);
+            let mut bytes = 0;
+            if let Some(content) = view.get("content")? {
+                if note && content.is_string()? {
+                    let content = content.resolve()?.into_owned();
+                    bytes = content.as_str().map_or(0, str::len);
+                    fields.insert("content".into(), content);
+                } else if label {
+                    content.for_each_str_chunk(|chunk| {
+                        bytes += chunk.len();
+                        Ok(())
+                    })?;
+                }
+            }
+            Ok(Self {
+                fields: std::borrow::Cow::Owned(Value::Object(fields)),
+                write_bytes: Some(bytes),
+            })
+        })
+    }
+    fn label(&self, name: &str) -> String {
+        match self.write_bytes {
+            Some(bytes) => truncate(
+                format!(
+                    "Write {} ({bytes} bytes)",
+                    self.fields.get("file_path").and_then(Value::as_str).unwrap_or("")
+                )
+                .trim(),
+                140,
+            ),
+            None => tool_label(name, &self.fields),
+        }
+    }
 }
 
 /// A short label for one tool call, for the ledger and the facts lists.
@@ -484,10 +580,18 @@ fn note_paths(p: &str) -> bool {
         && !p.starts_with("/etc/")
 }
 
-/// Distill `session` (any harness; materialized) into a context pack, a tail cut point and the
-/// elided-output list. Source-backed values are explicitly read before analysis; failures propagate.
+/// Distill `session` (any harness; owned or checked source-backed) into a context pack, a tail cut point and the
+/// elided-output list. Source-backed values are validated before analysis; failures propagate.
+/// Only demanded messages, fields and products become owned.
 pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Distilled> {
     Ok(prepare_distill(session, opts)?.distilled)
+}
+
+/// Prepare only the pack and identical statistics, without retaining the sidecar roster.
+/// `elided` is empty even when `stats.elided_outputs` is nonzero; use [`distill`] or
+/// [`prepare_distill`] when complete sidecar entries or resumable products are needed.
+pub fn distill_pack(session: &Session, opts: &DistillOptions) -> anyhow::Result<Distilled> {
+    Ok(analyze(session, opts, Demand::Pack)?.distilled)
 }
 
 /// Scoped demanded text. Owned blocks borrow directly; lazy fields resolve at most once while
@@ -546,7 +650,7 @@ impl<'a> MessageText<'a> {
     }
 }
 
-fn validate_findings_sources(session: &Session) -> anyhow::Result<()> {
+fn validate_analysis_sources(session: &Session) -> anyhow::Result<()> {
     let resolver = session.resolver();
     for message in &session.messages {
         // Preserve materialize's validation order: text first, then structured arguments.
@@ -573,7 +677,7 @@ fn validate_findings_sources(session: &Session) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn findings_label(session: &Session, resolver: &crate::Resolver) -> anyhow::Result<String> {
+fn analysis_label(session: &Session, resolver: &crate::Resolver) -> anyhow::Result<String> {
     if let Some(description) = session
         .harness_extra(crate::Harness::Claude)
         .and_then(|bag| bag.get("agent_description"))
@@ -593,13 +697,7 @@ fn findings_label(session: &Session, resolver: &crate::Resolver) -> anyhow::Resu
 }
 
 fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::Result<PreparedDistillation> {
-    let session = if demand == Demand::Findings {
-        validate_findings_sources(session)?;
-        std::borrow::Cow::Borrowed(session)
-    } else {
-        crate::emit::materialized_session(session)?
-    };
-    let session = session.as_ref();
+    validate_analysis_sources(session)?;
     let resolver = session.resolver();
     let msgs = &session.messages;
     let retrieve_ref = opts.retrieve_ref.clone().unwrap_or_else(|| session.id.clone());
@@ -628,10 +726,11 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     for m in &msgs[..tail_start] {
         for b in &m.content {
             if let Block::ToolUse { id, name, input, .. } = b {
-                let input = input.resolve()?;
+                let input = ToolInput::new(name, input, false, false)?;
+                let input = &input.fields;
                 let path = match name.as_str() {
                     "Read" => input.get("file_path").and_then(Value::as_str).map(String::from),
-                    _ => command_of(&input).and_then(|c| {
+                    _ => command_of(input).and_then(|c| {
                         let c = c.trim();
                         let simple = c.starts_with("cat ") || c.starts_with("sed -n");
                         let p = c.split_whitespace().last()?.trim_matches(['\'', '"']);
@@ -672,6 +771,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     let mut ledger: Vec<(usize, usize, String, String)> = Vec::new(); // first idx, last idx, label, outcome
     let mut ledger_runs: Vec<usize> = Vec::new(); // repeat count per ledger row
     let mut elided: Vec<Elided> = Vec::new();
+    let mut elided_outputs = 0usize;
 
     for (i, m) in msgs.iter().enumerate() {
         let in_tail = i >= tail_start;
@@ -753,10 +853,11 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                             });
                         }
                         Block::ToolUse { name, input, .. } => {
-                            let input = input.resolve()?;
-                            scan_input_facts(name, &input, &mut facts);
+                            let input = ToolInput::new(name, input, !in_tail, false)?;
+                            let input = &input.fields;
+                            scan_input_facts(name, input, &mut facts);
                             if !in_tail {
-                                if let Some(e) = own_words_from_tool(i, m, name, &input, opts) {
+                                if let Some(e) = own_words_from_tool(i, m, name, input, opts) {
                                     timeline.push(e);
                                 }
                             }
@@ -776,19 +877,16 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                     else {
                         continue;
                     };
-                    let (name, input) = uses
+                    let orphan = crate::Json::from(Value::Null);
+                    let (name, original_input) = uses
                         .get(tool_use_id.as_str())
-                        .map(|c| Ok::<_, anyhow::Error>((c.name.to_string(), c.input.resolve()?)))
-                        .transpose()?
-                        .unwrap_or_else(|| {
-                            (
-                                tool_name.clone().unwrap_or_default(),
-                                std::borrow::Cow::Owned(Value::Null),
-                            )
-                        });
-                    let label = tool_label(&name, &input);
+                        .map(|call| (call.name.to_string(), call.input))
+                        .unwrap_or_else(|| (tool_name.clone().unwrap_or_default(), &orphan));
+                    let summary = ToolInput::new(&name, original_input, false, true)?;
+                    let label = summary.label(&name);
+                    let input = &summary.fields;
                     let out = reader.block(index)?;
-                    let outcome = scan_result_facts(i, &name, &input, &label, out, *is_error, &mut facts);
+                    let outcome = scan_result_facts(i, &name, input, &label, out, *is_error, &mut facts);
                     if let Some(p) = doc_reads.get(tool_use_id.as_str()) {
                         if !in_tail && last_read_of.get(p) == Some(&tool_use_id.as_str()) {
                             timeline.push(Entry {
@@ -817,13 +915,16 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
                         });
                     }
                     let keep_whole = in_tail && out.len() <= opts.tail_result_max;
+                    if !keep_whole && demand != Demand::Findings {
+                        elided_outputs += 1;
+                    }
                     if !keep_whole && demand == Demand::Full {
                         #[cfg(test)]
                         note_work(|work| work.elided_copy_bytes += out.len());
                         elided.push(Elided {
                             tool_use_id: tool_use_id.clone(),
                             tool_name: name.clone(),
-                            input: input.as_ref().clone(),
+                            input: original_input.resolve()?.into_owned(),
                             content: out.to_string(),
                         });
                     }
@@ -863,11 +964,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     }
 
     // ── render the head ──
-    let label = if demand == Demand::Findings {
-        findings_label(session, &resolver)?
-    } else {
-        session_label(session)
-    };
+    let label = analysis_label(session, &resolver)?;
     let mut h = String::new();
     let _ = writeln!(h, "# Distilled context — {label}\n");
     let _ = writeln!(
@@ -938,9 +1035,9 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
     let tail = resumable_tail(msgs, tail_start, opts, &retrieve_ref, &session.resolver())?;
     let tail_md = render_prepared_tail(&tail, tail_start, opts)?;
 
-    let source_est_tokens: u64 = msgs
-        .iter()
-        .try_fold(0u64, |sum, message| Ok::<_, anyhow::Error>(sum + message_est(message)?))?;
+    let source_est_tokens: u64 = msgs.iter().try_fold(0u64, |sum, message| {
+        Ok::<_, anyhow::Error>(sum + message_est_resolved(message, &resolver)?)
+    })?;
     let pack_est_tokens = est(&h);
     let tail_est_tokens: u64 = tail
         .iter()
@@ -966,7 +1063,7 @@ fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::
         timeline_entries: timeline.len(),
         commits: facts.commits.len(),
         errors: facts.errors.len(),
-        elided_outputs: elided.len(),
+        elided_outputs,
     };
     Ok(PreparedDistillation {
         distilled: Distilled {
@@ -1390,6 +1487,7 @@ fn render_prepared_tail(tail: &[Message], tail_start: usize, opts: &DistillOptio
     Ok(s)
 }
 
+#[cfg(test)]
 fn session_label(s: &Session) -> String {
     let desc = s
         .extra
@@ -1777,6 +1875,228 @@ facts text",
         assert_eq!(new_work.tail_preparations, 0);
         assert_eq!(new_work.elided_copy_bytes, 0);
         assert_eq!(new_work.source_estimates, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn full_and_pack_demands_match_owned_write_oracle() -> anyhow::Result<()> {
+        let world = cv_testkit::World::new("distill-complete-demand");
+        let mut source = lane();
+        let payload = "code λ\n\"\\".repeat(32768);
+        let input = json!({"file_path":"/tmp/generated.rs", "content":payload,
+            "path":"/tmp/referenced.rs", "unknown":{"retained":"sidecar fidelity"}});
+        let bytes = serde_json::to_vec(&input)?;
+        let input_path = world.base.join("input.json");
+        std::fs::write(&input_path, &bytes)?;
+        source.messages.insert(
+            1,
+            msg(
+                Role::Assistant,
+                MessageKind::Reply,
+                vec![Block::ToolUse {
+                    id: "write".into(),
+                    name: "Write".into(),
+                    input: crate::Json::source(&input_path, 0, bytes.len() as u64)?,
+                    namespace: None,
+                }],
+            ),
+        );
+        source.messages.insert(
+            2,
+            msg(
+                Role::Tool,
+                MessageKind::ToolResult,
+                vec![result("write", "File written", false)],
+            ),
+        );
+        source.messages.insert(
+            3,
+            msg(
+                Role::User,
+                MessageKind::Prompt,
+                vec![text("Review /tmp/generated.rs after the write.")],
+            ),
+        );
+        // Result association survives an intervening message, not only adjacent call/result turns.
+        source.messages.swap(2, 3);
+        let thinking_path = world.base.join("thinking.json");
+        let bytes = serde_json::to_vec(&"ignored λ\n".repeat(32768))?;
+        std::fs::write(&thinking_path, &bytes)?;
+        let thinking = crate::Json::source(&thinking_path, 0, bytes.len() as u64)?
+            .with_view(|view| view.source_text())?
+            .unwrap();
+        source.messages[1].content.insert(
+            0,
+            Block::Thinking {
+                text: thinking,
+                signature: None,
+                encrypted: None,
+                redacted: false,
+            },
+        );
+        for keep_last in [0, 2, 100] {
+            let opts = DistillOptions {
+                keep_last,
+                ..Default::default()
+            };
+            let expected = legacy_products::distill(&source, &opts)?;
+            let prepared = prepare_distill(&source, &opts)?;
+            let expected_session = legacy_products::resumable_session(&source, &expected, &opts)?;
+            let (actual, actual_session) = prepared.into_resumable_session(&source);
+            same_products(&actual, &expected);
+            assert_eq!(
+                serde_json::to_value(actual_session)?,
+                serde_json::to_value(expected_session)?
+            );
+            WORK.with(|cell| cell.set(Work::default()));
+            let pack = distill_pack(&source, &opts)?;
+            let work = WORK.with(|cell| cell.get());
+            assert_eq!(work.elided_copy_bytes, 0);
+            assert_eq!(work.tail_preparations, 1);
+            assert_eq!(work.source_estimates, source.messages.len());
+            assert_eq!(pack.pack(), expected.pack());
+            assert_eq!(
+                serde_json::to_value(pack.stats)?,
+                serde_json::to_value(&expected.stats)?
+            );
+            assert!(pack.elided.is_empty());
+            let sidecar = world.base.join(format!("sidecar-{keep_last}.jsonl"));
+            write_sidecar(&sidecar, &actual.elided)?;
+            let expected_bytes: String = expected
+                .elided
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{}\n",
+                        crate::prune::sidecar_line(&row.tool_use_id, &row.tool_name, &row.input, &row.content)
+                    )
+                })
+                .collect();
+            assert!(
+                std::fs::read(sidecar)? == expected_bytes.as_bytes(),
+                "sidecar bytes differ"
+            );
+        }
+        // Omitted thinking and code input retain the same checked failure boundary.
+        std::fs::write(&thinking_path, b"changed")?;
+        assert!(distill_pack(&source, &Default::default()).is_err());
+        assert!(prepare_distill(&source, &Default::default()).is_err());
+        assert!(legacy_products::distill(&source, &Default::default()).is_err());
+        source.messages[1]
+            .content
+            .retain(|block| !matches!(block, Block::Thinking { .. }));
+        std::fs::write(&input_path, b"changed arguments")?;
+        assert!(distill_pack(&source, &Default::default()).is_err());
+        assert!(prepare_distill(&source, &Default::default()).is_err());
+        assert!(legacy_products::distill(&source, &Default::default()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn full_analysis_preserves_legacy_span_token_fallbacks() -> anyhow::Result<()> {
+        let world = cv_testkit::World::new("distill-legacy-spans");
+        let path = world.base.join("span.txt");
+        let opts = DistillOptions {
+            keep_last: 0,
+            ..Default::default()
+        };
+        for body in [Some(r#"escaped\n\u03bb"#), Some(r#"malformed\q"#), None] {
+            if let Some(body) = body {
+                std::fs::write(&path, body)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+            let mut source = lane();
+            source.messages.push(msg(
+                Role::Assistant,
+                MessageKind::Reply,
+                vec![Block::Text {
+                    text: crate::Text::Span(crate::Span {
+                        source: Some(path.clone()),
+                        offset: 0,
+                        len: body.map_or(20, str::len) as u64,
+                        escaped: true,
+                    }),
+                }],
+            ));
+            let expected = legacy_products::distill(&source, &opts)?;
+            same_products(&distill(&source, &opts)?, &expected);
+            let pack = distill_pack(&source, &opts)?;
+            assert_eq!(pack.pack(), expected.pack());
+            assert_eq!(serde_json::to_value(pack.stats)?, serde_json::to_value(expected.stats)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn write_projection_preserves_decoded_lengths_and_wrong_type_fallbacks() -> anyhow::Result<()> {
+        let world = cv_testkit::World::new("distill-write-projection");
+        let mut inputs = [
+            Value::Null,
+            json!({"file_path":44,"content":[]}),
+            json!({"file_path":"/tmp/code.rs","content":"é\n\"\\", "command":"git log", "path":"/tmp/other"}),
+            json!({"file_path":"/tmp/notes.md","content":"my note λ\n"}),
+        ]
+        .iter()
+        .map(serde_json::to_vec)
+        .collect::<Result<Vec<_>, _>>()?;
+        inputs.extend([
+            br#"{
+                "file_path": "/tmp/code.rs", "content": "discarded",
+                "file_path": 42, "content": ["late wrong type"]
+            }"#
+            .to_vec(),
+            br#"{
+                "file_path": null, "content": 17,
+                "file_path": "/tmp/n\u006ftes.md", "content": "escaped \u03bb\n\"\\",
+                "metadata": {"n": 1e0, "n": -0.0}
+            }"#
+            .to_vec(),
+        ]);
+        for (i, bytes) in inputs.into_iter().enumerate() {
+            let input: Value = serde_json::from_slice(&bytes)?;
+            let path = world.base.join(format!("input-{i}.json"));
+            std::fs::write(&path, &bytes)?;
+            let source = crate::Json::source(&path, 0, bytes.len() as u64)?;
+            let summary = ToolInput::new("Write", &source, true, true)?;
+            assert_eq!(summary.label("Write"), tool_label("Write", &input));
+            let message = msg(Role::Assistant, MessageKind::Reply, Vec::new());
+            let opts = DistillOptions::default();
+            assert_eq!(
+                own_words_from_tool(0, &message, "Write", &summary.fields, &opts).map(|e| e.body),
+                own_words_from_tool(0, &message, "Write", &input, &opts).map(|e| e.body)
+            );
+            let brief = ToolInput::new("Write", &source, false, false)?;
+            assert!(brief.fields.get("content").is_none());
+            let mut session = Session::new("projected-write", Harness::Claude);
+            session.messages = vec![
+                msg(Role::User, MessageKind::Prompt, vec![text("brief")]),
+                msg(
+                    Role::Assistant,
+                    MessageKind::Reply,
+                    vec![Block::ToolUse {
+                        id: "write".into(),
+                        name: "Write".into(),
+                        input: source,
+                        namespace: None,
+                    }],
+                ),
+                msg(
+                    Role::Tool,
+                    MessageKind::ToolResult,
+                    vec![result("write", "written", false)],
+                ),
+            ];
+            let options = DistillOptions {
+                keep_last: 0,
+                ..Default::default()
+            };
+            let expected = legacy_products::distill(&session, &options)?;
+            same_products(&distill(&session, &options)?, &expected);
+            let pack = distill_pack(&session, &options)?;
+            assert_eq!(pack.pack(), expected.pack());
+            assert_eq!(serde_json::to_value(pack.stats)?, serde_json::to_value(expected.stats)?);
+        }
         Ok(())
     }
 

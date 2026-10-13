@@ -17,7 +17,9 @@
 
 use crate::util::{parse_harness, report, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
-use cv_core::distill::{distill, findings, prepare_distill, DistillOptions, Distilled, PreparedDistillation};
+#[cfg(test)]
+use cv_core::distill::distill;
+use cv_core::distill::{distill_pack, findings, prepare_distill, DistillOptions, Distilled, PreparedDistillation};
 use cv_core::ir::{Harness, Session, SessionRef};
 use cv_core::EmitOptions;
 use serde_json::{json, Value};
@@ -80,7 +82,8 @@ pub(crate) fn resolve_source(
 
 /// Resolve a session spec: an existing transcript path (read as Claude unless `--harness` says
 /// otherwise), else an id / `harness:id` / agent id through the normal resolver.
-pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
+#[cfg(test)]
+fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
     let (r, adapter) = resolve_source(spec, harness)?;
     let p = Path::new(spec);
     let mut s = adapter.parse(&r)?;
@@ -88,6 +91,14 @@ pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, Pat
     enrich_path_meta(&mut s, p);
     let path = r.path.clone();
     Ok((s, path))
+}
+
+/// Checked full-fidelity bodies with EOF metadata, owned only when a distill product demands them.
+fn load_distill(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
+    let (reference, adapter) = resolve_source(spec, harness)?;
+    let (mut session, _) = cv_core::emit::prepare_selected(adapter.as_ref(), &reference, 0, None)?;
+    enrich_path_meta(&mut session, Path::new(spec));
+    Ok((session, reference.path))
 }
 
 /// Selected prefix with full EOF metadata and original-count validation. Other load callers
@@ -98,17 +109,13 @@ fn load_upto(spec: &str, harness: Option<Harness>, upto: usize) -> Result<(Sessi
     if upto == 0 || upto > total {
         return usage(format!("--upto {upto}: the session has {total} messages"));
     }
-    session.materialize()?;
     enrich_path_meta(&mut session, Path::new(spec));
     Ok((session, reference.path))
 }
 
 /// Findings retain checked bodies for the shared analyzer rather than owning discarded history.
 fn load_findings(spec: &str) -> Result<Session> {
-    let (reference, adapter) = resolve_source(spec, None)?;
-    let (mut session, _) = cv_core::emit::prepare_selected(adapter.as_ref(), &reference, 0, None)?;
-    enrich_path_meta(&mut session, Path::new(spec));
-    Ok(session)
+    Ok(load_distill(spec, None)?.0)
 }
 
 fn enrich_path_meta(s: &mut Session, p: &Path) {
@@ -322,14 +329,14 @@ pub(crate) fn cmd_distill(
     let want = parse_harness(&harness)?;
     let (s, src_path) = match upto {
         Some(n) => load_upto(spec, want, n)?,
-        None => load(spec, want)?,
+        None => load_distill(spec, want)?,
     };
     enum Products {
         Pack(Distilled),
         Resume(PreparedDistillation),
     }
     let mut products = if matches!(target, Target::PackOnly) {
-        Products::Pack(distill(&s, &opts)?)
+        Products::Pack(distill_pack(&s, &opts)?)
     } else {
         Products::Resume(prepare_distill(&s, &opts)?)
     };
@@ -346,14 +353,7 @@ pub(crate) fn cmd_distill(
         d.stats.pack_est_tokens = (d.head_md.len() as f64 / 3.5).ceil() as u64;
         d.stats.distilled_est_tokens = d.stats.pack_est_tokens + d.stats.tail_est_tokens;
     }
-    let description = format!(
-        "distilled: {}",
-        s.extra
-            .get("claude")
-            .and_then(|b| b.get("agent_description"))
-            .and_then(Value::as_str)
-            .unwrap_or(&s.label())
-    );
+    let description = format!("distilled: {}", d.label());
     let (d, emitted) = match products {
         Products::Pack(d) => (d, Emitted::default()),
         Products::Resume(prepared) => {
@@ -381,6 +381,84 @@ pub(crate) fn cmd_distill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Run alone in a fresh process with synthetic inputs. Includes loading, analysis, requested
+    /// resume/sidecar emission and reporting; fixture construction and report inspection are outside.
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "isolated whole-command allocation control; requires explicit scratch inputs"]
+    fn whole_command_heap_control() -> Result<()> {
+        let source = std::env::var("CV_DISTILL_PROBE_SOURCE")?;
+        let destination = PathBuf::from(std::env::var("CV_DISTILL_PROBE_DESTINATION")?);
+        let mode = std::env::var("CV_DISTILL_PROBE_MODE")?;
+        let opts = DistillOptions {
+            keep_last: std::env::var("CV_DISTILL_PROBE_KEEP_LAST")?.parse()?,
+            keep_tail_thinking: mode == "thinking-tail",
+            tail_result_max: std::env::var("CV_DISTILL_PROBE_TAIL_MAX").map_or(Ok(6000), |s| s.parse())?,
+            note_max: std::env::var("CV_DISTILL_PROBE_NOTE_MAX").map_or(Ok(6000), |s| s.parse())?,
+            ledger: std::env::var("CV_DISTILL_PROBE_LEDGER").as_deref() != Ok("0"),
+            ..Default::default()
+        };
+        let with: Vec<_> = std::env::var("CV_DISTILL_PROBE_WITH").ok().into_iter().collect();
+        let upto = std::env::var("CV_DISTILL_PROBE_UPTO")
+            .ok()
+            .map(|n| n.parse())
+            .transpose()?;
+        let target = match mode.as_str() {
+            "resume" => Target::Session {
+                cwd: None,
+                out: Some(destination.join("resume")),
+            },
+            "agent" => Target::AgentOf {
+                root: source.clone(),
+                model: Some("probe-model".into()),
+            },
+            _ => Target::PackOnly,
+        };
+        let json_out = std::env::var("CV_DISTILL_PROBE_REPORT").as_deref() != Ok("human");
+        let pack = (mode != "stdout").then(|| destination.join("pack.md"));
+        let baseline = cv_testkit::heap::begin();
+        let result = cmd_distill(&source, None, opts, upto, &with, pack, target, json_out);
+        let heap = cv_testkit::heap::end(baseline);
+        eprintln!("CV_DISTILL_HEAP {}", serde_json::to_string(&heap)?);
+        result
+    }
+    #[test]
+    fn ordinary_loader_preserves_relative_direct_path_and_path_metadata() -> Result<()> {
+        let world = cv_testkit::World::new("distill-relative-path");
+        let path = world.base.join("agent.jsonl");
+        std::fs::write(&path, concat!(
+            "{\"type\":\"user\",\"uuid\":\"u\",\"cwd\":\"/tmp/first\",\"message\":{\"role\":\"user\",\"content\":\"brief λ\"}}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"a\",\"cwd\":\"/tmp/final\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply\"}]}}\n",
+            "{\"type\":\"ai-title\",\"aiTitle\":\"EOF title\"}\n",
+        ))?;
+        std::fs::write(
+            path.with_extension("meta.json"),
+            r#"{"description":"relative agent","agentType":"reviewer"}"#,
+        )?;
+        let mut relative = PathBuf::new();
+        for _ in std::env::current_dir()?.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(path.strip_prefix("/")?);
+        for spec in [relative.to_str().unwrap(), path.to_str().unwrap()] {
+            let (expected, old_path) = load(spec, None)?;
+            let (actual, new_path) = load_distill(spec, None)?;
+            assert_eq!(old_path, Path::new(spec));
+            assert_eq!(new_path, old_path);
+            assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(&expected)?);
+            assert_eq!(actual.cwd.as_deref(), Some(Path::new("/tmp/first")));
+            assert_eq!(actual.title.as_deref(), Some("EOF title"));
+            assert_eq!(
+                actual.harness_extra(Harness::Claude).unwrap()["agent_description"],
+                "relative agent"
+            );
+            assert_eq!(
+                distill_pack(&actual, &Default::default())?.pack(),
+                distill(&expected, &Default::default())?.pack()
+            );
+        }
+        Ok(())
+    }
     #[test]
     fn findings_loader_retains_checked_ignored_bodies_and_matches_full_output() -> Result<()> {
         let world = cv_testkit::World::new("findings-loader");

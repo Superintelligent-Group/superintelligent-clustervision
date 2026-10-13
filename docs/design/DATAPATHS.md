@@ -1899,7 +1899,7 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    and retained allocation addresses verify removal of duplicate work. `--upto` now uses selected
    preparation with original-count validation, final EOF metadata and path-meta enrichment;
    sidecar output borrows the owned elisions into the existing bounded JSONL stage. The full fact scan
-   and analyzer's input ownership remain separate work.
+   remains separate work.
    **Findings-only source ownership completed (2026-10-13):** `distill --with` carries checked
    sources through loading and the shared analyzer. Ignored thinking is validated without keeping
    decoded strings; demanded text resolves per message and result buffers release per block.
@@ -1907,6 +1907,10 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    baseline with either 16 or 64 MiB of ignored thinking and exact findings output. See the
    findings ownership record below. Full products, rich extras, complete argument/result fallback
    and demanded output remain separate costs; demanded text also incurs a validation pass.
+   **Ordinary input/pack demand completed (2026-10-13):** main-source loading stays checked/lazy,
+   the shared analyzer owns demanded products per message, and pack-only omits its unused sidecar
+   roster with identical statistics. Complete sidecar/tail payloads remain required ownership; see
+   the whole-command controls in the ordinary distill record below.
 2. **Pack stale-event traversal composition completed (2026-10-13).** `cmd/pack.rs::build_source`
    shares its lazy excerpt pass with optional borrowed event observation only when events are stale.
    Warm events retain one excerpt pass and no event extraction/publication. Optional event errors
@@ -2507,3 +2511,59 @@ final title/prompt and input hashes match, with no page errors. All 63 web selft
 the new loading-header/panel-demand control. These are request counts, not backend byte counts or
 latency. Intermittent browser navigation timeouts observed while setting up the control are under
 separate server/connection investigation; this change does not claim to resolve them.
+
+### Ordinary distill input and pack demand (Sol recovery, 2026-10-13)
+
+Ordinary `cmd_distill` now loads through the same checked full-fidelity selected preparation as
+findings; `--upto` retains its selected prefix without materializing it before analysis. EOF
+metadata, path-meta enrichment and original-count validation remain required. The shared analyzer
+validates all checked text/argument sources in the prior per-message order, resolves demanded
+text per message, and releases result buffers after each block. Source token accounting uses the
+existing resolved-length/canonical-JSON estimators; legacy Span fields retain materialization's
+best-effort fallback. This removes retained whole-source input ownership, not validation or
+source-byte traversal. Owned public inputs were already borrowed by `materialized_session`;
+there was no duplicate whole-Session clone to remove for those callers.
+
+Write fact/ledger inputs project only the existing path/command fields and decoded content length.
+An earlier call referenced by a later result remains indexed across messages. Prose-note content,
+complete sidecar arguments and requested tail turns still become owned. All other tool inputs
+retain the existing complete-Value fallback. Additive `distill_pack` shares the analyzer and returns
+identical pack/statistics with an explicitly empty `elided` roster even when `elided_outputs` is
+nonzero. CLI pack-only uses it; public `distill` and `prepare_distill` retain complete `Elided<Value>`
+entries, and public resume remains compatible. The accepted analyzer label also supplies destination
+descriptions instead of calling owned-text `Session::label` on a lazy source.
+
+The independent baseline is `1377fdc9` with the identical isolated `whole_command_heap_control`
+test compiled against its unchanged production command/core. The candidate invokes its actual
+production command. Allocation starts before source loading and ends after analysis, requested
+resume/sidecar emission, report construction and pack writing. Synthetic fixture creation and
+inspection, test harness startup and clap parsing are excluded. The shared existing Rust allocator
+counts requests/bytes/peak live memory; mmap, SQLite/C, stacks and allocator overhead are excluded.
+The flat native controls use represented checked Source carriers; legacy Spans still use
+best-effort materialization, and owned inputs retain their supplied storage. No timing claim is
+made. The reproducible runner is `tools/profiling/distill-command.py`;
+`DISTILL-COMMAND-EVIDENCE.json` records exact controls and limits.
+
+Eight ignored Thinking fields totaling 16/64 MiB change whole-command peak above baseline from
+23,030,315/92,068,091 B to 1,169,557 B each time. Pack/stats and normalized resumable records match.
+One ignored code Write growing from 2/8 MiB changes pack-only peak from 8,345,061/33,342,687 B to
+1,185,496 B each time. Complete resume sidecars still scale: 4,530,269/17,113,175 B candidate peak
+versus 8,345,061/33,342,687 B baseline. Requested full Write tails cost
+12,521,482/47,753,614 B for pack and 15,261,855/58,672,866 B for resume. Keeping Thinking in the tail
+also retains output-sized ownership and can increase peak slightly; this is not a universal heap
+cap. Notes, rich extras, non-Write complete argument fallback, and genuinely requested outputs
+remain separate costs.
+
+Scoped checks cover owned/frozen/source product parity, mixed multi-message Write/result
+associations, code versus prose notes, escaped Unicode decoded lengths, complete unknown sidecar
+fields, duplicate-key/late wrong-type replacements, pretty/escaped inputs, changed Thinking/argument
+sources, valid/malformed/missing legacy Spans, tail selection and metadata. Absolute and relative
+direct-path loads preserve the original path spelling, EOF title and sibling agent metadata.
+Pack-only counters assert zero elided-body copies, one prepared tail, and one source estimate per message. Native and
+no-default-features core distill controls pass, as do the CLI prefix/findings/metadata controls.
+Whole-command controls compare pack bytes, report stats, exact sidecar bytes and normalized resume
+threading for session/sub-agent destinations, JSON/human reporting, stdout/file packs, requested
+Thinking, `--upto` selection and exact invalid-count errors. Nondefault `--with`/two-call-tail/
+three-byte-result-cap/eight-byte-note-cap/no-ledger pack and resume controls match with human
+reports. Strict native clippy and the end-to-end CLI distill/splice/session/sub-agent check pass.
+Full convergence belongs to integration.
