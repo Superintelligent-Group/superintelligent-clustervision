@@ -667,10 +667,8 @@ impl RangeSource {
         let mut fields = vec![None; keys.len()];
         for entry in entries {
             let (key, value) = entry?;
-            if unique {
-                if !self.accepts_value(key)? {
-                    return Err(super::InvalidStruct("invalid object key").into());
-                }
+            if unique && !self.accepts_value(key)? {
+                return Err(super::InvalidStruct("invalid object key").into());
             }
             if key.len > max_key.saturating_mul(6).saturating_add(2) {
                 continue;

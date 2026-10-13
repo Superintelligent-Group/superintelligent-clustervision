@@ -9,7 +9,9 @@ use crate::lazy::INLINE_MAX;
 use anyhow::Context;
 use anyhow::Result;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+#[cfg(any(feature = "mmap", test))]
+use std::collections::HashSet;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Read-only mapped source bytes used by native scoped views and JSONL readers.
 #[cfg(feature = "mmap")]
@@ -301,13 +303,17 @@ impl<'a> Iterator for ObjectIter<'a> {
     }
 }
 pub(crate) struct Record<'a> {
+    #[cfg(any(feature = "mmap", test))]
     raw: Raw<'a>,
     pub fields: BTreeMap<String, Raw<'a>>,
 }
 impl<'a> Record<'a> {
     /// Missing/nonobject nested fields behave as an empty object without allocating a Value.
     pub fn empty(raw: Raw<'a>) -> Self {
+        #[cfg(not(any(feature = "mmap", test)))]
+        let _ = raw;
         Self {
+            #[cfg(any(feature = "mmap", test))]
             raw,
             fields: BTreeMap::new(),
         }
@@ -322,10 +328,15 @@ impl<'a> Record<'a> {
             done: false,
         };
         let fields = entries.by_ref().collect();
-        entries.done.then_some(Self { raw, fields })
+        entries.done.then_some(Self {
+            #[cfg(any(feature = "mmap", test))]
+            raw,
+            fields,
+        })
     }
     /// serde_json's preserve_order keeps a key's first position and its final value. Only
     /// callers that require navigation order retain the set; ordinary records retain no roster.
+    #[cfg(any(feature = "mmap", test))]
     pub fn entries_in_order(&self) -> impl Iterator<Item = (String, Raw<'a>)> + '_ {
         let mut seen = HashSet::new();
         ObjectIter {
