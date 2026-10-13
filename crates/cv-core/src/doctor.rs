@@ -304,6 +304,34 @@ mod tests {
         m
     }
 
+    #[test]
+    fn unreadable_text_cannot_be_published_as_zero_tokens() {
+        let world = cv_testkit::World::in_process("doctor-checked-text");
+        let path = world.base.join("payload.json");
+        let wire = serde_json::to_vec(&"🌙\n".repeat(8192)).unwrap();
+        std::fs::write(&path, &wire).unwrap();
+        let retained = crate::json::Json::source(&path, 0, wire.len() as u64)
+            .unwrap()
+            .with_view(|view| view.source_text())
+            .unwrap()
+            .unwrap();
+        let span = crate::lazy::Text::Span(crate::lazy::Span {
+            source: Some(path.clone()),
+            offset: 1,
+            len: wire.len() as u64 - 2,
+            escaped: true,
+        });
+        std::fs::remove_file(path).unwrap();
+        for text in [retained, span] {
+            let mut report = Report::default();
+            let mut pass = report.session(None);
+            let mut message = Message::new(Role::Assistant);
+            message.content.push(Block::Text { text });
+            assert!(matches!(pass.message(message), Flow::Stop));
+            assert!(pass.finish().is_err());
+        }
+    }
+
     /// A result that names no tool attributes to its call's tool even when the call streams past
     /// after it (a resumed transcript re-copies history); an id no call carries is unknown.
     #[test]

@@ -115,11 +115,27 @@ impl SourceText {
     }
     pub fn try_decoded_len(&self) -> Result<usize> {
         let mut len = 0usize;
-        self.try_for_each_chunk(64 * 1024, |part| {
-            len = len.checked_add(part.len()).context("source text length overflow")?;
-            Ok(())
-        })?;
-        Ok(len)
+        let mut skip = self.skip;
+        // This reducer exposes no borrowed bytes or callbacks to its caller. Count directly in
+        // the existing decoder; the scoped view checks original provenance before and after the
+        // whole demand, without copying fragments or checking every external-callback boundary.
+        self.range.with_view(|view| {
+            anyhow::ensure!(
+                view.for_each_str_chunk(|part| {
+                    if skip >= part.len() {
+                        skip -= part.len();
+                        return Ok(());
+                    }
+                    let part = part.get(skip..).context("source text prefix is not a UTF8 boundary")?;
+                    skip = 0;
+                    len = len.checked_add(part.len()).context("source text length overflow")?;
+                    Ok(())
+                })?,
+                "source text backing is not a JSON string"
+            );
+            anyhow::ensure!(skip == 0, "source text prefix is past end");
+            Ok(len)
+        })
     }
 }
 
@@ -127,6 +143,31 @@ impl SourceText {
 mod tests {
     use super::*;
     use crate::{harness::store::bytes::ByteSource, json::JsonSource, lazy::Resolver};
+
+    #[test]
+    fn decoded_lengths_preserve_prefix_boundaries_and_source_guards() {
+        let world = cv_testkit::World::in_process("source-text-length");
+        let path = world.base.join("text.json");
+        let body = "a🌙\n\"\\".repeat(8192);
+        let bytes = serde_json::to_vec(&body).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let Json::Source(range) = Json::source(&path, 0, bytes.len() as u64).unwrap() else {
+            panic!("source descriptor required");
+        };
+        for skip in [0, 1, 2, 4, 5, 6, body.len() - 1, body.len(), body.len() + 1] {
+            let source = SourceText {
+                range: range.clone(),
+                skip,
+            };
+            match body.get(skip..) {
+                Some(suffix) => assert_eq!(source.try_decoded_len().unwrap(), suffix.len()),
+                None => assert!(source.try_decoded_len().is_err(), "accepted invalid skip {skip}"),
+            }
+        }
+        let source = SourceText::new(range);
+        std::fs::remove_file(path).unwrap();
+        assert!(source.try_decoded_len().is_err());
+    }
 
     #[test]
     fn backed_text_retains_arena_and_checked_decoded_demands() {

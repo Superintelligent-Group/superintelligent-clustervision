@@ -1012,7 +1012,7 @@ pub fn est_tokens_bytes(len: usize, bytes_per_token: f64) -> u64 {
 /// [`IMAGE_TOKENS`]; a file reference as nothing. The one definition `doctor`, `distill` and `stats`
 /// share — change what a block costs here, nowhere else.
 pub fn est_tokens(block: &Block, bytes_per_token: f64) -> anyhow::Result<u64> {
-    est_tokens_with(block, bytes_per_token, crate::lazy::Text::len)
+    est_tokens_with(block, bytes_per_token, |text| Ok(text.len()))
 }
 
 /// The same estimate as [`est_tokens`] after materializing the block, without retaining its
@@ -1023,33 +1023,29 @@ pub fn est_tokens_resolved(
     bytes_per_token: f64,
     resolver: &crate::lazy::Resolver,
 ) -> anyhow::Result<u64> {
-    est_tokens_with(block, bytes_per_token, |text| match text {
-        crate::lazy::Text::Inline(s) => s.len(),
-        crate::lazy::Text::Span(span) => resolver.resolved_len(span),
-        crate::lazy::Text::Source(source) => source.try_decoded_len().unwrap_or(0),
-    })
+    est_tokens_with(block, bytes_per_token, |text| text.try_decoded_len(resolver))
 }
 
 fn est_tokens_with(
     block: &Block,
     bytes_per_token: f64,
-    text_len: impl Fn(&crate::lazy::Text) -> usize,
+    text_len: impl Fn(&crate::lazy::Text) -> anyhow::Result<usize>,
 ) -> anyhow::Result<u64> {
     let b = |len: usize| est_tokens_bytes(len, bytes_per_token);
     Ok(match block {
-        Block::Text { text } => b(text_len(text)),
+        Block::Text { text } => b(text_len(text)?),
         Block::Thinking {
             text,
             signature,
             encrypted,
             ..
         } => {
-            b(text_len(text))
+            b(text_len(text)?)
                 + b(signature.as_deref().map_or(0, str::len))
                 + b(encrypted.as_deref().map_or(0, str::len))
         }
         Block::ToolUse { input, .. } => (input.canonical_len()? as f64 / bytes_per_token).ceil() as u64,
-        Block::ToolResult { content, .. } => b(text_len(content)),
+        Block::ToolResult { content, .. } => b(text_len(content)?),
         Block::Image { .. } => IMAGE_TOKENS,
         Block::File { .. } => 0,
     })

@@ -190,14 +190,11 @@ impl Text {
         }
     }
     pub fn try_decoded_len(&self, resolver: &Resolver) -> anyhow::Result<usize> {
-        let mut len = 0usize;
-        self.try_for_each_chunk(resolver, 64 * 1024, |part| {
-            len = len
-                .checked_add(part.len())
-                .ok_or_else(|| anyhow::anyhow!("text length overflow"))?;
-            Ok(())
-        })?;
-        Ok(len)
+        match self {
+            Text::Inline(text) => Ok(text.len()),
+            Text::Source(source) => source.try_decoded_len(),
+            Text::Span(span) => resolver.try_resolved_len(span),
+        }
     }
     pub fn with_skipped_prefix(mut self, bytes: usize) -> anyhow::Result<Self> {
         match &mut self {
@@ -578,6 +575,42 @@ impl Resolver {
         };
         state.finish(&source)?;
         Ok(output)
+    }
+
+    /// Count decoded bytes without retaining text or swallowing source failures. The existing
+    /// decoder preserves malformed-escape and lossy UTF-8 fallback; native valid unescaped spans
+    /// can use their checked mapped length directly.
+    pub fn try_resolved_len(&self, sp: &Span) -> anyhow::Result<usize> {
+        let source = self.checked_source(sp)?;
+        let state = DemandState::default();
+        #[cfg(feature = "mmap")]
+        let (reader, offset) = {
+            let bytes = self.checked_bytes(sp, &source)?;
+            if !sp.escaped && std::str::from_utf8(bytes).is_ok() {
+                state.finish(&source)?;
+                return Ok(bytes.len());
+            }
+            (std::io::Cursor::new(bytes), 0)
+        };
+        #[cfg(not(feature = "mmap"))]
+        let (reader, offset) = (source.reader(sp.offset)?, sp.offset);
+        let mut reader = DemandReader {
+            inner: reader,
+            source: &source,
+            state: &state,
+            since_check: 0,
+        };
+        let len = fold_body(
+            &mut reader,
+            offset,
+            sp.len,
+            sp.escaped,
+            0usize,
+            |len, text| *len = len.saturating_add(text.len()),
+            |len| *len = 0,
+        );
+        state.finish(&source)?;
+        Ok(len)
     }
 
     /// Checked raw-budget prefix, preserving resolve_prefix's escape and UTF-8 cut policy.
@@ -1383,6 +1416,30 @@ mod tests {
     }
 
     #[test]
+    fn checked_lengths_match_owned_decode_and_malformed_fallback() {
+        let dir = CheckedTestDir::new();
+        let path = dir.path().join("length");
+        for (raw, escaped) in [
+            ("plain🌙".repeat(16_384).into_bytes(), false),
+            (br#"plain\n\t\"\\\uD83C\uDF19"#.repeat(16_384), true),
+            ([br#"valid\n"#.repeat(16_384), br#"\q"#.to_vec()].concat(), true),
+            ([vec![b'x'; 131_072], vec![0xff, 0xfe]].concat(), false),
+        ] {
+            std::fs::write(&path, &raw).unwrap();
+            let resolver = Resolver::new(Some(path.clone()));
+            let span = Span {
+                offset: 0,
+                len: raw.len() as u64,
+                escaped,
+                source: None,
+            };
+            let expected = resolver.resolve(&span).len();
+            assert_eq!(resolver.try_resolved_len(&span).unwrap(), expected);
+            assert_eq!(Text::Span(span).try_decoded_len(&resolver).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn checked_demands_reject_missing_truncated_and_overflowing_sources() {
         let dir = CheckedTestDir::new();
         let path = dir.path().join("text");
@@ -1394,15 +1451,18 @@ mod tests {
             source: None,
         };
         assert!(resolver.try_resolve(&span).is_err());
+        assert!(resolver.try_resolved_len(&span).is_err());
         assert!(resolver.try_resolve_prefix(&span, 1).is_err());
         assert!(resolver.try_for_each_chunk(&span, 2, |_| Ok(())).is_err());
         std::fs::write(&path, b"abc").unwrap();
         assert!(resolver.try_resolve(&span).is_err());
+        assert!(resolver.try_resolved_len(&span).is_err());
         assert!(resolver.try_resolve_prefix(&span, 0).is_err());
         assert!(resolver.try_for_each_chunk(&span, 2, |_| Ok(())).is_err());
         span.offset = u64::MAX;
         span.len = 1;
         assert!(resolver.try_resolve(&span).is_err());
+        assert!(resolver.try_resolved_len(&span).is_err());
         assert!(Resolver::new(None).try_resolve(&span).is_err());
         std::fs::write(&path, b"").unwrap();
         span.offset = 0;
@@ -1607,6 +1667,7 @@ mod tests {
         std::fs::write(&replacement, b"after!").unwrap();
         std::fs::rename(replacement, &path).unwrap();
         assert!(resolver.try_resolve(&span).is_err());
+        assert!(resolver.try_resolved_len(&span).is_err());
         assert!(resolver.try_resolve_prefix(&span, 2).is_err());
         assert!(resolver.try_for_each_chunk(&span, 2, |_| Ok(())).is_err());
         assert_eq!(Resolver::new(Some(path)).try_resolve(&span).unwrap(), "after!");

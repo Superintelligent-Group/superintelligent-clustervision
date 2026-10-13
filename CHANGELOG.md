@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Doctor rejects unavailable lazy text instead of counting zero tokens; length-only reads avoid copying decoded fragments.
+
 - Diagnostics and affordance views request selected metadata facts; Claude and Cursor CLI avoid copying unrelated raw sidecars.
 - Lane summaries request response identities for usage deduplication without loading unrelated record metadata.
 - Shared payload staging copies bounded chunks before appending, preventing mapped-source writes from hanging on macOS.
