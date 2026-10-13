@@ -29,7 +29,9 @@ Current open work: `docs/design/DATAPATHS.md` (audited data paths, design and pe
   `CV_REGEN_CORPUS=1` and every diff is explained in the commit.
 - Removed command or flag names error with a pointer and exit 2; stored logs and transcripts keep
   reading.
-- Disk pressure: stop writing, report sizes, wait. Delete only files you created.
+- Judge disk pressure by free bytes and expected writes, not percentage alone. With adequate
+  headroom, continue small edits and reuse warm targets. If planned writes risk exhausting space,
+  stop those writes and report sizes. Delete only your own artifacts within authorized cleanup scope.
 - Commits: small, one change each, unsigned is fine; say what changed shape, why, what breaks. One
   CHANGELOG bullet per user-visible change, at most 25 words. Shell is zsh: an unquoted `$var`
   does not word-split (use `${=var}`).
