@@ -1,6 +1,8 @@
 //! Bounded text projections shared by search and API consumers.
+mod json_frames;
 mod string;
 use crate::{Resolver, Text};
+pub use json_frames::write_json_array;
 pub(crate) use string::{string_prefix, string_until};
 
 /// Append complete canonical JSON into an already demanded string without an intermediate copy.

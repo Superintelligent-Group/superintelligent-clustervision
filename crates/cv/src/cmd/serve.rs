@@ -307,6 +307,35 @@ fn handle(mut request: Request, ctx: &Ctx) {
             ));
         }
         None => {
+            match cv_core::api::route_staged(&parts, query) {
+                Ok(Some(stage)) => {
+                    match stage.body.reader() {
+                        Ok(reader) => {
+                            let response = staged_response(&stage, reader, origin.as_deref());
+                            let _ = request.respond(response);
+                        }
+                        Err(error) => {
+                            let _ = request.respond(json_response(
+                                500,
+                                &json!({"error":format!("staged response failed: {error}")}),
+                                origin.as_deref(),
+                                &[],
+                            ));
+                        }
+                    }
+                    return;
+                }
+                Err(error) => {
+                    let _ = request.respond(json_response(
+                        500,
+                        &json!({"error":format!("staged response failed: {error:#}")}),
+                        origin.as_deref(),
+                        &[],
+                    ));
+                    return;
+                }
+                Ok(None) => {}
+            }
             let (status, body, extra) = route(&parts, query);
             let _ = request.respond(json_response(status, &body, origin.as_deref(), &extra));
         }
@@ -735,6 +764,25 @@ fn json_response(
     resp
 }
 
+fn staged_response<'a>(
+    stage: &cv_core::api::StagedJson,
+    reader: Box<dyn std::io::Read + 'a>,
+    origin: Option<&str>,
+) -> Response<Box<dyn std::io::Read + 'a>> {
+    let mut response = Response::new(
+        tiny_http::StatusCode(stage.status),
+        Vec::new(),
+        reader,
+        usize::try_from(stage.bytes).ok(),
+        None,
+    );
+    response.add_header(header("Content-Type", "application/json"));
+    for h in cors_headers(origin) {
+        response.add_header(h);
+    }
+    response
+}
+
 /// A 204 No Content, CORS-tagged for `origin` when one was allowed — for `OPTIONS` preflight.
 fn no_content(origin: Option<&str>) -> Response<std::io::Empty> {
     let mut resp = Response::empty(204);
@@ -766,4 +814,47 @@ fn header(field: &str, value: &str) -> Header {
     // These are all static, valid headers; the parse cannot fail in practice.
     Header::from_bytes(field.as_bytes(), value.as_bytes())
         .unwrap_or_else(|_| Header::from_bytes(&b"X-Invalid"[..], &b"1"[..]).unwrap())
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "isolated actual HTTP response allocation control"]
+    fn staged_http_giant_selected_window_heap() {
+        let world = cv_testkit::World::in_process("staged-http-heap");
+        for kind in ["text", "arguments"] {
+            for mib in [16, 64] {
+                let body = "x\n月".repeat(mib * 1024 * 1024 / 5);
+                let block = if kind == "text" {
+                    json!({"type":"text","text":body})
+                } else {
+                    json!({"type":"tool_use","id":"c","name":"tool","input":{"payload":body}})
+                };
+                world.write_session("staged-http",&[json!({"type":"assistant","sessionId":"staged-http","uuid":"a","message":{"role":"assistant","content":[block]}})]);
+                let parts = ["api", "session", "claude", "staged-http", "messages"];
+                for staged in [false, true] {
+                    let baseline = cv_testkit::heap::begin();
+                    if staged {
+                        let stage = cv_core::api::route_staged(&parts, "start=0&end=1").unwrap().unwrap();
+                        let reader = stage.body.reader().unwrap();
+                        staged_response(&stage, reader, None)
+                            .raw_print(std::io::sink(), tiny_http::HTTPVersion(1, 1), &[], false, None)
+                            .unwrap();
+                    } else {
+                        let (status, value) = cv_core::api::route_json(&parts, "start=0&end=1");
+                        json_response(status, &value, None, &[])
+                            .raw_print(std::io::sink(), tiny_http::HTTPVersion(1, 1), &[], false, None)
+                            .unwrap();
+                    }
+                    let heap = cv_testkit::heap::end(baseline);
+                    println!("{}", json!({"kind":kind,"mib":mib,"staged":staged,"heap":heap}));
+                    if staged {
+                        assert!(heap.peak_above_baseline_bytes < 3 * 1024 * 1024);
+                    }
+                }
+            }
+        }
+    }
 }

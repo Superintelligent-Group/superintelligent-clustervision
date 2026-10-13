@@ -70,6 +70,72 @@ pub fn route_json(parts: &[&str], query: &str) -> (u16, Value) {
     }
 }
 
+/// A completed staged response. Its payload stays operation-owned until HTTP publication.
+pub struct StagedJson {
+    pub status: u16,
+    pub body: crate::bytes::ByteSource,
+    pub bytes: u64,
+}
+
+/// Bounded backend for the HTTP message-window route. Other routes keep `route_json`.
+/// Source and serialization failures are converted into a staged error before publication.
+pub fn route_staged(parts: &[&str], query: &str) -> anyhow::Result<Option<StagedJson>> {
+    let ["api", "session", harness, id, "messages"] = parts else {
+        return Ok(None);
+    };
+    let result = message_window(harness, id, query, true);
+    let mut output = crate::bytes::ByteStage::default();
+    let mut counted = Counted {
+        writer: &mut output,
+        bytes: 0,
+    };
+    let status = match result {
+        Ok((r, mut sink)) => {
+            let frames = sink
+                .staged
+                .take()
+                .expect("staged window destination")
+                .into_inner()
+                .map_err(|error| error.into_error())?
+                .finish()?;
+            let envelope = window_envelope(&r, &sink, Value::Array(Vec::new()));
+            crate::projection::write_json_array(&mut counted, &envelope, "messages", &frames)?;
+            anyhow::ensure!(
+                sink.reads.fresh(&mut crate::source::Probe::default()),
+                "API window source changed while staging response"
+            );
+            200
+        }
+        Err((status, error)) => {
+            serde_json::to_writer(&mut counted, &error)?;
+            status
+        }
+    };
+    let bytes = counted.bytes;
+    Ok(Some(StagedJson {
+        status,
+        body: output.finish()?,
+        bytes,
+    }))
+}
+struct Counted<W> {
+    writer: W,
+    bytes: u64,
+}
+impl<W: std::io::Write> std::io::Write for Counted<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.writer.write(bytes)?;
+        self.bytes = self
+            .bytes
+            .checked_add(n as u64)
+            .ok_or_else(|| std::io::Error::other("JSON response length overflow"))?;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 // --- the task log -------------------------------------------------------------------------------
 
 /// Replay the task log; on success hand the outcome to `f`. Log warnings ride every response so
@@ -254,12 +320,15 @@ fn session_head(harness: &str, id: &str) -> (u16, Value) {
 /// at `end` (after noting whether a message exists there — the `has_more` probe).
 struct WindowSink {
     resolver: crate::Resolver,
+    primary: std::path::PathBuf,
     /// Index of the next message to arrive.
     idx: usize,
     start: usize,
     /// Exclusive window end; `None` streams to EOF.
     end: Option<usize>,
     msgs: Vec<Value>,
+    staged: Option<std::io::BufWriter<crate::bytes::ByteStage>>,
+    selected: usize,
     /// A message at `end` exists (so the window isn't the tail of the session).
     more: bool,
     /// Session metadata the stream delivered (codex meta / the parse-bridge), when any did —
@@ -310,7 +379,7 @@ impl MessageSink for WindowSink {
     }
 
     fn message(&mut self, m: Message) -> Flow {
-        read::note_json_sources(&m, &mut self.reads);
+        read::note_message_sources(&m, &self.primary, &mut self.reads);
         let idx = self.idx;
         self.idx += 1;
         if idx < self.start {
@@ -320,6 +389,26 @@ impl MessageSink for WindowSink {
             self.more = true;
             return Flow::Stop; // at the window's end: note the existence, read no further
         }
+        if let Some(stage) = self.staged.as_mut() {
+            use std::io::Write;
+            let result = (|| -> anyhow::Result<()> {
+                if self.selected > 0 {
+                    stage.write_all(b",")?;
+                }
+                m.write_json(stage, &self.resolver)?;
+                Ok(())
+            })();
+            return match result {
+                Ok(()) => {
+                    self.selected += 1;
+                    Flow::Continue
+                }
+                Err(error) => {
+                    self.fail = Some(error);
+                    Flow::Stop
+                }
+            };
+        }
         let mut m = m;
         if let Err(error) = m.materialize(&self.resolver) {
             self.fail = Some(error);
@@ -328,6 +417,7 @@ impl MessageSink for WindowSink {
         match serde_json::to_value(&m) {
             Ok(v) => {
                 self.msgs.push(v);
+                self.selected += 1;
                 Flow::Continue
             }
             Err(e) => {
@@ -349,7 +439,12 @@ impl MessageSink for WindowSink {
 /// `extra=1` additionally keeps each message's harness `extra` map (e.g. `compactMetadata` on a
 /// compaction boundary) and the structured tool-result `details` sidecar — the structure view
 /// pages through with this on to find the seams.
-fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
+fn message_window(
+    harness: &str,
+    id: &str,
+    query: &str,
+    staged: bool,
+) -> Result<(SessionRef, WindowSink), (u16, Value)> {
     let params = Query::parse(query);
     // Window bounds must parse cleanly — a typo'd index is a clear 400, not a silent full read.
     let idx_param = |key: &str| -> Result<Option<usize>, (u16, Value)> {
@@ -361,48 +456,45 @@ fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
                 .map_err(|_| err(400, &format!("{key} must be a non-negative integer, got {v:?}"))),
         }
     };
-    let start = match idx_param("start") {
-        Ok(v) => v.unwrap_or(0),
-        Err(e) => return e,
-    };
-    let end = match idx_param("end") {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
+    let start = idx_param("start")?.unwrap_or(0);
+    let end = idx_param("end")?;
     if end.is_some_and(|e| e < start) {
-        return err(400, "end must be >= start");
+        return Err(err(400, "end must be >= start"));
     }
     let want_extra = params.flag("extra");
 
-    let (r, adapter) = match lookup(harness, id) {
-        Ok(x) => x,
-        Err(e) => return e,
-    };
+    let (r, adapter) = lookup(harness, id)?;
 
-    let (shell, mut sink) = match read::window(read::shared(), adapter.as_ref(), &r, start, end, want_extra) {
-        Ok(value) => value,
-        Err(e) => return err(500, &format!("stream failed: {e:#}")),
-    };
+    let (shell, mut sink) =
+        match read::window_output(read::shared(), adapter.as_ref(), &r, start, end, want_extra, staged) {
+            Ok(value) => value,
+            Err(e) => return Err(err(500, &format!("stream failed: {e:#}"))),
+        };
     // Preserve first pushed metadata; readers which never push it use the returned shell.
     if sink.meta.is_none() {
         sink.meta = Some(session_meta_json(&shell));
     }
 
-    // The count is exact when the stream ran to EOF.
+    Ok((r, sink))
+}
+
+fn window_envelope(r: &SessionRef, sink: &WindowSink, messages: Value) -> Value {
     let total_known = !sink.more;
-    ok(json!({
-        "harness": r.harness.as_str(),
-        "id": r.id,
-        "start": start,
-        "end": start + sink.msgs.len(),
-        "has_more": sink.more,
-        "total_known": total_known,
-        "total": total_known.then_some(sink.idx),
-        // Discovery-time count, as a hint while `total` is unknown.
-        "message_count": r.message_count,
-        "session": sink.meta,
-        "messages": sink.msgs,
-    }))
+    json!({
+        "harness": r.harness.as_str(), "id": r.id, "start": sink.start,
+        "end": sink.start + sink.selected, "has_more": sink.more, "total_known": total_known,
+        "total": total_known.then_some(sink.idx), "message_count": r.message_count,
+        "session": sink.meta, "messages": messages,
+    })
+}
+
+fn messages(harness: &str, id: &str, query: &str) -> (u16, Value) {
+    let (r, mut sink) = match message_window(harness, id, query, false) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let messages = Value::Array(std::mem::take(&mut sink.msgs));
+    ok(window_envelope(&r, &sink, messages))
 }
 
 /// `GET /api/session/{harness}/{id}/events?kind=` — the session's extracted tool events (file
@@ -618,6 +710,9 @@ mod tests {
     fn window(start: usize, end: Option<usize>) -> WindowSink {
         WindowSink {
             resolver: crate::Resolver::new(None),
+            primary: std::path::PathBuf::new(),
+            staged: None,
+            selected: 0,
             idx: 0,
             start,
             end,
@@ -628,6 +723,37 @@ mod tests {
             capture: false,
             checkpoint: None,
             reads: crate::source::ReadSet::default(),
+        }
+    }
+
+    #[test]
+    fn staged_message_windows_match_value_response_bytes() {
+        let world = cv_testkit::World::in_process("api-staged-windows");
+        let body = "月🌙é\n\"\\".repeat(4000);
+        world.write_session("staged",&[
+            json!({"type":"assistant","sessionId":"staged","uuid":"a","message":{"role":"assistant","content":[{"type":"text","text":body},{"type":"tool_use","id":"c","name":"tool","input":{"z":body,"a":2}}]}}),
+            json!({"type":"user","sessionId":"staged","uuid":"b","message":{"role":"user","content":"second"}}),
+            json!({"type":"assistant","sessionId":"staged","uuid":"c","message":{"role":"assistant","content":"third"}}),
+        ]);
+        let parts = ["api", "session", "claude", "staged", "messages"];
+        for query in [
+            "start=0&end=1",
+            "start=1&end=2",
+            "start=2&end=3",
+            "start=1",
+            "start=0&end=0",
+            "start=9&end=10",
+            "extra=1&start=0&end=1",
+            "start=oops",
+            "start=3&end=1",
+        ] {
+            let (status, expected) = route_json(&parts, query);
+            let actual = route_staged(&parts, query).unwrap().unwrap();
+            let mut bytes = Vec::new();
+            actual.body.copy_to(&mut bytes).unwrap();
+            assert_eq!(actual.status, status, "{query}");
+            assert_eq!(actual.bytes, bytes.len() as u64);
+            assert_eq!(bytes, serde_json::to_vec(&expected).unwrap(), "{query}");
         }
     }
 

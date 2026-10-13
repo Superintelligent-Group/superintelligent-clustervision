@@ -130,16 +130,8 @@ pub(super) fn shared() -> &'static Cache {
     CACHE.get_or_init(Cache::default)
 }
 
-pub(super) fn note_json_sources(message: &crate::Message, reads: &mut ReadSet) {
-    for block in &message.content {
-        if let crate::Block::ToolUse {
-            input: crate::json::Json::Source(range),
-            ..
-        } = block
-        {
-            reads.record(range.path());
-        }
-    }
+pub(super) fn note_message_sources(message: &crate::Message, primary: &std::path::Path, reads: &mut ReadSet) {
+    crate::source::record_message_reads(message, primary, reads);
 }
 
 fn captured(r: &SessionRef, primary: &std::path::Path) -> (Snapshot, ReadSet) {
@@ -165,10 +157,13 @@ fn window_sink(
 ) -> WindowSink {
     WindowSink {
         resolver: crate::Resolver::new(Some(primary.to_path_buf())),
+        primary: primary.to_path_buf(),
         idx: 0,
         start,
         end,
         msgs: Vec::new(),
+        staged: None,
+        selected: 0,
         more: false,
         meta: None,
         fail: None,
@@ -178,6 +173,7 @@ fn window_sink(
     }
 }
 
+#[cfg(test)]
 pub(super) fn window(
     cache: &Cache,
     adapter: &dyn Adapter,
@@ -186,6 +182,18 @@ pub(super) fn window(
     end: Option<usize>,
     extra: bool,
 ) -> Result<(Session, WindowSink)> {
+    window_output(cache, adapter, r, start, end, extra, false)
+}
+
+pub(super) fn window_output(
+    cache: &Cache,
+    adapter: &dyn Adapter,
+    r: &SessionRef,
+    start: usize,
+    end: Option<usize>,
+    extra: bool,
+    staged: bool,
+) -> Result<(Session, WindowSink)> {
     let opts = ParseOptions {
         extra,
         ..ParseOptions::lazy()
@@ -193,12 +201,19 @@ pub(super) fn window(
     let version = crate::resume::version(adapter, "api-window1");
     let primary = adapter.resume_source(r);
     if version.is_none() {
-        let mut sink = window_sink(&primary, start, end, false, ReadSet::default());
-        return Ok((adapter.try_stream(r, &opts, &mut sink)?, sink));
+        let (before, reads) = captured(r, &primary);
+        let mut sink = window_sink(&primary, start, end, false, reads);
+        sink.staged = staged.then(|| std::io::BufWriter::with_capacity(64 * 1024, crate::bytes::ByteStage::default()));
+        let shell = adapter.try_stream(r, &opts, &mut sink)?;
+        if staged {
+            verify(r, &primary, &before, &sink)?;
+        }
+        return Ok((shell, sink));
     }
     let key = version.and_then(|version| Key::admitted(r, &primary, version, extra));
     let (before, reads) = captured(r, &primary);
     let mut sink = window_sink(&primary, start, end, key.is_some(), reads);
+    sink.staged = staged.then(|| std::io::BufWriter::with_capacity(64 * 1024, crate::bytes::ByteStage::default()));
     let mut resumed = false;
     let mut shell = None;
     if let Some(key) = &key {
@@ -229,6 +244,7 @@ pub(super) fn window(
         // A declined resume promises no callbacks, but discard its initial state too.
         let (_, reads) = captured(r, &primary);
         sink = window_sink(&primary, start, end, key.is_some(), reads);
+        sink.staged = staged.then(|| std::io::BufWriter::with_capacity(64 * 1024, crate::bytes::ByteStage::default()));
         shell = Some(adapter.try_stream(r, &opts, &mut sink)?);
     }
     let source = before.with_reads(&sink.reads);
@@ -238,10 +254,17 @@ pub(super) fn window(
         if let Some(key) = &key {
             cache.remove(key);
         }
-        let (_, reads) = captured(r, &primary);
+        let (retry_before, reads) = captured(r, &primary);
         let mut whole = window_sink(&primary, start, end, false, reads);
+        whole.staged = staged.then(|| std::io::BufWriter::with_capacity(64 * 1024, crate::bytes::ByteStage::default()));
         let shell = adapter.try_stream(r, &opts, &mut whole)?;
+        if staged {
+            verify(r, &primary, &retry_before, &whole)?;
+        }
         return Ok((shell, whole));
+    }
+    if staged {
+        verify(r, &primary, &before, &sink)?;
     }
     if stable {
         if let (Some(key), Some((index, checkpoint, meta))) = (key, sink.checkpoint.take()) {
@@ -260,6 +283,14 @@ pub(super) fn window(
     Ok((shell.expect("a stream or accepted resume returned metadata"), sink))
 }
 
+fn verify(r: &SessionRef, primary: &std::path::Path, before: &Snapshot, sink: &WindowSink) -> Result<()> {
+    anyhow::ensure!(
+        fresh(r, &before.with_reads(&sink.reads), primary) && sink.reads.fresh(&mut Probe::default()),
+        "API window source changed before publication"
+    );
+    Ok(())
+}
+
 pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Result<Value> {
     let primary = adapter.resume_source(r);
     let key = Key::admitted(r, &primary, format!("{}/api-head1", env!("CARGO_PKG_VERSION")), false);
@@ -274,12 +305,13 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
     }
     let (before, reads) = captured(r, &primary);
     struct Counter {
+        primary: std::path::PathBuf,
         total: usize,
         reads: ReadSet,
     }
     impl crate::MessageSink for Counter {
         fn message(&mut self, message: crate::Message) -> Flow {
-            note_json_sources(&message, &mut self.reads);
+            note_message_sources(&message, &self.primary, &mut self.reads);
             self.total += 1;
             Flow::Continue
         }
@@ -287,7 +319,11 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
             self.reads.record(path);
         }
     }
-    let mut counter = Counter { total: 0, reads };
+    let mut counter = Counter {
+        primary: primary.clone(),
+        total: 0,
+        reads,
+    };
     let shell = adapter.try_stream(r, &ParseOptions::lazy(), &mut counter)?;
     let mut value = session_meta_json(&shell);
     let map = value.as_object_mut().expect("session metadata is an object");
@@ -441,6 +477,36 @@ mod tests {
         }
         file.flush().unwrap();
         SessionRef::new("cached-pages", Harness::Claude, path)
+    }
+
+    #[test]
+    fn staged_uncached_window_rejects_mutation_before_publication() {
+        struct Mutating;
+        impl Adapter for Mutating {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(&self, r: &SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+                let mut message = Message::new(crate::Role::Assistant);
+                message.content.push(crate::Block::Text {
+                    text: "selected".into(),
+                });
+                sink.try_message(message)?;
+                std::fs::write(&r.path, b"changed")?;
+                Ok(Session::new(r.id.clone(), r.harness))
+            }
+        }
+        let world = cv_testkit::World::in_process("api-staged-mutation");
+        let path = world.home.join("source");
+        std::fs::write(&path, b"original").unwrap();
+        let r = SessionRef::new("mutating", Harness::Claude, path);
+        assert!(window_output(&Cache::default(), &Mutating, &r, 0, Some(1), false, true).is_err());
     }
 
     #[test]

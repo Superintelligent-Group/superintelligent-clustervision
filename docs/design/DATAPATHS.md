@@ -1123,3 +1123,30 @@ clean CPU evidence remains separate. Structural key/navigation state and owned i
 are still not universal bounds. Evidence: cursor-ide-structured-{baseline,after}-reports.json,
 cursor_ide_structured_scale.py and cursor-ide-structured-scale/manifest.json in the lane scratch
 home; these controls are synthetic, not new genuine corpus captures.
+### HTTP selected-window response staging
+
+HTTP message windows use `api::route_staged`; the desktop/library `route_json` contract remains
+compatible. Both destinations share the same WindowSink selection, metadata envelope and verified
+continuation cache. Selected messages serialize through checked IR writers into a bounded ByteStage
+with one reusable 64 KiB buffered writer per window. Shared serde Formatter injection replaces only the envelope's empty
+root messages array with completed compact frames; response schema/order comes from the same
+envelope as Value output. HTTP preserves JSON content type, CORS and known response length, and
+reads completed private bytes through tiny_http. Original/auxiliary Text and Json read capture is
+shared with watch via `source::record_message_reads`; staged routes verify freshness after the
+window and again after envelope staging. Source failures occur before HTTP publication.
+
+Actual native Claude producer→API lookup/window→staging→tiny_http `Response::raw_print` allocation
+controls to a discard writer, 16/64 MiB selected escaped payloads: text peak above baseline
+**50,451,882/201,347,394→1,513,280/1,513,280 bytes**; tool arguments
+**50,352,868/201,347,809→1,062,343/1,062,343 bytes**. This is requested Rust heap with the counting
+allocator, not mmap/C heap or RSS. It includes completed response serialization and HTTP body
+emission rather than an isolated message serializer. An independent Value-route oracle checks
+byte-identical external JSON for selected giant escaped strings/arguments, empty/bounded/resumed/
+open-ended windows, extra mode and invalid bounds. The shared frame helper checks nested arrays
+and rejects absent/nonempty replacement fields; uncached mutation fails before publication.
+
+Limits: whole-session/other HTTP routes and desktop Value responses retain existing owned
+contracts; bounded selected output still depends on the producer's lazy payload capability, and
+demanded oversized metadata/extra remain owned. Staging consumes disk proportional to serialized
+output and reads the frames once more to construct the final response; no release CPU speedup is
+claimed by this allocation control. Browser JSON parsing still owns the requested response.

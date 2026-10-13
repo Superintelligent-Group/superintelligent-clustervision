@@ -148,6 +148,45 @@ impl ReadSet {
     }
 }
 
+/// Record the original and auxiliary sources retained by one message before a consumer demands it.
+pub(crate) fn record_message_reads(message: &crate::Message, primary: &std::path::Path, reads: &mut ReadSet) {
+    for block in &message.content {
+        if let crate::Block::ToolUse {
+            input: crate::Json::Source(range),
+            ..
+        } = block
+        {
+            if range.path() != primary {
+                reads.record(range.path());
+            }
+            if let Some(guard) = range.dependencies() {
+                reads.merge(guard);
+            }
+        }
+        let text = match block {
+            crate::Block::Text { text } | crate::Block::Thinking { text, .. } => Some(text),
+            crate::Block::ToolResult { content, .. } => Some(content),
+            _ => None,
+        };
+        match text {
+            Some(crate::Text::Span(span)) => {
+                if let Some(path) = span.source.as_ref().filter(|path| path.as_path() != primary) {
+                    reads.record(path);
+                }
+            }
+            Some(crate::Text::Source(source)) => {
+                if source.path() != primary {
+                    reads.record(source.path());
+                }
+                if let Some(guard) = source.dependencies() {
+                    reads.merge(guard);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A source pass's captured primary signature and auxiliary dependencies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {

@@ -17,6 +17,8 @@
 
 - Cursor CLI discovery and partial reads stream selected message fields with bounded scratch and reject changed SQLite snapshot dependencies.
 - Shared payload staging copies bounded chunks before appending, preventing mapped-source writes from hanging on macOS.
+- Browser message windows stage checked JSON responses without copying selected payloads into complete response trees.
+
 - MCP observation reads capped searchable prefixes without materializing giant text or tool arguments, preserving cursor freshness and source errors.
 
 - Compaction summary scans propagate lazy source read failures and preserve full summary text.

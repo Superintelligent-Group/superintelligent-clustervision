@@ -260,7 +260,7 @@ impl stream::MessageSink for Tail<'_> {
                 }
                 .is_some_and(|span| span.source.is_none())
             });
-            record_reads(&message, &self.primary, &mut self.materialized_reads);
+            source::record_message_reads(&message, &self.primary, &mut self.materialized_reads);
             let result = output.try_message(message);
             return match result {
                 Ok(flow) => flow,
@@ -360,44 +360,6 @@ pub fn read_session_into(
         ReadMode::StreamSession,
         Some(output),
     )
-}
-
-fn record_reads(message: &Message, primary: &std::path::Path, reads: &mut source::ReadSet) {
-    for block in &message.content {
-        if let crate::Block::ToolUse {
-            input: crate::Json::Source(range),
-            ..
-        } = block
-        {
-            if range.path() != primary {
-                reads.record(range.path());
-            }
-            if let Some(guard) = range.dependencies() {
-                reads.merge(guard);
-            }
-        }
-        let text = match block {
-            crate::Block::Text { text } | crate::Block::Thinking { text, .. } => Some(text),
-            crate::Block::ToolResult { content, .. } => Some(content),
-            _ => None,
-        };
-        match text {
-            Some(crate::Text::Span(span)) => {
-                if let Some(path) = span.source.as_ref().filter(|path| path.as_path() != primary) {
-                    reads.record(path);
-                }
-            }
-            Some(crate::Text::Source(source)) => {
-                if source.path() != primary {
-                    reads.record(source.path());
-                }
-                if let Some(guard) = source.dependencies() {
-                    reads.merge(guard);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 enum ReadMode {
@@ -501,7 +463,7 @@ fn read_inner(
     reads.merge(&sink.materialized_reads);
     let resolver = done.session.resolver();
     for message in &mut sink.messages {
-        record_reads(message, &primary, &mut reads);
+        source::record_message_reads(message, &primary, &mut reads);
         if !retained {
             message.materialize(&resolver)?;
         }
@@ -597,7 +559,7 @@ mod tests {
         let mut message = Message::new(crate::Role::Assistant);
         message.content.push(crate::Block::Text { text });
         let mut text_reads = source::ReadSet::default();
-        record_reads(&message, &path, &mut text_reads);
+        source::record_message_reads(&message, &path, &mut text_reads);
         message.content = vec![crate::Block::ToolUse {
             id: "call".into(),
             name: "test".into(),
@@ -605,7 +567,7 @@ mod tests {
             input: value,
         }];
         let mut input_reads = source::ReadSet::default();
-        record_reads(&message, &path, &mut input_reads);
+        source::record_message_reads(&message, &path, &mut input_reads);
         assert!(text_reads.fresh(&mut source::Probe::default()));
         assert!(input_reads.fresh(&mut source::Probe::default()));
         std::fs::write(&sidecar, "created after capture").unwrap();
