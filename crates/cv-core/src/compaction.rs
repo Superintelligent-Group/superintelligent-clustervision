@@ -204,10 +204,9 @@ pub fn detect(r: &SessionRef, keep_summaries: bool) -> anyhow::Result<Vec<Compac
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
     let mut sink = CompactionSink::new(keep_summaries);
     sink.resolver = Some(crate::lazy::Resolver::new(Some(r.path.clone())));
-    // `lazy_extra`: the boundary/summary `kind`s are always present, but the boundary's
-    // `compactMetadata` (trigger, preTokens, duration) lives in `extra` — plain `lazy()` omits it.
-    // Giant message bodies still stay lazy on disk.
-    adapter.try_stream(r, &crate::stream::ParseOptions::lazy_extra(), &mut sink)?;
+    // Boundary kinds and compactMetadata are reducer facts; summary bodies remain lazy until
+    // requested. Adapters without a Facts projection conservatively retain their existing extra.
+    adapter.try_stream(r, &crate::stream::ParseOptions::facts(), &mut sink)?;
     sink.into_boundaries()
 }
 
@@ -285,6 +284,36 @@ mod tests {
         let mut m = Message::new(Role::User);
         m.content = vec![Block::Text { text: body.into() }];
         m
+    }
+
+    #[test]
+    fn streamed_facts_keep_boundary_metadata_and_requested_summary() {
+        let world = cv_testkit::World::in_process("compaction-facts-detect");
+        let path = world.base.join("session.jsonl");
+        let body = "full summary🌙\n".repeat(8192);
+        let lines = [
+            serde_json::json!({"type":"system","uuid":"boundary","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":42,"durationMs":1234}}),
+            serde_json::json!({"type":"user","uuid":"summary","parentUuid":"boundary","isCompactSummary":true,"message":{"role":"user","content":[{"type":"text","text":body}]}}),
+        ];
+        std::fs::write(
+            &path,
+            lines
+                .iter()
+                .map(|line| serde_json::to_string(line).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let reference = SessionRef::new("facts-compaction", Harness::Claude, &path);
+        for keep in [false, true] {
+            let found = detect(&reference, keep).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].trigger.as_deref(), Some("manual"));
+            assert_eq!(found[0].pre_tokens, Some(42));
+            assert_eq!(found[0].duration_ms, Some(1234));
+            assert_eq!(found[0].summary_msg_idx, Some(1));
+            assert_eq!(found[0].summary.as_deref(), keep.then_some(body.as_str()));
+        }
     }
 
     #[test]
