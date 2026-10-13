@@ -1038,7 +1038,7 @@ mod db {
             let built = if opts.spans
                 && matches!(
                     ty.as_str(),
-                    "user" | "synthetic" | "system" | "skill" | "assistant" | "compaction"
+                    "user" | "synthetic" | "system" | "skill" | "shell" | "assistant" | "compaction"
                 ) {
                 let (offset, len) = if rowid {
                     crate::harness::store::sqlite::append_cell(conn, "session_message", "data", row.get(2)?, arena)?
@@ -1060,8 +1060,22 @@ mod db {
                     let mut data = Map::new();
                     let mut parts = Vec::new();
                     let mut text = None;
+                    let shell = (ty == "shell")
+                        .then(|| project_shell(view, source, arena))
+                        .transpose()?;
                     view.for_each_entry(|key, value| {
-                        if ((key == "text" && ty != "assistant") || (key == "summary" && ty == "compaction"))
+                        if ty == "shell" && matches!(key, "command" | "output") {
+                            // Payloads are retained separately; only the command-presence gate
+                            // is needed by the unchanged shell codec.
+                            data.insert(
+                                key.to_owned(),
+                                if key == "command" && value.is_string()? {
+                                    json!(if nonempty_string(value)? { "x" } else { "" })
+                                } else {
+                                    Value::Null
+                                },
+                            );
+                        } else if ((key == "text" && ty != "assistant") || (key == "summary" && ty == "compaction"))
                             && value.is_string()?
                         {
                             text = value.source_text()?;
@@ -1086,6 +1100,7 @@ mod db {
                         opts,
                         text.as_ref(),
                         Some(&parts),
+                        shell.as_ref(),
                     )))
                 });
                 match result {
@@ -1200,6 +1215,46 @@ fn decoded_input(
         }
     }
     view.argument(true)
+}
+
+fn project_shell(
+    view: crate::json::JsonView<'_>,
+    source: &crate::json::JsonSource,
+    arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
+) -> Result<v2::ProjectedShell> {
+    let command = match view.get("command")? {
+        Some(command) if command.is_string()? && nonempty_string(command)? => {
+            Some(crate::harness::store::text::append(source, arena, |writer| {
+                writer.push("$ ")?;
+                anyhow::ensure!(writer.push_string(command)?, "expected shell command string");
+                Ok(())
+            })?)
+        }
+        _ => None,
+    };
+    let output = match view.get("output")? {
+        Some(output) if !output.is_null()? => {
+            let string = if output.is_string()? {
+                Some(output)
+            } else {
+                // Presence wins before type: a non-string output field must NOT fall through
+                // to text. The historical codec canonicalizes the entire object instead.
+                match output.get("output")?.or(output.get("text")?) {
+                    Some(value) if value.is_string()? => Some(value),
+                    _ => None,
+                }
+            };
+            match string {
+                Some(string) if nonempty_string(string)? => string.source_text()?,
+                Some(_) => None,
+                None => Some(crate::harness::store::text::append(source, arena, |writer| {
+                    writer.push_json(output)
+                })?),
+            }
+        }
+        _ => None,
+    };
+    Ok(v2::ProjectedShell { command, output })
 }
 
 fn nonempty_string(view: crate::json::JsonView<'_>) -> Result<bool> {
@@ -2123,6 +2178,170 @@ mod tests {
     }
 
     #[test]
+    fn projected_v2_shell_matches_owned_command_output_priority_and_canonical_fallback() {
+        let world = cv_testkit::World::in_process("opencode-shell-projection");
+        let path = world.base.join("shell.json");
+        let body = "escaped\n\" λ🌙".repeat(6000);
+        let command = serde_json::to_string(&body).unwrap();
+        let output = serde_json::to_string(&body).unwrap();
+        let cases = [
+            format!(r#"{{"command":{command},"output":{{"output":{output},"cursor":1,"size":3,"truncated":false}}}}"#),
+            format!(r#"{{"command":"echo hi","output":{output}}}"#),
+            format!(r#"{{"command":"echo hi","output":{{"text":{output}}}}}"#),
+            format!(r#"{{"output":{{"output":null,"text":{output},"z":2,"a":1}}}}"#),
+            format!(r#"{{"output":{{"output":false,"text":{output}}}}}"#),
+            format!(r#"{{"output":{{"output":"","text":{output}}}}}"#),
+            format!(
+                r#"{{"command":"first","command":{command},"output":{{"output":"first","outpu\u0074":{output}}}}}"#
+            ),
+            format!(r#"{{"output":{{"z":{output},"a":1,"z":"duplicate winner"}}}}"#),
+            r#"{"command":"","output":null}"#.into(),
+            r#"{"command":null,"output":false}"#.into(),
+            r#"{"output":1.00}"#.into(),
+            r#"{"output":[1,"text",null]}"#.into(),
+            r#"{"output":{}}"#.into(),
+        ];
+        for raw in cases {
+            let mut owned: Value = serde_json::from_str(&raw).unwrap();
+            owned
+                .as_object_mut()
+                .unwrap()
+                .insert("time".into(), json!({"created":1}));
+            owned
+                .as_object_mut()
+                .unwrap()
+                .insert("metadata".into(), json!({"source":"shell","background":true}));
+            // Preserve duplicate-key cases in the checked input instead of serializing the Value.
+            let wire = format!(
+                "{{\"time\":{{\"created\":1}},\"metadata\":{{\"source\":\"shell\",\"background\":true}},{}",
+                &raw[1..]
+            );
+            fs::write(&path, &wire).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+            let shell = source
+                .read_range_value(0, source.len(), |view| project_shell(view, &source, &arena))
+                .unwrap();
+            if owned
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.len() > crate::lazy::INLINE_MAX)
+            {
+                assert!(
+                    matches!(shell.command, Some(crate::Text::Source(_))),
+                    "large prefixed command stays checked"
+                );
+            }
+            let mut skeleton = owned.clone();
+            skeleton["command"] = match owned.get("command").and_then(Value::as_str) {
+                Some(value) => json!(if value.is_empty() { "" } else { "x" }),
+                None => Value::Null,
+            };
+            skeleton["output"] = Value::Null;
+            let mut actual = v2::build_projected(
+                "message",
+                "shell",
+                &skeleton,
+                &ParseOptions::complete(),
+                None,
+                None,
+                Some(&shell),
+            )
+            .unwrap();
+            let expected = v2::build("message", "shell", &owned, &ParseOptions::complete()).unwrap();
+            for message in &mut actual {
+                message.materialize(&crate::lazy::Resolver::new(None)).unwrap();
+            }
+            assert!(
+                serde_json::to_vec(&actual).unwrap() == serde_json::to_vec(&expected).unwrap(),
+                "shell output differs for {}",
+                &wire[..wire.len().min(200)]
+            );
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_v2_shell_projection_preserves_modes_corpus_and_source_errors() {
+        let world = cv_testkit::World::in_process("opencode-shell-db");
+        let db = world.base.join("opencode.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,data TEXT); INSERT INTO session_v2 VALUES('session','/synthetic','shell',1,1);").unwrap();
+        let body = "escaped\nλ🌙".repeat(5000);
+        let value = json!({"time":{"created":1},"shellID":"shell","command":"echo user-shell","status":"exited","exit":0,"output":{"output":body,"cursor":3,"size":3,"truncated":false},"metadata":{"background":true}});
+        connection
+            .execute(
+                "INSERT INTO session_message VALUES('message','session','shell',1,?1)",
+                [value.to_string()],
+            )
+            .unwrap();
+        let adapter = OpenCode::with_db(db.clone());
+        let reference = SessionRef::new("session", Harness::OpenCode, &db);
+        let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::bulk()).unwrap();
+        for opts in [
+            ParseOptions::lazy(),
+            ParseOptions::facts(),
+            ParseOptions {
+                spans: true,
+                ..ParseOptions::complete()
+            },
+        ] {
+            let mut actual = crate::stream::collect_with(&adapter, &reference, &opts).unwrap();
+            assert!(matches!(
+                actual.messages[0].content[1],
+                Block::Text {
+                    text: crate::Text::Source(_)
+                }
+            ));
+            actual.materialize().unwrap();
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+        let mut retained = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        connection.execute("UPDATE session_message SET data='{}'", []).unwrap();
+        assert!(retained.materialize().is_err());
+        connection
+            .execute("UPDATE session_message SET data=?1", [value.to_string()])
+            .unwrap();
+        let mut sink = crate::stream::TryFnSink::new(|_| {
+            connection.execute("UPDATE session_message SET data='{}'", []).unwrap();
+            anyhow::bail!("consumer cap")
+        });
+        let error = adapter
+            .stream(&reference, &ParseOptions::lazy(), &mut sink)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("changed"), "{error:#}");
+        assert!(!format!("{error:#}").contains("consumer cap"));
+        // The current native user-shell record is part of the committed corpus, not a legacy edge.
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus/opencode/2.0.25/.local/share/opencode/opencode.db");
+        if !corpus.exists() {
+            return; // The published crate excludes the real harness corpus.
+        }
+        let corpus_adapter = OpenCode::with_db(corpus.clone());
+        // Locate its containing session read-only; fixture IDs should not become codec knowledge.
+        let reader = crate::harness::store::sqlite::open_ro(&corpus).unwrap();
+        let id: String = reader
+            .query_row(
+                "SELECT session_id FROM session_message WHERE type='shell' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let corpus_reference = SessionRef::new(id, Harness::OpenCode, &corpus);
+        let expected = crate::stream::collect_with(&corpus_adapter, &corpus_reference, &ParseOptions::bulk()).unwrap();
+        let mut actual =
+            crate::stream::collect_with(&corpus_adapter, &corpus_reference, &ParseOptions::lazy()).unwrap();
+        actual.materialize().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
     fn projected_v2_tools_keep_join_order_and_scalar_arguments() {
         let dir = std::env::temp_dir().join(format!("cv-opencode-projection-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
@@ -2158,7 +2377,8 @@ mod tests {
         let skeleton = json!({"content":projected.iter().map(|p|p.value.clone()).collect::<Vec<_>>(),"model":{"id":"model"},"tokens":{"input":1},"metadata":{"preserve":true}});
         let opts = ParseOptions::lazy();
         let expected = v2::build("message", "assistant", &original, &opts).unwrap();
-        let mut actual = v2::build_projected("message", "assistant", &skeleton, &opts, None, Some(&projected)).unwrap();
+        let mut actual =
+            v2::build_projected("message", "assistant", &skeleton, &opts, None, Some(&projected), None).unwrap();
         for message in &mut actual {
             message.materialize(&crate::lazy::Resolver::new(None)).unwrap();
         }
@@ -2403,18 +2623,29 @@ mod tests {
         connection.execute_batch("CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,data); INSERT INTO session_v2 VALUES('session','/tmp','test',1,1); INSERT INTO session_message VALUES('message','session','assistant',1,'{broken');").unwrap();
         let adapter = OpenCode::with_db(db);
         let reference = adapter.discover().unwrap().remove(0);
-        for expression in ["'{broken'", "CAST(X'FF' AS TEXT)", "X'7B7D'", "NULL"] {
-            connection
-                .execute_batch(&format!("UPDATE session_message SET data = {expression}"))
-                .unwrap();
-            let expected = adapter.stream(&reference, &ParseOptions::bulk(), &mut |_| Flow::Continue);
-            let actual = adapter.stream(&reference, &ParseOptions::lazy(), &mut |_| Flow::Continue);
-            assert_eq!(expected.is_err(), actual.is_err(), "{expression}");
-            if let (Ok(expected), Ok(actual)) = (expected, actual) {
-                assert_eq!(
-                    serde_json::to_value(expected).unwrap(),
-                    serde_json::to_value(actual).unwrap()
-                );
+        for ty in ["assistant", "shell"] {
+            connection.execute("UPDATE session_message SET type=?1", [ty]).unwrap();
+            for expression in [
+                "'{broken'",
+                "CAST(X'FF' AS TEXT)",
+                "X'7B7D'",
+                "NULL",
+                "'{\"output\":\"\\ud800\"}'",
+                "'{\"output\":1e400}'",
+                "'{\"output\":\"\\ud800\",\"output\":\"valid duplicate winner\"}'",
+            ] {
+                connection
+                    .execute_batch(&format!("UPDATE session_message SET data = {expression}"))
+                    .unwrap();
+                let expected = adapter.stream(&reference, &ParseOptions::bulk(), &mut |_| Flow::Continue);
+                let actual = adapter.stream(&reference, &ParseOptions::lazy(), &mut |_| Flow::Continue);
+                assert_eq!(expected.is_err(), actual.is_err(), "{expression}");
+                if let (Ok(expected), Ok(actual)) = (expected, actual) {
+                    assert_eq!(
+                        serde_json::to_value(expected).unwrap(),
+                        serde_json::to_value(actual).unwrap()
+                    );
+                }
             }
         }
         drop(connection);

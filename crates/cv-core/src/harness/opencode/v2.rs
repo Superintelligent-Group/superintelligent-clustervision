@@ -33,7 +33,14 @@ use serde_json::{json, Map, Value};
 /// `ToolResult`, a completed compaction gets its summary). `Err(())` means an unknown `type`, which
 /// the caller tallies; it is still carried under `complete`.
 pub(super) fn build(id: &str, ty: &str, data: &Value, opts: &ParseOptions) -> Result<Vec<Message>, ()> {
-    build_projected(id, ty, data, opts, None, None)
+    build_projected(id, ty, data, opts, None, None, None)
+}
+
+/// Selected ordinary shell payloads; shell metadata remains in its existing owned bag.
+#[derive(Default)]
+pub(super) struct ProjectedShell {
+    pub command: Option<crate::lazy::Text>,
+    pub output: Option<crate::lazy::Text>,
 }
 
 pub(super) fn build_projected(
@@ -43,6 +50,7 @@ pub(super) fn build_projected(
     opts: &ParseOptions,
     text: Option<&crate::lazy::Text>,
     parts: Option<&[super::ProjectedPart]>,
+    shell: Option<&ProjectedShell>,
 ) -> Result<Vec<Message>, ()> {
     let ts = data.pointer("/time/created").and_then(super::super::ts_from_value);
     let new = |role: Role, kind: MessageKind, origin: Origin| {
@@ -108,10 +116,16 @@ pub(super) fn build_projected(
             let mut m = new(Role::User, MessageKind::InjectedContext, Origin::Human);
             if let Some(c) = text_of("command") {
                 m.content.push(Block::Text {
-                    text: format!("$ {c}").into(),
+                    text: shell
+                        .and_then(|shell| shell.command.clone())
+                        .unwrap_or_else(|| format!("$ {c}").into()),
                 });
             }
-            if let Some(o) = data.get("output").filter(|o| !o.is_null()) {
+            if let Some(shell) = shell {
+                if let Some(text) = &shell.output {
+                    m.content.push(Block::Text { text: text.clone() });
+                }
+            } else if let Some(o) = data.get("output").filter(|o| !o.is_null()) {
                 let t = match o {
                     Value::String(s) => s.clone(),
                     // `Shell.Output`: `{output, cursor, size, truncated?}`.

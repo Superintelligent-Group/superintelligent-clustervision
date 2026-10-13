@@ -4,6 +4,8 @@
 
 - Cline, Roo, Continue and LM Studio rehomes retain checked complete payloads while preserving native output and public complete parsing.
 
+- OpenCode v2 shell reads retain checked command and output payloads, preserving native fallback formatting, metadata and source freshness.
+
 - Prune streams malformed JSON rows without owning their bodies, preserving exact bytes and fatal invalid UTF-8 behavior.
 - Cline and Roo exports stream guarded Anthropic history, preserving native files and fidelity without whole-session payload copies.
 - Gemini rehomes stream complete recording payloads through checked preparation, preserving native metadata, replay semantics and source freshness.

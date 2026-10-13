@@ -3928,3 +3928,34 @@ an alternate version. Binary/source/output hashes and all allocation counters ar
 physical-I/O, portable operation-heap or universal scale-bound claim. Owned system prompts and
 rich metadata, structural rosters, fallback carriers and private output staging remain explicit.
 This closes the named same-target eligibility gap for these represented reader contracts.
+
+### OpenCode v2 ordinary shell projection (2026-10-13, Sol/opencode_parts)
+
+The current 2.0.25 corpus contains a native user-shell row with command, status, exit and
+Shell.Output fields output/cursor/size/truncated. Shell rows previously bypassed selected
+SQLite replay, fetching the whole TEXT cell and cloning output.output into an owned Text block,
+even for doctor/Facts. The selected-row path now includes shell commands and output, using the
+existing incremental cell copy, guarded shared arena and checked text producers. Metadata is
+unchanged; this patch does not introduce a Facts metadata projection.
+
+One actual doctor/Facts control with fixed small metadata and 8/32 MiB ordinary shell output
+previously peaked at 25,176,630/100,674,181 requested live Rust bytes. It now peaks at
+135,776/135,854 B, with exact frozen doctor report/message parity. SQLite's independently
+verified native counters fall from 8,516,336/33,743,600 B to 766,704/2,622,192 B; largest native
+requests are now 48,000/65,600 B instead of 8,388,813/33,554,638 B whole-cell allocations. These
+measurements separate Rust ownership from SQLite page-cache allocation; they do not establish a
+universal native/RSS/CPU bound. The existing copied backing and generated text use payload-sized temporary arena
+storage. Evidence and the preceding binary are retained outside the repository under
+/Users/ember/dev/cv-worktrees/opencode-shell-evidence/{baseline,checked}.json.
+
+Independent owned-codec oracles cover escaped/large command prefixes, direct/nested output,
+empty/null values, duplicate and escaped keys, canonical nonstring fallback and presence-before-
+type precedence: a present nonstring output does not fall through to a string text field. Native
+and portable shell tests preserve serialized IR, the current corpus row and full metadata for
+lazy/Facts/complete+spans; public owned modes retain their existing path. WAL mutation invalidates
+retained text and overrides a failing consumer callback. Existing malformed-cell controls now
+also cover shell syntax errors, invalid UTF-8, BLOB/NULL types, lone surrogates, nonfinite values
+and an invalid duplicate preceding a valid winner. Native OpenCode scoped tests and focused
+portable shell/malformed checks pass, as do both library clippy configurations. Unknown types,
+full metadata costs and the WITHOUT ROWID whole-cell fallback remain unchanged. No broad
+producer matrix or timing campaign was added.
