@@ -4017,3 +4017,38 @@ not collected, so no native-heap reduction is claimed. Rust requested bytes are 
 evidence, not timing, RSS or physical I/O. One largest encoded row, source/message/block
 rosters, tool-result indexing, owned metadata and SQLite page/FTS caches remain; transaction
 atomicity does not bound database size or provide filesystem-level replacement on direct emit.
+### Same-target cumulative allocation attribution and repair (2026-10-13, Sol)
+
+`2eb4f988` repairs two repeated decoded traversals. Cline prompt metadata still performs its full
+first pass to settle task/environment markers and cwd; its second pass stops after the preferred
+title and complete cwd are known. An 81st nonwhitespace character settles existing 80-character
+title truncation. LM Studio searches retained encoded strings for literal `<` or escaped
+`\u003c`/`\u003C`; proven absence avoids decoded Harmony scanning. Escaped-backslash false
+positives retain the old scan. Reader acceptance and enclosing source-identity checks remain.
+
+Three frozen ordinary 8 MiB same-target operation controls retain exact files, message counts,
+complete fidelity reports and source hashes. With the preceding fixed 64 KiB ASCII decoder
+initial capacity, requested bytes change as follows:
+
+| Contract | Before traversal repair | Traversal repair only | With bounded decoder capacity |
+| --- | ---: | ---: | ---: |
+| Cline task directory | 99,190,768 | 74,158,273 | 74,029,112 |
+| Cline SDK | 48,711,365 | 48,712,002 | 48,582,825 |
+| LM Studio | 73,835,678 | 48,536,619 | 48,537,087 |
+
+The final column composes separate `2f06d258`, applied locally as `86abd6aa`, bounding initial
+ASCII escape scratch by encoded field size. Small differences include output-path length.
+Cline SDK supplies an unaffected reader control. Peak requested heap above baseline stays
+1,390,917/1,389,665 B for task/SDK and about 1,391,650 B for LM Studio. The traversal repairs
+address cumulative allocation rather than the prior peak result, removing the task/LM cumulative
+increases for these represented controls.
+
+All three Cline prompt tests and the LM absence-hint oracle pass under native and portable SQLite
+features. New source-backed cases compare 79/80/81/82-character Unicode titles across decoder
+windows and require mutation after intentional second-pass stop to remain an error. Native
+library/tests clippy passes before capacity composition; root checks composition separately.
+[SAME-TARGET-REPAIR-EVIDENCE.json](SAME-TARGET-REPAIR-EVIDENCE.json) preserves binary hashes,
+allocation counters, exact output hashes and fidelity reports. Original external evidence remains
+untouched; repair artifacts live in `same-target-repair-evidence`. No timing, RSS, native allocator,
+portable operation-heap or universal scaling claim follows. Continue's unaffected operation was
+not repeated.

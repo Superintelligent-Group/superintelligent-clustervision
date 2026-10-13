@@ -1,0 +1,307 @@
+{
+  "operation": "same-target complete parse_for_emit -> Native emit_report, including preparation, private staging and fidelity verification",
+  "preceding_evidence": "SAME-TARGET-PREPARE-EVIDENCE.json",
+  "traversal_only": {
+    "source_revision": "2eb4f988",
+    "configuration": "native debug probe-heap; RAYON_NUM_THREADS=2; unchanged 64 KiB ASCII decoder initial allocation",
+    "binary_sha256": "413337955a7da0a107d81b474575f2776022b7482d76d04751c0fd327b76554d",
+    "cases": {
+      "cline-task": {
+        "before": {
+          "baseline_live_bytes": 1187,
+          "peak_live_bytes": 1392104,
+          "peak_above_baseline_bytes": 1390917,
+          "stage_end_live_bytes": 7681,
+          "allocation_requests": 16700,
+          "requested_bytes": 99190768
+        },
+        "after": {
+          "baseline_live_bytes": 1199,
+          "peak_live_bytes": 1392116,
+          "peak_above_baseline_bytes": 1390917,
+          "stage_end_live_bytes": 7697,
+          "allocation_requests": 13254,
+          "requested_bytes": 74158273
+        },
+        "messages": 4,
+        "fidelity": {
+          "deltas": [
+            {
+              "field": "kind:meta",
+              "before": "2",
+              "after": "1",
+              "expected": true
+            },
+            {
+              "field": "message ids",
+              "before": "1",
+              "after": "0",
+              "expected": false
+            }
+          ]
+        },
+        "native_files": {
+          "tasks/00000000-0000-0000-0000-000000000001/api_conversation_history.json": {
+            "bytes": 10067080,
+            "sha256": "3b11b43bf576599b556a0ceddff60b12597a84decf340f4a6ba2f4c42b768685"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/task_metadata.json": {
+            "bytes": 63,
+            "sha256": "616f46ed6eb098021b9a8b7f04119b9b90f6a00ff020e445909c446853b9fe23"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/ui_messages.json": {
+            "bytes": 206,
+            "sha256": "c1e0fccf1d5e36dad9763365f3ef8afa729c60fc53abf38689ca604ea0ad4668"
+          }
+        },
+        "wire_exact": true,
+        "source_unchanged": true,
+        "source_sha256": "17c699e8d2f0756c9372dcf4a2181d55490aedf75afb5ec98a1146ad02bb75e8"
+      },
+      "cline-sdk": {
+        "before": {
+          "baseline_live_bytes": 1246,
+          "peak_live_bytes": 1390911,
+          "peak_above_baseline_bytes": 1389665,
+          "stage_end_live_bytes": 6527,
+          "allocation_requests": 8326,
+          "requested_bytes": 48711365
+        },
+        "after": {
+          "baseline_live_bytes": 1258,
+          "peak_live_bytes": 1390923,
+          "peak_above_baseline_bytes": 1389665,
+          "stage_end_live_bytes": 6543,
+          "allocation_requests": 8327,
+          "requested_bytes": 48712002
+        },
+        "messages": 2,
+        "fidelity": {
+          "deltas": [
+            {
+              "field": "message ids",
+              "before": "2",
+              "after": "0",
+              "expected": false
+            },
+            {
+              "field": "per-message model",
+              "before": "2",
+              "after": "0",
+              "expected": false
+            },
+            {
+              "field": "session model",
+              "before": "model",
+              "after": "(none)",
+              "expected": false
+            },
+            {
+              "field": "system prompt",
+              "before": "system",
+              "after": "(none)",
+              "expected": true
+            }
+          ]
+        },
+        "native_files": {
+          "tasks/00000000-0000-0000-0000-000000000001/api_conversation_history.json": {
+            "bytes": 10066815,
+            "sha256": "424dba1100241811fa44189a022035ac75dfdde49aa929704afeceb923f2c200"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/task_metadata.json": {
+            "bytes": 117,
+            "sha256": "290f52fbad152fd0accd93678a308607cc1cf6ab22943b5809777dc5adb805f4"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/ui_messages.json": {
+            "bytes": 197,
+            "sha256": "3be93576aff42756538e3020d4f422584aefcf54c34a24c21689de59f11ae4ba"
+          }
+        },
+        "wire_exact": true,
+        "source_unchanged": true,
+        "source_sha256": "3f191bda4841d48dcdb3c0c2766ae956d9b5189e3cfd0d50b7b4a02a1564988b"
+      },
+      "lmstudio": {
+        "before": {
+          "baseline_live_bytes": 1147,
+          "peak_live_bytes": 1392791,
+          "peak_above_baseline_bytes": 1391644,
+          "stage_end_live_bytes": 7153,
+          "allocation_requests": 10475,
+          "requested_bytes": 73835678
+        },
+        "after": {
+          "baseline_live_bytes": 1159,
+          "peak_live_bytes": 1392805,
+          "peak_above_baseline_bytes": 1391646,
+          "stage_end_live_bytes": 7167,
+          "allocation_requests": 7010,
+          "requested_bytes": 48536619
+        },
+        "messages": 3,
+        "fidelity": {
+          "deltas": [
+            {
+              "field": "kind:meta",
+              "before": "1",
+              "after": "0",
+              "expected": true
+            }
+          ]
+        },
+        "native_files": {
+          "conversations/00000000-0000-0000-0000-000000000001.conversation.json": {
+            "bytes": 10068042,
+            "sha256": "a3eea589363fc962e94f5738267e3cc2d531aa5cb5dd0d24b77749268342f4c1"
+          }
+        },
+        "wire_exact": true,
+        "source_unchanged": true,
+        "source_sha256": "0426be6659853be39b409311e5499829f227068a6a2f75e7a4dc712597b0f0c2"
+      }
+    }
+  },
+  "composed_capacity_repair": {
+    "source_revision": "86abd6aa",
+    "configuration": "native debug probe-heap; RAYON_NUM_THREADS=2; traversal repair plus min(WINDOW, body.len()) ASCII decoder allocation",
+    "binary_sha256": "1fa553d09fbd5a52f529e7918cfb12ee1ff293f7e4fc7b7666d4cbc698868d8d",
+    "cases": {
+      "cline-task": {
+        "after": {
+          "baseline_live_bytes": 1207,
+          "peak_live_bytes": 1392124,
+          "peak_above_baseline_bytes": 1390917,
+          "stage_end_live_bytes": 7741,
+          "allocation_requests": 13254,
+          "requested_bytes": 74029112
+        },
+        "messages": 4,
+        "fidelity": {
+          "deltas": [
+            {
+              "field": "kind:meta",
+              "before": "2",
+              "after": "1",
+              "expected": true
+            },
+            {
+              "field": "message ids",
+              "before": "1",
+              "after": "0",
+              "expected": false
+            }
+          ]
+        },
+        "native_files": {
+          "tasks/00000000-0000-0000-0000-000000000001/api_conversation_history.json": {
+            "bytes": 10067080,
+            "sha256": "3b11b43bf576599b556a0ceddff60b12597a84decf340f4a6ba2f4c42b768685"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/task_metadata.json": {
+            "bytes": 63,
+            "sha256": "616f46ed6eb098021b9a8b7f04119b9b90f6a00ff020e445909c446853b9fe23"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/ui_messages.json": {
+            "bytes": 206,
+            "sha256": "c1e0fccf1d5e36dad9763365f3ef8afa729c60fc53abf38689ca604ea0ad4668"
+          }
+        },
+        "wire_exact": true,
+        "source_unchanged": true,
+        "source_sha256": "17c699e8d2f0756c9372dcf4a2181d55490aedf75afb5ec98a1146ad02bb75e8"
+      },
+      "cline-sdk": {
+        "after": {
+          "baseline_live_bytes": 1266,
+          "peak_live_bytes": 1390931,
+          "peak_above_baseline_bytes": 1389665,
+          "stage_end_live_bytes": 6587,
+          "allocation_requests": 8327,
+          "requested_bytes": 48582825
+        },
+        "messages": 2,
+        "fidelity": {
+          "deltas": [
+            {
+              "field": "message ids",
+              "before": "2",
+              "after": "0",
+              "expected": false
+            },
+            {
+              "field": "per-message model",
+              "before": "2",
+              "after": "0",
+              "expected": false
+            },
+            {
+              "field": "session model",
+              "before": "model",
+              "after": "(none)",
+              "expected": false
+            },
+            {
+              "field": "system prompt",
+              "before": "system",
+              "after": "(none)",
+              "expected": true
+            }
+          ]
+        },
+        "native_files": {
+          "tasks/00000000-0000-0000-0000-000000000001/api_conversation_history.json": {
+            "bytes": 10066815,
+            "sha256": "424dba1100241811fa44189a022035ac75dfdde49aa929704afeceb923f2c200"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/task_metadata.json": {
+            "bytes": 117,
+            "sha256": "290f52fbad152fd0accd93678a308607cc1cf6ab22943b5809777dc5adb805f4"
+          },
+          "tasks/00000000-0000-0000-0000-000000000001/ui_messages.json": {
+            "bytes": 197,
+            "sha256": "3be93576aff42756538e3020d4f422584aefcf54c34a24c21689de59f11ae4ba"
+          }
+        },
+        "wire_exact": true,
+        "source_unchanged": true,
+        "source_sha256": "3f191bda4841d48dcdb3c0c2766ae956d9b5189e3cfd0d50b7b4a02a1564988b"
+      },
+      "lmstudio": {
+        "after": {
+          "baseline_live_bytes": 1167,
+          "peak_live_bytes": 1392831,
+          "peak_above_baseline_bytes": 1391664,
+          "stage_end_live_bytes": 7193,
+          "allocation_requests": 7010,
+          "requested_bytes": 48537087
+        },
+        "messages": 3,
+        "fidelity": {
+          "deltas": [
+            {
+              "field": "kind:meta",
+              "before": "1",
+              "after": "0",
+              "expected": true
+            }
+          ]
+        },
+        "native_files": {
+          "conversations/00000000-0000-0000-0000-000000000001.conversation.json": {
+            "bytes": 10068042,
+            "sha256": "a3eea589363fc962e94f5738267e3cc2d531aa5cb5dd0d24b77749268342f4c1"
+          }
+        },
+        "wire_exact": true,
+        "source_unchanged": true,
+        "source_sha256": "0426be6659853be39b409311e5499829f227068a6a2f75e7a4dc712597b0f0c2"
+      }
+    }
+  },
+  "checks": {
+    "native_and_portable_sqlite": "3 Cline prompt tests and LM Harmony absence test passed",
+    "native_clippy": "library and tests passed with -D warnings before capacity composition",
+    "limits": "native debug requested Rust allocation only; no timing/RSS/native allocator/portable operation heap claim; no universal scaling claim; Continue operation not repeated because no affected consumer change"
+  }
+}
