@@ -102,6 +102,22 @@ impl EventSink {
         }
     }
 
+    /// Observe a borrowed message when another consumer owns its delivery.
+    pub fn observe_message(&mut self, m: &Message) -> Flow {
+        if self.failed {
+            return Flow::Stop;
+        }
+        if self.capture_events {
+            if let Err(error) = extract_into(m, self.msg_idx, self.cwd.as_deref(), &mut self.events) {
+                self.error = Some(error);
+                self.failed = true;
+                return Flow::Stop;
+            }
+        }
+        self.msg_idx += 1;
+        Flow::Continue
+    }
+
     /// Keep checkpoint state and dependencies without extracting or retaining event rows.
     /// Useful when events are fresh but another consumer needs a new shared resume mark.
     pub fn without_events(mut self) -> Self {
@@ -167,18 +183,7 @@ impl MessageSink for EventSink {
     }
 
     fn message(&mut self, m: Message) -> Flow {
-        if self.failed {
-            return Flow::Stop;
-        }
-        if self.capture_events {
-            if let Err(error) = extract_into(&m, self.msg_idx, self.cwd.as_deref(), &mut self.events) {
-                self.error = Some(error);
-                self.failed = true;
-                return Flow::Stop;
-            }
-        }
-        self.msg_idx += 1;
-        Flow::Continue
+        self.observe_message(&m)
     }
 
     fn take_error(&mut self) -> Option<anyhow::Error> {

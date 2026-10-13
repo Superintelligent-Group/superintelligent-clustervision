@@ -1888,14 +1888,14 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    preparation with original-count validation, final EOF metadata and path-meta enrichment;
    sidecar output still builds a complete String. Bounded JSONL staging is in progress. The full fact scan
    and analyzer's input ownership remain separate work.
-2. **Pack stale-event traversal composition, in progress with work-count controls.** `cmd/pack.rs::build_source`
-   runs `best_window`, then `events::ingest_ref` reads the same source again when the event catalog
-   is stale; both use lazy parsing and visit the complete message stream. Warm events already avoid
-   the second parse. Compose the two consumers only on the stale branch through existing event
-   spooling/publication mechanisms. Preserve the current independent event-error policy (pack
-   ignores ingestion failure); blindly substituting `TeeSink` would make those failures fatal.
-   Refutation: a counted real adapter boundary must change cold callbacks from 2N to N while
-   excerpt/range/events match, warm ingestion stays zero, and mutation/failure publication matches.
+2. **Pack stale-event traversal composition completed (2026-10-13).** `cmd/pack.rs::build_source`
+   shares its lazy excerpt pass with optional borrowed event observation only when events are stale.
+   Warm events retain one excerpt pass and no event extraction/publication. Optional event errors
+   do not fail the excerpt or publish partial rows; excerpt/adapter errors remain fatal. A counted
+   real adapter control changes cold callbacks from 2N to N while exact excerpt/range/rows and
+   nonempty edit/read/command facts match. Mutation and publication-failure controls preserve prior
+   rows; source snapshots and adapter dependencies guard the shared read. See the operation record
+   below for the remaining post-check publication race boundary.
 3. **Browser scheduling completed; traversal composition remains deferred.** `web/components/cv-app.js:158` requests
    `/messages` and `/head` together; `api/read.rs::head` traverses EOF, separately from the window
    parse. API windows deliberately allow prefix metadata while head promises exact EOF metadata;
@@ -2027,3 +2027,26 @@ large messages. At 16/64 MiB discarded history, old parse/materialize/truncate p
 bytes at either size. Selected output hashes match, nine messages are still counted and one is
 retained. This refutes discarded payload materialization on the measured source path; it does not
 claim no EOF scan or bounds on every adapter's largest owned fallback.
+
+### Pack excerpt/event shared traversal (2026-10-13)
+
+Stale-event pack sources now observe borrowed messages through the existing EventSink/SpoolingSink
+while the excerpt sink owns delivery. Excerpt parsing and text errors remain fatal; optional event
+extraction/spooling errors stop that consumer and retain an unpublishable batch while the excerpt
+continues. Warm events allocate no event sink, perform no extraction and publish nothing. The
+production event-fact reducer is shared with the exact-output control; no message clones are added.
+
+A counted real OpenSession adapter compares the old two-pass control (6 callbacks for 3 messages)
+with composed cold (3) and warm (3, zero event INSERTs). Excerpt/range, ordered catalog rows and
+edit/read/command facts match exactly. Prospective changed rows with primary or auxiliary mutation
+during the shared read preserve prior rows and remain stale; an SQL trigger rolls back publication
+without failing the excerpt. Missing event payloads cannot publish earlier staged rows, subsequent
+excerpt turns still arrive, and excerpt-source or malformed-adapter input failures remain fatal.
+Six bounded spool/codec/checkpoint/transaction tests retain their prior contracts.
+
+Event staleness is selected before the shared excerpt read, rather than afterward as in the old
+sequence. A source snapshot is captured before reading, includes adapter dependencies, and must
+remain unchanged before publication. A later mutation between that check and publication can
+still race; existing provenance checks leave such rows stale rather than certifying them. This
+change does not add source locks or broaden standalone event publication policy. Tests use private
+catalogs/targets and deterministic callback/writer counts; no timing measurement is claimed.

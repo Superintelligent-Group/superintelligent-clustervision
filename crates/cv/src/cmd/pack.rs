@@ -325,42 +325,10 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<Stri
     let (r, adapter) =
         cv_core::find(&hit.id, want)?.with_context(|| format!("session {} no longer on disk", short_id(&hit.id)))?;
 
-    // The excerpt window: one streamed pass under lazy options, spans resolved head-only.
-    let (excerpt, excerpt_range) = best_window(adapter.as_ref(), &r, task)?;
-
-    // Event-catalog facts (what was DONE). Ingest on the spot when stale — one streamed pass,
-    // same as `cv events`.
-    if cv_core::events::needs_ingest(&r, cv_core::events::file_mtime_ns(&r.path)) {
-        let _ = cv_core::events::ingest_ref(&r);
-    }
+    // Stale events ride the excerpt pass; event failure remains best effort.
+    let (excerpt, excerpt_range) = best_window_and_ingest(adapter.as_ref(), &r, task)?;
     let rows = cv_core::events::events_for(r.harness.as_str(), &r.id, None);
-    let mut edits: BTreeMap<String, i64> = BTreeMap::new();
-    let mut reads: BTreeMap<String, i64> = BTreeMap::new();
-    let mut commands: Vec<String> = Vec::new();
-    for e in &rows {
-        match e.kind.as_str() {
-            "file_edit" => {
-                if let Some(t) = &e.target {
-                    *edits.entry(t.clone()).or_insert(0) += 1;
-                }
-            }
-            "file_read" => {
-                if let Some(t) = &e.target {
-                    *reads.entry(t.clone()).or_insert(0) += 1;
-                }
-            }
-            "command" => {
-                if let Some(c) = &e.target {
-                    // A whole shell pipeline isn't memory; its head is.
-                    let c = cv_core::ir::truncate(c, 90);
-                    if commands.len() < MAX_COMMANDS && !commands.contains(&c) {
-                        commands.push(c);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    let EventFacts { edits, reads, commands } = event_facts(&rows);
 
     // Optional abstractive pass over just this span (never the whole session).
     let llm_digest = llm_model.and_then(|model| {
@@ -413,14 +381,81 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<&Option<Stri
     })
 }
 
+#[derive(Debug, PartialEq)]
+struct EventFacts {
+    edits: BTreeMap<String, i64>,
+    reads: BTreeMap<String, i64>,
+    commands: Vec<String>,
+}
+fn event_facts(rows: &[cv_core::events::EventRow]) -> EventFacts {
+    let mut edits: BTreeMap<String, i64> = BTreeMap::new();
+    let mut reads: BTreeMap<String, i64> = BTreeMap::new();
+    let mut commands: Vec<String> = Vec::new();
+    for e in rows {
+        match e.kind.as_str() {
+            "file_edit" => {
+                if let Some(t) = &e.target {
+                    *edits.entry(t.clone()).or_insert(0) += 1;
+                }
+            }
+            "file_read" => {
+                if let Some(t) = &e.target {
+                    *reads.entry(t.clone()).or_insert(0) += 1;
+                }
+            }
+            "command" => {
+                if let Some(c) = &e.target {
+                    // A whole shell pipeline isn't memory; its head is.
+                    let c = cv_core::ir::truncate(c, 90);
+                    if commands.len() < MAX_COMMANDS && !commands.contains(&c) {
+                        commands.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    EventFacts { edits, reads, commands }
+}
+
 /// Stream the session once (lazy spans, head-capped per message) and return a compact window of
 /// `(role, trimmed text)` around the message that best matches `task`, plus its `[lo, hi)` range.
 /// Same scoring as `cv recall`'s excerpt — word hits + a whole-phrase bonus — but without ever
 /// materializing the session.
+fn best_window_and_ingest(
+    adapter: &dyn cv_core::Adapter,
+    r: &cv_core::SessionRef,
+    task: &str,
+) -> Result<(Excerpt, Option<(usize, usize)>)> {
+    if !cv_core::events::needs_ingest(r, cv_core::events::file_mtime_ns(&r.path)) {
+        return best_window(adapter, r, task);
+    }
+    let source = cv_core::source::Probe::default().snapshot(r);
+    let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone());
+    let result = best_window_observing(adapter, r, task, Some(&mut events))?;
+    let source = source.with_reads(events.inner().dependencies());
+    if cv_core::source::unchanged(r, &source) {
+        if let Ok(spool) = events.into_spool() {
+            let _ = cv_core::events::record_spooled_with_source(r, 0, spool, &source, &Default::default());
+        }
+    }
+    Ok(result)
+}
+
 fn best_window(
     adapter: &dyn cv_core::Adapter,
     r: &cv_core::ir::SessionRef,
     task: &str,
+) -> Result<(Excerpt, Option<(usize, usize)>)> {
+    best_window_observing(adapter, r, task, None)
+}
+
+fn best_window_observing(
+    adapter: &dyn cv_core::Adapter,
+    r: &cv_core::SessionRef,
+    task: &str,
+    events: Option<&mut cv_core::events::SpoolingSink>,
 ) -> Result<(Excerpt, Option<(usize, usize)>)> {
     let needle = task.to_lowercase();
     let words: Vec<String> = needle
@@ -429,7 +464,9 @@ fn best_window(
         .map(str::to_string)
         .collect();
 
-    struct WindowSink {
+    struct WindowSink<'a> {
+        events: Option<&'a mut cv_core::events::SpoolingSink>,
+        events_failed: bool,
         words: Vec<String>,
         needle: String,
         resolver: Resolver,
@@ -443,11 +480,30 @@ fn best_window(
         pending: usize,
         error: Option<anyhow::Error>,
     }
-    impl MessageSink for WindowSink {
+    impl MessageSink for WindowSink<'_> {
+        fn meta(&mut self, session: &Session) {
+            if !self.events_failed {
+                if let Some(events) = &mut self.events {
+                    events.meta(session);
+                }
+            }
+        }
+        fn dependency(&mut self, path: &Path) {
+            if !self.events_failed {
+                if let Some(events) = &mut self.events {
+                    events.dependency(path);
+                }
+            }
+        }
         fn take_error(&mut self) -> Option<anyhow::Error> {
             self.error.take()
         }
         fn message(&mut self, m: Message) -> Flow {
+            if !self.events_failed {
+                if let Some(events) = &mut self.events {
+                    self.events_failed = events.observe_message(&m) == Flow::Stop;
+                }
+            }
             let i = self.idx;
             self.idx += 1;
             if m.role == Role::Tool {
@@ -492,6 +548,8 @@ fn best_window(
     }
 
     let mut sink = WindowSink {
+        events,
+        events_failed: false,
         words,
         needle,
         resolver: Resolver::new(Some(r.path.clone())),
@@ -828,6 +886,235 @@ fn write_text(text: &str, out: Option<PathBuf>, what: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cv_core::Adapter;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedAdapter {
+        inner: Box<dyn cv_core::Adapter>,
+        calls: AtomicUsize,
+        mutate: Option<PathBuf>,
+        dependency: Option<PathBuf>,
+    }
+    impl cv_core::Adapter for CountedAdapter {
+        fn harness(&self) -> Harness {
+            self.inner.harness()
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
+            Ok(Vec::new())
+        }
+        fn stream(
+            &self,
+            r: &cv_core::SessionRef,
+            options: &ParseOptions,
+            sink: &mut dyn MessageSink,
+        ) -> Result<Session> {
+            struct Counter<'a> {
+                sink: &'a mut dyn MessageSink,
+                calls: &'a AtomicUsize,
+            }
+            impl MessageSink for Counter<'_> {
+                fn meta(&mut self, s: &Session) {
+                    self.sink.meta(s);
+                }
+                fn dependency(&mut self, path: &Path) {
+                    self.sink.dependency(path);
+                }
+                fn take_error(&mut self) -> Option<anyhow::Error> {
+                    self.sink.take_error()
+                }
+                fn message(&mut self, m: Message) -> Flow {
+                    self.calls.fetch_add(1, Ordering::Relaxed);
+                    self.sink.message(m)
+                }
+            }
+            if let Some(path) = &self.dependency {
+                sink.dependency(path);
+            }
+            let result = self.inner.try_stream(
+                r,
+                options,
+                &mut Counter {
+                    sink,
+                    calls: &self.calls,
+                },
+            )?;
+            if let Some(path) = &self.mutate {
+                use std::io::Write;
+                std::fs::OpenOptions::new().append(true).open(path)?.write_all(b" ")?;
+            }
+            Ok(result)
+        }
+    }
+    fn stale(path: &Path) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+    }
+    fn rows(r: &cv_core::SessionRef) -> Vec<cv_core::events::EventRow> {
+        cv_core::events::events_for(r.harness.as_str(), &r.id, None)
+    }
+
+    #[test]
+    fn shared_pack_pass_matches_two_pass_excerpt_rows_and_facts_with_cold_and_warm_counts() -> Result<()> {
+        let world = cv_testkit::World::in_process("pack-shared-real");
+        let path = world.base.join("real.opensession.json");
+        let mut session = Session::new("real", Harness::OpenSession);
+        session.cwd = Some(world.base.clone());
+        for (role, text, tool, input) in [
+            (Role::User, "before", "Read", serde_json::json!({"file_path":"file.rs"})),
+            (
+                Role::Assistant,
+                "chosen task",
+                "Edit",
+                serde_json::json!({"file_path":"file.rs", "old_string":"before", "new_string":"after"}),
+            ),
+            (
+                Role::User,
+                "after",
+                "Bash",
+                serde_json::json!({"command":"cargo check"}),
+            ),
+        ] {
+            let mut m = Message::new(role);
+            m.content.push(Block::Text { text: text.into() });
+            m.content.push(Block::ToolUse {
+                id: "call".into(),
+                name: tool.into(),
+                namespace: None,
+                input: input.into(),
+            });
+            session.messages.push(m);
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&cv_core::harness::opensession::document(&session))?,
+        )?;
+        let r = cv_core::SessionRef::new("real", Harness::OpenSession, &path);
+        let mut adapter = CountedAdapter {
+            inner: cv_core::harness::for_harness(Harness::OpenSession).unwrap(),
+            calls: Default::default(),
+            mutate: None,
+            dependency: None,
+        };
+        let expected = best_window(&adapter, &r, "chosen")?;
+        // The old independent ingestion traversal, through the same real adapter.
+        let source = cv_core::source::Probe::default().snapshot(&r);
+        let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone());
+        adapter.try_stream(&r, &ParseOptions::lazy(), &mut events)?;
+        let source = source.with_reads(events.inner().dependencies());
+        cv_core::events::record_spooled_with_source(&r, 0, events.into_spool()?, &source, &Default::default())?;
+        assert_eq!(adapter.calls.load(Ordering::Relaxed), 2 * session.messages.len());
+        let expected_rows = format!("{:?}", rows(&r));
+        let expected_facts = event_facts(&rows(&r));
+        assert!(!expected_facts.reads.is_empty());
+        assert!(!expected_facts.edits.is_empty());
+        assert!(!expected_facts.commands.is_empty());
+        stale(&path);
+        adapter.calls.store(0, Ordering::Relaxed);
+        assert_eq!(best_window_and_ingest(&adapter, &r, "chosen")?, expected);
+        assert_eq!(adapter.calls.load(Ordering::Relaxed), session.messages.len());
+        assert_eq!(format!("{:?}", rows(&r)), expected_rows);
+        assert_eq!(event_facts(&rows(&r)), expected_facts);
+        assert!(!cv_core::events::needs_ingest(
+            &r,
+            cv_core::events::file_mtime_ns(&path)
+        ));
+        let conn = rusqlite::Connection::open(world.cv_home.join("catalog.db"))?;
+        conn.execute_batch("CREATE TABLE pack_event_writes(n INTEGER); INSERT INTO pack_event_writes VALUES(0); CREATE TRIGGER count_pack_events AFTER INSERT ON events BEGIN UPDATE pack_event_writes SET n=n+1; END;")?;
+        adapter.calls.store(0, Ordering::Relaxed);
+        assert_eq!(best_window_and_ingest(&adapter, &r, "chosen")?, expected);
+        assert_eq!(adapter.calls.load(Ordering::Relaxed), session.messages.len());
+        assert_eq!(event_facts(&rows(&r)), expected_facts);
+
+        assert_eq!(
+            conn.query_row("SELECT n FROM pack_event_writes", [], |row| row.get::<_, i64>(0))?,
+            0
+        );
+        // Make the next candidate event rows observably different from the published baseline.
+        let changed = std::fs::read_to_string(&path)?.replace("file.rs", "changed.rs");
+        std::fs::write(&path, changed)?;
+        // Mid-pass primary/dependency changes do not replace previously published rows.
+        let dependency = world.base.join("aux");
+        std::fs::write(&dependency, "baseline")?;
+        for mutation in [&path, &dependency] {
+            stale(&path);
+            adapter.dependency = Some(dependency.clone());
+            adapter.mutate = Some(mutation.clone());
+            assert_eq!(best_window_and_ingest(&adapter, &r, "chosen")?, expected);
+            assert_eq!(format!("{:?}", rows(&r)), expected_rows);
+            assert!(cv_core::events::needs_ingest(&r, cv_core::events::file_mtime_ns(&path)));
+        }
+        adapter.mutate = None;
+        // Publication failure rolls back rows without failing the successful excerpt.
+        let conn = rusqlite::Connection::open(world.cv_home.join("catalog.db"))?;
+        conn.execute_batch(
+            "CREATE TRIGGER reject_pack_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'pack failure'); END;",
+        )?;
+        assert_eq!(best_window_and_ingest(&adapter, &r, "chosen")?, expected);
+        assert_eq!(format!("{:?}", rows(&r)), expected_rows);
+        assert!(cv_core::events::needs_ingest(&r, cv_core::events::file_mtime_ns(&path)));
+        std::fs::write(&path, b"{broken transcript")?;
+        assert!(best_window_and_ingest(&adapter, &r, "chosen").is_err());
+        assert_eq!(format!("{:?}", rows(&r)), expected_rows);
+        Ok(())
+    }
+
+    #[test]
+    fn optional_event_extraction_failure_keeps_excerpt_and_never_publishes_partial_rows() -> Result<()> {
+        let world = cv_testkit::World::in_process("pack-event-failure");
+        let path = world.base.join("source");
+        std::fs::write(&path, "source")?;
+        let r = cv_core::SessionRef::new("event-failure", Harness::OpenSession, &path);
+        let payload = world.base.join("removed.json");
+        std::fs::write(&payload, b"{\"file_path\":\"late\"}")?;
+        let input = cv_core::Json::source(&payload, 0, std::fs::metadata(&payload)?.len())?;
+        std::fs::remove_file(&payload)?;
+        let mut good = Message::new(Role::Assistant);
+        good.content.push(Block::Text {
+            text: "chosen excerpt".into(),
+        });
+        good.content.push(Block::ToolUse {
+            id: "good".into(),
+            name: "Read".into(),
+            namespace: None,
+            input: serde_json::json!({"file_path":"good"}).into(),
+        });
+        let mut bad = Message::new(Role::Tool);
+        bad.content.push(Block::ToolUse {
+            id: "bad".into(),
+            name: "Read".into(),
+            namespace: None,
+            input,
+        });
+        let mut following = Message::new(Role::User);
+        following.content.push(Block::Text {
+            text: "tail after failed events".into(),
+        });
+        let fixture = ExcerptFixture(vec![good, bad, following]);
+        let expected = best_window(&fixture, &r, "chosen")?;
+        assert_eq!(best_window_and_ingest(&fixture, &r, "chosen")?, expected);
+        assert!(rows(&r).is_empty());
+        let mut unreadable = Message::new(Role::Assistant);
+        unreadable.content.push(Block::Text {
+            text: cv_core::Text::Span(cv_core::lazy::Span {
+                source: Some(payload),
+                offset: 0,
+                len: 4,
+                escaped: false,
+            }),
+        });
+        assert!(best_window_and_ingest(&ExcerptFixture(vec![unreadable]), &r, "chosen").is_err());
+        assert!(rows(&r).is_empty());
+        assert!(cv_core::events::needs_ingest(&r, cv_core::events::file_mtime_ns(&path)));
+        Ok(())
+    }
 
     struct ExcerptFixture(Vec<Message>);
     impl cv_core::Adapter for ExcerptFixture {

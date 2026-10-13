@@ -122,6 +122,25 @@ impl SpoolingSink {
         &self.inner
     }
 
+    /// Observe without copying the message; failures keep the batch unpublished.
+    pub fn observe_message(&mut self, message: &Message) -> Flow {
+        if self.failed || self.error.is_some() {
+            return Flow::Stop;
+        }
+        if self.inner.observe_message(message) == Flow::Stop {
+            self.error = self.inner.take_error();
+            self.failed = true;
+            return Flow::Stop;
+        }
+        for event in self.inner.events.drain(..) {
+            if let Err(error) = self.spool.push(event) {
+                self.error = Some(error);
+                return Flow::Stop;
+            }
+        }
+        Flow::Continue
+    }
+
     pub fn into_spool(mut self) -> Result<EventSpool> {
         match self.take_error() {
             Some(error) => Err(error),
@@ -149,21 +168,7 @@ impl MessageSink for SpoolingSink {
     }
 
     fn message(&mut self, message: Message) -> Flow {
-        if self.failed || self.error.is_some() {
-            return Flow::Stop;
-        }
-        if let Err(error) = self.inner.try_message(message) {
-            self.error = Some(error);
-            self.failed = true;
-            return Flow::Stop;
-        }
-        for event in self.inner.events.drain(..) {
-            if let Err(error) = self.spool.push(event) {
-                self.error = Some(error);
-                return Flow::Stop;
-            }
-        }
-        Flow::Continue
+        self.observe_message(&message)
     }
 
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
@@ -187,6 +192,7 @@ mod tests {
         sink.error = Some(anyhow::anyhow!("temporary spool write failed"));
         assert_eq!(sink.take_error().unwrap().to_string(), "temporary spool write failed");
         assert_eq!(sink.message(Message::new(crate::Role::User)), Flow::Stop);
+        assert_eq!(sink.observe_message(&Message::new(crate::Role::User)), Flow::Stop);
         assert!(!sink.wants_checkpoint(1));
         assert!(
             sink.into_spool().is_err(),

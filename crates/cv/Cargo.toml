@@ -37,6 +37,7 @@ tiny_http = { version = "0.12", default-features = false }
 urlencoding = "2"
 
 [dev-dependencies]
+rusqlite.workspace = true
 cv-testkit = { path = "../cv-testkit" }
 
 [features]

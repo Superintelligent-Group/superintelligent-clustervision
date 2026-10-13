@@ -318,6 +318,7 @@ dependencies = [
  "cv-testkit",
  "libc",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "tiny_http",
