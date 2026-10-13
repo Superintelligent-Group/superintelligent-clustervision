@@ -3230,3 +3230,24 @@ changed content/nested IDs, unexpected headers and incomplete records fail valid
 The source's frozen size/hash and unchanged post-operation hash are also checked. Fixture
 creation and output hashing remain outside the measured Rust operation; no CPU, portable,
 SQLite/C-heap or physical-memory claim is added, and each synthetic case is removed after checking.
+
+
+### Prune linked-input owner boundary (Sol, 2026-10-13)
+
+The small old-user path used `materialize_tool_inputs` to reread/own the entire earlier assistant
+record just to take one indexed tool input. A later ordinary result therefore defeated bounded
+Thinking/turn projection when the call's original record retained giant unrelated bodies.
+It now reuses `source_tool_metadata` against the same captured range/index, resolving only the
+requested input Value. Lookup still occurs for the same result blocks; unknown IDs are omitted,
+repeated result IDs resolve once, and roster last-ID/name/index ordering is unchanged. Existing
+strict original-record compatibility and source guards remain; no parser or cache was added.
+
+Actual five-turn native prune controls put 16/64 MiB Thinking and a small indexed Bash call on
+one assistant record, followed by an ordinary 6,656-byte result and two recent protected turns.
+With Thinking enabled, both reasoning and result are genuinely snipped. Requested live Rust
+peak drops from 33,709,775 / 134,373,071 to 271,407 bytes at both sizes; every frozen-85 result
+field and transcript/sidecar hash matches. See `PRUNE-LINKED-INPUT-EVIDENCE.json`. Frozen owned
+lookup tests cover compact/full rosters, duplicate IDs, index order, missing/array inputs,
+repeated/unknown/nonstring result IDs and changed original metadata failure. Requested input
+metadata itself remains owned if unusually large; this is an owner-retention improvement,
+not a CPU/RSS claim or a reason to skip existing validation/error checks.

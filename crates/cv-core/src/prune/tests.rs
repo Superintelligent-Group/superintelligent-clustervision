@@ -1956,3 +1956,77 @@ fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Resu
     assert!(revive_staged(&source, stage.finish()?, &facts, &[false], true, None).is_err());
     Ok(())
 }
+
+#[test]
+fn linked_tool_input_projection_matches_frozen_owned_lookup() -> Result<()> {
+    fn owned_lookup(
+        file: &std::fs::File,
+        v: &Value,
+        tools: &HashMap<String, (String, Range, usize)>,
+    ) -> Result<HashMap<String, (String, Value)>> {
+        let mut result = HashMap::new();
+        if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if result.contains_key(id) {
+                    continue;
+                }
+                if let Some((name, range, index)) = tools.get(id) {
+                    let mut original: Value = serde_json::from_str(&read_line(file, *range)?)?;
+                    let input = original
+                        .pointer_mut(&format!("/message/content/{index}/input"))
+                        .map(Value::take)
+                        .unwrap_or(Value::Null);
+                    result.insert(id.to_owned(), (name.clone(), input));
+                }
+            }
+        }
+        Ok(result)
+    }
+    let world = cv_testkit::World::in_process("prune-linked-input");
+    let path = world.base.join("source.jsonl");
+    let raw = format!(
+        "{{\"type\":\"assistant\",\"ignored\":{},\"message\":{{\"content\":[\
+        {{\"type\":\"thinking\",\"thinking\":\"unrelated\"}},\
+        {{\"type\":\"tool_use\",\"id\":\"duplicate\",\"name\":\"first\",\"input\":{{\"a\":1,\"a\":2}}}},\
+        {{\"type\":\"tool_use\",\"id\":\"missing\",\"name\":\"NoInput\"}},\
+        {{\"type\":\"tool_use\",\"id\":\"duplicate\",\"name\":\"last\",\"input\":[{{\"keep\":\"λ\"}}]}}]}}}}",
+        serde_json::to_string(&"x".repeat(2 * 1024 * 1024))?
+    );
+    std::fs::write(&path, &raw)?;
+    let file = std::fs::File::open(&path)?;
+    let source = crate::json::JsonSource::capture(&path)?;
+    let range = Range {
+        offset: 0,
+        len: raw.len() as u64,
+    };
+    let original: Value = serde_json::from_str(&raw)?;
+    let mut tools = HashMap::new();
+    collect_tool_names(&original, range, &mut tools);
+    let user = serde_json::json!({"message":{"content":[
+        {"type":"tool_result","tool_use_id":"duplicate"},{"type":"tool_result","tool_use_id":"duplicate"},
+        {"type":"tool_result","tool_use_id":"missing"},{"type":"tool_result","tool_use_id":"unknown"},
+        {"type":"tool_result","tool_use_id":17},{"type":"text","tool_use_id":"duplicate"}]}});
+    let expected = owned_lookup(&file, &user, &tools)?;
+    assert_eq!(materialize_tool_inputs(&source, &user, &tools)?, expected);
+    assert_eq!(
+        expected["duplicate"],
+        ("last".into(), serde_json::json!([{"keep":"λ"}]))
+    );
+    assert_eq!(expected["missing"], ("NoInput".into(), Value::Null));
+    assert!(!expected.contains_key("unknown"));
+    let mut facts_tools = HashMap::new();
+    source.read_range_value(0, range.len, |view| {
+        decision_facts_source(view, range, &PruneOptions::default(), &mut facts_tools).map(|_| ())
+    })?;
+    assert_eq!(materialize_tool_inputs(&source, &user, &facts_tools)?, expected);
+    std::fs::write(&path, b"unavailable original metadata")?;
+    assert!(materialize_tool_inputs(&source, &user, &tools).is_err());
+    assert!(owned_lookup(&file, &user, &tools).is_err());
+    Ok(())
+}

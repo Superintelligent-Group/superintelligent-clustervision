@@ -744,7 +744,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         let mut modified = false;
         if is_old && ty == "user" {
             // Only old user messages carry snippable tool results.
-            let current_tools = materialize_tool_inputs(&file, &v, &tool_names)?;
+            let current_tools = materialize_tool_inputs(&source, &v, &tool_names)?;
             prune_user_line(
                 &mut v,
                 opts,
@@ -2680,7 +2680,7 @@ fn collect_tool_names(v: &Value, range: Range, map: &mut HashMap<String, (String
 }
 
 fn materialize_tool_inputs(
-    file: &std::fs::File,
+    source: &crate::json::JsonSource,
     v: &Value,
     tools: &HashMap<String, (String, Range, usize)>,
 ) -> Result<HashMap<String, (String, Value)>> {
@@ -2696,13 +2696,10 @@ fn materialize_tool_inputs(
             if result.contains_key(id) {
                 continue;
             }
-            if let Some((name, range, index)) = tools.get(id) {
-                let mut original: Value = serde_json::from_str(&read_line(file, *range)?)?;
-                let input = original
-                    .pointer_mut(&format!("/message/content/{index}/input"))
-                    .map(Value::take)
-                    .unwrap_or(Value::Null);
-                result.insert(id.to_owned(), (name.clone(), input));
+            if tools.contains_key(id) {
+                // Retain only this indexed call's input; unrelated original assistant bodies
+                // may already have been streamed into a sidecar by the preceding turn pass.
+                result.insert(id.to_owned(), source_tool_metadata(source, Some(id), tools)?);
             }
         }
     }

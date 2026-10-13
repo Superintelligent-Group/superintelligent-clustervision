@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prune resolves linked tool inputs without materializing unrelated earlier assistant content, preserving metadata and sidecar fidelity.
+
 - JSON listings with `--limit 0` return an empty array after argument validation without loading inventory, querying indexes, or enriching transcripts.
 
 - Prune revival frames corrected records with boundary searches, avoiding full-byte trimming scans while preserving output and source validation.
