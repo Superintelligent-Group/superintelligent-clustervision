@@ -70,9 +70,14 @@ enum Bytes {
 pub struct ByteStage {
     memory: Vec<u8>,
     spill: Option<Spill>,
+    len: u64,
 }
 impl std::io::Write for ByteStage {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let len = self
+            .len
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| std::io::Error::other("byte stage length overflow"))?;
         if self.spill.is_none() && self.memory.len().saturating_add(bytes.len()) > MEMORY_LIMIT {
             self.spill = Some(Spill::create(false)?);
             self.spill
@@ -101,6 +106,7 @@ impl std::io::Write for ByteStage {
             }
             self.memory.extend_from_slice(bytes);
         }
+        self.len = len;
         Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -113,6 +119,30 @@ impl std::io::Write for ByteStage {
 impl ByteStage {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Bytes written to this unpublished stage. Immutable sources expose no rollback.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Discard an unpublished suffix and resume writing at the retained extent.
+    pub fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        if len > self.len {
+            return Err(std::io::Error::other("byte stage truncation exceeds length"));
+        }
+        if let Some(spill) = &mut self.spill {
+            let file = spill.file.as_mut().unwrap();
+            file.set_len(len)?;
+            file.seek(SeekFrom::Start(len))?;
+        } else {
+            self.memory
+                .truncate(usize::try_from(len).map_err(std::io::Error::other)?);
+        }
+        self.len = len;
+        Ok(())
     }
     pub fn finish(mut self) -> std::io::Result<ByteSource> {
         use std::io::Write;
@@ -286,6 +316,44 @@ impl<F: std::borrow::Borrow<std::fs::File>> std::io::Read for FileReader<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unpublished_stage_rollback_preserves_memory_and_spilled_prefixes() {
+        use std::io::{Read, Write};
+        for initial in [16, MEMORY_LIMIT + 16] {
+            let mut stage = ByteStage::new();
+            stage.write_all(&vec![b'a'; initial]).unwrap();
+            assert_eq!(stage.len(), initial as u64);
+            stage.write_all(&vec![b'b'; MEMORY_LIMIT + 7]).unwrap();
+            stage.truncate(initial as u64).unwrap();
+            assert_eq!(stage.len(), initial as u64);
+            assert!(stage.truncate(initial as u64 + 1).is_err());
+            stage.write_all(b"last").unwrap();
+            let mut actual = Vec::new();
+            stage
+                .finish()
+                .unwrap()
+                .reader()
+                .unwrap()
+                .read_to_end(&mut actual)
+                .unwrap();
+            assert_eq!(actual, [vec![b'a'; initial], b"last".to_vec()].concat());
+        }
+        let mut stage = ByteStage::new();
+        stage.write_all(b"discard").unwrap();
+        stage.truncate(0).unwrap();
+        assert!(stage.is_empty());
+        stage.write_all(b"accepted").unwrap();
+        let mut actual = Vec::new();
+        stage
+            .finish()
+            .unwrap()
+            .reader()
+            .unwrap()
+            .read_to_end(&mut actual)
+            .unwrap();
+        assert_eq!(actual, b"accepted");
+    }
+
     #[test]
     fn arena_small_writes_flush_before_publishing_length() {
         let source = ByteSource::arena().unwrap();

@@ -6,18 +6,26 @@ use serde_json::ser::{Formatter, PrettyFormatter};
 use std::{
     cell::{Cell, RefCell},
     fs,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, Read, Seek, SeekFrom, Write},
     path::Path,
     rc::Rc,
 };
-/// RS cannot occur unescaped in JSON; each independently pretty message is one frame.
+#[cfg(test)]
+thread_local! { static FRAME_SERIALIZATIONS: Cell<usize> = const { Cell::new(0) }; }
+#[cfg(test)]
+pub(crate) fn take_frame_serializations() -> usize {
+    FRAME_SERIALIZATIONS.with(|count| count.replace(0))
+}
+/// RS cannot occur unescaped in JSON; each independently compact message is one frame.
 pub(crate) fn write_message_frame(
     writer: &mut impl Write,
     message: &cv_core::Message,
     resolver: &cv_core::Resolver,
 ) -> Result<()> {
     writer.write_all(&[0x1e])?;
-    message.write_json_pretty(writer, resolver)
+    #[cfg(test)]
+    FRAME_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    message.write_json(writer, resolver)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,39 +113,29 @@ impl Messages<'_> {
             self.record_end();
             self.pretty.end_array_value(writer)?;
         }
-        let mut inside = false;
-        let mut bytes = [0u8; 64 * 1024];
-        loop {
-            let n = self.spool.read(&mut bytes)?;
-            if n == 0 {
-                break;
+        let spool = std::mem::replace(&mut self.spool, Box::new(io::empty()));
+        let mut spool = io::BufReader::with_capacity(64 * 1024, spool);
+        while !spool.fill_buf()?.is_empty() {
+            if spool.fill_buf()?[0] != 0x1e {
+                return Err(io::Error::other("JSON spool has no frame boundary"));
             }
-            for piece in bytes[..n].split_inclusive(|byte| *byte == 0x1e) {
-                let delimiter = piece.last() == Some(&0x1e);
-                let body = &piece[..piece.len() - usize::from(delimiter)];
-                if !body.is_empty() {
-                    if !inside {
-                        return Err(io::Error::other("JSON spool has no frame boundary"));
+            spool.consume(1);
+            self.begin_message(writer)?;
+            {
+                // PrettyJson only changes whitespace of the compact frame already accepted
+                // and serialized by Message. Its base includes the enclosing messages array.
+                let mut output = &mut *writer;
+                let mut pretty = cv_core::PrettyJson::new(&mut output, 2);
+                loop {
+                    let bytes = spool.fill_buf()?;
+                    let end = bytes.iter().position(|byte| *byte == 0x1e).unwrap_or(bytes.len());
+                    if end == 0 {
+                        break;
                     }
-                    // Standalone Message pretty indentation gains the enclosing array's four
-                    // spaces at every physical newline. JSON strings contain escaped newlines.
-                    for line in body.split_inclusive(|byte| *byte == b'\n') {
-                        writer.write_all(line)?;
-                        if line.last() == Some(&b'\n') {
-                            writer.write_all(b"    ")?;
-                        }
-                    }
-                }
-                if delimiter {
-                    if inside {
-                        self.end_message(writer)?;
-                    }
-                    self.begin_message(writer)?;
-                    inside = true;
+                    pretty.write_all(&bytes[..end])?;
+                    spool.consume(end);
                 }
             }
-        }
-        if inside {
             self.end_message(writer)?;
         }
         if self.count != self.total {
@@ -290,4 +288,31 @@ fn write_framed(
         .take()
         .context("Session serializer omitted messages")?;
     Ok(prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn frame_stage_contains_exactly_one_compact_serialization() {
+        let mut message = cv_core::Message::new(cv_core::Role::Assistant);
+        message.content.push(cv_core::Block::ToolUse {
+            id: "call".into(),
+            name: "tool".into(),
+            namespace: None,
+            input: serde_json::json!({"quoted": "🌙\n\\\"", "nested": [{"a": []}, true, 12]}).into(),
+        });
+        let expected = serde_json::to_vec(&message).unwrap();
+        let mut stage = cv_core::bytes::ByteStage::new();
+        take_frame_serializations();
+        write_message_frame(&mut stage, &message, &cv_core::Resolver::new(None)).unwrap();
+        assert_eq!(take_frame_serializations(), 1);
+        assert_eq!(stage.len(), expected.len() as u64 + 1);
+        let pretty_frame = serde_json::to_vec_pretty(&message).unwrap().len() + 1;
+        assert!(stage.len() < pretty_frame as u64);
+        let mut actual = Vec::new();
+        stage.finish().unwrap().copy_to(&mut actual).unwrap();
+        assert_eq!(actual[0], 0x1e);
+        assert_eq!(actual[1..], expected);
+    }
 }

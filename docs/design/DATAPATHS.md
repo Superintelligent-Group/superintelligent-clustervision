@@ -1832,3 +1832,28 @@ only after a successful transaction; an injected SQLite failure proves the flush
 This evidence counts actual SQL mutations, not elapsed time, instruction counts or content
 reads. Enumeration, captured-primary metadata probes, watch reconstruction and pruning stats
 remain; this change removes publication writes without claiming those operations disappeared.
+One-pass staged Session JSON (2026-10-12): CLI JSON selection previously wrote each selected
+message through the compact serializer to count `max_bytes`, then traversed its lazy bodies
+again through the pretty serializer for the spool. The shared CLI/archive frame writer now
+stages RS plus one compact `Message::write_json` result. The compact frame length excluding RS
+is the exact existing budget measure. A rejected nonfirst candidate truncates only its
+unpublished `ByteStage` suffix; immutable `ByteSource` and shared append arenas have no rollback.
+The first selected message still exceeds the soft cap when needed. Selection continues to EOF
+for final metadata, and continuation indices/tail handling remain unchanged.
+
+Session publication reuses the existing bounded `PrettyJson` whitespace transformer on compact
+frames, at the enclosing messages-array indentation, without demanding any lazy body again.
+Previously saved archive prefixes remain pretty output and are relocated/copied unchanged.
+The public streaming transformer explicitly requires validated compact JSON; it is not an
+acceptance/parser API. `ByteStage` tracks length without per-message stat/seek calls, and its
+checked truncation repositions spilled files before the next write.
+
+The existing full-parse/window/budget oracle now asserts exactly one frame serialization per
+accepted message plus the single sized rejected candidate, across zero/finite/unlimited budgets
+and windows. Archive full pretty output/stable prefixes, source-change errors, physical chunk
+quote parity, and memory/spill rollback tests pass. A nested Unicode tool-message control
+stages 171 bytes instead of 327 pretty-frame bytes, retaining the exact 170-byte compact budget
+and byte-identical final pretty output. Evidence: `session-stage-once-control.json` in the
+encoded-arguments evidence directory. This removes a concrete duplicate lazy traversal for
+budgeted JSON reads; full requested output still requires bounded staging and copying, and no
+wall-clock speedup is claimed.

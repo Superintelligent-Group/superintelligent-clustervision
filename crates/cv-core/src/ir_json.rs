@@ -324,14 +324,27 @@ impl<W: Write> Write for BaseIndent<'_, W> {
 
 // Whitespace-only transform of already canonical JSON. Delimiters inside escaped string
 // chunks are untouched; the stack holds only a nonempty bit for each nesting level.
-struct PrettyJson<'a, W> {
+/// Whitespace transform for already validated compact JSON, preserving string bytes.
+/// This is not a JSON parser or acceptance boundary. One writer represents one complete value.
+pub struct PrettyJson<'a, W> {
     writer: &'a mut W,
     base: usize,
     stack: Vec<bool>,
     string: bool,
     escape: bool,
 }
-impl<W: Write> PrettyJson<'_, W> {
+impl<'a, W: Write> PrettyJson<'a, W> {
+    /// `base` counts two-space enclosing indentation levels.
+    pub fn new(writer: &'a mut W, base: usize) -> Self {
+        Self {
+            writer,
+            base,
+            stack: Vec::new(),
+            string: false,
+            escape: false,
+        }
+    }
+
     fn newline(&mut self) -> io::Result<()> {
         self.writer.write_all(b"\n")?;
         indent(self.writer, self.base + self.stack.len())

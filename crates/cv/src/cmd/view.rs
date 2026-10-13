@@ -384,19 +384,6 @@ fn staged_session_json(
     document: bool,
 ) -> Result<(cv_core::bytes::ByteSource, Option<usize>)> {
     use cv_core::bytes::ByteStage;
-    struct Counter(usize);
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_add(bytes.len())
-                .ok_or_else(|| std::io::Error::other("JSON size overflow"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
     struct Selection {
         resolver: cv_core::Resolver,
         seen: usize,
@@ -416,20 +403,19 @@ fn staged_session_json(
             if self.next.is_some() {
                 return Ok(());
             }
-            let mut size = Counter(0);
-            if self.budget.is_some() {
-                message.write_json(&mut size, &self.resolver)?;
-            }
+            let before = self.stage.len();
+            super::session_json::write_message_frame(&mut self.stage, &message, &self.resolver)?;
+            let size = usize::try_from(self.stage.len() - before - 1).context("JSON message size overflow")?;
             if self.count > 0
                 && self
                     .budget
-                    .is_some_and(|budget| size.0 > budget.saturating_sub(self.bytes))
+                    .is_some_and(|budget| size > budget.saturating_sub(self.bytes))
             {
+                self.stage.truncate(before)?;
                 self.next = Some(index);
                 return Ok(());
             }
-            super::session_json::write_message_frame(&mut self.stage, &message, &self.resolver)?;
-            self.bytes = self.bytes.checked_add(size.0).context("JSON budget size overflow")?;
+            self.bytes = self.bytes.checked_add(size).context("JSON budget size overflow")?;
             self.count += 1;
             Ok(())
         }
@@ -1750,7 +1736,13 @@ mod tests {
             for budget in [None, Some(0), Some(1024), Some(1 << 20)] {
                 let (expected, expected_next) = full_json_window(adapter, r, window, budget);
                 for document in [false, true] {
+                    super::super::session_json::take_frame_serializations();
                     let (staged, next) = staged_session_json(adapter, r, window, budget, document).unwrap();
+                    assert_eq!(
+                        super::super::session_json::take_frame_serializations(),
+                        expected.messages.len() + usize::from(expected_next.is_some()),
+                        "each accepted/rejected message is staged once"
+                    );
                     let mut bytes = Vec::new();
                     staged.copy_to(&mut bytes).unwrap();
                     let mut oracle = if document {
