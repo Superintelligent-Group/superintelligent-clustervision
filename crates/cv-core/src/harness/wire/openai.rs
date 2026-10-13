@@ -78,6 +78,113 @@ pub fn blocks_from(content: Option<&Value>, q: &Quirks) -> Vec<Block> {
     }
 }
 
+/// Selected counterpart of [`blocks_from`], retaining checked text and argument backing.
+pub(crate) fn blocks_view(content: Option<crate::json::JsonView<'_>>, q: &Quirks) -> anyhow::Result<Vec<Block>> {
+    let Some(content) = content else { return Ok(Vec::new()) };
+    if let Some(text) = content.source_text()? {
+        return Ok(if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Block::Text { text }]
+        });
+    }
+    let mut blocks = Vec::new();
+    if let Some(parts) = content.array()? {
+        for part in parts {
+            if let Some(block) = part_view(part?, q)? {
+                blocks.push(block);
+            }
+        }
+    }
+    Ok(blocks)
+}
+
+/// Apply the same dialect rules while selecting only the part's semantic fields.
+pub(crate) fn part_view(part: crate::json::JsonView<'_>, q: &Quirks) -> anyhow::Result<Option<Block>> {
+    use crate::harness::store::document::Fields;
+    let Some(fields) = Fields::parse(part, &["type", "text", "think", "encrypted"])? else {
+        return Ok(None);
+    };
+    let ty = fields.string("type")?.unwrap_or_default();
+    if let Some((think_ty, text_key)) = q.thinking {
+        if ty == think_ty {
+            let text = fields
+                .get(text_key)
+                .map(|v| v.source_text())
+                .transpose()?
+                .flatten()
+                .unwrap_or_default();
+            let encrypted = fields.string("encrypted")?;
+            if q.skip_empty_thinking && text.is_empty() && encrypted.is_none() {
+                return Ok(None);
+            }
+            return Ok(Some(Block::Thinking {
+                text,
+                signature: if q.thinking_signature_mirrors_encrypted {
+                    encrypted.clone()
+                } else {
+                    None
+                },
+                encrypted,
+                redacted: false,
+            }));
+        }
+    }
+    if super::is_image_part(&ty) || matches!(ty.as_str(), "audio_url" | "video_url") {
+        return Ok(part_to_block(part.resolve()?.as_ref(), q));
+    }
+    Ok(fields
+        .get("text")
+        .map(|v| v.source_text())
+        .transpose()?
+        .flatten()
+        .filter(|text| !q.skip_empty_text || !text.is_empty())
+        .map(|text| Block::Text { text }))
+}
+
+/// Selected chat/Responses call, including checked JSON-encoded argument handling.
+pub(crate) fn tool_call_view(call: crate::json::JsonView<'_>) -> anyhow::Result<Block> {
+    use crate::harness::store::document::Fields;
+    let fields = Fields::parse(call, &["id", "call_id", "name", "arguments", "function"])?;
+    let function = fields
+        .as_ref()
+        .and_then(|f| f.get("function"))
+        .map(|v| Fields::parse(v, &["name", "arguments"]))
+        .transpose()?
+        .flatten();
+    let get = |key| {
+        function
+            .as_ref()
+            .and_then(|f| f.get(key))
+            .or_else(|| fields.as_ref().and_then(|f| f.get(key)))
+    };
+    let name = get("name")
+        .map(|v| v.resolve().map(|v| v.as_str().unwrap_or("").to_owned()))
+        .transpose()?
+        .unwrap_or_default();
+    let id = match &fields {
+        Some(fields) => {
+            if fields.get("id").is_some() {
+                fields.string("id")?
+            } else {
+                fields.string("call_id")?
+            }
+        }
+        None => None,
+    }
+    .unwrap_or_default();
+    let input = match get("arguments") {
+        Some(v) => v.encoded_argument()?,
+        None => Value::Object(Default::default()).into(),
+    };
+    Ok(Block::ToolUse {
+        id,
+        name,
+        input,
+        namespace: None,
+    })
+}
+
 /// One part → one [`Block`]. Any part carrying a string `text` is text (`text`, `input_text`,
 /// `output_text`, `summary_text`, …); the image types become an [`Block::Image`] reference; a
 /// reasoning part (when the dialect has one) a [`Block::Thinking`]; Kimi's `audio_url`/`video_url`
