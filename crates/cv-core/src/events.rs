@@ -380,7 +380,7 @@ pub fn file_size(path: &Path) -> i64 {
 
 /// Compatibility entry point for the former size-only freshness policy. No source can safely
 /// ignore a changed mtime merely because its size is unchanged: an edit can preserve length.
-/// Incremental stores now use [`crate::offsets::sig_is_fresh`].
+/// Incremental stores now use [`crate::offsets::sig_is_fresh_with_source`].
 pub fn size_primary_freshness(_r: &SessionRef) -> bool {
     false
 }
@@ -599,12 +599,18 @@ mod db {
 
     /// The event-catalog freshness predicate over a stored `(mtime_ns, size)` stamp, shared with
     /// FTS. Both must match, including for append logs: a same-size edit is still a change.
-    /// A missing stored size (a pre-`size` catalog row) or a 0 size (unreadable file) is never
-    /// fresh, so those re-ingest — best-effort-cache semantics: errors mean re-ingest, never skip.
-    fn sync_fresh(_r: &SessionRef, stored: Option<(i64, Option<i64>)>, mtime_ns: i64, size: i64) -> bool {
+    /// A missing stored size (a pre-`size` catalog row) never matches. A real empty file
+    /// requires the captured source guard, just like a nonempty file; missing/old guards miss.
+    fn sync_fresh(
+        stored: Option<(i64, Option<i64>)>,
+        mtime_ns: i64,
+        size: i64,
+        source_fresh: impl FnOnce() -> bool,
+    ) -> bool {
         stored.is_some_and(|(stored_mtime, stored_size)| {
-            stored_size
-                .is_some_and(|stored_size| crate::offsets::sig_is_fresh((stored_mtime, stored_size), (mtime_ns, size)))
+            stored_size.is_some_and(|stored_size| {
+                crate::offsets::sig_is_fresh_with_source((stored_mtime, stored_size), (mtime_ns, size), source_fresh)
+            })
         })
     }
 
@@ -635,8 +641,9 @@ mod db {
             // their actual append file; keep the legacy signature without mixing two sources.
             probe.snapshot_from(r, &primary)
         };
-        !sync_fresh(r, stored, source.primary.0, source.primary.1)
-            || !crate::source::Table::load("events").fresh(r, source.primary, &source.dependencies)
+        !sync_fresh(stored, source.primary.0, source.primary.1, || {
+            crate::source::Table::load("events").fresh(r, source.primary, &source.dependencies)
+        })
     }
 
     /// The whole `event_sync` skip-table, loaded with **one** connection + query, for bulk passes
@@ -718,10 +725,10 @@ mod db {
                 r.id.clone(),
                 r.path.to_string_lossy().into_owned(),
             );
-            !sync_fresh(r, rows.get(&key).copied(), source.primary.0, source.primary.1)
-                || !self
-                    .dependencies
+            !sync_fresh(rows.get(&key).copied(), source.primary.0, source.primary.1, || {
+                self.dependencies
                     .fresh_with_probe(r, source.primary, &source.dependencies, probe)
+            })
         }
     }
 
@@ -1624,6 +1631,58 @@ mod tests {
         }];
         let ev = extract(&m, 0, None).unwrap();
         assert!(ev[0].detail.as_ref().unwrap().chars().count() <= DETAIL_MAX);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn guarded_empty_events_reuse_requires_known_size_and_source_identity() {
+        let world = cv_testkit::World::in_process("events-empty");
+        let path = world.cv_home.join("empty.jsonl");
+        std::fs::write(&path, []).unwrap();
+        let r = SessionRef::new("empty", crate::Harness::Claude, &path);
+        assert_eq!(ingest_ref(&r).unwrap(), 0);
+        assert!(!needs_ingest(&r, file_mtime_ns(&path)));
+        assert!(!SyncTable::load().needs_ingest(&r, file_mtime_ns(&path), 0));
+        let conn = crate::catalog::open_db().unwrap();
+        conn.execute("UPDATE event_sync SET size=NULL WHERE id='empty'", [])
+            .unwrap();
+        assert!(
+            needs_ingest(&r, file_mtime_ns(&path)),
+            "historical unknown size still misses"
+        );
+        ingest_ref(&r).unwrap();
+        conn.execute("DELETE FROM source_dependencies WHERE consumer='events'", [])
+            .unwrap();
+        assert!(
+            needs_ingest(&r, file_mtime_ns(&path)),
+            "missing captured authority still misses"
+        );
+        ingest_ref(&r).unwrap();
+        let text: String = conn
+            .query_row(
+                "SELECT stamp FROM source_dependencies WHERE consumer='events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_str(&text).unwrap();
+        legacy["version"] = 2.into();
+        legacy.as_object_mut().unwrap().remove("primary");
+        conn.execute(
+            "UPDATE source_dependencies SET stamp=?1 WHERE consumer='events'",
+            [legacy.to_string()],
+        )
+        .unwrap();
+        assert!(
+            needs_ingest(&r, file_mtime_ns(&path)),
+            "old source stamps cannot authorize empty reuse"
+        );
+        ingest_ref(&r).unwrap();
+        std::fs::write(&path, "\n").unwrap();
+        assert!(needs_ingest(&r, file_mtime_ns(&path)), "empty file growth is stale");
+        ingest_ref(&r).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(needs_ingest(&r, 0), "missing primary cannot match");
     }
 
     /// End-to-end against a real temp catalog db: stream a claude JSONL fixture through

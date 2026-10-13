@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Indexing skips unchanged empty transcripts when captured source guards are fresh; missing files and historical unknown signatures still invalidate.
+
 - Prune resolves linked tool inputs without materializing unrelated earlier assistant content, preserving metadata and sidecar fidelity.
 
 - JSON listings with `--limit 0` return an empty array after argument validation without loading inventory, querying indexes, or enriching transcripts.

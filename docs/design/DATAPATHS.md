@@ -3270,3 +3270,22 @@ unchanged cases were not rerun. No Rust build, new case/matrix, timing or physic
 was added. The paired control is preserved at
 `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/prune-linked-revival-ci-control.json`;
 its exact fixture is reproducible with the checked-in operation gate generator.
+
+### Guarded empty-source index freshness (2026-10-13)
+
+The frozen fleet composition control found eight Kimi sessions with real empty primary wire
+files: nonzero mtime, size zero and fresh version-3 primary identity guards. The tuple-only
+`offsets::sig_is_fresh` conservatively rejects zero size, which made FTS and event planning
+reread them despite complete source authority. FTS/event consumers now use a guarded tuple
+comparison; the old tuple-only API remains conservative. No schema or interpretation changes
+are needed. Missing/old source guards, historical NULL event sizes, unreadable `(0, 0)` tuples
+and changed/replaced sources still miss. Source guard evaluation remains lazy after a tuple
+match, preserving the changed-source path's avoided metadata work.
+
+The focused production Kimi `sweep` control seeds a native-layout empty primary and repeats
+unchanged: zero changed sessions, callbacks, document writes, body bytes and writer opens.
+Growth, return to empty and Unix same-tuple replacement each reindex; subsequent unchanged
+sweep again has zero work and matches an independent full sweep's events/count observations.
+Core event controls cover NULL historical size, missing/legacy authority and source removal.
+These are work/acceptance controls, not timing or physical-I/O measurements; the separate
+frozen-fleet lane owns the final composed fleet repeat.

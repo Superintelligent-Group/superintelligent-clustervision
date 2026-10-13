@@ -677,10 +677,13 @@ impl SweepPlanner<'_> {
                 &source.dependencies,
                 &mut probe,
             );
-            let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size)
-                && dependencies_fresh
-                && dependencies.primary_fresh(r, &source.dependencies)
-                && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &Default::default()));
+            let fts_fresh = fts_is_fresh(
+                r,
+                existing.get(&r.id),
+                mtime,
+                size,
+                dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies),
+            ) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &Default::default()));
             let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
             if fts_fresh && !events && affordances.counts_with_probe(r, &source, &mut probe).is_some() {
@@ -722,10 +725,13 @@ impl SweepPlanner<'_> {
                         agent_id: Some(sub.agent_id().to_string()),
                         workflow: sub.workflow.clone(),
                     };
-                    let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size)
-                        && dependencies_fresh
-                        && dependencies.primary_fresh(sr, &source.dependencies)
-                        && metadata.get(&sr.id) == Some(&DiscoveryMetadata::new(sr, &prov));
+                    let fts_fresh = fts_is_fresh(
+                        sr,
+                        existing.get(&sr.id),
+                        mtime,
+                        size,
+                        dependencies_fresh && dependencies.primary_fresh(sr, &source.dependencies),
+                    ) && metadata.get(&sr.id) == Some(&DiscoveryMetadata::new(sr, &prov));
                     let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
                     if fts_fresh && !events {
                         continue;
@@ -1995,12 +2001,16 @@ impl cv_core::MessageSink for ChunkSink<'_> {
 
 /// Whether an indexed session is FTS-fresh given its stored `(mtime, size)` and the current file
 /// signature. Both must match, including for append logs: a same-size edit is still a change.
-/// A `size` of 0 (unreadable file) is never fresh,
-/// mirroring [`cv_core::offsets`]'s `(0, 0)` semantics. An entry is present only when a doc carried a
-/// size; a pre-`size` index never reaches here (it's rebuilt by [`open_or_create`]), so an unknown
-/// size is correctly treated as not-fresh rather than skipped.
-fn fts_is_fresh(_r: &cv_core::SessionRef, stored: Option<&(i64, i64)>, mtime: i64, size: i64) -> bool {
-    stored.is_some_and(|&stored| cv_core::offsets::sig_is_fresh(stored, (mtime, size)))
+/// A real empty file requires fresh captured source authority. Unreadable `(0, 0)` tuples
+/// and missing/legacy guards still miss. Pre-`size` indexes rebuild in [`open_or_create`].
+fn fts_is_fresh(
+    _r: &cv_core::SessionRef,
+    stored: Option<&(i64, i64)>,
+    mtime: i64,
+    size: i64,
+    source_fresh: bool,
+) -> bool {
+    stored.is_some_and(|&stored| cv_core::offsets::sig_is_fresh_with_source(stored, (mtime, size), || source_fresh))
 }
 
 /// `id → (mtime, size)` for every live doc (the incremental skip-set), plus the set of ids that
@@ -4019,6 +4029,52 @@ mod tests {
     }
 
     #[test]
+    fn guarded_empty_kimi_sweep_skips_without_parse_or_writer_work() {
+        let _home = IsolatedHome::new();
+        let (dir, base) = (tmpdir(), tmpdir());
+        let session = base.join("empty-kimi");
+        std::fs::create_dir(&session).unwrap();
+        let path = session.join("context.jsonl");
+        std::fs::write(&path, []).unwrap();
+        let r = cv_core::SessionRef::new("empty-kimi", cv_core::Harness::Kimi, &session);
+        let cold = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((cold.changed, cold.errors), (1, 0));
+        let before = observe(&dir, std::slice::from_ref(&r), &[]);
+        let warm = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((warm.changed, warm.errors, warm.work), (0, 0, SweepWork::default()));
+        assert_eq!(before, observe(&dir, std::slice::from_ref(&r), &[]));
+        std::fs::write(&path, "\n").unwrap();
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 1);
+        #[cfg(unix)]
+        {
+            let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let replacement = session.join("replacement");
+            std::fs::write(&replacement, []).unwrap();
+            std::fs::File::open(&replacement)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(mtime))
+                .unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            assert_eq!(
+                sweep(&dir, vec![r.clone()], false, false).unwrap().changed,
+                1,
+                "same-tuple replacement misses identity guard"
+            );
+        }
+        let warm = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((warm.changed, warm.work), (0, SweepWork::default()));
+        assert_eq!(
+            observe(&dir, std::slice::from_ref(&r), &[]),
+            whole_sweep(std::slice::from_ref(&r), &[])
+        );
+        for path in [dir, base] {
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
     fn incremental_skips_unchanged_and_reaps_missing() {
         let _home = IsolatedHome::new();
         let dir = tmpdir();
@@ -4148,15 +4204,17 @@ mod tests {
             message_count: 1,
         };
 
-        assert!(fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 8192));
-        assert!(!fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0));
-        assert!(!fts_is_fresh(&append_only, None, 111, 4096));
+        assert!(fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 222, 4096, true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 8192, true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, false));
+        assert!(fts_is_fresh(&append_only, Some(&(111, 0)), 111, 0, true));
+        assert!(!fts_is_fresh(&append_only, Some(&(111, 4096)), 111, 4096, false));
+        assert!(!fts_is_fresh(&append_only, None, 111, 4096, true));
 
-        assert!(fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 4096));
-        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 222, 4096));
-        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 8192));
+        assert!(fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 4096, true));
+        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 222, 4096, true));
+        assert!(!fts_is_fresh(&non_append, Some(&(111, 4096)), 111, 8192, true));
     }
 
     #[test]
