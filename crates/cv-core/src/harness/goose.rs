@@ -125,6 +125,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod legacy;
 mod project;
 use project::{decode_content_view, project_metadata};
 
@@ -808,49 +809,9 @@ fn list_legacy(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Read just the header line of a legacy `.jsonl` for a cheap [`SessionRef`].
+/// Project the metadata header and conversational count without retaining raw message lines.
 fn discover_legacy(name: &str, path: &Path) -> Option<SessionRef> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let header: Value = lines
-        .next()
-        .and_then(|l| serde_json::from_str(l).ok())
-        .unwrap_or(Value::Null);
-    // The contract count (`SessionRef::message_count`): user + assistant turns, with a user line
-    // that is only tool results read as the Tool turn `stream_legacy` makes of it.
-    let count = lines
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|m| {
-            let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
-            let only_tool_results = m.get("content").and_then(Value::as_array).is_some_and(|items| {
-                !items.is_empty()
-                    && items
-                        .iter()
-                        .all(|i| i.get("type").and_then(Value::as_str) == Some("toolResponse"))
-            });
-            matches!(role, "user" | "assistant") && !only_tool_results
-        })
-        .count();
-    let title = header
-        .get("description")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| crate::ir::truncate(s, 80));
-    let cwd = header
-        .get("working_dir")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-    Some(SessionRef {
-        id: name.to_string(),
-        harness: Harness::Goose,
-        path: path.to_path_buf(),
-        cwd,
-        title,
-        created_at: header.get("created_at").and_then(parse_ts_value),
-        updated_at: header.get("updated_at").and_then(parse_ts_value),
-        message_count: count,
-    })
+    legacy::discover(name, path)
 }
 
 fn stream_legacy(name: &str, path: &Path, sink: &mut dyn MessageSink) -> Result<Session> {

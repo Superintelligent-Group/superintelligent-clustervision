@@ -442,7 +442,7 @@ impl RangeSource {
     #[cfg(not(feature = "mmap"))]
     pub fn valid_utf8(&self, range: Range) -> Result<bool> {
         self.check_identity()?;
-        let result = utf8(&mut self.cursor(range)?);
+        let result = super::super::jsonl::ranges::valid_utf8(&mut self.cursor(range)?);
         self.check_identity()?;
         Ok(result?)
     }
@@ -470,7 +470,7 @@ impl RangeSource {
             }
             return Ok(false);
         }
-        let valid = utf8(&mut self.cursor(range)?)?;
+        let valid = super::super::jsonl::ranges::valid_utf8(&mut self.cursor(range)?)?;
         self.check_identity()?;
         Ok(valid)
     }
@@ -737,42 +737,6 @@ impl RangeSource {
             }
         }
         Ok(found)
-    }
-}
-
-/// Whole-range UTF-8 validates ignored/discarded fields too. At most one incomplete scalar is
-/// carried over a window boundary; outside-string non-ASCII is already rejected by grammar.
-fn utf8(cursor: &mut Cursor<'_>) -> io::Result<bool> {
-    let mut pending = [0; 4];
-    let mut len = 0;
-    loop {
-        let bytes = cursor.fill_buf()?;
-        if bytes.is_empty() {
-            return Ok(len == 0);
-        }
-        let mut start = 0;
-        while len > 0 && start < bytes.len() {
-            pending[len] = bytes[start];
-            len += 1;
-            start += 1;
-            match std::str::from_utf8(&pending[..len]) {
-                Ok(_) => len = 0,
-                Err(e) if e.error_len().is_none() && len < 4 => {}
-                Err(_) => return Ok(false),
-            }
-        }
-        if start < bytes.len() {
-            if let Err(e) = std::str::from_utf8(&bytes[start..]) {
-                if e.error_len().is_some() {
-                    return Ok(false);
-                }
-                let tail = &bytes[start + e.valid_up_to()..];
-                pending[..tail.len()].copy_from_slice(tail);
-                len = tail.len();
-            }
-        }
-        let n = bytes.len();
-        cursor.consume(n);
     }
 }
 

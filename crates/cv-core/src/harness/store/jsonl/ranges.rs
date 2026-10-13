@@ -243,6 +243,42 @@ pub(crate) fn read_exact_at(file: &fs::File, mut bytes: &mut [u8], mut at: u64) 
     }
     Ok(())
 }
+/// Whole-range UTF-8 validates ignored/discarded fields too. At most one incomplete scalar is
+/// carried over a window boundary; JSON callers independently validate their grammar.
+pub(crate) fn valid_utf8(cursor: &mut impl BufRead) -> io::Result<bool> {
+    let mut pending = [0; 4];
+    let mut len = 0;
+    loop {
+        let bytes = cursor.fill_buf()?;
+        if bytes.is_empty() {
+            return Ok(len == 0);
+        }
+        let mut start = 0;
+        while len > 0 && start < bytes.len() {
+            pending[len] = bytes[start];
+            len += 1;
+            start += 1;
+            match std::str::from_utf8(&pending[..len]) {
+                Ok(_) => len = 0,
+                Err(e) if e.error_len().is_none() && len < 4 => {}
+                Err(_) => return Ok(false),
+            }
+        }
+        if start < bytes.len() {
+            if let Err(e) = std::str::from_utf8(&bytes[start..]) {
+                if e.error_len().is_some() {
+                    return Ok(false);
+                }
+                let tail = &bytes[start + e.valid_up_to()..];
+                pending[..tail.len()].copy_from_slice(tail);
+                len = tail.len();
+            }
+        }
+        let n = bytes.len();
+        cursor.consume(n);
+    }
+}
+
 pub(crate) struct Records<'a> {
     reader: BufReader<Reader<'a>>,
     at: u64,
@@ -253,12 +289,10 @@ pub(crate) struct Records<'a> {
 impl Records<'_> {
     /// Optionally retain small physical records during framing, avoiding a second positioned
     /// read. Above this fixed cap the scratch is cleared; giant records remain only ranges.
-    #[cfg(not(feature = "mmap"))]
     pub(crate) fn keep_small_records(&mut self, limit: usize) {
         self.small = Vec::with_capacity(limit);
         self.small_limit = limit;
     }
-    #[cfg(not(feature = "mmap"))]
     pub(crate) fn small_record(&self) -> Option<&[u8]> {
         self.small_complete.then_some(&self.small)
     }
