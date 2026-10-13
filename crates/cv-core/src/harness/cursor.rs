@@ -153,7 +153,13 @@ impl Adapter for Cursor {
 
         if let Some(db) = self.global_db() {
             if let Ok(conn) = open_ro(&db) {
-                discover_global(&conn, &db, &cwd_map, &mut out);
+                if let Ok(rows) = conn.read(|conn| {
+                    let mut rows = Vec::new();
+                    discover_global(conn, &db, &cwd_map, &mut rows);
+                    Ok(rows)
+                }) {
+                    out.extend(rows);
+                }
             }
         }
 
@@ -165,7 +171,13 @@ impl Adapter for Cursor {
             }
             let cwd = workspace_cwd(&ws);
             if let Ok(conn) = open_ro(&db) {
-                discover_legacy_workspace(&conn, &db, cwd.as_deref(), &mut out);
+                if let Ok(rows) = conn.read(|conn| {
+                    let mut rows = Vec::new();
+                    discover_legacy_workspace(conn, &db, cwd.as_deref(), &mut rows);
+                    Ok(rows)
+                }) {
+                    out.extend(rows);
+                }
             }
         }
         if let Some(home) = &self.cli_home {
@@ -177,17 +189,24 @@ impl Adapter for Cursor {
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // `path` is the DB the thread lives in. Legacy refs carry a `legacy:` id prefix.
+            for suffix in ["-wal", "-journal"] {
+                let mut path = r.path.as_os_str().to_os_string();
+                path.push(suffix);
+                sink.dependency(&PathBuf::from(path));
+            }
             let conn = open_ro(&r.path)?;
-            if r.id.starts_with("cli:") {
-                return cli::stream(&conn, r, opts, sink);
-            }
-            if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
-                return stream_legacy(&conn, r, legacy_id, sink);
-            }
-            if opts.spans && !opts.wants_full_extra() {
-                return selected::global(&conn, r, sink);
-            }
-            stream_global(&conn, r, sink)
+            conn.read(|conn| {
+                if r.id.starts_with("cli:") {
+                    return cli::stream(conn, r, opts, sink);
+                }
+                if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
+                    return stream_legacy(conn, r, legacy_id, sink);
+                }
+                if opts.spans && !opts.wants_full_extra() {
+                    return selected::global_with_reads(conn, r, conn.reads(), sink);
+                }
+                stream_global(conn, r, sink)
+            })
         })
     }
 }
@@ -205,10 +224,10 @@ impl Cursor {
                 continue;
             };
             let Ok(conn) = open_ro(&db) else { continue };
-            let Some(raw) = item_table_get(&conn, "composer.composerData") else {
-                continue;
-            };
-            let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+            let Ok(Some(v)) = conn.read(|conn| {
+                Ok(item_table_get(conn, "composer.composerData")
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()))
+            }) else {
                 continue;
             };
             if let Some(all) = v.get("allComposers").and_then(Value::as_array) {

@@ -5,12 +5,22 @@ use crate::json::{Json, JsonSource, JsonView};
 use crate::lazy::Text;
 use std::sync::Arc;
 
+#[cfg(test)]
 pub(super) fn global(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
+    global_with_reads(conn, r, &crate::source::ReadSet::default(), sink)
+}
+
+pub(super) fn global_with_reads(
+    conn: &Connection,
+    r: &SessionRef,
+    original_reads: &crate::source::ReadSet,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
     let mut wal = r.path.as_os_str().to_os_string();
     wal.push("-wal");
     let wal = PathBuf::from(wal);
     sink.dependency(&wal);
-    let mut reads = crate::source::ReadSet::default();
+    let mut reads = original_reads.clone();
     reads.record(&wal);
     let captured = JsonSource::capture_with_reads(&r.path, &reads)?;
     let arena = Arc::new(ByteSource::arena()?);
@@ -615,6 +625,43 @@ mod tests {
             assert!(stream_global(&conn, &r, &mut CollectSink::default()).is_err());
             assert!(global(&conn, &r, &mut CollectSink::default()).is_err());
         }
+    }
+    #[test]
+    fn cold_wal_adapter_preserves_original_sidecars_and_journal_guard() {
+        let world = cv_testkit::World::in_process("cursor-ide-cold-wal");
+        let root = json!({"conversation":[{"type":1,"text":"日本語\n".repeat(4096)}]});
+        let (conn, r) = fixture(&world.base, &root.to_string(), &[]);
+        conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+        drop(conn);
+        let wal = r.path.with_file_name("state.vscdb-wal");
+        let shm = r.path.with_file_name("state.vscdb-shm");
+        let journal = r.path.with_file_name("state.vscdb-journal");
+        assert!(!wal.exists() && !shm.exists());
+        let adapter = Cursor::with_user_dir(&world.base);
+        let retained = crate::stream::collect_with(&adapter, &r, &ParseOptions::facts()).unwrap();
+        assert!(!wal.exists() && !shm.exists());
+        let Block::Text {
+            text: Text::Source(text),
+        } = &retained.messages[0].content[0]
+        else {
+            panic!("source text required")
+        };
+        std::fs::write(&journal, b"changed journal").unwrap();
+        assert!(text.try_prefix(10).is_err());
+        std::fs::remove_file(&journal).unwrap();
+        struct Stop(PathBuf);
+        impl MessageSink for Stop {
+            fn message(&mut self, _: Message) -> Flow {
+                std::fs::write(&self.0, b"changed journal").unwrap();
+                Flow::Stop
+            }
+        }
+        assert!(adapter
+            .stream(&r, &ParseOptions::bulk(), &mut Stop(journal))
+            .unwrap_err()
+            .to_string()
+            .contains("dependencies changed"));
+        assert!(!wal.exists() && !shm.exists());
     }
     #[test]
     fn ide_facts_guard_later_demands_and_intentional_stop() {

@@ -22,10 +22,17 @@ pub(super) fn discover(home: &Path, out: &mut Vec<SessionRef>) {
             }
             let path = entry.path();
             let Ok(conn) = open_ro(path) else { continue };
-            let result = (|| -> Result<SessionRef> {
+            let result = conn.read(|conn| -> Result<SessionRef> {
                 let mut collector = Count::default();
                 let r = SessionRef::new("cli:", Harness::Cursor, path);
-                let session = read(&conn, &r, &ParseOptions::default(), true, &mut collector)?;
+                let session = read_with_reads(
+                    conn,
+                    &r,
+                    &ParseOptions::default(),
+                    true,
+                    Some(conn.reads()),
+                    &mut collector,
+                )?;
                 Ok(SessionRef {
                     id: session.id,
                     cwd: session.cwd,
@@ -35,7 +42,7 @@ pub(super) fn discover(home: &Path, out: &mut Vec<SessionRef>) {
                     message_count: collector.count,
                     ..r
                 })
-            })();
+            });
             if let Ok(reference) = result {
                 // An empty or uninitialized native store is not a conversation.
                 if reference.message_count > 0 {
@@ -65,19 +72,31 @@ impl MessageSink for Count {
 }
 
 pub(super) fn stream(
-    conn: &Connection,
+    conn: &crate::harness::store::sqlite::ReadConnection,
     r: &SessionRef,
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    read(conn, r, opts, false, sink)
+    read_with_reads(conn, r, opts, false, Some(conn.reads()), sink)
 }
 
+#[cfg(test)]
 fn read(
     conn: &Connection,
     r: &SessionRef,
     opts: &ParseOptions,
     counting: bool,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    read_with_reads(conn, r, opts, counting, None, sink)
+}
+
+fn read_with_reads(
+    conn: &Connection,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    counting: bool,
+    original_reads: Option<&crate::source::ReadSet>,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
     // Cursor's fact reducers consume native summary/context/error markers through the IR;
@@ -86,7 +105,7 @@ fn read(
     let captured = if counting || lazy {
         // Capture the compound provenance before the first SQL read establishes its snapshot.
         // A checkpoint can leave the DB tuple unchanged while the WAL or optional ACP head changes.
-        let mut reads = crate::source::ReadSet::default();
+        let mut reads = original_reads.cloned().unwrap_or_default();
         let mut wal = r.path.as_os_str().to_os_string();
         wal.push("-wal");
         reads.record(&PathBuf::from(wal));
@@ -802,6 +821,45 @@ mod tests {
         (disk, reference)
     }
     #[test]
+    fn cold_wal_adapter_preserves_original_sidecars_and_journal_guard() {
+        let world = cv_testkit::World::in_process("cursor-cli-cold-wal");
+        let record = json!({"role":"user","content":"日本語\n".repeat(4096)})
+            .to_string()
+            .into_bytes();
+        let (conn, r) = disk_fixture(field(1, &[1; 32]), &[(1, record)], &world.base.join("source"));
+        conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+        drop(conn);
+        let wal = r.path.with_file_name("store.db-wal");
+        let shm = r.path.with_file_name("store.db-shm");
+        let journal = r.path.with_file_name("store.db-journal");
+        assert!(!wal.exists() && !shm.exists());
+        let adapter = Cursor::with_cli_home(&world.base);
+        let retained = crate::stream::collect_with(&adapter, &r, &ParseOptions::facts()).unwrap();
+        assert!(!wal.exists() && !shm.exists());
+        let Block::Text {
+            text: crate::lazy::Text::Source(text),
+        } = &retained.messages[0].content[0]
+        else {
+            panic!("source text required")
+        };
+        std::fs::write(&journal, b"changed journal").unwrap();
+        assert!(text.try_prefix(10).is_err());
+        std::fs::remove_file(&journal).unwrap();
+        struct Stop(PathBuf);
+        impl MessageSink for Stop {
+            fn message(&mut self, _: Message) -> Flow {
+                std::fs::write(&self.0, b"changed journal").unwrap();
+                Flow::Stop
+            }
+        }
+        assert!(adapter
+            .stream(&r, &ParseOptions::bulk(), &mut Stop(journal))
+            .unwrap_err()
+            .to_string()
+            .contains("dependencies changed"));
+        assert!(!wal.exists() && !shm.exists());
+    }
+    #[test]
     fn selected_large_fields_match_owned_messages_and_dataset() {
         let world = cv_testkit::World::in_process("cursor-cli-selected");
         let big = "日本語\n".repeat(4096);
@@ -940,12 +998,10 @@ mod tests {
                     }
                 ));
             } else {
-                assert!(
-                    retained.messages[1]
-                        .harness_extra(Harness::Cursor)
-                        .unwrap()
-                        .contains_key("record_metadata")
-                );
+                assert!(retained.messages[1]
+                    .harness_extra(Harness::Cursor)
+                    .unwrap()
+                    .contains_key("record_metadata"));
             }
             sessions.push(session);
         }
@@ -959,12 +1015,10 @@ mod tests {
         complete.complete = true;
         let mut retained = CollectSink::default();
         read(&conn, &reference, &complete, false, &mut retained).unwrap();
-        assert!(
-            retained.messages[1]
-                .harness_extra(Harness::Cursor)
-                .unwrap()
-                .contains_key("record")
-        );
+        assert!(retained.messages[1]
+            .harness_extra(Harness::Cursor)
+            .unwrap()
+            .contains_key("record"));
     }
     #[test]
     fn wal_guard_survives_lazy_blob_arguments_and_intentional_stop() {
