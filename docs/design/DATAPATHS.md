@@ -3758,3 +3758,37 @@ One actual Claude→Cline Native export of ordinary 32 MiB text freezes all thre
 The frozen owned-writer oracle covers both Cline and Roo across Native/Text/Drop modes: roles and result filtering, signed/redacted/empty thinking, Unicode/escaped text, images/documents, first-user title/cwd injection and exact pretty field order. Native and portable scoped tests and clippy pass. Guarded Text/Json failure preserves all preexisting destination files because checked history production and flush finish before destination opening. Shared publication retains link/permission and ordinary partial-I/O behavior; metadata or later I/O failure is not claimed atomic. Requested output still uses private staging and a publication copy; message/metadata cardinality and oversized demanded owned metadata remain explicit costs. No CPU or physical-memory claim follows from these allocator controls.
 
 Preserved baseline/candidate probe reports, files and hashes live in `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/cline-export/` (`baseline-heap.json`, `candidate-heap.json`, corresponding stdout reports, `baseline-files.json`, and `baseline`/`candidate` outputs). The unchanged source is `/Users/ember/dev/cv-worktrees/excellence-evidence/gemini-export-control/32MiB/source.jsonl`; the reusable gate creates the same frozen bytes without depending on that private path.
+
+### Checked Gemini complete rehome (2026-10-13, Sol/opencode_parts)
+
+Actual Gemini→Gemini Native parse_for_emit → checked write → fidelity read-back previously
+owned ordinary payloads despite the checked emitter. With three messages and fixed small
+metadata, legacy JSON 8/32 MiB body controls peaked at 16,785,140/67,116,794 B of live Rust heap;
+modern JSONL peaked at 16,786,608/67,118,262 B. The complete recording projection now retains
+checked payloads, using the existing legacy and replay readers rather than a new codec. Final
+peaks are 277,122/277,128 B (legacy) and 277,124/277,130 B (modern), with cumulative requested
+allocations about 0.741/0.746 MB instead of 17.4/67.8 MB. All source hashes, three messages,
+empty fidelity reports and frozen output bytes match after replacing only generated top-level
+message UUIDs. Evidence and the frozen preceding binary live outside the repository in
+/Users/ember/dev/cv-worktrees/gemini-rehome-evidence/{baseline,checked}.json.
+
+Default public complete parsing remains owned. Explicit complete+spans uses the same accepted
+recording metadata and payload projections as full+spans; Gemini's existing codec does not add
+unknown-record carrier bags for complete mode. The change preserves that behavior, including
+unknown record classification and native fields. Unsupported checkpoint/log shapes and typed
+legacy-wrapper compatibility fallbacks remain owned. No Gemini checkpoint format or logical
+counts interpretation changes. Source/dependency capture uses the existing checked preparation
+and consumers retain original freshness guards. This is a selected ordinary-body allocation
+claim, not a universal complete-metadata, CPU, RSS or I/O bound.
+
+Native and portable exact serialized-IR/wire/report controls cover legacy and modern recording
+metadata, per-message model/usage, subagent IDs, thought/call de-duplication, paired/composite/
+nonstring tool output, notices, unknown types, $set replacement, rewind, duplicate keys and late
+invalid records. Changed-source failures preserve existing destinations for direct emission and
+emit_report. Existing Gemini fixtures, acceptance and replay controls also exercise explicit
+checked complete mode. The native/portable Gemini suites pass 36/37 scoped tests, the new complete
+preparation oracle passes in both configurations, and library clippy passes both configurations.
+The persistent modern 32 MiB rehome gate uses the existing 4 MiB cap and frozen all-output digest
+db3bc67dc2b670cc5d61ec397ff43f6114c7863c6fd51e35f784f91bd19bb3c7; it peaks at 277,396 B,
+retains three generated message IDs and validates all 33,555,466 output bytes. Eleven operation
+driver unit controls pass. Output-sized private staging and metadata/cardinality costs remain.

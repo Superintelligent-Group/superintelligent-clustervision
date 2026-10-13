@@ -4,6 +4,7 @@
 
 - Prune streams malformed JSON rows without owning their bodies, preserving exact bytes and fatal invalid UTF-8 behavior.
 - Cline and Roo exports stream guarded Anthropic history, preserving native files and fidelity without whole-session payload copies.
+- Gemini rehomes stream complete recording payloads through checked preparation, preserving native metadata, replay semantics and source freshness.
 
 - MCP releases oversized request buffers between frames instead of retaining the largest request for the server lifetime.
 - Cold SQLite snapshots reclaim abandoned copies on later reads and after MCP child cancellation, preserving live readers and producer stores.

@@ -445,7 +445,7 @@ fn stream_legacy_json_recording(
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
     #[cfg(not(feature = "mmap"))]
-    if opts.spans && !opts.complete {
+    if opts.spans {
         return stream_legacy_views(path, harness, sink);
     }
     use serde::Deserialize;
@@ -471,9 +471,7 @@ fn stream_legacy_json_recording(
         kind: Option<std::borrow::Cow<'a, str>>,
     }
 
-    let source = (opts.spans && !opts.complete)
-        .then(|| crate::json::JsonSource::capture(path))
-        .transpose()?;
+    let source = opts.spans.then(|| crate::json::JsonSource::capture(path)).transpose()?;
     let arena = source
         .as_ref()
         .map(|_| super::store::bytes::ByteSource::arena().map(std::sync::Arc::new))
@@ -729,9 +727,7 @@ fn stream_jsonl_recording(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
-    let source = (opts.spans && !opts.complete)
-        .then(|| crate::json::JsonSource::capture(path))
-        .transpose()?;
+    let source = opts.spans.then(|| crate::json::JsonSource::capture(path)).transpose()?;
     let arena = source
         .as_ref()
         .map(|_| super::store::bytes::ByteSource::arena().map(std::sync::Arc::new))
@@ -807,7 +803,7 @@ fn stream_jsonl_recording(
     opts: &ParseOptions,
     sink: &mut dyn MessageSink,
 ) -> Result<Option<Session>> {
-    if opts.spans && !opts.complete {
+    if opts.spans {
         return stream_jsonl_ranges(path, harness, sink);
     }
     let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -2027,6 +2023,13 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
 
+    fn checked_complete() -> ParseOptions {
+        ParseOptions {
+            spans: true,
+            ..ParseOptions::complete()
+        }
+    }
+
     fn fixture(name: &str) -> String {
         let path = format!("{}/tests/fixtures/gemini/{}", env!("CARGO_MANIFEST_DIR"), name);
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
@@ -2143,6 +2146,7 @@ mod tests {
                 ParseOptions::full(),
                 ParseOptions::bulk(),
                 ParseOptions::complete(),
+                checked_complete(),
                 ParseOptions::lazy(),
                 ParseOptions::lazy_extra(),
             ] {
@@ -2150,9 +2154,8 @@ mod tests {
                 let inputs = json_inputs(&actual);
                 assert_eq!(inputs.len(), args.len() + 2);
                 for (i, input) in inputs.iter().enumerate() {
-                    let expected_source = opts.spans
-                        && !opts.complete
-                        && (i == args.len() || (i < args.len() && args[i].len() > crate::lazy::INLINE_MAX));
+                    let expected_source =
+                        opts.spans && (i == args.len() || (i < args.len() && args[i].len() > crate::lazy::INLINE_MAX));
                     assert_eq!(
                         matches!(input, crate::Json::Source(_)),
                         expected_source,
@@ -2635,18 +2638,19 @@ mod tests {
             "parse() must stay byte-identical to the pure parser for {name}"
         );
 
-        // Native stream → CollectSink must reassemble the same Session.
-        let mut sink = CollectSink::default();
-        let mut streamed = adapter
-            .stream(&r, &ParseOptions::full(), &mut sink)
-            .expect("on-disk stream");
-        assert!(streamed.messages.is_empty(), "stream returns empty messages");
-        streamed.messages = sink.messages;
-        assert_eq!(
-            as_json(&streamed),
-            as_json(&reference),
-            "stream() must reassemble the same Session for {name}"
-        );
+        // Native stream and explicit checked complete preparation retain the existing codec.
+        for opts in [ParseOptions::full(), ParseOptions::complete(), checked_complete()] {
+            let mut sink = CollectSink::default();
+            let mut streamed = adapter.stream(&r, &opts, &mut sink).expect("on-disk stream");
+            assert!(streamed.messages.is_empty(), "stream returns empty messages");
+            streamed.messages = sink.messages;
+            streamed.materialize().unwrap();
+            assert_eq!(
+                serde_json::to_vec(&streamed).unwrap(),
+                serde_json::to_vec(&reference).unwrap(),
+                "stream() must reassemble the same Session for {name}, {opts:?}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2745,7 +2749,12 @@ mod tests {
             let text = lines[..end].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
             fs::write(&file, &text).unwrap();
             let reference = parse_all_str(&text, Some(file.clone())).remove(0);
-            for opts in [ParseOptions::full(), ParseOptions::lazy(), ParseOptions::complete()] {
+            for opts in [
+                ParseOptions::full(),
+                ParseOptions::lazy(),
+                ParseOptions::complete(),
+                checked_complete(),
+            ] {
                 let mut sink = CollectSink::default();
                 let mut s = Gemini { roots: vec![] }
                     .stream(
@@ -2788,7 +2797,12 @@ mod tests {
             fs::write(&file, &text).unwrap();
             let reference = parse_all_str(&text, Some(file.clone())).remove(0);
             assert_eq!(reference.messages.len(), 2);
-            for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::full(),
+                ParseOptions::complete(),
+                checked_complete(),
+            ] {
                 let mut sink = CollectSink::default();
                 let mut streamed = stream_jsonl_recording(&file, Harness::Gemini, &opts, &mut sink)
                     .unwrap()
@@ -2806,7 +2820,12 @@ mod tests {
         );
         fs::write(&file, text).unwrap();
         let mut sessions = Vec::new();
-        for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+        for opts in [
+            ParseOptions::lazy(),
+            ParseOptions::full(),
+            ParseOptions::complete(),
+            checked_complete(),
+        ] {
             let mut sink = CollectSink::default();
             let mut streamed = stream_legacy_json_recording(&file, Harness::Gemini, &opts, &mut sink)
                 .unwrap()

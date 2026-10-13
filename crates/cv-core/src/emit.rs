@@ -501,9 +501,10 @@ pub fn prepare_selected(
     prepare::selected(adapter, reference, &options, start, end)
 }
 
-/// Parse at native emission fidelity. Claude/Codex retain guarded full or complete bodies;
-/// cross-harness Gemini/Cline/Roo retain guarded full bodies. Same-harness Gemini/Cline/Roo keep their complete
-/// owned compatibility path. Public full/complete parsing still owns bodies by default.
+/// Parse at native emission fidelity. Claude, Codex and Gemini retain guarded full or complete
+/// recording bodies; Cline/Roo use guarded full bodies for cross-harness emission. Unsupported
+/// shapes and other same-harness targets keep their owned compatibility paths. Public full and
+/// complete parsing still own bodies by default.
 pub fn parse_for_emit(
     adapter: &dyn crate::harness::Adapter,
     reference: &SessionRef,
@@ -514,8 +515,8 @@ pub fn parse_for_emit(
     } else {
         ParseOptions::full()
     };
-    let checked =
-        checked_target(target) && (reference.harness != target || matches!(target, Harness::Claude | Harness::Codex));
+    let checked = checked_target(target)
+        && (reference.harness != target || matches!(target, Harness::Claude | Harness::Codex | Harness::Gemini));
     if checked {
         options.spans = true;
     }

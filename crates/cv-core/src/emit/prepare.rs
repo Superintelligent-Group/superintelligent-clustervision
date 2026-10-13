@@ -368,6 +368,96 @@ mod tests {
     }
 
     #[test]
+    fn complete_gemini_preparation_matches_owned_recordings_replay_and_source_errors() -> Result<()> {
+        let world = cv_testkit::World::new("port-prepare-complete-gemini");
+        let chats = world.base.join("chats");
+        fs::create_dir_all(&chats)?;
+        let body = "escaped\n\" λ🌙".repeat(6000);
+        let meta = serde_json::json!({"sessionId":"source","projectHash":"project","startTime":"2026-10-12T12:00:00Z","lastUpdated":"2026-10-12T12:00:00Z","summary":"complete title","directories":["/synthetic/complete-gemini"],"kind":"subagent","future":{"ignored":true}});
+        let rows = vec![
+            serde_json::json!({"type":"user","id":"u","timestamp":"2026-10-12T12:00:00Z","content":[{"text":"small prompt"},{"inlineData":{"mimeType":"image/png","data":"small"}},{"fileData":{"mimeType":"text/plain","fileUri":"file:///synthetic/input"}}]}),
+            serde_json::json!({"type":"gemini","id":"a","timestamp":"2026-10-12T12:00:00Z","model":"first-model","tokens":{"input":11,"output":3,"cached":2},"content":[{"text":body},{"text":"duplicate thought","thought":true},{"functionCall":{"id":"call","name":"Read","args":{"duplicate":"suppressed"}}}],"thoughts":[{"subject":"subject","description":body}],"toolCalls":[{"id":"call","name":"Read","agentId":"child","args":{"blob":body},"status":"success","result":[{"text":body},{"functionResponse":{"response":{"output":body}}}]},{"id":"object","name":"custom","args":null,"status":"error","result":{"z":body,"a":1}}],"future":{"ignored":true}}),
+            serde_json::json!({"type":"user","id":"result-copy","content":[{"functionResponse":{"id":"call","name":"Read","response":{"output":body}}}]}),
+            serde_json::json!({"type":"warning","id":"warning","content":body}),
+            serde_json::json!({"type":"future-record","id":"future","content":"unknown record remains a native user turn","unknown":{"not_a_complete_carrier":true}}),
+            serde_json::json!({"type":"gemini","id":"other-model","model":"second-model","content":"final answer"}),
+        ];
+        let normalized = |path: &Path| -> Result<Vec<u8>> {
+            let mut raw = fs::read(path)?;
+            let value: Value = serde_json::from_slice(&raw)?;
+            for message in value["messages"].as_array().unwrap() {
+                let id = message["id"].as_str().unwrap();
+                anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "expected generated message UUID");
+                let text = String::from_utf8(raw)?;
+                raw = text.replace(id, "GENERATED-MESSAGE-ID").into_bytes();
+            }
+            Ok(raw)
+        };
+        let adapter = crate::harness::gemini::Gemini::detect();
+        for modern in [false, true] {
+            let path = chats.join(if modern {
+                "session-modern.jsonl"
+            } else {
+                "session-legacy.json"
+            });
+            let wire = if modern {
+                let discarded = serde_json::json!({"type":"user","id":"discard","content":"removed by rewind"});
+                format!("{meta}\n{{\"type\":\"user\",\"id\":\"old\",\"content\":\"replaced by set\"}}\n{}\n{discarded}\n{{\"$rewindTo\":\"discard\"}}\n{{\"$set\":{{\"summary\":\"patched title\",\"kind\":\"subagent\"}}}}\n{{\"type\":\"user\",\"id\":\"duplicate-old\",\"id\":\"duplicate-last\",\"content\":\"duplicate winner\"}}\n{{\"type\":\"user\",\"id\":\"invalid\",\"content\":\"must skip\",\"ignored\":\"\\ud800\"}}\n", serde_json::json!({"$set":{"messages":rows}}))
+            } else {
+                let mut object = meta.as_object().unwrap().clone();
+                object.insert("messages".into(), Value::Array(rows.clone()));
+                Value::Object(object).to_string()
+            };
+            fs::write(&path, &wire)?;
+            let reference = SessionRef::new("source", Harness::Gemini, &path);
+            let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+            assert!(expected
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .all(|b| !matches!(text(b), Some(Text::Span(_) | Text::Source(_)))));
+            let actual = super::super::parse_for_emit(&adapter, &reference, Harness::Gemini)?;
+            assert!(actual
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .any(|b| matches!(text(b), Some(Text::Source(_)))));
+            let mut materialized = actual.clone();
+            materialized.materialize()?;
+            assert_serialized_equal(&materialized, &expected)?;
+            for extra in [false, true] {
+                let options = ParseOptions {
+                    spans: true,
+                    extra,
+                    usage_identity: !extra,
+                    ..ParseOptions::complete()
+                };
+                let mut custom = crate::stream::collect_with(&adapter, &reference, &options)?;
+                custom.materialize()?;
+                assert_serialized_equal(&custom, &expected)?;
+            }
+            let options = EmitOptions {
+                new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                ..Default::default()
+            };
+            let owned_dir = world.base.join(if modern { "owned-modern" } else { "owned-legacy" });
+            let checked_dir = world
+                .base
+                .join(if modern { "checked-modern" } else { "checked-legacy" });
+            let (old, old_report) = super::super::emit_report(&expected, Harness::Gemini, &owned_dir, &options)?;
+            let (new, new_report) = super::super::emit_report(&actual, Harness::Gemini, &checked_dir, &options)?;
+            assert_eq!(normalized(&new.path)?, normalized(&old.path)?);
+            assert_eq!(serde_json::to_value(new_report)?, serde_json::to_value(old_report)?);
+            let before = fs::read(&new.path)?;
+            fs::write(&path, b"{}")?;
+            assert!(super::super::emit_report(&actual, Harness::Gemini, &checked_dir, &options).is_err());
+            assert!(super::super::emit(&actual, Harness::Gemini, &checked_dir, &options).is_err());
+            assert_eq!(fs::read(&new.path)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn actual_claude_preparation_retains_original_body_identity() -> Result<()> {
         let world = cv_testkit::World::new("port-prepare-claude");
         let path = world.base.join("session.jsonl");

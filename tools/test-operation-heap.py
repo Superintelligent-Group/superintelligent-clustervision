@@ -17,6 +17,11 @@ class BudgetTests(unittest.TestCase):
     def measured(peak):
         return dict(peak_above_baseline_bytes=peak, allocation_requests=100, requested_bytes=1 << 20)
 
+    def test_rejects_owned_same_gemini_rehome(self):
+        with self.assertRaises(AssertionError):
+            gate.checked_peak(dict(peak_above_baseline_bytes=67118262,
+                                   allocation_requests=1834, requested_bytes=67781518))
+
     def test_missing_or_invalid_counters_fail(self):
         for value in (None, {}, {"peak_above_baseline_bytes": None},
                       {"peak_above_baseline_bytes": True}, {"peak_above_baseline_bytes": -1},

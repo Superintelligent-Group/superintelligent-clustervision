@@ -397,6 +397,50 @@ def cline_port_gate(binary, root, env):
                           sha256=files["api_conversation_history.json"][1])), flush=True)
     shutil.rmtree(directory)
 
+
+def gemini_rehome_fixture(path):
+    """Modern recording; fixed metadata and one ordinary 32 MiB assistant body."""
+    stamp = "2026-10-12T12:00:00Z"
+    header = dict(sessionId="synthetic-source", projectHash="controlled-project",
+                  startTime=stamp, lastUpdated=stamp, summary="controlled complete title",
+                  directories=["/synthetic/gemini-rehome"], kind="subagent",
+                  unknown=dict(kept_by_native_reader=False))
+    messages = [dict(id="u", type="user", timestamp=stamp, content="small prompt"),
+                dict(id="a", type="gemini", timestamp=stamp,
+                     content="ordinary native text " + "x" * (32 * MIB - 21),
+                     model="controlled-model", tokens=dict(input=11, output=3),
+                     unknown=dict(ignored=True)),
+                dict(id="w", type="warning", timestamp=stamp, content="small notice")]
+    with path.open("x") as output:
+        for record in [header, *messages]:
+            json.dump(record, output, separators=(",", ":"))
+            output.write("\n")
+
+
+def gemini_rehome_gate(binary, root, env):
+    directory = root / "gemini-rehome"
+    chats = directory / "source" / "chats"
+    chats.mkdir(parents=True)
+    source = chats / "session-modern.jsonl"
+    gemini_rehome_fixture(source)
+    original = file_digest(source)
+    assert original == "0677c225601bb8f04ad4b6856ef09158edebf60acbed8f041073b1f0bd9ab988"
+    child = subprocess.run([str(binary), "gemini", str(source), str(directory / "output"), "native", "gemini"],
+                           env=env, text=True, capture_output=True)
+    assert child.returncode == 0, f"verified same-harness Gemini port failed: {child.stderr[-2000:]}"
+    report = json.loads(child.stdout)
+    peak = checked_peak(json.loads(child.stderr))
+    assert report["messages"] == 3 and report["fidelity"] == dict(deltas=[])
+    output = Path(report["path"])
+    assert output.stat().st_size == 33555466
+    # Frozen complete owned preparation: normalize only generated message UUIDs.
+    digest, ids = gemini_output_digest(output)
+    assert ids == 3 and digest == "db3bc67dc2b670cc5d61ec397ff43f6114c7863c6fd51e35f784f91bd19bb3c7"
+    assert file_digest(source) == original, "same-harness Gemini port modified its source"
+    print(json.dumps(dict(case="verified-gemini-complete-rehome", peak_live_rust_bytes=peak,
+                          messages=3, output_bytes=output.stat().st_size, normalized_sha256=digest)), flush=True)
+    shutil.rmtree(directory)
+
 def claude_rehome_gate(binary, root, env):
     directory = root / "claude-rehome"
     directory.mkdir()
@@ -495,6 +539,7 @@ def main():
         codex_thinking_gate(args.claude_port_probe.resolve(strict=True), root, env)
         gemini_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
         cline_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
+        gemini_rehome_gate(args.claude_port_probe.resolve(strict=True), root, env)
         claude_rehome_gate(args.claude_port_probe.resolve(strict=True), root, env)
 
 
