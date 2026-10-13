@@ -683,7 +683,13 @@ fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter
         })
         .map(|i| (cosine(q, store.vector(i)), i))
         .collect();
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    // Refreshing one source moves its vector row. Resolve ties by stable session identity,
+    // so incremental and clean stores return the same ranking and top-k boundary.
+    scored.sort_unstable_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| store.meta[a.1].id.cmp(&store.meta[b.1].id))
+            .then_with(|| store.meta[a.1].harness.cmp(&store.meta[b.1].harness))
+    });
     scored.truncate(k);
 
     scored
@@ -1317,6 +1323,38 @@ mod tests {
             s.meta.push(m);
         }
         s
+    }
+
+    #[test]
+    fn rank_ties_do_not_depend_on_vector_row_order() {
+        let records = || {
+            let mut codex = meta("a", None);
+            codex.harness = "codex".into();
+            vec![
+                (meta("b", None), vec![1.0, 0.0]),
+                (codex, vec![1.0, 0.0]),
+                (meta("a", None), vec![1.0, 0.0]),
+            ]
+        };
+        let forward = store(records());
+        let reverse = store(records().into_iter().rev().collect());
+        for limit in 0..=3 {
+            let identities = |store: &Store| {
+                rank(store, &[1.0, 0.0], limit)
+                    .into_iter()
+                    .map(|hit| (hit.id, hit.harness))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(identities(&forward), identities(&reverse));
+            assert_eq!(
+                identities(&forward),
+                [("a", "claude"), ("a", "codex"), ("b", "claude")]
+                    .into_iter()
+                    .take(limit)
+                    .map(|(id, harness)| (id.into(), harness.into()))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
