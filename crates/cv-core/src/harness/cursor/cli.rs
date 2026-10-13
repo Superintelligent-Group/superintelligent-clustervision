@@ -80,6 +80,41 @@ fn read(
     counting: bool,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
+    let lazy = opts.spans && !opts.extra && !opts.complete;
+    let captured = if counting || lazy {
+        // Capture the compound provenance before the first SQL read establishes its snapshot.
+        // A checkpoint can leave the DB tuple unchanged while the WAL or optional ACP head changes.
+        let mut reads = crate::source::ReadSet::default();
+        let mut wal = r.path.as_os_str().to_os_string();
+        wal.push("-wal");
+        reads.record(&PathBuf::from(wal));
+        if let Some(meta) = crate::source::cursor_cli_metadata(r) {
+            reads.record(&meta);
+        }
+        Some(crate::json::JsonSource::capture_with_reads(&r.path, &reads)?)
+    } else {
+        None
+    };
+    // One operation-owned arena serves every retained message range; no per-message descriptor
+    // or private-file growth. Counting releases each transient blob after its bounded projection.
+    let arena = lazy.then(|| ByteSource::arena().map(std::sync::Arc::new)).transpose()?;
+    let result = read_snapshot(conn, r, opts, counting, sink, captured.as_ref(), arena.as_ref());
+    // Even Stop and callback errors must not hide a source mutation before publication.
+    if let Some(captured) = &captured {
+        captured.check()?;
+    }
+    result
+}
+
+fn read_snapshot(
+    conn: &Connection,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    counting: bool,
+    sink: &mut dyn MessageSink,
+    captured: Option<&crate::json::JsonSource>,
+    arena: Option<&std::sync::Arc<ByteSource>>,
+) -> Result<Session> {
     let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let encoded: String = conn.query_row("SELECT value FROM meta WHERE key='0'", [], |row| row.get(0))?;
     let metadata: Value = serde_json::from_slice(&decode_hex(&encoded)?).context("Cursor CLI metadata JSON")?;
@@ -213,19 +248,39 @@ fn read(
         return Err(error);
     }
     let mut emit = |id: &str| -> Result<Flow> {
-        let source = blob(conn, id)?;
-        let value = if counting {
-            projection::source(&source)?
+        let message = if let Some(captured) = captured {
+            let (backing, offset, length) = if let Some(arena) = arena {
+                let (offset, length) =
+                    crate::harness::store::sqlite::append_cell(conn, "blobs", "data", blob_rowid(conn, id)?, arena)?;
+                (arena.clone(), offset, length)
+            } else {
+                let backing = std::sync::Arc::new(blob(conn, id)?);
+                let length = backing.len()?;
+                (backing, 0, length)
+            };
+            captured.read_backing_syntax(backing, offset, length, |view| {
+                if counting {
+                    Ok(message(projection::view(view)?, false, false))
+                } else {
+                    let message = selected::message(view)?;
+                    if let Some(model) = selected::model(view)? {
+                        session.model.get_or_insert(model);
+                    }
+                    Ok(message)
+                }
+            })?
         } else {
-            serde_json::from_reader(source.reader()?)?
+            let source = blob(conn, id)?;
+            let value: Value = serde_json::from_reader(source.reader()?)?;
+            if let Some(model) = value
+                .pointer("/providerOptions/cursor/systemPromptFingerprint/model")
+                .and_then(Value::as_str)
+            {
+                session.model.get_or_insert_with(|| model.to_owned());
+            }
+            message(value, opts.extra, opts.complete)
         };
-        if let Some(model) = value
-            .pointer("/providerOptions/cursor/systemPromptFingerprint/model")
-            .and_then(Value::as_str)
-        {
-            session.model.get_or_insert_with(|| model.to_owned());
-        }
-        if let Some(message) = message(value, opts.extra, opts.complete) {
+        if let Some(message) = message {
             return Ok(sink.message(message));
         }
         Ok(Flow::Continue)
@@ -256,12 +311,21 @@ fn acp_metadata(path: &Path, sink: &mut dyn MessageSink) -> Option<Value> {
     serde_json::from_reader(std::fs::File::open(path).ok()?).ok()
 }
 
+fn blob_input<'a>(conn: &'a Connection, id: &str) -> Result<rusqlite::blob::Blob<'a>> {
+    Ok(conn.blob_open(
+        rusqlite::DatabaseName::Main,
+        "blobs",
+        "data",
+        blob_rowid(conn, id)?,
+        true,
+    )?)
+}
+fn blob_rowid(conn: &Connection, id: &str) -> Result<i64> {
+    conn.query_row("SELECT rowid FROM blobs WHERE id=?1", [id], |row| row.get(0))
+        .with_context(|| format!("Cursor CLI blob {id} missing"))
+}
 fn blob(conn: &Connection, id: &str) -> Result<ByteSource> {
-    let rowid: i64 = conn
-        .query_row("SELECT rowid FROM blobs WHERE id=?1", [id], |row| row.get(0))
-        .with_context(|| format!("Cursor CLI blob {id} missing"))?;
-    let input = conn.blob_open(rusqlite::DatabaseName::Main, "blobs", "data", rowid, true)?;
-    Ok(ByteSource::read(input)?)
+    Ok(ByteSource::read(blob_input(conn, id)?)?)
 }
 
 fn references(source: &ByteSource, field: u32, f: &mut dyn FnMut(&str) -> Result<Flow>) -> Result<Flow> {
@@ -508,6 +572,7 @@ fn message(mut value: Value, extra: bool, complete: bool) -> Option<Message> {
 }
 
 mod projection;
+mod selected;
 
 #[cfg(test)]
 mod tests {
@@ -723,5 +788,164 @@ mod tests {
         }
         let session = read(&conn, &reference, &ParseOptions::bulk(), false, &mut Count::default()).unwrap();
         assert_eq!(session.updated_at.unwrap().timestamp(), 2);
+    }
+    fn disk_fixture(root: Vec<u8>, messages: &[(u8, Vec<u8>)], dir: &Path) -> (Connection, SessionRef) {
+        std::fs::create_dir_all(dir).unwrap();
+        let (memory, mut reference) = fixture(root, messages);
+        reference.path = dir.join("store.db");
+        memory
+            .execute("VACUUM INTO ?1", [reference.path.to_str().unwrap()])
+            .unwrap();
+        let disk = Connection::open(&reference.path).unwrap();
+        (disk, reference)
+    }
+    #[test]
+    fn selected_large_fields_match_owned_messages_and_dataset() {
+        let world = cv_testkit::World::in_process("cursor-cli-selected");
+        let big = "日本語\n".repeat(4096);
+        let records = [
+            json!({"role":"user","content":[{"type":"text","text":big}],"providerOptions":{"cursor":{"requestId":"request"}}}),
+            json!({"role":"assistant","content":[{"type":"reasoning","text":big,"signature":"sig"},{"type":"tool-call","toolCallId":"call","toolName":"Shell","args":{"text":big,"small":7}}],"providerOptions":{"cursor":{"ignored":big}}}),
+            json!({"role":"tool","content":[{"type":"tool-result","toolCallId":"call","toolName":"Shell","result":big,"experimental_content":[{"type":"text","text":big}]}],"providerOptions":{"cursor":{"highLevelToolCallResult":{"isError":true,"output":big}}}}),
+        ];
+        let root = (1..=3).flat_map(|id| field(1, &[id; 32])).collect();
+        let records: Vec<_> = records
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| ((i + 1) as u8, v.to_string().into_bytes()))
+            .collect();
+        let (_conn, reference) = disk_fixture(root, &records, &world.base.join("source"));
+        let adapter = Cursor::with_cli_home(&world.base);
+        let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::bulk()).unwrap();
+        let mut lazy = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+        let mut owned_output = Vec::new();
+        let mut lazy_output = Vec::new();
+        crate::dataset::write_record(&owned, &mut owned_output, crate::dataset::Format::Chatml, None).unwrap();
+        let staged = crate::dataset::stage_record(
+            &adapter,
+            &reference,
+            crate::dataset::Format::Chatml,
+            None,
+            0,
+            None,
+            &crate::query::TextSets::default(),
+        )
+        .unwrap()
+        .unwrap();
+        staged.publish(&mut lazy_output).unwrap();
+        lazy_output.pop(); // stage publication includes the record's newline
+        assert_eq!(owned_output, lazy_output);
+        // A filter retains deferred descriptors before rendering rather than eagerly demanding
+        // payloads. This exercises the same checked text/JSON carriers through registry restore.
+        let query = crate::SessionQuery::parse("harness:cursor").unwrap();
+        let filtered = crate::dataset::stage_record(
+            &adapter,
+            &reference,
+            crate::dataset::Format::Chatml,
+            None,
+            0,
+            Some(&query),
+            &crate::query::TextSets::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let mut filtered_output = Vec::new();
+        filtered.publish(&mut filtered_output).unwrap();
+        filtered_output.pop();
+        assert_eq!(owned_output, filtered_output);
+        lazy.materialize().unwrap();
+        assert_eq!(
+            serde_json::to_value(&lazy.messages).unwrap(),
+            serde_json::to_value(&owned.messages).unwrap()
+        );
+    }
+    #[test]
+    fn selected_schema_edges_and_ignored_invalid_values_match_owned_acceptance() {
+        let world = cv_testkit::World::in_process("cursor-cli-selected-edges");
+        let cases = [
+            r#"{"role":"user","content":"first","content":"last","providerOptions":{"cursor":{"requestContextCompleteness":false,"isSummary":true}}}"#,
+            r#"{"role":"developer","content":[{"type":"text","text":""},{"type":"unknown","opaque":7},{"type":"redacted-reasoning","text":null},{"type":"image","mimeType":false},{"type":"file","filename":"a"}]}"#,
+            r#"{"role":"assistant","content":[{"type":"tool-call","args":"{\"literal\":true}"},{"type":"tool-result","result":{"z":2,"a":1}},{"type":"tool-result","result":null},{"type":"reasoning","text":false}]}"#,
+            r#"{"role":"user","content":"ok","ignored":"\uD800"}"#,
+            r#"{"role":"user","content":"ok","ignored":1e9999}"#,
+            r#"{"role":"user","content":"ok"} garbage"#,
+        ];
+        for (index, record) in cases.into_iter().enumerate() {
+            let (conn, reference) = disk_fixture(
+                field(1, &[1; 32]),
+                &[(1, record.as_bytes().to_vec())],
+                &world.base.join(index.to_string()),
+            );
+            let mut owned = CollectSink::default();
+            let mut selected = CollectSink::default();
+            let full = read(&conn, &reference, &ParseOptions::bulk(), false, &mut owned);
+            let lazy = read(&conn, &reference, &ParseOptions::lazy(), false, &mut selected);
+            assert_eq!(full.is_ok(), lazy.is_ok(), "case {index}");
+            if full.is_ok() {
+                let resolver = crate::lazy::Resolver::new(Some(reference.path.clone()));
+                for message in &mut selected.messages {
+                    message.materialize(&resolver).unwrap();
+                }
+                assert_eq!(
+                    serde_json::to_value(owned.messages).unwrap(),
+                    serde_json::to_value(selected.messages).unwrap(),
+                    "case {index}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn wal_guard_survives_lazy_blob_arguments_and_intentional_stop() {
+        let world = cv_testkit::World::in_process("cursor-cli-guard");
+        let record=json!({"role":"assistant","content":[{"type":"tool-call","toolCallId":"call","toolName":"Read","args":{"body":"x".repeat(8192)}},{"type":"text","text":"日本語\n".repeat(4096)}]}).to_string().into_bytes();
+        let (conn, reference) = disk_fixture(field(1, &[1; 32]), &[(1, record)], &world.base.join("source"));
+        let mut retained = CollectSink::default();
+        read(&conn, &reference, &ParseOptions::lazy(), false, &mut retained).unwrap();
+        let input = match &retained.messages[0].content[0] {
+            Block::ToolUse { input, .. } => input,
+            _ => panic!("expected tool"),
+        };
+        assert!(matches!(input, crate::json::Json::Source(_)));
+        let text = match &retained.messages[0].content[1] {
+            Block::Text {
+                text: crate::lazy::Text::Source(text),
+            } => text,
+            _ => panic!("expected checked source text"),
+        };
+        assert_eq!(text.try_decoded_len().unwrap(), "日本語\n".len() * 4096);
+        let adapter = Cursor::with_cli_home(&world.base);
+        let staged = crate::dataset::stage_record(
+            &adapter,
+            &reference,
+            crate::dataset::Format::Chatml,
+            None,
+            0,
+            None,
+            &crate::query::TextSets::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let wal = reference.path.with_file_name("store.db-wal");
+        std::fs::write(&wal, b"new WAL identity").unwrap();
+        assert!(input.canonical_len().is_err());
+        assert!(text.try_prefix(10).is_err());
+        assert!(text.try_decoded_len().is_err());
+        let mut output = Vec::new();
+        // Staging has already demanded and validated every field. These finalized private
+        // bytes represent the accepted snapshot and remain publishable after it changes.
+        staged.publish(&mut output).unwrap();
+        assert!(!output.is_empty());
+        let resolver = crate::lazy::Resolver::new(Some(reference.path.clone()));
+        assert!(retained.messages[0].materialize(&resolver).is_err());
+        std::fs::remove_file(&wal).unwrap();
+        struct Mutate(PathBuf);
+        impl MessageSink for Mutate {
+            fn message(&mut self, _: Message) -> Flow {
+                std::fs::write(&self.0, b"new WAL identity").unwrap();
+                Flow::Stop
+            }
+        }
+        let error = read(&conn, &reference, &ParseOptions::lazy(), false, &mut Mutate(wal)).unwrap_err();
+        assert!(error.to_string().contains("dependencies changed"), "{error:#}");
     }
 }

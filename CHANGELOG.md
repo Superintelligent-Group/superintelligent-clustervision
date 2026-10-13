@@ -8,6 +8,7 @@
 - Warm token statistics reuse bounded, dependency-validated usage rows while preserving response deduplication and exact cost totals.
 - Staged dataset and JSON output retain checked source-backed text without copying decoded payloads into private transport.
 
+- Cursor CLI discovery and partial reads stream selected message fields with bounded scratch and reject changed SQLite snapshot dependencies.
 - LM Studio discovery projects source metadata and bounded titles without loading whole documents, including portable builds.
 - Cursor Agent CLI chat and ACP blob stores now expose native prompts, replies, tool calls, summaries, modes, and lineage.
 - Cursor numeric message modes map to readable names, retaining original values and unknown future enum values in harness metadata.
