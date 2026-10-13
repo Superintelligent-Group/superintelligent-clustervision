@@ -331,6 +331,9 @@ impl Adapter for OpenCode {
 
             sink.meta(&s);
 
+            // All regenerated payloads share one private file for this session pass.
+            let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
+
             // Re-read one message file at a time, emit, then drop before the next.
             for (_, path) in &order {
                 let built = if _opts.spans {
@@ -349,7 +352,7 @@ impl Adapter for OpenCode {
                         Err(error) => return Err(error),
                     };
                     let msg_id = header.value.get("id").and_then(Value::as_str).unwrap_or("");
-                    let parts = self.load_projected_parts(msg_id)?;
+                    let parts = self.load_projected_parts(msg_id, &arena)?;
                     build_header_projected(&header, &parts)
                 } else {
                     let Ok(t) = fs::read_to_string(path) else { continue };
@@ -428,7 +431,11 @@ fn count_turns(dir: &std::path::Path) -> usize {
 }
 
 impl OpenCode {
-    fn load_projected_parts(&self, mid: &str) -> Result<Vec<ProjectedPart>> {
+    fn load_projected_parts(
+        &self,
+        mid: &str,
+        arena: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,
+    ) -> Result<Vec<ProjectedPart>> {
         let Some(dir) = self.part_dir(mid) else {
             return Ok(Vec::new());
         };
@@ -440,7 +447,6 @@ impl OpenCode {
         }
         paths.sort_by(|a, b| a.0.cmp(&b.0));
         let mut parts = Vec::new();
-        let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
         for (_, path) in paths {
             let Ok(source) = crate::json::JsonSource::capture(&path) else {
                 continue;
@@ -449,7 +455,7 @@ impl OpenCode {
                 if !view.accepts_value()? || !view.is_object()? {
                     return Ok(None);
                 }
-                Ok(Some(ProjectedPart::read(view, &source, &arena)?))
+                Ok(Some(ProjectedPart::read(view, &source, arena)?))
             }) {
                 Ok(Some(part)) => parts.push(part),
                 Ok(None) => {}
