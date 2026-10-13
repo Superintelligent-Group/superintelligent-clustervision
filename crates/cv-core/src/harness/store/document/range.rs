@@ -39,6 +39,10 @@ impl RangeSource {
     }
     pub fn from_captured(captured: crate::json::JsonSource) -> Result<Self> {
         let file = File::open(captured.path()).with_context(|| format!("opening {}", captured.path().display()))?;
+        Self::from_file(file, captured)
+    }
+    /// Reuse an already opened original-source descriptor for framing and selected reads.
+    pub(crate) fn from_file(file: File, captured: crate::json::JsonSource) -> Result<Self> {
         let source = Self {
             file: Some(file),
             memory: None,
@@ -49,6 +53,11 @@ impl RangeSource {
         source.check_identity()?;
         Ok(source)
     }
+    /// File-backed positioned sources expose their read-only descriptor without reopening it.
+    pub(crate) fn file(&self) -> Option<&File> {
+        self.file.as_ref()
+    }
+
     pub(crate) fn decoded(
         captured: crate::json::JsonSource,
         bytes: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,

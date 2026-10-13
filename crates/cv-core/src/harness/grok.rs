@@ -31,6 +31,7 @@
 //!   under `subagents/<child id>/meta.json` (→ the child's `lineage.parent`).
 
 pub(crate) mod emit;
+mod metadata;
 mod selected;
 pub use emit::emit;
 
@@ -41,7 +42,7 @@ use super::store::{
 use super::wire::{openai, text_parts};
 use super::{parse_ts, Adapter};
 use crate::ir::*;
-use crate::lazy::{Span, Text, INLINE_MAX};
+use crate::lazy::{Text, INLINE_MAX};
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -533,36 +534,39 @@ impl ToolEnrich {
 /// yields an empty map and zero behavior change.
 fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
     let mut map: HashMap<String, ToolEnrich> = HashMap::new();
-    if jsonl::scan(&dir.join("updates.jsonl"), |raw, _| {
-        let v = fields(raw);
-        let Some(u) = v.get("params").and_then(|r| fields(r).get("update")) else {
-            return;
+    if metadata::scan(&dir.join("updates.jsonl"), |v| {
+        let Some(u) = v.get("params")?.map(|p| p.get("update")).transpose()?.flatten() else {
+            return Ok(());
         };
-        let u = fields(u);
-        let su = u.string("sessionUpdate");
+        let su = u.string_field("sessionUpdate")?;
         if !matches!(su.as_deref(), Some("tool_call") | Some("tool_call_update")) {
-            return;
+            return Ok(());
         }
-        let Some(id) = u.string("toolCallId") else { return };
+        let Some(id) = u.string_field("toolCallId")? else {
+            return Ok(());
+        };
         let e = map.entry(id).or_default();
-        if let Some(t) = u.string("title") {
+        if let Some(title) = u.string_field("title")? {
             if su.as_deref() == Some("tool_call_update") || e.title.is_none() {
-                e.title = Some(t);
+                e.title = Some(title)
             }
         }
-        if let Some(k) = u.string("kind") {
-            e.kind = Some(k);
+        if let Some(kind) = u.string_field("kind")? {
+            e.kind = Some(kind)
         }
-        for l in u.get("locations").and_then(document::array_iter).into_iter().flatten() {
-            if let Some(p) = fields(l).string("path") {
-                if !e.locations.contains(&p) {
-                    e.locations.push(p);
+        if let Some(locations) = u.get("locations")? {
+            for location in locations.array()? {
+                if let Some(path) = location?.string_field("path")? {
+                    if !e.locations.contains(&path) {
+                        e.locations.push(path)
+                    }
                 }
             }
         }
-        if let Some(st) = u.string("status") {
-            e.status = Some(st);
+        if let Some(status) = u.string_field("status")? {
+            e.status = Some(status)
         }
+        Ok(())
     })
     .is_none()
     {
@@ -789,18 +793,17 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
     let initial_title = title.clone();
     let history = dir.join("chat_history.jsonl");
     let resolver = crate::lazy::Resolver::new(Some(history.clone()));
-    if jsonl::scan(&history, |raw, offset| {
-        let v = fields(raw);
-        let ty = v.string("type");
+    if metadata::scan(&history, |v| {
+        let ty = v.string_field("type")?;
         if matches!(ty.as_deref(), Some("user") | Some("assistant")) {
             message_count += 1;
         }
         if title.is_none() && ty.as_deref() == Some("user") {
-            if let Some(content) = v.get("content") {
-                let texts = title_parts(content, raw, offset);
-                title = document::text_summary(texts, &resolver, true);
+            if let Some(content) = v.get("content")? {
+                title = content.title(&resolver)?;
             }
         }
+        Ok(())
     })
     .is_none()
     {
@@ -822,32 +825,6 @@ fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
             .or_else(|| summary.get("last_active_at").and_then(Value::as_str).and_then(parse_ts)),
         message_count,
     }))
-}
-
-/// wire::text_parts joins every string text field, including empty ones, in source order.
-fn title_parts<'a>(content: Raw<'a>, record: Raw<'a>, offset: u64) -> impl Iterator<Item = Text> + 'a {
-    let text = move |raw: Raw<'_>| {
-        let b = raw.get().as_bytes();
-        if b.first() != Some(&b'"') {
-            return None;
-        }
-        if b.len() - 2 > INLINE_MAX {
-            Some(Text::Span(Span {
-                source: None,
-                offset: offset + (b.as_ptr() as usize - record.get().as_ptr() as usize) as u64 + 1,
-                len: b.len() as u64 - 2,
-                escaped: b.contains(&b'\\'),
-            }))
-        } else {
-            serde_json::from_str::<String>(raw.get()).ok().map(Text::Inline)
-        }
-    };
-    text(content).into_iter().chain(
-        document::array_iter(content)
-            .into_iter()
-            .flatten()
-            .filter_map(move |p| fields(p).get("text").and_then(text)),
-    )
 }
 
 #[cfg(test)]
