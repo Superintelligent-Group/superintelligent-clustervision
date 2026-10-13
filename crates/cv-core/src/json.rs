@@ -1399,7 +1399,9 @@ fn decode_string(raw: Raw<'_>, f: &mut impl FnMut(&str) -> Result<()>) -> Result
 #[cfg(feature = "mmap")]
 fn decode_ascii_escapes(body: &str, f: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
     const WINDOW: usize = 64 * 1024;
-    let mut decoded = Vec::with_capacity(WINDOW);
+    // Valid JSON escapes never decode to more bytes than their encoded body. Preserve the
+    // WINDOW chunk boundaries without reserving a full window for every tiny/medium field.
+    let mut decoded = Vec::with_capacity(WINDOW.min(body.len()));
     let mut cursor = 0;
     loop {
         let slash = memchr::memchr(b'\\', &body.as_bytes()[cursor..]).map(|n| cursor + n);
@@ -1617,11 +1619,11 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn ascii_escape_chunks_match_serde_and_propagate_callback_failure() {
-        for prefix in [65530, 65531, 65532, 65533, 65534, 65535, 65536] {
+        for prefix in [0, 1, 7, 65530, 65531, 65532, 65533, 65534, 65535, 65536] {
             let wanted = format!(
                 "{}😀\n\t\r\u{8}\u{c}\\\"/é{}",
                 "x".repeat(prefix),
-                "tail😀\n".repeat(20000)
+                "tail😀\n".repeat(if prefix < 65530 { 1 } else { 20000 })
             );
             let encoded = serde_json::to_string(&wanted).unwrap();
             let mut actual = String::new();
