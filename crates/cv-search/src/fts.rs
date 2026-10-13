@@ -524,14 +524,14 @@ fn source_consumer(dir: &Path) -> Result<String> {
     ))
 }
 
-fn preferred_index_candidates(
-    refs: Vec<(std::borrow::Cow<'_, cv_core::SessionRef>, cv_core::events::Provenance)>,
-) -> Vec<(std::borrow::Cow<'_, cv_core::SessionRef>, cv_core::events::Provenance)> {
+fn preferred_index_candidates<'a>(
+    refs: Vec<(&'a cv_core::SessionRef, &'a cv_core::events::Provenance)>,
+) -> Vec<(&'a cv_core::SessionRef, &'a cv_core::events::Provenance)> {
     let mut slots: HashMap<String, usize> = HashMap::new();
-    let mut selected: Vec<(std::borrow::Cow<'_, cv_core::SessionRef>, cv_core::events::Provenance)> = Vec::new();
+    let mut selected: Vec<(&cv_core::SessionRef, &cv_core::events::Provenance)> = Vec::new();
     for (r, prov) in refs {
         if let Some(&slot) = slots.get(&r.id) {
-            let (old, old_prov) = &selected[slot];
+            let (old, old_prov) = selected[slot];
             // Keep source errors meaningful if no live copy exists.
             if (!r.path.exists())
                 .cmp(&(!old.path.exists()))
@@ -551,14 +551,11 @@ fn preferred_index_candidates(
 
 #[cfg(test)]
 fn preferred_index_copies(refs: Vec<cv_core::SessionRef>) -> Vec<cv_core::SessionRef> {
-    preferred_index_candidates(
-        refs.into_iter()
-            .map(|r| (std::borrow::Cow::Owned(r), Default::default()))
-            .collect(),
-    )
-    .into_iter()
-    .map(|(r, _)| r.into_owned())
-    .collect()
+    let prov = cv_core::events::Provenance::default();
+    preferred_index_candidates(refs.iter().map(|r| (r, &prov)).collect())
+        .into_iter()
+        .map(|(r, _)| r.clone())
+        .collect()
 }
 
 /// Bring the index at `dir` up to date with `refs` (the top-level sessions on disk), on every core.
@@ -715,10 +712,9 @@ impl SweepPlanner<'_> {
 
         let mut seen: HashSet<String> = HashSet::new();
         let mut jobs: Vec<Job> = Vec::new();
-        let mut candidates: Vec<_> = refs
-            .iter()
-            .map(|r| (std::borrow::Cow::Borrowed(r), cv_core::events::Provenance::default()))
-            .collect();
+        // Seal owned folded entries before taking pointers into them. Top-level metadata
+        // and provenance stay borrowed until a real Job needs ownership.
+        let mut folded_candidates = Vec::new();
         if subagents {
             for r in refs {
                 for sub in cv_core::subagent_tree_of(r) {
@@ -727,13 +723,17 @@ impl SweepPlanner<'_> {
                         agent_id: Some(sub.agent_id().to_string()),
                         workflow: sub.workflow.clone(),
                     };
-                    candidates.push((std::borrow::Cow::Owned(sub.session), prov));
+                    folded_candidates.push((sub.session, prov));
                 }
             }
         }
-        let candidates = preferred_index_candidates(candidates);
-        for (r, prov) in candidates {
-            let r = r.as_ref();
+        let top_prov = cv_core::events::Provenance::default();
+        let candidates = refs
+            .iter()
+            .map(|r| (r, &top_prov))
+            .chain(folded_candidates.iter().map(|(r, prov)| (r, prov)))
+            .collect();
+        for (r, prov) in preferred_index_candidates(candidates) {
             seen.insert(r.id.clone());
             let source = probe.snapshot(r);
             let (mtime, size) = source.primary;
@@ -745,7 +745,7 @@ impl SweepPlanner<'_> {
             );
             let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size, || {
                 dependencies_fresh && dependencies.primary_fresh(r, &source.dependencies)
-            }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &prov));
+            }) && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
             let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
             if fts_fresh
@@ -765,7 +765,7 @@ impl SweepPlanner<'_> {
                     && existing
                         .get(&r.id)
                         .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
-                prov,
+                prov: prov.clone(),
                 mark: marks.get(r).cloned(),
                 source,
                 dependencies_fresh,
