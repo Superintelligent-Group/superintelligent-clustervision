@@ -75,7 +75,7 @@ fn args() -> Result<Args> {
             "--help" | "-h" => bail!(
                 "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|facts|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
-                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|dataset|dataset-collect|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|checked-chunks|prefix|checked-prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
+                 OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|dataset|dataset-collect|tools|tools-collect|query|query-collect|hash|discover|sessions|events|events-collected|chunks|checked-chunks|prefix|checked-prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
             ),
             s if s.starts_with('-') => bail!("unknown option {s}"),
@@ -260,8 +260,12 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
     let mut out = Outcome::default();
     match a.operation.as_str() {
         "baseline" => {}
-        "discover" => {
-            let mut refs = adapter.discover()?;
+        "discover" | "sessions" => {
+            let mut refs = if a.operation == "sessions" {
+                cv_core::sessions()
+            } else {
+                adapter.discover()?
+            };
             out.detail = json!({ "discovered_sessions": refs.len() });
             if a.hash_output {
                 refs.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
@@ -667,6 +671,7 @@ fn main() -> Result<()> {
             a.operation.as_str(),
             "affordance-read"
                 | "discover"
+                | "sessions"
                 | "events"
                 | "events-collected"
                 | "query"
@@ -717,7 +722,7 @@ fn main() -> Result<()> {
                 "affordance-read" | "token-stats" => "production-defined",
                 "dataset-collect" => &a.mode,
                 "query" | "query-collect" | "tools" | "tools-collect" | "dataset" => "lazy",
-                "baseline" | "discover" | "chunks" | "checked-chunks" | "prefix" | "checked-prefix" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
+                "baseline" | "discover" | "sessions" | "chunks" | "checked-chunks" | "prefix" | "checked-prefix" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
                 _ => &a.mode,
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }

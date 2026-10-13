@@ -1,13 +1,17 @@
 # Store probe
 
-This diagnostic example performs one read-only operation per process on an explicit source.
+This diagnostic example performs one operation per process without modifying harness stores.
 It supports Claude, Codex, Gemini, OpenClaw, Continue, LM Studio, Cline, Kimi, Kimi Code, Grok, Qwen,
-OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Cursor, OpenCode, Devin, Hermes, Goose and Zed through explicit-root constructors. It does not
-detect installed homes or discover to resolve IDs. Direct stream operations never update the catalog.
-The composed `affordance-read` operation may persist counts, and `discover` initializes the catalog's
-scan cache: both require an existing scratch `CLUSTERVISION_HOME` and refuse the real catalog directory. Claude fork detection
-and adapter side-store reads still examine siblings of the supplied source, so use a frozen
-scratch directory. `discover` explicitly scans `--root`; the other operations read `PATH`.
+OpenSession, ChatGPT/Claude account exports and (with SQLite enabled) Cursor, OpenCode, Devin,
+Hermes, Goose and Zed through explicit-root constructors. Direct stream operations never update
+the catalog or detect installed homes to resolve IDs. The `sessions` operation follows production
+fleet detection from `HOME`/XDG and may perform a scoped or full discovery.
+
+The composed `sessions` and `affordance-read` operations may update the catalog; `discover`
+initializes its scan cache. These require an existing scratch `CLUSTERVISION_HOME` and refuse
+the real catalog directory. Claude fork detection and adapter side-store reads still examine
+siblings of the supplied source, so use a frozen scratch directory. `discover` scans `--root`,
+`sessions` uses isolated `HOME`/XDG roots, and the remaining operations read `PATH`.
 
 Build clean timing and requested Rust heap versions separately, with your own target directory:
 
@@ -52,6 +56,7 @@ OpenSession and account exports scan only the explicit root, excluding configure
 | `affordance-read` | Production `affordance::read`; requires scratch `CLUSTERVISION_HOME` |
 | `hash` | Resolve each message, sort owned JSON maps recursively, hash streamed JSON and final metadata |
 | `discover` | Explicit-root discovery; requires scratch `CLUSTERVISION_HOME` |
+| `sessions` | Production catalog listing/scoped refresh; requires scratch catalog and synthetic `HOME`/XDG roots |
 | `chunks` | Direct span decoding; `--span OFFSET:LENGTH [--escaped] --chunk-bytes N` |
 | `checked-chunks` | Same chunk callback work, using fallible source reads; same span flags |
 | `prefix` / `checked-prefix` | Retain a text prefix under `--prefix-bytes N` raw encoded bytes, using legacy / fallible reads; same span flags |
@@ -303,3 +308,12 @@ canonical output budget. Both prefix operations retain the returned string throu
 snapshot and hash it only with `--hash-output`. The checked operations guard the whole supplied
 span even when the prefix budget is zero. They do not prove historical source identity from an
 unstamped `Span`; the resolver captures identity at first demand.
+
+First-use metadata-cache allocation control uses `tools/profiling/discovery-cache.py` with two
+`store_probe` binaries built with `--features probe-heap`. It creates a new synthetic home and
+restores one canonical catalog path for every child, holding the one stale Claude inventory
+constant while adding 4,096 unrelated serialized cache rows. The `sessions` operation follows
+production fleet detection from `HOME`/XDG; its `--root` argument does not restrict that fleet.
+The runner supplies a minimal isolated environment and discards elapsed-time fields. It reports
+exact listing digests, count publication, allocation requests/bytes and peak requested Rust heap;
+SQLite/C heap and retained serialized-row copying are separate limits.

@@ -235,3 +235,25 @@ kernel/I/O time, native macOS elapsed time, large-fleet costs or a current ranki
 of all system operations. No additional workload matrix was added. Baseline and
 after raw profiles remain under `/scratch/cli-*-reader-before` and `/scratch/cli-*`
 in the retained task-owned volume; the container is stopped after capture.
+
+### First-use scoped discovery cache allocations
+
+`discovery-cache.py --before PROBE --after PROBE --output NEW_DIRECTORY` compares production
+`cv_core::sessions()` using two `store_probe` binaries with `--features probe-heap`. It creates
+one synthetic Claude inventory, warms its persisted catalog during setup, then appends a user
+record. Every measured child starts with an empty process-local cache and the same restored
+catalog path and original transcript identity. Adding 4,096 unrelated serialized cache rows
+changes no affected inventory. Setup and result reporting are outside the measured child stage;
+elapsed-time fields are discarded. The listing must remain one exact session reference with message count two.
+
+The [recorded native allocation control](results/discovery-cache-allocation-native.json) uses
+rustc 1.99, the same dev build recipe/default mmap+SQLite+parallel features, and one Rayon worker.
+Build parity was verified separately; the runner checks the features reported by the probes.
+At 4,096 unrelated rows, lazy payload decoding reduces allocation requests **50,421 → 13,549**,
+requested bytes **21,478,200 → 8,967,285**, and peak above the starting Rust heap
+**13,748,681 → 7,948,688 bytes**. All four listing digests and empty stderr match; with zero
+unrelated rows, peak stays **20,706 bytes**. These are requested Rust allocations, excluding
+SQLite/C, stacks, mmap and allocator overhead. No native elapsed-time or fleet-wide ranking is
+claimed. Bulk SQL string copying and serialized-row retention still grow with cache size;
+this removes unrelated JSON decoding and nested allocations, not the complete first-use floor.
+The fixture is synthetic metadata, not a genuine harness corpus capture.
