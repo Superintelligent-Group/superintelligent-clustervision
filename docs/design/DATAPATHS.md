@@ -104,7 +104,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; ordered usage rows reuse a bounded dependency-validated cache | Cold ledger publication, exact dedup I/O and model roster growth; tiny native sources bypass caching |
-| Reshape/emit | Bounded shared JSONL staging; Codex/Grok/OpenClaw/Qwen stream output records | Retained source/materialization, Claude record rewrites, record-local structured Values and complete verification reparse |
+| Reshape/emit | Bounded shared JSONL stage; native Codex ports retain checked lazy bodies; verification reduces compact facts | Message roster/selected metadata, complete carriers, Claude record rewrites and other emitters/materializing thinking transforms |
 | Prune/revive | Compact selection facts and source positions; transcript/sidecar staging with sequential record rewrites | Giant changed records remain owned; additional scans/staging currently increase CPU |
 | MCP observe | Retained-message watch callbacks and checked capped searchable prefixes | Other full producer modes, owned metadata and uncapped MCP show windows remain separate |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
@@ -1111,9 +1111,10 @@ Native scoped round trips cover Codex, Grok and OpenClaw; native/portable shared
 spilled bytes, failed serialization, link/mode preservation, borrowed text twins and Qwen's
 first-record fork/empty-session shapes. The probe is `examples/emit_probe.rs`.
 
-This measures plain emission, not end-to-end port or verified emission. The input Session remains
-retained, lazy sources still traverse a materialization clone, and `emit_report` retains the full
-reparsed target. Structured record-local Values can still be payload-sized. Spill disk and write
+This original staging control measures plain emission, not end-to-end port or verified emission.
+The input Session remains retained. At that checkpoint, lazy sources traversed a materialization
+clone and `emit_report` retained the full reparsed target; the follow-through below removes those
+copies from the measured native Codex port path. Structured record-local Values can still be payload-sized. Spill disk and write
 traffic scale with output bytes; there is no constant total disk, RSS or whole-port heap claim.
 Evidence is in `resume-emit-evidence/{summary,final-clean-cpu,after-heap}.json` under the durable
 worktree evidence directory; baseline is `621b5977`, implementation `74ab96ec` (integrated `971d8e76`).
@@ -1375,49 +1376,63 @@ capability assessment; current unsupported formats are explicit engineering deci
 
 ## Verified native export and port consumption (Codex, 2026-10-12)
 
-`emit_report` now streams reparsed messages through the same feature reducer used by its
-collected reference oracle. Its compact projection retains only comparison facts. Claude keeps
-answered call IDs and pending call-bearing fact rows until EOF, preserving future-answer
-filtering; session model fallback is applied after final metadata. All session-field deltas,
+`emit_report` streams reparsed messages through the same feature reducer used by its collected
+reference oracle. Compact projections retain comparison facts rather than payloads. Claude
+keeps answered call IDs and pending call-bearing fact rows until EOF, preserving future-answer
+filtering; final session model fallback applies to every eligible turn. Session-field deltas,
 expected-loss classifications, unsupported turns, carriers and full/complete parsing contracts
-remain part of verification. Native 52 and portable 42 scoped emitter tests pass, including
-whole-report equality against collected verification across every emitter and thinking mode.
+remain part of verification.
 
-Cross-harness native Codex port preparation requests full metadata with checked lazy bodies;
-same-harness ports still parse format-complete records. The Codex writer streams selected text,
-reasoning, canonical arguments and tool results through the shared staged string writer. It
-preserves multipart separator rules, compact record bytes and error prefixes. A source-backed
-fixture matches independently materialized output and its complete loss report; changing its
-source before re-emission fails without replacing an existing export. Partial serialization
-failures also prevent stage publication.
+Cross-harness native Codex preparation requests full metadata with checked lazy bodies;
+same-harness ports still parse format-complete records. The writer streams text, reasoning,
+canonical arguments and tool results through the shared staged string writer, preserving exact
+multipart separator rules, compact record bytes and error prefixes. Target verification uses
+the native selected Codex producer (`ec5f1da`), including giant prompts and replies, rather than
+its earlier giant-function-output-only shortcut. There is no Facts-mode substitution.
+
+Preparation captures original primary identity and declared inventory before parsing. Its sink
+records conditional dependencies before reads and message source paths at encounter. One
+complete read-set check accepts the parsed metadata snapshot. Legacy spans then retain their
+original per-file identity: exact quoted ranges bind without copying; literal/nonquoted spans
+stage bounded chunks into that file's shared immutable arena. Existing checked Json/SourceText
+per-body dependency guards remain intact. Later changes to owned metadata alone do not invalidate
+an accepted snapshot; changes to retained lazy body files fail. Full read sets are neither copied
+to every carrier nor re-statted for every payload chunk.
 
 The actual scratch Claude parse → native Codex write → adapter read-back → fidelity report
-probe is `examples/port_probe.rs`; `lazy` selects the same preparation API used by `cv port`.
-An owned full parse on baseline `971d8e76` is the control. Requested Rust heap begins before
-source parsing; mmap, C heaps, allocator overhead and RSS remain outside this measurement.
+probe is `examples/port_probe.rs`; `lazy` selects the preparation API used by `cv port`. An owned
+full parse on baseline `971d8e76` is the control. Payloads contain quotes, backslashes, newlines
+and Unicode. Requested Rust heap begins before parsing; mmap, C heaps, allocator overhead and
+RSS are outside the measurement. CPU is child-process user+system time from three alternating
+clean release pairs, using binaries without the counting allocator.
 
-| Source shape | End-to-end heap before → after |
-|---|---:|
-| 32 × 256 KiB text messages | after 1,548,715 B |
-| 128 × 256 KiB text messages | 67,788,122 → 1,653,801 B |
-| One 32 MiB text message | 134,226,424 → 67,120,604 B |
+| Source shape | Exact output bytes | End-to-end heap before → after | CPU median before → after |
+|---|---:|---:|---:|
+| 32 × 256 KiB text messages | 25,174,072 | after 895,192 B | — |
+| 128 × 256 KiB text messages | 100,695,160 | 67,788,122 → 1,004,885 B | 1.722527 → 1.223259 s (−29.0%) |
+| One 32 MiB text message | 100,663,924 | 134,226,424 → 277,902 B | 2.095152 → 1.609532 s (−23.2%) |
 
-The giant control exposes a remaining native Codex reader floor: its mmap lazy branch still
-materializes selected user/assistant text through `lean::parse` into Values. The positioned
-portable projection is being composed into the native producer; the consumer change does not
-hide that floor by reducing metadata fidelity. The many-message output remains exactly
-100,695,160 bytes with SHA-256
-`50c79139013fd016eb1a703c9565b323aaadde918a372588dcb3c6b85051e8cd`; three alternating clean
-release controls reproduce identical whole loss reports. Their child user+system CPU medians
-are 1.775812 → 2.003143 seconds (+12.8%); repeated checked source/canonical passes exchange CPU
-for smaller retained heap. Debug allocation controls are separate binaries.
+Every before/after output and complete loss report matches. SHA-256 values, in table order, are
+`5c17b5acbfbddb34e1e22973ce24e2bff69576be3aeff8981673e7dd19ed4229`,
+`50c79139013fd016eb1a703c9565b323aaadde918a372588dcb3c6b85051e8cd`, and
+`522e2d19fa015b581cddb2fe694c0557eb9b83df8bfcc24af7d8daef9a53d6c5`.
+Native 57 and portable 47 scoped emission tests pass. Whole-report oracles compare all emitters
+and thinking modes against collected verification; source-backed output matches an independently
+materialized session, including duplicate-key canonical arguments. Actual Claude preparation
+followed by same-length mutation fails before replacing an existing export. Literal sidecar
+bytes/Unicode, changes during preparation, changes before emission, failed stage publication,
+complete raw carriers and Claude pairing/filtering semantics have scoped coverage. Core library
+clippy with warnings denied and CLI composition checks pass.
 
-Remaining ownership includes the source message roster and selected metadata, Claude pairing
-IDs, format-complete raw carriers, adapters using owned stream bridges, and other emitters or
-non-native thinking transforms that still materialize bodies. Staged disk scales with output.
-These results establish reduced retained payloads on the measured many-message native Codex
-port path, not constant total memory across every harness, giant record or complete-mode port.
-Durable evidence is `resume-verify-evidence/{clean-cpu-current,port-*-heap}.json`.
+Remaining ownership includes source message rosters and selected metadata, Claude pairing IDs,
+format-complete raw carriers, adapters using owned stream bridges, Claude's mutable output
+history, and other emitters or non-native thinking transforms that materialize bodies. Staged
+disk scales with output; mapped source pages and RSS are not requested heap. These controls
+establish reduced retained payloads for the measured native Codex port path, not constant total
+memory across every harness or complete-mode port. Durable evidence is
+`resume-verify-evidence/{final-heap-parity,final-clean-cpu}.json`; initial consumer commit `9bf15ad`
+and producer `ec5f1da` compose with the retained preparation follow-through.
+
 ### Prune large string tool-result mutation (2026-10-12)
 
 Large old user records with string tool-result payloads now plan source-specific content replacements

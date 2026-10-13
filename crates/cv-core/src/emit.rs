@@ -21,6 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) mod fidelity;
+mod prepare;
 use fidelity::{diff_features, is_carrier, reparse_features, source_features, target_holds};
 #[cfg(test)]
 use fidelity::{diff_fidelity, reparse_emitted};
@@ -473,7 +474,11 @@ pub fn parse_for_emit(
     if target == Harness::Codex && reference.harness != target {
         options.spans = true;
     }
-    let mut session = crate::stream::collect_with(adapter, reference, &options)?;
+    let mut session = if target == Harness::Codex && reference.harness != target {
+        prepare::parse(adapter, reference, &options)?
+    } else {
+        crate::stream::collect_with(adapter, reference, &options)?
+    };
     if target != Harness::Codex || reference.harness == target {
         session.materialize()?;
     }

@@ -227,6 +227,16 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Retain both declared inventory and conditional reads with their original identities.
+    pub(crate) fn all_reads(&self) -> Option<ReadSet> {
+        let records = self.dependencies.as_ref()?.records()?;
+        let mut reads = ReadSet::default();
+        for entry in records.entries.into_iter().chain(records.reads.into_iter().flatten()) {
+            reads.entries.entry(entry.path.clone()).or_insert(entry);
+        }
+        Some(reads)
+    }
+
     /// Recorded consumer reads, for a resumed consumer to retain reads made by its old prefix.
     pub fn reads(&self) -> Option<ReadSet> {
         let entries = self.dependencies.as_ref()?.records()?.reads?;
