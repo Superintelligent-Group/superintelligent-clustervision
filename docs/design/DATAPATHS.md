@@ -57,7 +57,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
-| Claude JSONL | Parallel metadata discovery; mmap typed borrowed conversational records including rich reads; large lazy tool inputs use Json source ranges; checkpoints | Demanded full arguments/details and uncommon fallback records remain owned; portable transport retains one line |
+| Claude JSONL | Typed borrowed mmap records and positioned portable projections; lazy text/arguments, Facts metadata, checkpoints and projected discovery/fork heads | Full details and uncommon fallback records remain owned; native/portable CPU convergence is measured separately |
 | Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; selected giant outputs/assistant text retain checked ranges; checkpoints | Function arguments, nonstring outputs, body-dependent user classification and unknown shapes retain owned fallbacks |
 | Codex legacy JSON / zstd | Compressed modern JSONL decodes once into a shared private arena; legacy JSON remains separate | Legacy whole-document path; decoded disk extent is input-sized; no general compressed incremental marks |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
@@ -69,12 +69,12 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
 | Continue | Native/positioned typed header and selected-record source views; lazy payloads and tool-answer dedup | JSON-encoded arguments, selected composites, answer-ID state and mutable snapshots remain |
-| OpenCode files | Ordered message descriptors, parts per message | Reads message metadata twice; dependency set includes parts |
-| OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
-| Cursor SQLite | Indexed IDE composer ranges; CLI/ACP snapshot replay of reachable protobuf/JSON blobs | Selected message scalars and rich fields; shared private text backing activation in progress |
+| OpenCode files | Ordered message descriptors and source-selected headers/parts; one shared payload arena per session | File inventory and publication metadata scale with part count; late-query miss gate still exposes redundant copies |
+| OpenCode SQLite | Indexed rows and source-selected parts; strict readable-role discovery counts; guarded original DB/WAL/journal dependencies | Encoded input CPU regression remains; full modes and structural metadata stay owned |
+| Cursor SQLite | CLI/ACP reachable-message replay and IDE composer projections; selected strings, Lexical rich text and structured results share private backing | Encoded rich-text CPU cost, owned identifiers/full metadata, WITHOUT ROWID fallback |
 | Devin SQLite | Compact structural forest projection, then selected full metadata per emitted row | Necessary navigation state grows with nodes; strict metadata projection has a measured CPU cost |
 | Hermes SQLite | Indexed rows; exact prompt suppression uses one borrowed-key admission per candidate and bounded spill | Flat retained prompt heap; prompt-only CPU still about 50% above original unbounded Vec |
-| Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
+| Goose SQLite | Indexed selected message rows into guarded shared backing; typed Facts omit unrelated metadata bags | Full metadata and legacy JSONL remain owned; selected decoding CPU differs by shape |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
 | LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Bounded discovery title prefixes; Harmony decoding and arbitrary demanded output/metadata remain owned |
@@ -99,12 +99,14 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
 | FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep | Writer arenas coexist with admitted documents; giant escaped-body composition proof pending |
 | Semantic indexing | Shares discovery inventory; source/model identity enables unchanged-vector reuse and deferred model load; atomic streamed save | Fallible lazy text projections and final end-to-end cost proof; vector store still grows with session count |
-| API pagination | Bounded source-verified page checkpoints and head metadata cache; no messages cached | Safe continuation formats only; source/dependency changes and oversized state fall back |
+| API pagination / HTTP windows | Verified page checkpoints and head metadata cache; selected HTTP JSON stages bounded frames through shared window selection | Desktop Value responses, full-session routes, browser JSON parsing and demanded metadata remain owned |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; ordered usage rows reuse a bounded dependency-validated cache | Cold ledger publication, exact dedup I/O and model roster growth; tiny native sources bypass caching |
 | Reshape/emit | Bounded shared JSONL staging; Codex/Grok/OpenClaw/Qwen stream output records | Retained source/materialization, Claude record rewrites, record-local structured Values and complete verification reparse |
+| Prune/revive | Compact selection facts and source positions; transcript/sidecar staging with sequential record rewrites | Giant changed records remain owned; additional scans/staging currently increase CPU |
+| MCP observe | Retained-message watch callbacks and checked capped searchable prefixes | Other full producer modes, owned metadata and uncapped MCP show windows remain separate |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
 
 Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,stream}.rs`,
@@ -469,7 +471,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Hermes exact-set CPU/heap controls and corpus parity; remaining prompt-only CPU tradeoff recorded.
 - [x] Kimi Code logical-step/selected payload retention, with native/portable resolved parity, late-query CPU controls and bounded deferred handles.
 - [x] Cursor CLI selected text and arguments, strict fused portable validation, and shared reducer facts.
-- [ ] Cursor IDE selected composer payloads and OpenCode many-part CPU convergence.
+- [x] Cursor IDE selected strings, rich text and structured results with exact owned-output controls.
+- [ ] Cursor/OpenCode selected-path CPU convergence; source inventory retention for file-store late predicates.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
 - [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
@@ -494,9 +497,12 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Portable/zstd Codex selected payload retention with matched clean release CPU and exact output controls.
 - [x] Shared reducer metadata demand; Claude/Cursor CLI facts preserve doctor, compaction and affordance outputs.
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
-- [ ] Bounded retained MCP observation and staged HTTP/browser response payloads.
-- [ ] Native emission record/output staging and incremental fidelity verification.
-- [ ] Prune compact decision facts, staged rewrites/sidecars and bounded usage repair.
+- [ ] Complete guarded cold SQLite snapshot integration, operation-scoped reuse and journal dependency propagation.
+- [x] Bounded retained MCP observation and staged HTTP selected-window payloads; owned-route/browser limits recorded.
+- [x] Native JSONL record/output staging for append-only emitters.
+- [ ] Native emission incremental fidelity verification, lazy source admission and Claude record rewrite retention.
+- [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
+- [ ] Prune giant-record retention, shared restamp writing and CPU convergence.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
 - [x] Exact session-ranked search limits and pre-limit CLI/HTTP filters, including tied scores and current metadata.
 - [x] Measure exact search collector stored-document costs; project stored IDs without decoding unrelated metadata, preserving existing indexes.
