@@ -120,7 +120,7 @@ impl Identity {
     }
 }
 impl JsonSource {
-    fn decoded_backing(&self) -> Result<Arc<crate::harness::store::bytes::ByteSource>> {
+    pub(crate) fn decoded_backing(&self) -> Result<Arc<crate::harness::store::bytes::ByteSource>> {
         let mut decoded = self
             .0
             .decoded

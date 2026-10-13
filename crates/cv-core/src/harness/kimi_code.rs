@@ -89,11 +89,15 @@
 //! `…/agents/agent-N`); parsing one yields its own [`Session`] with `lineage.parent` = the session
 //! uuid and `lineage.agent_path` = `agent-N`.
 
-use super::store::{document::Record, jsonl};
+use super::store::{
+    document::{Fields, Record},
+    jsonl,
+};
 use super::wire::{coerce_text, openai, text_parts};
 use super::Adapter;
 use crate::harness::claude::CARRIER_KEY;
 use crate::ir::*;
+use crate::json::JsonView;
 use crate::lazy::Text;
 use crate::stream::{Checkpoint, Flow, MessageSink, ParseOptions};
 use anyhow::Result;
@@ -195,7 +199,11 @@ impl Adapter for KimiCode {
             let (s, wire) = session_header(r);
             sink.meta(&s);
             let Ok(file) = fs::File::open(&wire) else { return Ok(s) };
-            Ok(stream_wire(BufReader::new(file), &wire, 0, s, Ctx::new(opts), 0, sink))
+            if opts.spans && !opts.complete {
+                stream_projected(&file, &wire, 0, s, Ctx::new(opts), 0, sink)
+            } else {
+                Ok(stream_wire(BufReader::new(file), &wire, 0, s, Ctx::new(opts), 0, sink))
+            }
         })
     }
 
@@ -232,15 +240,28 @@ impl Adapter for KimiCode {
             // the checkpoint. The caller verifies those dependencies before accepting the suffix.
             let (s, _) = session_header(r);
             sink.meta(&s);
-            Ok(Some(stream_wire(
-                BufReader::new(file),
-                &wire,
-                from.offset,
-                s,
-                state.ctx.restore(opts),
-                state.skipped,
-                sink,
-            )))
+            let session = if opts.spans && !opts.complete {
+                stream_projected(
+                    &file,
+                    &wire,
+                    from.offset,
+                    s,
+                    state.ctx.restore(opts),
+                    state.skipped,
+                    sink,
+                )?
+            } else {
+                stream_wire(
+                    BufReader::new(file),
+                    &wire,
+                    from.offset,
+                    s,
+                    state.ctx.restore(opts),
+                    state.skipped,
+                    sink,
+                )
+            };
+            Ok(Some(session))
         })
     }
 }
@@ -401,24 +422,7 @@ fn stream_wire(
         // Pending steps are amended by subsequent parts/results/usage; EOF flush is provisional.
         // Only a complete record with no held step can preserve an immutable emitted prefix.
         if flow != Flow::Stop && complete && ctx.step.is_none() && sink.wants_checkpoint(offset) {
-            #[derive(serde::Serialize)]
-            struct State<'a, 'b> {
-                wire: &'a Path,
-                flavor: Flavor,
-                ctx: &'a Ctx<'b>,
-                skipped: u64,
-            }
-            let mut checkpoint = Checkpoint::new(offset);
-            checkpoint.put(
-                crate::stream::ADAPTER_LAYER,
-                &State {
-                    wire,
-                    flavor: Flavor::of(ctx.opts),
-                    ctx: &ctx,
-                    skipped: prior_skipped + skipped,
-                },
-            );
-            sink.checkpoint(&mut checkpoint);
+            checkpoint_wire(&ctx, wire, offset, prior_skipped + skipped, sink);
         }
         flow
     });
@@ -432,6 +436,97 @@ fn stream_wire(
     }
     super::note_skipped_lines(&mut s, prior_skipped + skipped);
     s
+}
+
+fn stream_projected(
+    file: &fs::File,
+    wire: &Path,
+    at: u64,
+    mut s: Session,
+    mut ctx: Ctx<'_>,
+    prior_skipped: u64,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    use jsonl::ranges::{self, Range};
+    let source = crate::json::JsonSource::capture(wire)?;
+    let end = file.metadata()?.len();
+    let mut records = ranges::records(
+        file,
+        Range {
+            offset: at,
+            len: end.saturating_sub(at),
+        },
+    )?;
+    let mut skipped = prior_skipped;
+    let mut known_offset = true;
+    while let Some(record) = records.next() {
+        let (range, complete) = match record {
+            Ok(record) => record,
+            Err(_) => {
+                skipped += 1;
+                known_offset = false;
+                continue;
+            }
+        };
+        let range = match ranges::trim(file, range) {
+            Ok(range) => range,
+            Err(_) => {
+                skipped += 1;
+                known_offset = false;
+                continue;
+            }
+        };
+        if range.len == 0 {
+            continue;
+        }
+        let flow = match source.read_range_value(range.offset, range.len, |view| ctx.record_view(view, &source, sink)) {
+            Ok(flow) => flow,
+            Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => {
+                skipped += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if flow == Flow::Stop {
+            break;
+        }
+        let offset = records.offset();
+        if known_offset && complete && ctx.step.is_none() && sink.wants_checkpoint(offset) {
+            checkpoint_wire(&ctx, wire, offset, skipped, sink);
+        }
+    }
+    source.check()?;
+    if !ctx.stopped {
+        ctx.flush_step(sink);
+    }
+    s.harness_extra_mut(Harness::KimiCode).append(&mut ctx.facts);
+    if let Some(pv) = ctx.protocol_version.take() {
+        s.harness_extra_mut(Harness::KimiCode)
+            .insert("protocol_version".into(), pv.into());
+    }
+    super::note_skipped_lines(&mut s, skipped);
+    Ok(s)
+}
+
+fn checkpoint_wire(ctx: &Ctx<'_>, wire: &Path, offset: u64, skipped: u64, sink: &mut dyn MessageSink) {
+    #[derive(serde::Serialize)]
+    struct State<'a, 'b> {
+        wire: &'a Path,
+        flavor: Flavor,
+        ctx: &'a Ctx<'b>,
+        skipped: u64,
+    }
+    let mut checkpoint = Checkpoint::new(offset);
+    checkpoint.put(
+        crate::stream::ADAPTER_LAYER,
+        &State {
+            wire,
+            flavor: Flavor::of(ctx.opts),
+            ctx,
+            skipped,
+        },
+    );
+    sink.checkpoint(&mut checkpoint);
 }
 
 /// The session's own transcript: the `main` agent's wire log.
@@ -655,10 +750,9 @@ fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
 /// The model alias from the first `profile.bind` / `config.update` near the head of the transcript
 /// (the bind is the 2nd record; scan a handful of lines, never the whole file).
 fn peek_model(wire: &Path) -> Option<String> {
-    let file = fs::File::open(wire).ok()?;
     let mut model = None;
     let mut seen = 0usize;
-    super::for_each_json_line(BufReader::new(file), |v| {
+    peek_fields(wire, &["type", "modelAlias"], |v| {
         seen += 1;
         if matches!(
             v.get("type").and_then(Value::as_str),
@@ -678,16 +772,53 @@ fn peek_model(wire: &Path) -> Option<String> {
     model
 }
 
+/// Header peeks select metadata without allocating unrelated giant wire payloads.
+fn peek_fields(wire: &Path, keys: &[&'static str], mut visit: impl FnMut(Value) -> Flow) {
+    let mut run = || -> Result<()> {
+        use jsonl::ranges::{self, Range};
+        let file = fs::File::open(wire)?;
+        let source = crate::json::JsonSource::capture(wire)?;
+        for record in ranges::records(
+            &file,
+            Range {
+                offset: 0,
+                len: file.metadata()?.len(),
+            },
+        )? {
+            let (range, _) = match record {
+                Ok(record) => record,
+                Err(_) => continue,
+            };
+            let range = ranges::trim(&file, range)?;
+            if range.len == 0 {
+                continue;
+            }
+            match source.read_range_value(range.offset, range.len, |view| {
+                let object = Fields::parse(view, keys)?
+                    .map(|fields| fields.project(keys))
+                    .transpose()?;
+                Ok(visit(object.map(Value::Object).unwrap_or(Value::Null)))
+            }) {
+                Ok(Flow::Stop) => break,
+                Ok(Flow::Continue) => {}
+                Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    };
+    let _ = run();
+}
+
 /// `message.origin.kind` (`user` / `injection` / `system_trigger` / `background_task` / `task`),
 /// `"user"` when absent (older records).
 /// The system prompt from the head of the wire: the first `profile.bind` / `config.update` that
 /// carries a non-empty `systemPrompt` (the same records [`Ctx::system_prompt`] turns into a
 /// `SystemPrompt` message). Bounded like [`peek_model`].
 fn peek_system_prompt(wire: &Path) -> Option<String> {
-    let file = fs::File::open(wire).ok()?;
     let mut prompt = None;
     let mut seen = 0usize;
-    super::for_each_json_line(BufReader::new(file), |v| {
+    peek_fields(wire, &["type", "systemPrompt"], |v| {
         seen += 1;
         if matches!(
             v.get("type").and_then(Value::as_str),
@@ -753,6 +884,250 @@ impl<'a> Ctx<'a> {
             stopped: false,
         }
     }
+    /// Selected payloads keep their source lifetime while the mutable step waits for usage/end.
+    fn record_view(
+        &mut self,
+        view: JsonView<'_>,
+        source: &crate::json::JsonSource,
+        sink: &mut dyn MessageSink,
+    ) -> Result<Flow> {
+        let Some(record) = Fields::parse(view, &["type", "time", "event", "message"])? else {
+            return Ok(Flow::Continue);
+        };
+        let ty = record.string("type")?.unwrap_or_default();
+        if ty == "context.append_message" {
+            let message = record
+                .get("message")
+                .map(|view| Fields::parse(view, &["role", "origin", "content"]))
+                .transpose()?
+                .flatten();
+            let mut blocks = Vec::new();
+            if let Some(content) = message.as_ref().and_then(|message| message.get("content")) {
+                if let Some(text) = content.source_text()? {
+                    if !text.is_empty() {
+                        blocks.push(Block::Text { text });
+                    }
+                } else if let Some(parts) = content.array()? {
+                    for part in parts {
+                        if let Some(block) = part_view(part?)? {
+                            blocks.push(block);
+                        }
+                    }
+                }
+            }
+            let metadata = message
+                .map(|message| message.project(&["role", "origin"]))
+                .transpose()?
+                .map(Value::Object)
+                .unwrap_or(Value::Null);
+            let projected = serde_json::json!({"message":metadata});
+            let ts = record.value("time")?.as_ref().and_then(super::ts_from_value);
+            let flow = self.append_message(&projected, ts, sink, Some(blocks));
+            return Ok(if flow == Flow::Stop { self.stop() } else { flow });
+        }
+        if ty != "context.append_loop_event" {
+            // Bookkeeping has no semantic output in lazy passes and need not become a Value.
+            if !matches!(
+                ty.as_str(),
+                "permission.set_mode"
+                    | "file_history.checkpoint"
+                    | "metadata"
+                    | "profile.bind"
+                    | "config.update"
+                    | "context.append_message"
+                    | "context.apply_compaction"
+                    | "task.terminated"
+                    | "subagent.spawned"
+                    | "subagent.completed"
+                    | "subagent.failed"
+                    | "context.undo"
+                    | "context.clear"
+                    | "turn.cancel"
+            ) {
+                return Ok(Flow::Continue);
+            }
+            return Ok(self.record(view.resolve()?.as_ref(), sink));
+        }
+        let Some(event) = record.get("event") else {
+            return Ok(Flow::Continue);
+        };
+        let Some(fields) = Fields::parse(
+            event,
+            &[
+                "type",
+                "stepUuid",
+                "part",
+                "toolCallId",
+                "name",
+                "args",
+                "result",
+                "traceId",
+                "turnId",
+                "step",
+            ],
+        )?
+        else {
+            return Ok(Flow::Continue);
+        };
+        let ts = record.value("time")?.as_ref().and_then(super::ts_from_value);
+        let event_type = fields.string("type")?.unwrap_or_default();
+        let flow = match event_type.as_str() {
+            "content.part" | "tool.call" => {
+                let uuid = fields.string("stepUuid")?.unwrap_or_default();
+                let metadata = Value::Object(fields.project(&["stepUuid", "turnId", "step"])?);
+                if self.ensure_step(&uuid, &metadata, ts, sink) == Flow::Stop {
+                    return Ok(self.stop());
+                }
+                if event_type == "content.part" {
+                    if let Some(part) = fields.get("part") {
+                        if let Some(block) = part_view(part)? {
+                            self.step.as_mut().unwrap().msg.content.push(block);
+                        }
+                    }
+                } else {
+                    let id = fields.string("toolCallId")?.unwrap_or_default();
+                    let name = fields.string("name")?.unwrap_or_default();
+                    self.call_names.insert(id.clone(), name.clone());
+                    let input = fields
+                        .get("args")
+                        .map(|v| v.argument(true))
+                        .transpose()?
+                        .unwrap_or_else(|| Value::Null.into());
+                    self.step.as_mut().unwrap().msg.content.push(Block::ToolUse {
+                        id,
+                        name,
+                        input,
+                        namespace: None,
+                    });
+                }
+                Flow::Continue
+            }
+            "tool.result" => {
+                let id = fields.string("toolCallId")?.unwrap_or_default();
+                let result = fields
+                    .get("result")
+                    .map(|v| Fields::parse(v, &["output", "isError", "note", "truncated"]))
+                    .transpose()?
+                    .flatten();
+                let output = result.as_ref().and_then(|r| r.get("output"));
+                let (content, path) = match output {
+                    Some(output) if output.is_string()? => (output.source_text()?.unwrap(), output_path_view(output)?),
+                    Some(output) if output.array()?.is_some() => {
+                        // Flattened parts need owned bytes. One append arena per wire capture
+                        // keeps deferred descriptor registries bounded in file handles.
+                        let backing = source.decoded_backing()?;
+                        let (offset, len) = backing.append(|writer| {
+                            writer.write_all(b"\"")?;
+                            let mut first = true;
+                            for part in output.array()?.unwrap() {
+                                let part = part?;
+                                let Some(fields) = Fields::parse(part, &["type", "text"])? else {
+                                    continue;
+                                };
+                                let image = fields.string("type")?.is_some_and(|ty| super::wire::is_image_part(&ty));
+                                let text = match fields.get("text") {
+                                    Some(text) if text.is_string()? => Some(text),
+                                    _ => None,
+                                };
+                                if !image && text.is_none() {
+                                    continue;
+                                }
+                                if !first {
+                                    writer.write_all(b"\\n")?;
+                                }
+                                first = false;
+                                if image {
+                                    writer.write_all(b"[image]")?;
+                                } else {
+                                    text.unwrap().for_each_str_chunk(|chunk| {
+                                        let encoded = serde_json::to_vec(chunk)?;
+                                        writer.write_all(&encoded[1..encoded.len() - 1])?;
+                                        Ok(())
+                                    })?;
+                                }
+                            }
+                            writer.write_all(b"\"")?;
+                            Ok(())
+                        })?;
+                        source.read_backing_syntax(backing, offset, len, |text| {
+                            Ok((text.source_text()?.unwrap(), output_path_view(text)?))
+                        })?
+                    }
+                    _ => (Text::default(), None),
+                };
+                let mut details = Map::new();
+                if let Some(result) = &result {
+                    if let Some(note) = result.value("note")?.filter(|v| !v.is_null()) {
+                        details.insert("note".into(), note);
+                    }
+                    if result.value("truncated")? == Some(Value::Bool(true)) {
+                        details.insert("truncated".into(), Value::Bool(true));
+                    }
+                }
+                if let Some(path) = path {
+                    details.insert("persistedOutput".into(), serde_json::json!({"path":path}));
+                }
+                let mut message = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
+                message.timestamp = ts;
+                message.content.push(Block::ToolResult {
+                    tool_use_id: id.clone(),
+                    content,
+                    is_error: result
+                        .as_ref()
+                        .map(|r| r.value("isError"))
+                        .transpose()?
+                        .flatten()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    tool_name: self.call_names.get(&id).cloned(),
+                    status: None,
+                    details: (!details.is_empty()).then(|| Value::Object(details)),
+                });
+                if self.opts.extra {
+                    if let Some(trace) = fields.value("traceId")? {
+                        message
+                            .harness_extra_mut(Harness::KimiCode)
+                            .insert("traceId".into(), trace);
+                    }
+                }
+                if let Some(step) = &mut self.step {
+                    step.results.push(message);
+                    Flow::Continue
+                } else {
+                    sink.message(message)
+                }
+            }
+            "step.begin" | "step.end" => {
+                const KEYS: &[&str] = &[
+                    "type",
+                    "uuid",
+                    "turnId",
+                    "step",
+                    "messageId",
+                    "finishReason",
+                    "llmFirstTokenLatencyMs",
+                    "llmStreamDurationMs",
+                    "traceId",
+                    "rawFinishReason",
+                ];
+                let metadata = Fields::parse(event, KEYS)?.unwrap();
+                let mut metadata = metadata.project(KEYS)?;
+                if let Some(usage) = event.get("usage")? {
+                    const TOKENS: &[&str] = &["inputOther", "output", "inputCacheRead", "inputCacheCreation"];
+                    let usage = Fields::parse(usage, TOKENS)?
+                        .map(|fields| fields.project(TOKENS))
+                        .transpose()?
+                        .map(Value::Object)
+                        .unwrap_or(Value::Null);
+                    metadata.insert("usage".into(), usage);
+                }
+                let projected = serde_json::json!({"event":metadata});
+                self.loop_event(&projected, ts, sink)
+            }
+            _ => Flow::Continue,
+        };
+        Ok(if flow == Flow::Stop { self.stop() } else { flow })
+    }
     fn record(&mut self, v: &Value, sink: &mut dyn MessageSink) -> Flow {
         let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
         let ts = v.get("time").and_then(super::ts_from_value);
@@ -778,7 +1153,7 @@ impl<'a> Ctx<'a> {
                 self.carry(v, ts, sink)
             }
             "profile.bind" | "config.update" => self.system_prompt(v, ty, ts, sink),
-            "context.append_message" => self.append_message(v, ts, sink),
+            "context.append_message" => self.append_message(v, ts, sink, None),
             "context.append_loop_event" => self.loop_event(v, ts, sink),
             "context.apply_compaction" => {
                 let f = self.flush_step(sink);
@@ -990,7 +1365,13 @@ impl<'a> Ctx<'a> {
         sink.message(m)
     }
 
-    fn append_message(&mut self, v: &Value, ts: Option<DateTime<Utc>>, sink: &mut dyn MessageSink) -> Flow {
+    fn append_message(
+        &mut self,
+        v: &Value,
+        ts: Option<DateTime<Utc>>,
+        sink: &mut dyn MessageSink,
+        blocks: Option<Vec<Block>>,
+    ) -> Flow {
         let f = self.flush_step(sink);
         if f == Flow::Stop {
             return Flow::Stop;
@@ -1017,7 +1398,11 @@ impl<'a> Ctx<'a> {
         };
         let mut m = Message::of_kind(role, kind, origin);
         m.timestamp = ts;
-        push_parts(&mut m, message.and_then(|m| m.get("content")));
+        if let Some(blocks) = blocks {
+            m.content = blocks;
+        } else {
+            push_parts(&mut m, message.and_then(|m| m.get("content")));
+        }
         m.harness_extra_mut(Harness::KimiCode)
             .insert("origin_kind".into(), Value::String(origin_kind.to_string()));
         if self.opts.complete {
@@ -1215,6 +1600,86 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// Decode only bounded metadata; text/thinking payloads retain the validated wire source.
+fn part_view(part: JsonView<'_>) -> Result<Option<Block>> {
+    let Some(fields) = Fields::parse(part, &["type", "text", "think", "encrypted"])? else {
+        return Ok(None);
+    };
+    let ty = fields.string("type")?.unwrap_or_default();
+    if ty == "think" {
+        let text = fields
+            .get("think")
+            .map(|v| v.source_text())
+            .transpose()?
+            .flatten()
+            .unwrap_or_default();
+        let encrypted = fields.string("encrypted")?;
+        if text.is_empty() && encrypted.is_none() {
+            return Ok(None);
+        }
+        return Ok(Some(Block::Thinking {
+            text,
+            signature: None,
+            encrypted,
+            redacted: false,
+        }));
+    }
+    if super::wire::is_image_part(&ty) || matches!(ty.as_str(), "audio_url" | "video_url") {
+        return Ok(openai::part_to_block(part.resolve()?.as_ref(), &openai::KIMI_CODE));
+    }
+    Ok(fields
+        .get("text")
+        .map(|v| v.source_text())
+        .transpose()?
+        .flatten()
+        .map(|text| Block::Text { text }))
+}
+
+/// Keep only candidate output-path lines while scanning decoded chunks. Last matching line wins,
+/// including an empty final path, exactly like output_path's reverse lines lookup.
+fn output_path_view(output: JsonView<'_>) -> Result<Option<String>> {
+    const PREFIX: &str = "output_path:";
+    let mut prefix = Some(0);
+    let mut candidate = None::<String>;
+    let mut last = None;
+    output.for_each_str_chunk(|chunk| {
+        for segment in chunk.split_inclusive('\n') {
+            let complete = segment.ends_with('\n');
+            let mut text = if complete {
+                &segment[..segment.len() - 1]
+            } else {
+                segment
+            };
+            if let Some(matched) = prefix {
+                let n = text.len().min(PREFIX.len() - matched);
+                if text.as_bytes()[..n] == PREFIX.as_bytes()[matched..matched + n] {
+                    prefix = Some(matched + n);
+                    text = &text[n..];
+                    if matched + n == PREFIX.len() {
+                        candidate.get_or_insert_with(String::new);
+                    }
+                } else {
+                    prefix = None;
+                }
+            }
+            if let Some(line) = &mut candidate {
+                line.push_str(text);
+            }
+            if complete {
+                if let Some(line) = candidate.take() {
+                    last = Some(line);
+                }
+                prefix = Some(0);
+            }
+        }
+        Ok(())
+    })?;
+    if let Some(line) = candidate {
+        last = Some(line);
+    }
+    Ok(last.map(|line| line.trim().to_owned()).filter(|line| !line.is_empty()))
+}
+
 /// A harness-side System turn of the given kind and origin, with the wire record type that
 /// produced it in `extra["kimi-code"]["event"]`.
 fn note(text: String, ts: Option<DateTime<Utc>>, kind: MessageKind, origin: Origin, event: &str) -> Message {
@@ -1377,6 +1842,52 @@ mod tests {
         fs::write(dir.join("state.json"), r#"{"id":"session_resume","cwd":"/project"}"#).unwrap();
         fs::write(dir.join("agents/main/wire.jsonl"), body).unwrap();
         SessionRef::new("resume", Harness::KimiCode, dir)
+    }
+
+    #[test]
+    fn lazy_finalized_payloads_resolve_like_original_step_dispatch() {
+        let world = cv_testkit::World::in_process("kimi_code_source_payloads");
+        let body = "雪\n\"".repeat(6000);
+        let output = format!("{body}\noutput_path: first\n{body}\noutput_path: /scratch/result.log\n");
+        let records = [
+            serde_json::json!({"type":"metadata","protocol_version":"2"}),
+            serde_json::json!({"type":"profile.bind","modelAlias":"test","systemPrompt":"fixture"}),
+            serde_json::json!({"type":"context.append_message","message":{"role":"user","origin":{"kind":"injection"},"content":[{"type":"text","text":body}]}}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"content.part","stepUuid":"s","turnId":"turn","step":3,"part":{"type":"think","think":body}}}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.call","stepUuid":"s","toolCallId":"c","name":"Read","args":{"payload":body}}}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"c","traceId":"trace","result":{"output":output,"note":"n","truncated":true,"isError":false}}}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"c","result":{"output":[{"type":"text","text":body},{"type":"image_url","image_url":{"url":"blobref:image"}},{"text":"\noutput_path: /scratch/composite.log"}]}}}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.end","uuid":"s","messageId":"final","usage":{"inputOther":7,"output":11},"finishReason":"tool_use"}}),
+        ];
+        let text = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        let r = resume_fixture(&world, text.as_bytes());
+        let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
+        for opts in [
+            ParseOptions::lazy(),
+            ParseOptions::lazy_extra(),
+            ParseOptions::full(),
+            ParseOptions::complete(),
+        ] {
+            let expected = old_wire_oracle(&r, &opts);
+            let mut actual = crate::stream::collect_with(&adapter, &r, &opts).unwrap();
+            if opts.spans {
+                assert!(matches!(
+                    &actual.messages[2].content[1],
+                    Block::ToolUse {
+                        input: crate::Json::Source(_),
+                        ..
+                    }
+                ));
+            }
+            actual.materialize().unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        let mut lazy = crate::stream::collect_with(&adapter, &r, &ParseOptions::lazy()).unwrap();
+        fs::write(adapter.resume_source(&r), "{}\n").unwrap();
+        assert!(lazy.materialize().is_err());
     }
 
     #[test]
