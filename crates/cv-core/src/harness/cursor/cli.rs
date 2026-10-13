@@ -80,7 +80,9 @@ fn read(
     counting: bool,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    let lazy = opts.spans && !opts.extra && !opts.complete;
+    // Cursor's fact reducers consume native summary/context/error markers through the IR;
+    // its record_metadata and part_metadata bags have no fact keys. Session modes stay intact.
+    let lazy = opts.spans && !opts.wants_full_extra();
     let captured = if counting || lazy {
         // Capture the compound provenance before the first SQL read establishes its snapshot.
         // A checkpoint can leave the DB tuple unchanged while the WAL or optional ACP head changes.
@@ -893,6 +895,76 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn facts_preserve_doctor_compaction_affordance_and_session_facts() {
+        let world = cv_testkit::World::in_process("cursor-cli-facts");
+        let big = "日本語\n".repeat(8192);
+        let values = [
+            json!({"role":"user","content":"question"}),
+            json!({"role":"user","content":big,"providerOptions":{"cursor":{"requestContextCompleteness":false,"ignoredPayload":big}}}),
+            json!({"role":"assistant","content":[{"type":"reasoning","text":"reason"},{"type":"tool-call","toolCallId":"call","toolName":"Read","args":{"file_path":"/scratch/file","content":big}}],"providerOptions":{"cursor":{"systemPromptFingerprint":{"model":"native-model"},"ignoredPayload":big}}}),
+            json!({"role":"tool","content":[{"type":"tool-result","toolCallId":"call","toolName":"Read","result":big,"experimental_content":[{"type":"text","text":big}]}],"providerOptions":{"cursor":{"highLevelToolCallResult":{"isError":true,"output":big}}}}),
+            json!({"role":"assistant","content":"native summary","providerOptions":{"cursor":{"isSummary":true,"ignoredPayload":big}}}),
+        ];
+        let root = (1..=5).flat_map(|id| field(1, &[id; 32])).chain([80, 1]).collect();
+        let records: Vec<_> = values
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| ((i + 1) as u8, value.to_string().into_bytes()))
+            .collect();
+        let (conn, reference) = disk_fixture(root, &records, &world.base.join("source"));
+        let mut reports = Vec::new();
+        let mut sessions = Vec::new();
+        let mut counts = Vec::new();
+        for options in [ParseOptions::lazy_extra(), ParseOptions::facts()] {
+            let mut report = crate::doctor::Report::default();
+            let mut pass = report.session(Some(reference.path.clone()));
+            let session = read(&conn, &reference, &options, false, &mut pass).unwrap();
+            pass.finish().unwrap();
+            reports.push(report.to_json());
+            let mut retained = CollectSink::default();
+            read(&conn, &reference, &options, false, &mut retained).unwrap();
+            assert_eq!(retained.messages.last().unwrap().kind, MessageKind::CompactionSummary);
+            let mut counter = crate::affordance::Counter::new(&reference);
+            for message in &retained.messages {
+                counter.note(message).unwrap();
+            }
+            counts.push(counter.finish(&session, &[]));
+            if options.facts_only() {
+                assert!(retained.messages.iter().all(|message| message.extra.is_empty()));
+                assert!(matches!(
+                    &retained.messages[1].content[0],
+                    Block::Text {
+                        text: crate::lazy::Text::Source(_)
+                    }
+                ));
+            } else {
+                assert!(
+                    retained.messages[1]
+                        .harness_extra(Harness::Cursor)
+                        .unwrap()
+                        .contains_key("record_metadata")
+                );
+            }
+            sessions.push(session);
+        }
+        assert_eq!(reports[0], reports[1]);
+        // Native summaries are summary messages, not inferred compaction boundaries.
+        assert_eq!(reports[0]["compactions"], 0);
+        assert_eq!(counts[0], counts[1]);
+        assert_eq!(sessions[0].model, sessions[1].model);
+        assert_eq!(sessions[0].extra, sessions[1].extra);
+        let mut complete = ParseOptions::facts();
+        complete.complete = true;
+        let mut retained = CollectSink::default();
+        read(&conn, &reference, &complete, false, &mut retained).unwrap();
+        assert!(
+            retained.messages[1]
+                .harness_extra(Harness::Cursor)
+                .unwrap()
+                .contains_key("record")
+        );
     }
     #[test]
     fn wal_guard_survives_lazy_blob_arguments_and_intentional_stop() {
