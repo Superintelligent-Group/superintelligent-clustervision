@@ -373,4 +373,42 @@ mod tests {
         assert_eq!(fs::read(first.path)?, before);
         Ok(())
     }
+    #[test]
+    fn late_argument_source_failure_preserves_published_files() -> Result<()> {
+        let world = cv_testkit::World::in_process("late-argument-LmStudio");
+        let source = world.base.join("arguments.json");
+        fs::write(&source, br#"{"path":"old"}"#)?;
+        let input = crate::Json::source(&source, 0, fs::metadata(&source)?.len())?;
+        let mut session = Session::new("synthetic", Harness::Claude);
+        session.title = Some("explicit".into());
+        session.created_at =
+            Some(chrono::DateTime::parse_from_rfc3339("2026-10-13T12:00:00Z")?.with_timezone(&chrono::Utc));
+        let mut user = Message::new(Role::User);
+        user.content.push(Block::Text {
+            text: "inline prompt".into(),
+        });
+        session.messages.push(user);
+        let mut assistant = Message::new(Role::Assistant);
+        assistant.content.push(Block::ToolUse {
+            id: "call".into(),
+            name: "Read".into(),
+            input,
+            namespace: None,
+        });
+        session.messages.push(assistant);
+        let dest = world.base.join("output");
+        let opts = crate::emit::EmitOptions {
+            new_id: Some("fixed".into()),
+            ..Default::default()
+        };
+        let result = super::super::emit(&session, &dest, &opts)?;
+        let transcript = fs::read(&result.path)?;
+        let index = dest.join("sessions.json");
+        let index_before = fs::read(&index).ok();
+        fs::write(&source, br#"{"path":"new"}"#)?;
+        assert!(super::super::emit(&session, &dest, &opts).is_err());
+        assert_eq!(fs::read(result.path)?, transcript);
+        assert_eq!(fs::read(index).ok(), index_before);
+        Ok(())
+    }
 }
