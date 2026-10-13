@@ -4087,3 +4087,38 @@ binaries/results, candidate probe/CLI logs, and native/portable test logs. Same-
 preparation outside the existing Claude/Codex/Gemini eligibility remains unchanged pending
 reader-contract proof; this step removes checked export ownership, not every parser/fidelity
 allocation. No broad gates or release were run in this lane.
+### Checked OpenClaw exports and flat verification reads (Sol, 2026-10-13)
+
+OpenClaw exports now reuse the guarded wire writer, thinking projection, bounded first-user
+fallback title and JSONL stage. Deferred calls use the existing replay wrapper keys without
+cloning unchanged blocks. Captured Text/Json descriptor guards run before destination creation;
+requested source production completes before transcript publication or index modification.
+The sessions index retains its existing owned merge and ordinary partial-I/O contract.
+
+Flat full+spans JSONL reads retain checked user, assistant and tool-result payloads, using strict
+Value-compatible mapped/positioned views and the original metadata parser. Complete reads, tree
+selection, custom roles and owned Session.system_prompt retain their existing policies. Unknown
+blocks stay ignored; rich assistant usage/provider/error metadata and structured tool details
+keep their existing homes. The shared Anthropic projection only changes flat-media text/tool
+ownership; image/document references still use the original truncation policy. Whole accepted
+rows and original provenance remain checked, including after Flow::Stop. The bounded leaf scan
+preserves the preceding compact substring detection policy and skips non-UTF8 rows.
+
+[Matched actual-operation evidence](OPENCLAW-EXPORT-EVIDENCE.json) compares the preserved
+2a2d35f9 heap probe against Claude parse_for_emit -> OpenClaw Native emit_report with two
+messages and 9,087,663 bytes of mixed Unicode/escaped ordinary prompt text. Requested live Rust
+peak above baseline falls from 46,357,663 to 275,024 bytes; cumulative requested allocations
+fall from 221,343,476 to 1,178,264 bytes. Both operations retain two messages, an empty fidelity
+report and all 10,486,282 transcript bytes. Full normalized transcript hashes match after replacing
+only generated eight-hex entry IDs and their parent references; sessions.json bytes match exactly.
+Source hash and identity are unchanged across the candidate operation. Preserved binaries,
+reports, outputs and source live outside the repository at
+/Users/ember/dev/cv-worktrees/openclaw-export-evidence/.
+
+All 26 native OpenClaw library tests and 18 no-default portable tests pass. The seven checked
+controls cover frozen all-mode wire/index/title behavior, deferred wrappers, source failure
+before publication and during staging, invalid UTF8/JSON, duplicate fields, rich metadata,
+complete+spans preservation, retained replay and stop-time mutation. Native and portable
+SQLite-enabled lib/tests clippy and pinned formatting pass; the no-default test build retains
+four existing unrelated warnings. No complete-mode, unknown-record, metadata-cardinality,
+output-stage, CPU, RSS or physical-I/O bound follows from this selected ordinary-body control.
