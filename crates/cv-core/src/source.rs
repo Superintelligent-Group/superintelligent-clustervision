@@ -340,7 +340,14 @@ impl Probe {
                         identity,
                     }))
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    Some(None)
+                }
                 Err(_) => None,
             })
             .clone()?;
@@ -901,6 +908,21 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[test]
+    fn impossible_child_absence_invalidates_when_parent_becomes_directory() {
+        let world = cv_testkit::World::in_process("not-directory-absence");
+        let parent = world.base.join("parent");
+        let child = parent.join("child");
+        std::fs::write(&parent, "a file").unwrap();
+        let mut reads = ReadSet::default();
+        reads.record(&child);
+        assert!(reads.fresh(&mut Probe::default()));
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(&child, "now present").unwrap();
+        assert!(!reads.fresh(&mut Probe::default()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn primary_identity_rejects_restored_tuple_rewrites_and_replacements() {
