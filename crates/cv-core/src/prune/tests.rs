@@ -1927,3 +1927,32 @@ fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Res
     assert!(revive_staged(&source, stage.finish()?, &facts, &[false; 3], true, None).is_err());
     Ok(())
 }
+
+#[test]
+fn staged_usage_trim_preserves_whitespace_only_buffers_and_eof_failure() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-usage-trim-buffers");
+    let path = world.base.join("source.jsonl");
+    let row = serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"small"}],"usage":{"input_tokens":900,"output_tokens":7}}});
+    let raw = format!("{}{}{}\r\n", " ".repeat(2 * 65536), row, "\t".repeat(2 * 65536));
+    std::fs::write(&path, &raw)?;
+    let source = crate::json::JsonSource::capture(&path)?;
+    let facts = [Some(decision_facts(&row, true))];
+    let mut stage = ByteStage::new();
+    stage.write_all(raw.as_bytes())?;
+    let (output, rewritten, honest, _) = revive_staged(&source, stage.finish()?, &facts, &[false], true, None)?;
+    assert_eq!(rewritten, 1);
+    let mut expected = row;
+    expected["_cv_orig_ctx"] = Value::from(900);
+    pin_usage(
+        expected.pointer_mut("/message/usage").unwrap().as_object_mut().unwrap(),
+        honest.unwrap(),
+    );
+    let mut actual = Vec::new();
+    output.reader()?.read_to_end(&mut actual)?;
+    assert_eq!(actual, format!("{expected}\n").as_bytes());
+    // The producer promises newline framing; truncated private rows still fail at EOF.
+    let mut stage = ByteStage::new();
+    stage.write_all(raw.trim_end_matches('\n').as_bytes())?;
+    assert!(revive_staged(&source, stage.finish()?, &facts, &[false], true, None).is_err());
+    Ok(())
+}

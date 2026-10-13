@@ -4,6 +4,8 @@
 
 - JSON listings with `--limit 0` return an empty array after argument validation without loading inventory, querying indexes, or enriching transcripts.
 
+- Prune revival frames corrected records with boundary searches, avoiding full-byte trimming scans while preserving output and source validation.
+
 - Prune revival updates usage through checked staged row projections without materializing unchanged message bodies or unrelated record fields.
 
 - Prune streams large Thinking and ASCII declassification mutations through checked source projections while preserving exact sidecars and revival estimates.

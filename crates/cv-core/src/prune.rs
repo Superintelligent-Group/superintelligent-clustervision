@@ -1952,11 +1952,15 @@ fn revive_staged(
             let newline = memchr::memchr(b'\n', bytes);
             let n = newline.map_or(bytes.len(), |i| i + 1);
             if rewrite {
-                for (offset, byte) in bytes[..n].iter().enumerate() {
-                    if !matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
-                        start.get_or_insert(position + offset as u64);
-                        end = position + offset as u64 + 1;
-                    }
+                let non_whitespace = |byte: &u8| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n');
+                if start.is_none() {
+                    start = bytes[..n]
+                        .iter()
+                        .position(non_whitespace)
+                        .map(|offset| position + offset as u64);
+                }
+                if let Some(offset) = bytes[..n].iter().rposition(non_whitespace) {
+                    end = position + offset as u64 + 1;
                 }
             } else {
                 stage.write_all(&bytes[..n])?;
