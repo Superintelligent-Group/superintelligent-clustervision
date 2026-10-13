@@ -550,7 +550,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Claude conversational lazy-extra projections and bounded notification classification; raw serialized metadata order checked.
 - [x] Fallible Json demands across consumers and native Claude large lazy argument activation; giant composed allocation/parity proof.
 - [x] Structured inputs retain checked Json sources across shared Anthropic/native SDK/export/OpenSession producers, Kimi Code, OpenCode, Goose, Gemini, Codex and Continue, including supported JSON-encoded arguments.
-- [ ] Demanded owned details and uncommon producer fallbacks: identify concrete remaining shapes and consumer contracts before making broader bounded-memory claims.
+- [x] Inventory remaining demanded owned details and uncommon producer fallbacks by consumer contract. Gemini display text, Continue system prompt and OpenCode rich/unknown metadata remain explicit owned contracts; OpenCode v2 shell output is a concrete avoidable-payload gap tracked below. This inventory does not assert universal bounds.
+- [ ] OpenCode v2 shell selected output: current native 2.0.25 shell records bypass selected replay and own/copy nested output even for Facts/doctor. Extend existing checked projection, retaining exact command/output fallback and metadata semantics.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
@@ -611,7 +612,9 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Shared Cline/Roo export streams checked Anthropic history; frozen native/portable file oracles and the actual Cline allocation control preserve output, fidelity and source-failure behavior.
 - [x] Gemini complete rehome retains checked payloads in both recording formats; exact metadata/replay/acceptance oracles and the actual modern rehome gate preserve the complete contract.
 - [x] Continue/LM Studio checked export and bounded title fallback preserve frozen output and direct captured-source failures, including discarded fields and LM whitespace-thinking projection.
-- [ ] Remaining emitters and other same-harness complete preparation: distinguish required metadata ownership from avoidable ordinary-payload materialization using actual operations. Grok/OpenClaw writers and same-target preparation outside Claude/Codex/Gemini remain candidates, not covered by the preceding allocation claims.
+- [ ] Remaining JSONL emitters: Grok, OpenClaw and Qwen still own ordinary session payloads and construct payload-bearing records. Reuse checked writers; preserve native output, thinking, sidecars and source-error behavior. Qwen local-store absence limits fleet evidence, not supported export scope.
+- [ ] SQLite exports (OpenCode/Hermes): retain checked session leaves and construct only demanded rows; reuse prepared inserts and publish an export in one transaction. Current per-row autocommits and whole-session ownership are avoidable. Test exact logical rows/FTS and rollback; row-sized native/contiguous TEXT costs remain explicit.
+- [ ] Same-harness complete preparation outside Claude/Codex/Gemini: establish independent complete-mode metadata/carrier/variant and wire/fidelity parity before enabling checked preparation. Cline/Roo/Continue/LM Studio are the first active group; newly checked writers need their own same-target assessment.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
 - [x] Prune Thinking, ASCII declassification and ordinary usage-record projections, with whole-operation output parity and CI heap caps.
@@ -3863,3 +3866,38 @@ rejections retain the verifier's unexpected timestamp/ID losses; this lane does
 not change fidelity policy. The unused counting pass is removed; strict source
 acceptance/publication costs remain. This is a scoped CPU tradeoff, not a speed
 claim; separate operation gates establish memory ownership.
+
+
+### Checked-operation integration and remaining ownership audit (2026-10-13)
+
+[Local convergence evidence](CHECKED-OPERATIONS-CONVERGENCE.json) records source `2a2d35f9`: release,
+fmt/clippy, workspace build/test coverage, parse budget, native/portable store and selected-payload
+heap gates, search/semantic and CLI output gates, all 13 whole-operation heap controls, manual,
+no-default builds, published-crate packaging, dist plan, standalone/web wasm, desktop and 63 browser
+selftests pass. The original workspace run stopped at an obsolete LM Studio manifest exception
+after passing the CLI, core library and preceding integrations. Removing that exception and running
+the failed plus remaining targets completes coverage without repeating the passed suites. Earlier
+clippy caught one test-only attribute blank line; its corrected run passes. Package sources and
+extracted same-version dependencies both identify the final source revision. These are local gates;
+Linux CI and installation are recorded separately when completed. No release or version change.
+
+The complete supported-emitter audit distinguishes the checked Claude/Codex/Gemini, Cline/Roo and
+Continue/LM Studio writers from the remaining Grok/OpenClaw/Qwen JSONL and
+OpenCode/Hermes SQLite writers. The latter still retain all decoded session payloads; SQLite's
+need for a contiguous current row does not require that retention. Both SQL emitters also issue
+repeated inserts without an export-wide transaction or prepared-statement reuse. OpenClaw makes
+an unused clone of every unchanged block and eagerly computes the first-user fallback even when
+an explicit title exists. These are concrete follow-ups, not claims that completed paths need
+universal remeasurement. The existing OpenCode writer targets v1 tables while the reader supports
+v2; native v2 resumability needs source evidence independently of our own round-trip reader.
+
+The remaining metadata inventory names actual contracts: Gemini `displayContent`/`display_text`
+retains the user's pre-expansion text in rich IR; Continue duplicates the first System body into
+`Session.system_prompt`, consumed by fidelity and emitters; OpenCode complete carriers preserve raw
+records, and `metadata.source` affects background-job classification. Reducer-only reads may not
+demand every rich field, but deleting these values globally loses behavior. Current 2.0.25 corpus
+evidence separately confirms an ordinary OpenCode shell `output.output` that bypasses selected
+projection; its body can use the existing Text/source contract without a metadata redesign.
+Message/block rosters, complete variants, requested owned APIs and output staging retain their
+cardinality or output costs. Further optimization of the named metadata requires a concrete
+consumer demand and counterexample, rather than an obligation to prove every input optimal.

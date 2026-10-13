@@ -1,0 +1,440 @@
+{
+  "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+  "date": "2026-10-13",
+  "platform": "macOS arm64",
+  "toolchain": "1.99.0",
+  "result": "All CI-equivalent local gates covered. Workspace suite coverage combines original passing targets with scoped recovery after one manifest correction.",
+  "release_sha256": "1e2ecd90c3000dc3c7815ab75f6c5a1eb253b33588c63e871ac76d9e91170070",
+  "gates": [
+    {
+      "name": "release-cli",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "fmt",
+      "source_revision": "71ac6c71abeac4cf122496ba51022c5fdd7421f3",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "corpus-tools",
+      "source_revision": "e7a0ea30dcf9e8325edaedb745084a42d3a46011",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "clippy",
+      "source_revision": "71ac6c71abeac4cf122496ba51022c5fdd7421f3",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "default-build",
+      "source_revision": "71ac6c71abeac4cf122496ba51022c5fdd7421f3",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "default-test",
+      "source_revision": "71ac6c71abeac4cf122496ba51022c5fdd7421f3",
+      "original_exit_code": 101,
+      "coverage": "scoped recovery passed"
+    },
+    {
+      "name": "parse-budget",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-driver-tests",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "store-native-build",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "store-portable-build",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-stores",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-active",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-query",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-doctor",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-events",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-zed",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-portable-docs",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-selected-docs",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-selected-payloads",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-encoded-arguments",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "heap-stats",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "sqlite-heap",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "store-sqlite-portable-build",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "portable-selected-payloads",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "fts-heap",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "semantic-heap",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "cli-output-heap",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "operation-driver-tests",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "operation-probes-build",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "operation-window-build",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "whole-operation-heaps",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "manual-names",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "manual-build",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "core-no-default",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "search-no-default",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "package-cache-refresh",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "package",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "dist-plan",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "core-wasm",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "web-wasm",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "desktop-check",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "desktop-test",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "web-syntax",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "web-tags",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    },
+    {
+      "name": "web-selftest",
+      "source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+      "original_exit_code": 0,
+      "coverage": "passed"
+    }
+  ],
+  "workspace_recovery": {
+    "original_result": "CLI targets, core library, claude_roots, corpus and dependency_fence passed. formats_manifest rejected obsolete LM Studio Untitled match-literal exception; later targets had not run.",
+    "repair": "2a2d35f9 removes only the obsolete manifest exception. 71ac6c71 previously removed a test-only blank line rejected by clippy.",
+    "commands": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--test",
+          "formats_manifest"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--test",
+          "freshness",
+          "--test",
+          "json_consumers",
+          "--test",
+          "opencode_baseline_count",
+          "--test",
+          "perf_budget",
+          "--test",
+          "robustness",
+          "--test",
+          "wire_golden"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--exclude",
+          "clustervision",
+          "--exclude",
+          "clustervision-core",
+          "--lib"
+        ],
+        "exit_code": 0
+      },
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc"
+        ],
+        "exit_code": 0
+      }
+    ],
+    "retained_checks": "Passing default-build/clippy/fmt checks precede the manifest-only correction; release and format-manifest integration rebuilt afterward. No adapter/runtime Rust source changed during recovery."
+  },
+  "package_verification": {
+    "all_tarball_source_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+    "extracted_core_and_search_dependency_revision": "2a2d35f9999ede00e612d9adc973bc59ffd2c839",
+    "cache_recovery": "Preserved 42 exact prior root-owned package-cache entries before verification; no general cache cleanup."
+  },
+  "web_selftests": {
+    "passed": 63,
+    "total": 63
+  },
+  "whole_operation_heap_cases": [
+    {
+      "case": "thinking",
+      "peak_live_rust_bytes": 467757,
+      "sidecar_bytes": 67116376,
+      "sidecar_sha256": "68c8fcaf6c42fa65fcd367f4eca3e8334dfb412f08637b2a206a97cfa3ad4822"
+    },
+    {
+      "case": "ascii-declass",
+      "peak_live_rust_bytes": 270210,
+      "sidecar_bytes": 67109028,
+      "sidecar_sha256": "e02a472d3c4aa721b5199b991ef3c3aa1b1c73420f1885adaa73d1574a9c0b1f"
+    },
+    {
+      "case": "unicode-declass",
+      "peak_live_rust_bytes": 270220,
+      "sidecar_bytes": 67109033,
+      "sidecar_sha256": "f33abf0c9f6c74196c646e4e57da3415f1da247097dbc964ccc6fdbd79d547dd"
+    },
+    {
+      "case": "unchanged-giant-usage-rewrite",
+      "peak_live_rust_bytes": 1318039,
+      "usage_rewritten": 1,
+      "output_bytes": 67110008
+    },
+    {
+      "case": "claude-unselected-rich-window",
+      "peak_live_rust_bytes": 329084,
+      "messages": 1
+    },
+    {
+      "case": "cursor-unselected-rich-window",
+      "peak_live_rust_bytes": 328829,
+      "messages": 1
+    },
+    {
+      "case": "verified-claude-export",
+      "peak_live_rust_bytes": 1398497,
+      "messages": 4,
+      "output_bytes": 74566782,
+      "normalized_sha256": "bb1364b6a0e47516873453e41eee4700f8c472f017b79820daf5489b5ae34119"
+    },
+    {
+      "case": "verified-codex-text-thinking-export",
+      "peak_live_rust_bytes": 283070,
+      "messages": 5,
+      "output_bytes": 67118455,
+      "normalized_sha256": "cc7670ce4e3e93f0ae3099f76bb771d2ff100c393486ed6302c3cefd4e16aa5d"
+    },
+    {
+      "case": "verified-codex-drop-thinking-export",
+      "peak_live_rust_bytes": 405810,
+      "messages": 5,
+      "output_bytes": 9450,
+      "normalized_sha256": "cb0d4dd02494a631c0d197a4951f4536fb5d27016d62f39e61dc88b5fd298562"
+    },
+    {
+      "case": "verified-gemini-export",
+      "peak_live_rust_bytes": 276575,
+      "messages": 4,
+      "output_bytes": 33555582,
+      "normalized_sha256": "567c3d0e0fc2568b6d56e2a1e1fcf9319787e8df9515c2365c525899da17c2a0"
+    },
+    {
+      "case": "verified-cline-export",
+      "peak_live_rust_bytes": 276528,
+      "messages": 4,
+      "output_bytes": 33555301,
+      "sha256": "ce2ed1d91cd5c44afd871021a6a417c7a3bcde99ac31369715447509f515286c"
+    },
+    {
+      "case": "verified-gemini-complete-rehome",
+      "peak_live_rust_bytes": 277372,
+      "messages": 3,
+      "output_bytes": 33555466,
+      "normalized_sha256": "db3bc67dc2b670cc5d61ec397ff43f6114c7863c6fd51e35f784f91bd19bb3c7"
+    },
+    {
+      "case": "verified-claude-complete-rehome",
+      "peak_live_rust_bytes": 284707,
+      "messages": 6,
+      "output_bytes": 67117687,
+      "sha256": "f86d92ed9208134168092ec42e0e29ce22777d9a2239840dbc93be6ecfc95883"
+    }
+  ],
+  "limits": [
+    "Local gates do not establish Linux or Windows runtime behavior.",
+    "Heap probes measure requested live Rust allocations; native SQLite controls are separate.",
+    "Allocation controls are not timing or CPU speed claims.",
+    "No version bump, tag or release is part of this batch.",
+    "Grok/OpenClaw/Qwen, SQLite export ownership, remaining same-target preparation and OpenCode v2 shell projection remain named follow-up work."
+  ]
+}
