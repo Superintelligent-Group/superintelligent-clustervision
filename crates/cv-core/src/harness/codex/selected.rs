@@ -141,7 +141,7 @@ pub(super) fn project(
                 Some(v) => joined(v, source, spans)?,
                 None => Text::from(""),
             };
-            let raw_nonempty = !raw.try_resolve_prefix(&crate::Resolver::new(None), 4)?.is_empty();
+            let raw_nonempty = selected_nonempty(&raw)?;
             let summary_view = payload.get("summary");
             let summary = match summary_view {
                 Some(v) => joined(v, source, spans)?,
@@ -172,12 +172,7 @@ pub(super) fn project(
             } else {
                 p.insert(
                     "summary".into(),
-                    if text.try_resolve_prefix(&crate::Resolver::new(None), 4)?.is_empty() {
-                        ""
-                    } else {
-                        "selected"
-                    }
-                    .into(),
+                    if !selected_nonempty(&text)? { "" } else { "selected" }.into(),
                 );
             }
             Ok(Some(Projection::Text {
@@ -235,6 +230,16 @@ pub(super) fn project(
         _ => Ok(None),
     }
 }
+// These descriptors were constructed in the enclosing strictly accepted source view and have
+// no decoded prefix skipped. Every valid nonempty JSON string representation decodes at least
+// one scalar; inspecting its extent avoids reopening/revalidating giant text just for emptiness.
+fn selected_nonempty(text: &Text) -> Result<bool> {
+    match text {
+        Text::Inline(text) => Ok(!text.is_empty()),
+        Text::Source(source) => Ok(source.raw_len() != 0),
+        Text::Span(_) => Ok(!text.try_resolve_prefix(&crate::Resolver::new(None), 4)?.is_empty()),
+    }
+}
 fn body_text(view: JsonView<'_>, spans: bool) -> Result<Option<Text>> {
     if spans {
         view.source_text()
@@ -244,7 +249,7 @@ fn body_text(view: JsonView<'_>, spans: bool) -> Result<Option<Text>> {
 }
 fn blocks(content: JsonView<'_>, spans: bool) -> Result<Vec<Block>> {
     if let Some(text) = body_text(content, spans)? {
-        return Ok(if text.try_resolve_prefix(&crate::Resolver::new(None), 4)?.is_empty() {
+        return Ok(if !selected_nonempty(&text)? {
             Vec::new()
         } else {
             vec![Block::Text { text }]
@@ -264,7 +269,7 @@ fn blocks(content: JsonView<'_>, spans: bool) -> Result<Vec<Block>> {
                     out.push(block);
                 }
             } else if let Some(text) = part.get("text")?.map(|v| body_text(v, spans)).transpose()?.flatten() {
-                if !text.try_resolve_prefix(&crate::Resolver::new(None), 4)?.is_empty() {
+                if selected_nonempty(&text)? {
                     out.push(Block::Text { text });
                 }
             }

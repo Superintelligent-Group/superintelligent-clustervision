@@ -986,5 +986,640 @@
       "decoded_utf8_body_bytes": 80510976,
       "source_bytes": 120766644
     }
+  },
+  "borrowed_native_followup": {
+    "changes": [
+      "Reuse original mappedUTF8slice under samecapturedsource before/afterguard.",
+      "Native mapped and reopened range readers share one strictvalidation function.",
+      "Validated unskipped producer text emptiness uses its JSONstringextent, avoiding reopen/fullUTF8validation forfourdecodedbytes."
+    ],
+    "profile": {
+      "optimization": 3,
+      "lto": "thin",
+      "features": "default native, no probe-heap"
+    },
+    "summary": [
+      {
+        "case": "user32",
+        "consumer": "discard",
+        "variant": "baseline",
+        "cpu_seconds": [
+          0.59,
+          0.59,
+          0.6900000000000001
+        ],
+        "median_cpu_seconds": 0.59,
+        "median_rss_bytes": 209829888,
+        "median_macos_footprint_bytes": 104841840
+      },
+      {
+        "case": "user32",
+        "consumer": "discard",
+        "variant": "final-candidate",
+        "cpu_seconds": [
+          0.58,
+          0.61,
+          0.6900000000000001
+        ],
+        "median_cpu_seconds": 0.61,
+        "median_rss_bytes": 157564928,
+        "median_macos_footprint_bytes": 2015808
+      },
+      {
+        "case": "user32",
+        "consumer": "json",
+        "variant": "baseline",
+        "cpu_seconds": [
+          0.77,
+          0.68,
+          0.63
+        ],
+        "median_cpu_seconds": 0.68,
+        "median_rss_bytes": 209944576,
+        "median_macos_footprint_bytes": 104858224
+      },
+      {
+        "case": "user32",
+        "consumer": "json",
+        "variant": "final-candidate",
+        "cpu_seconds": [
+          1.03,
+          1.0,
+          0.81
+        ],
+        "median_cpu_seconds": 1.0,
+        "median_rss_bytes": 157908992,
+        "median_macos_footprint_bytes": 2277976
+      },
+      {
+        "case": "assistant64",
+        "consumer": "discard",
+        "variant": "baseline",
+        "cpu_seconds": [
+          0.7,
+          0.65,
+          0.64
+        ],
+        "median_cpu_seconds": 0.65,
+        "median_rss_bytes": 290242560,
+        "median_macos_footprint_bytes": 165200568
+      },
+      {
+        "case": "assistant64",
+        "consumer": "discard",
+        "variant": "final-candidate",
+        "cpu_seconds": [
+          0.69,
+          0.66,
+          0.61
+        ],
+        "median_cpu_seconds": 0.66,
+        "median_rss_bytes": 127254528,
+        "median_macos_footprint_bytes": 1950248
+      },
+      {
+        "case": "assistant64",
+        "consumer": "json",
+        "variant": "baseline",
+        "cpu_seconds": [
+          0.78,
+          0.76,
+          0.77
+        ],
+        "median_cpu_seconds": 0.77,
+        "median_rss_bytes": 290308096,
+        "median_macos_footprint_bytes": 165200568
+      },
+      {
+        "case": "assistant64",
+        "consumer": "json",
+        "variant": "final-candidate",
+        "cpu_seconds": [
+          1.19,
+          1.19,
+          1.19
+        ],
+        "median_cpu_seconds": 1.19,
+        "median_rss_bytes": 248430592,
+        "median_macos_footprint_bytes": 2310792
+      },
+      {
+        "case": "tiny",
+        "consumer": "discard",
+        "variant": "baseline",
+        "cpu_seconds": [
+          0.14,
+          0.14,
+          0.14
+        ],
+        "median_cpu_seconds": 0.14,
+        "median_rss_bytes": 6668288,
+        "median_macos_footprint_bytes": 2113992
+      },
+      {
+        "case": "tiny",
+        "consumer": "discard",
+        "variant": "final-candidate",
+        "cpu_seconds": [
+          0.14,
+          0.14,
+          0.14
+        ],
+        "median_cpu_seconds": 0.14,
+        "median_rss_bytes": 6832128,
+        "median_macos_footprint_bytes": 2163144
+      },
+      {
+        "case": "tiny",
+        "consumer": "json",
+        "variant": "baseline",
+        "cpu_seconds": [
+          0.15,
+          0.15,
+          0.15
+        ],
+        "median_cpu_seconds": 0.15,
+        "median_rss_bytes": 6750208,
+        "median_macos_footprint_bytes": 2113992
+      },
+      {
+        "case": "tiny",
+        "consumer": "json",
+        "variant": "final-candidate",
+        "cpu_seconds": [
+          0.15,
+          0.15,
+          0.15
+        ],
+        "median_cpu_seconds": 0.15,
+        "median_rss_bytes": 6897664,
+        "median_macos_footprint_bytes": 2146760
+      }
+    ],
+    "process_records": [
+      {
+        "case": "user32",
+        "mode": "discard",
+        "pair": 0,
+        "variant": "baseline",
+        "wall_seconds": 1.2,
+        "user_seconds": 0.57,
+        "system_seconds": 0.02,
+        "rss_bytes": 209829888,
+        "macos_footprint_bytes": 104841840,
+        "instructions": 8158602417
+      },
+      {
+        "case": "user32",
+        "mode": "discard",
+        "pair": 0,
+        "variant": "final-candidate",
+        "wall_seconds": 1.35,
+        "user_seconds": 0.57,
+        "system_seconds": 0.01,
+        "rss_bytes": 157564928,
+        "macos_footprint_bytes": 2015808,
+        "instructions": 7799647163
+      },
+      {
+        "case": "user32",
+        "mode": "discard",
+        "pair": 1,
+        "variant": "final-candidate",
+        "wall_seconds": 1.42,
+        "user_seconds": 0.6,
+        "system_seconds": 0.01,
+        "rss_bytes": 157532160,
+        "macos_footprint_bytes": 1999448,
+        "instructions": 7803800957
+      },
+      {
+        "case": "user32",
+        "mode": "discard",
+        "pair": 1,
+        "variant": "baseline",
+        "wall_seconds": 1.73,
+        "user_seconds": 0.57,
+        "system_seconds": 0.02,
+        "rss_bytes": 209813504,
+        "macos_footprint_bytes": 104825456,
+        "instructions": 8160583318
+      },
+      {
+        "case": "user32",
+        "mode": "discard",
+        "pair": 2,
+        "variant": "baseline",
+        "wall_seconds": 1.53,
+        "user_seconds": 0.66,
+        "system_seconds": 0.03,
+        "rss_bytes": 209829888,
+        "macos_footprint_bytes": 104841840,
+        "instructions": 8193662232
+      },
+      {
+        "case": "user32",
+        "mode": "discard",
+        "pair": 2,
+        "variant": "final-candidate",
+        "wall_seconds": 0.83,
+        "user_seconds": 0.67,
+        "system_seconds": 0.02,
+        "rss_bytes": 157564928,
+        "macos_footprint_bytes": 2015808,
+        "instructions": 7813419817
+      },
+      {
+        "case": "user32",
+        "mode": "json",
+        "pair": 0,
+        "variant": "baseline",
+        "wall_seconds": 0.82,
+        "user_seconds": 0.75,
+        "system_seconds": 0.02,
+        "rss_bytes": 209895424,
+        "macos_footprint_bytes": 104809072,
+        "instructions": 9128449309
+      },
+      {
+        "case": "user32",
+        "mode": "json",
+        "pair": 0,
+        "variant": "final-candidate",
+        "wall_seconds": 1.09,
+        "user_seconds": 1.01,
+        "system_seconds": 0.02,
+        "rss_bytes": 157892608,
+        "macos_footprint_bytes": 2261592,
+        "instructions": 10592577630
+      },
+      {
+        "case": "user32",
+        "mode": "json",
+        "pair": 1,
+        "variant": "final-candidate",
+        "wall_seconds": 1.02,
+        "user_seconds": 0.98,
+        "system_seconds": 0.02,
+        "rss_bytes": 157908992,
+        "macos_footprint_bytes": 2277976,
+        "instructions": 10571217159
+      },
+      {
+        "case": "user32",
+        "mode": "json",
+        "pair": 1,
+        "variant": "baseline",
+        "wall_seconds": 0.69,
+        "user_seconds": 0.67,
+        "system_seconds": 0.01,
+        "rss_bytes": 212025344,
+        "macos_footprint_bytes": 106938992,
+        "instructions": 9106319875
+      },
+      {
+        "case": "user32",
+        "mode": "json",
+        "pair": 2,
+        "variant": "baseline",
+        "wall_seconds": 0.64,
+        "user_seconds": 0.62,
+        "system_seconds": 0.01,
+        "rss_bytes": 209944576,
+        "macos_footprint_bytes": 104858224,
+        "instructions": 9102465073
+      },
+      {
+        "case": "user32",
+        "mode": "json",
+        "pair": 2,
+        "variant": "final-candidate",
+        "wall_seconds": 0.82,
+        "user_seconds": 0.8,
+        "system_seconds": 0.01,
+        "rss_bytes": 157974528,
+        "macos_footprint_bytes": 2327104,
+        "instructions": 10560569474
+      },
+      {
+        "case": "assistant64",
+        "mode": "discard",
+        "pair": 0,
+        "variant": "baseline",
+        "wall_seconds": 0.71,
+        "user_seconds": 0.69,
+        "system_seconds": 0.01,
+        "rss_bytes": 290226176,
+        "macos_footprint_bytes": 165184184,
+        "instructions": 9786611634
+      },
+      {
+        "case": "assistant64",
+        "mode": "discard",
+        "pair": 0,
+        "variant": "final-candidate",
+        "wall_seconds": 0.7,
+        "user_seconds": 0.69,
+        "system_seconds": 0.0,
+        "rss_bytes": 127254528,
+        "macos_footprint_bytes": 1950248,
+        "instructions": 8801236773
+      },
+      {
+        "case": "assistant64",
+        "mode": "discard",
+        "pair": 1,
+        "variant": "final-candidate",
+        "wall_seconds": 0.68,
+        "user_seconds": 0.66,
+        "system_seconds": 0.0,
+        "rss_bytes": 127270912,
+        "macos_footprint_bytes": 1966632,
+        "instructions": 8805479147
+      },
+      {
+        "case": "assistant64",
+        "mode": "discard",
+        "pair": 1,
+        "variant": "baseline",
+        "wall_seconds": 0.66,
+        "user_seconds": 0.64,
+        "system_seconds": 0.01,
+        "rss_bytes": 290258944,
+        "macos_footprint_bytes": 165216952,
+        "instructions": 9782747584
+      },
+      {
+        "case": "assistant64",
+        "mode": "discard",
+        "pair": 2,
+        "variant": "baseline",
+        "wall_seconds": 0.65,
+        "user_seconds": 0.63,
+        "system_seconds": 0.01,
+        "rss_bytes": 290242560,
+        "macos_footprint_bytes": 165200568,
+        "instructions": 9781872547
+      },
+      {
+        "case": "assistant64",
+        "mode": "discard",
+        "pair": 2,
+        "variant": "final-candidate",
+        "wall_seconds": 0.62,
+        "user_seconds": 0.61,
+        "system_seconds": 0.0,
+        "rss_bytes": 127254528,
+        "macos_footprint_bytes": 1950248,
+        "instructions": 8792799494
+      },
+      {
+        "case": "assistant64",
+        "mode": "json",
+        "pair": 0,
+        "variant": "baseline",
+        "wall_seconds": 0.79,
+        "user_seconds": 0.77,
+        "system_seconds": 0.01,
+        "rss_bytes": 290291712,
+        "macos_footprint_bytes": 165184184,
+        "instructions": 12090425413
+      },
+      {
+        "case": "assistant64",
+        "mode": "json",
+        "pair": 0,
+        "variant": "final-candidate",
+        "wall_seconds": 1.19,
+        "user_seconds": 1.18,
+        "system_seconds": 0.01,
+        "rss_bytes": 248397824,
+        "macos_footprint_bytes": 2278024,
+        "instructions": 15423471752
+      },
+      {
+        "case": "assistant64",
+        "mode": "json",
+        "pair": 1,
+        "variant": "final-candidate",
+        "wall_seconds": 1.2,
+        "user_seconds": 1.18,
+        "system_seconds": 0.01,
+        "rss_bytes": 248496128,
+        "macos_footprint_bytes": 2359920,
+        "instructions": 15423217619
+      },
+      {
+        "case": "assistant64",
+        "mode": "json",
+        "pair": 1,
+        "variant": "baseline",
+        "wall_seconds": 0.77,
+        "user_seconds": 0.75,
+        "system_seconds": 0.01,
+        "rss_bytes": 290308096,
+        "macos_footprint_bytes": 165200568,
+        "instructions": 12089764421
+      },
+      {
+        "case": "assistant64",
+        "mode": "json",
+        "pair": 2,
+        "variant": "baseline",
+        "wall_seconds": 0.79,
+        "user_seconds": 0.76,
+        "system_seconds": 0.01,
+        "rss_bytes": 290324480,
+        "macos_footprint_bytes": 165216952,
+        "instructions": 12113525096
+      },
+      {
+        "case": "assistant64",
+        "mode": "json",
+        "pair": 2,
+        "variant": "final-candidate",
+        "wall_seconds": 1.2,
+        "user_seconds": 1.18,
+        "system_seconds": 0.01,
+        "rss_bytes": 248430592,
+        "macos_footprint_bytes": 2310792,
+        "instructions": 15422452151
+      },
+      {
+        "case": "tiny",
+        "mode": "discard",
+        "pair": 0,
+        "variant": "baseline",
+        "wall_seconds": 0.14,
+        "user_seconds": 0.14,
+        "system_seconds": 0.0,
+        "rss_bytes": 6668288,
+        "macos_footprint_bytes": 2113992,
+        "instructions": 2231712565
+      },
+      {
+        "case": "tiny",
+        "mode": "discard",
+        "pair": 0,
+        "variant": "final-candidate",
+        "wall_seconds": 0.14,
+        "user_seconds": 0.14,
+        "system_seconds": 0.0,
+        "rss_bytes": 6832128,
+        "macos_footprint_bytes": 2163144,
+        "instructions": 2234841422
+      },
+      {
+        "case": "tiny",
+        "mode": "discard",
+        "pair": 1,
+        "variant": "final-candidate",
+        "wall_seconds": 0.14,
+        "user_seconds": 0.14,
+        "system_seconds": 0.0,
+        "rss_bytes": 6864896,
+        "macos_footprint_bytes": 2195912,
+        "instructions": 2234353879
+      },
+      {
+        "case": "tiny",
+        "mode": "discard",
+        "pair": 1,
+        "variant": "baseline",
+        "wall_seconds": 0.14,
+        "user_seconds": 0.14,
+        "system_seconds": 0.0,
+        "rss_bytes": 6717440,
+        "macos_footprint_bytes": 2163144,
+        "instructions": 2233548278
+      },
+      {
+        "case": "tiny",
+        "mode": "discard",
+        "pair": 2,
+        "variant": "baseline",
+        "wall_seconds": 0.14,
+        "user_seconds": 0.14,
+        "system_seconds": 0.0,
+        "rss_bytes": 6651904,
+        "macos_footprint_bytes": 2097608,
+        "instructions": 2229562391
+      },
+      {
+        "case": "tiny",
+        "mode": "discard",
+        "pair": 2,
+        "variant": "final-candidate",
+        "wall_seconds": 0.14,
+        "user_seconds": 0.14,
+        "system_seconds": 0.0,
+        "rss_bytes": 6832128,
+        "macos_footprint_bytes": 2163144,
+        "instructions": 2235747805
+      },
+      {
+        "case": "tiny",
+        "mode": "json",
+        "pair": 0,
+        "variant": "baseline",
+        "wall_seconds": 0.16,
+        "user_seconds": 0.15,
+        "system_seconds": 0.0,
+        "rss_bytes": 6717440,
+        "macos_footprint_bytes": 2081224,
+        "instructions": 2505427846
+      },
+      {
+        "case": "tiny",
+        "mode": "json",
+        "pair": 0,
+        "variant": "final-candidate",
+        "wall_seconds": 0.16,
+        "user_seconds": 0.15,
+        "system_seconds": 0.0,
+        "rss_bytes": 6979584,
+        "macos_footprint_bytes": 2228680,
+        "instructions": 2518683768
+      },
+      {
+        "case": "tiny",
+        "mode": "json",
+        "pair": 1,
+        "variant": "final-candidate",
+        "wall_seconds": 0.16,
+        "user_seconds": 0.15,
+        "system_seconds": 0.0,
+        "rss_bytes": 6897664,
+        "macos_footprint_bytes": 2146760,
+        "instructions": 2510709012
+      },
+      {
+        "case": "tiny",
+        "mode": "json",
+        "pair": 1,
+        "variant": "baseline",
+        "wall_seconds": 0.16,
+        "user_seconds": 0.15,
+        "system_seconds": 0.0,
+        "rss_bytes": 6750208,
+        "macos_footprint_bytes": 2113992,
+        "instructions": 2504478647
+      },
+      {
+        "case": "tiny",
+        "mode": "json",
+        "pair": 2,
+        "variant": "baseline",
+        "wall_seconds": 0.16,
+        "user_seconds": 0.15,
+        "system_seconds": 0.0,
+        "rss_bytes": 6782976,
+        "macos_footprint_bytes": 2146760,
+        "instructions": 2509985262
+      },
+      {
+        "case": "tiny",
+        "mode": "json",
+        "pair": 2,
+        "variant": "final-candidate",
+        "wall_seconds": 0.16,
+        "user_seconds": 0.15,
+        "system_seconds": 0.0,
+        "rss_bytes": 6897664,
+        "macos_footprint_bytes": 2146760,
+        "instructions": 2510737324
+      }
+    ],
+    "separate_output_oracle": {
+      "user32": {
+        "seconds": 1.118887958,
+        "runs": 1,
+        "messages": 1,
+        "json_bytes": 50332324,
+        "sha256": "74f59d4e70e1ff86f53be248d3bd7c06356237b5c8eb4a4720b879da566ae69e"
+      },
+      "assistant16": {
+        "seconds": 0.486049625,
+        "runs": 1,
+        "messages": 1,
+        "json_bytes": 30154983,
+        "sha256": "8e741589d16c6758f7f514efa5652e1b0ad59207b8ec113265e09b308754411f"
+      },
+      "assistant64": {
+        "seconds": 4.0884045,
+        "runs": 1,
+        "messages": 1,
+        "json_bytes": 120766695,
+        "sha256": "8de9ef43ee934eb805d0a846d98a298f2002db20799d77eea20e20448cb77a0b"
+      },
+      "tiny": {
+        "seconds": 0.003156208,
+        "runs": 1,
+        "messages": 1000,
+        "json_bytes": 111132,
+        "sha256": "ecf87881fa0c8ad9b4d18e8dbd92cc7f2728143de02ea799c655d1ac78f4c324"
+      }
+    },
+    "interpretation": "Giant parse regression removed; canonical emitted JSON still costs more CPU than owned baseline. MaximumRSS drops because projection no longer reopens a secondsource mapping. No acceptancefusion introduced."
   }
 }

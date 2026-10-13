@@ -895,9 +895,11 @@ fn stream_jsonl_spans_at(
         let projected = if giant {
             source
                 .map(|source| {
-                    source.read_range_value(base_off, slice.len() as u64, |view| {
-                        selected::project(view, source, true, has_events)
-                    })
+                    source.read_borrowed_range_value(
+                        base_off,
+                        std::str::from_utf8(slice).map_err(|_| crate::json::InvalidJson)?,
+                        |view| selected::project(view, source, true, has_events),
+                    )
                 })
                 .transpose()
         } else {

@@ -200,6 +200,22 @@ impl JsonSource {
             decoded: None,
         })
     }
+    /// Project an already mapped, UTF8-checked original-source range without mapping it again.
+    /// The producer checks its opened descriptor against this capture before supplying bytes.
+    #[cfg(feature = "mmap")]
+    pub(crate) fn read_borrowed_range_value<T>(
+        &self,
+        offset: u64,
+        text: &str,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        let range = self.range(offset, text.len() as u64)?;
+        self.check()?;
+        let index = document::Index::default();
+        let result = range.with_native_view(Raw::new(text, &index), Validation::Value, f);
+        self.check()?;
+        result
+    }
     pub(crate) fn read_range_value<T>(
         &self,
         offset: u64,
@@ -431,6 +447,27 @@ impl JsonRange {
     pub(crate) fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
         self.with_validation(Validation::Cached, f)
     }
+    #[cfg(feature = "mmap")]
+    fn with_native_view<T>(
+        &self,
+        raw: Raw<'_>,
+        validation: Validation,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        let base = raw.get().as_ptr() as usize;
+        let index = document::Index::default();
+        let raw = if matches!(validation, Validation::Cached) {
+            raw
+        } else {
+            let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).map_err(|_| InvalidJson)?;
+            let checked = Raw::new(syntax.get(), &index);
+            if matches!(validation, Validation::Value) && !document::accepts_value(checked) {
+                return Err(InvalidJson.into());
+            }
+            checked
+        };
+        f(JsonView(View::Source(SourceView { raw, range: self, base })))
+    }
     fn with_validation<T>(
         &self,
         validation: Validation,
@@ -438,21 +475,7 @@ impl JsonRange {
     ) -> Result<T> {
         #[cfg(feature = "mmap")]
         {
-            self.with_raw(|raw| {
-                let base = raw.get().as_ptr() as usize;
-                let index = document::Index::default();
-                let raw = if matches!(validation, Validation::Cached) {
-                    raw
-                } else {
-                    let syntax: &crate::lazy::RawValue = serde_json::from_str(raw.get()).map_err(|_| InvalidJson)?;
-                    let checked = Raw::new(syntax.get(), &index);
-                    if matches!(validation, Validation::Value) && !document::accepts_value(checked) {
-                        return Err(InvalidJson.into());
-                    }
-                    checked
-                };
-                f(JsonView(View::Source(SourceView { raw, range: self, base })))
-            })
+            self.with_raw(|raw| self.with_native_view(raw, validation, f))
         }
         #[cfg(not(feature = "mmap"))]
         {
@@ -1751,12 +1774,36 @@ mod tests {
         for input in cases {
             let expected = serde_json::from_slice::<Value>(&input).is_ok();
             let fixture = Fixture::new(&input);
+            #[cfg(feature = "mmap")]
+            if let Ok(text) = std::str::from_utf8(&input) {
+                let source = JsonSource::capture(&fixture.path).unwrap();
+                assert_eq!(
+                    source.read_borrowed_range_value(0, text, |_| Ok(())).is_ok(),
+                    expected,
+                    "borrowed {input:?}"
+                );
+            }
             assert_eq!(
                 Json::source(&fixture.path, 0, input.len() as u64).is_ok(),
                 expected,
                 "{input:?}"
             );
         }
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn borrowed_source_guard_checks_after_callback_failure() {
+        let input = "{\"s\":\"body\"}";
+        let fixture = Fixture::new(input.as_bytes());
+        let source = JsonSource::capture(&fixture.path).unwrap();
+        let error = source
+            .read_borrowed_range_value(0, input, |_| -> Result<()> {
+                std::fs::write(&fixture.path, b"null").unwrap();
+                anyhow::bail!("callback failure")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("source changed"), "{error}");
     }
 
     #[test]
