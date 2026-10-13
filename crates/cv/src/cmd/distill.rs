@@ -63,17 +63,26 @@ pub(crate) fn target(
     }
 }
 
-/// Resolve a session spec: an existing transcript path (read as Claude unless `--harness` says
-/// otherwise), else an id / `harness:id` / agent id through the normal resolver.
-pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
+pub(crate) fn resolve_source(
+    spec: &str,
+    harness: Option<Harness>,
+) -> Result<(SessionRef, Box<dyn cv_core::harness::Adapter>)> {
     let p = Path::new(spec);
-    let (r, adapter) = if p.is_file() {
+    let resolved = if p.is_file() {
         let h = harness.unwrap_or(Harness::Claude);
         let a = cv_core::harness::for_harness(h).with_context(|| format!("no adapter for {h}"))?;
         (SessionRef::from_path(p, h), a)
     } else {
         resolve(spec, harness)?
     };
+    Ok(resolved)
+}
+
+/// Resolve a session spec: an existing transcript path (read as Claude unless `--harness` says
+/// otherwise), else an id / `harness:id` / agent id through the normal resolver.
+pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, PathBuf)> {
+    let (r, adapter) = resolve_source(spec, harness)?;
+    let p = Path::new(spec);
     let mut s = adapter.parse(&r)?;
     s.materialize()?;
     // A sub-agent transcript read by path: its label lives in the sibling `<stem>.meta.json`

@@ -1775,3 +1775,28 @@ UTF-8 splits and invalid bytes, stderr/failure trimming, broken response pipes, 
 notifications, concurrent child drains and cancellation; a shared string oracle checks tiny and
 64 KiB reader boundaries. Private evidence: staged-protocol-parity.json and staged-transport-heap.json
 under /private/tmp/cv-mcp-http-operation-evidence/.
+
+### Selected splice preparation (Sol, 2026-10-12)
+
+`cv splice` now uses shared `emit::prepare_selected` and a moving `loom::Composition`, rather
+than materializing every complete source and cloning its selected messages. Preparation uses
+ordinary full-fidelity message indices with lazy payloads, continues through EOF for metadata,
+original counts and clamped provenance, and reuses the native preparation snapshot/read-set/span
+binding. All consulted dependencies remain checked; only selected body spans are retained.
+Each source owner is consumed immediately. The first source contributes the same cwd/title/model/git
+defaults; unused source metadata is dropped. Selected export/generation materialization remains at
+the output boundary; native writers retain their existing checked-source/materialization policy.
+
+Evidence: `SPLICE-SELECTED-EVIDENCE.json`, isolated `examples/splice_probe.rs` counting-allocator
+probe, no timing runs. Two repeated source spans selecting two six-byte tail messages from 16/64 MiB
+histories have identical output hashes. Requested peak Rust heap above baseline falls from
+37,782,640 / 151,028,848 bytes to 10,255 bytes at either size. This excludes mapped bytes, RSS and
+page cache. A unit test proves selected inline allocation addresses survive composition unchanged;
+full-window output parity covers empty/inverted/out-of-range windows, overlap/repeated-source
+provenance, OpenSession underlying-harness defaults, JSON/Markdown and native Claude/Codex output. Existing preparation dependency/source
+mutation tests remain; an empty selected window also rejects a changing discarded dependency.
+
+Limits: adapters may still produce an owned largest-record fallback; full metadata and selected
+payloads still cost their demanded size. Preparation intentionally reads through EOF. This removes
+retained discarded histories and the loom body clone, not all source scanning or all native writer
+materialization. Distill can reuse the primitive but is not migrated by this change.

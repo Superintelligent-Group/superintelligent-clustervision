@@ -376,36 +376,26 @@ pub(crate) fn cmd_splice(
 ) -> Result<()> {
     let parsed: Vec<SpliceSpec> = specs.iter().map(|s| parse_splice_spec(s)).collect::<Result<_>>()?;
 
-    // Resolve + parse each spec's session FIRST, keeping the owners alive in a Vec so the spans can
-    // borrow them. We pair each parsed session with the (start, end) it'll select. A spec may be a
-    // transcript path (a sub-agent file straight from `subagents/`), as for `distill`.
-    let mut owned: Vec<(Session, usize, Option<usize>)> = Vec::with_capacity(parsed.len());
-    let mut first_path: Option<PathBuf> = None;
+    let mut composition = cv_core::loom::Composition::default();
+    let mut first_path = None;
     for sp in &parsed {
-        let (session, path) = crate::cmd::distill::load(&sp.id, None)?;
-        first_path.get_or_insert(path);
-        owned.push((session, sp.start, sp.end));
+        let (reference, adapter) = crate::cmd::distill::resolve_source(&sp.id, None)?;
+        first_path.get_or_insert_with(|| reference.path.clone());
+        let (session, total) = cv_core::emit::prepare_selected(adapter.as_ref(), &reference, sp.start, sp.end)?;
+        composition.push(session, total, sp.start, sp.end);
     }
-
-    let spans: Vec<cv_core::loom::Span<'_>> = owned
-        .iter()
-        .map(|(s, start, end)| cv_core::loom::Span {
-            source: s,
-            start: *start,
-            end: *end,
-        })
-        .collect();
-
-    // Target harness: --harness, else the first spec's source harness.
     let to_h = match &harness {
         Some(s) => Harness::parse(s).with_context(|| format!("unknown target harness: {s}"))?,
-        None => owned
-            .first()
-            .map(|(s, _, _)| s.harness)
+        None => composition
+            .first_harness()
             .context("splice needs at least one session")?,
     };
-
-    let spliced = cv_core::loom::splice(&spans, None, to_h);
+    let mut spliced = composition.finish(None, to_h);
+    // Text exports and generation retain their ordinary owned-IR contract. Only selected bodies
+    // are materialized, after discarded source owners have already been released.
+    if generate || (resumable.is_none() && harness.is_none() && out.is_none() && export.is_some()) {
+        spliced.materialize()?;
+    }
     if let Some(target) = resumable {
         // `--session` / `--agent-of`: a resumable Claude transcript, the way `distill` writes one.
         // Nothing is elided (every selected message is carried whole), so there is no sidecar.

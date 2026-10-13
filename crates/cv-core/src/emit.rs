@@ -459,6 +459,20 @@ pub(crate) fn validate_native_source(session: &Session, target: Harness, thinkin
     Ok(())
 }
 
+/// Prepare a full-fidelity message window, retaining the source guards used by native emission.
+/// The stream continues through EOF for final metadata and the original message count. Indices
+/// match ordinary full parsing, rather than format-complete carrier parsing.
+pub fn prepare_selected(
+    adapter: &dyn crate::harness::Adapter,
+    reference: &SessionRef,
+    start: usize,
+    end: Option<usize>,
+) -> Result<(Session, usize)> {
+    let mut options = ParseOptions::full();
+    options.spans = true;
+    prepare::selected(adapter, reference, &options, start, end)
+}
+
 /// Parse at native emission fidelity. Same-harness ports retain complete records; cross-harness
 /// Codex ports retain full metadata with lazy payloads consumed directly by its staged writer.
 pub fn parse_for_emit(

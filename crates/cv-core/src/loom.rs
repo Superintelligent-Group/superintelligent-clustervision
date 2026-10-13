@@ -39,19 +39,45 @@ impl<'a> Span<'a> {
     }
 }
 
+/// Incremental composition of prepared windows. Each source owner is consumed immediately;
+/// selected messages move into the composition without cloning their bodies.
+#[derive(Default)]
+pub struct Composition {
+    first: Option<Session>,
+    messages: Vec<Message>,
+    provenance: Vec<serde_json::Value>,
+}
+impl Composition {
+    pub fn push(&mut self, mut source: Session, total: usize, start: usize, end: Option<usize>) {
+        let start = start.min(total);
+        let end = end.unwrap_or(total).min(total).max(start);
+        self.provenance.push(serde_json::json!({
+            "source_id": source.id, "harness": source.harness.as_str(), "start": start, "end": end,
+        }));
+        self.messages.append(&mut source.messages);
+        if self.first.is_none() {
+            let mut defaults = Session::new(&source.id, source.harness);
+            defaults.cwd = source.cwd.take();
+            defaults.title = source.title.take();
+            defaults.model = source.model.take();
+            defaults.git = source.git.take();
+            self.first = Some(defaults);
+        }
+    }
+    /// The first prepared session's harness, which may differ from its discovery reference
+    /// (OpenSession documents preserve their named underlying harness).
+    pub fn first_harness(&self) -> Option<Harness> {
+        self.first.as_ref().map(|source| source.harness)
+    }
+    pub fn finish(self, new_id: Option<String>, harness: Harness) -> Session {
+        assembled(self.first.as_ref(), self.messages, self.provenance, new_id, harness)
+    }
+}
+
 /// Concatenate `spans` (in order) into a new [`Session`] with `harness` and a fresh id (or
 /// `new_id`). Messages are cloned as they are — ids and parents included — and the first span's
 /// session provides default cwd/title/model.
 pub fn splice(spans: &[Span<'_>], new_id: Option<String>, harness: Harness) -> Session {
-    let id = new_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-
-    // Defaults come from the first span's source session (if any).
-    let first_source = spans.first().map(|s| s.source);
-    let cwd = first_source.and_then(|s| s.cwd.clone());
-    let title = first_source.and_then(|s| s.title.clone());
-    let model = first_source.and_then(|s| s.model.clone());
-    let git = first_source.and_then(|s| s.git.clone());
-
     // Concatenate the selected messages (cloned) in span order, and record provenance per span.
     let mut messages: Vec<Message> = Vec::new();
     let mut provenance: Vec<serde_json::Value> = Vec::with_capacity(spans.len());
@@ -66,6 +92,21 @@ pub fn splice(spans: &[Span<'_>], new_id: Option<String>, harness: Harness) -> S
         messages.extend(span.messages().iter().cloned());
     }
 
+    assembled(spans.first().map(|s| s.source), messages, provenance, new_id, harness)
+}
+
+fn assembled(
+    first_source: Option<&Session>,
+    messages: Vec<Message>,
+    provenance: Vec<serde_json::Value>,
+    new_id: Option<String>,
+    harness: Harness,
+) -> Session {
+    let id = new_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    let cwd = first_source.and_then(|s| s.cwd.clone());
+    let title = first_source.and_then(|s| s.title.clone());
+    let model = first_source.and_then(|s| s.model.clone());
+    let git = first_source.and_then(|s| s.git.clone());
     // created_at = min, updated_at = max of the included messages' timestamps (when present).
     let created_at = messages.iter().filter_map(|m| m.timestamp).min();
     let updated_at = messages.iter().filter_map(|m| m.timestamp).max();
@@ -138,6 +179,54 @@ mod tests {
 
     fn texts(s: &Session) -> Vec<String> {
         s.messages.iter().filter_map(|m| m.text()).collect()
+    }
+
+    #[test]
+    fn moved_windows_match_owned_splice_without_copying_bodies() {
+        let a = session("A", Harness::Claude, 6);
+        let b = session("B", Harness::Codex, 3);
+        let specs = [(&a, 1, Some(4)), (&b, 8, None), (&a, 3, Some(2)), (&a, 2, None)];
+        let spans: Vec<_> = specs
+            .iter()
+            .map(|(source, start, end)| Span {
+                source,
+                start: *start,
+                end: *end,
+            })
+            .collect();
+        let expected = splice(&spans, Some("fixed".into()), Harness::Gemini);
+        let mut builder = Composition::default();
+        let mut pointers = Vec::new();
+        for span in &spans {
+            let mut selected = span.source.clone();
+            selected.messages = span.messages().to_vec();
+            for message in &selected.messages {
+                if let Block::Text {
+                    text: crate::Text::Inline(text),
+                } = &message.content[0]
+                {
+                    pointers.push(text.as_ptr());
+                }
+            }
+            builder.push(selected, span.source.messages.len(), span.start, span.end);
+        }
+        let actual = builder.finish(Some("fixed".into()), Harness::Gemini);
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        for (message, pointer) in actual.messages.iter().zip(pointers) {
+            if let Block::Text {
+                text: crate::Text::Inline(text),
+            } = &message.content[0]
+            {
+                assert_eq!(
+                    text.as_ptr(),
+                    pointer,
+                    "composition must move selected body allocations"
+                );
+            }
+        }
     }
 
     #[test]
