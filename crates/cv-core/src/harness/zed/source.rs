@@ -6,10 +6,7 @@ use crate::json::{JsonSource, JsonView};
 use crate::lazy::{Resolver, Text};
 
 pub(super) fn replay(view: JsonView<'_>, source: &JsonSource, f: &mut dyn FnMut(Message) -> Flow) -> Result<()> {
-    let Some(root) = Fields::parse(view, &["messages"])? else {
-        return Ok(());
-    };
-    let Some(messages) = root.get("messages").map(|v| v.array()).transpose()?.flatten() else {
+    let Some(messages) = view.array()? else {
         return Ok(());
     };
     let mut names = HashMap::new();

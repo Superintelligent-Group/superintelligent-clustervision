@@ -158,7 +158,7 @@ pub(super) fn prepare_reader(data_type: Option<&str>, data: impl std::io::Read) 
 }
 
 /// Validate the entire decoded document before metadata/callbacks, then retain its checked
-/// source view. Replaying selected children does not deserialize a whole message tree.
+/// messages child. Replaying selected children does not deserialize a whole message tree.
 pub(super) fn prepare_checked_reader(
     data_type: Option<&str>,
     data: impl std::io::Read,
@@ -168,13 +168,23 @@ pub(super) fn prepare_checked_reader(
     let len = decoded.len().ok()?;
     source
         .read_backing_value(decoded, 0, len, |view| {
-            let metadata = crate::harness::store::document::Fields::parse(view, METADATA)?
+            let mut keys = METADATA.to_vec();
+            keys.push("messages");
+            let fields = crate::harness::store::document::Fields::parse(view, &keys)?;
+            let metadata = fields
+                .as_ref()
                 .map(|fields| fields.project(METADATA))
+                .transpose()?
+                .unwrap_or_default();
+            let messages = fields
+                .as_ref()
+                .and_then(|fields| fields.get("messages"))
+                .map(|view| view.to_json())
                 .transpose()?
                 .unwrap_or_default();
             Ok(Header {
                 metadata: Value::Object(metadata),
-                checked: Some(view.to_json()?),
+                checked: Some(messages),
                 ..Header::default()
             })
         })

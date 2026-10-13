@@ -260,7 +260,7 @@ fn stream_thread_with_source(
     let mut parent_thread_id: Option<String> = None;
     if let Some(header) = &mut thread {
         // Release parsed metadata before replay. Owned reads retain the final messages-member
-        // ordinal; lazy reads retain the checked immutable decoded document.
+        // ordinal; lazy reads retain its checked messages child and immutable decoded backing.
         let t = std::mem::take(&mut header.metadata);
         // `title` (0.3.0) / `summary` (legacy) — same meaning, renamed across generations.
         blob_title = t
