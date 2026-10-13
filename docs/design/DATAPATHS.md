@@ -73,7 +73,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | OpenCode SQLite | Indexed rows / parts per session | Discovery count scans; WAL and per-session invalidation |
 | Cursor SQLite | Indexed IDE composer ranges; CLI/ACP snapshot replay of reachable protobuf/JSON blobs | Selected message scalars and rich fields; shared private text backing activation in progress |
 | Devin SQLite | Compact structural forest projection, then selected full metadata per emitted row | Necessary navigation state grows with nodes; strict metadata projection has a measured CPU cost |
-| Hermes SQLite | Indexed rows; prompt suppression uses the shared portable exact string set | Initial SQL spill had significant CPU/temp-I/O cost; final cached exact-set CPU proof pending |
+| Hermes SQLite | Indexed rows; exact prompt suppression uses one borrowed-key admission per candidate and bounded spill | Flat retained prompt heap; prompt-only CPU still about 50% above original unbounded Vec |
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
@@ -465,7 +465,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
 - [x] Devin compact forest metadata and Hermes exact-key prompt spill, with measured native/Rust bounds and output parity.
-- [ ] Hermes shared portable exact-set CPU proof; Kimi Code logical-step/selected payloads, Cursor inline composers and OpenCode many-part records.
+- [x] Hermes exact-set CPU/heap controls and corpus parity; remaining prompt-only CPU tradeoff recorded.
+- [ ] Kimi Code logical-step/selected payloads, Cursor inline composers and OpenCode many-part records.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
 - [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
@@ -483,7 +484,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Dataset filter/output staging preserves late selection and byte fidelity with bounded history retention.
 - [x] Matched-query dataset spool CPU: bounded slice decoding preserves exact output and flat heap.
 - [x] Ordered usage-row reuse: clean large/tiny CPU controls, exact totals and bounded warm heap.
-- [ ] Final Hermes cached-spill CPU.
+- [x] Final Hermes cached-spill CPU: one borrowed insertion avoids duplicate hashing/copies; bounded-memory tradeoff remains.
 - [x] Actual-model semantic refresh, unchanged reuse, source/model invalidation and clean-build ranking oracle.
 - [x] Matched release controls for streamed native escaped output; adaptive validation and canonical short-escape bypass preserve exact output.
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
@@ -796,3 +797,16 @@ git-command result. Whole-output token-oracle tests include long runs, uppercase
 delimiters and chunk splits; unavailable lazy results propagate errors. Thirteen focused rewind
 tests pass. This bounds result-scanning scratch; remembered git command IDs and requested
 SHA/evidence lists still scale with their actual input and output cardinality.
+
+
+Hermes replay dedup now admits each candidate with one exact-set insertion and borrows keys
+after spill. It avoids duplicate whole-key hashing and cloning without changing the original
+assistant-reset/dedup rules. Three alternating release pairs at 32/100 MiB reduce current
+CPU 0.053993/0.154679 to 0.042026/0.119800 seconds (22–23%). Against the original
+unbounded Vec, prompt-only CPU remains about 50% higher: distinct prefixes let old equality
+checks return early, whereas spill hashes and writes complete keys. The ordinary alternating
+control remains near parity; no extra tier was added for an unmeasured benefit. Matched
+8/32/100 MiB peak Rust heap falls from 8,529,633/33,703,523/105,029,733 bytes to
+1,319,868/1,319,870/1,319,872 bytes, with no retained scratch at stage end. Five synthetic
+lazy/complete cases and 32 corpus sessions preserve message order, resolved bytes, metadata and
+discovery filters. Six exact-set tests include borrowed-key lifetime and collision/spill behavior.
