@@ -3427,3 +3427,31 @@ The fleet affordance-count multiset includes complete count values, not just ses
 unchanged append hash is expected: ordinary user text and an `Edit` tool call add two messages
 and one event but no affordance kind. The selected session's counts match the independent cold
 reference; metadata message counts and event hashes change as expected.
+
+
+### Whole-operation batch convergence (Codex, 2026-10-13)
+
+The integrated runtime through `9e9d622e`, with formatting-only `39acca26`, passed the local
+macOS gate roster in `.github/workflows/ci.yml`: fmt, all-target clippy/build, workspace tests
+with the scoped recovery below, release parse budget, corpus-tool tests, native/portable and
+SQLite heap controls, production FTS/semantic/CLI heap controls, all six operation heap gates,
+manual names/build, core and search no-default builds, verification of all three package
+archives, dist plan, standalone core wasm, cv-web wasm-pack, desktop check/tests (5), web syntax,
+tags and browser self-test (63/63). The preserved release CLI used for append/reference evidence
+is the default-feature `9e9d622e` binary. No release or version bump is part of this batch.
+
+The original full workspace test run exposed the event WAL upgrade race: core reported 1,078
+passing tests, one failure and six ignored. After the immediate-transaction correction, recovery
+passed the affected core event tests, every core integration target, core doctests, and the
+remaining workspace against the corrected runtime. Evidence combines those results with the
+previous unaffected core passes; it is not a second complete core-library run on the new revision.
+The deterministic two-connection regression verifies the actual production transaction owner.
+All initial failures remain recorded. Setup corrections selected the existing native zstd binary
+and retired only our stale unchanged-version local-registry package sources and compiled metadata,
+preserving them separately; current package archives then verified successfully.
+
+These are local integration results, not a claim that Linux CI has already run. The fleet control
+above additionally verifies production index composition and representative CLI queries. The
+remaining concrete export follow-up is Codex Text/Drop dispatch: it still materializes lazy thinking
+before mode projection despite the checked writer. An isolated actual-port control will determine
+that change's benefit while preserving output, fidelity reports and source-error behavior.
