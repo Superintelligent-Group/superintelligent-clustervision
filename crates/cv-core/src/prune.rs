@@ -184,31 +184,36 @@ impl PruneResult {
 
 /// One stashed payload, written as a line of `<new-id>.flat.jsonl` and read back by [`retrieve`].
 #[derive(serde::Serialize, serde::Deserialize)]
-struct SidecarEntry {
-    id: String,
-    slot: String, // "content" | "toolUseResult"
-    name: String,
-    input: Value,
-    content: Value, // the ORIGINAL value, verbatim — lossless
+pub(crate) struct SidecarEntry<S = String, I = Value, C = Value> {
+    id: S,
+    slot: S, // "content" | "toolUseResult"
+    name: S,
+    input: I,
+    content: C, // the ORIGINAL value, verbatim — lossless
     size: usize,
     line_count: usize,
-    kind: String, // "text" | "image" | "mixed"
+    kind: S, // "text" | "image" | "mixed"
+}
+pub(crate) type BorrowedSidecarEntry<'a> = SidecarEntry<&'a str, &'a Value, &'a str>;
+impl<'a> BorrowedSidecarEntry<'a> {
+    pub(crate) fn text(id: &'a str, name: &'a str, input: &'a Value, content: &'a str) -> Self {
+        Self {
+            id,
+            slot: "content",
+            name,
+            input,
+            content,
+            size: content.len(),
+            line_count: content.lines().count(),
+            kind: "text",
+        }
+    }
 }
 
 /// One sidecar line in the `<stem>.flat.jsonl` format [`retrieve`] (and `cv cat`) reads: the stash
 /// format is shared with `cv distill`, which elides whole tool outputs the same way prune snips them.
 pub fn sidecar_line(id: &str, name: &str, input: &Value, content: &str) -> String {
-    let e = SidecarEntry {
-        id: id.to_string(),
-        slot: "content".into(),
-        name: name.to_string(),
-        input: input.clone(),
-        content: Value::String(content.to_string()),
-        size: content.len(),
-        line_count: content.lines().count(),
-        kind: "text".into(),
-    };
-    serde_json::to_string(&e).unwrap_or_default()
+    serde_json::to_string(&BorrowedSidecarEntry::text(id, name, input, content)).unwrap_or_default()
 }
 
 /// Sub-agent (Task tool) lines carry `isSidechain: true`; their usage belongs to the sub-agent's
@@ -2471,3 +2476,7 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "prune/sidecar_tests.rs"]
+mod sidecar_tests;

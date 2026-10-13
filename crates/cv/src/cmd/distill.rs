@@ -142,17 +142,7 @@ fn write_sidecar(transcript: &Path, elided: &[cv_core::distill::Elided]) -> Resu
     }
     let stem = transcript.file_stem().and_then(|s| s.to_str()).unwrap_or("session");
     let p = transcript.with_file_name(format!("{stem}.flat.jsonl"));
-    let mut body = String::new();
-    for e in elided {
-        body.push_str(&cv_core::prune::sidecar_line(
-            &e.tool_use_id,
-            &e.tool_name,
-            &e.input,
-            &e.content,
-        ));
-        body.push('\n');
-    }
-    std::fs::write(&p, body).with_context(|| format!("writing sidecar {}", p.display()))?;
+    cv_core::distill::write_sidecar(&p, elided).with_context(|| format!("writing sidecar {}", p.display()))?;
     Ok(Some(p))
 }
 
@@ -383,6 +373,17 @@ pub(crate) fn cmd_distill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn distill_sidecar_empty_roster_leaves_existing_artifact_untouched() -> Result<()> {
+        let world = cv_testkit::World::new("distill-sidecar-empty");
+        let transcript = world.base.join("session.jsonl");
+        let sidecar = world.base.join("session.flat.jsonl");
+        std::fs::write(&sidecar, b"existing")?;
+        assert!(write_sidecar(&transcript, &[])?.is_none());
+        assert_eq!(std::fs::read(sidecar)?, b"existing");
+        Ok(())
+    }
+
     #[test]
     fn distill_prefix_inherits_codex_and_opensession_full_parity() -> Result<()> {
         let world = cv_testkit::World::new("distill-prefix-other-harnesses");

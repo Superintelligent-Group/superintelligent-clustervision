@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Distill sidecars serialize borrowed payloads through bounded staging, avoiding complete output strings while preserving existing destination behavior.
+
 - Distill prefixes materialize only messages selected by `--upto`, preserving final session metadata and original-count validation.
 
 - Pack extracts stale events during its excerpt pass, preserving excerpt output and best-effort event publication while avoiding a second transcript traversal.

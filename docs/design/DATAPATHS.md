@@ -2068,3 +2068,30 @@ errors on a reused connection. Stepping errors return the existing full-discover
 instead of disappearing through iterator flattening. Another writer can commit while the
 operation owner is idle; there is no held read transaction. Existing freshness/publication
 regressions retain quiet appends, new projects, replacements, removals and atomic error rollback.
+
+### Distill sidecar artifact boundary (Sol, 2026-10-13)
+
+`cmd/distill.rs::write_sidecar` now delegates to core `distill::write_sidecar`, which borrows each
+existing elision and uses the existing `JsonlStage`. The shared `SidecarEntry` schema has default
+owned field parameters and a borrowed text instantiation: original field order, Deserialize
+shape/positional order, name, defaults and arbitrary original content remain unchanged. Public
+`prune::sidecar_line` remains a compatible String-returning wrapper but no longer clones its inputs.
+The CLI no longer creates a line String followed by a complete file String. Serialization and
+spooling finish before opening the destination; publication preserves the same existing inode,
+permissions, symlink following and hardlinks as `fs::write`. Empty CLI rosters still touch no file.
+Transcript and sidecar publication remain separate; write failures retain established partial-write
+semantics, and no multi-output transaction or independent staging framework was introduced.
+
+`DISTILL-SIDECAR-EVIDENCE.json` / `examples/distill_sidecar_probe.rs` compare frozen owned-row,
+line-String and whole-file construction with borrowed staging. The elision roster is allocated
+before the counting baseline; output hashing occurs afterwards. For escaped 16/64 MiB content,
+extra requested Rust heap above that existing ownership falls from 84,250,916 / 336,953,638 bytes
+to 1,114,321 bytes at either size. Encoded output is 25,174,163 / 100,671,636 bytes; exact hashes match.
+No timing measurements. Original `Distilled.elided` content/input ownership remains proportional
+to its demanded payload, and the private spool remains output-sized on disk.
+
+Forty scoped prune/schema tests pass, including owned-vs-borrowed exact lines/spilled files,
+Unicode/escaping/CRLF/empty text/input-order cases, original owned deserialization and duplicate-field
+rejection, existing destination links/permissions, and existing prune/retrieve controls. The CLI
+empty-roster regression also preserves a preexisting sidecar; actual CLI `--upto`/resume/`--with` output matches the legacy sidecar fields and bytes. The shared stage's existing
+pre-publication failure mechanism is reused unchanged.

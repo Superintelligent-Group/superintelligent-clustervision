@@ -1,0 +1,65 @@
+{
+  "scope": "Owned elision content/input allocated before counting baseline; legacy owned-row + line String + whole-file String versus borrowed shared-schema JSONL stage. Synthetic escaped 16/64 MiB content, no timings, output hashing after allocation measurement; requested Rust heap excludes mappings/RSS/native allocation.",
+  "results": [
+    {
+      "source_content_bytes": 16777212,
+      "output_bytes": 25174163,
+      "sha256": "46d06103c13f7fbc15510c214769de154eee0a2f088fc0530146af2e9a072f85",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 16786702,
+        "peak_live_bytes": 101037618,
+        "peak_above_baseline_bytes": 84250916,
+        "stage_end_live_bytes": 16786702,
+        "allocation_requests": 27,
+        "requested_bytes": 160105322
+      },
+      "mode": "legacy",
+      "mib": 16
+    },
+    {
+      "source_content_bytes": 16777212,
+      "output_bytes": 25174163,
+      "sha256": "46d06103c13f7fbc15510c214769de154eee0a2f088fc0530146af2e9a072f85",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 16786702,
+        "peak_live_bytes": 17901023,
+        "peak_above_baseline_bytes": 1114321,
+        "stage_end_live_bytes": 16786702,
+        "allocation_requests": 13,
+        "requested_bytes": 2302296
+      },
+      "mode": "staged",
+      "mib": 16
+    },
+    {
+      "source_content_bytes": 67108860,
+      "output_bytes": 100671636,
+      "sha256": "1ee6d2487d3a4a9b2a82edf7ccd1a4763472950d2d0bcf1663801c2627bbf077",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 67118350,
+        "peak_live_bytes": 404071988,
+        "peak_above_baseline_bytes": 336953638,
+        "stage_end_live_bytes": 67118350,
+        "allocation_requests": 29,
+        "requested_bytes": 640344941
+      },
+      "mode": "legacy",
+      "mib": 64
+    },
+    {
+      "source_content_bytes": 67108860,
+      "output_bytes": 100671636,
+      "sha256": "1ee6d2487d3a4a9b2a82edf7ccd1a4763472950d2d0bcf1663801c2627bbf077",
+      "requested_rust_heap": {
+        "baseline_live_bytes": 67118350,
+        "peak_live_bytes": 68232671,
+        "peak_above_baseline_bytes": 1114321,
+        "stage_end_live_bytes": 67118350,
+        "allocation_requests": 13,
+        "requested_bytes": 2302296
+      },
+      "mode": "staged",
+      "mib": 64
+    }
+  ]
+}

@@ -178,6 +178,21 @@ pub fn prepare_distill(session: &Session, opts: &DistillOptions) -> anyhow::Resu
     analyze(session, opts, Demand::Full)
 }
 
+/// Serialize elided outputs through the shared bounded JSONL stage before opening the sidecar.
+/// Inputs and content are borrowed from the existing elision roster; no artifact-sized copy is made.
+pub fn write_sidecar(path: &std::path::Path, elided: &[Elided]) -> anyhow::Result<()> {
+    let mut stage = crate::harness::store::JsonlStage::new();
+    for entry in elided {
+        stage.push(crate::prune::BorrowedSidecarEntry::text(
+            &entry.tool_use_id,
+            &entry.tool_name,
+            &entry.input,
+            &entry.content,
+        ))?;
+    }
+    stage.publish(path)
+}
+
 // ── analysis ─────────────────────────────────────────────────────────────────────────────────
 
 /// One entry in the chronological record of what was said to and by the agent.
