@@ -1899,6 +1899,12 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    preparation with original-count validation, final EOF metadata and path-meta enrichment;
    sidecar output borrows the owned elisions into the existing bounded JSONL stage. The full fact scan
    and analyzer's input ownership remain separate work.
+   **Active findings-only follow-up:** `distill --with` currently loads and materializes each peer
+   before extracting findings. Ignored thinking is retained even though this product emits no
+   thinking, tail or elisions. Carry checked sources through the caller and shared analyzer,
+   validate ignored source fields without retaining their decoded text, and keep one-result/argument
+   owned fallbacks where analysis requires them. Full distillation's output-sized ownership remains
+   a separate contract; a library-only copy reduction would not fix the existing CLI load.
 2. **Pack stale-event traversal composition completed (2026-10-13).** `cmd/pack.rs::build_source`
    shares its lazy excerpt pass with optional borrowed event observation only when events are stale.
    Warm events retain one excerpt pass and no event extraction/publication. Optional event errors
@@ -1916,6 +1922,12 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    below retains the independent routes: their current concurrent lifetimes provide no guaranteed
    sharing benefit without more coordination. Existing verified API page continuations, watch EOF
    reuse and stats token-ledger reuse remain intact.
+
+Listing enrichment follow-up: `cmd/browse.rs::enrich_head` currently collects every user message,
+while `Session::synth_title` needs only the first meaningful prompt unless an explicit final title
+wins. Investigate retaining just the title candidate through the same title policy. Preserve
+per-block prefix semantics, legacy Span/source resolver behavior, late git/title metadata and
+the EOF pass used for count publication; this is a retention issue, not permission to stop early.
 
 ### Browser window/head work audit (2026-10-13)
 
