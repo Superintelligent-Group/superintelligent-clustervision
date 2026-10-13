@@ -1582,7 +1582,7 @@ mod tests {
         );
         assert_eq!(bag(h)["metadata"]["usage"]["isCompaction"], true);
         assert!(h.model.is_none(), "no inference → no model");
-        assert_eq!(crate::compaction::detect_in_session(&s, true).len(), 1);
+        assert_eq!(crate::compaction::detect_in_session(&s, true).unwrap().len(), 1);
         assert_nested_extra(&s);
     }
 

@@ -1850,7 +1850,7 @@ mod tests {
         assert_eq!(bag(summary)["display_kind"], "hidden");
         assert!(!bag(summary).contains_key("isCompactSummary"), "the kind carries it");
         // the shared detector sees one compaction with its summary
-        let found = crate::compaction::detect_in_session(&s, true);
+        let found = crate::compaction::detect_in_session(&s, true).unwrap();
         assert_eq!(found.len(), 1);
         assert!(found[0].summary.as_deref().is_some_and(|t| t.contains("earlier turns")));
         assert_nested_extra(&s);

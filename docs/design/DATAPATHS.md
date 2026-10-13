@@ -873,3 +873,13 @@ Plain discovery keeps its existing 8 MiB full-file cap and 1 MiB head/tail sampl
 discovery reuses positioned known-record metadata without retaining giant tool/assistant bodies.
 The private decoded arena uses disk proportional to decoded source size; it is not a persistent
 cache or a claim of bounded disk/RSS.
+
+Compaction summary demands (2026-10-12): `summary_text` consumes checked chunks into the requested
+full output string. Summary size is unrestricted; retaining summaries grows with their output,
+not a promised few-KB bound. Count-only scans do not demand those bodies. `CompactionSink` retains
+summary errors across legacy `Flow::Stop` and rejects partial results on finish; streamed `detect`
+and in-session detection propagate failures. The public Rust `into_boundaries` and
+`detect_in_session` returns are now Result; doctor and materialized test callers are migrated,
+while CLI/HTTP `detect` remains fallible with its existing signature. Scoped native/portable
+oracles cover full inline/escaped-Span/retained-Source summaries, multiline concatenation,
+whitespace-only omission, source mutation/missing files, stopped sinks, and count-only no-demand.

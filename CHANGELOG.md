@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Compaction summary scans propagate lazy source read failures and preserve full summary text.
+
 - Affordance rows and counts propagate source text read failures instead of classifying incomplete content.
 
 - Staged dataset and JSON output retain checked source-backed text without copying decoded payloads into private transport.

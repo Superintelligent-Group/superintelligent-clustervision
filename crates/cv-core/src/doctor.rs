@@ -175,7 +175,7 @@ impl SessionPass<'_> {
             e.result_tokens += t;
             e.is_mcp |= is_mcp_tool(name);
         }
-        for c in self.compactions.into_boundaries() {
+        for c in self.compactions.into_boundaries()? {
             rep.compactions += 1;
             if c.trigger.as_deref() == Some("auto") {
                 rep.auto_compactions += 1;

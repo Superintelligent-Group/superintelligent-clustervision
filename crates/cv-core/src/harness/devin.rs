@@ -1456,7 +1456,7 @@ mod tests {
         );
 
         // `cv show --kind compaction_boundary` sees exactly one boundary, paired, with the summary text.
-        let found = crate::compaction::detect_in_session(&s, true);
+        let found = crate::compaction::detect_in_session(&s, true).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].summary_msg_idx, Some(9));
         assert_eq!(found[0].trigger.as_deref(), Some("async_file_compactor"));

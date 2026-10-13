@@ -16,7 +16,7 @@
 //!
 //! Memory discipline (the project value): detection rides the streaming parse through a
 //! [`CompactionSink`]; it keeps only small per-boundary rows + (optionally) the summary text, never
-//! the transcript. The summary itself is bounded (a few KB) so it's resolved eagerly.
+//! the transcript. Requested full summaries are retained as output and may be arbitrarily large.
 
 use crate::ir::{Block, Message, MessageKind, Session, SessionRef};
 use crate::stream::{Flow, MessageSink};
@@ -64,8 +64,8 @@ impl Compaction {
 /// A [`MessageSink`] that detects every compaction boundary as the transcript streams past, pairing
 /// each `compact_boundary` with its `isCompactSummary` summary (by `parentUuid == boundary.uuid`).
 ///
-/// `keep_summaries` controls whether the (bounded) summary text is retained — `cv show --kind compaction_*` keeps
-/// it; a count-only probe need not. Holds only the small [`Compaction`] rows.
+/// `keep_summaries` controls whether full summary text is retained — `cv show --kind compaction_*`
+/// keeps it; a count-only probe need not. Requested summaries may exceed the boundary metadata.
 pub struct CompactionSink {
     keep_summaries: bool,
     msg_idx: usize,
@@ -76,6 +76,7 @@ pub struct CompactionSink {
     /// Resolver for a lazily-spanned summary body (set on the streaming path; `None` for the
     /// already-materialized in-session path). A compaction summary can exceed the inline threshold.
     resolver: Option<crate::lazy::Resolver>,
+    error: Option<anyhow::Error>,
 }
 
 impl CompactionSink {
@@ -86,11 +87,16 @@ impl CompactionSink {
             boundaries: Vec::new(),
             pending: std::collections::HashMap::new(),
             resolver: None,
+            error: None,
         }
     }
 
-    pub fn into_boundaries(self) -> Vec<Compaction> {
-        self.boundaries
+    /// Finish a scan, rejecting partial results when a demanded summary failed.
+    pub fn into_boundaries(self) -> anyhow::Result<Vec<Compaction>> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(self.boundaries),
+        }
     }
 }
 
@@ -105,6 +111,22 @@ fn bag_value<'a>(m: &'a Message, key: &str) -> Option<&'a Value> {
 
 impl MessageSink for CompactionSink {
     fn message(&mut self, m: Message) -> Flow {
+        self.try_message(m).unwrap_or(Flow::Stop)
+    }
+
+    fn try_message(&mut self, m: Message) -> anyhow::Result<Flow> {
+        if self.error.is_none() {
+            match self.observe(m) {
+                Ok(flow) => return Ok(flow),
+                Err(error) => self.error = Some(error),
+            }
+        }
+        Err(anyhow::anyhow!("{:#}", self.error.as_ref().unwrap()))
+    }
+}
+
+impl CompactionSink {
+    fn observe(&mut self, m: Message) -> anyhow::Result<Flow> {
         let idx = self.msg_idx;
         self.msg_idx += 1;
 
@@ -128,7 +150,7 @@ impl MessageSink for CompactionSink {
                 self.pending.insert(uuid.clone(), self.boundaries.len());
             }
             self.boundaries.push(comp);
-            return Flow::Continue;
+            return Ok(Flow::Continue);
         }
 
         // The paired summary: a `CompactionSummary` whose `parent_id` is a pending boundary's uuid.
@@ -146,35 +168,37 @@ impl MessageSink for CompactionSink {
             if let Some(i) = slot {
                 self.boundaries[i].summary_msg_idx = Some(idx);
                 if self.keep_summaries {
-                    self.boundaries[i].summary = summary_text(&m, self.resolver.as_ref());
+                    self.boundaries[i].summary = summary_text(&m, self.resolver.as_ref())?;
                 }
             }
         }
-        Flow::Continue
+        Ok(Flow::Continue)
     }
 }
 
 /// The summary body of an `isCompactSummary` message: its concatenated text blocks, resolving a
 /// lazy span (a long summary can exceed the inline threshold) against `resolver` when present.
-fn summary_text(m: &Message, resolver: Option<&crate::lazy::Resolver>) -> Option<String> {
+fn summary_text(m: &Message, resolver: Option<&crate::lazy::Resolver>) -> anyhow::Result<Option<String>> {
+    let fallback = crate::lazy::Resolver::new(None);
+    let resolver = resolver.unwrap_or(&fallback);
     let mut s = String::new();
     for b in &m.content {
         if let Block::Text { text } = b {
             if !s.is_empty() {
                 s.push('\n');
             }
-            match resolver {
-                Some(r) => s.push_str(&text.resolve(r)),
-                None => s.push_str(text), // already-materialized (in-session) path
-            }
+            text.try_for_each_chunk(resolver, 64 * 1024, |part| {
+                s.push_str(part);
+                Ok(())
+            })?;
         }
     }
-    (!s.trim().is_empty()).then_some(s)
+    Ok((!s.trim().is_empty()).then_some(s))
 }
 
-/// Detect every compaction in a session by streaming it (memory-safe on a multi-GB transcript).
-/// `keep_summaries` retains each boundary's (bounded) summary text. Best-effort: a parse error
-/// yields whatever boundaries were seen before it.
+/// Detect every compaction by streaming, retaining boundary rows and requested summaries.
+/// `keep_summaries` retains each boundary's full summary text as requested output. Parse errors
+/// and demanded summary read errors are returned; partial results are not published.
 pub fn detect(r: &SessionRef, keep_summaries: bool) -> anyhow::Result<Vec<Compaction>> {
     let adapter =
         crate::harness::for_harness(r.harness).ok_or_else(|| anyhow::anyhow!("no adapter for {}", r.harness))?;
@@ -184,7 +208,7 @@ pub fn detect(r: &SessionRef, keep_summaries: bool) -> anyhow::Result<Vec<Compac
     // `compactMetadata` (trigger, preTokens, duration) lives in `extra` — plain `lazy()` omits it.
     // Giant message bodies still stay lazy on disk.
     adapter.try_stream(r, &crate::stream::ParseOptions::lazy_extra(), &mut sink)?;
-    Ok(sink.into_boundaries())
+    sink.into_boundaries()
 }
 
 /// The message-index span *before* the Nth compaction boundary (0-based `n`): `[start, boundary)`
@@ -219,11 +243,13 @@ pub fn row(boundaries: &[Compaction], n: usize) -> Value {
 
 /// A [`Session`]-level convenience (used by tests / whole-session consumers): detect compactions
 /// from an already-parsed session's messages, without re-streaming. Mirrors [`CompactionSink`]'s
-/// logic on `session.messages`.
-pub fn detect_in_session(session: &Session, keep_summaries: bool) -> Vec<Compaction> {
+/// logic on `session.messages`, resolving retained lazy text against `session.source_path` and
+/// returning demanded summary read errors.
+pub fn detect_in_session(session: &Session, keep_summaries: bool) -> anyhow::Result<Vec<Compaction>> {
     let mut sink = CompactionSink::new(keep_summaries);
+    sink.resolver = Some(crate::lazy::Resolver::new(session.source_path.clone()));
     for m in &session.messages {
-        let _ = sink.message(m.clone());
+        sink.try_message(m.clone())?;
     }
     sink.into_boundaries()
 }
@@ -262,6 +288,104 @@ mod tests {
     }
 
     #[test]
+    fn full_summaries_match_inline_span_and_source_without_truncation() {
+        let world = cv_testkit::World::in_process("compaction-checked-summary");
+        let path = world.base.join("summary.json");
+        for body in [" \n\t".repeat(9000), "🌙\n\"\\".repeat(32768)] {
+            let wire = serde_json::to_vec(&body).unwrap();
+            std::fs::write(&path, &wire).unwrap();
+            let source = crate::Json::source(&path, 0, wire.len() as u64)
+                .unwrap()
+                .with_view(|view| view.source_text())
+                .unwrap()
+                .unwrap();
+            let span = crate::lazy::Text::Span(crate::lazy::Span {
+                source: Some(path.clone()),
+                offset: 1,
+                len: wire.len() as u64 - 2,
+                escaped: true,
+            });
+            let make = |text| {
+                let mut session = Session::new("summary", Harness::Claude);
+                let mut message = summary("b", "");
+                message.content.push(Block::Text { text });
+                message.content.push(Block::Thinking {
+                    text: "ignored".into(),
+                    signature: None,
+                    encrypted: None,
+                    redacted: false,
+                });
+                message.content.push(Block::Text { text: "".into() });
+                session.messages = vec![boundary("b", "auto", 42), message];
+                session
+            };
+            let inline = detect_in_session(&make(body.clone().into()), true).unwrap();
+            for text in [span, source] {
+                let lazy = detect_in_session(&make(text), true).unwrap();
+                assert_eq!(
+                    serde_json::to_value(lazy).unwrap(),
+                    serde_json::to_value(&inline).unwrap()
+                );
+            }
+            if !body.trim().is_empty() {
+                assert_eq!(inline[0].summary.as_deref(), Some(format!("{body}\n").as_str()));
+                assert!(inline[0].summary.as_ref().unwrap().len() > 128 * 1024);
+            } else {
+                assert!(inline[0].summary.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn demanded_summary_failure_stops_and_rejects_partial_boundaries() {
+        let world = cv_testkit::World::in_process("compaction-summary-mutation");
+        let path = world.base.join("original");
+        std::fs::write(&path, "snapshot provenance").unwrap();
+        let capture = crate::json::JsonSource::capture(&path).unwrap();
+        let backing = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+        let wire = serde_json::to_vec(&"summary🌙".repeat(8192)).unwrap();
+        let (offset, len) = backing
+            .append(|out| {
+                out.write_all(&wire)?;
+                Ok(())
+            })
+            .unwrap();
+        let text = capture
+            .read_backing_value(backing, offset, len, |view| view.source_text())
+            .unwrap()
+            .unwrap();
+        let mut message = summary("b", "");
+        message.content = vec![Block::Text { text }];
+        let mut session = Session::new("source-summary", Harness::Claude);
+        session.messages = vec![boundary("b", "auto", 42), message.clone()];
+        std::fs::write(&path, "changed snapshot").unwrap();
+        assert!(detect_in_session(&session, true).is_err());
+        let count_only = detect_in_session(&session, false).unwrap();
+        assert_eq!(count_only[0].summary_msg_idx, Some(1));
+        assert!(count_only[0].summary.is_none());
+        let mut sink = CompactionSink::new(true);
+        assert!(matches!(sink.message(session.messages[0].clone()), Flow::Continue));
+        assert!(matches!(sink.message(message.clone()), Flow::Stop));
+        assert!(matches!(sink.message(plain_user("after failure")), Flow::Stop));
+        assert!(sink.into_boundaries().is_err());
+        let mut sink = CompactionSink::new(true);
+        sink.try_message(session.messages[0].clone()).unwrap();
+        assert!(sink.try_message(message).is_err());
+        assert!(sink.into_boundaries().is_err());
+        let missing = crate::lazy::Text::Span(crate::lazy::Span {
+            source: Some(world.base.join("missing")),
+            offset: 0,
+            len: 8192,
+            escaped: true,
+        });
+        if let Block::Text { text } = &mut session.messages[1].content[0] {
+            *text = missing;
+        }
+        assert!(detect_in_session(&session, true).is_err());
+        assert_eq!(detect_in_session(&session, false).unwrap().len(), 1);
+    }
+
+    #[test]
     fn detects_boundaries_and_pairs_summaries_by_parent_uuid() {
         let session = Session {
             id: "s".into(),
@@ -286,7 +410,7 @@ mod tests {
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         };
-        let comps = detect_in_session(&session, true);
+        let comps = detect_in_session(&session, true).unwrap();
         assert_eq!(comps.len(), 2, "two boundaries");
 
         assert_eq!(comps[0].boundary_msg_idx, 1);
@@ -328,7 +452,7 @@ mod tests {
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         };
-        let comps = detect_in_session(&session, true);
+        let comps = detect_in_session(&session, true).unwrap();
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0].summary_msg_idx, Some(1));
         assert_eq!(comps[0].summary.as_deref(), Some("ADJACENT SUMMARY"));
@@ -351,7 +475,7 @@ mod tests {
             system_prompt: None,
             lineage: crate::ir::Lineage::default(),
         };
-        let comps = detect_in_session(&session, false);
+        let comps = detect_in_session(&session, false).unwrap();
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0].summary_msg_idx, Some(1));
         assert_eq!(comps[0].summary, None, "count-only mode keeps no summary text");

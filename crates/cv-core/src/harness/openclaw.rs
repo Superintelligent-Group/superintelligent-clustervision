@@ -2700,7 +2700,7 @@ mod tests {
         assert_eq!(summary.text().as_deref(), Some("earlier history compacted"));
         assert_eq!(summary.parent_id.as_deref(), Some("c3"));
         assert_eq!(summary.extra["openclaw"]["message_role"], "compactionSummary");
-        let comps = crate::compaction::detect_in_session(&s, true);
+        let comps = crate::compaction::detect_in_session(&s, true).unwrap();
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0].summary_msg_idx, Some(3));
 

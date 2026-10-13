@@ -2174,7 +2174,7 @@ mod tests {
         assert_eq!(reply.extra["kimi"]["token_count"], 1234);
         assert_eq!(reply.usage.as_ref().and_then(|u| u.input_tokens), Some(1234));
         // the compaction detector pairs the synthetic boundary with the summary
-        let comps = crate::compaction::detect_in_session(&s, true);
+        let comps = crate::compaction::detect_in_session(&s, true).unwrap();
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0].summary_msg_idx, Some(2));
         assert!(comps[0].summary.as_deref().unwrap_or("").contains("summary body"));
