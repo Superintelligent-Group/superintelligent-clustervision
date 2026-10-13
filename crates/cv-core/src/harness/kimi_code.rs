@@ -93,7 +93,9 @@ use super::store::{
     document::{Fields, Record},
     jsonl,
 };
-use super::wire::{coerce_text, openai, text_parts};
+#[cfg(test)]
+use super::wire::text_parts;
+use super::wire::{coerce_text, openai};
 use super::Adapter;
 use crate::harness::claude::CARRIER_KEY;
 use crate::ir::*;
@@ -576,7 +578,7 @@ pub fn subagent_refs(main: &SessionRef) -> Vec<SessionRef> {
             if !wire.exists() {
                 return None;
             }
-            let w = scan_wire(&wire);
+            let w = scan_wire(&wire).ok()?;
             Some((
                 n,
                 SessionRef {
@@ -601,6 +603,28 @@ fn read_state(session_dir: &Path) -> Value {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(Value::Null)
+}
+
+/// Only listing fields are demanded; lastPrompt and other state bodies remain validated ranges.
+fn read_discovery_state(session_dir: &Path) -> Value {
+    let read = || -> Result<Value> {
+        let source = crate::json::JsonSource::capture(&session_dir.join("state.json"))?;
+        source.read_range_value(0, source.len(), |view| {
+            let fields = super::store::document::Fields::parse(view, &["cwd", "title", "createdAt", "updatedAt"])?;
+            let Some(fields) = fields else { return Ok(Value::Null) };
+            let mut state = serde_json::Map::new();
+            for key in ["cwd", "title", "createdAt", "updatedAt"] {
+                if let Some(value) = fields.get(key) {
+                    if value.is_string()? || (matches!(key, "createdAt" | "updatedAt") && value.as_number()?.is_some())
+                    {
+                        state.insert(key.into(), value.resolve()?.into_owned());
+                    }
+                }
+            }
+            Ok(Value::Object(state))
+        })
+    };
+    read().unwrap_or(Value::Null)
 }
 
 #[derive(Default)]
@@ -654,7 +678,7 @@ fn read_workspaces(path: &Path) -> HashMap<String, PathBuf> {
 /// Cheap metadata-only scan for `discover`: state.json for identity/title/times, one pass over the
 /// transcript for the turn count (and the title when state.json has none).
 fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<SessionRef> {
-    let state = read_state(session_dir);
+    let state = read_discovery_state(session_dir);
     let wire = main_wire(session_dir);
     if !wire.exists() && state.is_null() {
         return None;
@@ -664,7 +688,11 @@ fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Option<S
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or(fallback_cwd);
-    let w = scan_wire(&wire);
+    let title_needed = state
+        .get("title")
+        .and_then(Value::as_str)
+        .is_none_or(|t| t.trim().is_empty());
+    let w = scan_wire_with_title(&wire, title_needed).ok()?;
     let title = state
         .get("title")
         .and_then(Value::as_str)
@@ -708,7 +736,76 @@ struct WireScan {
 
 /// One pass over a wire log: turn count, title fallback and time bounds. A user record is one turn;
 /// an assistant turn is one LLM step (`step.end`).
-fn scan_wire(wire: &Path) -> WireScan {
+fn scan_wire(wire: &Path) -> Result<WireScan> {
+    scan_wire_with_title(wire, true)
+}
+fn scan_wire_with_title(wire: &Path, title_needed: bool) -> Result<WireScan> {
+    let mut w = WireScan::default();
+    let file = match fs::File::open(wire) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(w),
+        Err(error) => return Err(error.into()),
+    };
+    let source = crate::json::JsonSource::capture(wire)?;
+    super::store::checked_lines::for_each(&file, 0, &source, |view, _, _, _| {
+        if let Some(ts) = view
+            .get("time")?
+            .map(|v| v.resolve())
+            .transpose()?
+            .as_deref()
+            .and_then(super::ts_from_value)
+        {
+            w.first_ts = Some(w.first_ts.map_or(ts, |f| f.min(ts)));
+            w.last_ts = Some(w.last_ts.map_or(ts, |l| l.max(ts)));
+        }
+        let fields = super::store::document::Fields::parse(view, &["type", "message", "event"])?;
+        let Some(fields) = fields else {
+            return Ok(Flow::Continue);
+        };
+        match fields.string("type")?.as_deref() {
+            Some("context.append_message") => {
+                if let Some(message) = fields.get("message") {
+                    let message = super::store::document::Fields::parse(message, &["role", "origin", "content"])?;
+                    if let Some(message) = message {
+                        if message.string("role")?.as_deref() == Some("user") {
+                            w.message_count += 1;
+                            if title_needed && w.title.is_none() {
+                                let origin = message
+                                    .get("origin")
+                                    .map(|v| v.get("kind"))
+                                    .transpose()?
+                                    .flatten()
+                                    .map(|v| v.resolve())
+                                    .transpose()?;
+                                if origin.as_deref().and_then(Value::as_str).unwrap_or("user") == "user" {
+                                    w.title = super::wire::text_title(message.get("content"))?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some("context.append_loop_event") => {
+                let event = fields
+                    .get("event")
+                    .map(|v| v.get("type"))
+                    .transpose()?
+                    .flatten()
+                    .map(|v| v.resolve())
+                    .transpose()?;
+                if event.as_deref().and_then(Value::as_str) == Some("step.end") {
+                    w.message_count += 1;
+                }
+            }
+            _ => {}
+        }
+        Ok(Flow::Continue)
+    })?;
+    Ok(w)
+}
+
+#[cfg(test)]
+fn old_scan_wire(wire: &Path) -> WireScan {
     let mut w = WireScan::default();
     let Ok(file) = fs::File::open(wire) else {
         return w;
@@ -1718,6 +1815,78 @@ fn push_parts(m: &mut Message, content: Option<&Value>) {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn checked_discovery_kimi_code_matches_owned_steps_titles_and_state() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi-code-discovery-selected");
+        let dir = world.base.join("session-id");
+        fs::create_dir_all(&dir)?;
+        let wire = dir.join("wire.jsonl");
+        let body = "body λ\n".repeat(512 * 1024);
+        let rows = [
+            serde_json::json!({"type":"context.append_message","time":2,"message":{"role":"user","origin":{"kind":"injection"},"content":body}}),
+            serde_json::json!({"type":"context.append_message","time":1,"message":{"role":"user","content":[{"text":""},{"image":"ignored"},{"text":body}]}}),
+            serde_json::json!({"type":"context.append_loop_event","time":7,"event":{"type":"step.begin","ignored":body}}),
+            serde_json::json!({"type":"context.append_loop_event","time":9,"event":{"type":"step.end","ignored":body}}),
+            serde_json::json!({"type":"context.append_message","time":8,"message":{"role":"assistant","content":body}}),
+        ];
+        let mut bytes = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>()
+            .into_bytes();
+        bytes.extend_from_slice(b"invalid-json\n\xff\n{\"ignored\":1e999}\n");
+        bytes.extend_from_slice("\u{2003}{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"origin\":{\"kind\":null},\"content\":\"partial\"}}\u{2003}".as_bytes());
+        bytes.extend_from_slice(b"\n{\"type\":\"ignored\",\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"step.begin\",\"type\":\"step.end\"}}\n");
+        fs::write(&wire, bytes)?;
+        let facts = |w: WireScan| (w.message_count, w.title, w.first_ts, w.last_ts);
+        assert_eq!(facts(scan_wire(&wire)?), facts(old_scan_wire(&wire)));
+        for title in [
+            Value::Null,
+            serde_json::json!("explicit title λ"),
+            serde_json::json!(" "),
+            serde_json::json!([{"text":"invalid title type"}]),
+        ] {
+            let state = serde_json::json!({"cwd":"/p","title":title,"createdAt":3,"updatedAt":11,"lastPrompt":body,"unknown":body});
+            fs::write(dir.join("state.json"), serde_json::to_vec(&state)?)?;
+            let actual = scan(&dir, "id", None).unwrap();
+            let old = old_scan_wire(&wire);
+            assert_eq!(actual.message_count, old.message_count);
+            assert_eq!(
+                actual.title,
+                state
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|t| !t.trim().is_empty())
+                    .map(str::to_string)
+                    .or(old.title)
+            );
+            assert_eq!(
+                actual.created_at,
+                state
+                    .get("createdAt")
+                    .and_then(super::super::ts_from_value)
+                    .or(old.first_ts)
+            );
+            assert_eq!(
+                actual.updated_at,
+                state
+                    .get("updatedAt")
+                    .and_then(super::super::ts_from_value)
+                    .or(old.last_ts)
+            );
+        }
+        for entry in walkdir::WalkDir::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/kimi-code"))
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+        {
+            if entry.file_name() != "wire.jsonl" {
+                continue;
+            }
+            assert_eq!(facts(scan_wire(entry.path())?), facts(old_scan_wire(entry.path())));
+        }
+        Ok(())
+    }
 
     #[derive(Default)]
     struct Kept {

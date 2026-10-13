@@ -732,20 +732,20 @@ fn scan(
     // title: state.json.custom_title (modern only) else first user text from the transcript.
     let mut title = read_custom_title(dir);
     let mut message_count = 0usize;
-    for_each_segment_record(&transcript_segments(dir, transcript), |v, _| {
-        let role = v.get("role").and_then(Value::as_str).unwrap_or("");
-        // SessionRef contract: user + assistant turns only (no tool / _system_prompt records).
-        if matches!(role, "user" | "assistant") {
+    records::visit(&transcript_segments(dir, transcript), None, |view, _, _, _, _| {
+        let Some(fields) = super::store::document::Fields::parse(view, &["role", "content"])? else {
+            return Ok(Flow::Continue);
+        };
+        let role = fields.string("role")?;
+        if matches!(role.as_deref(), Some("user" | "assistant")) {
             message_count += 1;
         }
-        if title.is_none() && role == "user" {
-            let t = text_parts(v.get("content"));
-            if !t.trim().is_empty() {
-                title = Some(crate::ir::truncate(&t, 80));
-            }
+        if title.is_none() && role.as_deref() == Some("user") {
+            title = super::wire::text_title(fields.get("content"))?;
         }
-        Flow::Continue
-    });
+        Ok(Flow::Continue)
+    })
+    .ok()?;
 
     // wire gives nicer first/last timestamps when present.
     let wire = wire_path_for(dir, transcript);
@@ -767,8 +767,76 @@ fn scan(
     })
 }
 
+#[cfg(test)]
+fn old_scan(
+    id: &str,
+    transcript: &Path,
+    dir: &Path,
+    cwd: Option<PathBuf>,
+    _default_model: Option<String>,
+) -> Option<SessionRef> {
+    let meta = fs::metadata(transcript).ok()?;
+    let mtime: Option<DateTime<Utc>> = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| DateTime::<Utc>::from_timestamp_nanos(d.as_nanos() as i64));
+
+    // title: state.json.custom_title (modern only) else first user text from the transcript.
+    let mut title = old_read_custom_title(dir);
+    let mut message_count = 0usize;
+    old_for_each_segment_record(&transcript_segments(dir, transcript), |v, _| {
+        let role = v.get("role").and_then(Value::as_str).unwrap_or("");
+        // SessionRef contract: user + assistant turns only (no tool / _system_prompt records).
+        if matches!(role, "user" | "assistant") {
+            message_count += 1;
+        }
+        if title.is_none() && role == "user" {
+            let t = text_parts(v.get("content"));
+            if !t.trim().is_empty() {
+                title = Some(crate::ir::truncate(&t, 80));
+            }
+        }
+        Flow::Continue
+    });
+
+    // wire gives nicer first/last timestamps when present.
+    let wire = wire_path_for(dir, transcript);
+    let (created, updated) = wire
+        .as_ref()
+        .and_then(|w| old_wire_time_bounds(w))
+        .map(|(a, b)| (Some(a), Some(b)))
+        .unwrap_or((mtime, mtime));
+
+    Some(SessionRef {
+        id: id.to_string(),
+        harness: Harness::Kimi,
+        path: dir.to_path_buf(),
+        cwd,
+        title,
+        created_at: created,
+        updated_at: updated,
+        message_count,
+    })
+}
+
 /// `state.json.custom_title`, when present and non-empty.
 fn read_custom_title(dir: &Path) -> Option<String> {
+    let path = dir.join("state.json");
+    let source = crate::json::JsonSource::capture(&path).ok()?;
+    source
+        .read_range_value(0, source.len(), |view| {
+            super::wire::text_title(
+                view.get("custom_title")?
+                    .filter(|value| value.is_string().unwrap_or(false)),
+            )
+        })
+        .ok()
+        .flatten()
+}
+
+#[cfg(test)]
+fn old_read_custom_title(dir: &Path) -> Option<String> {
     let text = fs::read_to_string(dir.join("state.json")).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
     v.get("custom_title")
@@ -878,10 +946,6 @@ fn old_for_each_segment_record(segments: &[PathBuf], mut f: impl FnMut(Value, Op
         prev = cur;
     }
     skipped
-}
-
-fn for_each_segment_record(segments: &[PathBuf], mut f: impl FnMut(Value, Option<&str>) -> Flow) -> u64 {
-    for_each_segment_record_at(segments, None, |value, starts, _, _| f(value, starts))
 }
 
 fn for_each_segment_record_at(
@@ -1390,6 +1454,49 @@ fn wire_timestamp(raw: Raw<'_>) -> Option<DateTime<Utc>> {
 
 /// First and last event timestamps in a wire file (epoch floats), for created/updated bounds.
 fn wire_time_bounds(wire: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    use super::store::jsonl::ranges;
+    let file = fs::File::open(wire).ok()?;
+    let source = crate::json::JsonSource::capture(wire).ok()?;
+    source.check_metadata(file.metadata().ok()?).ok()?;
+    // The old shared wire scanner rejects invalid UTF-8 anywhere, unlike context records.
+    if !ranges::valid_utf8(
+        &mut ranges::reader(
+            &file,
+            ranges::Range {
+                offset: 0,
+                len: source.len(),
+            },
+        )
+        .ok()?,
+    )
+    .ok()?
+    {
+        return None;
+    }
+    let mut first = None;
+    let mut last = None;
+    super::store::checked_lines::for_each(&file, 0, &source, |view, _, _, _| {
+        if let Some(ts) = view
+            .get("timestamp")?
+            .map(|v| v.as_number())
+            .transpose()?
+            .flatten()
+            .and_then(|n| n.as_f64())
+            .and_then(epoch_to_dt)
+        {
+            if first.is_none() {
+                first = Some(ts);
+            }
+            last = Some(ts);
+        }
+        Ok(Flow::Continue)
+    })
+    .ok()?;
+    Some((first?, last?))
+}
+
+#[cfg(test)]
+fn old_wire_time_bounds(wire: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let mut first = None;
     let mut last = None;
     scan_wire(wire, |raw, _| {
@@ -1540,6 +1647,67 @@ fn md5_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn checked_discovery_kimi_matches_owned_segments_titles_and_wire_bounds() -> Result<()> {
+        let world = cv_testkit::World::in_process("kimi-discovery-selected");
+        let dir = world.base.join("session");
+        fs::create_dir_all(&dir)?;
+        let live = dir.join("context.jsonl");
+        let body = "body λ\n".repeat(512 * 1024);
+        let prompt = serde_json::json!({"role":"user","content":[{"text":""},{"text":body}]}).to_string();
+        let prefix = format!("\u{2003}{prompt}\r\n\ninvalid-json\n");
+        let mut rotated = prefix.as_bytes().to_vec();
+        rotated.extend_from_slice(b"\xff\n{\"role\":\"assistant\",\"content\":\"old\"}\n");
+        fs::write(dir.join("context_1.jsonl"), rotated)?;
+        let mut current = prefix.as_bytes().to_vec();
+        current.extend_from_slice(b"\xff\n{\"ignored\":1e999}\n{\"role\":\"assistant\",\"content\":\"new\"}\n{\"role\":\"user\",\"content\":\"partial\"}");
+        current.extend_from_slice(b"\n{\"role\":\"assistant\",\"role\":\"tool\",\"content\":\"duplicate role\"}\n");
+        fs::write(&live, current)?;
+        fs::write(
+            dir.join("wire.jsonl"),
+            format!(
+                "{{\"timestamp\":1,\"ignored\":{}}}\n{{\"timestamp\":9}}\n",
+                serde_json::to_string(&body)?
+            ),
+        )?;
+        for title in [
+            Value::Null,
+            serde_json::json!(" custom λ "),
+            serde_json::json!("\u{2003}".repeat(8192)),
+            serde_json::json!([{"text":"invalid title type"}]),
+        ] {
+            fs::write(
+                dir.join("state.json"),
+                serde_json::to_vec(&serde_json::json!({"custom_title":title,"unused":body}))?,
+            )?;
+            let actual = scan("session", &live, &dir, Some("/p".into()), None);
+            let expected = old_scan("session", &live, &dir, Some("/p".into()), None);
+            assert_eq!(serde_json::to_value(actual)?, serde_json::to_value(expected)?);
+        }
+        let mut file = fs::OpenOptions::new().append(true).open(dir.join("wire.jsonl"))?;
+        use std::io::Write;
+        file.write_all(b"\xff")?;
+        assert_eq!(
+            wire_time_bounds(&dir.join("wire.jsonl")),
+            old_wire_time_bounds(&dir.join("wire.jsonl"))
+        );
+        for entry in walkdir::WalkDir::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/kimi"))
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+        {
+            if entry.file_name() != "context.jsonl" {
+                continue;
+            }
+            let dir = entry.path().parent().unwrap();
+            let id = dir.file_name().unwrap().to_str().unwrap();
+            assert_eq!(
+                serde_json::to_value(scan(id, entry.path(), dir, None, None))?,
+                serde_json::to_value(old_scan(id, entry.path(), dir, None, None))?
+            );
+        }
+        Ok(())
+    }
 
     #[derive(Default)]
     pub(super) struct ResumeKeep {

@@ -202,9 +202,9 @@ the current targeted fixture/heap gates do not establish either claim.
 | Codex legacy JSON / zstd | Compressed modern JSONL decodes once into a shared private arena; legacy JSON remains separate | Legacy whole-document path; decoded disk extent is input-sized; no general compressed incremental marks |
 | Gemini legacy JSON | Checked selected string/canonical/composite results and formatted thoughts; native mmap or portable range projections | Full/complete modes and rich display extras still own required payloads |
 | Gemini JSONL | Native mmap and portable checked-range replay retain compact order/keys; selected composite bodies use one session arena | Must scan complete history for replacements/rewinds; required metadata and rich display extras remain owned |
-| Qwen modern JSONL | Checked selected reading, complete preparation, export and verification; call/spawn state and finalized-record checkpoints | Discovery still invokes the owned reader; systemPayload bookkeeping remains owned; no local fleet coverage |
-| Kimi | Context stream + pending usage message, rotated prefix dedup; wire enrichment uses raw ranges and lazy output spans | Discovery and ordinary context interpretation still own physical lines and Values; structural lookup state and mutable trailing usage are separate required state |
-| Kimi Code | Mutable finalized-step metadata with checked source-backed text/arguments/results; shared positioned framing and composite-result arena | Discovery wire Values and complete-mode owned fallback; call/step metadata; arena disk grows with flattened output |
+| Qwen modern JSONL | Checked selected reading, discovery, complete preparation, export and verification; finalized-record checkpoints | Requested title/metadata ownership; full replay systemPayload bookkeeping remains owned; no local fleet coverage |
+| Kimi | Checked context bodies and cold discovery share positioned rotation handling; pending usage and wire enrichment preserved | Rotated fingerprint/navigation state and mutable trailing usage; requested metadata remains owned |
+| Kimi Code | Selected cold wire/state discovery and checked finalized-step/complete playback; raw envelopes retain shared checked backing | Call/step state, requested title/cwd, unknown complete carriers and output backing extent |
 | Grok | Checked selected reading, complete preparation, export and verification; metadata-projected native discovery and sidecars | Portable discovery fallback buffers a physical line; header/system metadata remains owned; enrichment can revise old messages |
 | Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
@@ -4513,3 +4513,38 @@ weakening replay guards. Final focused batch: **4 passed**, including exact row 
 plus the legacy producer, attachment and transformed/group/source controls. Final native edited
 user-text/image evidence is `native-opencode-v2-rich-native-final`; imported PNG bytes appear in
 the actual native model request, and edited text is present in the imported native row.
+
+### Cold discovery payload projection: Kimi, Kimi Code, Qwen (2026-10-13)
+
+Kimi listing now counts roles and derives the exact existing first-user title through the shared
+checked positioned segment visitor. Rotated prefix fingerprints include the same trimmed raw
+blank/malformed UTF-8-valid physical rows, exclude invalid UTF-8 rows, and retain old logical
+ordering. Their vector cardinality still scales with rotated history. Discovery state reads demand
+only custom_title; wire clock bounds demand only timestamps through existing positioned records,
+retaining the previous whole-wire UTF-8 rejection and first/last encounter order. Ordinary Kimi
+context playback is a separate lane consuming the same visitor; this discovery change does not
+claim to finish its complete reader contract.
+
+Kimi Code listing selects time/type, user role/origin and step.end, rather than decoding every
+wire Value. State projects only cwd/title/createdAt/updatedAt; lastPrompt and unrelated fields
+are strictly validated without owning them. Explicit state titles avoid unused prompt-title
+work. Subagent references use the same scanner, preserving their IDs, ordering and metadata.
+The shared wire text-title projection preserves plain/array text joins, empty parts, whitespace
+selection, UTF-8 and 80-character truncation using existing checked source text.
+
+Qwen discovery now uses its selected replay, preserving hook splits, tool/spawn state, compaction
+and source/fork metadata. A discovery-only systemPayload projection retains the facts affecting
+message presence, model markers and exact custom titles without owning display/error/goal/
+compressed-summary bodies. Full replay still keeps its original systemPayload metadata contract;
+unknown system message bodies do not trigger unused content construction. Cache keys and append
+capabilities are unchanged. Explicit Qwen custom titles and Kimi Code state titles/cwd remain
+requested owned output, rather than a universal bound on arbitrary metadata.
+
+Independent owned discovery oracles and committed corpora are included in the new
+`checked_discovery_*` tests. Giant ordinary/state/system payloads, rotated/shared prefixes,
+user/injected origins, step boundaries, duplicate/empty text parts, Unicode wrapper/partial EOF,
+malformed/invalid UTF-8/overflow rows and optional-wire timestamp rejection are covered. The
+shared visitor's separate oracle checks offsets/skipped counts and early-stop source mutation.
+Implementation library checking passed before the final test batch; newly added behavior tests
+are intentionally left for root's combined native/portable convergence cycle. No new benchmark
+matrix or broad gates were run in this lane, and no Qwen fleet claim is made.

@@ -56,6 +56,32 @@ pub(crate) fn text_parts(v: Option<&Value>) -> String {
     }
 }
 
+/// Discovery's exact text_parts title, retaining only the demanded head. The caller's checked
+/// record view validates the entire row and rechecks its source after this projection.
+pub(crate) fn text_title(content: Option<crate::json::JsonView<'_>>) -> anyhow::Result<Option<String>> {
+    let Some(content) = content else { return Ok(None) };
+    let mut texts = Vec::new();
+    if let Some(text) = content.source_text()? {
+        texts.push(text);
+    } else if let Some(parts) = content.array()? {
+        for part in parts {
+            if let Some(text) = part?
+                .get("text")?
+                .map(|value| value.source_text())
+                .transpose()?
+                .flatten()
+            {
+                texts.push(text);
+            }
+        }
+    }
+    Ok(super::store::document::text_summary(
+        texts.iter(),
+        &crate::lazy::Resolver::new(None),
+        true,
+    ))
+}
+
 fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }

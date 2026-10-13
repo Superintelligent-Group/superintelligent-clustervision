@@ -281,7 +281,7 @@ fn scan_session_jsonl(path: &Path) -> Option<SessionRef> {
         turns += usize::from(matches!(m.role, Role::User | Role::Assistant));
         Flow::Continue
     };
-    let s = stream_session_jsonl(path, &mut sink).ok()?;
+    let s = selected::stream_for_discovery(path, &mut sink).ok()?;
     if messages == 0 && s.created_at.is_none() {
         return None;
     }
@@ -853,6 +853,100 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
     use std::fs;
+
+    #[test]
+    fn checked_discovery_qwen_matches_owned_replay_with_giant_system_payloads() -> Result<()> {
+        let world = cv_testkit::World::in_process("qwen-discovery-selected");
+        let body = "body λ\n".repeat(512 * 1024);
+        let oracle = |path: &Path| -> Result<Option<SessionRef>> {
+            let mut messages = 0;
+            let mut turns = 0;
+            let session = stream_session_jsonl(path, &mut |m: Message| {
+                messages += 1;
+                turns += usize::from(matches!(m.role, Role::User | Role::Assistant));
+                Flow::Continue
+            })?;
+            if messages == 0 && session.created_at.is_none() {
+                return Ok(None);
+            }
+            let mut reference = SessionRef::new(session.id, Harness::Qwen, path);
+            reference.cwd = session.cwd;
+            reference.title = session.title;
+            reference.created_at = session.created_at;
+            reference.updated_at = session.updated_at;
+            reference.message_count = turns;
+            Ok(Some(reference))
+        };
+        let rows = [
+            serde_json::json!({"type":"user","sessionId":"s","cwd":"/p","timestamp":"2026-10-13T00:00:00Z","forkedFrom":{"sessionId":"parent"},"message":{"parts":[{"text":body},{"text":"<qwen:user-prompt-submit-context>hook"}]}}),
+            serde_json::json!({"type":"assistant","model":"m","message":{"parts":[{"text":body,"thought":true},{"functionCall":{"id":"a","name":"agent","args":{"prompt":body}}}]}}),
+            serde_json::json!({"type":"tool_result","message":{"parts":[{"functionResponse":{"id":"a","name":"agent","response":{"output":body}}}]}}),
+            serde_json::json!({"type":"system","subtype":"chat_compression","systemPayload":{"info":{"unknown":body},"compressedHistory":[{"parts":[{"text":body}]}]}}),
+            serde_json::json!({"type":"system","subtype":"notification","systemPayload":{"text":body}}),
+            serde_json::json!({"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":{"objective":body,"status":"active"}}}}),
+            serde_json::json!({"type":"system","subtype":"turn_result","systemPayload":{"error":{"message":body}}}),
+            serde_json::json!({"type":"system","subtype":"custom_title","systemPayload":{"title":"selected title λ","ignored":body}}),
+        ];
+        for suffix in ["chats/s.jsonl", "subagents/parent/agent-child.jsonl"] {
+            let path = world.base.join("projects/p").join(suffix);
+            fs::create_dir_all(path.parent().unwrap())?;
+            let mut bytes = rows
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>()
+                .into_bytes();
+            bytes.extend_from_slice(b"invalid-json\n\xff\n{\"ignored\":1e999}\n");
+            bytes.extend_from_slice(
+                "\u{2003}{\"type\":\"user\",\"message\":{\"parts\":[{\"text\":\"partial\"}]}}\u{2003}".as_bytes(),
+            );
+            bytes.extend_from_slice(
+                b"\n{\"type\":\"system\",\"type\":\"user\",\"message\":{\"parts\":[{\"text\":\"duplicate type\"}]}}\n",
+            );
+            fs::write(&path, bytes)?;
+            assert_eq!(
+                serde_json::to_value(scan_session_jsonl(&path))?,
+                serde_json::to_value(oracle(&path)?)?
+            );
+            for payload in [
+                serde_json::json!({"text":""}),
+                serde_json::json!({"text":null,"unused":"fallback"}),
+                serde_json::json!(null),
+                serde_json::json!({"compressedHistory":[{"parts":[{"text":""},{"text":""}]}]}),
+            ] {
+                for subtype in [
+                    "notification",
+                    "chat_compression",
+                    "turn_result",
+                    "goal_state",
+                    "session_model",
+                    "custom_title",
+                ] {
+                    fs::write(
+                        &path,
+                        serde_json::to_vec(
+                            &serde_json::json!({"type":"system","subtype":subtype,"systemPayload":payload}),
+                        )?,
+                    )?;
+                    assert_eq!(
+                        serde_json::to_value(scan_session_jsonl(&path))?,
+                        serde_json::to_value(oracle(&path)?)?,
+                        "{subtype}/{payload}"
+                    );
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/qwen/0.25.1/.qwen");
+        for reference in Qwen::with_home(&root).discover()? {
+            if !is_session_jsonl(&reference.path) {
+                continue;
+            }
+            assert_eq!(
+                serde_json::to_value(scan_session_jsonl(&reference.path))?,
+                serde_json::to_value(oracle(&reference.path)?)?
+            );
+        }
+        Ok(())
+    }
 
     /// A job names its owner (`qwen serve`) or, made by `cron_create`, belongs to the session live
     /// when it was created; sub-agent transcripts take none.

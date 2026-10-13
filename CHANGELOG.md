@@ -5,6 +5,7 @@
 - Devin lazy reads retain checked bodies and arguments in shared backing, preserving chain metadata and compaction while avoiding whole selected-row copies.
 - OpenClaw branch reads retain compact navigation and replay checked payload ranges, preserving visible-path order, complete metadata and source freshness.
 - OpenCode rehomes preserve checked complete native records and embedded attachments, while edits invalidate stale replay and unavailable external images report fidelity loss.
+- Cold Kimi, Kimi Code, and Qwen discovery projects counts and titles without owning unrelated transcript or state payloads.
 
 - OpenCode exports target native 2.x stores and bootstrap resumable fresh databases, while preserving existing 1.x store compatibility.
 
