@@ -2313,7 +2313,6 @@ mod tests {
             .unwrap();
         let adapter = OpenCode::with_db(db.clone());
         let reference = SessionRef::new("session", Harness::OpenCode, &db);
-        let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::bulk()).unwrap();
         for opts in [
             ParseOptions::lazy(),
             ParseOptions::facts(),
@@ -2330,9 +2329,28 @@ mod tests {
                 }
             ));
             actual.materialize().unwrap();
-            assert_eq!(
-                serde_json::to_vec(&actual).unwrap(),
-                serde_json::to_vec(&expected).unwrap()
+            // Complete demand now retains the actual native record. Compare against the
+            // same owned demand, rather than the bulk projection that omits rich metadata.
+            let owned_opts = ParseOptions { spans: false, ..opts };
+            let owned = crate::stream::collect_with(&adapter, &reference, &owned_opts).unwrap();
+            let actual = serde_json::to_vec(&actual).unwrap();
+            let expected = serde_json::to_vec(&owned).unwrap();
+            let mismatch = actual
+                .iter()
+                .zip(&expected)
+                .position(|(a, b)| a != b)
+                .unwrap_or(actual.len().min(expected.len()));
+            let context = |bytes: &[u8]| {
+                String::from_utf8_lossy(&bytes[mismatch.saturating_sub(60)..bytes.len().min(mismatch + 120)])
+                    .into_owned()
+            };
+            assert!(
+                actual == expected,
+                "serialized mismatch at byte {mismatch}: actual length {}, owned length {}; actual {:?}; owned {:?}",
+                actual.len(),
+                expected.len(),
+                context(&actual),
+                context(&expected)
             );
         }
         let mut retained = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();

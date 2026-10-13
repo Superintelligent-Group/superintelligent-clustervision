@@ -15,11 +15,25 @@ pub struct CompleteRecord {
     pub(crate) projection: Vec<Message>,
 }
 impl CompleteRecord {
+    /// Retain a complete record solely for its public serialization contract.
     pub(crate) fn attach(messages: &mut [Message], harness: Harness, value: Json, identity: Map<String, Value>) {
+        Self::attach_inner(messages, harness, value, identity, false);
+    }
+    /// Retain cheap checked projection descriptors for unchanged native replay.
+    pub(crate) fn attach_replay(messages: &mut [Message], harness: Harness, value: Json, identity: Map<String, Value>) {
+        Self::attach_inner(messages, harness, value, identity, true);
+    }
+    fn attach_inner(
+        messages: &mut [Message],
+        harness: Harness,
+        value: Json,
+        identity: Map<String, Value>,
+        replay: bool,
+    ) {
         if messages.is_empty() {
             return;
         }
-        let projection = if matches!(value, Json::Source(_)) {
+        let projection = if replay && matches!(value, Json::Source(_)) {
             messages
                 .iter()
                 .map(|message| Message {

@@ -46,7 +46,7 @@ pub(super) fn attach_complete(messages: &mut [Message], id: &str, ty: &str, data
     let mut identity = Map::new();
     identity.insert("id".into(), json!(id));
     identity.insert("type".into(), json!(ty));
-    crate::ir::CompleteRecord::attach(messages, Harness::OpenCode, data, identity);
+    crate::ir::CompleteRecord::attach_replay(messages, Harness::OpenCode, data, identity);
 }
 
 /// Map one `session_message` row to IR messages (0–2: a tool-bearing reply gets a trailing

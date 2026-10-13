@@ -4547,3 +4547,10 @@ shared visitor's separate oracle checks offsets/skipped counts and early-stop so
 Implementation library checking passed before the final test batch; newly added behavior tests
 are intentionally left for root's combined native/portable convergence cycle. No new benchmark
 matrix or broad gates were run in this lane, and no Qwen fleet claim is made.
+Serialization-only complete records now use `CompleteRecord::attach` without a projection witness;
+OpenCode explicitly uses `attach_replay` for native replay eligibility. KimiCode's existing attach
+calls therefore retain the public full `_record` without duplicating unused content/metadata.
+The older shell projection test compared complete demand against bulk demand; its exact-byte
+oracle now compares selected and owned forms of the same demand, reporting only the first
+mismatch and nearby context. Complete metadata enrichment is tested rather than erased to match
+an intentionally narrower projection.
