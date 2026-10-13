@@ -184,7 +184,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                 .and_then(Value::as_str);
                             let present = match summary {
                                 Some(summary) => !summary.is_empty(),
-                                None => text.try_decoded_len(&resolver)? != 0,
+                                None => crate::emit::thinking::first_character(text, &resolver, false)?.is_some(),
                             };
                             writer::record(&mut lines, &ts, "response_item", |out| {
                                 out.write_all(b"{\"type\":\"reasoning\",\"summary\":[")?;

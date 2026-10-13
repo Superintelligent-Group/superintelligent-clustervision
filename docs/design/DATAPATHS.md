@@ -3533,3 +3533,20 @@ extra=false/usage identity, Facts sink complete override, duplicate/malformed in
 carriers, exact wire/fidelity and changed-source output preservation. Native and portable
 checkpoint migration controls pass, as do both library clippy configurations. No timing or
 broad producer matrix was added.
+
+
+Follow-up checked prefix/presence reducers (Sol/opencode_parts): the exact preceding 8 MiB Codex
+Native rehome control now requests 27,888,911 B cumulatively in 4,170 allocation requests,
+down from the first checked implementation's 122,528,229 B / 13,455 requests and below the
+original owned path's 62,902,403 B. Peak live allocations remain 1,399,941 B; wire records,
+four messages and empty fidelity match the frozen owned oracle after only generated turn UUID
+normalization. The attribution control located only 49,939 B / 613 requests in preparation;
+the post-preparation report stage drops from 122,478,464 B / 12,842 requests to
+27,839,320 B / 3,557 requests. First-character fidelity scans and an exact decoded-length calculation used solely for emptiness
+were avoidable repeated decoding. Both now share the existing checked early-stop mechanism.
+Captured Source strings retain strict acceptance and original provenance; raw Span demands retain
+full preflight and their established literal/lossy fallback. Unicode whitespace, late invalid
+Source escapes, malformed raw-Span fallback, bounds and changed-source controls pass native and
+portable, along with the existing emitter tests. No validated-dispatch bypass or serde decoder
+scratch redesign was needed; actual output decoding and staging remain. These allocation counters
+are not timing or native allocator/RSS evidence.
