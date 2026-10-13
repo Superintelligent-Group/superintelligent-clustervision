@@ -629,6 +629,28 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             continue;
         }
+        if range.len >= LARGE_RECORD && is_old && ty == "user" && !opts.declassify && !needs_root {
+            if let Some(plan) = source_string_prune(&source, *range, opts, &new_id, idx, &tool_names)? {
+                plan.record
+                    .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut output))?;
+                output.write_all(b"\n")?;
+                pruned_count += plan.payloads.len();
+                est_tokens_saved += plan.saved;
+                if !opts.drop {
+                    for payload in &plan.payloads {
+                        write_source_payload(payload, &mut sidecar_stage)?;
+                        sidecar_count += 1;
+                    }
+                }
+                if opts.revive {
+                    let mut facts = facts;
+                    facts["_prune_est"] = Value::from(plan.estimate);
+                    output_facts.push(Some(facts));
+                    output_pruned.push(true);
+                }
+                continue;
+            }
+        }
         let line = read_line(&file, *range)?;
         let mut v: Value = serde_json::from_str(&line)?;
 
@@ -1085,6 +1107,221 @@ fn est_tokens_source(view: crate::json::JsonView<'_>) -> Result<u64> {
 }
 
 /// Marker evidence follows emitted bytes, including source chunks split by id surgery.
+struct SourcePayload {
+    entry: SidecarEntry,
+    original: crate::json::Json,
+}
+struct SourcePrune {
+    record: crate::json::Json,
+    replacements: Vec<(crate::json::Json, Value)>,
+    payloads: Vec<SourcePayload>,
+    saved: u64,
+    estimate: u64,
+}
+
+/// Common large string tool results can be replaced without owning their bytes. More complex
+/// mutations continue through the established Value path; planning has no output effects.
+fn source_string_prune(
+    source: &crate::json::JsonSource,
+    range: Range,
+    opts: &PruneOptions,
+    new_id: &str,
+    idx: usize,
+    tools: &HashMap<String, (String, Range, usize)>,
+) -> Result<Option<SourcePrune>> {
+    use crate::harness::store::document::Fields;
+    let record = source.validated_range(range.offset, range.len)?;
+    let planned = record.with_view(|view| {
+        let Some(top) = Fields::parse(view, &["message", "uuid", "toolUseResult", "sessionId", "session_id"])? else {
+            return Ok(None);
+        };
+        // Mirror classification is intentionally left to the richer existing path for now.
+        if top
+            .get("toolUseResult")
+            .map(|value| value.is_null())
+            .transpose()?
+            .is_some_and(|is_null| !is_null)
+        {
+            return Ok(None);
+        }
+        let Some(message) = top
+            .get("message")
+            .map(|value| Fields::parse(value, &["content"]))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let Some(blocks) = message.get("content").map(|value| value.array()).transpose()?.flatten() else {
+            return Ok(None);
+        };
+        let key = top.string("uuid")?.unwrap_or_else(|| format!("L{idx}"));
+        let mut replacements = Vec::new();
+        let mut payloads = Vec::new();
+        let mut saved = 0;
+        let mut block_sources = Vec::new();
+        for (index, original_block) in blocks.enumerate() {
+            let original_block = original_block?;
+            block_sources.push(original_block.to_json()?);
+            let Some(block) = Fields::parse(original_block, &["type", "tool_use_id", "content"])? else {
+                continue;
+            };
+            if block.string("type")?.as_deref() != Some("tool_result") {
+                continue;
+            }
+            let Some(content) = block.get("content") else { continue };
+            if content.is_null()? {
+                continue;
+            }
+            if !content.is_string()? {
+                if value_byte_size_source(content)? > opts.min_size {
+                    return Ok(None);
+                }
+                continue;
+            }
+            let size = value_byte_size_source(content)?;
+            if size <= opts.min_size {
+                continue;
+            }
+            let mut prefix = String::new();
+            let mut newlines = 0;
+            let mut last = None;
+            content.for_each_str_chunk(|chunk| {
+                if prefix.len() < MARKER_PREFIX.len() {
+                    prefix.extend(chunk.chars().take(MARKER_PREFIX.len() - prefix.len()));
+                }
+                newlines += memchr::memchr_iter(b'\n', chunk.as_bytes()).count();
+                if let Some(byte) = chunk.as_bytes().last() {
+                    last = Some(*byte);
+                }
+                Ok(())
+            })?;
+            if prefix.starts_with(MARKER_PREFIX) {
+                continue;
+            }
+            let line_count = (newlines + usize::from(last.is_some_and(|byte| byte != b'\n'))).max(1);
+            let tuid = block.string("tool_use_id")?;
+            let id = tuid.clone().unwrap_or_else(|| format!("{key}#tr{index}"));
+            let (name, input) =
+                if let Some((name, tool_range, block_index)) = tuid.as_deref().and_then(|id| tools.get(id)) {
+                    let input = source
+                        .validated_range(tool_range.offset, tool_range.len)?
+                        .with_view(|tool| {
+                            let Some(message) = tool.get("message")? else {
+                                return Ok(Value::Null);
+                            };
+                            let Some(content) = message.get("content")? else {
+                                return Ok(Value::Null);
+                            };
+                            let Some(mut blocks) = content.array()? else {
+                                return Ok(Value::Null);
+                            };
+                            let Some(block) = blocks.nth(*block_index).transpose()? else {
+                                return Ok(Value::Null);
+                            };
+                            Ok(block
+                                .get("input")?
+                                .map(|input| input.resolve().map(|value| value.into_owned()))
+                                .transpose()?
+                                .unwrap_or(Value::Null))
+                        })?;
+                    (name.clone(), input)
+                } else {
+                    ("unknown".into(), Value::Null)
+                };
+            let marker = build_marker(&id, &name, &input, "text", size, line_count, new_id, opts.drop);
+            saved += crate::ir::est_tokens_bytes(size, TEXT_BYTES_PER_TOKEN).saturating_sub(str_tokens(&marker));
+            let original = content.to_json()?;
+            replacements.push((original.clone(), Value::String(marker)));
+            payloads.push(SourcePayload {
+                original,
+                entry: SidecarEntry {
+                    id,
+                    slot: "content".into(),
+                    name,
+                    input,
+                    content: Value::Null,
+                    size,
+                    line_count,
+                    kind: "text".into(),
+                },
+            });
+        }
+        if payloads.is_empty() {
+            return Ok(None);
+        }
+        for key in ["sessionId", "session_id"] {
+            if let Some(value) = top.get(key) {
+                if value.is_string()? {
+                    replacements.push((value.to_json()?, Value::String(new_id.into())));
+                }
+            }
+        }
+        let mut estimate = 0;
+        if opts.revive {
+            for block in block_sources {
+                block.with_view(|view| {
+                    let fields = Fields::parse(view, &["type", "text"])?;
+                    let ty = fields
+                        .as_ref()
+                        .map(|fields| fields.string("type"))
+                        .transpose()?
+                        .flatten();
+                    if ty.as_deref() == Some("image") {
+                        estimate += crate::ir::IMAGE_TOKENS;
+                    } else if ty.as_deref() == Some("text") {
+                        estimate += fields
+                            .as_ref()
+                            .and_then(|fields| fields.get("text"))
+                            .map(source_string_tokens)
+                            .transpose()?
+                            .unwrap_or(0);
+                    } else {
+                        let mut counter = LengthWriter(0);
+                        view.write_canonical_replacing(&replacements, &mut counter)?;
+                        estimate += crate::ir::est_tokens_bytes(counter.0, TEXT_BYTES_PER_TOKEN);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        Ok(Some((replacements, payloads, saved, estimate)))
+    })?;
+    Ok(planned.map(|(replacements, payloads, saved, estimate)| SourcePrune {
+        record,
+        replacements,
+        payloads,
+        saved,
+        estimate,
+    }))
+}
+struct LengthWriter(usize);
+impl Write for LengthWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn write_source_payload(payload: &SourcePayload, writer: &mut impl Write) -> Result<()> {
+    // Serialize the established struct layout, then replace only its own null content slot with
+    // the shared canonical source writer. The slot follows input; rfind excludes nested inputs.
+    let encoded = serde_json::to_vec(&payload.entry)?;
+    let anchor = b",\"content\":null,\"size\":";
+    let at = encoded
+        .windows(anchor.len())
+        .rposition(|bytes| bytes == anchor)
+        .context("missing sidecar content slot")?;
+    let start = at + b",\"content\":".len();
+    writer.write_all(&encoded[..start])?;
+    payload.original.write_canonical(writer)?;
+    writer.write_all(&encoded[start + 4..])?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
 struct MarkerWriter<'a, W> {
     output: &'a mut W,
     tail: Vec<u8>,

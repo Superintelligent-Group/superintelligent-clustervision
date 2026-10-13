@@ -1418,3 +1418,25 @@ non-native thinking transforms that still materialize bodies. Staged disk scales
 These results establish reduced retained payloads on the measured many-message native Codex
 port path, not constant total memory across every harness, giant record or complete-mode port.
 Durable evidence is `resume-verify-evidence/{clean-cpu-current,port-*-heap}.json`.
+### Prune large string tool-result mutation (2026-10-12)
+
+Large old user records with string tool-result payloads now plan source-specific content replacements
+and stream the shared canonical writer. Sidecars stream the original captured JSON payload at the
+established struct slot; metadata, counters, marker text and loaded-content estimates match the owned
+helper independently. Canonical replacements require the exact captured source/backing identity and
+child range. Existing complete acceptance checks and publication source guards remain in force.
+Canonical order follows this workspace's serde_json `preserve_order`: first key position and final
+duplicate value, rather than alphabetical sorting.
+
+The giant changed 16/64 MiB string tool result now peaks at **269,475/269,475 bytes** default and
+**463,553/463,553 bytes** with revival (owned baseline approximately 64/256 MiB). Twenty native
+output/sidecar/result comparisons pass. Independent helper parity covers multiple blocks, original
+duplicate fields, Unicode/escapes/newlines, image token estimates and drop. The new override identity
+test and mutation parity also pass without mmap (`--no-default-features --features sqlite`).
+Default filtered prune tests: 35 pass. Source identity-specific override test: one passes.
+
+Clean release CPU for giant tool-result default is 28.80→27.19 ms (16 MiB), 120.61→104.50 ms
+(64 MiB); revival 29.81→32.31 ms and 95.91→117.59 ms. These three alternating trials are separate
+from heap instrumentation; sample variability precludes a general throughput claim. Full counters
+and trials are in `PRUNE-PAYLOAD-EVIDENCE.json`. Rich array/object tool payloads, mirror payloads,
+thinking, declassification, parent rerooting and usage corrections retain the owned mutation fallback.

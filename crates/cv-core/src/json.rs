@@ -1053,6 +1053,67 @@ impl<'a> JsonView<'a> {
         }
         Ok((String::from_utf8(writer.bytes)?, writer.stopped))
     }
+    /// Canonicalize with source-identity-specific replacements selected from this capture.
+    /// Replacements never change acceptance: the producer must validate the complete original.
+    pub(crate) fn write_canonical_replacing(
+        self,
+        replacements: &[(Json, Value)],
+        writer: &mut impl Write,
+    ) -> Result<()> {
+        let owner = match self.0 {
+            View::Owned(_) => None,
+            #[cfg(feature = "mmap")]
+            View::Source(source) => Some(source.range),
+            #[cfg(not(feature = "mmap"))]
+            View::Portable(source) => Some(source.owner),
+        };
+        if let Some(owner) = owner {
+            let span = self.source_range()?;
+            for (original, replacement) in replacements {
+                if let Json::Source(range) = original {
+                    let same_backing = match (&range.decoded, &owner.decoded) {
+                        (None, None) => true,
+                        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                        _ => false,
+                    };
+                    if Arc::ptr_eq(&range.source.0, &owner.source.0)
+                        && same_backing
+                        && span == Some((range.offset, range.len))
+                    {
+                        serde_json::to_writer(writer, replacement)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        if self.is_object()? {
+            writer.write_all(b"{")?;
+            let mut first = true;
+            self.for_each_entry(|key, child| {
+                if !first {
+                    writer.write_all(b",")?;
+                }
+                first = false;
+                serde_json::to_writer(&mut *writer, key)?;
+                writer.write_all(b":")?;
+                child.write_canonical_replacing(replacements, writer)
+            })?;
+            writer.write_all(b"}")?;
+        } else if let Some(array) = self.array()? {
+            writer.write_all(b"[")?;
+            for (index, child) in array.enumerate() {
+                if index != 0 {
+                    writer.write_all(b",")?;
+                }
+                child?.write_canonical_replacing(replacements, writer)?;
+            }
+            writer.write_all(b"]")?;
+        } else {
+            self.write_canonical(writer)?;
+        }
+        Ok(())
+    }
+
     /// Same partial-output-on-error contract as Json::write_canonical.
     pub fn write_canonical(self, writer: &mut impl Write) -> Result<()> {
         match self.0 {
@@ -1328,6 +1389,33 @@ fn write_portable(value: JsonView<'_>, writer: &mut impl Write) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_replacements_require_same_capture_and_exact_range() {
+        let world = cv_testkit::World::new("json-canonical-replacements");
+        let raw = r#"{"z":"first","a":{"content":"old","content":"final"},"z":"last","n":1.50}"#;
+        let left = world.base.join("left.json");
+        let right = world.base.join("right.json");
+        std::fs::write(&left, raw).unwrap();
+        std::fs::write(&right, raw).unwrap();
+        let left = Json::source(&left, 0, raw.len() as u64).unwrap();
+        let right = Json::source(&right, 0, raw.len() as u64).unwrap();
+        let selected = left.select("a").unwrap().unwrap().select("content").unwrap().unwrap();
+        let replacements = vec![(selected, Value::String("replacement".into()))];
+        let mut actual = Vec::new();
+        left.with_view(|view| view.write_canonical_replacing(&replacements, &mut actual))
+            .unwrap();
+        let mut expected: Value = serde_json::from_str(raw).unwrap();
+        expected["a"]["content"] = Value::String("replacement".into());
+        assert_eq!(actual, serde_json::to_vec(&expected).unwrap());
+        actual.clear();
+        right
+            .with_view(|view| view.write_canonical_replacing(&replacements, &mut actual))
+            .unwrap();
+        assert_eq!(
+            actual,
+            serde_json::to_vec(&serde_json::from_str::<Value>(raw).unwrap()).unwrap()
+        );
+    }
     use super::*;
     use serde_json::json;
 

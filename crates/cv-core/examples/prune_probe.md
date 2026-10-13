@@ -34,3 +34,7 @@ Large unchanged records now stream through source-backed restamping and unchange
 The giant ignored-field 16/64 MiB control uses 1.192 MiB requested peak in both cases. Changed
 records, usage corrections and malformed giant records retain an owned fallback. See
 `docs/design/PRUNE-SOURCE-EVIDENCE.json` for separate allocator-free CPU costs.
+
+Large changed string tool-result controls now use source-backed canonical replacement and sidecar
+writing (269,475 bytes default / 463,553 bytes revival at both 16/64 MiB). Rich payloads and other
+mutation kinds retain owned fallback; see `docs/design/PRUNE-PAYLOAD-EVIDENCE.json`.
