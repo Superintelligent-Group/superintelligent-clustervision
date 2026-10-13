@@ -1500,3 +1500,22 @@ in `PRUNE-RICH-EVIDENCE.json`. Filtered prune tests: 36 pass. Rich source/owned 
 passes through positioned portable views with mmap disabled. Nonnull-parent reroots, thinking,
 declassification, usage corrections, malformed giant records and large selected tool-input
 metadata still have owned fallbacks; this is not a bound for every prune option and record shape.
+Generated text length and publication (2026-10-12): shared `store::text::Builder` counts
+decoded UTF8 bytes while producing each complete strict JSON string, including canonical JSON
+rendered as text. Large successful outputs retain this optional count and avoid remapping the
+bytes just emitted at publication. Length demands still check original captured identity, all
+auxiliary dependency stamps, and private arena range bounds before and after returning. Failed
+producers/writers publish no descriptor. Prefix-skipped strings and restored deferred descriptors
+retain the normal checked decoding path; external IR JSON and deferred wire shapes are unchanged.
+The optional count adds no heap allocation; its inline carrier field costs 16 bytes.
+
+Matched native release controls at root baseline `558d939a` compare previous lazy behavior with
+this combined generated-length/publication change, not with owned parsing. Five alternating
+100 MB Goose doctor Facts pairs give CPU median 0.55 to 0.52 seconds (5.5%); three pairs each
+of Cursor IDE 64 MiB structured doctor Facts give encoded 1.15 to 1.05 seconds (8.7%) and inline
+0.62 to 0.49 seconds (21%). Every doctor detail is identical, and respective peak Rust heaps
+remain 140,695, 208,133, and 143,205 bytes. Evidence: `counted-length-goose-cpu-control.json`
+and `counted-length-cursor-cpu-control.json` under the encoded-arguments evidence directory.
+These controls establish this incremental win, without assigning earlier owned/lazy CPU gaps
+to the count alone. Native and portable scoped string construction tests cover exact Unicode,
+controls, fragmented escapes, source/journal mutation, backing truncation, and failed writes.

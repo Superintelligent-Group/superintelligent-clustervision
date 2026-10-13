@@ -246,11 +246,21 @@ impl JsonSource {
         backing: Arc<crate::harness::store::bytes::ByteSource>,
         offset: u64,
         len: u64,
+        decoded_len: usize,
     ) -> Result<crate::lazy::Text> {
-        self.backing_range(backing, offset, len)?
-            .with_validation(Validation::Cached, |view| {
+        let range = self.backing_range(backing, offset, len)?;
+        if len > crate::lazy::INLINE_MAX as u64 {
+            // The controlled producer has completed and strictly encoded this entire string.
+            // Construct its descriptor without remapping/scanning the bytes it just emitted.
+            range.check_retained_bounds()?;
+            let mut text = crate::lazy::SourceText::new(Arc::new(range));
+            text.known_len = Some(decoded_len);
+            Ok(crate::lazy::Text::Source(text))
+        } else {
+            range.with_validation(Validation::Cached, |view| {
                 view.source_text()?.context("constructed JSON string")
             })
+        }
     }
 
     fn backing_range(
@@ -317,6 +327,18 @@ impl JsonRange {
     pub(crate) fn check(&self) -> Result<()> {
         self.source.check()?;
         Ok(())
+    }
+
+    pub(crate) fn check_retained_bounds(&self) -> Result<()> {
+        self.check()?;
+        if let Some(bytes) = &self.decoded {
+            let len = bytes.len()?;
+            anyhow::ensure!(
+                self.offset.checked_add(self.len).is_some_and(|end| end <= len),
+                "source text backing is truncated"
+            );
+        }
+        self.check()
     }
 
     /// Captured auxiliary source dependencies, retaining original stamps and absence.

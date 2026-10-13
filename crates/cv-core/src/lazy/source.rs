@@ -7,6 +7,9 @@ use std::sync::Arc;
 pub struct SourceText {
     pub(crate) range: Arc<JsonRange>,
     pub(crate) skip: usize,
+    // Immutable producer count for a complete generated string. Private deferred transport may
+    // omit this optional optimization; restored strings retain the checked decoding fallback.
+    pub(crate) known_len: Option<usize>,
 }
 impl PartialEq for SourceText {
     fn eq(&self, other: &Self) -> bool {
@@ -24,7 +27,11 @@ impl std::fmt::Display for PrefixComplete {
 impl std::error::Error for PrefixComplete {}
 impl SourceText {
     pub(crate) fn new(range: Arc<JsonRange>) -> Self {
-        Self { range, skip: 0 }
+        Self {
+            range,
+            skip: 0,
+            known_len: None,
+        }
     }
     pub fn path(&self) -> &std::path::Path {
         self.range.path()
@@ -114,6 +121,12 @@ impl SourceText {
         Ok((output, truncated))
     }
     pub fn try_decoded_len(&self) -> Result<usize> {
+        if self.skip == 0 {
+            if let Some(len) = self.known_len {
+                self.range.check_retained_bounds()?;
+                return Ok(len);
+            }
+        }
         let mut len = 0usize;
         let mut skip = self.skip;
         // This reducer exposes no borrowed bytes or callbacks to its caller. Count directly in
@@ -158,6 +171,7 @@ mod tests {
             let source = SourceText {
                 range: range.clone(),
                 skip,
+                known_len: None,
             };
             match body.get(skip..) {
                 Some(suffix) => assert_eq!(source.try_decoded_len().unwrap(), suffix.len()),
