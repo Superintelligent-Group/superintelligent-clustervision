@@ -4254,3 +4254,51 @@ Evidence remains in `../grok-qwen-export-evidence`: `owned-same-*`, `selected-sa
 `selected-cross-*`, native/portable producer test logs and adapter regression logs. These are
 operation allocation measurements, not fleet/RSS/timing claims. No local Qwen fleet was available.
 Remaining owned bookkeeping is explicit rather than hidden behind a spans eligibility flag.
+
+### Native OpenCode 2.x export and fresh-store bootstrap (2026-10-13, Sol/native_opencode_v2)
+
+The previous SQLite exporter always wrote legacy `session/message/part` rows. Native 2.0.25's
+store only reads `session_v2/session_message`, and a completed v1 migration does not recopy later
+legacy exports. This was a native resumability gap, independently of cv's own round-trip reader.
+Exports now select v2 whenever its session table exists, including migrated stores; existing v1
+stores keep the checked v1 writer. Fresh databases default to native 2.x.
+
+The actual fresh-v1 negative control exited before serving: `SQLiteError: table message already
+exists`. Native `database/migration.ts` detects the legacy table and replays migrations because
+our miniature schema carried no journal. The useful replacement reproduces native empty-store
+bootstrap: the complete native-written **2.0.25** schema and its matching migration frontier,
+extracted from the immutable 2.0.25 corpus, live inside the core crate. The 36 DDL objects and
+49 migration IDs are one versioned unit. Export timestamps replace fixture journal timestamps;
+no session/project/kv rows or `migration.v1-v2` marker are copied. Bootstrap, journal and export
+commit together, with checked source provenance verified again before commit. Updating this
+snapshot requires a new native corpus and fresh/existing/migrated native acceptance, not guessing
+migration IDs from a later checkout. The extraction and acceptance recipes are in
+`tools/harness-fixtures/opencode/README.md`.
+
+Native v2 assistant rows require agent/model and use typed content. Thinking uses native reasoning
+`state`; tools use object inputs, nonempty `content[]`, structured errors and native top-level
+provider/time metadata. Tool results fold into their originating assistant; orphan results retain
+a native tool item. Native metadata keeps structured extras, and `clustervision.details` preserves
+the legacy IR title/time/details contract across the new schema. Invalid nonobject tool arguments
+and duplicate session IDs reject atomically. The latter avoids replacing a native session while
+stranding its previous rows. Missing cwd uses the current directory for the native absolute-path
+contract. Partial unrelated databases fail with initialization guidance.
+
+The checked-v2 oracle compares logical rows against owned input in all thinking modes, observes
+one prepared message INSERT reused across rows and one commit including bootstrap, and changes a
+retained source after the first row insertion: the operation fails and leaves zero native tables.
+The existing-v1 checked/legacy oracle explicitly seeds v1 destinations now that fresh output is v2.
+All 34 scoped OpenCode unit tests pass. Native **OpenCode 2.0.25 itself**, against isolated copies
+of existing-v2, fresh-v2 and migrated-1.18.20 stores, accepts get/list/messages/context and completes
+a real agent-loop turn through the deterministic loopback Goose fixture stub. Each provider
+request contains the imported prompt, assistant answer and tool output; each native store persists
+the stub answer and succeeded idle marker. This is stronger than our own reader accepting rows.
+No external model calls or real-store writes occurred. Private synthetic evidence is under
+`/Users/ember/dev/cv-worktrees/native-opencode-v2-final-native-{0,1,2}/`.
+
+Known typed complete replay is a separate follow-up: the existing OpenCode complete reader carries
+idle/unknown rows but has no complete raw skeleton for ordinary rows. Enabling checked same-target
+preparation without preserving shell/skill/compaction/model-change types and unknown native fields
+would merely compare equally lossy output against the old owned path. That follow-up must attach
+payload-free native skeletons plus checked overlays and emit each native row once, preserving the
+owned complete/native metadata contract. Native 2.0.26 acceptance is not claimed here.

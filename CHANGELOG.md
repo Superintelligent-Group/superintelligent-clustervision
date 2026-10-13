@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- OpenCode exports target native 2.x stores and bootstrap resumable fresh databases, while preserving existing 1.x store compatibility.
+
 - Cline, Roo, Continue and LM Studio rehomes retain checked complete payloads while preserving native output and public complete parsing.
 
 - OpenCode v2 shell reads retain checked command and output payloads, preserving native fallback formatting, metadata and source freshness.

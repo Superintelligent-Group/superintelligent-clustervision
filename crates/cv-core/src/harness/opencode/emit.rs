@@ -34,13 +34,10 @@ fn opencode_db_path(out_dir: &Path) -> PathBuf {
     }
 }
 
-/// Emit into OpenCode's canonical SQLite store `opencode.db` (`session`/`message`/`part` tables;
-/// schema per `~/pug/opencode/packages/core/src/session/sql.ts`). The dead JSON tree under
-/// `storage/` is no longer read by OpenCode 1.18, so a session emitted there was unresumable — we
-/// write the db instead. Each `data` column holds the Info/Part JSON *minus* `id`/`sessionID`/
-/// `messageID` (the reader re-hydrates them). Tables are created when the db is absent; a `--out`
-/// dir gets a fresh db. Tool results are folded onto the originating assistant's `tool` part
-/// (`state.output`/`state.error`), since OpenCode has no standalone tool turn.
+/// Export to OpenCode's canonical SQLite store. Existing v1 stores retain their
+/// `session`/`message`/`part` layout; existing v2 and fresh stores use native 2.0.25
+/// `session_v2`/`session_message`. Fresh bootstrap and row publication are atomic.
+/// Tool results fold onto assistant tools; native v2 uses content[] and structured errors.
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
     crate::harness::wire::write::check_source_fields(session)?;
     #[cfg(not(feature = "sqlite"))]
@@ -78,7 +75,37 @@ fn emit_opencode_db(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Re
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let mut conn = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
-    write_database(session, opts, &new_id, &cwd_str, &project_id, &mut conn)?;
+    let empty: bool = conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
+        [],
+        |row| row.get(0),
+    )?;
+    let v2: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2')",
+        [],
+        |row| row.get(0),
+    )?;
+    if v2 || empty {
+        let cwd = if cwd_str.is_empty() {
+            std::env::current_dir()?.to_string_lossy().into_owned()
+        } else {
+            cwd_str.clone()
+        };
+        v2::write_database(session, opts, &new_id, &cwd, &mut conn).context(
+            "exporting native OpenCode 2.x store (requires complete session_v2/session_message/project schema)",
+        )?;
+    } else {
+        let v1: bool = conn.query_row(
+            "SELECT count(*)=3 FROM sqlite_master WHERE type='table' AND name IN ('session','message','part')",
+            [],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(
+            v1,
+            "unsupported partial OpenCode database; initialize an empty store with OpenCode before exporting"
+        );
+        write_database(session, opts, &new_id, &cwd_str, &project_id, &mut conn)?;
+    }
     Ok(EmitResult {
         path: db_path,
         new_id: new_id.clone(),
@@ -393,3 +420,6 @@ mod tests {
         )
     }
 }
+
+#[cfg(feature = "sqlite")]
+mod v2;

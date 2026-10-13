@@ -392,7 +392,10 @@ fn tool_blocks(c: &Value, projected: Option<&super::ProjectedPart>) -> (Block, V
             is_error,
             tool_name: (!name.is_empty()).then_some(name),
             status: (!status.is_empty()).then(|| status.to_string()),
-            details: (!details.is_empty()).then_some(Value::Object(details)),
+            details: c
+                .pointer("/state/metadata/clustervision.details")
+                .cloned()
+                .or_else(|| (!details.is_empty()).then_some(Value::Object(details))),
         });
     }
     out.extend(files);

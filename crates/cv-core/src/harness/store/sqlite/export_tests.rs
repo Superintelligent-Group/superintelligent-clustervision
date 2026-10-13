@@ -75,6 +75,7 @@ unsafe extern "C" fn trace(
     let sql = unsafe { std::ffi::CStr::from_ptr(sql) }.to_string_lossy();
     if sql.starts_with("INSERT OR REPLACE INTO session ")
         || sql.starts_with("INSERT OR REPLACE INTO sessions ")
+        || sql.starts_with("INSERT INTO session_message ")
         || sql.starts_with("INSERT INTO message ")
         || sql.starts_with("INSERT INTO part ")
         || sql.starts_with("INSERT INTO messages ")
@@ -223,27 +224,28 @@ pub(crate) fn fixture(world: &cv_testkit::World) -> Result<(Session, PathBuf)> {
     Ok((session, path))
 }
 
-pub(crate) fn logical(connection: &Connection, target: Harness) -> Result<Value> {
-    fn rows(connection: &Connection, sql: &str) -> Result<Vec<Vec<Value>>> {
-        let mut statement = connection.prepare(sql)?;
-        let width = statement.column_count();
-        let result = statement
-            .query_map([], |row| {
-                (0..width)
-                    .map(|i| {
-                        Ok(match row.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(n) => json!(n),
-                            rusqlite::types::ValueRef::Real(n) => json!(n),
-                            rusqlite::types::ValueRef::Text(s) => json!(String::from_utf8_lossy(s)),
-                            rusqlite::types::ValueRef::Blob(s) => json!(s),
-                        })
+fn rows(connection: &Connection, sql: &str) -> Result<Vec<Vec<Value>>> {
+    let mut statement = connection.prepare(sql)?;
+    let width = statement.column_count();
+    let result = statement
+        .query_map([], |row| {
+            (0..width)
+                .map(|i| {
+                    Ok(match row.get_ref(i)? {
+                        rusqlite::types::ValueRef::Null => Value::Null,
+                        rusqlite::types::ValueRef::Integer(n) => json!(n),
+                        rusqlite::types::ValueRef::Real(n) => json!(n),
+                        rusqlite::types::ValueRef::Text(s) => json!(String::from_utf8_lossy(s)),
+                        rusqlite::types::ValueRef::Blob(s) => json!(s),
                     })
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(result)
-    }
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(result)
+}
+
+pub(crate) fn logical(connection: &Connection, target: Harness) -> Result<Value> {
     let schema = rows(
         connection,
         "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name",
@@ -274,6 +276,21 @@ pub(crate) fn exercise(
         crate::emit::project_owned_thinking_for_test(&mut owned, target, mode);
         let old = legacy(&owned, &world.base.join(format!("old-{target}-{mode}")), &options)?;
         let old = Connection::open(&old.path)?;
+        if target == Harness::OpenCode {
+            // This oracle exercises existing v1 stores; fresh exports now bootstrap native v2.
+            let mut ddl = old.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type DESC,name")?;
+            let schema = ddl
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for kind in ["direct", "dispatch"] {
+                let directory = world.base.join(format!("{kind}-{target}-{mode}"));
+                std::fs::create_dir_all(&directory)?;
+                let connection = Connection::open(directory.join("opencode.db"))?;
+                for statement in &schema {
+                    connection.execute_batch(statement)?;
+                }
+            }
+        }
         let direct_result = direct(&session, &world.base.join(format!("direct-{target}-{mode}")), &options)?;
         let dispatch_result = crate::emit::emit(
             &session,
@@ -392,6 +409,68 @@ pub(crate) fn exercise(
     assert_eq!(
         database.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))?,
         0
+    );
+    Ok(())
+}
+
+pub(crate) fn exercise_v2(
+    writer: impl Fn(&Session, &crate::emit::EmitOptions, &mut Connection) -> Result<()>,
+) -> Result<()> {
+    let world = cv_testkit::World::in_process("sqlite-v2-export-oracle");
+    let (session, path) = fixture(&world)?;
+    for mode in crate::emit::ThinkingMode::ALL {
+        let options = crate::emit::EmitOptions {
+            thinking: mode,
+            ..Default::default()
+        };
+        let mut owned = session.clone();
+        owned.materialize()?;
+        let mut expected = Connection::open_in_memory()?;
+        writer(&owned, &options, &mut expected)?;
+        let mut actual = Connection::open_in_memory()?;
+        let hooks = Hooks::new(&mut actual, None);
+        writer(&session, &options, hooks.connection)?;
+        assert_eq!(hooks.counts.commits, 1, "bootstrap and export commit together");
+        let inserts = hooks
+            .counts
+            .inserts
+            .iter()
+            .filter(|(sql, _)| sql.starts_with("INSERT INTO session_message "))
+            .collect::<Vec<_>>();
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[0].1.len(), 1, "one prepared native message INSERT");
+        assert!(hooks
+            .counts
+            .runs
+            .values()
+            .any(|runs| runs.len() > 1 && runs.windows(2).all(|pair| pair[1] > pair[0])));
+        assert_eq!(
+            rows(
+                hooks.connection,
+                "SELECT type,seq,time_created,data FROM session_message ORDER BY seq"
+            )?,
+            rows(
+                &expected,
+                "SELECT type,seq,time_created,data FROM session_message ORDER BY seq"
+            )?
+        );
+    }
+    let mut conn = Connection::open_in_memory()?;
+    let hooks = Hooks::new(&mut conn, Some(path));
+    assert!(writer(&session, &Default::default(), hooks.connection).is_err());
+    assert_eq!(hooks.counts.commits, 0);
+    assert!(
+        hooks.counts.mutate.is_none(),
+        "source changed during first row insertion"
+    );
+    assert_eq!(
+        hooks.connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        0,
+        "rollback includes native bootstrap"
     );
     Ok(())
 }
