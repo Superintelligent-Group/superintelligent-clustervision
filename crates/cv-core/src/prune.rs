@@ -1772,38 +1772,40 @@ impl<'a> SigmaMatcher<'a> {
 }
 
 /// Piece-local sigma choices differ only at the complete UTF-8 scalar σ/ς. A valid String
-/// needle containing neither cannot cover that position, so only sigma-sensitive token demand
-/// needs contextual replay. Original stats and checked decoding always traverse the full value.
+/// needle containing neither cannot cover that position. Sensitive rosters use the same
+/// bounded contextual matcher directly; stats and checked decoding always traverse the full
+/// value, including after matcher completion, without replaying its source.
 fn source_declassify_stats(
     text: Option<crate::json::JsonView<'_>>,
     opts: &PruneOptions,
 ) -> Result<(SourceTextStats, usize)> {
     let mut stats = SourceTextStats::default();
-    let mut matcher = DeclassMatcher::new(&opts.declassify_tokens);
     let sigma_sensitive = opts
         .declassify_tokens
         .iter()
         .any(|token| token.contains('σ') || token.contains('ς'));
-    let mut has_sigma = false;
-    if let Some(text) = text {
-        text.for_each_str_chunk(|part| {
-            stats.append(part);
-            has_sigma |= sigma_sensitive && !part.is_ascii() && part.contains('Σ');
-            if !has_sigma {
-                matcher.fold_chunks(part);
-            }
-            Ok(())
-        })?;
-        if has_sigma {
-            let mut matcher = SigmaMatcher::new(&opts.declassify_tokens);
+    let hits = if sigma_sensitive {
+        let mut matcher = SigmaMatcher::new(&opts.declassify_tokens);
+        if let Some(text) = text {
             text.for_each_str_chunk(|part| {
+                stats.append(part);
                 matcher.push(part);
                 Ok(())
             })?;
-            return Ok((stats, matcher.finish()));
         }
-    }
-    Ok((stats, matcher.hits()))
+        matcher.finish()
+    } else {
+        let mut matcher = DeclassMatcher::new(&opts.declassify_tokens);
+        if let Some(text) = text {
+            text.for_each_str_chunk(|part| {
+                stats.append(part);
+                matcher.fold_chunks(part);
+                Ok(())
+            })?;
+        }
+        matcher.hits()
+    };
+    Ok((stats, hits))
 }
 
 #[derive(Default)]

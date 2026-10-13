@@ -2124,7 +2124,7 @@ fn unicode_sigma_classes_and_chunked_matching_equal_std() -> Result<()> {
 }
 
 #[test]
-fn unicode_declassification_source_replay_preserves_stats_and_pending_branches() -> Result<()> {
+fn unicode_declassification_source_preserves_stats_and_pending_branches() -> Result<()> {
     let world = cv_testkit::World::in_process("prune-unicode-context");
     let options = PruneOptions {
         declassify_tokens: [
