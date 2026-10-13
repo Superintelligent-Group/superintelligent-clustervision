@@ -1212,3 +1212,22 @@ source-metadata control, not a consumer-wide heap bound. Inventory/registry meta
 with distinct source files. Private probe/control evidence is under
 `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/source-metadata-control.json`; activated
 consumer gate composition remains the separate matched test.
+
+
+Cursor Lexical CPU followup (`606304c`) enumerates each node's text/children fields once and
+stops the checked whitespace demand on its first nonblank chunk. Long leading Unicode spaces
+and whitespace-only documents preserve the owned output; source mutations still override the
+internal early-stop signal. Final controls include the shared strict text-count optimization and
+trusted generated-string publication. At 64 MiB, three alternating old/new pairs give median
+CPU seconds: encoded richText .88→1.06, inline richText .54→.57, inline non-string results
+1.20→.91. Median probe wall is .884→1.079, .545→.581 and 1.204→.939 respectively. The rich-text
+memory bound still costs CPU versus an owned in-memory tree; encoded staging and length demands
+remain concrete shared optimization targets. This is not a universal CPU improvement claim.
+Evidence: cursor-ide-structured-cpu-paired-reports.json and cursor-ide-structured-cpu-clean-reports.json.
+
+A read-only runtime comparison of one installed inline and one header composer also accepts
+both owned bulk and selected Facts reads and produces exactly the same doctor report. Only
+shape/success booleans were retained in cursor-ide-genuine-read-only-parity.json; this is genuine
+installed output evidence, not a scrubbed native corpus capture. A separate read-only Lexical
+survey finds 12/12 sampled richText strings decode to JSON root objects with children arrays;
+cursor-ide-richtext-installed-shape.json contains aggregate shapes only.
