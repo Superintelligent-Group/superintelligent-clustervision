@@ -44,8 +44,11 @@ and portable output/failure controls. That settled batch completed local converg
 The post-restart batch completes Grok/Qwen/OpenClaw checked exports, SQLite row transactions,
 and the native OpenCode 2.x compatibility gap. SQLite v1/Hermes transactions and the shared
 short-string allocation repair are integrated at `0af1dc87`; Cline/LM Studio redundant decoding
-is repaired at `927917a6`. Same-target preparation remains a separate producer-contract check,
-not an automatic consequence of a checked writer. Run focused composition checks while these
+is repaired at `927917a6`. Grok/Qwen selected producers are integrated at `6f13a0b2`, including
+complete rehome and verification. Native OpenCode 2.0.25 fresh/existing/migrated stores accept
+export and continuation after the atomic event-watermark repair (`f958e2c5`, `8556c087`).
+Faithful typed complete OpenCode replay remains in progress. Same-target preparation is a
+separate producer-contract check, not an automatic consequence of a checked writer. Run focused composition checks while these
 changes land, then one convergence batch. Changes must preserve complete output, metadata,
 acceptance and source-error semantics; shared checked readers/writers take priority over new
 format machinery. Qwen has no local data, so fleet evidence remains unavailable; its supported
@@ -620,11 +623,11 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Shared Cline/Roo export streams checked Anthropic history; frozen native/portable file oracles and the actual Cline allocation control preserve output, fidelity and source-failure behavior.
 - [x] Gemini complete rehome retains checked payloads in both recording formats; exact metadata/replay/acceptance oracles and the actual modern rehome gate preserve the complete contract.
 - [x] Continue/LM Studio checked export and bounded title fallback preserve frozen output and direct captured-source failures, including discarded fields and LM whitespace-thinking projection.
-- [x] Grok, OpenClaw and Qwen JSONL emitters consume checked fields through shared staged writers. Frozen native/portable wire, thinking, sidecar and source-failure controls pass. Actual operation evidence is recorded below; Grok/Qwen verification readers still account for large transient allocations, and complete preparation is tracked separately.
+- [x] Grok, OpenClaw and Qwen JSONL emitters consume checked fields through shared staged writers. Frozen native/portable wire, thinking, sidecar and source-failure controls pass. Actual operation evidence is recorded below; Grok/Qwen selected producers now remove the measured verification transient, with complete preparation separately validated.
 - [x] SQLite exports (OpenCode v1/Hermes): checked session leaves, current-row ownership, reused prepared inserts and one export transaction. Native/portable logical-row, FTS and late-failure rollback controls pass; actual operation evidence records Rust/native allocation separately. Largest-row and SQLite cache costs remain explicit; native OpenCode 2.x is tracked separately.
 - [x] Same-harness complete Cline/Roo/Continue/LM Studio preparation retains checked bodies, with independent native/portable complete IR, wire/fidelity, LM variant and late-source controls. Four actual reader-contract controls establish peak-memory savings; higher cumulative allocation on Cline task directories and LM remains an explicit cost under attribution.
-- [ ] Finish same-harness complete preparation: flat OpenClaw and ordinary Hermes bodies now have owned-complete, wire/fidelity and late-source oracles; Grok/Qwen producer work and OpenCode complete contracts remain. OpenClaw tree/SQLite, Hermes multimodal/raw reasoning and demanded complete carriers retain their stated owned costs.
-- [ ] Native OpenCode 2.x export compatibility: the current writer emits v1 tables; pinned native 2.0.25 get/list reads only v2 tables, and its completed historical migration does not import newly emitted v1 rows. Implement explicit v2 output and native isolated acceptance; do not reset migration markers or use our reader alone as resumability proof.
+- [ ] Finish same-harness complete preparation: flat OpenClaw, ordinary Hermes and Grok/Qwen bodies now have owned-complete, wire/fidelity and late-source oracles; faithful native OpenCode complete replay remains. OpenClaw tree/SQLite, Hermes multimodal/raw reasoning and demanded complete carriers retain their stated owned costs.
+- [x] Native OpenCode 2.0.25 export compatibility: fresh and existing v2 stores use native rows; existing v1 output stays supported. Schema/journal bootstrap and event watermark commit atomically. Isolated native get/list/messages/context and actual continuation pass on fresh/existing/migrated stores with 18 imported rows; missing-watermark negative control fails. Native 2.0.26 acceptance and faithful typed complete replay are not claimed.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
 - [x] Prune Thinking, ASCII declassification and ordinary usage-record projections, with whole-operation output parity and CI heap caps.
@@ -4299,9 +4302,10 @@ No external model calls or real-store writes occurred. Private synthetic evidenc
 Known typed complete replay is a separate follow-up: the existing OpenCode complete reader carries
 idle/unknown rows but has no complete raw skeleton for ordinary rows. Enabling checked same-target
 preparation without preserving shell/skill/compaction/model-change types and unknown native fields
-would merely compare equally lossy output against the old owned path. That follow-up must attach
-payload-free native skeletons plus checked overlays and emit each native row once, preserving the
-owned complete/native metadata contract. Native 2.0.26 acceptance is not claimed here.
+would merely compare equally lossy output against the old owned path. That follow-up must preserve complete native records through checked backing and current-IR
+overlays, emitting each native row once. Noninvertible projections need an unchanged-content
+guard before replay so transformations cannot resurrect stale content; serialized complete IR
+must retain its public carrier contract. Native 2.0.26 acceptance is not claimed here.
 
 Native durable-frontier follow-up: independent recovery review found that a two-row continuation
 could mask an absent `event_sequence` watermark behind incidental native startup events. Pinned
