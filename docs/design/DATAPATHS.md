@@ -3502,3 +3502,8 @@ Actual release CLI `port --strict --harness codex` also matches the preceding va
 Native/Text/Drop records and warnings in a scratch home, normalizing only generated session/turn
 UUIDs and package version; source bytes are unchanged. This does not cover same-harness complete
 carrier ownership, which remains a separate deciding control rather than a claimed bound.
+
+[Linux CI for `5e366e96`](https://github.com/emberian/cv/actions/runs/38392656419) subsequently
+passed all four jobs, including the fresh full workspace suite, all eight operation heap gates,
+packages, desktop, web and wasm. The same-harness and Unicode/Gemini controls recorded in the
+current priorities above identify the next batch; they are not covered by this revision's bounds.
