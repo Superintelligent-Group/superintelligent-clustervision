@@ -91,24 +91,34 @@ pub(crate) fn append(
 
 fn write_quoted_json(view: crate::json::JsonView<'_>, writer: &mut dyn std::io::Write) -> Result<()> {
     use std::io::Write;
-    struct Escaped<'a>(&'a mut dyn Write);
+    struct Escaped<'a> {
+        writer: &'a mut dyn Write,
+        scratch: Vec<u8>,
+    }
     impl Write for Escaped<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            let mut rest = bytes;
-            while let Some(index) = memchr::memchr2(b'"', b'\\', rest) {
-                self.0.write_all(&rest[..index])?;
-                self.0.write_all(&[b'\\', rest[index]])?;
-                rest = &rest[index + 1..];
+            for chunk in bytes.chunks(64 * 1024) {
+                self.scratch.clear();
+                self.scratch.reserve(chunk.len().saturating_mul(2));
+                for &byte in chunk {
+                    if matches!(byte, b'"' | b'\\') {
+                        self.scratch.push(b'\\');
+                    }
+                    self.scratch.push(byte);
+                }
+                self.writer.write_all(&self.scratch)?;
             }
-            self.0.write_all(rest)?;
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.0.flush()
+            self.writer.flush()
         }
     }
     let mut buffered = std::io::BufWriter::with_capacity(64 * 1024, writer);
-    view.write_canonical(&mut Escaped(&mut buffered))?;
+    view.write_canonical(&mut Escaped {
+        writer: &mut buffered,
+        scratch: Vec::new(),
+    })?;
     buffered.flush()?;
     Ok(())
 }
