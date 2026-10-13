@@ -2467,3 +2467,26 @@ match installed `ef75a100` stdout/stderr exactly: all sort keys/directions, enri
 wide and empty windows. Two-row windows exercise heap activation. Input hashes remain unchanged;
 raw results are retained at `excellence-evidence/listing-cli-parity/results.json`. These checks
 cover integration behavior, not a new full convergence or end-to-end speed measurement.
+
+### Settled operation batch: convergence and remaining priorities (2026-10-13)
+
+The combined code at `1377fdc9` passes the complete local convergence set, recorded in
+[OPERATION-CONVERGENCE-2026-10-13.json](OPERATION-CONVERGENCE-2026-10-13.json): 1,399 workspace
+tests, all-target clippy/build, packaging/manual/feature builds, desktop/web/wasm checks, 764
+heap/fidelity observations, 20 SQLite fixtures, and production search/CLI heap gates. This is
+one convergence after the batch settled, with no release or fleet-wide latency claim. Requested
+Rust heap does not establish physical-memory bounds; native allocations and mapped pages remain
+outside those counters.
+
+The next implementation priorities are whole-operation costs with concrete evidence: remove
+unrelated discovery-cache payload ownership during a scoped refresh, then reduce ordinary
+distill's unused input ownership and overly broad tool-input demand. Preserve demanded pack,
+sidecar, tail, token accounting and source-error semantics. These are separate from the completed
+findings-only reduction. Cold/one-change indexing also needs a traversal control to establish
+whether discovery and resumed indexing repeat consequential source work.
+
+The original full-fleet cold-start, recount and physical-memory targets remain unproven. Exact
+initial counts require source inspection without another authoritative index; final EOF metadata,
+mutable replay reconciliation and requested rich output impose real work. Treat those as explicit
+contracts, and remaining format/large-fleet/native-memory coverage as evidence gaps, rather than
+asserting every unchecked item is a demonstrated performance defect.
