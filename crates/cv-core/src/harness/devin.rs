@@ -142,6 +142,8 @@
 //! "" falls back to the last chain assistant's `generation_model` (observed on a real session). `hidden = 1` sessions are
 //! still discovered, flagged in `extra["devin"]["hidden"]`.
 
+mod selected;
+
 use super::store::sqlite::{columns, open_ro, table_exists};
 use super::store::xdg_data_dir;
 use super::{note_skipped_lines, ts_from_epoch, Adapter};
@@ -203,13 +205,18 @@ impl Adapter for Devin {
         conn.read(|conn| discover_conn(conn, &db))
     }
 
-    fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Devin, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
             let conn = open_ro(&r.path)?;
-            conn.read(|conn| stream_conn(conn, r, sink))
+            conn.read(|conn| {
+                let selected = (opts.spans && conn.prepare("SELECT rowid FROM message_nodes LIMIT 0").is_ok())
+                    .then(|| selected::Selected::new(&r.path, conn.reads()))
+                    .transpose()?;
+                stream_conn_selected(conn, r, sink, selected.as_ref())
+            })
         })
     }
 }
@@ -554,13 +561,23 @@ impl NodeFacts {
     }
 }
 
+#[cfg(test)]
 fn stream_conn(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
+    stream_conn_selected(conn, r, sink, None)
+}
+
+fn stream_conn_selected(
+    conn: &Connection,
+    r: &SessionRef,
+    sink: &mut dyn MessageSink,
+    selected: Option<&selected::Selected>,
+) -> Result<Session> {
     // Child ids split on the FIRST '/': `<session_id>/<agent_id>` — slugs never contain one.
     let (session_id, agent_id) = match r.id.split_once('/') {
         Some((s, a)) => (s, Some(a)),
         None => (r.id.as_str(), None),
     };
-    stream_session(conn, session_id, agent_id, r, sink)
+    stream_session(conn, session_id, agent_id, r, sink, selected)
 }
 
 /// The one chain walk / node map / meta path behind [`Adapter::stream`] for both a session and
@@ -573,6 +590,7 @@ fn stream_session(
     agent: Option<&str>,
     r: &SessionRef,
     sink: &mut dyn MessageSink,
+    selected: Option<&selected::Selected>,
 ) -> Result<Session> {
     let _snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let cols = columns(conn, "sessions");
@@ -681,6 +699,19 @@ fn stream_session(
             // The window's token cost: the larger `num_tokens_preceding` of the pair.
             let cur = entry.get("pre_tokens").and_then(Value::as_u64).unwrap_or(0);
             entry.insert("pre_tokens".into(), json!(cur.max(ntp)));
+        }
+        if let Some(selected) = selected {
+            let rowid: i64 = conn.query_row(
+                "SELECT rowid FROM message_nodes WHERE session_id=?1 AND node_id=?2",
+                rusqlite::params![session_id, nid],
+                |row| row.get(0),
+            )?;
+            match selected.read(conn, rowid, selected::compaction) {
+                Ok(facts) => entry.extend(facts),
+                Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => {}
+                Err(error) => return Err(error),
+            }
+            continue;
         }
         let raw: Option<String> = conn
             .query_row(
@@ -901,28 +932,54 @@ fn stream_session(
     let mut last_msg_id: Option<String> = None;
     let mut last_sf: Option<i64> = None;
     let mut skipped = 0u64;
-    let metadata_column = if has_node_metadata { "metadata" } else { "NULL" };
+    let metadata_column = if has_node_metadata && selected.is_none() {
+        "metadata"
+    } else {
+        "NULL"
+    };
+    let payload = if selected.is_some() { "NULL" } else { "chat_message" };
+    let rowid_column = if selected.is_some() { "rowid" } else { "0" };
     let mut stmt = conn.prepare(&format!(
-        "SELECT chat_message, created_at, {metadata_column} FROM message_nodes WHERE session_id = ?1 AND node_id = ?2"
+        "SELECT {payload}, created_at, {metadata_column}, {rowid_column} FROM message_nodes WHERE session_id = ?1 AND node_id = ?2"
     ))?;
     for &nid in &chain {
-        let row: Option<(String, i64, Option<String>)> = stmt
+        let row: Option<(Option<String>, i64, Option<String>, i64)> = stmt
             .query_row(rusqlite::params![session_id, nid], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2).ok().flatten()))
+                Ok((
+                    if selected.is_none() { Some(row.get(0)?) } else { None },
+                    row.get(1)?,
+                    row.get(2).ok().flatten(),
+                    row.get(3)?,
+                ))
             })
             .ok();
-        let Some((raw, node_created, metadata)) = row else {
+        let Some((raw, node_created, metadata, rowid)) = row else {
             skipped += 1;
             continue;
         };
-        let Ok(chat) = serde_json::from_str::<Value>(&raw) else {
-            skipped += 1;
-            continue;
+        let metadata = if let Some(selected) = selected.filter(|_| has_node_metadata) {
+            selected.metadata(conn, rowid)?
+        } else {
+            metadata
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .filter(Value::is_object)
         };
-        let metadata = metadata
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .filter(Value::is_object);
-        let mut m = node_to_message(nid, node_created, &chat, metadata.as_ref(), &mut tool_names);
+        let mut m = if let Some(selected) = selected {
+            match selected.node(conn, rowid, nid, node_created, metadata.as_ref(), &mut tool_names) {
+                Ok(message) => message,
+                Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            let Ok(chat) = serde_json::from_str::<Value>(raw.as_deref().unwrap()) else {
+                skipped += 1;
+                continue;
+            };
+            node_to_message(nid, node_created, &chat, metadata.as_ref(), &mut tool_names)
+        };
 
         // The first node of a compaction pair: emit a synthetic boundary right before it and
         // point the summary's parent_id at the boundary (compaction.rs pairs them by uuid).
@@ -1297,6 +1354,63 @@ mod tests {
             .stream(&reference, &ParseOptions::default(), &mut MutatingSink(&writer))
             .unwrap_err();
         assert!(failure.to_string().contains("dependencies changed"), "{failure:#}");
+    }
+
+    #[test]
+    fn selected_rows_preserve_corpus_chains_metadata_and_wal_guards() -> Result<()> {
+        let world = cv_testkit::World::in_process("devin-selected-corpus");
+        let path = world.base.join("sessions.db");
+        std::fs::copy(fixture(), &path)?;
+        let adapter = Devin::with_root(&world.base);
+        for reference in adapter.discover()? {
+            let owned = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full())?;
+            for options in [
+                ParseOptions::lazy_extra(),
+                ParseOptions {
+                    spans: true,
+                    ..ParseOptions::complete()
+                },
+            ] {
+                let mut selected = crate::stream::collect_with(&adapter, &reference, &options)?;
+                selected.materialize()?;
+                assert_eq!(
+                    serde_json::to_value(&selected)?,
+                    serde_json::to_value(&owned)?,
+                    "{}",
+                    reference.id
+                );
+            }
+        }
+        let writer = Connection::open(&path)?;
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let reference = adapter.discover()?.remove(0);
+        let selected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
+        let before = std::fs::read(&path)?;
+        writer.execute(
+            "UPDATE message_nodes SET chat_message=json_set(chat_message,'$.content',?1) WHERE session_id=?2",
+            rusqlite::params!["changed", reference.id],
+        )?;
+        assert_eq!(std::fs::read(&path)?, before);
+        // Tiny corpus values are inline; add a large demanded body to establish retained-source guard.
+        writer.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        writer.execute(
+            "UPDATE message_nodes SET chat_message=json_set(chat_message,'$.content',?1) WHERE session_id=?2",
+            rusqlite::params!["large body ".repeat(10000), reference.id],
+        )?;
+        let mut large = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy_extra())?;
+        assert!(large.messages.iter().any(|m| m.content.iter().any(|b| matches!(
+            b,
+            Block::Text {
+                text: crate::Text::Source(_)
+            }
+        ))));
+        writer.execute(
+            "UPDATE message_nodes SET created_at=created_at+1 WHERE session_id=?1",
+            [&reference.id],
+        )?;
+        assert!(large.materialize().is_err());
+        let _ = selected;
+        Ok(())
     }
 
     #[test]

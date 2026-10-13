@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Devin lazy reads retain checked bodies and arguments in shared backing, preserving chain metadata and compaction while avoiding whole selected-row copies.
+
 - OpenCode exports target native 2.x stores and bootstrap resumable fresh databases, while preserving existing 1.x store compatibility.
 
 - Cline, Roo, Continue and LM Studio rehomes retain checked complete payloads while preserving native output and public complete parsing.

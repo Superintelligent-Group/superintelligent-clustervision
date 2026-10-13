@@ -4377,3 +4377,36 @@ JSON/UTF-8 skipping, checkpoint offsets after physical records, and original-sou
 Unicode trim retries remain limited to rejected records. Existing native/portable complete
 producer, frozen wire/fidelity, source mutation and checkpoint controls pass; no new allocation
 or timing campaign was run for this consolidation.
+
+### Devin selected rows and compaction inspection (Sol, 2026-10-13)
+
+Devin's compact forest was already bounded by navigation cardinality, but selected replay still
+owned each chat_message String, decoded the entire Value and copied ordinary bodies/arguments
+into Message. Lazy rowid preparation now uses the shared incremental SQLite cell reader and
+checked JSON views. The existing node mapper remains authoritative for roles, metadata, usage,
+compaction and subagent wiring; a demanded metadata skeleton feeds it, with selected body,
+thinking and argument descriptors replacing its placeholders. Native node metadata is reduced
+to the fields the mapper actually reads. Unknown extensions, undo original_content, skill
+descriptions and duplicated ACP call bodies are validated without ownership. Required rich
+metadata remains owned. Public owned parsing and non-rowid schema fallback keep the old path.
+
+The compaction inspection pass reads only demanded sidecars and scans decoded chunks for the
+existing history-path sentence. It retains the demanded path token, not the entire summary body.
+One operation-local cell-range cache lets compaction inspection and row replay share backing;
+its descriptors grow with selected rows/columns. This is reuse under one checked read snapshot,
+not a new persistent cache or schema policy. Original DB/WAL guards follow retained Text/Json
+descriptors. Source and backing failures propagate; malformed Value-incompatible chat records
+retain the existing skipped-row accounting. Forest walks, prefix prompt composition, model
+fallback, synthetic compaction boundaries and complete visibility remain unchanged.
+
+Ten scoped native Devin checks passed during development, including full materialized corpus
+IR parity for main/subagent chains, compaction boundaries/sidecars, a giant escaped-body/tool
+argument mapper oracle and retained-source mutation. The oracle includes discarded giant
+metadata, undo contents, skill descriptions, ACP raw inputs and chunk-boundary history paths.
+Subsequent cell-cache/node-metadata refinements are intentionally left to the combined batch
+checks rather than another per-stage campaign. No new timing/native-allocation campaign was
+run following the user's batching instruction. Rust descriptor ownership is distinct from
+SQLite-native allocation: forest SQL role extraction, model/prefix SQL, native cell fallbacks,
+page caches and overflow-page metadata remain. Selected quoted-cell backing still writes
+encoded data privately; prefix/system_prompt and demanded rich extras remain owned. No total
+process or largest-row native-memory bound is claimed.
