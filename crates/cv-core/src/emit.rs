@@ -477,10 +477,10 @@ pub fn prepare_selected(
     prepare::selected(adapter, reference, &options, start, end)
 }
 
-/// Parse at native emission fidelity. Every supported writer accepts guarded full bodies;
-/// same-target complete preparation opts in only for verified producer contracts. Unsupported
-/// producer shapes keep their owned compatibility paths. Public full and complete parsing still own
-/// bodies by default; this preparation explicitly opts into checked sources.
+/// Parse at native emission fidelity. Registered writers accept guarded bodies, including
+/// same-target complete records. Adapters retain owned fallbacks for unsupported source shapes.
+/// Public full and complete parsing still own bodies by default; this preparation explicitly
+/// opts into checked sources.
 pub fn parse_for_emit(
     adapter: &dyn crate::harness::Adapter,
     reference: &SessionRef,
@@ -491,23 +491,7 @@ pub fn parse_for_emit(
     } else {
         ParseOptions::full()
     };
-    let checked = emitter_for(target).is_some()
-        && (reference.harness != target
-            || matches!(
-                target,
-                Harness::Claude
-                    | Harness::Codex
-                    | Harness::Gemini
-                    | Harness::Cline
-                    | Harness::Roo
-                    | Harness::Continue
-                    | Harness::LmStudio
-                    | Harness::Hermes
-                    | Harness::OpenClaw
-                    | Harness::Grok
-                    | Harness::Qwen
-                    | Harness::OpenCode
-            ));
+    let checked = emitter_for(target).is_some();
     if checked {
         options.spans = true;
     }
