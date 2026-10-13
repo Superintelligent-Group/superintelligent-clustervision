@@ -3680,3 +3680,45 @@ The follow-up at `56e94da5` releases a previous input frame's buffer when its ca
 sizes and protocol behavior are unchanged. All 11 MCP protocol integration tests pass on this
 composition. This removes lifetime retention of an unusually large prior request; it does not
 bound the current request's size or claim an absolute server heap ceiling.
+
+### Cold SQLite snapshot lease and reclamation (2026-10-13, distill_demand_recovery)
+
+The actual ordinary Goose doctor control confirms the destructor-only lifecycle defect:
+8,192 records / 8,000,000 decoded bytes require an 11,718,656-byte cold-WAL backing. The
+installed independent baseline leaves 11,718,656 / 11,751,424 logical named bytes after
+SIGINT / SIGKILL. The repair preserves original DB/WAL/journal freshness and live SQLite
+semantics, the existing 256 MiB idle-copy budget, cache reuse and reader lifetime. One kernel
+owner lease is shared by the cache and directly retained by each backing, avoiding a lease FD
+per database. Versioned identity-bound owner/marker records live in a dedicated private
+namespace. A stable kernel gate serializes publication/removal; operation reapers skip busy
+gates and live leases. Directory/handle identities and Unix ownership/privacy are checked
+again after locking. No PID liveness test or legacy TMPDIR-name sweep authorizes deletion.
+
+Outermost read scopes reclaim at entry/exit; nested scopes share an origin-thread Weak/Arc
+boundary token, which remains correct when a Send guard drops on another thread. Internal
+per-database readers do not scan the namespace. A finished handler can reclaim a killed
+child's owner while another thread retains its long-poll scope/shared cache. Payload deletion
+preserves the recognition marker until all copied files are removed, allowing another
+operation to continue after an interrupted remover. Existing ReadConnection ordering closes
+SQLite before the last backing/owner can clean up, including on Windows.
+
+The repaired actual SIGINT/SIGKILL controls leave payload immediately after abrupt standalone
+exit, then the next ordinary doctor operation reclaims every copied DB/WAL/SHM file. The
+actual generated MCP child is stopped after its complete backing is observed, so it cannot
+finish naturally. Closing stdout + ping triggers EPIPE cancellation; accepted MCP handler
+drain kills/reaps the child and ends its request scope before server exit. No child or copied
+payload remains. Exact baseline doctor bytes, original source SHA/stat identity and auxiliary
+absence match; only the fixed 75-byte namespace gate remains. Controls/reproduction are in
+[`sqlite-lifecycle/README.md`](../../tools/profiling/results/sqlite-lifecycle/README.md) and
+`tools/check-sqlite-lifecycle.py`. Default and SQLite-only portable configurations each pass
+21 scoped tests and lib/tests clippy. Independent review cleared the final gate/root
+replacement protection and lifetime/Windows API source shape; Windows execution was not run.
+
+This resolves the demonstrated named-payload leak with an explicitly eventual standalone
+contract: a later operation in the same namespace must attempt reclamation, and busy gates or
+filesystem failures defer it. Immediate SIGKILL cleanup requires an external owner; no daemon
+is added. Unmarked/foreign/malformed/replaced/symlink paths remain untouched. Tiny metadata
+can remain if initialization or final empty-directory cleanup itself is interrupted; no
+copied payload is created before owner publication, and its marker survives payload cleanup.
+The controls measure logical named extents, not RSS, APFS physical blocks or universal disk
+bounds. Other required output stages retain their existing lifetime contracts.

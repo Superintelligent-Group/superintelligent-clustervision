@@ -8,6 +8,8 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::Path;
 
+mod snapshots;
+
 /// A reader retains both its private backing (when needed) and the original provenance.
 /// Use `read` around an adapter operation, and carry `reads()` into lazy source captures.
 pub(crate) struct ReadConnection {
@@ -39,13 +41,32 @@ impl ReadConnection {
 }
 
 /// Retain at an operation boundary that reads multiple sessions. Dropping the final scope or
-/// reader releases cached backings, including their directories; no process-global files
-/// survive idle operations. Concurrent/nested scopes share this bounded cache.
+/// reader releases cached payloads and their directories. Concurrent/nested scopes share this
+/// bounded cache. Outermost scope entry/exit also reclaims marked, unlocked owners left by dead
+/// processes; a fixed tiny namespace gate persists. Abrupt standalone death needs a later scope.
 pub(crate) struct ReadScope {
     cache: std::sync::Arc<SnapshotCache>,
+    _boundary: Option<std::sync::Arc<ReadBoundary>>,
 }
 
-struct SnapshotCache(std::sync::Mutex<SnapshotCacheState>);
+struct SnapshotCache {
+    state: std::sync::Mutex<SnapshotCacheState>,
+    namespace: snapshots::Namespace,
+    owner: std::sync::Mutex<Option<std::sync::Arc<snapshots::Owner>>>,
+}
+
+struct ReadBoundary(snapshots::Namespace);
+impl Drop for ReadBoundary {
+    fn drop(&mut self) {
+        self.0.reap();
+    }
+}
+
+thread_local! {
+    // The guard may move between threads. Its last Arc drop performs exit cleanup; the
+    // origin thread only retains a Weak, never a depth that must be decremented elsewhere.
+    static BOUNDARY: std::cell::RefCell<std::sync::Weak<ReadBoundary>> = const { std::cell::RefCell::new(std::sync::Weak::new()) };
+}
 
 #[derive(Default)]
 struct SnapshotCacheState {
@@ -76,6 +97,24 @@ impl SnapshotCacheState {
 }
 
 pub(crate) fn read_scope() -> ReadScope {
+    let mut scope = reader_scope();
+    scope._boundary = Some(operation_boundary(&scope.cache.namespace));
+    scope
+}
+
+fn operation_boundary(namespace: &snapshots::Namespace) -> std::sync::Arc<ReadBoundary> {
+    BOUNDARY.with(|slot| {
+        if let Some(boundary) = slot.borrow().upgrade() {
+            return boundary;
+        }
+        namespace.reap();
+        let boundary = std::sync::Arc::new(ReadBoundary(namespace.clone()));
+        *slot.borrow_mut() = std::sync::Arc::downgrade(&boundary);
+        boundary
+    })
+}
+
+fn reader_scope() -> ReadScope {
     use std::sync::{Arc, Mutex, OnceLock, Weak};
     static ACTIVE: OnceLock<Mutex<Weak<SnapshotCache>>> = OnceLock::new();
     let mut active = ACTIVE
@@ -83,11 +122,15 @@ pub(crate) fn read_scope() -> ReadScope {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cache = active.upgrade().unwrap_or_else(|| {
-        let cache = Arc::new(SnapshotCache(Mutex::new(SnapshotCacheState::default())));
+        let cache = Arc::new(SnapshotCache {
+            state: Mutex::new(SnapshotCacheState::default()),
+            namespace: snapshots::Namespace::current(),
+            owner: Mutex::new(None),
+        });
         *active = Arc::downgrade(&cache);
         cache
     });
-    ReadScope { cache }
+    ReadScope { cache, _boundary: None }
 }
 
 struct ColdSnapshot {
@@ -95,6 +138,7 @@ struct ColdSnapshot {
     directory: std::path::PathBuf,
     database: std::path::PathBuf,
     copied_bytes: u64,
+    _owner: Option<std::sync::Arc<snapshots::Owner>>,
 }
 
 impl Drop for ColdSnapshot {
@@ -149,11 +193,11 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
     let cold = &header[..16] == b"SQLite format 3\0"
         && (header[18] == 2 || header[19] == 2)
         && (!sidecar(&path, "-wal").exists() || !sidecar(&path, "-shm").exists());
-    let scope = cold.then(read_scope);
+    let scope = cold.then(reader_scope);
     let snapshot = if let Some(scope) = scope.as_ref() {
         let mut cache = scope
             .cache
-            .0
+            .state
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite snapshot cache poisoned"))?;
         cache.active.retain(|_, snapshot| snapshot.strong_count() > 0);
@@ -168,13 +212,24 @@ fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>
             if let Some(stale) = existing {
                 cache.discard_idle(&stale);
             }
-            let directory = std::env::temp_dir().join(format!("cv-sqlite-snapshot-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir(&directory)?;
+            let owner = {
+                let mut slot = scope
+                    .cache
+                    .owner
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("SQLite snapshot owner poisoned"))?;
+                if slot.is_none() {
+                    *slot = Some(scope.cache.namespace.owner()?);
+                }
+                Arc::clone(slot.as_ref().unwrap())
+            };
+            let directory = owner.snapshot_directory()?;
             let mut snapshot = ColdSnapshot {
                 reads: reads.clone(),
                 database: directory.join("store.db"),
                 directory,
                 copied_bytes: 0,
+                _owner: Some(owner),
             };
             #[cfg(unix)]
             {
@@ -339,6 +394,27 @@ mod tests {
     }
 
     #[test]
+    fn retained_backing_keeps_lease_after_its_connection_and_cache_finish() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (directory, database) = fixture();
+        {
+            let writer = Connection::open(&database).unwrap();
+            writer
+                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x);")
+                .unwrap();
+        }
+        let reader = open_ro(&database).unwrap();
+        let backing = std::sync::Arc::clone(reader._snapshot.as_ref().unwrap());
+        let private = backing.directory.clone();
+        drop(reader); // Its cache/scope are gone, but the backing retains its own owner Arc.
+        snapshots::Namespace::current().reap();
+        assert!(private.exists());
+        drop(backing);
+        assert!(!private.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn interleaved_databases_reuse_active_snapshots_and_cleanup_operation() {
         let _serial = SNAPSHOT_TEST.lock().unwrap();
         let (directory, database) = fixture();
@@ -379,6 +455,7 @@ mod tests {
                 directory,
                 database,
                 copied_bytes: bytes,
+                _owner: None,
             })
         }
         let mut cache = SnapshotCacheState::default();

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - MCP releases oversized request buffers between frames instead of retaining the largest request for the server lifetime.
+- Cold SQLite snapshots reclaim abandoned copies on later reads and after MCP child cancellation, preserving live readers and producer stores.
 
 - MCP bounds concurrent tools and response backlog, preserves control replies, and cancels and reaps work on observed disconnect.
 

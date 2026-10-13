@@ -1,0 +1,70 @@
+{
+  "binary": "/Users/ember/.cargo/bin/cv",
+  "binary_sha256": "15d4f6371d2a5d172960450ddfc549985c5e6ff4549c5c553316b4803721e756",
+  "source_sha256": "8403fa972194451a5a821490029aac10edfcc57eaa55c45ab2ee217186d1f960",
+  "fixture": {
+    "harness": "goose",
+    "id": "00000000-0000-4000-8000-000000000001",
+    "root": "/Users/ember/dev/cv-worktrees/sqlite-lifecycle-evidence/goose/data/sessions",
+    "path": "/Users/ember/dev/cv-worktrees/sqlite-lifecycle-evidence/goose/data/sessions/sessions.db",
+    "shape": "history",
+    "requested_payload_bytes": 8000000,
+    "decoded_payload_bytes": 8000000,
+    "selected_payload_bytes": 8000000,
+    "records": 8192,
+    "expected_messages": 8192,
+    "escaped": true,
+    "physical_input_bytes": 11718656,
+    "synthetic": true,
+    "provenance": "adapter-supported native schema; made-up IDs and payloads"
+  },
+  "normal_output_sha256": "264789a069e38d1f208d2ec6d887d5af02c0362704b4f7cd4b761078d3fd99c0",
+  "normal_cleanup": true,
+  "cancelled": [
+    {
+      "signal": "SIGINT",
+      "pid": 64533,
+      "returncode": -2,
+      "orphan_files": [
+        {
+          "path": "temporary/cv-sqlite-snapshot-795475f1-3f7f-491b-998a-b2ef7be56860/store.db",
+          "bytes": 11718656,
+          "allocated_bytes": 11718656
+        }
+      ],
+      "orphan_logical_bytes": 11718656,
+      "stdout_bytes": 0,
+      "stderr": ""
+    },
+    {
+      "signal": "SIGKILL",
+      "pid": 64534,
+      "returncode": -9,
+      "orphan_files": [
+        {
+          "path": "temporary/cv-sqlite-snapshot-95c4a035-3f5e-4ce7-ae1f-fb042f518d4e/store.db-wal",
+          "bytes": 0,
+          "allocated_bytes": 0
+        },
+        {
+          "path": "temporary/cv-sqlite-snapshot-95c4a035-3f5e-4ce7-ae1f-fb042f518d4e/store.db-shm",
+          "bytes": 32768,
+          "allocated_bytes": 32768
+        },
+        {
+          "path": "temporary/cv-sqlite-snapshot-95c4a035-3f5e-4ce7-ae1f-fb042f518d4e/store.db",
+          "bytes": 11718656,
+          "allocated_bytes": 11718656
+        }
+      ],
+      "orphan_logical_bytes": 11751424,
+      "stdout_bytes": 0,
+      "stderr": ""
+    }
+  ],
+  "limits": [
+    "logical and allocated file extents only; APFS may share source blocks",
+    "all homes/catalog/temp/fixture are owned scratch; source hash unchanged",
+    "SIGINT and SIGKILL terminate this CLI without Rust Drop; no timing claim"
+  ]
+}

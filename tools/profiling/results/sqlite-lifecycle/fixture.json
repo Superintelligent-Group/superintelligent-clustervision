@@ -1,0 +1,16 @@
+{
+  "harness": "goose",
+  "id": "00000000-0000-4000-8000-000000000001",
+  "root": "/Users/ember/dev/cv-worktrees/sqlite-lifecycle-evidence/goose/data/sessions",
+  "path": "/Users/ember/dev/cv-worktrees/sqlite-lifecycle-evidence/goose/data/sessions/sessions.db",
+  "shape": "history",
+  "requested_payload_bytes": 8000000,
+  "decoded_payload_bytes": 8000000,
+  "selected_payload_bytes": 8000000,
+  "records": 8192,
+  "expected_messages": 8192,
+  "escaped": true,
+  "physical_input_bytes": 11718656,
+  "synthetic": true,
+  "provenance": "adapter-supported native schema; made-up IDs and payloads"
+}

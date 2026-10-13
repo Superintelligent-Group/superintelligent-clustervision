@@ -1,0 +1,89 @@
+{
+  "binary": "/Users/ember/dev/cv-worktrees/native-sqlite-heap-target/debug/cv",
+  "binary_sha256": "a624e2d654151ddd96e1affc05ada30a0ac10e5fa3e0c129455d876cd573661d",
+  "source_sha256": "8403fa972194451a5a821490029aac10edfcc57eaa55c45ab2ee217186d1f960",
+  "source_identity": [
+    16777233,
+    721139039,
+    11718656,
+    1791896832112041880,
+    1791896832112041880
+  ],
+  "normal_output_sha256": "264789a069e38d1f208d2ec6d887d5af02c0362704b4f7cd4b761078d3fd99c0",
+  "standalone": [
+    {
+      "signal": "SIGINT",
+      "pid": 88006,
+      "returncode": -2,
+      "completed_copy_witness": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/15787eee-ca87-4777-a2fb-e098ab7acf8b/93fc9744-d856-405a-b1ad-7023362c1d4d/store.db",
+      "after_exit_payloads": [
+        {
+          "path": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/15787eee-ca87-4777-a2fb-e098ab7acf8b/93fc9744-d856-405a-b1ad-7023362c1d4d/store.db",
+          "bytes": 11718656
+        },
+        {
+          "path": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/15787eee-ca87-4777-a2fb-e098ab7acf8b/93fc9744-d856-405a-b1ad-7023362c1d4d/store.db-shm",
+          "bytes": 32768
+        },
+        {
+          "path": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/15787eee-ca87-4777-a2fb-e098ab7acf8b/93fc9744-d856-405a-b1ad-7023362c1d4d/store.db-wal",
+          "bytes": 0
+        }
+      ],
+      "after_next_operation_payloads": [],
+      "next_output_sha256": "264789a069e38d1f208d2ec6d887d5af02c0362704b4f7cd4b761078d3fd99c0",
+      "stdout_bytes": 0,
+      "stderr": ""
+    },
+    {
+      "signal": "SIGKILL",
+      "pid": 88014,
+      "returncode": -9,
+      "completed_copy_witness": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/380f9c41-c266-4c2f-bb98-d806a70637cb/e3ca5b54-1e80-4a97-a18e-be7d94cec8a7/store.db",
+      "after_exit_payloads": [
+        {
+          "path": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/380f9c41-c266-4c2f-bb98-d806a70637cb/e3ca5b54-1e80-4a97-a18e-be7d94cec8a7/store.db",
+          "bytes": 11718656
+        },
+        {
+          "path": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/380f9c41-c266-4c2f-bb98-d806a70637cb/e3ca5b54-1e80-4a97-a18e-be7d94cec8a7/store.db-shm",
+          "bytes": 32768
+        },
+        {
+          "path": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/380f9c41-c266-4c2f-bb98-d806a70637cb/e3ca5b54-1e80-4a97-a18e-be7d94cec8a7/store.db-wal",
+          "bytes": 0
+        }
+      ],
+      "after_next_operation_payloads": [],
+      "next_output_sha256": "264789a069e38d1f208d2ec6d887d5af02c0362704b4f7cd4b761078d3fd99c0",
+      "stdout_bytes": 0,
+      "stderr": ""
+    }
+  ],
+  "mcp_disconnect": {
+    "pid": 88021,
+    "returncode": 0,
+    "generated_children_at_witness": [
+      88022
+    ],
+    "child_stopped_before_disconnect": true,
+    "children_after_server_exit": [],
+    "completed_copy_witness": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/ad2e7e28-1148-4fba-ab58-c41bb74494e5/e6a7b564-c21d-4431-bb70-32e3c4589898/store.db",
+    "payloads_after_joined_handlers": [],
+    "stderr": "cv mcp: clustervision MCP server starting (stdio JSON-RPC)\ncv mcp: generated 49 tools from the CLI\ncv mcp: stdout write failed: Broken pipe (os error 32)\n"
+  },
+  "final_normal_output_sha256": "264789a069e38d1f208d2ec6d887d5af02c0362704b4f7cd4b761078d3fd99c0",
+  "final_bookkeeping": [
+    {
+      "path": "temporary/cv-sqlite-owners-v1-47192623fa63dcdb/gate",
+      "bytes": 75
+    }
+  ],
+  "limits": [
+    "standalone abrupt exit reclamation is eventual at a later operation boundary",
+    "MCP closed-output cancellation kills and reaps a stopped generated child before request cleanup",
+    "logical named payload extents only, not physical APFS blocks or timing/RSS",
+    "owned fixture/home/catalog/TMPDIR only; source hash/identity/auxiliary absence and exact output preserved",
+    "fixed recognized gate metadata may remain; no abandoned store.db payloads"
+  ]
+}
