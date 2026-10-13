@@ -1459,3 +1459,192 @@ fn source_reroot_preserves_owned_stamp_order_including_duplicate_ids() {
         assert_eq!(actual, format!("{expected}\n").as_bytes());
     }
 }
+
+fn retrieve_legacy_oracle(path: &Path, id: &str) -> Result<Value> {
+    let raw = std::fs::read_to_string(path).with_context(|| format!("reading sidecar {}", path.display()))?;
+    let mut available = Vec::new();
+    let mut found = None;
+    let mut duplicates = 0;
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(entry) = serde_json::from_str::<SidecarEntry>(line) else {
+            continue;
+        };
+        available.push(entry.id.clone());
+        if entry.id == id {
+            if found.is_some() {
+                duplicates += 1;
+            } else {
+                found = Some(entry.content);
+            }
+        }
+    }
+    if duplicates > 0 {
+        anyhow::bail!(
+            "id {id:?} appears {} times in sidecar {} — ambiguous, refusing to guess which payload you meant",
+            duplicates + 1,
+            path.display()
+        );
+    }
+    found.ok_or_else(|| {
+        anyhow::anyhow!(
+            "id {id:?} not found in sidecar. available: {}",
+            available.iter().take(20).cloned().collect::<Vec<_>>().join(", ")
+        )
+    })
+}
+
+#[test]
+fn retrieve_projection_matches_typed_legacy_acceptance_and_error_semantics() {
+    let world = cv_testkit::World::in_process("retrieve-projection-oracle");
+    let path = world.base.join("session.flat.jsonl");
+    let row = |input: &str, content: &str, tail: &str| {
+        format!(
+            r#"{{"id":"wanted","slot":"content","name":"Read","input":{input},"content":{content},"size":1,"line_count":1,"kind":"text"{tail}}}"#
+        )
+    };
+    let valid = row("null", r#"{"actual":["雪",true,null]}"#, "");
+    let mut cases = vec![
+        valid.clone(),
+        format!("\r\n\u{2003}\nnot JSON\n{valid}\r\n"),
+        format!("\u{2003}{valid}"),
+        row("null", "null", ""),
+        row("null", r#""actual""#, r#", "unknown":"\ud800", "number":1e400"#),
+        row("null", r#""actual""#, r#", "unknown":null, "unknown":"\ud800"#),
+        row("null", r#""actual""#, r#", "id":"wanted""#),
+        row("null", r#""actual""#, r#", "\u0069d":"wanted""#),
+        row("null", r#""actual""#, r#", "\ud800":null"#),
+        row("1e400", r#""actual""#, ""),
+        row("null", r#""\ud800""#, ""),
+        row("null", "1e400", ""),
+        valid.replace(r#""size":1"#, r#""size":1.0"#),
+        valid.replace(r#""line_count":1"#, r#""line_count":-1"#),
+        valid.replace(r#""size":1"#, r#""size":18446744073709551616"#),
+        valid.replace(r#""size":1"#, r#""size":1e400"#),
+        valid.replace(r#""name":"Read""#, r#""name":null"#),
+        valid.replace(r#""input":null,""#, ""),
+        r#"["wanted","content","Read",null,{"actual":"🌙"},1,1,"text"]"#.into(),
+        r#"["wanted","content","Read",null,"actual",1,1,"text",null]"#.into(),
+        r#"["wanted","content","Read",null,"actual",1,1]"#.into(),
+        format!("{valid}\n{valid}\n{valid}"),
+    ];
+    for depth in 124..=130 {
+        let nested = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+        cases.push(row(&nested, "null", ""));
+        cases.push(row("null", "null", &format!(",\"unknown\":{nested}")));
+    }
+    for integer in [
+        "-0",
+        "0.0",
+        "1e0",
+        "18446744073709551615",
+        "18446744073709551616",
+        "true",
+        "null",
+        "-1",
+    ] {
+        cases.push(valid.replace(r#""size":1"#, &format!("\"size\":{integer}")));
+        cases.push(valid.replace(r#""line_count":1"#, &format!("\"line_count\":{integer}")));
+    }
+    for key in ["id", "slot", "name", "input", "content", "size", "line_count", "kind"] {
+        let mut missing: Value = serde_json::from_str(&valid).unwrap();
+        missing.as_object_mut().unwrap().remove(key);
+        cases.push(missing.to_string());
+    }
+    for (i, case) in cases.into_iter().enumerate() {
+        std::fs::write(&path, case).unwrap();
+        for id in ["wanted", "absent"] {
+            let expected = retrieve_legacy_oracle(&path, id);
+            let actual = retrieve(&path, id);
+            match (expected, actual) {
+                (Ok(expected), Ok(actual)) => assert_eq!(actual, expected, "case {i}"),
+                (Err(expected), Err(actual)) => assert_eq!(actual.to_string(), expected.to_string(), "case {i}"),
+                (expected, actual) => panic!("case {i}: expected {expected:?}, actual {actual:?}"),
+            }
+        }
+    }
+    let mut bytes = valid.into_bytes();
+    bytes.extend_from_slice(b"\nmalformed\xff");
+    std::fs::write(&path, bytes).unwrap();
+    let expected = retrieve_legacy_oracle(&path, "wanted").unwrap_err();
+    let actual = retrieve(&path, "wanted").unwrap_err();
+    assert_eq!(actual.to_string(), expected.to_string());
+    assert_eq!(format!("{actual:#}"), format!("{expected:#}"));
+}
+
+#[test]
+fn retrieve_bounds_available_ids_and_rejects_captured_source_changes() {
+    let world = cv_testkit::World::in_process("retrieve-source-guard");
+    let path = world.base.join("session.flat.jsonl");
+    let mut out = std::fs::File::create(&path).unwrap();
+    for i in 0..40 {
+        writeln!(
+            out,
+            "{}",
+            sidecar_line(&format!("id-{i}"), "tool", &Value::Null, "actual")
+        )
+        .unwrap();
+    }
+    drop(out);
+    assert_eq!(
+        retrieve(&path, "absent").unwrap_err().to_string(),
+        retrieve_legacy_oracle(&path, "absent").unwrap_err().to_string()
+    );
+    let captured = crate::json::JsonSource::capture(&path).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    assert!(retrieve_captured(&captured, &file, &path, "id-0").is_err());
+}
+
+#[test]
+fn retrieve_giant_unselected_fields_return_only_requested_content() {
+    let world = cv_testkit::World::in_process("retrieve-giant-unselected");
+    let path = world.base.join("session.flat.jsonl");
+    let mut out = std::fs::File::create(&path).unwrap();
+    let chunk = "ignored-🌙\\n\\\"\\\\".repeat(4096);
+    out.write_all(br#"{"id":"other-"#).unwrap();
+    for _ in 0..32 {
+        out.write_all(chunk.as_bytes()).unwrap();
+    }
+    out.write_all(br#"","slot":"content","name":""#).unwrap();
+    for _ in 0..32 {
+        out.write_all(chunk.as_bytes()).unwrap();
+    }
+    out.write_all(br#"","input":{"body":""#).unwrap();
+    for _ in 0..32 {
+        out.write_all(chunk.as_bytes()).unwrap();
+    }
+    out.write_all(br#""},"content":{"body":""#).unwrap();
+    for _ in 0..32 {
+        out.write_all(chunk.as_bytes()).unwrap();
+    }
+    out.write_all(br#""},"size":1,"line_count":1,"kind":"text"}"#).unwrap();
+    out.write_all(b"\n").unwrap();
+    let chosen = serde_json::json!({"actual":["雪🌙",true,null]});
+    let entry = SidecarEntry {
+        id: "wanted".into(),
+        slot: "content".into(),
+        name: "tool".into(),
+        input: Value::Null,
+        content: chosen.clone(),
+        size: 1,
+        line_count: 1,
+        kind: "text".into(),
+    };
+    serde_json::to_writer(&mut out, &entry).unwrap();
+    drop(out);
+    assert_eq!(retrieve(&path, "wanted").unwrap(), chosen);
+    assert_eq!(
+        retrieve(&path, "wanted").unwrap(),
+        retrieve_legacy_oracle(&path, "wanted").unwrap()
+    );
+    assert!(retrieve(&path, "absent").unwrap_err().to_string().contains(", wanted"));
+    assert_eq!(
+        retrieve(&path, "absent").unwrap_err().to_string(),
+        retrieve_legacy_oracle(&path, "absent").unwrap_err().to_string()
+    );
+}

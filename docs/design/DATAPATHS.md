@@ -2097,3 +2097,41 @@ Unicode/escaping/CRLF/empty text/input-order cases, original owned deserializati
 rejection, existing destination links/permissions, and existing prune/retrieve controls. The CLI
 empty-roster regression also preserves a preexisting sidecar; actual CLI `--upto`/resume/`--with` output matches the legacy sidecar fields and bytes. The shared stage's existing
 pre-publication failure mechanism is reused unchanged.
+Bounded prune-sidecar retrieval (2026-10-13): `prune::retrieve`, used by `cv cat`, previously
+read the complete flat JSONL into one String and deserialized every row's input/content while
+retaining every available ID. It now captures/checks the original sidecar, scans every row for
+ambiguity, and retains only the first selected content descriptor plus at most 20 ID descriptors.
+The requested Value becomes owned only after duplicate detection; diagnostic IDs are streamed
+into the existing not-found error only when that error is needed. A giant unrelated ID therefore
+does not inflate successful retrieval. Requested large content or diagnostic text still grows
+with the actual returned output. No cache/index or persistent backing is added.
+
+Typed `SidecarEntry` acceptance remains distinct from blanket Value acceptance: unique required
+fields and positional sequences use shared `Fields::parse_struct`; input/content validate as
+Value at the enclosing struct's recursion depth; unused required strings validate without
+materialization; integer fields preserve usize acceptance. Unknown values keep IgnoredAny
+semantics, including invalid Unicode escapes/numeric overflow that derived serde ignores. Raw
+nonblank Unicode boundary whitespace stays invalid JSON; blank/malformed rows remain ignored.
+Whole-file UTF8 failure retains the original `reading sidecar PATH` error context/chain, and
+not-found/duplicate diagnostics match the frozen reader. Opened-descriptor and original-path
+checks run even after projection failures; newly detected source changes are errors. CLI's
+existing best-effort sidecar fallback remains unchanged.
+
+Native scanning opens/maps once and borrows UTF8-checked rows through the existing JsonSource
+projection factory; portable scanning reuses one captured positioned context (two initial
+readonly descriptors including the framing file). There are no per-row opens/maps. The final
+requested Value needs one checked source replay; a not-found diagnostic replays at most 20 ID
+ranges. Native mmap/RSS, OS cache and allocator overhead are outside Rust heap measurements.
+Whole-file validation/full scanning remain work proportional to input; no timing claim is made.
+
+Frozen native/portable oracles cover objects/sequences, duplicate/missing fields, unknown fields,
+Unicode, recursion boundaries, scalar usize edge cases, duplicate IDs, malformed lines, full
+UTF8 error chains and capture changes. Giant unselected ID/name/input/content precede a tiny
+selected Value in the allocation control. At 16/64 MiB input, old Rust heap peaks above baseline
+are 37,749,830/150,996,038 bytes; candidate native peaks are 1,472/1,472 and portable
+328,594/328,594 bytes, with exact selected output. Missing-ID controls with small diagnostic IDs
+and giant unrelated bodies preserve the exact error text: old peaks 33,424,451/134,087,747,
+versus the same flat candidate peaks. Reports are `retrieve-{native,portable}-heap.json` and
+`retrieve-{native,portable}-miss-heap.json` under `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence`;
+that directory also preserves the fixtures in `retrieve-control/` and
+`retrieve_heap_probe.rs`, which records the isolated requested-Rust-allocation control.

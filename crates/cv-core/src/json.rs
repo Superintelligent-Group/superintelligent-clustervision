@@ -206,12 +206,48 @@ impl JsonSource {
         text: &str,
         f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
     ) -> Result<T> {
+        self.read_borrowed_range(offset, text, Validation::Value, f)
+    }
+    /// Syntax-only counterpart for typed projections whose ignored fields use IgnoredAny.
+    #[cfg(feature = "mmap")]
+    pub(crate) fn read_borrowed_range_syntax<T>(
+        &self,
+        offset: u64,
+        text: &str,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        self.read_borrowed_range(offset, text, Validation::Syntax, f)
+    }
+    #[cfg(feature = "mmap")]
+    fn read_borrowed_range<T>(
+        &self,
+        offset: u64,
+        text: &str,
+        validation: Validation,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
         let range = self.range(offset, text.len() as u64)?;
         self.check()?;
         let index = document::Index::default();
-        let result = range.with_native_view(Raw::new(text, &index), Validation::Value, f);
+        let result = range.with_native_view(Raw::new(text, &index), validation, f);
         self.check()?;
         result
+    }
+    /// Reuse one checked original-source positioned context for many typed records.
+    #[cfg(not(feature = "mmap"))]
+    pub(crate) fn read_positioned_range_syntax<T>(
+        &self,
+        context: &RangeSource,
+        offset: u64,
+        len: u64,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        anyhow::ensure!(
+            context.matches_original(self),
+            "JSON positioned context has different provenance"
+        );
+        self.range(offset, len)?
+            .with_positioned_view(context, Validation::Syntax, f)
     }
     pub(crate) fn read_range_value<T>(
         &self,
@@ -504,35 +540,44 @@ impl JsonRange {
                 Some(bytes) => RangeSource::decoded(self.source.clone(), bytes)?,
                 None => RangeSource::from_captured(self.source.clone())?,
             };
-            let requested = Range {
-                offset: self.offset,
-                len: self.len,
-            };
-            let result = (|| {
-                let value = match validation {
-                    Validation::Cached => requested,
-                    Validation::Value | Validation::Syntax => {
-                        let valid = if matches!(validation, Validation::Value) {
-                            source.validate(requested)?
-                        } else {
-                            source.syntax(requested)?
-                        };
-                        if !valid {
-                            return Err(InvalidJson.into());
-                        }
-                        source.cursor(requested)?.value()?
-                    }
-                };
-                f(JsonView(View::Portable(PortableView {
-                    source: &source,
-                    owner: self,
-                    value,
-                })))
-            })();
-            source.check_identity()?;
-            self.check()?;
-            result
+            self.with_positioned_view(&source, validation, f)
         }
+    }
+    #[cfg(not(feature = "mmap"))]
+    fn with_positioned_view<T>(
+        &self,
+        source: &RangeSource,
+        validation: Validation,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        let requested = Range {
+            offset: self.offset,
+            len: self.len,
+        };
+        let result = (|| {
+            let value = match validation {
+                Validation::Cached => requested,
+                Validation::Value | Validation::Syntax => {
+                    let valid = if matches!(validation, Validation::Value) {
+                        source.validate(requested)?
+                    } else {
+                        source.syntax(requested)?
+                    };
+                    if !valid {
+                        return Err(InvalidJson.into());
+                    }
+                    source.cursor(requested)?.value()?
+                }
+            };
+            f(JsonView(View::Portable(PortableView {
+                source,
+                owner: self,
+                value,
+            })))
+        })();
+        source.check_identity()?;
+        self.check()?;
+        result
     }
 }
 
@@ -1484,6 +1529,37 @@ mod tests {
     }
     use super::*;
     use serde_json::json;
+
+    #[cfg(not(feature = "mmap"))]
+    #[test]
+    fn positioned_syntax_context_preserves_capture_and_failure_precedence() {
+        let first = Fixture::new(br#"{"known":1,"ignored":"\ud800"}"#);
+        let second = Fixture::new(br#"{"known":1,"ignored":"\ud800"}"#);
+        let source = JsonSource::capture(&first.path).unwrap();
+        let other = JsonSource::capture(&second.path).unwrap();
+        let context = RangeSource::from_captured(source.clone()).unwrap();
+        assert_eq!(
+            source
+                .read_positioned_range_syntax(&context, 0, source.len(), |view| {
+                    Ok(view.get("known")?.unwrap().resolve()?.as_u64())
+                })
+                .unwrap(),
+            Some(1)
+        );
+        assert!(other
+            .read_positioned_range_syntax(&context, 0, other.len(), |_| Ok(()))
+            .is_err());
+        let error = source
+            .read_positioned_range_syntax(&context, 0, source.len(), |_| -> Result<()> {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&first.path)?
+                    .write_all(b" ")?;
+                anyhow::bail!("intentional callback stop")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("source changed"));
+    }
 
     #[cfg(feature = "mmap")]
     #[test]

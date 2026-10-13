@@ -69,6 +69,10 @@ impl RangeSource {
         source.check_identity()?;
         Ok(source)
     }
+    #[cfg(not(feature = "mmap"))]
+    pub(crate) fn matches_original(&self, captured: &crate::json::JsonSource) -> bool {
+        self.decoded_len.is_none() && &self.captured == captured
+    }
     pub fn range(&self) -> Range {
         Range {
             offset: 0,

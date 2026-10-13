@@ -8,6 +8,7 @@
 - Distill prefixes materialize only messages selected by `--upto`, preserving final session metadata and original-count validation.
 
 - Pack extracts stale events during its excerpt pass, preserving excerpt output and best-effort event publication while avoiding a second transcript traversal.
+- Prune-sidecar retrieval avoids owning unrelated payloads and IDs while preserving typed row acceptance, ambiguity errors, and requested content.
 
 - Transcript windows render before full-session metadata arrives; late metadata preserves loaded pages, pagination, expanded prompts and the current selection.
 - Distill reuses one prepared tail; findings-only analysis skips unused sidecar copies, tail rendering and token accounting.
