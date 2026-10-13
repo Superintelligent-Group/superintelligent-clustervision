@@ -152,32 +152,45 @@ class CvApp extends HTMLElement {
    *  "load more" pages in the rest (`_loadMoreMessages`). Falls back to the classic whole-session
    *  fetch when the windowed path isn't available (older server). Returns the hydrated session. */
   async _hydrate(stub) {
-    // Both at once: the first window, and the session-level facts a window can never learn. A
-    // windowed read stops when its window is full, so anything the transcript records LATER —
-    // Claude writes its system prompt well after the opening turns — is simply not reached.
-    const [win, head] = await Promise.all([getMessages(stub, 0, PAGE), getSessionHead(stub)]);
+    this._hydrations ||= new WeakMap();
+    const pending = this._hydrations.get(stub);
+    if (pending) return pending;
+    const task = this._hydrateWindow(stub);
+    this._hydrations.set(stub, task);
+    try { return await task; }
+    finally { this._hydrations.delete(stub); }
+  }
+
+  async _hydrateWindow(stub) {
+    // Head scans through EOF, independently of the first useful message window.
+    // Settle failure immediately so it cannot reject unhandled while the window is pending.
+    const headReady = getSessionHead(stub).catch(() => null);
+    const win = await getMessages(stub, 0, PAGE);
     if (win) {
-      // Drop nulls from EACH source before merging, not after: a windowed read reports
-      // `system_prompt: null` (it stops before the record that carries it), and merging that null
-      // over the head's real value destroyed it — the filter below then removed the key entirely.
       const present = (o) => Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v != null));
-      const meta = { ...present(head), ...present(win.session) };
-      // The stream's parsed metadata (when delivered) beats the discovery-time stub's. Spread the
-      // whole meta rather than three named fields: the server decides what a session-level fact is, and a
-      // fact it starts sending (`system_prompt`, `lineage`) should reach the UI without a change
-      // here. Nulls in the meta must not clobber the stub, so drop them first.
-      const live = Object.fromEntries(Object.entries(meta).filter(([, v]) => v != null));
-      const full = normalizeSession({
-        ...stub,
-        ...live,
-        messages: win.messages,
-      });
+      const windowMeta = present(win.session);
+      const full = normalizeSession({ ...stub, ...windowMeta, messages: win.messages });
       full._stub = false;
+      full._totalKnown = !!win.total_known;
       if (win.total_known) full.message_count = win.total;
-      else if (head && Number.isFinite(head.total)) full.message_count = head.total;
       if (win.has_more) full._paged = { next: win.end };
-      const i = this._sessions.findIndex((x) => x.id === stub.id && x.harness === stub.harness);
+      const i = this._sessions.indexOf(stub);
       if (i >= 0) this._sessions[i] = full;
+      headReady.then((head) => {
+        if (!head) return;
+        const current = this._sessions.find((x) => x.id === full.id && x.harness === full.harness);
+        if (current && current !== full) return; // a newer pool entry owns this identity
+        // Normalize metadata without copying or replacing already-loaded messages/pages.
+        const meta = normalizeSession({ ...full, ...present(head), ...windowMeta, messages: [] });
+        for (const [key, value] of Object.entries(meta)) {
+          if (key !== "messages" && key !== "message_count") full[key] = value;
+        }
+        if (!full._totalKnown) {
+          if (Number.isFinite(head.total)) full.message_count = head.total;
+          else if (meta.message_count != null) full.message_count = meta.message_count;
+        }
+        if (this._transcript?.session === full) this._transcript.notifyMetadata();
+      });
       return full;
     }
 
@@ -185,7 +198,7 @@ class CvApp extends HTMLElement {
     const raw = await apiGet(`/api/session/${encodeURIComponent(stub.harness)}/${encodeURIComponent(stub.id)}`);
     const full = normalizeSession(raw);
     full._stub = false;
-    const i = this._sessions.findIndex((x) => x.id === stub.id && x.harness === stub.harness);
+    const i = this._sessions.indexOf(stub);
     if (i >= 0) this._sessions[i] = full; // cache so we don't refetch
     return full;
   }
@@ -200,7 +213,7 @@ class CvApp extends HTMLElement {
         // Route the raw window through the session normalizer so blocks/usage match the pool.
         const norm = normalizeSession({ id: s.id, harness: s.harness, messages: win.messages });
         s.messages.push(...norm.messages);
-        if (win.total_known) s.message_count = win.total;
+        if (win.total_known) { s.message_count = win.total; s._totalKnown = true; }
         s._paged = win.has_more ? { next: win.end } : null;
       } else {
         s._paged = null; // endpoint gone or nothing left — stop offering more
@@ -209,7 +222,7 @@ class CvApp extends HTMLElement {
       console.warn("[clustervision] load-more failed:", e);
       s._paged = null;
     }
-    this._transcript.notifyAppended();
+    if (this._transcript?.session === s) this._transcript.notifyAppended();
   }
 
   /** GET JSON with a hard timeout; returns null on any failure/timeout (never throws, never hangs). */
@@ -492,16 +505,19 @@ class CvApp extends HTMLElement {
     const hit = this._sessions.find((s) => s.id === id)
       || this._sessions.find((s) => s.id?.startsWith(id) || id.startsWith(s.id));
     if (hit) { this._openInSessions(hit); return; }
+    const token = (this._showToken = (this._showToken || 0) + 1);
     this._setStatus(`Looking up ${id}…`);
     try {
       const stub = normalizeSession({ id, harness, _stub: true });
       stub._stub = true;
       const full = await this._hydrate(stub);
+      if (token !== this._showToken) return;
       this._sessions = this._mergePool(this._sessions, [full]);
       this._refreshViews();
       this._openInSessions(full);
       this._setStatus("", "ok");
     } catch {
+      if (token !== this._showToken) return;
       this._setStatus(`No session ${id} in this archive — it may live on another machine.`, "warn");
     }
   }

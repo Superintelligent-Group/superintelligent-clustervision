@@ -72,6 +72,7 @@ import "./components/cv-session-list.js";
 import "./components/cv-compare.js";
 import "./components/cv-forest.js";
 import "./components/cv-splice.js";
+import "./components/cv-app.js";
 
 // ---------------------------------------------------------------------------
 // Tiny harness. No dependencies, no build step: a check is a name and a body
@@ -753,6 +754,160 @@ check("an unfolded dropzone is still the prominent invitation", () => {
   document.body.appendChild(dz);
   if (dz.getBoundingClientRect().height < 60) throw new Error("the demo dropzone lost its prominence");
 });
+
+suite("First transcript window — independent late metadata");
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
+async function hydrationFixture(body) {
+  const original = globalThis.fetch;
+  const heads = new Map(), windows = new Map();
+  const app = document.createElement("cv-app"); // detached: no init/sample fetch
+  app._transcript = document.createElement("cv-transcript");
+  app._transcript._mountEvents = () => {};
+  app._transcript._mountSubagents = () => {};
+  app._list = {};
+  app._setStatus = () => {};
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    const id = path.split("/")[4];
+    const source = path.endsWith("/head") ? heads : windows;
+    const raw = await source.get(id).promise;
+    return { ok: true, json: async () => raw };
+  };
+  const stub = (id) => {
+    const s = normalizeSession({ id, harness: "claude", title: "discovery", message_count: 99 });
+    s._stub = true;
+    app._sessions.push(s);
+    heads.set(id, deferred()); windows.set(id, deferred());
+    return s;
+  };
+  const window = (extra = {}) => ({ messages: [{ role: "user", content: [{ type: "text", text: "ready" }] }],
+    start: 0, end: 1, has_more: true, total_known: false, session: { title: "window", system_prompt: null }, ...extra });
+  const settle = async () => { for (let n = 0; n < 30; n++) await Promise.resolve(); };
+  try { await body({ app, heads, windows, stub, window, settle }); }
+  finally { globalThis.fetch = original; }
+}
+
+await acheck("window paints before head; final merged metadata matches the prior oracle", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
+  const s = stub("first");
+  const win = window();
+  const opening = app._showSession(s);
+  windows.get(s.id).resolve(win);
+  await opening; // head is deliberately unresolved
+  const full = app._transcript.session;
+  truthy(app._transcript.querySelector(".turn"), "first message painted without head");
+  const turns = app._transcript.querySelector(".turns");
+  const head = { title: "head", model: "late-model", system_prompt: "late prompt", total: 7, lineage: { forked_from: "parent" } };
+  heads.get(s.id).resolve(head);
+  await settle();
+  eq(app._transcript.querySelector(".turns"), turns, "metadata must preserve rendered turns");
+  const present = o => Object.fromEntries(Object.entries(o).filter(([, v]) => v != null));
+  const oracle = normalizeSession({ ...s, ...present(head), ...present(win.session), messages: win.messages });
+  oracle.message_count = head.total;
+  for (const key of Object.keys(oracle)) eq(JSON.stringify(full[key]), JSON.stringify(oracle[key]), `merged ${key}`);
+  has(app._transcript.textContent, "late prompt", "late metadata visible");
+}));
+
+await acheck("paging before head preserves loaded pages, known total and expanded prompt", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
+  const s = stub("paged");
+  const opening = app._showSession(s);
+  windows.get(s.id).resolve(window({ session: { system_prompt: "window prompt" } }));
+  await opening;
+  const full = app._transcript.session;
+  app._transcript.querySelector(".th-sysprompt").open = true;
+  windows.set(s.id, deferred());
+  const paging = app._loadMoreMessages();
+  windows.get(s.id).resolve(window({ start: 1, end: 2, has_more: false, total_known: true, total: 2 }));
+  await paging;
+  const messages = full.messages;
+  const turns = app._transcript.querySelector(".turns");
+  heads.get(s.id).resolve({ system_prompt: "head prompt", total: 99, model: "late" });
+  await settle();
+  eq(full.messages, messages, "keep loaded message array");
+  eq(full.messages.length, 2, "keep second page");
+  eq(full.message_count, 2, "page known total beats head");
+  eq(full._paged, null, "head cannot restart paging");
+  eq(app._transcript.querySelector(".turns"), turns, "no page reset");
+  truthy(app._transcript.querySelector(".th-sysprompt").open, "prompt remains expanded");
+  eq(full.system_prompt, "window prompt", "nonnull window metadata wins");
+}));
+
+await acheck("late head enriches cached session without repainting another selection", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
+  const a = stub("away"), b = normalizeSession({ id: "other", messages: [] });
+  const opening = app._showSession(a);
+  windows.get(a.id).resolve(window()); await opening;
+  const cached = app._transcript.session;
+  await app._showSession(b);
+  const otherHeader = app._transcript.querySelector(".transcript-header");
+  heads.get(a.id).resolve({ model: "cached late", total: 8 }); await settle();
+  eq(app._transcript.session, b, "selection remains other session");
+  eq(app._transcript.querySelector(".transcript-header"), otherHeader, "other header untouched");
+  eq(cached.model, "cached late", "cached metadata enriched");
+  await app._showSession(cached);
+  has(app._transcript.textContent, "cached late", "return uses enriched cached session");
+}));
+
+await acheck("early head and known first-window totals retain window precedence", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
+  const s = stub("head-first");
+  heads.get(s.id).resolve({ title: "head", model: "early", total: 999 });
+  const opening = app._showSession(s);
+  await settle();
+  windows.get(s.id).resolve(window({ total_known: true, total: 1, has_more: false }));
+  await opening; await settle();
+  eq(app._transcript.session.model, "early", "early metadata retained");
+  eq(app._transcript.session.title, "window", "window title wins");
+  eq(app._transcript.session.message_count, 1, "known first-window total wins");
+}));
+
+await acheck("superseded pool identity and stale first-window completion cannot repaint selection", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
+  const s = stub("stale-window");
+  const opening = app._showSession(s);
+  const other = normalizeSession({ id: "selected", messages: [] });
+  await app._showSession(other);
+  windows.get(s.id).resolve(window()); await opening;
+  eq(app._transcript.session, other, "stale window cannot paint");
+  const old = app._sessions[0];
+  const replacement = normalizeSession({ id: s.id, harness: s.harness, model: "new generation", messages: [] });
+  app._sessions[0] = replacement;
+  heads.get(s.id).resolve({ model: "obsolete head", total: 99 }); await settle();
+  eq(app._sessions[0], replacement, "late head cannot replace newer pool entry");
+  eq(replacement.model, "new generation", "new generation facts unchanged");
+  eq(old.model, undefined, "obsolete object is not enriched");
+}));
+
+await acheck("head failure and unavailable windows retain first result and whole-session fallback", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
+  const s = stub("failed-head");
+  const opening = app._showSession(s);
+  windows.get(s.id).resolve(window()); await opening;
+  heads.get(s.id).reject(new Error("head unavailable")); await settle();
+  eq(app._transcript.session.messages.length, 1, "head failure retains window");
+  const old = stub("old-server");
+  windows.get(old.id).resolve(null);
+  const whole = normalizeSession({ id: old.id, harness: old.harness, title: "whole", messages: window().messages });
+  // The fixture's whole-session path uses the same deferred map after window absence.
+  globalThis.fetch = async url => new URL(url).pathname.endsWith("/head")
+    ? await heads.get(old.id).promise
+    : { ok: true, json: async () => new URL(url).pathname.endsWith("/messages") ? null : whole };
+  const full = await app._hydrate(old); // still-unresolved head cannot hold the fallback
+  eq(full.title, "whole", "whole-session fallback");
+  eq(full._stub, false, "fallback cached as loaded");
+}));
+
+await acheck("superseded lookup cannot change navigation; concurrent stub hydration shares window", () => hydrationFixture(async ({ app, heads, windows, stub, window }) => {
+  const a = stub("dedup");
+  const first = app._hydrate(a), second = app._hydrate(a);
+  windows.get(a.id).resolve(window());
+  eq(await first, await second, "same in-flight session object");
+  heads.set("missing", deferred()); windows.set("missing", deferred());
+  const lookup = app._openById({ id: "missing", harness: "claude" });
+  const other = normalizeSession({ id: "selected", messages: [] });
+  await app._showSession(other);
+  windows.get("missing").resolve(window()); await lookup;
+  eq(app._transcript.session, other, "stale lookup cannot navigate");
+}));
 
 // ===========================================================================
 // Report

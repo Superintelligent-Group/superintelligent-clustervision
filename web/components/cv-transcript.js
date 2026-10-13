@@ -212,6 +212,19 @@ class CvTranscript extends HTMLElement {
     this._renderPager();
   }
 
+  /** Late session facts update chrome without resetting turns, paging or scroll. */
+  notifyMetadata() {
+    const s = this._session;
+    const header = this.querySelector(".transcript-header");
+    if (!s || !header) return;
+    const promptOpen = !!header.querySelector(".th-sysprompt")?.open;
+    header.outerHTML = this._headerHtml(s);
+    const prompt = this.querySelector(".th-sysprompt");
+    if (prompt) prompt.open = promptOpen;
+    this._wireHeader(s);
+    this._renderPager();
+  }
+
   // ---- events panel --------------------------------------------------------
   // What the session DID: file edits/commands/errors from the event catalog (cv serve's `/events`
   // endpoint / the desktop's `local_events`). Collapsible, below the header, mirroring the

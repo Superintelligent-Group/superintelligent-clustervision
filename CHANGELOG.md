@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Transcript windows render before full-session metadata arrives; late metadata preserves loaded pages, pagination, expanded prompts and the current selection.
+
 - Pack excerpts include checked source-backed text and report unavailable prefixes instead of silently omitting conversational content.
 - CLI JSON staging batches small writes through bounded operation buffers while preserving output, byte budgets, rollback and continuation hints.
 - Cat and rendered views report unavailable retained text instead of empty output or unresolved-text panics, while preserving lazy tool arguments.

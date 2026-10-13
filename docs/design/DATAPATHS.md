@@ -1953,3 +1953,23 @@ render/text helpers require materialized messages; best-effort Text resolution h
 report source failures; error-event detail intentionally omits lazy bodies; and `cat --input`
 fully owns requested JSON through checked serde. No further proven disconnected carrier
 consumer remains in the reviewed paths.
+
+
+### Browser first-window scheduling (2026-10-13)
+
+The main transcript viewer no longer awaits Promise.all(window, head). It starts both existing
+requests, renders/caches the ready first window, then merges EOF-derived head facts into that
+exact object. Nonnull window metadata still wins over head metadata; exact window/page totals
+win over head totals. Late metadata refreshes only the selected object's header and pager,
+retaining turn DOM, loaded messages, page progress and expanded system prompts. An inactive
+cached session still gains metadata for later selection. Pool-object and navigation guards
+prevent old work from replacing newer entries or repainting another session. In-flight stub
+hydration is deduplicated only until the window/fallback settles. Old servers still use the
+whole-session fallback without waiting for head; head failure retains the ready window.
+
+Seven deterministic deferred-fetch tests exercise head/window completion order, paging before
+head, known-total precedence, exact prior merged-end-state oracle, navigation and pool-generation
+races, inactive-session enrichment, deduplication, head failures and whole-session fallback.
+The Chrome web selftest passes 62/62. This removes an application-level first-render dependency;
+it does not reduce EOF-head work, cancel background requests, add a metadata cache or change
+API contracts. No elapsed-time measurement or throughput claim is made.
