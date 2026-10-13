@@ -1,0 +1,51 @@
+{
+  "command": [
+    "/scratch/target/release/cv",
+    "ls",
+    "--json",
+    "--limit",
+    "20"
+  ],
+  "binary_sha256": "1e0b1dfe19c44aa645a641d6de1f92b5b55563bd40df0dd984eddc577e73ab16",
+  "input_sha256": "f87c9458870ffaf7c284f9d72dee59384195a5cf08c24473b73c7a2ad6902992",
+  "seed_catalog_sha256": null,
+  "output_mode": "bytes",
+  "harness_home": "/scratch/cli-fixture/home",
+  "rayon_threads": 1,
+  "runtime_rustflags": "",
+  "valgrind": "valgrind-3.24.0",
+  "architecture": "aarch64",
+  "Ir": [
+    23632021,
+    23625936
+  ],
+  "Ir_delta": -6085,
+  "semantic_output": {
+    "sha256": "adde83e6d98baf8c2e538fa26cba9490c02419e0ada259badf659cdd74bd721d",
+    "bytes": 3091
+  },
+  "parity": true,
+  "stderr_output": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "exact_parity": true
+  },
+  "build": {
+    "source_commit": "d14714a6",
+    "base_commit": "78a3f86d",
+    "publication_commit": "2a10cfda",
+    "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+    "llvm": "23.1.1",
+    "profile": "release opt-level=3 lto=thin debuginfo=1",
+    "core_features": [
+      "default",
+      "mmap",
+      "parallel",
+      "sqlite"
+    ],
+    "rustflags": "",
+    "image_manifest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+    "cpus": 3,
+    "memory_bytes": 8589934592
+  }
+}

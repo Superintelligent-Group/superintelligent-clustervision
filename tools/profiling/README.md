@@ -96,3 +96,100 @@ Raw Cachegrind files and both attribution reports are retained in the task-owned
 Docker volume at `/scratch/profile-pinned`; compiler/package evidence is at
 `/scratch/compiler.txt` and `/scratch/packages.txt`. The container is stopped
 after capture; restarting it preserves the exclusive Linux target and results.
+
+## Whole CLI controls
+
+`--output bytes` compares stdout and stderr byte for byte against the native
+child. `--harness-home` supplies an isolated synthetic HOME/XDG environment;
+`--seed-catalog` restores a frozen catalog/index before each child. Fixtures and
+seeds are hashed before and after the three invocations to reject input mutation.
+A directory hash covers sorted relative filenames, lengths and bytes, without
+following symlinks. Setup/generation/copying/hashing are outside the profiled child.
+
+Index provenance includes its canonical path (`fts:<index path>`). Relocating a
+seed causes legitimate reindexing. Use `--catalog-home` to restore the original
+canonical path; it must initially be absent and becomes runner-owned. Prepare the
+seed at that path, checkpoint SQLite, then move it aside before profiling. Do not
+rewrite the seed's provenance strings to pretend a relocated index is unchanged.
+`--expect-stderr TEXT` can require operation diagnostics in each child.
+
+Example after building the actual CLI in the same exclusive Linux target:
+
+```sh
+# In the container; setup is outside Cachegrind.
+python3 /scratch/cli-work/tools/profiling/cli-fixture.py /scratch/cli-fixture
+export HOME=/scratch/cli-fixture/home RAYON_NUM_THREADS=1
+export XDG_CONFIG_HOME=/scratch/seed-config XDG_DATA_HOME=/scratch/seed-data
+export XDG_CACHE_HOME=/scratch/seed-cache
+CV=/scratch/target/release/cv
+RUNNER=/scratch/cli-work/tools/profiling/cachegrind.py
+python3 "$RUNNER" --input "$HOME" --harness-home "$HOME" --output bytes \
+  /scratch/cli-ls-cold -- "$CV" ls --json --limit 20
+CLUSTERVISION_HOME=/scratch/cli-seed "$CV" ls --json --limit 20
+CLUSTERVISION_HOME=/scratch/cli-seed "$CV" index
+# Checkpoint all seed *.db files with sqlite3's PRAGMA wal_checkpoint(TRUNCATE).
+python3 "$RUNNER" --input "$HOME" --harness-home "$HOME" --output bytes \
+  --seed-catalog /scratch/cli-seed /scratch/cli-ls-warm -- "$CV" ls --json --limit 20
+CLUSTERVISION_HOME=/scratch/profiled-index-catalog "$CV" index
+CLUSTERVISION_HOME=/scratch/profiled-index-catalog "$CV" index
+# Require the second setup pass to say 0 changed/new, 8 unchanged, 0 errors;
+# checkpoint SQLite, then move this task-owned directory to /scratch/index-seed-fixed.
+python3 "$RUNNER" --input "$HOME" --harness-home "$HOME" --output bytes \
+  --seed-catalog /scratch/index-seed-fixed --catalog-home /scratch/profiled-index-catalog \
+  --expect-stderr '0 changed/new' --expect-stderr '8 unchanged, 0 errors' \
+  /scratch/cli-index-fixed -- "$CV" index
+```
+
+The warm seed's full-sync stamp must remain within the configured freshness
+backstop (default 900 seconds); confirm that the intended warm route was measured.
+For before/after controls retain the exact input inodes, seed bytes, canonical
+catalog/index paths, auxiliary paths, commands and environment. Preserve old
+reports before reusing their paths. Count only child instructions, not setup.
+
+### Recorded CLI results (2026-10-13)
+
+Eight synthetic sessions (four Claude, four Codex), 586,452 physical input bytes.
+Source `78a3f86d` plus publication change `2a10cfda` (local combined `d14714a6`),
+same Rust/Valgrind/image/build settings as above, actual default-feature CLI,
+one Rayon worker, three CPUs/8 GiB. No timing comparison, cache/branch simulation,
+semantic model or real harness data. Each row is two repeats of one fixed state:
+
+| Operation | Ir run 1 | Ir run 2 | Difference |
+|---|---:|---:|---:|
+| cold `cv ls --json --limit 20` | 23,632,021 | 23,625,936 | 0.0257% |
+| verified warm list, same command | 5,579,741 | 5,578,344 | 0.0250% |
+| unchanged `cv index` | 20,039,841 | 20,033,524 | 0.0315% |
+
+All stdout and stderr bytes match each operation's native child. Cold and warm
+list outputs also match each other (3,091 bytes). Index diagnostics confirm zero
+changed/new, zero removed, eight unchanged and zero errors. Hashes and provenance
+are in the three `cli-*-arm64.json` results. Raw profiles and complete attribution
+remain in the exclusive volume under their `/scratch/cli-*` operation directories.
+
+File attribution accounts for all instructions; these categories are source-file
+locations, **not inclusive call-tree costs** (inlining assigns work to Rust core
+files separately):
+
+| Source files | Cold list | Warm list | Unchanged index |
+|---|---:|---:|---:|
+| SQLite C | 7,383,981 (31.2%) | 2,154,697 (38.6%) | 7,971,380 (39.8%) |
+| glibc allocator | 4,401,882 (18.6%) | 1,225,674 (22.0%) | 5,061,983 (25.3%) |
+| dynamic loader | 565,025 (2.4%) | 563,637 (10.1%) | 565,469 (2.8%) |
+| clap sources | 89,139 (0.4%) | 89,139 (1.6%) | 85,483 (0.4%) |
+
+Warm list's SQLite parser alone executes 334,382 instructions; unchanged index's
+executes 1,213,829, plus 779,418 in parser reduction and 639,980 in tokenization.
+Cold list additionally spends 1,208,012 in serde JSON escape scanning. True unchanged
+index attributes only 59,946 directly to Tantivy files and performs no transcript
+indexing. A deliberately rejected relocated-seed control did tokenize/reindex;
+its 133M instructions are not an unchanged-index result.
+
+The next supported candidate is operation-scoped catalog connection/schema/SQL
+preparation reuse: catalog initialization repeats across last-sync, freshness,
+row reads and index planning. This can remove repeated setup without weakening
+fresh inventory/source checks. It needs its own before/after proof; this profile
+does not establish how much of SQLite or allocation is removable. Loader/clap
+are fixed startup work for this small fixture. These user-space guest instruction
+counts omit kernel/I/O wait costs and do not predict Apple Silicon elapsed time
+or the scaling of a 6,000-session fleet. Known-ID windows and rich queries were
+not profiled in this control.
