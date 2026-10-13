@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "u", "sessionId": "old", "message": {"role": "user", "content": "prompt"}}
+{"type": "assistant", "uuid": "a", "sessionId": "old", "parentUuid": "u", "message": {"role": "assistant", "content": [{"type": "text", "text": "ALPHA beta __GIANT_FIELD__"}, {"type": "text", "text": "conclusion"}]}}
+{"type": "user", "uuid": "v", "sessionId": "old", "message": {"role": "user", "content": "recent"}}
+{"type": "assistant", "uuid": "z", "sessionId": "old", "message": {"role": "assistant", "content": [{"type": "text", "text": "recent answer"}]}}

@@ -21,10 +21,11 @@ batch addresses three actual-operation counterexamples: same-harness complete re
 ordinary body, 267 MB peak requested Rust heap), Unicode prune declassification (32 MiB body
 with one emoji, 67 MB), and Gemini export (32 MiB ordinary text, 134 MB). The integrated checked
 paths reduce those peaks to approximately 285 KB, 270 KB and 277 KB respectively; combined
-operation verification is underway. Matched whole-CLI instruction controls refute calling the
-Unicode change finished: ASCII and emoji improve, but a late Greek term makes contextual replay
-8.50 times as expensive as the baseline. Repair that demonstrated regression before final
-convergence. Changes must preserve complete output, metadata, acceptance and source-error
+operation controls pass. Matched whole-CLI instruction controls caught an 8.50-fold contextual
+Unicode regression; batching ordinary runs and removing the second source traversal repair it.
+The final late-Greek control executes 1.71% fewer instructions than baseline with exact output
+parity. Full convergence remains deferred while the demonstrated SQLite snapshot-lifetime and
+MCP admission defects below are addressed. Changes must preserve complete output, metadata, acceptance and source-error
 semantics; shared checked readers/writers take priority over new format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
 This changes priority, not the correctness or fidelity requirements.
 
@@ -34,7 +35,7 @@ This changes priority, not the correctness or fidelity requirements.
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. In the frozen 64-session whole-command control, the limited query reduces two bodies versus 63 for the full-filter oracle, with identical output; its warm repeat reduces none. Metadata inventory, rank preparation and text membership still scale with fleet size. Zero-limit JSON validates arguments then skips that work. Required source errors remain fatal. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. Forward CLI JSON windows project discarded Claude message extras after full validation; selected rich output and EOF metadata remain exact. Cursor IDE rich lazy windows now use the existing checked selected builder: the 64 MiB discarded-bubble control falls from 235 MB to 329 KB requested Rust heap. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds; existing controls preserve event/count/search results for unchanged indexed metadata. Changed copied metadata now rejects skip/resume, fixing stale title/body conjunctions; unchanged-title appends retain resume. Older indexes rebuild once to establish that authority. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Verified Claude metadata continuation now frames only the 549-byte stable append in an 8.4 MB source; FTS replays 1,433 bytes from its earlier checkpoint. A changed title correctly forces a full FTS rewrite. Metadata acceptance and provisional EOF records remain exact under the immutable-prefix append contract. A copied 3.78 GB index retains every large segment through sixteen tiny commits; that older-index geometry control remains distinct from the completed current-schema fleet composition. The 6,889-reference cold/unchanged/append/clean-reference control passes; seven fork-dependent siblings remain an accepted append fanout cost. See [fleet evidence](FTS-FLEET-COMPOSITION.json) for scope and unmeasured physical-work limits. |
-| Transform / export | Verified Codex port retains checked source-backed bodies across Native/Text/Drop thinking modes. Splice retains selected guarded messages. Distill retains checked selected sources, analyzes per-message demand, shares one prepared tail, and stages borrowed sidecars; pack-only analysis skips the unused elision roster. Pack shares excerpt/event traversal when events are stale. | Actual verified Claude port now peaks at 1.40 MB for the large Native/Text thinking controls, versus 325 MB before. Prune projects Thinking, ASCII declassification and ordinary usage repair through checked sources; the large Thinking and usage controls fall to 270 KB and 1.32 MB requested live Rust heap. Matched instruction controls improve Thinking+revival 62.2% and usage repair 19.0%. Linked-record tool-input lookup now resolves only the selected input; its 64 MiB control falls from 134 MB to 271 KB, and the existing Thinking CI gate exercises the composition. Unicode declassification has bounded live heap, with its demonstrated contextual CPU regression under repair; demanded oversized metadata remains an explicit limit. Requested distill products and staged archive/prune/dataset output still grow with demand. |
+| Transform / export | Verified Codex port retains checked source-backed bodies across Native/Text/Drop thinking modes. Splice retains selected guarded messages. Distill retains checked selected sources, analyzes per-message demand, shares one prepared tail, and stages borrowed sidecars; pack-only analysis skips the unused elision roster. Pack shares excerpt/event traversal when events are stale. | Actual verified Claude port now peaks at 1.40 MB for the large Native/Text thinking controls, versus 325 MB before. Prune projects Thinking, ASCII declassification and ordinary usage repair through checked sources; the large Thinking and usage controls fall to 270 KB and 1.32 MB requested live Rust heap. Matched instruction controls improve Thinking+revival 62.2% and usage repair 19.0%. Linked-record tool-input lookup now resolves only the selected input; its 64 MiB control falls from 134 MB to 271 KB, and the existing Thinking CI gate exercises the composition. Unicode declassification has bounded live heap and a verified contextual CPU repair; demanded oversized metadata remains an explicit limit. Requested distill products and staged archive/prune/dataset output still grow with demand. |
 
 ### Measurement correction: count the work (2026-10-12)
 
@@ -600,7 +601,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Prune Thinking, ASCII declassification and ordinary usage-record projections, with whole-operation output parity and CI heap caps.
 - [x] Prune linked-record tool-input lookup reuses checked selected metadata, preserving exact output and flat heap; the existing Thinking gate now includes the linked-result composition.
 - [x] Unicode declassification retains bounded contextual lowercase matching with exact transcript/sidecar/source controls through 64 MiB; see PRUNE-UNICODE-EVIDENCE.json.
-- [ ] Repair the demonstrated contextual Unicode CPU regression: late Greek-term whole-CLI control executes 872.8M instructions versus 102.7M baseline. ASCII and emoji controls improve 25.0% and 77.7%; these do not excuse the contextual regression.
+- [x] Repair the demonstrated contextual Unicode CPU regression: batched single-pass matching executes 101.0M instructions versus 102.7M baseline on the late Greek-term control, preserving exact output; the initial 872.8M regression and intermediate repair are retained in the evidence.
 - [ ] Malformed prune fallbacks and demanded oversized metadata remain outside the proven bounds.
 - [x] Matched whole-operation Thinking+revival and usage-correction instruction controls, including attribution and repair of the initial usage framing regression.
 - [ ] Broader prune CPU claims remain unproven: required source validation/canonicalization and staged copying retain shape-dependent costs outside those two controls.
@@ -3616,7 +3617,7 @@ output/source contracts pass; peaks are 1,398,437 / 283,018 / 405,758 / 276,587 
 Reports are retained under `excellence-evidence/rehome-gemini-integration` outside the repository.
 The run-based contextual prune repair additionally passed 54 scoped tests and the four
 Thinking/ASCII/Unicode/usage controls, preserving frozen outputs. A subsequent one-pass repair
-removes contextual replay; its instruction comparison is pending. No full gate run or push has
+removes contextual replay; its matched instruction comparison passes at 1.71% fewer instructions. No full gate run or push has
 been performed for this batch.
 
 Two holistic lifecycle/admission questions now have concrete owners:
@@ -3631,3 +3632,15 @@ Two holistic lifecycle/admission questions now have concrete owners:
   from consuming ordinary execution capacity. This is a concurrency/lifetime control, not a
   claim about per-response payload size or measured aggregate heap. Evidence is retained under
   `encoded-arguments-evidence/mcp-burst` outside the repository.
+
+Whole-CLI Unicode prune CPU follow-up (mcp_finish):
+[control and reproducible fixture](../../tools/profiling/results/prune-unicode-cli/README.md)
+compares isolated 5e366e96 with bounded Unicode matching. Two matched instruction
+counts retain ASCII −24.98% and emoji −77.72%, measured on 60ca75bb paths unchanged
+by subsequent contextual repairs. A late demanded Greek term refuted scalar
+contextual matching (+749.76%); run batching reduced this to +13.72%, and final
+single-pass stats/matching 0d44f4e0 reaches −1.71%. Rejected intermediates remain
+diagnostic history. Native and instrumented stdout/stderr/transcript/full 8 MiB
+sidecar bytes match, with frozen source/catalog identity. Sixteen scoped
+Cachegrind children, no timing or broad matrix; memory ownership remains covered
+by the separate Unicode operation gates.
