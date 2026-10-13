@@ -14,7 +14,10 @@ operation controls demonstrate redundant work. Claude export, Cursor rich window
 turn transformations now have measured fixes and operation controls. The completion audit found
 one further linked-record prune ownership defect; that fix and its strengthened CI gate are
 integrated. Current-schema fleet composition exposed guarded-empty freshness and duplicate-copy
-indexing defects; both fixes are active. Qwen has no local data, so its synthetic carrier work is explicitly deferred. This changes priority, not the correctness or fidelity requirements.
+indexing defects; guarded-empty reuse, canonical FTS copies and canonical semantic copies are
+integrated. Event publication still needs explicit source/provenance authority so a formerly
+indexed copy or parent cannot remain falsely fresh; that connected fix is active. Qwen has no
+local data, so its synthetic carrier work is explicitly deferred. This changes priority, not the correctness or fidelity requirements.
 
 | User operation | What we know | Next question / action |
 |---|---|---|
@@ -164,9 +167,9 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; ordered usage rows reuse a bounded dependency-validated cache | Cold ledger publication, exact dedup I/O and model roster growth; tiny native sources bypass caching |
-| Reshape/emit | Bounded shared JSONL stage; native Codex ports retain checked lazy bodies; verification reduces compact facts | Message roster/selected metadata, complete carriers, Claude record rewrites and other emitters/materializing thinking transforms |
+| Reshape/emit | Bounded shared JSONL stage; native Codex and Claude ports retain checked lazy bodies; verification reduces compact facts | Message roster/selected metadata, same-harness complete carriers and other emitters/materializing thinking transforms |
 | Distill/findings | Shared analysis demand and one prepared tail; findings omit unused products and resolve text per message; --upto loads selected messages; borrowed sidecars use bounded staging | Ordinary CLI loads retain checked sources; analysis owns demanded products per message. Requested tails, notes, argument/result fallbacks, rich extras and prose remain output-sized; staged sidecar bytes scale with output |
-| Prune/revive | Compact selection facts and source positions; transcript/sidecar staging with sequential record rewrites | Giant changed records remain owned; additional scans/staging currently increase CPU |
+| Prune/revive | Compact selection facts and source positions; checked Thinking, ASCII declassification, usage and linked-input projections; transcript/sidecar staging | Selected Unicode fields and oversized metadata retain owned fallbacks; validation and output staging remain required work |
 | MCP observe | Retained-message watch callbacks and checked capped searchable prefixes | Other full producer modes, owned metadata and uncapped MCP show windows remain separate |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
 
@@ -3311,3 +3314,26 @@ cover divergent bodies, reversed inputs, timestamp ties, vanished-copy fallback,
 all-missing errors, duplicate-record repair, and adopted-agent parent provenance. This does not
 expand the existing global-ID namespace into harness-qualified index identities. Full-fleet
 cold/unchanged/append/reference composition remains pending until the corrected CLI is built.
+
+Follow-up integration disables append reuse when duplicate metadata requires repair: a valid
+checkpoint is insufficient because a suffix deletion would preserve duplicate prefix documents.
+The regression establishes a valid mark after source growth and compares full replacement with
+an independent clean index. Candidate selection now seals owned folded entries first and keeps
+only borrowed reference/provenance pairs in its candidate lists, cloning actual jobs alone.
+Independent review found the original repair blocker resolved and copy ordering preserved.
+
+### Preferred session copies in semantic refresh (2026-10-13)
+
+An injected actual refresh reproduced a cold failure with two identical files sharing one
+harness-qualified identity: projection retained duplicate rows and final source validation
+reported a changed source. Refresh now uses the same canonical live references for both
+planning and final validation, preserving separate rows for identical IDs in different harnesses.
+Unique identities incur no extra availability stat. Ambiguous duplicate rows in an older vector
+store force fresh projection; no arbitrary old vector is selected.
+
+Scoped controls cover divergent newer content, creation-time fallback, reversed ties, missing
+preferred copies, all-missing atomic failure and poisoned legacy rows. Cold duplicate input
+performs one read, one encoded row and one save; unchanged input performs none. An independent
+reversed-input rebuild is byte-identical. Refresh, ranking, source-guard tests and library clippy
+pass in the owner tree. These tests inject encoding, so no model download or real-fleet embedding
+claim is involved; combined integration checks remain pending.
