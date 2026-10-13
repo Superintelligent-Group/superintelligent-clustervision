@@ -561,7 +561,6 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) 
 }
 mod emit;
 #[cfg(test)]
-
 /// Build the single `version` object for one IR message turn (the parser only reads the
 /// `currentlySelected` version, so we emit exactly one). Returns `None` for empty turns.
 fn emit_version(session: &Session, msg: &Message, fallback: DateTime<Utc>) -> Result<Option<Value>> {
