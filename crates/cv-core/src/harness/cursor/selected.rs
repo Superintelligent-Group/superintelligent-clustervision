@@ -107,6 +107,9 @@ pub(super) fn global_with_reads(
                         let Ok((offset, length)) = source::append_cell(conn, "cursorDiskKV", &key, &arena) else {
                             continue;
                         };
+                        if length == 0 {
+                            continue;
+                        }
                         // Existing IDE reads skip missing or malformed external bubbles. The final
                         // compound guard still rejects source mutations even when a bubble is skipped.
                         match captured
@@ -242,6 +245,11 @@ fn lexical(view: JsonView<'_>, captured: &JsonSource, arena: &Arc<ByteSource>) -
         })?;
         Ok(())
     })?;
+    // An empty encoded editor state is malformed JSON, so the owned reader ignores it.
+    // It has no range to validate; do not turn this fallback into a backing-bounds error.
+    if length == 0 {
+        return Ok(None);
+    }
     match captured.read_backing_value(arena.clone(), offset, length, build) {
         Ok(text) => Ok(text),
         Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => Ok(None),
@@ -587,6 +595,8 @@ mod tests {
             json!({"type":2,"richText":{"root":{"text":"start","children":[{"text":"日本語","children":null},{"text":" next"},{"children":[{"text":"last"}]}]}}}),
             json!({"type":2,"richText":{"root":{"text":" \n\t","children":[null,17,{"text":false}]}}}),
             json!({"type":2,"richText":"{broken"}),
+            json!({"type":2,"text":"","richText":""}),
+            json!({"type":2,"richText":"","toolFormerData":{"name":"shell","result":"still visible"}}),
             json!({"type":2,"richText":"{\"root\":{\"text\":\"first\",\"text\":\"last\"}}"}),
             json!({"type":2,"richText":"{\"root\":{\"text\":\"valid\"},\"ignored\":1e9999}"}),
             json!({"type":2,"toolFormerData":{"result":[true,null,1.5,{"z":"日本語\n","a":"\\quoted\""}]}}),
@@ -600,7 +610,7 @@ mod tests {
             r#"{"conversation":[{"type":1,"text":"first"}],"conversation":[{"type":1,"text":"last"}]}"#,
             r#"{"conversation":[{"type":1,"text":"fallback"}],"fullConversationHeadersOnly":[]}"#,
             r#"{"conversation":[{"type":1,"text":"fallback"}],"fullConversationHeadersOnly":[],"fullConversationHeadersOnly":false}"#,
-            r#"{"fullConversationHeadersOnly":[{"bubbleId":"missing"},{"bubbleId":"invalid"},{"bubbleId":"lossy"}]}"#,
+            r#"{"fullConversationHeadersOnly":[{"bubbleId":"missing"},{"bubbleId":"invalid"},{"bubbleId":"empty"},{"bubbleId":"lossy"}]}"#,
             "null",
             "[]",
             "42",
@@ -609,7 +619,11 @@ mod tests {
             let (conn, r) = fixture(
                 &world.base.join(index.to_string()),
                 root,
-                &[("invalid", b"{broken"), ("lossy", b"{\"type\":1,\"text\":\"bad\xff\"}")],
+                &[
+                    ("invalid", b"{broken"),
+                    ("empty", b""),
+                    ("lossy", b"{\"type\":1,\"text\":\"bad\xff\"}"),
+                ],
             );
             compare(&conn, &r);
         }
