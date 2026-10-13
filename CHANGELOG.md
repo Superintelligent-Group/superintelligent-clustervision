@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Unchanged full-text refreshes avoid starting Tantivy writers while still completing pending compaction.
+- Codex lazy reads retain giant prompt, reply, reasoning and tool arguments in checked source storage across native and portable transports.
 
 - Guard Devin, Hermes and Zed database reads against source changes during streaming and discovery.
 

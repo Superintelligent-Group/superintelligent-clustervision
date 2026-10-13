@@ -19,7 +19,7 @@ struct Rollout {
 }
 enum Projection {
     Output { record: Value, text: Text, error: bool },
-    Agent { record: Value, text: Text },
+    Selected(super::selected::Projection),
 }
 impl Rollout {
     fn open(path: &Path) -> Result<Self> {
@@ -124,18 +124,8 @@ impl Rollout {
     fn projection(&self, range: Range, spans: bool, agents: bool) -> Result<Option<Projection>> {
         self.value(range, |view| {
             let Some((record, output)) = function_output_fields(view)? else {
-                if agents {
-                    if let Some((record, body)) = agent_text_fields(view)? {
-                        if let Some(text) = body
-                            .map(|text| if spans { text.source_text() } else { text.text(false) })
-                            .transpose()?
-                            .flatten()
-                        {
-                            return Ok(Some(Projection::Agent { record, text }));
-                        }
-                    }
-                }
-                return Ok(None);
+                return super::selected::project(view, &self.source, spans, agents)
+                    .map(|p| p.map(Projection::Selected));
             };
             let Some(output) = output else { return Ok(None) };
             let Some(mut text) = (if spans {
@@ -198,7 +188,19 @@ fn function_output_fields(view: JsonView<'_>) -> Result<Option<(Value, Option<Js
     }
     let Some(payload) = top
         .get("payload")
-        .map(|view| Fields::parse(view, &["type", "call_id", "name", "namespace", "output"]))
+        .map(|view| {
+            Fields::parse(
+                view,
+                &[
+                    "type",
+                    "call_id",
+                    "name",
+                    "namespace",
+                    "output",
+                    "internal_chat_message_metadata_passthrough",
+                ],
+            )
+        })
         .transpose()?
         .flatten()
     else {
@@ -217,6 +219,12 @@ fn function_output_fields(view: JsonView<'_>) -> Result<Option<(Value, Option<Js
         if let Some(value) = payload.string(key)? {
             p.insert(key.into(), value.into());
         }
+    }
+    if let Some(meta) = payload.get("internal_chat_message_metadata_passthrough") {
+        p.insert(
+            "internal_chat_message_metadata_passthrough".into(),
+            meta.resolve()?.into_owned(),
+        );
     }
     Ok(Some((
         record_fields(&top, "response_item", Value::Object(p))?,
@@ -368,16 +376,8 @@ fn stream_at(rollout: &Rollout, id: &str, state: ResumeState, at: u64, sink: &mu
             Ok(Some(Projection::Output { record, text, error })) => {
                 dispatch_line_with_output(&mut s, &mut scratch, &record, has_events, &mut ctx, Some((text, error)))
             }
-            Ok(Some(Projection::Agent { record, text })) => {
-                // Assistant events have no body-dependent classification. Preserve normal context
-                // and inheritance handling, replacing only the newly emitted text placeholder.
-                let before = scratch.len();
-                dispatch_line(&mut s, &mut scratch, &record, has_events, &mut ctx);
-                if let Some(message) = scratch.get_mut(before) {
-                    if let Some(Block::Text { text: body }) = message.content.first_mut() {
-                        *body = text;
-                    }
-                }
+            Ok(Some(Projection::Selected(projection))) => {
+                projection.dispatch(&mut s, &mut scratch, has_events, &mut ctx)
             }
             Err(error) if error.downcast_ref::<InvalidJson>().is_none() => return Err(error),
             Ok(None) | Err(_) => {

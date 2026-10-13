@@ -42,6 +42,7 @@ mod emit;
 mod lean;
 mod metadata;
 mod portable;
+mod selected;
 pub use emit::emit;
 
 use super::wire::{openai, text_parts};
@@ -206,7 +207,9 @@ impl Adapter for Codex {
             // Never for a compressed rollout — a span can't point into zstd frames.
             #[cfg(feature = "mmap")]
             if opts.spans && !is_zst_path(&r.path) {
+                let source = crate::json::JsonSource::capture(&r.path)?;
                 if let Ok(file) = fs::File::open(&r.path) {
+                    source.check_metadata(file.metadata()?)?;
                     if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
                         // One forward pass: tell the kernel, so it reads ahead in big runs instead of
                         // faulting the file in a page at a time. Measured on a 12-thread recount of
@@ -217,14 +220,16 @@ impl Adapter for Codex {
                         #[cfg(unix)]
                         let _ = map.advise(memmap2::Advice::Sequential);
                         let has_events = detect_has_events_bytes(&map);
-                        return Ok(stream_jsonl_spans_with_options(
+                        source.check()?;
+                        return stream_jsonl_spans_with_options(
                             &r.id,
                             &map,
                             Some(r.path.clone()),
                             has_events,
                             opts,
+                            Some(&source),
                             sink,
-                        ));
+                        );
                     }
                 }
             }
@@ -266,7 +271,9 @@ impl Adapter for Codex {
                 if !opts.spans {
                     return Ok(None);
                 }
+                let source = crate::json::JsonSource::capture(&r.path)?;
                 let file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
+                source.check_metadata(file.metadata()?)?;
                 let map =
                     unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mapping {}", r.path.display()))?;
                 if (map.len() as u64) < from.offset {
@@ -283,8 +290,9 @@ impl Adapter for Codex {
                     state,
                     from.offset,
                     opts.offsets,
+                    Some(&source),
                     sink,
-                )))
+                )?))
             }
             #[cfg(not(feature = "mmap"))]
             {
@@ -822,7 +830,8 @@ pub fn stream_jsonl_spans(
         offsets: stamp_offsets,
         ..ParseOptions::lazy()
     };
-    stream_jsonl_spans_with_options(id, data, source_path, has_events, &opts, sink)
+    stream_jsonl_spans_with_options(id, data, source_path, has_events, &opts, None, sink)
+        .expect("in-memory span parser does not read source files")
 }
 
 #[cfg(feature = "mmap")]
@@ -832,10 +841,11 @@ fn stream_jsonl_spans_with_options(
     source_path: Option<PathBuf>,
     has_events: bool,
     opts: &ParseOptions,
+    source: Option<&crate::json::JsonSource>,
     sink: &mut dyn MessageSink,
-) -> Session {
+) -> Result<Session> {
     let state = ResumeState::new(source_path, has_events, opts, false);
-    stream_jsonl_spans_at(id, data, state, 0, opts.offsets, sink)
+    stream_jsonl_spans_at(id, data, state, 0, opts.offsets, source, sink)
 }
 
 /// [`stream_jsonl_spans`] from byte `at` of `data` with `state` (a checkpoint's, or a fresh one at
@@ -847,8 +857,9 @@ fn stream_jsonl_spans_at(
     state: ResumeState,
     at: u64,
     stamp_offsets: bool,
+    source: Option<&crate::json::JsonSource>,
     sink: &mut dyn MessageSink,
-) -> Session {
+) -> Result<Session> {
     let ResumeState {
         session: mut s,
         mut ctx,
@@ -881,36 +892,57 @@ fn stream_jsonl_spans_at(
 
         let before = scratch.len();
         let giant = slice.len() > crate::lazy::INLINE_MAX;
-        match lean::parse(slice, giant) {
-            Ok(lean::LeanLine { mut v, output }) => match output {
-                Some(raw) => match giant_fco_span(&v, raw, slice, base_off) {
-                    Some((span, is_error)) => {
-                        dispatch_line_with_output(
-                            &mut s,
-                            &mut scratch,
-                            &v,
-                            has_events,
-                            &mut ctx,
-                            Some((Text::Span(span), is_error)),
-                        );
-                    }
-                    None => {
-                        // Not the span case after all: build the output in its place.
-                        if let Some(slot) = v.get_mut("payload").and_then(|p| p.get_mut("output")) {
-                            *slot = serde_json::from_str(raw.get()).unwrap_or(Value::Null);
+        let projected = if giant {
+            source
+                .map(|source| {
+                    source.read_range_value(base_off, slice.len() as u64, |view| {
+                        selected::project(view, source, true, has_events)
+                    })
+                })
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        let projected = match projected {
+            Ok(Some(Some(projection))) => Some(projection),
+            Ok(_) => None,
+            Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(projection) = projected {
+            projection.dispatch(&mut s, &mut scratch, has_events, &mut ctx);
+        } else {
+            match lean::parse(slice, giant) {
+                Ok(lean::LeanLine { mut v, output }) => match output {
+                    Some(raw) => match giant_fco_span(&v, raw, slice, base_off) {
+                        Some((span, is_error)) => {
+                            dispatch_line_with_output(
+                                &mut s,
+                                &mut scratch,
+                                &v,
+                                has_events,
+                                &mut ctx,
+                                Some((Text::Span(span), is_error)),
+                            );
                         }
-                        dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx);
+                        None => {
+                            // Not the span case after all: build the output in its place.
+                            if let Some(slot) = v.get_mut("payload").and_then(|p| p.get_mut("output")) {
+                                *slot = serde_json::from_str(raw.get()).unwrap_or(Value::Null);
+                            }
+                            dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx);
+                        }
+                    },
+                    None => dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx),
+                },
+                Err(_) => match serde_json::from_slice::<Value>(slice) {
+                    Ok(v) => dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx),
+                    Err(_) => {
+                        skipped += 1; // corrupt line — tolerated, but counted (see note_skipped_lines)
+                        continue;
                     }
                 },
-                None => dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx),
-            },
-            Err(_) => match serde_json::from_slice::<Value>(slice) {
-                Ok(v) => dispatch_line(&mut s, &mut scratch, &v, has_events, &mut ctx),
-                Err(_) => {
-                    skipped += 1; // corrupt line — tolerated, but counted (see note_skipped_lines)
-                    continue;
-                }
-            },
+            }
         }
         if stamp_offsets {
             // Stamp this record's byte offset on the message(s) it produced (see
@@ -959,7 +991,10 @@ fn stream_jsonl_spans_at(
     if !meta_sent {
         sink.meta(&s);
     }
-    s
+    if let Some(source) = source {
+        source.check()?;
+    }
+    Ok(s)
 }
 
 #[derive(serde::Serialize)]
@@ -2529,6 +2564,87 @@ mod tests {
     }
 
     #[test]
+    fn selected_giant_bodies_match_owned_dispatch_in_native_and_positioned_paths() {
+        let world = cv_testkit::World::in_process("codex-selected-bodies");
+        let giant = "月🌙é\n\t\"\\".repeat(2048);
+        let metadata = serde_json::json!({"create_time":1234.5,"turn_id":"turn"});
+        for events in [false, true] {
+            let mut records = vec![
+                serde_json::json!({"type":"session_meta","payload":{"id":"selected","subagent_history_start_ordinal":1}}),
+                serde_json::json!({"type":"response_item","ordinal":0,"payload":{"type":"message","role":"user","content":[{"text":giant}]}}),
+            ];
+            for role in ["user", "assistant", "developer", "system"] {
+                records.push(serde_json::json!({"type":"response_item","ordinal":2,"payload":{"type":"message","role":role,"phase":"commentary",
+                    "internal_chat_message_metadata_passthrough":metadata,"content":[{"type":"input_text","text":format!("{}<environment_context {giant}","\u{2003}".repeat(5000))},
+                    {"type":"input_text","text":giant},{"type":"input_image","image_url":"https://image"}]}}));
+            }
+            for summary in ["", "summary"] {
+                records.push(serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"text":summary}],
+                    "content":[{"text":giant},{"text":giant}],"encrypted_content":"encrypted","internal_chat_message_metadata_passthrough":metadata}}));
+            }
+            records.push(
+                serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"text":giant}]}}),
+            );
+            records.push(serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":"","content":[],"encrypted_content":null},"ignored":giant}));
+            for input in [
+                serde_json::json!({"key":giant}).to_string(),
+                "42".into(),
+                "{partial".into(),
+                " \t ".into(),
+            ] {
+                records.push(serde_json::json!({"type":"response_item","payload":{"type":"function_call","id":"legacy","call_id":"call","name":"tool","namespace":"ns",
+                    "arguments":input,"status":"completed","internal_chat_message_metadata_passthrough":metadata},"ignored":giant}));
+                records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","input":input,"call_id":"custom","name":"apply_patch"},"ignored":giant}));
+            }
+            records.push(serde_json::json!({"type":"response_item","payload":{"type":"local_shell_call","id":"local","status":"completed","action":{"type":"exec","command":[giant]}}}));
+            if events {
+                for (ty, body) in [
+                    (
+                        "user_message",
+                        format!("{}# AGENTS.md instructions {giant}", "\u{2003}".repeat(5000)),
+                    ),
+                    ("agent_message", giant.clone()),
+                ] {
+                    records.push(
+                        serde_json::json!({"type":"event_msg","payload":{"type":ty,"message":body,"kind":"prompt"}}),
+                    );
+                }
+            }
+            records.push(serde_json::json!({"type":"turn_context","payload":{"model":"late"}}));
+            let path = world.base.join(format!("rollout-{events}.jsonl"));
+            std::fs::write(
+                &path,
+                records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"),
+            )
+            .unwrap();
+            let r = SessionRef::new("selected", Harness::Codex, &path);
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::full(),
+                ParseOptions::complete(),
+            ] {
+                let expected = serde_json::to_value(old_buffered_oracle(&r, &opts)).unwrap();
+                for native in [false, true] {
+                    let mut sink = crate::stream::CollectSink::default();
+                    let mut actual = if native {
+                        Codex::detect().stream(&r, &opts, &mut sink).unwrap()
+                    } else {
+                        portable::stream(&r, &opts, &mut sink).unwrap()
+                    };
+                    actual.messages = sink.messages;
+                    actual.materialize().unwrap();
+                    assert_eq!(
+                        serde_json::to_value(actual).unwrap(),
+                        expected,
+                        "events={events}, native={native}, opts={opts:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn portable_corrupt_raw_records_match_old_buffered_rejections() {
         let world = cv_testkit::World::in_process("codex-portable-corrupt");
         let path = world.base.join("rollout-corrupt.jsonl");
@@ -2635,6 +2751,16 @@ mod tests {
                 ParseOptions::complete(),
             ] {
                 let expected = old_buffered_oracle(&r, &opts);
+                let mut native_sink = crate::stream::CollectSink::default();
+                let mut native = Codex::detect().stream(&r, &opts, &mut native_sink).unwrap();
+                native.messages = native_sink.messages;
+                native.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(native).unwrap(),
+                    serde_json::to_value(&expected).unwrap(),
+                    "native {} {opts:?}",
+                    entry.path().display()
+                );
                 let mut sink = crate::stream::CollectSink::default();
                 let mut actual = portable::stream(&r, &opts, &mut sink).unwrap();
                 actual.messages = sink.messages;
