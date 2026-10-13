@@ -4,6 +4,24 @@ Source audit: `c0f0044`, 2026-10-12; updated through the first pass and the ongo
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
+## Completion criteria carried across the work
+
+The objective covers the composed system: discovery and identity lookup; record interpretation
+and demanded fields; reducers and output; index/catalog reuse; watch, transport and native
+reshaping. A bounded reader or completed export lane alone does not establish completion.
+
+- Preserve native records, exact relevant output (including insertion order), accepted/rejected
+  input, transformations and source-error behavior. Intentional corrections need explicit evidence.
+- Measure useful operations on matched inputs. Distinguish retained and cumulative Rust allocation,
+  native SQLite memory, mapped residency, instructions and staged disk work. Repair redundant
+  traversal and investigate measured regressions; state accepted tradeoffs without claiming speed.
+- Reuse shared checked text/JSON, framing, source guards and bounded staging. Consolidate duplicate
+  mechanisms when recovered work supplies the same contract; smaller heap must not require a
+  continually growing parallel architecture.
+- Finish concrete outstanding operation defects, check their composition, then run one final
+  convergence batch. No intermediate releases or repeated full gates while implementation moves.
+  Explicitly requested rich output and format-required scans remain costs, not automatic defects.
+
 ## Current priorities: whole operations (2026-10-12, user steering)
 
 Ember asked us to zoom out: giant-payload heap has dominated the investigation for too long.
