@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 FAIL_MARKER = "CORPUS-PROVIDER-ERROR"
 FAIL_MODEL = "corpus-error"
@@ -568,6 +569,12 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # This proxy binds loopback only. HTTPServer's reverse DNS lookup can stall startup
+        # for tens of seconds when the host resolver is unavailable; no hostname is needed.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         # A client closing its keep-alive socket is routine; anything else is worth one line.

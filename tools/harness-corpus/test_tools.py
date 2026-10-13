@@ -20,9 +20,17 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEY = "sk-corpustest0123456789abcdefXYZ"
+
+
+class LocalServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # The mock is entirely local and must not wait for the machine's DNS resolver.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -96,7 +104,7 @@ DIALECT = {
 class ProxyCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.up = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        cls.up = LocalServer(("127.0.0.1", 0), Upstream)
         threading.Thread(target=cls.up.serve_forever, daemon=True).start()
         cls.upstream = f"http://127.0.0.1:{cls.up.server_address[1]}/api/v4"
         cls.tmp = tempfile.TemporaryDirectory(prefix="cv-corpus-test.")
