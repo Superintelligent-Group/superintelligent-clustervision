@@ -1,5 +1,7 @@
 //! Strict read-only JSONL projection, sharing document source slices and navigation indexes.
 
+pub(crate) mod ranges;
+
 use super::document::{accepts_value, Index, Raw};
 use crate::lazy::RawValue;
 use std::fs::File;
