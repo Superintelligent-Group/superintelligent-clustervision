@@ -2306,3 +2306,27 @@ Integration at `2c1d4d5f` passes eight core distill controls and four CLI distil
 the preceding title integration passes four enrichment controls. Pinned-toolchain formatting
 also passes after normalizing the enrichment file. These are scoped combined-branch checks;
 the last full local/remote convergence and installed binary remain at `ef75a100`.
+
+The complete CLI at `2a64ebc0` also matches installed `ef75a100` byte-for-byte for four synthetic
+commands: a pack with findings, a selected prefix with two peers and no ledger, a JSON report plus
+pack file, and a peer with 16 MiB of ignored thinking. Stdout, stderr and the requested pack file
+match; input hashes remain unchanged. This crosses actual argument dispatch, loading, findings
+composition, statistics and output, rather than only the loader helper. Private task-owned raw
+outputs and hashes are in `excellence-evidence/consumer-cli-parity/results.json`. Debug/release
+builds were compared for behavior only, with no work or timing inference.
+
+### Fleet-scale operation follow-up (2026-10-13, in progress)
+
+- First-use scoped discovery currently loads and decodes the complete persisted scan cache.
+  Investigate deferred decoding within existing cache entries, measuring unrelated-row growth;
+  avoid per-file catalog opens, eager SQLite-only loading and new operation-scope machinery.
+- Small unqueried JSON listings fully sort an inventory whose tail is never emitted. Compare a
+  stable ordered heap with existing sorting, including ties, missing paths, ascending windows
+  and already-ordered inputs. Queried windows and exact text totals have different requirements.
+- Filtered ranked search can repeat a global metadata lookup for one ID across index segments.
+  Share compact query-local decisions/addresses; retaining every full metadata document would
+  create a new memory cost proportional to arbitrary title/cwd widths. Preserve legacy body-only
+  fallbacks and stored-document failures. Multiple `text:` needles also repeat reader setup.
+- MCP startup constructs another clap tree after parsing, and keeps it after deriving tool specs.
+  Reuse and release the parsed tree if the generated roster is identical. Existing evidence does
+  not justify replacing child dispatch and bounded staging with a persistent daemon.
