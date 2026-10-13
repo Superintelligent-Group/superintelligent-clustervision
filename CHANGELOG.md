@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Commit evidence scans tool results in bounded chunks and reports unreadable lazy sources instead of silently losing matches.
+
 - Warm token statistics reuse bounded, dependency-validated usage rows while preserving response deduplication and exact cost totals.
 
 - LM Studio discovery projects source metadata and bounded titles without loading whole documents, including portable builds.

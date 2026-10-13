@@ -788,3 +788,11 @@ that depended on vector row position; ties now use session ID then harness so re
 source cannot reorder equal scores or change the cutoff. Twelve focused semantic tests pass.
 This is a warm-OS-cache local fixture, not a fleet latency or scaling claim. Production unchanged
 model freshness checks use metadata identities, not repeated model-weight hashing.
+
+
+Commit-evidence extraction for blame/rewind now scans decoded result chunks with a fixed
+64-byte hex-token prefix and one match bit per requested SHA. It no longer resolves a whole
+git-command result. Whole-output token-oracle tests include long runs, uppercase, UTF-8
+delimiters and chunk splits; unavailable lazy results propagate errors. Thirteen focused rewind
+tests pass. This bounds result-scanning scratch; remembered git command IDs and requested
+SHA/evidence lists still scale with their actual input and output cardinality.

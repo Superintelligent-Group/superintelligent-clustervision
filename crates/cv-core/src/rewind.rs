@@ -132,6 +132,50 @@ pub fn output_names_sha(output: &str, sha: &str) -> bool {
         })
 }
 
+/// Only the first 64 hex digits can matter to a normalized query. Carry that prefix across
+/// decoder chunks, including arbitrarily long runs, rather than owning a tool's entire output.
+struct ShaMatches<'a> {
+    queries: &'a [String],
+    hits: Vec<bool>,
+    prefix: [u8; 64],
+    len: usize,
+}
+impl<'a> ShaMatches<'a> {
+    fn new(queries: &'a [String]) -> Self {
+        Self {
+            queries,
+            hits: vec![false; queries.len()],
+            prefix: [0; 64],
+            len: 0,
+        }
+    }
+    fn end_token(&mut self) {
+        if self.len >= MIN_SHA_LEN {
+            for (query, hit) in self.queries.iter().zip(&mut self.hits) {
+                let n = self.len.min(query.len());
+                *hit |= self.prefix[..n].eq_ignore_ascii_case(&query.as_bytes()[..n]);
+            }
+        }
+        self.len = 0;
+    }
+    fn push(&mut self, text: &str) {
+        for byte in text.bytes() {
+            if byte.is_ascii_hexdigit() {
+                if self.len < self.prefix.len() {
+                    self.prefix[self.len] = byte;
+                    self.len += 1;
+                }
+            } else {
+                self.end_token();
+            }
+        }
+    }
+    fn finish(mut self) -> Vec<bool> {
+        self.end_token();
+        self.hits
+    }
+}
+
 /// The commit-relevant git verbs a shell command runs: `Created` when any is commit-creating,
 /// else `Pushed` for a push, else `None`. Global options between `git` and the verb (`-C <dir>`,
 /// `-c k=v`, `--no-pager`, …) are skipped.
@@ -160,7 +204,7 @@ pub struct CommitEvidenceSink {
     shas: Vec<String>,
     git_calls: HashMap<String, (EvidenceKind, String)>,
     msg_idx: usize,
-    resolver: Option<Resolver>,
+    resolver: Resolver,
     /// Stop the stream at the first `Created` match (a rewind wants the landing moment, not
     /// every later mention).
     stop_on_created: bool,
@@ -175,7 +219,7 @@ impl CommitEvidenceSink {
             shas,
             git_calls: HashMap::new(),
             msg_idx: 0,
-            resolver: source.map(|p| Resolver::new(Some(p))),
+            resolver: Resolver::new(source),
             stop_on_created: false,
             found: Vec::new(),
             fail: None,
@@ -200,12 +244,16 @@ impl CommitEvidenceSink {
                     let Some((kind, cmd)) = self.git_calls.get(tool_use_id) else {
                         continue;
                     };
-                    let text = match &self.resolver {
-                        Some(r) => content.resolve(r),
-                        None => std::borrow::Cow::Borrowed(content.inline_str().unwrap_or("")),
-                    };
-                    for sha in &self.shas {
-                        if output_names_sha(&text, sha) {
+                    let mut matches = ShaMatches::new(&self.shas);
+                    match content {
+                        crate::Text::Inline(text) => matches.push(text),
+                        crate::Text::Span(span) => self.resolver.try_for_each_chunk(span, 64 * 1024, |chunk| {
+                            matches.push(chunk);
+                            Ok(())
+                        })?,
+                    }
+                    for (sha, matched) in self.shas.iter().zip(matches.finish()) {
+                        if matched {
                             created |= *kind == EvidenceKind::Created;
                             self.found.push(CommitEvidence {
                                 sha: sha.clone(),
@@ -916,6 +964,64 @@ mod tests;
 #[cfg(test)]
 mod json_read_tests {
     use super::*;
+
+    #[test]
+    fn chunked_sha_matches_the_whole_output_oracle() {
+        let queries = ["abcdef1", "abcdef1234567", "1234567", &"a".repeat(64)]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let cases = [
+            "".into(),
+            "abcdef abcdef1zABCDEF1234567".into(),
+            "[main ABCDEF123] hi\n1234567..abcdef1".into(),
+            format!("{}!{}", "a".repeat(200_000), "🌙"),
+            "aabcdef1234567 abcdef0 123456".into(),
+        ];
+        for body in cases {
+            let expected: Vec<_> = queries.iter().map(|q| output_names_sha(&body, q)).collect();
+            for size in [1, 2, 7, 64, 65_536] {
+                let mut scan = ShaMatches::new(&queries);
+                // Character boundaries model decoded chunks, including UTF-8 delimiters.
+                let mut start = 0;
+                while start < body.len() {
+                    let mut end = (start + size).min(body.len());
+                    while !body.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    scan.push(&body[start..end]);
+                    start = end;
+                }
+                assert_eq!(scan.finish(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn commit_evidence_reports_unavailable_lazy_results() {
+        let world = cv_testkit::World::in_process("rewind_text_failure");
+        let path = world.home.join("absent-output");
+        let mut sink = CommitEvidenceSink::new(vec!["abcdef1".into()], None);
+        sink.git_calls
+            .insert("call".into(), (EvidenceKind::Created, "git commit".into()));
+        let mut message = Message::new(crate::Role::Tool);
+        message.content.push(Block::ToolResult {
+            tool_use_id: "call".into(),
+            content: crate::Text::Span(crate::Span {
+                source: Some(path),
+                offset: 0,
+                len: 8,
+                escaped: false,
+            }),
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: None,
+        });
+        assert_eq!(sink.message(message), Flow::Stop);
+        assert!(sink.take_error().is_some());
+        assert!(sink.found.is_empty());
+    }
 
     #[test]
     fn commit_evidence_does_not_ignore_unreadable_command_arguments() {
