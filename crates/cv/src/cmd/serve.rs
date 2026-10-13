@@ -13,13 +13,13 @@
 //! `$CV_SERVE_TOKEN`) gates every `/api/*` request; a non-loopback bind demands one (or an explicit
 //! `--insecure-expose`). `OPTIONS` preflight is answered with a 204.
 
+use crate::http_transport::{Header, Method, Request, Response, Server};
 use anyhow::Result;
 use cv_core::Harness;
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tiny_http::{Header, Method, Request, Response, Server};
 
 use super::serve_tasks;
 
@@ -770,7 +770,7 @@ fn staged_response<'a>(
     origin: Option<&str>,
 ) -> Response<Box<dyn std::io::Read + 'a>> {
     let mut response = Response::new(
-        tiny_http::StatusCode(stage.status),
+        crate::http_transport::StatusCode(stage.status),
         Vec::new(),
         reader,
         usize::try_from(stage.bytes).ok(),
@@ -841,12 +841,24 @@ mod staged_tests {
                         let stage = cv_core::api::route_staged(&parts, "start=0&end=1").unwrap().unwrap();
                         let reader = stage.body.reader().unwrap();
                         staged_response(&stage, reader, None)
-                            .raw_print(std::io::sink(), tiny_http::HTTPVersion(1, 1), &[], false, None)
+                            .raw_print(
+                                std::io::sink(),
+                                crate::http_transport::HTTPVersion(1, 1),
+                                &[],
+                                false,
+                                None,
+                            )
                             .unwrap();
                     } else {
                         let (status, value) = cv_core::api::route_json(&parts, "start=0&end=1");
                         json_response(status, &value, None, &[])
-                            .raw_print(std::io::sink(), tiny_http::HTTPVersion(1, 1), &[], false, None)
+                            .raw_print(
+                                std::io::sink(),
+                                crate::http_transport::HTTPVersion(1, 1),
+                                &[],
+                                false,
+                                None,
+                            )
                             .unwrap();
                     }
                     let heap = cv_testkit::heap::end(baseline);

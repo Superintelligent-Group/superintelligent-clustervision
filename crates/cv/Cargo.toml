@@ -33,7 +33,11 @@ uuid.workspace = true
 ureq = { version = "2", features = ["json"] }
 # `cv serve`: a tiny synchronous HTTP server (no async stack for pages a few pollers read), plus
 # the query-string encoder its banner uses.
-tiny_http = { version = "0.12", default-features = false }
+# Private in-crate HTTP transport derives from tiny_http 0.12; see src/http_transport/UPSTREAM.md.
+ascii = "1"
+chunked_transfer = "1"
+httpdate = "1"
+log = "0.4"
 urlencoding = "2"
 
 [dev-dependencies]

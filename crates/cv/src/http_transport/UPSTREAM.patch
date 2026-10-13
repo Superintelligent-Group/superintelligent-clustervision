@@ -1,0 +1,831 @@
+--- tiny_http-0.12.0/src/client.rs
++++ src/http_transport/client.rs
+@@ -7,10 +7,10 @@
+ use std::net::SocketAddr;
+ use std::str::FromStr;
+ 
+-use crate::common::{HTTPVersion, Method};
+-use crate::util::RefinedTcpStream;
+-use crate::util::{SequentialReader, SequentialReaderBuilder, SequentialWriterBuilder};
+-use crate::Request;
++use crate::http_transport::common::{HTTPVersion, Method};
++use crate::http_transport::util::RefinedTcpStream;
++use crate::http_transport::util::{SequentialReader, SequentialReaderBuilder, SequentialWriterBuilder};
++use crate::http_transport::Request;
+ 
+ /// A ClientConnection is an object that will store a socket to a client
+ /// and return Request objects.
+@@ -48,10 +48,7 @@
+ 
+ impl ClientConnection {
+     /// Creates a new `ClientConnection` that takes ownership of the `TcpStream`.
+-    pub fn new(
+-        write_socket: RefinedTcpStream,
+-        mut read_socket: RefinedTcpStream,
+-    ) -> ClientConnection {
++    pub fn new(write_socket: RefinedTcpStream, mut read_socket: RefinedTcpStream) -> ClientConnection {
+         let remote_addr = read_socket.peer_addr();
+         let secure = read_socket.secure();
+ 
+@@ -144,7 +141,7 @@
+         std::mem::swap(&mut self.next_header_source, &mut data_source);
+ 
+         // building the next reader
+-        let request = crate::request::new_request(
++        let request = crate::http_transport::request::new_request(
+             self.secure,
+             method,
+             path,
+@@ -155,12 +152,10 @@
+             writer,
+         )
+         .map_err(|e| {
+-            use crate::request;
++            use crate::http_transport::request;
+             match e {
+                 request::RequestCreationError::CreationIoError(e) => ReadError::ReadIoError(e),
+-                request::RequestCreationError::ExpectationFailed => {
+-                    ReadError::ExpectationFailed(version)
+-                }
++                request::RequestCreationError::ExpectationFailed => ReadError::ExpectationFailed(version),
+             }
+         })?;
+ 
+@@ -175,7 +170,7 @@
+     /// Blocks until the next Request is available.
+     /// Returns None when no new Requests will come from the client.
+     fn next(&mut self) -> Option<Request> {
+-        use crate::{Response, StatusCode};
++        use crate::http_transport::{Response, StatusCode};
+ 
+         // the client sent a "connection: close" header in this previous request
+         //  or is using HTTP 1.0, meaning that no new request will come
+@@ -188,9 +183,7 @@
+                 Err(ReadError::WrongRequestLine) => {
+                     let writer = self.sink.next().unwrap();
+                     let response = Response::new_empty(StatusCode(400));
+-                    response
+-                        .raw_print(writer, HTTPVersion(1, 1), &[], false, None)
+-                        .ok();
++                    response.raw_print(writer, HTTPVersion(1, 1), &[], false, None).ok();
+                     return None; // we don't know where the next request would start,
+                                  // se we have to close
+                 }
+@@ -207,9 +200,7 @@
+                     // request timeout
+                     let writer = self.sink.next().unwrap();
+                     let response = Response::new_empty(StatusCode(408));
+-                    response
+-                        .raw_print(writer, HTTPVersion(1, 1), &[], false, None)
+-                        .ok();
++                    response.raw_print(writer, HTTPVersion(1, 1), &[], false, None).ok();
+                     return None; // closing the connection
+                 }
+ 
+@@ -228,13 +219,9 @@
+             // checking HTTP version
+             if *rq.http_version() > (1, 1) {
+                 let writer = self.sink.next().unwrap();
+-                let response = Response::from_string(
+-                    "This server only supports HTTP versions 1.0 and 1.1".to_owned(),
+-                )
+-                .with_status_code(StatusCode(505));
+-                response
+-                    .raw_print(writer, HTTPVersion(1, 1), &[], false, None)
+-                    .ok();
++                let response = Response::from_string("This server only supports HTTP versions 1.0 and 1.1".to_owned())
++                    .with_status_code(StatusCode(505));
++                response.raw_print(writer, HTTPVersion(1, 1), &[], false, None).ok();
+                 continue;
+             }
+ 
+@@ -250,9 +237,7 @@
+             match lowercase {
+                 Some(ref val) if val.contains("close") => self.no_more_requests = true,
+                 Some(ref val) if val.contains("upgrade") => self.no_more_requests = true,
+-                Some(ref val)
+-                    if !val.contains("keep-alive") && *rq.http_version() == HTTPVersion(1, 0) =>
+-                {
++                Some(ref val) if !val.contains("keep-alive") && *rq.http_version() == HTTPVersion(1, 0) => {
+                     self.no_more_requests = true
+                 }
+                 None if *rq.http_version() == HTTPVersion(1, 0) => self.no_more_requests = true,
+@@ -299,9 +284,9 @@
+     fn test_parse_request_line() {
+         let (method, path, ver) = super::parse_request_line("GET /hello HTTP/1.1").unwrap();
+ 
+-        assert!(method == crate::Method::Get);
++        assert!(method == crate::http_transport::Method::Get);
+         assert!(path == "/hello");
+-        assert!(ver == crate::common::HTTPVersion(1, 1));
++        assert!(ver == crate::http_transport::common::HTTPVersion(1, 1));
+ 
+         assert!(super::parse_request_line("GET /hello").is_err());
+         assert!(super::parse_request_line("qsd qsd qsd").is_err());
+--- tiny_http-0.12.0/src/common.rs
++++ src/http_transport/common.rs
+@@ -171,10 +171,7 @@
+         let header = HeaderField::from_bytes(header).or(Err(()))?;
+         let value = AsciiString::from_ascii(value).or(Err(()))?;
+ 
+-        Ok(Header {
+-            field: header,
+-            value,
+-        })
++        Ok(Header { field: header, value })
+     }
+ }
+ 
+--- tiny_http-0.12.0/src/connection.rs
++++ src/http_transport/connection.rs
+@@ -24,9 +24,7 @@
+ 
+     pub(crate) fn accept(&self) -> std::io::Result<(Connection, Option<SocketAddr>)> {
+         match self {
+-            Self::Tcp(l) => l
+-                .accept()
+-                .map(|(conn, addr)| (Connection::from(conn), Some(addr))),
++            Self::Tcp(l) => l.accept().map(|(conn, addr)| (Connection::from(conn), Some(addr))),
+             #[cfg(unix)]
+             Self::Unix(l) => l.accept().map(|(conn, _)| (Connection::from(conn), None)),
+         }
+--- tiny_http-0.12.0/src/lib.rs
++++ src/http_transport/mod.rs
+@@ -90,9 +90,6 @@
+ #![forbid(unsafe_code)]
+ #![deny(rust_2018_idioms)]
+ #![allow(clippy::match_like_matches_macro)]
+-
+-#[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-use zeroize::Zeroizing;
+ 
+ use std::error::Error;
+ use std::io::Error as IoError;
+@@ -106,22 +103,21 @@
+ use std::thread;
+ use std::time::Duration;
+ 
+-use client::ClientConnection;
+-use connection::Connection;
+-use util::MessagesQueue;
+-
+-pub use common::{HTTPVersion, Header, HeaderField, Method, StatusCode};
+-pub use connection::{ConfigListenAddr, ListenAddr, Listener};
+-pub use request::{ReadWrite, Request};
+-pub use response::{Response, ResponseBox};
+-pub use test::TestRequest;
++use self::client::ClientConnection;
++use self::connection::Connection;
++use self::util::MessagesQueue;
++
++pub use self::common::{HTTPVersion, Header, HeaderField, Method, StatusCode};
++pub use self::connection::{ConfigListenAddr, ListenAddr, Listener};
++pub use self::request::{ReadWrite, Request};
++pub use self::response::{Response, ResponseBox};
++pub use self::test::TestRequest;
+ 
+ mod client;
+ mod common;
+ mod connection;
+ mod request;
+ mod response;
+-mod ssl;
+ mod test;
+ mod util;
+ 
+@@ -201,28 +197,10 @@
+         })
+     }
+ 
+-    /// Shortcut for an HTTPS server on a specific address.
+-    #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-    #[inline]
+-    pub fn https<A>(
+-        addr: A,
+-        config: SslConfig,
+-    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>>
+-    where
+-        A: ToSocketAddrs,
+-    {
+-        Server::new(ServerConfig {
+-            addr: ConfigListenAddr::from_socket_addrs(addr)?,
+-            ssl: Some(config),
+-        })
+-    }
+-
+     #[cfg(unix)]
+     #[inline]
+     /// Shortcut for a UNIX socket server at a specific path
+-    pub fn http_unix(
+-        path: &std::path::Path,
+-    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
++    pub fn http_unix(path: &std::path::Path) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
+         Server::new(ServerConfig {
+             addr: ConfigListenAddr::unix_from_path(path),
+             ssl: None,
+@@ -254,30 +232,9 @@
+             (listener, local_addr)
+         };
+ 
+-        // building the SSL capabilities
+-        #[cfg(all(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-        compile_error!(
+-            "Features 'ssl-openssl' and 'ssl-rustls' must not be enabled at the same time"
+-        );
+-        #[cfg(not(any(feature = "ssl-openssl", feature = "ssl-rustls")))]
+-        type SslContext = ();
+-        #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-        type SslContext = crate::ssl::SslContextImpl;
+-        let ssl: Option<SslContext> = {
+-            match ssl_config {
+-                #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-                Some(config) => Some(SslContext::from_pem(
+-                    config.certificate,
+-                    Zeroizing::new(config.private_key),
+-                )?),
+-                #[cfg(not(any(feature = "ssl-openssl", feature = "ssl-rustls")))]
+-                Some(_) => return Err(
+-                    "Building a server with SSL requires enabling the `ssl` feature in tiny-http"
+-                        .into(),
+-                ),
+-                None => None,
+-            }
+-        };
++        if ssl_config.is_some() {
++            return Err("the private cv HTTP transport does not enable TLS".into());
++        }
+ 
+         // creating a task where server.accept() is continuously called
+         // and ClientConnection objects are pushed in the messages queue
+@@ -293,23 +250,8 @@
+             while !inside_close_trigger.load(Relaxed) {
+                 let new_client = match server.accept() {
+                     Ok((sock, _)) => {
+-                        use util::RefinedTcpStream;
+-                        let (read_closable, write_closable) = match ssl {
+-                            None => RefinedTcpStream::new(sock),
+-                            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-                            Some(ref ssl) => {
+-                                // trying to apply SSL over the connection
+-                                // if an error occurs, we just close the socket and resume listening
+-                                let sock = match ssl.accept(sock) {
+-                                    Ok(s) => s,
+-                                    Err(_) => continue,
+-                                };
+-
+-                                RefinedTcpStream::new(sock)
+-                            }
+-                            #[cfg(not(any(feature = "ssl-openssl", feature = "ssl-rustls")))]
+-                            Some(ref _ssl) => unreachable!(),
+-                        };
++                        use self::util::RefinedTcpStream;
++                        let (read_closable, write_closable) = RefinedTcpStream::new(sock);
+ 
+                         Ok(ClientConnection::new(write_closable, read_closable))
+                     }
+--- tiny_http-0.12.0/src/request.rs
++++ src/http_transport/request.rs
+@@ -7,8 +7,8 @@
+ 
+ use std::sync::mpsc::Sender;
+ 
+-use crate::util::{EqualReader, FusedReader};
+-use crate::{HTTPVersion, Header, Method, Response, StatusCode};
++use crate::http_transport::util::{EqualReader, FusedReader};
++use crate::http_transport::{HTTPVersion, Header, Method, Response, StatusCode};
+ use chunked_transfer::Decoder;
+ 
+ /// Represents an HTTP request made by a client.
+@@ -46,7 +46,7 @@
+ ///
+ /// # Testing
+ ///
+-/// If you want to build fake requests to test your server, use [`TestRequest`](crate::test::TestRequest).
++/// If you want to build fake requests to test your server, use [`TestRequest`](crate::http_transport::test::TestRequest).
+ pub struct Request {
+     // where to read the body from
+     data_reader: Option<Box<dyn Read + Send + 'static>>,
+@@ -302,12 +302,8 @@
+     /// If you call this on a non-websocket request, tiny-http will wait until this `Stream` object
+     ///  is destroyed before continuing to read or write on the socket. Therefore you should always
+     ///  destroy it as soon as possible.
+-    pub fn upgrade<R: Read>(
+-        mut self,
+-        protocol: &str,
+-        response: Response<R>,
+-    ) -> Box<dyn ReadWrite + Send> {
+-        use crate::util::CustomStream;
++    pub fn upgrade<R: Read>(mut self, protocol: &str, response: Response<R>) -> Box<dyn ReadWrite + Send> {
++        use crate::http_transport::util::CustomStream;
+ 
+         response
+             .raw_print(
+@@ -323,10 +319,7 @@
+ 
+         let stream = CustomStream::new(self.extract_reader_impl(), self.extract_writer_impl());
+         if let Some(sender) = self.notify_when_responded.take() {
+-            let stream = NotifyOnDrop {
+-                sender,
+-                inner: stream,
+-            };
++            let stream = NotifyOnDrop { sender, inner: stream };
+             Box::new(stream) as Box<dyn ReadWrite + Send>
+         } else {
+             Box::new(stream) as Box<dyn ReadWrite + Send>
+@@ -390,10 +383,7 @@
+     pub fn into_writer(mut self) -> Box<dyn Write + Send + 'static> {
+         let writer = self.extract_writer_impl();
+         if let Some(sender) = self.notify_when_responded.take() {
+-            let writer = NotifyOnDrop {
+-                sender,
+-                inner: writer,
+-            };
++            let writer = NotifyOnDrop { sender, inner: writer };
+             Box::new(writer) as Box<dyn Write + Send + 'static>
+         } else {
+             writer
+--- tiny_http-0.12.0/src/response.rs
++++ src/http_transport/response.rs
+@@ -1,4 +1,4 @@
+-use crate::common::{HTTPVersion, Header, StatusCode};
++use crate::http_transport::common::{HTTPVersion, Header, StatusCode};
+ use httpdate::HttpDate;
+ use std::cmp::Ordering;
+ use std::sync::mpsc::Receiver;
+@@ -117,7 +117,7 @@
+     has_additional_headers: bool,
+     chunked_threshold: usize,
+ ) -> TransferEncoding {
+-    use crate::util;
++    use crate::http_transport::util;
+ 
+     // HTTP 1.0 doesn't support other encoding
+     if *http_version <= (1, 0) {
+@@ -172,10 +172,7 @@
+     }
+ 
+     // if we don't have a Content-Length, or if the Content-Length is too big, using chunks writer
+-    if entity_length
+-        .as_ref()
+-        .map_or(true, |val| *val >= chunked_threshold)
+-    {
++    if entity_length.as_ref().map_or(true, |val| *val >= chunked_threshold) {
+         return TransferEncoding::Chunked;
+     }
+ 
+@@ -272,11 +269,7 @@
+             return;
+         // if the header is Content-Type and it's already set, overwrite it
+         } else if header.field.equiv("Content-Type") {
+-            if let Some(content_type_header) = self
+-                .headers
+-                .iter_mut()
+-                .find(|h| h.field.equiv("Content-Type"))
+-            {
++            if let Some(content_type_header) = self.headers.iter_mut().find(|h| h.field.equiv("Content-Type")) {
+                 content_type_header.value = header.value;
+                 return;
+             }
+@@ -355,39 +348,32 @@
+ 
+         // add `Server` if not in the headers
+         if !self.headers.iter().any(|h| h.field.equiv("Server")) {
+-            self.headers.insert(
+-                0,
+-                Header::from_bytes(&b"Server"[..], &b"tiny-http (Rust)"[..]).unwrap(),
+-            );
++            self.headers
++                .insert(0, Header::from_bytes(&b"Server"[..], &b"tiny-http (Rust)"[..]).unwrap());
+         }
+ 
+         // handling upgrade
+         if let Some(upgrade) = upgrade {
+-            self.headers.insert(
+-                0,
+-                Header::from_bytes(&b"Upgrade"[..], upgrade.as_bytes()).unwrap(),
+-            );
+-            self.headers.insert(
+-                0,
+-                Header::from_bytes(&b"Connection"[..], &b"upgrade"[..]).unwrap(),
+-            );
++            self.headers
++                .insert(0, Header::from_bytes(&b"Upgrade"[..], upgrade.as_bytes()).unwrap());
++            self.headers
++                .insert(0, Header::from_bytes(&b"Connection"[..], &b"upgrade"[..]).unwrap());
+             transfer_encoding = None;
+         }
+ 
+         // if the transfer encoding is identity, the content length must be known ; therefore if
+         // we don't know it, we buffer the entire response first here
+         // while this is an expensive operation, it is only ever needed for clients using HTTP 1.0
+-        let (mut reader, data_length): (Box<dyn Read>, _) =
+-            match (self.data_length, transfer_encoding) {
+-                (Some(l), _) => (Box::new(self.reader), Some(l)),
+-                (None, Some(TransferEncoding::Identity)) => {
+-                    let mut buf = Vec::new();
+-                    self.reader.read_to_end(&mut buf)?;
+-                    let l = buf.len();
+-                    (Box::new(Cursor::new(buf)), Some(l))
+-                }
+-                _ => (Box::new(self.reader), None),
+-            };
++        let (mut reader, data_length): (Box<dyn Read>, _) = match (self.data_length, transfer_encoding) {
++            (Some(l), _) => (Box::new(self.reader), Some(l)),
++            (None, Some(TransferEncoding::Identity)) => {
++                let mut buf = Vec::new();
++                self.reader.read_to_end(&mut buf)?;
++                let l = buf.len();
++                (Box::new(Cursor::new(buf)), Some(l))
++            }
++            _ => (Box::new(self.reader), None),
++        };
+ 
+         // checking whether to ignore the body of the response
+         let do_not_send_body = do_not_send_body
+@@ -407,25 +393,15 @@
+                 assert!(data_length.is_some());
+                 let data_length = data_length.unwrap();
+ 
+-                self.headers.push(
+-                    Header::from_bytes(
+-                        &b"Content-Length"[..],
+-                        format!("{}", data_length).as_bytes(),
+-                    )
+-                    .unwrap(),
+-                )
++                self.headers
++                    .push(Header::from_bytes(&b"Content-Length"[..], format!("{}", data_length).as_bytes()).unwrap())
+             }
+ 
+             _ => (),
+         };
+ 
+         // sending headers
+-        write_message_header(
+-            writer.by_ref(),
+-            &http_version,
+-            &self.status_code,
+-            &self.headers,
+-        )?;
++        write_message_header(writer.by_ref(), &http_version, &self.status_code, &self.headers)?;
+ 
+         // sending the body
+         if !do_not_send_body {
+@@ -493,13 +469,7 @@
+     pub fn from_file(file: File) -> Response<File> {
+         let file_size = file.metadata().ok().map(|v| v.len() as usize);
+ 
+-        Response::new(
+-            StatusCode(200),
+-            Vec::with_capacity(0),
+-            file,
+-            file_size,
+-            None,
+-        )
++        Response::new(StatusCode(200), Vec::with_capacity(0), file, file_size, None)
+     }
+ }
+ 
+@@ -529,10 +499,7 @@
+ 
+         Response::new(
+             StatusCode(200),
+-            vec![
+-                Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=UTF-8"[..])
+-                    .unwrap(),
+-            ],
++            vec![Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=UTF-8"[..]).unwrap()],
+             Cursor::new(data.into_bytes()),
+             Some(data_len),
+             None,
+@@ -546,13 +513,7 @@
+     where
+         S: Into<StatusCode>,
+     {
+-        Response::new(
+-            status_code.into(),
+-            Vec::with_capacity(0),
+-            io::empty(),
+-            Some(0),
+-            None,
+-        )
++        Response::new(status_code.into(), Vec::with_capacity(0), io::empty(), Some(0), None)
+     }
+ 
+     /// DEPRECATED. Use `empty` instead.
+--- tiny_http-0.12.0/src/test.rs
++++ src/http_transport/test.rs
+@@ -1,4 +1,4 @@
+-use crate::{request::new_request, HTTPVersion, Header, HeaderField, Method, Request};
++use crate::http_transport::{request::new_request, HTTPVersion, Header, HeaderField, Method, Request};
+ use ascii::AsciiString;
+ use std::net::SocketAddr;
+ use std::str::FromStr;
+@@ -54,11 +54,7 @@
+     fn from(mut mock: TestRequest) -> Request {
+         // if the user didn't set the Content-Length header, then set it for them
+         // otherwise, leave it alone (it may be under test)
+-        if !mock
+-            .headers
+-            .iter_mut()
+-            .any(|h| h.field.equiv("Content-Length"))
+-        {
++        if !mock.headers.iter_mut().any(|h| h.field.equiv("Content-Length")) {
+             mock.headers.push(Header {
+                 field: HeaderField::from_str("Content-Length").unwrap(),
+                 value: AsciiString::from_ascii(mock.body.len().to_string()).unwrap(),
+--- tiny_http-0.12.0/src/util/messages_queue.rs
++++ src/http_transport/util/messages_queue.rs
+@@ -86,9 +86,7 @@
+             } else {
+                 Duration::from_millis(0)
+             };
+-            if result.timed_out()
+-                || (duration.as_secs() == 0 && duration.subsec_nanos() < 1_000_000)
+-            {
++            if result.timed_out() || (duration.as_secs() == 0 && duration.subsec_nanos() < 1_000_000) {
+                 return None;
+             }
+         }
+--- tiny_http-0.12.0/src/util/refined_tcp_stream.rs
++++ src/http_transport/util/refined_tcp_stream.rs
+@@ -2,22 +2,16 @@
+ use std::io::{Read, Write};
+ use std::net::{Shutdown, SocketAddr};
+ 
+-use crate::connection::Connection;
+-#[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-use crate::ssl::SslStream;
++use crate::http_transport::connection::Connection;
+ 
+ pub(crate) enum Stream {
+     Http(Connection),
+-    #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-    Https(SslStream),
+ }
+ 
+ impl Clone for Stream {
+     fn clone(&self) -> Self {
+         match self {
+             Stream::Http(tcp_stream) => Stream::Http(tcp_stream.try_clone().unwrap()),
+-            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-            Stream::Https(ssl_stream) => Stream::Https(ssl_stream.clone()),
+         }
+     }
+ }
+@@ -32,24 +26,18 @@
+     fn secure(&self) -> bool {
+         match self {
+             Stream::Http(_) => false,
+-            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-            Stream::Https(_) => true,
+         }
+     }
+ 
+     fn peer_addr(&mut self) -> IoResult<Option<SocketAddr>> {
+         match self {
+             Stream::Http(tcp_stream) => tcp_stream.peer_addr(),
+-            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-            Stream::Https(ssl_stream) => ssl_stream.peer_addr(),
+         }
+     }
+ 
+     fn shutdown(&mut self, how: Shutdown) -> IoResult<()> {
+         match self {
+             Stream::Http(tcp_stream) => tcp_stream.shutdown(how),
+-            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-            Stream::Https(ssl_stream) => ssl_stream.shutdown(how),
+         }
+     }
+ }
+@@ -58,8 +46,6 @@
+     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+         match self {
+             Stream::Http(tcp_stream) => tcp_stream.read(buf),
+-            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-            Stream::Https(ssl_stream) => ssl_stream.read(buf),
+         }
+     }
+ }
+@@ -68,16 +54,12 @@
+     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+         match self {
+             Stream::Http(tcp_stream) => tcp_stream.write(buf),
+-            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-            Stream::Https(ssl_stream) => ssl_stream.write(buf),
+         }
+     }
+ 
+     fn flush(&mut self) -> IoResult<()> {
+         match self {
+             Stream::Http(tcp_stream) => tcp_stream.flush(),
+-            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+-            Stream::Https(ssl_stream) => ssl_stream.flush(),
+         }
+     }
+ }
+--- tiny_http-0.12.0/src/util/task_pool.rs
++++ src/http_transport/util/task_pool.rs
+@@ -69,7 +69,13 @@
+     pub fn spawn(&self, code: Box<dyn FnMut() + Send>) {
+         let mut queue = self.sharing.todo.lock().unwrap();
+ 
+-        if self.sharing.waiting_tasks.load(Ordering::Acquire) == 0 {
++        self.dispatch_locked(code, &mut queue);
++    }
++
++    // The mutex protects both queued reservations and transitions into/out of waiting.
++    // A notified worker has not consumed its queued connection until it reacquires this lock.
++    fn dispatch_locked(&self, code: Box<dyn FnMut() + Send>, queue: &mut VecDeque<Box<dyn FnMut() + Send>>) {
++        if queue.len() >= self.sharing.waiting_tasks.load(Ordering::Acquire) {
+             self.add_thread(Some(code));
+         } else {
+             queue.push_back(code);
+@@ -100,18 +106,15 @@
+                         }
+                         let _waiting_guard = Registration::new(&sharing.waiting_tasks);
+ 
+-                        let received =
+-                            if sharing.active_tasks.load(Ordering::Acquire) <= MIN_THREADS {
+-                                todo = sharing.condvar.wait(todo).unwrap();
+-                                true
+-                            } else {
+-                                let (new_lock, waitres) = sharing
+-                                    .condvar
+-                                    .wait_timeout(todo, Duration::from_millis(5000))
+-                                    .unwrap();
+-                                todo = new_lock;
+-                                !waitres.timed_out()
+-                            };
++                        let received = if sharing.active_tasks.load(Ordering::Acquire) <= MIN_THREADS {
++                            todo = sharing.condvar.wait(todo).unwrap();
++                            true
++                        } else {
++                            let (new_lock, waitres) =
++                                sharing.condvar.wait_timeout(todo, Duration::from_millis(5000)).unwrap();
++                            todo = new_lock;
++                            !waitres.timed_out()
++                        };
+ 
+                         if !received && todo.is_empty() {
+                             return;
+@@ -129,9 +132,156 @@
+ 
+ impl Drop for TaskPool {
+     fn drop(&mut self) {
+-        self.sharing
+-            .active_tasks
+-            .store(999_999_999, Ordering::Release);
++        self.sharing.active_tasks.store(999_999_999, Ordering::Release);
+         self.sharing.condvar.notify_all();
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::mpsc;
++
++    fn idle_pool() -> TaskPool {
++        let pool = TaskPool::new();
++        let deadline = std::time::Instant::now() + Duration::from_secs(2);
++        loop {
++            let queue = pool.sharing.todo.lock().unwrap();
++            if pool.sharing.waiting_tasks.load(Ordering::Acquire) == MIN_THREADS {
++                drop(queue);
++                return pool;
++            }
++            drop(queue);
++            assert!(
++                std::time::Instant::now() < deadline,
++                "pool workers did not reach their idle condition"
++            );
++            thread::yield_now();
++        }
++    }
++
++    #[test]
++    fn queued_connections_reserve_idle_workers_before_a_burst_can_overcommit_them() {
++        let pool = idle_pool();
++        let release = Arc::new((Mutex::new(false), Condvar::new()));
++        let (started, starts) = mpsc::channel();
++        let (done, finishes) = mpsc::channel();
++        {
++            // Force the allowed producer interleaving: no notified worker can consume a queue
++            // reservation while the acceptor dispatches this burst under the same mutex.
++            let mut queue = pool.sharing.todo.lock().unwrap();
++            for id in 0..MIN_THREADS + 1 {
++                let release = release.clone();
++                let started = started.clone();
++                let done = done.clone();
++                pool.dispatch_locked(
++                    Box::new(move || {
++                        started.send(id).unwrap();
++                        let mut ready = release.0.lock().unwrap();
++                        while !*ready {
++                            ready = release.1.wait(ready).unwrap();
++                        }
++                        done.send(id).unwrap();
++                    }),
++                    &mut queue,
++                );
++            }
++        }
++        let mut running = Vec::new();
++        for _ in 0..MIN_THREADS + 1 {
++            match starts.recv_timeout(Duration::from_secs(2)) {
++                Ok(id) => running.push(id),
++                Err(_) => break,
++            }
++        }
++        *release.0.lock().unwrap() = true;
++        release.1.notify_all();
++        for _ in 0..MIN_THREADS + 1 {
++            finishes.recv_timeout(Duration::from_secs(2)).unwrap();
++        }
++        assert_eq!(
++            running.len(),
++            MIN_THREADS + 1,
++            "queued keepalive jobs must not share one idle-worker reservation"
++        );
++    }
++
++    #[test]
++    fn preconnections_cannot_strand_a_new_http_connection_or_its_keepalive_reuse() {
++        use crate::http_transport::client::ClientConnection;
++        use crate::http_transport::connection::Connection;
++        use crate::http_transport::util::RefinedTcpStream;
++        use crate::http_transport::Response;
++        use std::io::{Read, Write};
++        use std::net::{Shutdown, TcpListener, TcpStream};
++        let pool = idle_pool();
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let mut clients = Vec::new();
++        let (done, finishes) = mpsc::channel();
++        {
++            let mut queue = pool.sharing.todo.lock().unwrap();
++            for id in 0..MIN_THREADS + 1 {
++                let client = TcpStream::connect(addr).unwrap();
++                let (server, _) = listener.accept().unwrap();
++                let (read, write) = RefinedTcpStream::new(Connection::from(server));
++                let mut connection = Some(ClientConnection::new(write, read));
++                let done = done.clone();
++                pool.dispatch_locked(
++                    Box::new(move || {
++                        for request in connection.take().unwrap() {
++                            let _ = request.respond(Response::from_string("transport-ready"));
++                        }
++                        done.send(id).unwrap();
++                    }),
++                    &mut queue,
++                );
++                clients.push(client);
++            }
++        }
++        let last = clients.last_mut().unwrap();
++        last.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
++        let request = format!("GET /api/health HTTP/1.1\r\nHost: {addr}\r\nConnection: keep-alive\r\n\r\n");
++        let mut responses = Vec::new();
++        let mut failure = None;
++        for _ in 0..2 {
++            if let Err(error) = last.write_all(request.as_bytes()) {
++                failure = Some(error);
++                break;
++            }
++            let mut body = Vec::new();
++            while !body.ends_with(b"transport-ready") {
++                let mut chunk = [0; 1024];
++                match last.read(&mut chunk) {
++                    Ok(0) => {
++                        failure = Some(std::io::Error::other("connection closed before response"));
++                        break;
++                    }
++                    Ok(n) => body.extend_from_slice(&chunk[..n]),
++                    Err(error) => {
++                        failure = Some(error);
++                        break;
++                    }
++                }
++            }
++            if failure.is_some() {
++                break;
++            }
++            responses.push(body);
++        }
++        for client in clients {
++            let _ = client.shutdown(Shutdown::Both);
++        }
++        for _ in 0..MIN_THREADS + 1 {
++            finishes.recv_timeout(Duration::from_secs(2)).unwrap();
++        }
++        assert!(
++            failure.is_none(),
++            "new connection stalled behind idle preconnections: {failure:?}"
++        );
++        assert_eq!(responses.len(), 2, "keepalive remains enabled and reusable");
++        for response in responses {
++            assert!(response.starts_with(b"HTTP/1.1 200"));
++        }
++    }
++}

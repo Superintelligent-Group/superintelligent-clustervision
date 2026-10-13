@@ -14,6 +14,9 @@ static ALLOCATOR: cv_testkit::heap::Allocator = cv_testkit::heap::Allocator;
 
 mod blame;
 mod cmd;
+// Private released HTTP transport; keep upstream style/API lint allowances local to this copy.
+#[allow(dead_code, unused_imports, clippy::all)]
+mod http_transport;
 mod llm;
 mod util;
 

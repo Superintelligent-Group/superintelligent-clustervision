@@ -311,17 +311,20 @@ name = "clustervision"
 version = "0.16.1"
 dependencies = [
  "anyhow",
+ "ascii",
  "chrono",
+ "chunked_transfer",
  "clap",
  "clustervision-core",
  "cv-search",
  "cv-testkit",
+ "httpdate",
  "libc",
+ "log",
  "regex",
  "rusqlite",
  "serde",
  "serde_json",
- "tiny_http",
  "ureq",
  "urlencoding",
  "uuid",
@@ -2231,18 +2234,6 @@ checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
-]
-
-[[package]]
-name = "tiny_http"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
-dependencies = [
- "ascii",
- "chunked_transfer",
- "httpdate",
- "log",
 ]
 
 [[package]]

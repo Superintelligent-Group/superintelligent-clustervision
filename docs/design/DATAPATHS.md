@@ -2616,3 +2616,43 @@ no-SQL compilation passes. These synthetic requested-allocation/SQL-work control
 native allocations, stacks/mapped pages, instruction/time costs and real fleet ranking. They prove
 removal of unrelated serialized ownership, not universally faster full discovery or bounded fleet
 metadata/results. Full discovery still enumerates/stats actual inventory and retains demanded refs.
+
+### Production HTTP connection scheduling (2026-10-13)
+
+Actual cv serve/system-Chrome loading exposed a transport stall that the Node static-server web
+selftest did not cover. With 19 asset requests, 17 completed while cv-forest.js and cv-splice.js
+remained pending. A live sample showed all four tiny_http connection-parser workers waiting on
+persistent socket reads, all four cv request handlers idle, and the acceptor waiting for new
+connections. One independent health connection returned 200 and released one stranded asset;
+the other still prevented DOMContentLoaded. Node22 had also passed and Node26 had once loaded
+fully, so attributing this to Node versions was not supported. Plain burst/backlog socket trials
+did not reproduce the scheduling race; they are retained as negative controls.
+
+The released tiny_http0.12 parser TaskPool selected an idle worker based only on waiting_tasks.
+Accepted connection tasks could queue faster than notified workers reacquired the mutex, assigning
+multiple long-lived jobs to the same idle capacity. Once those workers entered persistent/preconnect
+reads, queued jobs had no executor until another accepted connection caused expansion. The private
+CLI transport now compares queued reservations with idle capacity under that same mutex. It keeps
+HTTP parsing, response ordering, keepalive and worker reclamation; no timeout or connection-close
+workaround is added. The latest released version and upstream master still carried the old rule.
+
+A deterministic dispatch control holds the queue mutex across the legal acceptor-burst ordering:
+four idle workers and five blocking jobs. The old predicate starts only four; the patched one starts
+all five. A real socket control keeps four idle preconnections open while the fifth connection
+responds twice through keepalive. Both tests fail with the original predicate and pass with the
+reservation-aware rule. Eleven private transport tests, fifteen public serve integration tests and
+production-bin clippy pass. One unchanged-c8d16a92-web, Node26/system-Chrome production control
+then completes four pages/768messages without a rescue request: exact CLI role/content oracle,
+final EOF prompt/title, no page errors and unchanged source hash. This is a scheduling/liveness
+proof plus a functional live control, not a throughput measurement or universal browser guarantee.
+
+No released upstream fix was available, so the CLI carries a private HTTP-only copy of the released
+transport (15Rust files,105,141B/3,447lines including regression tests). Both upstream licenses, archive
+checksum, source-file hashes and exact adaptation patch live in src/http_transport/. The three
+unused TLS implementation files/dependencies are omitted. Only module path adaptations, non-TLS
+specialization, local upstream lint allowances and the scheduling patch/tests change that copy.
+This avoids creating a new public package or letting cargo publication normalize a local path/git
+patch back to unpatched crates.io code. The actual cargo package tarball contains the scheduler,
+licenses and provenance and has no tiny_http registry fallback. Private evidence is retained at
+/Users/ember/dev/cv-worktrees/browser-production-investigation-evidence/; the remaining maintenance
+cost is refreshing this explicit upstream delta if the released transport changes.
