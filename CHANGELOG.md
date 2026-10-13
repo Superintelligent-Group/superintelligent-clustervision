@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Guard Devin, Hermes and Zed database reads against source changes during streaming and discovery.
+
 - OpenCode discovery counts readable roles consistently, including duplicate keys and malformed headers; cached discovery refreshes once.
 - Cold WAL databases use guarded private snapshots, preserving committed WAL data without creating sidecars in harness stores.
 

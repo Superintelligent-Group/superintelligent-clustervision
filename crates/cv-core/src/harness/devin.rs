@@ -144,12 +144,12 @@
 
 use super::store::sqlite::{columns, open_ro, table_exists};
 use super::store::xdg_data_dir;
-use super::{Adapter, note_skipped_lines, ts_from_epoch};
+use super::{note_skipped_lines, ts_from_epoch, Adapter};
 use crate::ir::*;
 use crate::stream::{Flow, MessageSink, ParseOptions};
 use anyhow::Result;
 use rusqlite::Connection;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -200,7 +200,7 @@ impl Adapter for Devin {
         let Ok(conn) = open_ro(&db) else {
             return Ok(vec![]);
         };
-        discover_conn(&conn, &db)
+        conn.read(|conn| discover_conn(conn, &db))
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -209,7 +209,7 @@ impl Adapter for Devin {
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Devin, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
             let conn = open_ro(&r.path)?;
-            stream_conn(&conn, r, sink)
+            conn.read(|conn| stream_conn(conn, r, sink))
         })
     }
 }
@@ -443,54 +443,57 @@ pub fn subagent_tree(db: &Path, session_id: &str) -> Vec<crate::harness::claude:
     let Ok(conn) = open_ro(db) else {
         return Vec::new();
     };
-    let cols = columns(&conn, "sessions");
-    let sel = |c: &str| {
-        if cols.contains(c) {
-            c.to_string()
-        } else {
-            "NULL".to_string()
+    conn.read(|conn| {
+        let cols = columns(conn, "sessions");
+        let sel = |c: &str| {
+            if cols.contains(c) {
+                c.to_string()
+            } else {
+                "NULL".to_string()
+            }
+        };
+        let (wd, title, created, last): (Option<String>, Option<String>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                &format!(
+                    "SELECT working_directory, {}, created_at, last_activity_at FROM sessions WHERE id = ?1",
+                    sel("title")
+                ),
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get(0).ok().flatten(),
+                        row.get(1).ok().flatten(),
+                        row.get(2).ok().flatten(),
+                        row.get(3).ok().flatten(),
+                    ))
+                },
+            )
+            .unwrap_or_default();
+        let parent = SessionRef {
+            cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
+            title,
+            created_at: created.and_then(ts_from_epoch),
+            updated_at: last.and_then(ts_from_epoch),
+            ..SessionRef::new(session_id.to_string(), Harness::Devin, db.to_path_buf())
+        };
+        let forest = load_forest(conn, session_id);
+        let mut out = Vec::new();
+        for (agent, head, updated) in subagent_head_rows(conn, session_id) {
+            if let Some(session) = child_ref(db, session_id, &agent, head, updated, &forest, &parent) {
+                out.push(crate::harness::claude::SubagentInfo {
+                    session,
+                    agent_type: Some(agent),
+                    description: None,
+                    tool_use_id: None,
+                    workflow: None,
+                    result_status: None,
+                    result_summary: None,
+                });
+            }
         }
-    };
-    let (wd, title, created, last): (Option<String>, Option<String>, Option<i64>, Option<i64>) = conn
-        .query_row(
-            &format!(
-                "SELECT working_directory, {}, created_at, last_activity_at FROM sessions WHERE id = ?1",
-                sel("title")
-            ),
-            [session_id],
-            |row| {
-                Ok((
-                    row.get(0).ok().flatten(),
-                    row.get(1).ok().flatten(),
-                    row.get(2).ok().flatten(),
-                    row.get(3).ok().flatten(),
-                ))
-            },
-        )
-        .unwrap_or_default();
-    let parent = SessionRef {
-        cwd: wd.filter(|s| !s.is_empty()).map(PathBuf::from),
-        title,
-        created_at: created.and_then(ts_from_epoch),
-        updated_at: last.and_then(ts_from_epoch),
-        ..SessionRef::new(session_id.to_string(), Harness::Devin, db.to_path_buf())
-    };
-    let forest = load_forest(&conn, session_id);
-    let mut out = Vec::new();
-    for (agent, head, updated) in subagent_head_rows(&conn, session_id) {
-        if let Some(session) = child_ref(db, session_id, &agent, head, updated, &forest, &parent) {
-            out.push(crate::harness::claude::SubagentInfo {
-                session,
-                agent_type: Some(agent),
-                description: None,
-                tool_use_id: None,
-                workflow: None,
-                result_status: None,
-                result_summary: None,
-            });
-        }
-    }
-    out
+        Ok(out)
+    })
+    .unwrap_or_default()
 }
 
 /// Row shape of the session metadata SELECT (columns probed — absent ones come back NULL):
@@ -1270,6 +1273,30 @@ mod tests {
 
     fn sref(id: &str) -> SessionRef {
         SessionRef::new(id, Harness::Devin, fixture())
+    }
+
+    #[test]
+    fn adapter_rejects_source_mutated_by_metadata_callback() {
+        let world = cv_testkit::World::new("devin-checked-read");
+        let path = world.base.join("sessions.db");
+        std::fs::copy(fixture(), &path).unwrap();
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let adapter = Devin::with_root(&world.base);
+        let reference = adapter.discover().unwrap().remove(0);
+        struct MutatingSink<'a>(&'a Connection);
+        impl MessageSink for MutatingSink<'_> {
+            fn meta(&mut self, _: &Session) {
+                self.0.execute_batch("CREATE TABLE callback_mutation(value);").unwrap();
+            }
+            fn message(&mut self, _: Message) -> Flow {
+                Flow::Continue
+            }
+        }
+        let failure = adapter
+            .stream(&reference, &ParseOptions::default(), &mut MutatingSink(&writer))
+            .unwrap_err();
+        assert!(failure.to_string().contains("dependencies changed"), "{failure:#}");
     }
 
     #[test]

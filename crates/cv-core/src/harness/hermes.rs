@@ -246,7 +246,7 @@ impl Adapter for Hermes {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            if let Ok(refs) = discover_conn(&conn, db) {
+            if let Ok(refs) = conn.read(|conn| discover_conn(conn, db)) {
                 out.extend(refs);
             }
         }
@@ -261,7 +261,7 @@ impl Adapter for Hermes {
             // Route by the ref's own DB path (set at discovery time), NOT a single self.db — this is
             // what lets one Hermes adapter span many profile DBs without id collisions.
             let conn = open_ro(&r.path)?;
-            stream_conn(&conn, r, opts, sink)
+            conn.read(|conn| stream_conn(conn, r, opts, sink))
         })
     }
 
@@ -270,10 +270,13 @@ impl Adapter for Hermes {
         let Ok(conn) = open_ro(&r.path) else {
             return Vec::new();
         };
-        if !table_exists(&conn, "state_meta") {
-            return Vec::new();
-        }
-        state_meta_affordances(&conn, &r.id)
+        conn.read(|conn| {
+            if !table_exists(conn, "state_meta") {
+                return Ok(Vec::new());
+            }
+            Ok(state_meta_affordances(conn, &r.id))
+        })
+        .unwrap_or_default()
     }
 }
 
@@ -329,14 +332,17 @@ pub fn subagent_refs(parent: &SessionRef) -> Vec<SessionRef> {
     let Ok(conn) = open_ro(&parent.path) else {
         return Vec::new();
     };
-    let chain: HashSet<String> = if columns(&conn, "sessions").contains("parent_session_id") {
-        session_lineage_root_to_tip(&conn, &parent.id).into_iter().collect()
-    } else {
-        HashSet::from([parent.id.clone()])
-    };
-    let mut out = refs_conn(&conn, &parent.path, Some(&chain)).unwrap_or_default();
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
+    conn.read(|conn| {
+        let chain: HashSet<String> = if columns(conn, "sessions").contains("parent_session_id") {
+            session_lineage_root_to_tip(conn, &parent.id).into_iter().collect()
+        } else {
+            HashSet::from([parent.id.clone()])
+        };
+        let mut out = refs_conn(conn, &parent.path, Some(&chain)).unwrap_or_default();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    })
+    .unwrap_or_default()
 }
 
 /// Session refs in one db: with `delegates_of` unset, every listed conversation (see
@@ -1397,6 +1403,31 @@ mod tests {
     }
 
     /// A message's `extra["hermes"]` bag (the only place a Hermes message fact may live).
+    #[test]
+    fn adapter_rejects_source_mutated_by_metadata_callback() {
+        let world = cv_testkit::World::new("hermes-checked-read");
+        let path = world.base.join("state.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch(&fixture("schema-v14.sql")).unwrap();
+        insert_session(&writer, "t", None, None, 1000.0, None);
+        writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let adapter = Hermes::with_db(path.clone());
+        let reference = adapter.discover().unwrap().remove(0);
+        struct MutatingSink<'a>(&'a Connection);
+        impl MessageSink for MutatingSink<'_> {
+            fn meta(&mut self, _: &Session) {
+                self.0.execute_batch("CREATE TABLE callback_mutation(value);").unwrap();
+            }
+            fn message(&mut self, _: Message) -> Flow {
+                Flow::Continue
+            }
+        }
+        let failure = adapter
+            .stream(&reference, &ParseOptions::default(), &mut MutatingSink(&writer))
+            .unwrap_err();
+        assert!(failure.to_string().contains("dependencies changed"), "{failure:#}");
+    }
+
     #[test]
     fn replay_text_memory_budget_includes_tiny_entry_slots() {
         let mut texts = crate::spill::ExactStrings::default();

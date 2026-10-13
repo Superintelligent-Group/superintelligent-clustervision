@@ -125,13 +125,13 @@ impl Adapter for Zed {
             return Ok(vec![]);
         };
         let conn = open_ro(db)?;
-        discover_db(&conn, db)
+        conn.read(|conn| discover_db(conn, db))
     }
 
     fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             let conn = open_ro(&r.path)?;
-            stream_thread(&conn, r, sink)
+            conn.read(|conn| stream_thread(conn, r, sink))
         })
     }
 }
@@ -1234,6 +1234,12 @@ mod tests {
                         [zstd_blob(&modern_thread())],
                     )
                     .unwrap();
+                self.writer
+                    .execute(
+                        "UPDATE threads SET summary = ?1 WHERE id = 't'",
+                        [uuid::Uuid::new_v4().to_string()],
+                    )
+                    .unwrap();
             }
             fn message(&mut self, message: Message) -> Flow {
                 self.messages.push(message);
@@ -1252,6 +1258,16 @@ mod tests {
             parse_thread(&reader, &sref("t")).unwrap().model.as_deref(),
             Some("openai/gpt-5-mini")
         );
+        // The internal SQLite snapshot remains consistent, but publication through the real
+        // adapter must reject a source changed by a callback rather than recapture its identity.
+        assert!(reader.read(|conn| parse_thread(conn, &sref("t"))).is_err());
+        let adapter = Zed::with_root(&world.base);
+        let mut reference = sref("t");
+        reference.path = path;
+        let failure = adapter
+            .stream(&reference, &ParseOptions::default(), &mut sink)
+            .unwrap_err();
+        assert!(failure.to_string().contains("dependencies changed"));
     }
 
     #[test]
