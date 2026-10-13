@@ -16,6 +16,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+/// Cursor Agent CLI/ACP metadata participates in both catalog discovery and consumer freshness.
+/// Include the absent path: creating it can supply a previously missing cwd or title.
+pub(crate) fn cursor_cli_metadata(r: &SessionRef) -> Option<PathBuf> {
+    (r.harness == Harness::Cursor && r.id.starts_with("cli:"))
+        .then(|| r.path.parent().map(|parent| parent.join("meta.json")))
+        .flatten()
+}
+
 // Preserve the path spelling: canonicalize cannot represent missing files and would hide a
 // symlink's later retargeting. Relative reads belong to the cwd of the pass that consulted them.
 fn absolute(path: &Path) -> Option<PathBuf> {
@@ -255,6 +263,9 @@ impl Probe {
             let mut wal = r.path.as_os_str().to_os_string();
             wal.push("-wal");
             files.push(PathBuf::from(wal));
+        }
+        if let Some(metadata) = cursor_cli_metadata(r) {
+            files.push(metadata);
         }
         match r.harness {
             Harness::Claude => {
@@ -701,6 +712,28 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[test]
+    fn cursor_cli_metadata_creation_and_rewrite_invalidate_consumers() {
+        let world = cv_testkit::World::in_process("cursor-cli-source-metadata");
+        let path = world.base.join("store.db");
+        std::fs::write(&path, "database").unwrap();
+        let r = crate::SessionRef::new("cli:session", crate::Harness::Cursor, &path);
+        let before = super::Probe::default()
+            .snapshot(&r)
+            .with_reads(&super::ReadSet::default());
+        let metadata = world.base.join("meta.json");
+        assert!(super::unchanged(&r, &before));
+        std::fs::write(&metadata, r#"{"title":"first"}"#).unwrap();
+        assert!(!super::unchanged(&r, &before));
+        let present = super::Probe::default()
+            .snapshot(&r)
+            .with_reads(&super::ReadSet::default());
+        std::fs::write(&metadata, r#"{"title":"rewritten title"}"#).unwrap();
+        assert!(!super::unchanged(&r, &present));
+        let ide = crate::SessionRef::new("composer", crate::Harness::Cursor, &path);
+        assert!(super::cursor_cli_metadata(&ide).is_none());
+    }
+
     #[test]
     fn selected_directory_primary_grows_without_blessing_metadata_changes() {
         let w = cv_testkit::World::in_process("source-directory-primary");

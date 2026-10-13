@@ -297,16 +297,20 @@ mod imp {
     /// ancestor directory between each session file and its root (so a new project/day directory
     /// anywhere in the tree bumps a watched mtime), and — for the SQLite-backed harnesses — each
     /// session's backing file and its WAL (in-place writes change neither directory mtimes nor
-    /// necessarily the main database). Absent WALs remain watched. Other paths that can't be
+    /// necessarily the main database). Optional CLI metadata and absent WALs remain watched. Other paths that can't be
     /// stat'd record `0`, as do recently-modified paths (see [`WATCH_FUDGE`]).
     pub(crate) fn watches_for(h: Harness, roots: &[PathBuf], refs: &[SessionRef]) -> Vec<(PathBuf, i64)> {
         let mut paths: BTreeSet<PathBuf> = roots.iter().cloned().collect();
-        let mut optional_wals = BTreeSet::new();
+        let mut optional_files = BTreeSet::new();
         let file_watch = matches!(
             h,
             Harness::Cursor | Harness::Goose | Harness::Hermes | Harness::Zed | Harness::Devin | Harness::OpenCode
         );
         for r in refs {
+            if let Some(metadata) = crate::source::cursor_cli_metadata(r) {
+                optional_files.insert(metadata.clone());
+                paths.insert(metadata);
+            }
             let sqlite_watch =
                 file_watch || (h == Harness::OpenClaw && r.path.extension().and_then(|e| e.to_str()) == Some("sqlite"));
             if sqlite_watch {
@@ -321,7 +325,7 @@ mod imp {
                 let mut wal = r.path.as_os_str().to_os_string();
                 wal.push("-wal");
                 let wal = PathBuf::from(wal);
-                optional_wals.insert(wal.clone());
+                optional_files.insert(wal.clone());
                 paths.insert(wal);
             }
             let root = roots.iter().map(PathBuf::as_path).find(|rt| r.path.starts_with(rt));
@@ -342,7 +346,7 @@ mod imp {
             .filter_map(|p| {
                 let md = match std::fs::metadata(&p) {
                     Ok(md) => md,
-                    Err(e) if optional_wals.contains(&p) && e.kind() == std::io::ErrorKind::NotFound => {
+                    Err(e) if optional_files.contains(&p) && e.kind() == std::io::ErrorKind::NotFound => {
                         return Some((p, WATCH_ABSENT));
                     }
                     Err(_) => return Some((p, 0)), // unknown: never record as fresh
@@ -765,6 +769,31 @@ mod imp {
                 updated_at: None,
                 message_count: 0,
             }
+        }
+
+        #[test]
+        fn watches_track_cursor_cli_metadata_without_database_changes() {
+            let world = cv_testkit::World::in_process("catalog-cursor-cli-meta");
+            let path = world.base.join("store.db");
+            std::fs::write(&path, []).unwrap();
+            let mut r = db_ref(Harness::Cursor, path);
+            r.id = "cli:session".into();
+            let metadata = world.base.join("meta.json");
+            let watches = watches_for(Harness::Cursor, std::slice::from_ref(&world.base), &[r]);
+            let absent = watches.iter().find(|(path, _)| path == &metadata).unwrap().1;
+            assert_eq!(absent, WATCH_ABSENT);
+            assert!(watch_is_fresh(&metadata, absent));
+            std::fs::write(&metadata, r#"{"cwd":"/scratch/project"}"#).unwrap();
+            assert!(!watch_is_fresh(&metadata, absent));
+            let present = crate::offsets::file_sig(&metadata).0;
+            assert!(watch_is_fresh(&metadata, present));
+            std::fs::File::open(&metadata)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(123))
+                .unwrap();
+            assert!(!watch_is_fresh(&metadata, present));
+            std::fs::remove_file(&metadata).unwrap();
+            assert!(!watch_is_fresh(&metadata, present));
         }
 
         #[test]
