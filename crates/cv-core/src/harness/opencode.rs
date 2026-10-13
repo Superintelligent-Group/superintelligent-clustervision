@@ -1342,6 +1342,28 @@ impl ProjectedPart {
                         });
                         state.insert(key.to_owned(), Value::Null);
                     } else if key == "content" && v2 && value.is_array()? {
+                        // A single text result already has the exact joined representation.
+                        // Retain its source range instead of copying it through another arena extent.
+                        let mut content = value.array()?.unwrap();
+                        if let Some(item) = content.next().transpose()? {
+                            if content.next().transpose()?.is_none()
+                                && item
+                                    .get("type")?
+                                    .map(|ty| ty.resolve().map(|ty| ty.as_str() == Some("text")))
+                                    .transpose()?
+                                    .unwrap_or(false)
+                            {
+                                part.output = Some(
+                                    item.get("text")?
+                                        .map(|text| text.source_text())
+                                        .transpose()?
+                                        .flatten()
+                                        .unwrap_or_default(),
+                                );
+                                state.insert(key.to_owned(), json!([{"type":"text","text":""}]));
+                                return Ok(());
+                            }
+                        }
                         let mut items = Vec::new();
                         let mut text_count = 0usize;
                         let output = crate::harness::store::text::append(source, arena, |writer| {
@@ -2115,7 +2137,10 @@ mod tests {
             {"type":"tool", "id":"four", "name":"read", "state":{"status":"running", "input":serde_json::to_string(&json!({"payload":payload})).unwrap()}},
             {"type":"tool", "id":"five", "name":"read", "state":{"status":"running", "input":format!("true{}", " ".repeat(50000))}},
             {"type":"tool", "id":"six", "name":"read", "state":{"status":"running", "input":serde_json::to_string(&payload).unwrap()}},
-            {"type":"tool", "id":"seven", "name":"read", "state":{"status":"running", "input":format!("{{partial {payload}")}}
+            {"type":"tool", "id":"seven", "name":"read", "state":{"status":"running", "input":format!("{{partial {payload}")}},
+            {"type":"tool", "id":"eight", "name":"read", "state":{"status":"completed", "content":[{"type":"text","text":payload}]}},
+            {"type":"tool", "id":"nine", "name":"read", "state":{"status":"error", "content":[{"type":"text","text":42}],"error":{"message":"unused"}}},
+            {"type":"tool", "id":"ten", "name":"read", "state":{"status":"completed", "content":[{"type":"text"}]}}
         ]);
         std::fs::write(&path, serde_json::to_vec(&content).unwrap()).unwrap();
         let source = crate::json::JsonSource::capture(&path).unwrap();
@@ -2141,6 +2166,14 @@ mod tests {
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
+        assert!(matches!(projected[9].output, Some(crate::lazy::Text::Source(_))));
+        std::fs::write(&path, b"[]").unwrap();
+        assert!(projected[9]
+            .output
+            .as_ref()
+            .unwrap()
+            .try_resolve_prefix(&crate::lazy::Resolver::new(None), 8)
+            .is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
