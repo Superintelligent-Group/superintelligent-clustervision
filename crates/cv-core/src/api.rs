@@ -249,9 +249,7 @@ fn sessions(query: &str) -> (u16, Value) {
         refs.truncate(n);
     }
     ok(Value::Array(
-        refs.iter()
-            .map(|r| crate::rows::session_row(r, size_of(r)))
-            .collect(),
+        refs.iter().map(|r| crate::rows::session_row(r, size_of(r))).collect(),
     ))
 }
 
