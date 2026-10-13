@@ -437,6 +437,15 @@ impl Read for SyntaxReader<'_> {
 }
 
 impl RangeSource {
+    /// Validate a physical byte range without JSON parsing. Line readers can preserve their
+    /// stop-on-invalid-UTF-8 policy while separately skipping malformed JSON records.
+    #[cfg(not(feature = "mmap"))]
+    pub fn valid_utf8(&self, range: Range) -> Result<bool> {
+        self.check_identity()?;
+        let result = utf8(&mut self.cursor(range)?);
+        self.check_identity()?;
+        Ok(result?)
+    }
     /// Validate grammar and whole-range UTF-8 once. Export archives use this boundary before
     /// validating individual conversations with Value's independently reset recursion budget.
     pub fn syntax(&self, range: Range) -> Result<bool> {

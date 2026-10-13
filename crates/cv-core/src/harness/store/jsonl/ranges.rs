@@ -24,6 +24,9 @@ pub(crate) fn records(file: &fs::File, range: Range) -> Result<Records<'_>> {
     Ok(Records {
         reader: reader(file, range)?,
         at: range.offset,
+        small: Vec::new(),
+        small_limit: 0,
+        small_complete: false,
     })
 }
 
@@ -154,6 +157,34 @@ mod tests {
         let invalid = trim(&file, rows[0].0).unwrap();
         assert_eq!((invalid.offset, invalid.len), (0, 1));
     }
+    #[cfg(not(feature = "mmap"))]
+    #[test]
+    fn optional_small_records_drop_giant_bytes_and_resume_after_window_boundaries() {
+        let world = cv_testkit::World::in_process("positioned-small-record-cache");
+        let path = world.base.join("rows.jsonl");
+        let bytes = format!("{}\n{}\nsmall\r\npartial", "a".repeat(65535), "b".repeat(65537));
+        fs::write(&path, &bytes).unwrap();
+        let file = fs::File::open(path).unwrap();
+        let mut rows = records(
+            &file,
+            Range {
+                offset: 0,
+                len: bytes.len() as u64,
+            },
+        )
+        .unwrap();
+        rows.keep_small_records(65536);
+        for expected in bytes.split_inclusive('\n') {
+            let complete = expected.ends_with('\n');
+            let body = expected.strip_suffix('\n').unwrap_or(expected);
+            let (range, got_complete) = rows.next().unwrap().unwrap();
+            assert_eq!(range.len, body.len() as u64);
+            assert_eq!(got_complete, complete);
+            assert_eq!(rows.small_record(), (body.len() <= 65536).then_some(body.as_bytes()));
+            assert!(rows.small.capacity() <= 65536);
+        }
+        assert!(rows.next().is_none());
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -215,8 +246,22 @@ pub(crate) fn read_exact_at(file: &fs::File, mut bytes: &mut [u8], mut at: u64) 
 pub(crate) struct Records<'a> {
     reader: BufReader<Reader<'a>>,
     at: u64,
+    small: Vec<u8>,
+    small_limit: usize,
+    small_complete: bool,
 }
 impl Records<'_> {
+    /// Optionally retain small physical records during framing, avoiding a second positioned
+    /// read. Above this fixed cap the scratch is cleared; giant records remain only ranges.
+    #[cfg(not(feature = "mmap"))]
+    pub(crate) fn keep_small_records(&mut self, limit: usize) {
+        self.small = Vec::with_capacity(limit);
+        self.small_limit = limit;
+    }
+    #[cfg(not(feature = "mmap"))]
+    pub(crate) fn small_record(&self) -> Option<&[u8]> {
+        self.small_complete.then_some(&self.small)
+    }
     pub(crate) fn offset(&self) -> u64 {
         self.at
     }
@@ -225,6 +270,8 @@ impl Iterator for Records<'_> {
     type Item = Result<(Range, bool)>;
     fn next(&mut self) -> Option<Self::Item> {
         let start = self.at;
+        self.small.clear();
+        self.small_complete = self.small_limit > 0;
         loop {
             let bytes = match self.reader.fill_buf() {
                 Ok(bytes) => bytes,
@@ -241,6 +288,15 @@ impl Iterator for Records<'_> {
             }
             let newline = memchr::memchr(b'\n', bytes);
             let n = newline.map_or(bytes.len(), |i| i + 1);
+            if self.small_complete {
+                let payload = n - usize::from(newline.is_some());
+                if payload <= self.small_limit - self.small.len() {
+                    self.small.extend_from_slice(&bytes[..payload]);
+                } else {
+                    self.small.clear();
+                    self.small_complete = false;
+                }
+            }
             self.at += n as u64;
             self.reader.consume(n);
             if newline.is_some() {
