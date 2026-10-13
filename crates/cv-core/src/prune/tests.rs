@@ -571,7 +571,12 @@ fn rendered_attachments_count_toward_byte_estimates() {
     ];
     let parsed = pv(&lines);
     let out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-    let honest = honest_window_tokens(&parsed, &out, 0, true);
+    let honest = honest_window_tokens(
+        &parsed,
+        &out.iter().map(|l| l.contains(MARKER_PREFIX)).collect::<Vec<_>>(),
+        0,
+        true,
+    );
     assert!(
         honest >= 10_000,
         "35k bytes of rendered reminder ≈ 10k tokens must be counted (got {honest})"
@@ -1059,4 +1064,80 @@ fn declassify_spares_benign_sessions_entirely() {
         "benign-density prose kept verbatim"
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn decision_roster_preserves_selection_and_revive_evidence() {
+    let rows = vec![
+        serde_json::json!({"type":"user","message":{"content":"opening prompt"}}),
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":"reasoning","signature":"sig"}],"usage":{"input_tokens":12,"cache_read_input_tokens":5,"iterations":[{"type":"message","input_tokens":30,"cache_read_input_tokens":4,"cache_creation_input_tokens":1,"output_tokens":2}]}}}),
+        serde_json::json!({"type":"assistant","isSidechain":true,"message":{"content":"other context","usage":{"input_tokens":999999}}}),
+        serde_json::json!({"type":"system","subtype":"compact_boundary"}),
+        serde_json::json!({"type":"attachment","attachment":{"type":"memory","rendered":["system reminder"]}}),
+        serde_json::json!({"type":"assistant","message":{"model":"<synthetic>","content":"Prompt too long"}}),
+        serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":"[PRUNED id=t]"}]}}),
+        serde_json::json!({"type":"assistant","_cv_orig_ctx":120,"message":{"content":"answer","usage":{"input_tokens":100}}}),
+    ];
+    let original = pv(&rows);
+    let facts: Vec<_> = rows.iter().map(|v| Some(decision_facts(v, true))).collect();
+    for budget in [0, 1, 30, 100, 200, 1000] {
+        let options = PruneOptions {
+            window: Some(budget),
+            ..Default::default()
+        };
+        assert_eq!(
+            select_kept_turns(&original, &options, 4),
+            select_kept_turns(&facts, &options, 4)
+        );
+    }
+    let pruned: Vec<_> = rows.iter().map(|v| v.to_string().contains(MARKER_PREFIX)).collect();
+    for window in [0, 4] {
+        for trusted in [true, false] {
+            assert_eq!(
+                honest_window_tokens(&original, &pruned, window, trusted),
+                honest_window_tokens(&facts, &pruned, window, trusted)
+            );
+        }
+    }
+}
+
+#[test]
+fn sidecar_preparation_failure_preserves_existing_transcript() {
+    let dir = tmpdir();
+    let src = fixture(&dir, &"payload".repeat(1024));
+    let new_id = "22222222-2222-4222-8222-222222222222";
+    let transcript = dir.join(format!("{new_id}.jsonl"));
+    std::fs::write(&transcript, "prior destination").unwrap();
+    std::fs::create_dir(dir.join(format!("{new_id}.flat.jsonl"))).unwrap();
+    let options = PruneOptions {
+        new_id: Some(new_id.into()),
+        keep_last: 0,
+        ..Default::default()
+    };
+    assert!(prune_session(&src, &options).is_err());
+    assert_eq!(std::fs::read_to_string(transcript).unwrap(), "prior destination");
+    assert!(!std::fs::read_dir(&dir).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".cv-prune-")));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn renamed_source_cannot_be_its_own_prune_destination() {
+    let dir = tmpdir();
+    let src = fixture(&dir, &"payload".repeat(1024));
+    let new_id = "22222222-2222-4222-8222-222222222222";
+    let renamed = dir.join(format!("{new_id}.jsonl"));
+    std::fs::rename(src, &renamed).unwrap();
+    let original = std::fs::read(&renamed).unwrap();
+    let options = PruneOptions {
+        new_id: Some(new_id.into()),
+        keep_last: 0,
+        ..Default::default()
+    };
+    assert!(prune_session(&renamed, &options).is_err());
+    assert_eq!(std::fs::read(renamed).unwrap(), original);
+    std::fs::remove_dir_all(dir).unwrap();
 }

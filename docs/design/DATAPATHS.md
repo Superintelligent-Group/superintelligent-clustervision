@@ -1150,3 +1150,46 @@ contracts; bounded selected output still depends on the producer's lazy payload 
 demanded oversized metadata/extra remain owned. Staging consumes disk proportional to serialized
 output and reads the frames once more to construct the final response; no release CPU speedup is
 claimed by this allocation control. Browser JSON parsing still owns the requested response.
+### Prune staged history (2026-10-12, intermediate)
+
+`prune_session` captures/checks its source, frames positioned JSONL ranges, and retains compact
+selection facts plus tool-input source positions. The sequential rewrite owns one record Value,
+stages transcript/sidecar bytes in the shared spill-backed `ByteStage`, and releases each record's
+sidecar entries immediately. Revival retains facts/marker flags, computes the same span evidence,
+then sequentially rewrites only over-reporting usage. No whole input String, all-record payload
+Value roster, output String roster/join, complete sidecar tree/body, or second all-payload revival
+roster remains. Per-record buffers reserve their captured length rather than geometrically growing.
+
+The isolated scratch `prune_probe` compares old/new native transcript bytes, sidecar bytes and all
+result/revive fields. Controls include keep-last, explicit range, window, synthetic/sidechain rows,
+compaction boundaries, singleton titles, usage iterations, thinking, declassification, CRLF,
+malformed rows, trailing whitespace, dry-run and resource copying. Existing filtered prune tests
+plus compact/full-Value evidence parity and failed-sidecar preparation preservation cover the
+implementation. Serialization and both output writes finish privately before publication; each
+rename is atomic, but transcript/sidecar/resource-copy publication remains separate operations.
+This does not add a transaction across those outputs.
+
+Measured requested Rust peak above baseline (MiB), 128/512 assistant/user pairs with 64 KiB result
+and mirror per user (~16/64 MiB inputs):
+
+| operation | 16 MiB old → staged | 64 MiB old → staged |
+|---|---:|---:|
+| default keep-last=2 | 49.033 → 1.591 | 195.025 → 1.692 |
+| revive | 49.062 → 1.610 | 195.158 → 3.594 |
+
+This is an aggregate-history improvement, **not a giant-record scratch bound**. A single changed
+16/64 MiB tool result still peaks at 64.066/256.066 MiB (old 64.006/256.006); a single ignored
+16/64 MiB field peaks at 48.065/192.065 MiB (old 64.005/256.005). The per-record mutation fallback
+and untouched record/restamp copies remain. Next: shared source restamp writing and source-selected
+giant unchanged records; changed-record mutation remains an explicit fallback. Clean timing is
+measured separately from counting allocations; staged I/O and a second source scan trade CPU for
+peak memory and still need optimization. See `crates/cv-core/examples/prune_probe.md` for probe
+controls and measurement exclusions.
+
+Clean default-feature release medians (process CPU / operation wall, milliseconds; seven alternating
+trials, allocator disabled): 16 MiB default 25.47/22.51 → 43.07/40.90, revive 26.81/23.74 →
+45.78/44.21; 64 MiB default 101.39/96.20 → 166.39/163.26, revive 104.85/101.71 →
+167.10/163.93. CPU is ~1.6–1.7× the owned baseline, not a CPU win. The 20 native-output/result
+oracle cases include the separate 16/64 MiB giant tool-result and ignored-field controls. Full
+counters/trials/hashes are in `PRUNE-STAGED-EVIDENCE.json`. Destination canonical-path guards also
+reject a renamed source whose filename would otherwise be reused as its own prune output.

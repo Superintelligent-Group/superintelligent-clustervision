@@ -8,6 +8,7 @@
 - Native JSONL exports stage bounded bytes and stream records for Codex, Grok, OpenClaw and Qwen without retaining complete output histories.
 
 - Doctor rejects unavailable lazy text instead of counting zero tokens; length-only reads avoid copying decoded fragments.
+- Prune stages transcript/sidecar rewrites with compact decision records, reducing memory and rejecting output paths that alias the source.
 
 - Diagnostics and affordance views request selected metadata facts; Claude and Cursor CLI avoid copying unrelated raw sidecars.
 - Lane summaries request response identities for usage deduplication without loading unrelated record metadata.

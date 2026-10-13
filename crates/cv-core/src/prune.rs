@@ -31,9 +31,14 @@
 //! `--range` indices or `--window` sizing. Model-visible `attachment` records (those with
 //! `rendered[]`) DO count toward byte estimates — that text is in the prompt.
 
+use crate::harness::store::{
+    bytes::{ByteSource, ByteStage},
+    jsonl::ranges::{self, Range},
+};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Marker prefix stamped where a payload used to be; carries enough to retrieve the original. The
@@ -385,10 +390,10 @@ fn select_kept_turns(
     let mut pending = 0u64;
     for v in parsed.iter().flatten().filter(|v| !is_sidechain(v)) {
         if is_main_turn(v) {
-            per_turn.push(line_est_tokens(v) + pending);
+            per_turn.push(fact_est_tokens(v) + pending);
             pending = 0;
         } else {
-            pending += line_est_tokens(v);
+            pending += fact_est_tokens(v);
         }
     }
     let mut acc = 0u64;
@@ -414,13 +419,50 @@ fn select_kept_turns(
 
 /// Prune `src_path` (a Claude `<id>.jsonl`) into a new session. Returns what happened.
 pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult> {
-    let raw = std::fs::read_to_string(src_path).with_context(|| format!("reading session {}", src_path.display()))?;
-    let original_size = raw.len() as u64;
-    let lines: Vec<&str> = raw.trim_end().split('\n').collect();
-    // Parse every line ONCE; all later passes (tool-name map, turn counting, window sizing, the
-    // rewrite loop) share this instead of each re-parsing the file. The rewrite loop consumes it,
-    // freeing each Value as its output line is emitted.
-    let parsed: Vec<Option<Value>> = lines.iter().map(|l| serde_json::from_str::<Value>(l).ok()).collect();
+    let source = crate::json::JsonSource::capture(src_path)?;
+    let file = std::fs::File::open(src_path)?;
+    source.check_metadata(file.metadata()?)?;
+    let original_size = file.metadata()?.len();
+    let mut lines = Vec::new();
+    let mut parsed = Vec::new();
+    let mut tool_names = HashMap::new();
+    // Retain only decision facts; payload trees live for one record. Preserve the old global
+    // trim_end contract (including whitespace-only trailing records) without copying the file.
+    for record in ranges::records(
+        &file,
+        Range {
+            offset: 0,
+            len: original_size,
+        },
+    )? {
+        let (range, _) = record?;
+        let line = read_line(&file, range)?;
+        let value = serde_json::from_str::<Value>(&line).ok();
+        if let Some(v) = &value {
+            collect_tool_names(v, range, &mut tool_names);
+        }
+        // The compact roster is payload-free; a complete Value lives for one input record only.
+        let facts = value.as_ref().map(|v| decision_facts(v, opts.window.is_some()));
+        parsed.push(facts);
+        lines.push(range);
+    }
+    while let Some(range) = lines.last_mut() {
+        let line = read_line(&file, *range)?;
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            lines.pop();
+            parsed.pop();
+        } else {
+            range.len = trimmed.len() as u64;
+            break;
+        }
+    }
+    // split on an empty trimmed file historically produces one empty line.
+    if lines.is_empty() {
+        lines.push(Range { offset: 0, len: 0 });
+        parsed.push(None);
+    }
+    source.check()?;
 
     let source_id = parsed
         .iter()
@@ -436,10 +478,13 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     let src_stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or(&source_id);
     let new_path = dir.join(format!("{new_id}.jsonl"));
     let sidecar_path = dir.join(format!("{new_id}.flat.jsonl"));
+    let source_location = std::fs::canonicalize(src_path)?;
+    if std::fs::canonicalize(&new_path).is_ok_and(|p| p == source_location) {
+        bail!("new session path must differ from the source path");
+    }
 
     // Map tool_use_id -> (name, input) from assistant tool_use blocks (which use `id`, not
     // `tool_use_id`); tool_result blocks only carry the id, not the name.
-    let tool_names = build_tool_name_map(&parsed);
 
     // Conversational-turn index per line, so keep-last can spare the most recent turns. A line is
     // "old" (eligible to snip) iff its turn index is before the keep-last window. Sidechain lines
@@ -465,6 +510,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         }
         keep_singletons.extend(last.into_values());
     }
+    drop(parsed);
     let mut dropped_turns = 0usize;
     let mut warnings: Vec<String> = Vec::new();
     if overshoot {
@@ -476,16 +522,26 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         ));
     }
 
-    let mut out_lines: Vec<String> = Vec::with_capacity(lines.len());
+    let mut output = ByteStage::new();
+    let mut output_facts = Vec::new();
+    let mut output_pruned = Vec::new();
+    let mut sidecar_stage = std::io::BufWriter::with_capacity(64 * 1024, ByteStage::new());
+    let mut sidecar_count = 0usize;
+    let mut rooted = false;
     let mut sidecar: Vec<SidecarEntry> = Vec::new();
     let mut pruned_count = 0usize;
     let mut image_blocks = 0usize;
     let mut est_tokens_saved = 0u64;
     let mut turn = 0usize;
 
-    for (idx, (pv, line)) in parsed.into_iter().zip(lines.iter()).enumerate() {
-        let Some(mut v) = pv else {
-            out_lines.push((*line).to_string()); // non-JSON line: verbatim
+    for (idx, range) in lines.iter().enumerate() {
+        let line = read_line(&file, *range)?;
+        let Some(mut v) = serde_json::from_str::<Value>(&line).ok() else {
+            writeln!(output, "{line}")?;
+            if opts.revive {
+                output_facts.push(None);
+                output_pruned.push(line.contains(MARKER_PREFIX));
+            }
             continue;
         };
 
@@ -535,10 +591,11 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         let mut modified = false;
         if is_old && ty == "user" {
             // Only old user messages carry snippable tool results.
+            let current_tools = materialize_tool_inputs(&file, &v, &tool_names)?;
             prune_user_line(
                 &mut v,
                 opts,
-                &tool_names,
+                &current_tools,
                 &new_id,
                 &line_key,
                 &mut sidecar,
@@ -582,51 +639,62 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
         // An untouched line is the source's bytes with only its session id replaced
         // ([`crate::restamp_line`]); a snipped line is re-serialized (values preserved; key order
         // and whitespace may normalize) and then stamped the same way.
-        let out = if modified { v.to_string() } else { (*line).to_string() };
-        out_lines.push(crate::restamp_line(&out, &new_id).unwrap_or(out));
-    }
-
-    // Re-root the first surviving main-thread turn: its parentUuid points at a now-dropped message,
-    // which would break the resume chain. Null it so the kept tail is a valid standalone
-    // conversation. Sidechain lines are skipped — a sub-agent turn can't root the main thread.
-    if windowing && keep_start > 0 {
-        for l in out_lines.iter_mut() {
-            let Ok(mut v) = serde_json::from_str::<Value>(l) else {
-                continue;
-            };
-            if is_main_turn(&v) {
-                if v.get("parentUuid").is_some_and(|p| !p.is_null()) {
-                    v["parentUuid"] = Value::Null;
-                    *l = v.to_string();
-                }
-                break;
+        let out = if modified { v.to_string() } else { line };
+        let mut out = crate::restamp_line(&out, &new_id).unwrap_or(out);
+        if windowing && keep_start > 0 && !rooted && is_main_turn(&v) {
+            rooted = true;
+            if v.get("parentUuid").is_some_and(|p| !p.is_null()) {
+                // Reparse the stamped line so the new session id survives normalization.
+                let mut stamped: Value = serde_json::from_str(&out)?;
+                stamped["parentUuid"] = Value::Null;
+                out = stamped.to_string();
             }
+        }
+        if opts.revive {
+            output_facts.push(Some(decision_facts(&v, true)));
+            output_pruned.push(out.contains(MARKER_PREFIX));
+        }
+        writeln!(output, "{out}")?;
+        for entry in sidecar.drain(..) {
+            serde_json::to_writer(&mut sidecar_stage, &entry)?;
+            sidecar_stage.write_all(b"\n")?;
+            sidecar_count += 1;
         }
     }
 
-    // `--revive`: correct the stale recorded context size so the resume gate reads the honest
-    // post-prune figure. Runs on the already-flattened lines, so the number reflects what's left.
-    let (usage_rewritten, revive_tokens, revive_old_tokens) = if opts.revive {
-        revive_usage(&mut out_lines, windowing, window_real)
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    let output = output.finish()?;
+    let (output, usage_rewritten, revive_tokens, revive_old_tokens) = if opts.revive {
+        revive_staged(output, &output_facts, &output_pruned, windowing, window_real)?
     } else {
-        (0, None, None)
+        (output, 0, None, None)
     };
+    let new_size = output.len()?;
+    let sidecar = sidecar_stage.into_inner().map_err(|e| e.into_error())?.finish()?;
 
-    let new_content = out_lines.join("\n") + "\n";
-    let new_size = new_content.len() as u64;
-
-    let sidecar_out = (!opts.drop && !sidecar.is_empty()).then(|| sidecar_path.clone());
+    let sidecar_out = (!opts.drop && sidecar_count > 0).then(|| sidecar_path.clone());
     let copied = (opts.copy_resources && dir.join(src_stem).is_dir()).then(|| dir.join(&new_id));
+    if sidecar_out
+        .as_ref()
+        .is_some_and(|p| std::fs::canonicalize(p).is_ok_and(|p| p == source_location))
+    {
+        bail!("sidecar path must differ from the source path");
+    }
 
     if !opts.dry_run {
-        std::fs::write(&new_path, &new_content)
-            .with_context(|| format!("writing new session {}", new_path.display()))?;
-        if let Some(p) = &sidecar_out {
-            let body: String = sidecar
-                .iter()
-                .map(|e| serde_json::to_string(e).unwrap_or_default() + "\n")
-                .collect();
-            std::fs::write(p, body).with_context(|| format!("writing sidecar {}", p.display()))?;
+        let transcript = PreparedFile::new(&new_path, &output)?;
+        let sidecar_file = sidecar_out
+            .as_ref()
+            .map(|p| PreparedFile::new(p, &sidecar))
+            .transpose()?;
+        source.check_metadata(file.metadata()?)?;
+        source.check()?;
+        // Serialization and writes complete before publication. Each rename is atomic, but the
+        // transcript, sidecar and optional resource copy remain separate filesystem operations.
+        transcript.publish()?;
+        if let Some(sidecar_file) = sidecar_file {
+            sidecar_file.publish()?;
         }
         if let Some(dst) = &copied {
             copy_dir(&dir.join(src_stem), dst)
@@ -655,6 +723,86 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     })
 }
 
+/// Same-directory temporary outputs keep a failed write from truncating a prior destination.
+struct PreparedFile {
+    temporary: PathBuf,
+    destination: PathBuf,
+}
+impl PreparedFile {
+    fn new(destination: &Path, bytes: &ByteSource) -> Result<Self> {
+        if destination.exists() && !destination.is_file() {
+            bail!("output is not a regular file: {}", destination.display());
+        }
+        let temporary = destination.with_file_name(format!(".cv-prune-{}", uuid::Uuid::new_v4()));
+        let prepared = Self {
+            temporary,
+            destination: destination.to_owned(),
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&prepared.temporary)?;
+        bytes.copy_to(&mut file)?;
+        file.flush()?;
+        Ok(prepared)
+    }
+    fn publish(self) -> Result<()> {
+        std::fs::rename(&self.temporary, &self.destination)
+            .with_context(|| format!("publishing {}", self.destination.display()))
+    }
+}
+impl Drop for PreparedFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.temporary);
+    }
+}
+
+fn read_line(file: &std::fs::File, range: Range) -> Result<String> {
+    let mut line = String::with_capacity(usize::try_from(range.len)?);
+    ranges::reader(file, range)?.read_to_string(&mut line)?;
+    Ok(line)
+}
+
+/// Compact decision roster: no message content, thinking, image or tool-result payloads.
+fn decision_facts(v: &Value, estimate: bool) -> Value {
+    let mut facts = serde_json::Map::new();
+    for key in [
+        "type",
+        "subtype",
+        "isSidechain",
+        "isApiErrorMessage",
+        "sessionId",
+        "_cv_orig_ctx",
+    ] {
+        if let Some(value) = v.get(key) {
+            facts.insert(key.into(), value.clone());
+        }
+    }
+    let mut message = serde_json::Map::new();
+    if let Some(model) = v.pointer("/message/model") {
+        message.insert("model".into(), model.clone());
+    }
+    if let Some(usage) = v.pointer("/message/usage").and_then(Value::as_object) {
+        message.insert("usage".into(), serde_json::json!({"input_tokens": usage_total(usage)}));
+    }
+    facts.insert("message".into(), Value::Object(message));
+    facts.insert(
+        "_prune_est".into(),
+        Value::from(if estimate { line_est_tokens(v) } else { 0 }),
+    );
+    Value::Object(facts)
+}
+
+fn fact_est_tokens(v: &Value) -> u64 {
+    v.get("_prune_est")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| line_est_tokens(v))
+}
+
 /// Rewrite the trailing `message.usage` token counts to an honest post-prune figure (`--revive`).
 ///
 /// Claude Code's resume gate reads the **last turn's recorded `usage`** (input + cache tokens) as the
@@ -674,21 +822,13 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
 /// evidence, span by span — see [`honest_window_tokens`]) with byte estimates, always preferring the
 /// **higher** supported figure so the gate errs on the safe side: it must never be talked into loading
 /// a session that would blow the real limit. Returns `(records rewritten, honest tokens, stale max)`.
-fn revive_usage(
-    out_lines: &mut [String],
+fn revive_staged(
+    output: ByteSource,
+    parsed: &[Option<Value>],
+    pruned: &[bool],
     windowed: bool,
     real_override: Option<u64>,
-) -> (usize, Option<u64>, Option<u64>) {
-    let parsed: Vec<Option<Value>> = out_lines
-        .iter()
-        .map(|l| serde_json::from_str::<Value>(l).ok())
-        .collect();
-
-    // Claude re-sends only what follows the last compaction boundary; before the first, the whole file.
-    // BUT a `--window`/`--range` tail IS the whole resumable session — and it can still contain OLDER
-    // compaction boundaries whose turns kept their original near-wall usage numbers. Honoring "last
-    // boundary" there would leave those stale highs in place (Claude reads one ⇒ "0% remaining"). So
-    // when windowed, treat the entire tail as the loaded window and pin EVERY over-reporting record.
+) -> Result<(ByteSource, usize, Option<u64>, Option<u64>)> {
     let window = if windowed {
         0
     } else {
@@ -700,54 +840,51 @@ fn revive_usage(
                         && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
                 })
             })
-            .map(|i| i + 1)
-            .unwrap_or(0)
+            .map_or(0, |i| i + 1)
     };
-
-    // Honest size of the loaded window: the tokens Claude will actually re-send. When `--window`
-    // supplied the REAL tail size (from recorded usage), take the max of the two — a snipped tail is
-    // smaller than that figure, but conservative (higher) keeps the gate honest.
-    // The first record of the scan is untrusted when the window starts at a compaction boundary
-    // (its absolute total is the very stale figure we're correcting) or when turns were dropped
-    // in front of it (`--window` tail) — its span falls back to the byte estimate.
-    let first_record_trusted = window == 0 && !windowed;
-    let evidence = honest_window_tokens(&parsed, out_lines, window, first_record_trusted);
-    let honest: u64 = evidence.max(real_override.unwrap_or(0));
-
-    let mut rewritten = 0usize;
-    let mut stale_max = 0u64;
-    for i in window..out_lines.len() {
-        let Some(v) = &parsed[i] else { continue };
-        if is_sidechain(v) {
-            continue; // sub-agent usage measures a different context — never ours to rewrite
+    let honest = honest_window_tokens(parsed, pruned, window, window == 0 && !windowed).max(real_override.unwrap_or(0));
+    let mut rewritten = 0;
+    let mut stale_max = 0;
+    let mut stage = ByteStage::new();
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(output.reader()?);
+    let mut i = 0;
+    let mut bytes = Vec::new();
+    while reader.read_until(b'\n', &mut bytes)? != 0 {
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
         }
-        let Some(usage) = v.pointer("/message/usage").and_then(Value::as_object) else {
-            continue;
-        };
-        let total = usage_total(usage);
-        if total <= honest {
-            continue; // already honest (or smaller) — leave it
+        let mut line = String::from_utf8(std::mem::take(&mut bytes))?;
+        if i >= window {
+            if let Some(facts) = &parsed[i] {
+                let total = facts
+                    .pointer("/message/usage")
+                    .and_then(Value::as_object)
+                    .map(usage_total)
+                    .unwrap_or(0);
+                if !is_sidechain(facts) && total > honest {
+                    let mut v: Value = serde_json::from_str(&line)?;
+                    if v.get("_cv_orig_ctx").is_none() {
+                        v["_cv_orig_ctx"] = Value::from(total);
+                    }
+                    if let Some(usage) = v.pointer_mut("/message/usage").and_then(Value::as_object_mut) {
+                        pin_usage(usage, honest);
+                    }
+                    line = v.to_string();
+                    rewritten += 1;
+                    stale_max = stale_max.max(total);
+                }
+            }
         }
-        stale_max = stale_max.max(total);
-        let mut v = v.clone();
-        // Stash the ORIGINAL recorded context size before overwriting it, so a future `--window`
-        // can still size this (now-revived) session by Claude's real counts instead of falling back
-        // to a byte estimate. (Revive otherwise destroys the ground truth that windowing needs.)
-        if v.get("_cv_orig_ctx").is_none() {
-            v["_cv_orig_ctx"] = Value::from(total);
-        }
-        if let Some(u) = v.pointer_mut("/message/usage").and_then(Value::as_object_mut) {
-            pin_usage(u, honest);
-        }
-        out_lines[i] = v.to_string();
-        rewritten += 1;
+        writeln!(stage, "{line}")?;
+        i += 1;
     }
-
-    if rewritten == 0 {
-        (0, None, None)
-    } else {
-        (rewritten, Some(honest), Some(stale_max))
-    }
+    Ok((
+        stage.finish()?,
+        rewritten,
+        (rewritten > 0).then_some(honest),
+        (rewritten > 0).then_some(stale_max),
+    ))
 }
 
 /// Honest post-prune token size of `parsed[window..]`, combining recorded-usage deltas with byte
@@ -765,13 +902,13 @@ fn revive_usage(
 ///  * Lines after the last record (or when there are no records at all): byte estimate.
 ///
 /// Sidechain lines contribute neither usage nor bytes — they aren't re-sent on the main thread.
-fn honest_window_tokens(parsed: &[Option<Value>], out_lines: &[String], window: usize, first_trusted: bool) -> u64 {
+fn honest_window_tokens(parsed: &[Option<Value>], pruned: &[bool], window: usize, first_trusted: bool) -> u64 {
     let span_est = |lo: usize, hi: usize| -> u64 {
         parsed[lo..hi]
             .iter()
             .flatten()
             .filter(|v| !is_sidechain(v))
-            .map(line_est_tokens)
+            .map(fact_est_tokens)
             .sum()
     };
     let mut sum = 0u64;
@@ -798,7 +935,7 @@ fn honest_window_tokens(parsed: &[Option<Value>], out_lines: &[String], window: 
             continue;
         }
         let est = span_est(span_start, i + 1);
-        let span_pruned = out_lines[span_start..=i].iter().any(|l| l.contains(MARKER_PREFIX));
+        let span_pruned = pruned[span_start..=i].iter().any(|p| *p);
         sum += if seg_start || span_pruned {
             est
         } else {
@@ -1233,26 +1370,59 @@ pub(crate) fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn build_tool_name_map(parsed: &[Option<Value>]) -> HashMap<String, (String, Value)> {
-    let mut map = HashMap::new();
-    for v in parsed.iter().flatten() {
-        if v.get("type").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) else {
-            continue;
-        };
-        for b in blocks {
-            if b.get("type").and_then(Value::as_str) == Some("tool_use") {
-                if let Some(id) = b.get("id").and_then(Value::as_str) {
-                    let name = b.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                    let input = b.get("input").cloned().unwrap_or(Value::Null);
-                    map.insert(id.to_string(), (name, input));
-                }
+/// Tool inputs can themselves contain giant file contents. Keep their source record and block
+/// position, then materialize only the inputs needed by the current tool-result record.
+fn collect_tool_names(v: &Value, range: Range, map: &mut HashMap<String, (String, Range, usize)>) {
+    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) else {
+        return;
+    };
+    for (index, b) in blocks.iter().enumerate() {
+        if b.get("type").and_then(Value::as_str) == Some("tool_use") {
+            if let Some(id) = b.get("id").and_then(Value::as_str) {
+                map.insert(
+                    id.to_owned(),
+                    (
+                        b.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        range,
+                        index,
+                    ),
+                );
             }
         }
     }
-    map
+}
+
+fn materialize_tool_inputs(
+    file: &std::fs::File,
+    v: &Value,
+    tools: &HashMap<String, (String, Range, usize)>,
+) -> Result<HashMap<String, (String, Value)>> {
+    let mut result = HashMap::new();
+    if let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) {
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if result.contains_key(id) {
+                continue;
+            }
+            if let Some((name, range, index)) = tools.get(id) {
+                let mut original: Value = serde_json::from_str(&read_line(file, *range)?)?;
+                let input = original
+                    .pointer_mut(&format!("/message/content/{index}/input"))
+                    .map(Value::take)
+                    .unwrap_or(Value::Null);
+                result.insert(id.to_owned(), (name.clone(), input));
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Classify a tool_result content value → (kind, projected text, image count).
