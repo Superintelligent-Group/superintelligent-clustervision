@@ -180,6 +180,8 @@ impl From<LegacyStore> for Store {
 
 /// Serialize + write the store atomically (temp + rename).
 fn save_store(path: &Path, store: &Store) -> Result<()> {
+    #[cfg(test)]
+    actual_probe::record(2);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -341,6 +343,8 @@ fn artifact_root(paths: &[PathBuf; 3]) -> Result<PathBuf> {
 }
 
 fn load_model(spec: &ModelSpec) -> Result<StaticModel> {
+    #[cfg(test)]
+    actual_probe::record(1);
     anyhow::ensure!(
         spec.reads.fresh(&mut Probe::default()),
         "embedding model artifacts changed before loading"
@@ -386,7 +390,11 @@ pub fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize
         &key,
         PROJECTION_VERSION,
         reads,
-        crate::read_corpus_doc,
+        |reference| {
+            #[cfg(test)]
+            actual_probe::record(0);
+            crate::read_corpus_doc(reference)
+        },
         |bodies| {
             if model.is_none() {
                 model = Some(load_model(spec.as_ref().context("embedding model is not cached")?)?);
@@ -1492,3 +1500,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+#[cfg(test)]
+#[path = "semantic_actual_probe.rs"]
+mod actual_probe;
