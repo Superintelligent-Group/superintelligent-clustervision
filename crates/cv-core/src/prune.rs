@@ -1654,7 +1654,6 @@ struct SigmaMatcher<'a> {
     final_sigma: DeclassMatcher<'a>,
     pending: bool,
     before_cased: bool,
-    buffer: String,
     classes: [Option<(char, SigmaClass)>; 128],
 }
 impl<'a> SigmaMatcher<'a> {
@@ -1665,21 +1664,8 @@ impl<'a> SigmaMatcher<'a> {
             final_sigma: DeclassMatcher::new(tokens),
             pending: false,
             before_cased: false,
-            buffer: String::with_capacity(64 * 1024),
             classes: [None; 128],
         }
-    }
-    fn flush(&mut self) {
-        if self.buffer.is_empty() {
-            return;
-        }
-        if self.pending {
-            self.normal.feed(&self.buffer);
-            self.final_sigma.feed(&self.buffer);
-        } else {
-            self.current.feed(&self.buffer);
-        }
-        self.buffer.clear();
     }
     fn class(&mut self, character: char) -> SigmaClass {
         let index = character as usize % self.classes.len();
@@ -1699,47 +1685,85 @@ impl<'a> SigmaMatcher<'a> {
             self.current.complete()
         }
     }
-    fn push(&mut self, text: &str) {
-        for character in text.chars() {
-            // Hit bits never unset. Only stop a pending branch when both possible spellings
-            // already match every nonempty token; stats and checked decoding continue outside.
+    fn resolve(&mut self, class: SigmaClass) {
+        if self.pending && class != SigmaClass::Ignorable {
+            if class == SigmaClass::Cased {
+                std::mem::swap(&mut self.current, &mut self.normal);
+            } else {
+                std::mem::swap(&mut self.current, &mut self.final_sigma);
+            }
+            self.pending = false;
+        }
+    }
+    fn run(&mut self, text: &str) {
+        if text.is_empty() || self.complete() {
+            return;
+        }
+        // Runs contain no capital sigma, so std lowercase needs no outside context. Only
+        // their first/last non-ignorable original scalars affect neighboring sigmas; ASCII
+        // runs usually inspect just their endpoints rather than every payload character.
+        let first = text
+            .chars()
+            .map(|c| self.class(c))
+            .find(|c| *c != SigmaClass::Ignorable);
+        if let Some(first) = first {
+            self.resolve(first);
+        }
+        if self.pending {
+            // Both branches see the same ignorable run; lowercase each bounded piece once.
+            let mut rest = text;
+            while !rest.is_empty() && !self.complete() {
+                let mut end = rest.len().min(64 * 1024);
+                while !rest.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let lowered = rest[..end].to_lowercase();
+                if !self.normal.complete() {
+                    self.normal.feed(&lowered);
+                }
+                if !self.final_sigma.complete() {
+                    self.final_sigma.feed(&lowered);
+                }
+                rest = &rest[end..];
+            }
+        } else {
+            self.current.fold_chunks(text);
+        }
+        if let Some(last) = text
+            .chars()
+            .rev()
+            .map(|c| self.class(c))
+            .find(|c| *c != SigmaClass::Ignorable)
+        {
+            self.before_cased = last == SigmaClass::Cased;
+        }
+    }
+    fn push(&mut self, mut text: &str) {
+        while !text.is_empty() && !self.complete() {
+            let Some(index) = text.find('Σ') else {
+                self.run(text);
+                return;
+            };
+            self.run(&text[..index]);
             if self.complete() {
                 return;
             }
-            let class = self.class(character);
-            if class != SigmaClass::Ignorable && self.pending {
-                self.flush();
-                if class == SigmaClass::Cased {
-                    std::mem::swap(&mut self.current, &mut self.normal);
-                } else {
-                    std::mem::swap(&mut self.current, &mut self.final_sigma);
-                }
-                self.pending = false;
-            }
-            if character == 'Σ' && self.before_cased {
-                // Flush before copying so only token overlap and match bits are copied. Reuse
-                // both branches' allocations: repeated sigmas do not create new matcher buffers.
-                self.flush();
+            // Capital sigma is itself non-ignorable and cased, resolving any earlier sigma.
+            self.resolve(SigmaClass::Cased);
+            if self.before_cased {
                 self.normal.copy_from(&self.current);
                 self.final_sigma.copy_from(&self.current);
                 self.normal.feed("σ");
                 self.final_sigma.feed("ς");
                 self.pending = true;
             } else {
-                for lowered in character.to_lowercase() {
-                    if self.buffer.len() + lowered.len_utf8() > 64 * 1024 {
-                        self.flush();
-                    }
-                    self.buffer.push(lowered);
-                }
+                self.current.feed("σ");
             }
-            if class != SigmaClass::Ignorable {
-                self.before_cased = class == SigmaClass::Cased;
-            }
+            self.before_cased = true;
+            text = &text[index + 'Σ'.len_utf8()..];
         }
     }
     fn finish(mut self) -> usize {
-        self.flush();
         if self.pending {
             std::mem::swap(&mut self.current, &mut self.final_sigma);
         }

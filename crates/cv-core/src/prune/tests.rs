@@ -2215,3 +2215,32 @@ fn sigma_insensitive_tokens_keep_exact_hits_across_context_boundaries() -> Resul
     })?;
     Ok(())
 }
+
+#[test]
+fn sigma_context_batches_long_ordinary_runs_without_changing_matches() {
+    let tokens = vec!["alpha".into(), "ος".into(), "σx".into(), "ςx".into(), "ς ".into()];
+    for text in [
+        format!("ALPHA {}ΟΣ ", "x".repeat(1 << 20)),
+        format!("AΣ{}AΣ ", "x".repeat(1 << 20)),
+        format!("AΣ{}Σ ", "'".repeat(1 << 17)),
+    ] {
+        let lowered = text.to_lowercase();
+        let expected = tokens
+            .iter()
+            .filter(|token: &&String| !token.is_empty() && lowered.contains(token.as_str()))
+            .count();
+        for chunk_size in [65535, 65536, 65537] {
+            let mut matcher = SigmaMatcher::new(&tokens);
+            let mut rest = text.as_str();
+            while !rest.is_empty() {
+                let mut end = rest.len().min(chunk_size);
+                while !rest.is_char_boundary(end) {
+                    end -= 1;
+                }
+                matcher.push(&rest[..end]);
+                rest = &rest[end..];
+            }
+            assert_eq!(matcher.finish(), expected);
+        }
+    }
+}
