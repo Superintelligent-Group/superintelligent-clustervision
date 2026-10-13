@@ -1030,3 +1030,47 @@ use the strict canonical string writer; scoped native/portable tests verify lone
 surrogates from syntax-only views fail before publication, producer/writer failures propagate,
 published prefixes remain valid, and full composed text matches the existing codec. Producer-wide
 CPU measurements remain the consuming adapter lanes' work.
+### Cursor selected SQLite paths (2026-10-12)
+
+Cursor CLI/ACP and modern IDE partial reads now retain selected strings and arguments in one
+shared private arena per accepted SQLite snapshot. DB/WAL and optional ACP metadata provenance
+are checked before and after callbacks and on deferred demands. Full, lazy-extra and complete
+reads preserve the owned fidelity path; Facts supplies doctor metadata without unused provider
+payloads. Finalized dataset bytes remain the accepted snapshot after a later source change.
+
+CLI synthetic native-shaped text/arguments/result/unused controls at 16/64 MiB preserve all 24
+count/detail/output-length/SHA oracles. Native requested heap stays flat: discard 139–140 KB,
+dataset text 3.482 MB, arguments 2.435 MB, result 1.626 MB, unused 207 KB; result/unused discovery
+1.1865 MB. Explicit SQLite portable controls stay flat: discard 399 KB, dataset text 1.647 MB,
+arguments 1.714 MB, result 1.691 MB, unused 467 KB, discovery 1.1865 MB. CLI Facts doctor result
+uses 380,059 bytes at both sizes, versus 67,256,296/268,582,888 for the old lazy-extra demand;
+the complete doctor report matches exactly. Native mapped-page RSS grows 88→315 MB while
+footprint stays about 5–7 MB; portable result RSS stays about 12–15 MB. Requested Rust heap,
+footprint and resident pages are distinct measurements.
+
+Modern IDE header and inline conversations use the same selected reader for ordinary lazy and
+Facts reads. String-result 16/64 MiB controls preserve doctor, affordance, message/session and
+direct/deferred-filter dataset output. Requested heap stays flat: discard 139,536 bytes,
+dataset 1,495,945 bytes, doctor 250,352 bytes, versus old discard/doctor 100,801,607/402,791,495
+and dataset 100,867,519/402,857,407. Native doctor RSS grows 62.03→213.16 MB; footprint stays
+5.54→5.70 MB. RichText lexical decoding and non-string serialized results remain owned floors:
+Facts heap 33,564,407/134,227,703 and 50,341,034/201,335,978 bytes respectively. Names, IDs,
+signatures and SQLite WITHOUT ROWID fallback are separate retained-field limits.
+
+Clean single-run native CLI 64 MiB text discard falls .415→.042 s, arguments .436→.042 s,
+result 2.008→.687 s and unused .657→.227 s. IDE result doctor 16/64 MiB changes
+.1995/1.1431→.2318/1.0131 s; richText .0951/.5654→.1644/.6225 s and non-string results
+.336/1.8956→.3532/1.4281 s. These scoped controls do not establish a general CPU speedup.
+
+The installed Cursor 3.18.25 store was surveyed read-only: 320 composers and 13,106 bubbles;
+164 header-array composers, 140 inline arrays, 82 modelConfig objects and one subagentInfo
+object. Actual bubble shapes include string richText/rawArgs/params/results and numeric modes.
+This shape-only metadata survey is not harness-written corpus. The genuine newer CLI corpus
+remains a separate native capture. Synthetic scale fixtures are not relabeled as captures.
+
+Evidence lives in the count-authority-resumed scratch home: cursor-cli-performance.md,
+cursor-cli-doctor-facts-reports.json, cursor-ide-performance.md, cursor-ide-lazy-{baseline,selected}-reports.json,
+cursor-ide-doctor-{baseline,facts}-reports.json, cursor-ide-doctor-{baseline,facts}-clean-reports.json,
+cursor-ide-facts-native-memory.json and cursor-ide-installed-shape.json. Generators and manifests
+are adjacent; committed corpus versions were not regenerated. The remaining structured IDE
+floors above are active work, not covered by the string-result boundedness claim.
