@@ -48,6 +48,12 @@ fn codex(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Codex::with_home(&version_dir.join(".codex")))
 }
 
+fn cursor(version_dir: &Path) -> Box<dyn Adapter> {
+    Box::new(cv_core::harness::cursor::Cursor::with_cli_home(
+        &version_dir.join(".cursor"),
+    ))
+}
+
 fn grok(version_dir: &Path) -> Box<dyn Adapter> {
     Box::new(Grok::with_home(&version_dir.join(".grok")))
 }
@@ -122,6 +128,11 @@ fn hermes(version_dir: &Path) -> Box<dyn Adapter> {
 const SNAPSHOT_ONLY: &[&str] = &["lmstudio", "zed"];
 
 const HARNESSES: &[CorpusHarness] = &[
+    CorpusHarness {
+        name: "cursor",
+        adapter: cursor,
+        children: None,
+    },
     CorpusHarness {
         name: "claude",
         adapter: claude_adapter,

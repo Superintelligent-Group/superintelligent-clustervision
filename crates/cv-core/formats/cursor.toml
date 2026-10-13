@@ -5,11 +5,13 @@
 # tests/formats_manifest.rs holds it to the adapter source.
 
 harness = "cursor"
-source_files = ["harness/cursor.rs"]
+source_files = ["harness/cursor.rs", "harness/cursor/cli.rs"]
 ignore_literals = []
 store = [
   "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
   "…/workspaceStorage/<hash>/state.vscdb",
+  "~/.cursor/chats/<md5(cwd)>/<agentId>/store.db",
+  "~/.cursor/acp-sessions/<agentId>/store.db",
 ]
 
 [upstream]
@@ -24,3 +26,5 @@ date = "2026-05-29"
 "field.toolFormerData" = { status = "generic", note = "tool call + result" }
 "field.richText" = { status = "generic", note = "Lexical" }
 "field.tokenCount" = { status = "generic", note = "" }
+
+"field.providerOptions" = { status = "generic", note = "CLI injected context, summaries, model and error metadata" }

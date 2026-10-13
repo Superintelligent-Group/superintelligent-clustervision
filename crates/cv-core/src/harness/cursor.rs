@@ -36,6 +36,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod cli;
 mod composer;
 mod legacy;
 mod source;
@@ -43,6 +44,7 @@ mod source;
 pub struct Cursor {
     /// `<AppSupport>/Cursor/User` if it exists.
     user_dir: Option<PathBuf>,
+    cli_home: Option<PathBuf>,
 }
 
 impl Cursor {
@@ -52,13 +54,28 @@ impl Cursor {
             .map(PathBuf::from)
             .or_else(default_user_dir)
             .filter(|p| p.exists());
-        Cursor { user_dir }
+        let cli_home = std::env::var_os("CURSOR_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(|base| PathBuf::from(base).join("cursor")))
+            .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")))
+            .filter(|path| path.is_dir());
+        Cursor { user_dir, cli_home }
     }
 
     /// Use an explicit Cursor/User directory without consulting installed homes.
     pub fn with_user_dir(dir: &Path) -> Self {
         Self {
             user_dir: Some(dir.to_path_buf()).filter(|p| p.exists()),
+            cli_home: None,
+        }
+    }
+
+    /// Use only an explicit Cursor Agent CLI configuration home (`.cursor`), including chats
+    /// and ACP sessions. Never consult the installed IDE or other harness homes.
+    pub fn with_cli_home(home: &Path) -> Self {
+        Self {
+            user_dir: None,
+            cli_home: Some(home.to_path_buf()),
         }
     }
 
@@ -115,7 +132,11 @@ impl Adapter for Cursor {
     /// `Cursor/User`: the dir under which both the global `state.vscdb` and every
     /// `workspaceStorage/<hash>/state.vscdb` live. The db files are catalog file-watches.
     fn roots(&self) -> Vec<PathBuf> {
-        self.user_dir.clone().into_iter().collect()
+        let mut roots: Vec<_> = self.user_dir.clone().into_iter().collect();
+        if let Some(home) = &self.cli_home {
+            roots.extend(cli::roots(home));
+        }
+        roots
     }
 
     fn discover(&self) -> Result<Vec<SessionRef>> {
@@ -141,13 +162,19 @@ impl Adapter for Cursor {
                 discover_legacy_workspace(&conn, &db, cwd.as_deref(), &mut out);
             }
         }
+        if let Some(home) = &self.cli_home {
+            cli::discover(home, &mut out);
+        }
         Ok(out)
     }
 
-    fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // `path` is the DB the thread lives in. Legacy refs carry a `legacy:` id prefix.
             let conn = open_ro(&r.path)?;
+            if r.id.starts_with("cli:") {
+                return cli::stream(&conn, r, opts, sink);
+            }
             if let Some(legacy_id) = r.id.strip_prefix("legacy:") {
                 return stream_legacy(&conn, r, legacy_id, sink);
             }

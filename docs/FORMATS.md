@@ -627,6 +627,29 @@ is *there*, not in the `.sql`), `src/config/sessions/*`,
   links composerIds → workspace; sibling `workspace.json` `folder:"file://…"` is the cwd. Legacy: in-workspace
   `workbench.panel.aichat.view.aichat.chatdata`. Closed-source & churny (`_v` 1..=10+) — skip the unknown.
 
+## Cursor Agent CLI — `~/.cursor/chats/` and `acp-sessions/`
+
+- `CURSOR_CONFIG_DIR` overrides the default; `XDG_CONFIG_HOME/cursor` is the next fallback.
+  Both IDE and CLI sessions use `--harness cursor`; CLI IDs are prefixed `cli:`.
+- Native 2026.10.01-e373342: SQLite `store.db`, `blobs(id TEXT PRIMARY KEY,data BLOB)` and
+  `meta(key TEXT PRIMARY KEY,value TEXT)`. `meta["0"]` is hex-encoded JSON with `agentId`,
+  `latestRootBlobId`, `name`, `createdAt`, optional `subagentInfo` and mode/approval metadata.
+- The selected protobuf root references JSON model messages (field 1), ordered summary archives
+  (field 13; legacy singular field 11), workspace URIs (9), AgentMode (10), and start time (26).
+  Archive field 1 references older messages. Old root snapshots and unreferenced blobs are skipped.
+  ACP sibling `meta.json` supplies cwd/title fallbacks. Missing references and malformed wire data error.
+- JSON messages use `role` and string/part-array `content`: text, reasoning, tool-call (`args`),
+  tool-result (`result`), image, file. `providerOptions.cursor.requestContextCompleteness` marks
+  injected user context; `isSummary` marks compaction summaries. Tool IDs preserve call/result links.
+- CLI AgentMode differs from IDE UnifiedMode: 0 unspecified, 1 agent, 2 ask, 3 plan, 4 debug,
+  5 triage, 6 project, 7 multitask, 8 custom. Raw numbers survive unknown values. `subagentInfo`
+  populates lineage. Per-message usage/timestamps are not present in the first native JSON capture;
+  root context token details are not reported as generation usage.
+- Discovery validates JSON with a count/title projection and uses the same semantic reducer as
+  streaming. One SQLite snapshot and bounded byte staging replay one reachable message at a time;
+  full JSON decoding retains a per-message allocation floor. See the native corpus and generator
+  in `tools/harness-corpus/cursor/`; byte replacement alone breaks protobuf length prefixes.
+
 ## Desktop apps (not harnesses: nothing on disk cv can read)
 
 Neither app is a `--harness` (they were, as `claude-app`/`chatgpt-app`, until cv removed two adapters whose

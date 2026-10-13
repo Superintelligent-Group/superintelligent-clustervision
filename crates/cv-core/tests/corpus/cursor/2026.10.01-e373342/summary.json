@@ -1,0 +1,40 @@
+{
+  "sessions": [
+    {
+      "id": "cli:6000bbd0-679d-49b9-8ced-d4fc730f3448",
+      "path": ".cursor/chats/6623f7def3828c6a04003e7e2d714b8b/6000bbd0-679d-49b9-8ced-d4fc730f3448/store.db",
+      "messages": 10,
+      "sequence": [
+        "system/injected_context",
+        "user/injected_context",
+        "user/prompt",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply",
+        "tool/tool_result",
+        "assistant/reply"
+      ],
+      "blocks": {
+        "text": 5,
+        "thinking": 4,
+        "tool_result": 3,
+        "tool_use": 3
+      },
+      "tools": [
+        "Read",
+        "StrReplace",
+        "Shell"
+      ],
+      "usage_messages": 0,
+      "compaction_boundaries": [],
+      "subagent_spawns": 0,
+      "subagent_returns": 0,
+      "affordances": {},
+      "lineage": {},
+      "model": "grok-4.5",
+      "skipped_lines": 0
+    }
+  ]
+}

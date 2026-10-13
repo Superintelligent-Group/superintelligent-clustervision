@@ -1,0 +1,13 @@
+# Native Cursor Agent CLI-written scratch session, protocol-aware scrubbed.
+harness = "cursor"
+version = "2026.10.01-e373342"
+generated = "2026-10-12"
+model = "grok-4.5 (native default)"
+model_calls = 4 # four assistant completion steps in one CLI invocation
+cli_invocations = 1
+scenarios = ["chat", "read", "write", "shell", "tool_results"]
+skipped = ["resume", "compaction", "subagents", "ACP"]
+writer = "installed cursor-agent 2026.10.01-e373342; --print --force --trust --output-format json"
+auth = "existing IDE access token used only in child memory; AGENT_CLI_CREDENTIAL_STORE=memory; no refresh/API-key exchange"
+scrub = "paths, account IDs, local encryption key; protobuf field lengths rebuilt; SHA-256 IDs and binary references rebuilt"
+generator = "isolated Python subprocess capture, subsequently codified as tools/harness-corpus/cursor/generate.py; not rerun for this committed version"
