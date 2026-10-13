@@ -15,7 +15,7 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 
 | User operation | What we know | Next question / action |
 |---|---|---|
-| List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Catalog setup is now shared within each listing/discovery operation; verified warm listing initializes one connection instead of three. Cold discovery still derives counts from content. | Matched eight-session whole-CLI controls show 34.03% fewer warm-list instructions and 13.59% fewer cold-list instructions, with identical output; see the [comparison artifact](../../tools/profiling/results/catalog-reader-comparison-arm64.json). This isolates setup work and does not rank the real fleet. Preserve freshness and exact counts. |
+| List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Catalog setup is shared across listing/discovery read and publication stages; changed-harness refresh now also reuses that owner. Cold discovery still derives counts from content, and first-use metadata-cache loading retains its lazy catalog open. | Matched eight-session whole-CLI controls show 34.03% fewer warm-list instructions and 13.59% fewer cold-list instructions, with identical output; see the [comparison artifact](../../tools/profiling/results/catalog-reader-comparison-arm64.json). This isolates setup work and does not rank the real fleet. The subsequent scoped-refresh control uses one initialization with an already loaded metadata cache. Preserve freshness and exact counts. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. One candidate decodes one cached row with 8 or 1,024 unrelated records; inventory enumeration and ranking still scale with fleet size. Required source errors remain fatal. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
@@ -2232,3 +2232,18 @@ one demonstrated cold-segment rewrite pattern; it is not a large-fleet I/O bound
 append control, full-tier/rest control and unchanged-pending-compaction control pass. See
 [FTS-COMPACTION-WORK-CONTROL.json](FTS-COMPACTION-WORK-CONTROL.json) for deterministic work
 accounting and exact fixture/query scope; no timing campaign or full index sweep was run.
+
+Scoped discovery refresh (2026-10-13): source capture, per-harness publication and metadata-cache
+persistence now reuse the listing operation's Reader. No transaction spans adapter discovery;
+adapter failures retain previous catalog rows. A warmed process-cache control appends one Claude
+message, observes one catalog initialization, and matches full-discovery JSON with the new count.
+Native and portable Reader controls, eleven freshness cases, native clippy and no-SQL compilation
+pass. Integration at `5c22f7d8` also passes three default-feature compaction controls and twelve
+filtered reader checks; this is scoped validation, not another full convergence run.
+
+The metadata cache stays demand-lazy. Eager preload was rejected because SQLite-only discovery
+could otherwise load unrelated fleet metadata to avoid one connection setup. A first transcript
+scan may still open that cache separately. Claude discovery also retains its two distinct
+validation responsibilities: metadata projection checks grammar while avoiding decoded giant
+strings; strict compatibility rejects invalid Unicode, overflowing numbers and excessive depth,
+including ignored or overwritten fields. No acceptance check was removed to claim a saved pass.
