@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Goose partial reads stage SQLite payloads in bounded memory; doctor retains typed facts without decoding large native metadata bags.
+
 - Doctor rejects unavailable lazy text instead of counting zero tokens; length-only reads avoid copying decoded fragments.
 
 - Diagnostics and affordance views request selected metadata facts; Claude and Cursor CLI avoid copying unrelated raw sidecars.

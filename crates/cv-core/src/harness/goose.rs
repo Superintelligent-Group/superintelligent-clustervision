@@ -125,6 +125,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod project;
+use project::{decode_content_view, project_metadata};
+
 pub struct Goose {
     /// The `sessions/` dir, if it exists on disk.
     dir: Option<PathBuf>,
@@ -230,7 +233,7 @@ impl Adapter for Goose {
         Ok(out)
     }
 
-    fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Goose, sink);
@@ -240,7 +243,7 @@ impl Adapter for Goose {
                 return stream_legacy(&r.id, &r.path, sink);
             }
             let conn = open_ro(&r.path)?;
-            stream_db(&conn, r, sink)
+            stream_db_opts(&conn, r, opts, sink)
         })
     }
 
@@ -391,7 +394,27 @@ fn fork_source(conn: &Connection, id: &str, created_at: Option<DateTime<Utc>>) -
         .map(|(_, sid)| sid)
 }
 
+#[cfg(test)]
 fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
+    stream_db_opts(conn, r, &ParseOptions::full(), sink)
+}
+
+fn stream_db_opts(
+    conn: &Connection,
+    r: &SessionRef,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+) -> Result<Session> {
+    let mut reads = crate::source::ReadSet::default();
+    reads.record(&r.path);
+    let mut wal = r.path.as_os_str().to_os_string();
+    wal.push("-wal");
+    reads.record(Path::new(&wal));
+    let source = opts
+        .spans
+        .then(|| crate::json::JsonSource::capture_with_reads(&r.path, &reads))
+        .transpose()?;
+    let arena = std::sync::Arc::new(super::store::bytes::ByteSource::arena()?);
     let cols = columns(conn, "sessions");
     let has = |c: &str| cols.contains(c);
     let title_expr = title_expr(has);
@@ -490,30 +513,87 @@ fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> R
     } else {
         "NULL"
     };
+    let payload = if opts.spans { "rowid" } else { "content_json" };
+    let metadata = if opts.spans {
+        format!("{metadata} IS NOT NULL")
+    } else {
+        metadata.to_owned()
+    };
     let sql = format!(
-        "SELECT role, content_json, created_timestamp, {msg_id}, {tokens}, {metadata} \
+        "SELECT role, {payload}, created_timestamp, {msg_id}, {tokens}, {metadata} \
          FROM messages WHERE session_id = ?1 ORDER BY created_timestamp, id"
     );
     let mut stmt = conn.prepare(&sql)?;
-    // Stream rows lazily: build one `DbMsg` -> one `Message`, emit it, drop it before the next row,
-    // so a large Goose session never fully materializes (peak = one message's content).
+    // Partial readers select row IDs rather than giant TEXT cells. SQLite copies demanded cells
+    // into one private arena; selected text/arguments retain checked DB/WAL provenance. Full
+    // readers keep their owned output floor and the established tolerant native decoder.
     let rows = stmt.query_map([&r.id], |row| {
-        Ok(DbMsg {
-            role: row.get::<_, String>(0).unwrap_or_default(),
-            content_json: row.get::<_, Option<String>>(1).ok().flatten().unwrap_or_default(),
-            created: row.get::<_, Option<i64>>(2).ok().flatten(),
-            id: row.get::<_, Option<String>>(3).ok().flatten(),
-            tokens: row.get::<_, Option<i64>>(4).ok().flatten(),
-            metadata: row.get::<_, Option<String>>(5).ok().flatten(),
-        })
+        Ok((
+            if opts.spans { Some(row.get::<_, i64>(1)?) } else { None },
+            if opts.spans {
+                None
+            } else {
+                row.get::<_, Option<String>>(1).ok().flatten()
+            },
+            DbMsg {
+                role: row.get::<_, String>(0).unwrap_or_default(),
+                created: row.get::<_, Option<i64>>(2).ok().flatten(),
+                id: row.get::<_, Option<String>>(3).ok().flatten(),
+                tokens: row.get::<_, Option<i64>>(4).ok().flatten(),
+                metadata: if opts.spans {
+                    None
+                } else {
+                    row.get::<_, Option<String>>(5)
+                        .ok()
+                        .flatten()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                },
+                has_metadata: row.get::<_, bool>(5).unwrap_or(false),
+            },
+        ))
     })?;
 
     // Track tool-request names so we can label later tool responses (forward-only state).
     let mut tool_names: HashMap<String, String> = HashMap::new();
     let mut history = AgentHistory::default();
     for (idx, row) in rows.enumerate() {
-        let Ok(row) = row else { continue };
-        let Some(mut m) = row.into_message(&mut tool_names, s.model.as_deref(), &mut history) else {
+        let Ok((rowid, owned, mut row)) = row else { continue };
+        let decoded = if let (Some(rowid), Some(source)) = (rowid, source.as_ref()) {
+            if row.has_metadata {
+                let (offset, len) =
+                    super::store::sqlite::append_cell(conn, "messages", "metadata_json", rowid, &arena)?;
+                let metadata = source.read_backing_value(arena.clone(), offset, len, |v| {
+                    if opts.facts_only() {
+                        project_metadata(v)
+                    } else {
+                        Ok(v.resolve()?.into_owned())
+                    }
+                });
+                source.check()?;
+                row.metadata = match metadata {
+                    Ok(value) => Some(value),
+                    Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => None,
+                    Err(error) => return Err(error),
+                };
+            }
+            let (offset, len) = super::store::sqlite::append_cell(conn, "messages", "content_json", rowid, &arena)?;
+            let decoded = source.read_backing_value(arena.clone(), offset, len, |view| {
+                decode_content_view(view, &mut tool_names, opts, source, &arena)
+            });
+            source.check()?;
+            match decoded {
+                Ok(decoded) => decoded,
+                Err(error) if error.downcast_ref::<crate::json::InvalidJson>().is_some() => Decoded::default(),
+                Err(error) => return Err(error),
+            }
+        } else {
+            decode_content(
+                &owned.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null),
+                &mut tool_names,
+            )
+        };
+        let Some(mut m) = row.into_message_decoded(decoded, s.model.as_deref(), &mut history, !opts.facts_only())
+        else {
             continue;
         };
         if m.kind == MessageKind::Prompt {
@@ -539,6 +619,9 @@ fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> R
             break;
         }
     }
+    if let Some(source) = source {
+        source.check()?;
+    }
     Ok(s)
 }
 
@@ -557,12 +640,12 @@ fn prompt_origin(session_type: Option<&str>) -> Origin {
 
 struct DbMsg {
     role: String,
-    content_json: String,
     created: Option<i64>,
     id: Option<String>,
     tokens: Option<i64>,
     /// `messages.metadata_json` — the only place Goose records per-message usage and model.
-    metadata: Option<String>,
+    metadata: Option<Value>,
+    has_metadata: bool,
 }
 
 /// What the rows before this one left in the model's context, in store order: how many there were
@@ -579,16 +662,14 @@ struct AgentHistory {
 }
 
 impl DbMsg {
-    fn into_message(
+    fn into_message_decoded(
         self,
-        tool_names: &mut HashMap<String, String>,
+        decoded: Decoded,
         session_model: Option<&str>,
         history: &mut AgentHistory,
+        rich: bool,
     ) -> Option<Message> {
-        let meta = self
-            .metadata
-            .as_deref()
-            .and_then(|j| serde_json::from_str::<Value>(j).ok());
+        let meta = self.metadata;
         let flag = |k: &str| meta.as_ref().and_then(|m| m.get(k)).and_then(Value::as_bool);
         let agent_visible = flag("agentVisible") != Some(false);
         let compaction_summary = self.role == "user"
@@ -600,8 +681,6 @@ impl DbMsg {
         history.rows += 1;
         history.any_agent_visible |= agent_visible;
 
-        let content: Value = serde_json::from_str(&self.content_json).unwrap_or(Value::Null);
-        let decoded = decode_content(&content, tool_names);
         let mut m = build_message(
             &self.role,
             self.id,
@@ -611,6 +690,9 @@ impl DbMsg {
         )?;
         if let Some(meta) = meta {
             apply_metadata(&mut m, meta, session_model, compaction_summary);
+        }
+        if !rich {
+            m.extra.remove(Harness::Goose.as_str());
         }
         Some(m)
     }
@@ -1882,6 +1964,155 @@ mod tests {
         let g = Goose { dir: None };
         assert!(g.discover().unwrap().is_empty());
         assert!(g.roots().is_empty());
+    }
+
+    fn projected_session(conn: &Connection, r: &SessionRef, opts: &ParseOptions) -> Session {
+        let mut sink = crate::stream::CollectSink::default();
+        let mut session = stream_db_opts(conn, r, opts, &mut sink).unwrap();
+        session.messages = sink.messages;
+        session.materialize().unwrap();
+        session
+    }
+
+    #[test]
+    fn checked_projection_matches_native_store_in_all_modes() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/goose/sessions-v16-1.51.0.db");
+        let conn = open_ro(&path).unwrap();
+        for r in discover_db(&conn, &path).unwrap() {
+            let expected = serde_json::to_value(projected_session(&conn, &r, &ParseOptions::full())).unwrap();
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::bulk(),
+                ParseOptions::complete(),
+            ] {
+                assert_eq!(
+                    serde_json::to_value(projected_session(&conn, &r, &opts)).unwrap(),
+                    expected,
+                    "{} {opts:?}",
+                    r.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_projection_large_selected_and_ignored_payloads() {
+        let dir = tempdir();
+        let path = dir.join("sessions.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, description, working_dir) VALUES ('large','large','/scratch')",
+            [],
+        )
+        .unwrap();
+        let giant = "é\n\"\\".repeat(400_000);
+        let content = serde_json::json!([
+            {"type":"text","text": giant},
+            {"type":"thinking","thinking": giant,"signature":"sig"},
+            {"type":"toolRequest","id":"call","toolCall":{"status":"success","value":{"name":"shell","arguments":{"command":giant}}}},
+            {"type":"toolResponse","id":"call","toolResult":{"status":"success","value":{"content":[{"type":"text","text":giant},{"type":"resource","resource":{"text":giant}},{"type":"audio","mimeType":"audio/wav"}],"structuredContent":{"stdout":giant},"_meta":{"subagent_session_id":"child"}}}},
+            {"type":"image","data":giant,"mimeType":"image/png"},
+            {"type":"document","data":giant,"mimeType":"application/pdf","name":"file"},
+            {"type":"error"},
+            {"type":"systemNotification","msg":giant},
+            {"type":"actionRequired","data":{"actionType":"elicitation","message":giant}},
+            {"type":"unknown","discarded":giant}
+        ]);
+        let metadata = serde_json::json!({"userVisible":false,"turnContext":true,"usage":{"inputTokens":9,"cacheReadTokens":3,"cost":0.25,"discarded":giant},"inference":{"provider":"p","resolvedModel":"m","discarded":giant},"operations":[giant]});
+        conn.execute("INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES ('large','user',?1,1,?2)", rusqlite::params![content.to_string(),metadata.to_string()]).unwrap();
+        let r = SessionRef::new("large", Harness::Goose, path.clone());
+        let full = projected_session(&conn, &r, &ParseOptions::full());
+        for opts in [ParseOptions::lazy(), ParseOptions::bulk(), ParseOptions::complete()] {
+            assert_eq!(
+                serde_json::to_value(projected_session(&conn, &r, &opts)).unwrap(),
+                serde_json::to_value(&full).unwrap()
+            );
+        }
+        let facts = projected_session(&conn, &r, &ParseOptions::facts());
+        assert_eq!(facts.messages[0].role, full.messages[0].role);
+        assert_eq!(facts.messages[0].kind, full.messages[0].kind);
+        assert_eq!(
+            serde_json::to_value(&facts.messages[0].usage).unwrap(),
+            serde_json::to_value(&full.messages[0].usage).unwrap()
+        );
+        assert_eq!(facts.messages[0].model, full.messages[0].model);
+        assert!(facts.messages[0].extra.is_empty());
+        assert!(matches!(
+            &facts.messages[0].content[3],
+            Block::ToolResult { details: None, .. }
+        ));
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn checked_projection_rejects_sidecar_creation_at_early_stop() {
+        let dir = tempdir();
+        let path = dir.join("sessions.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id,description,working_dir) VALUES ('guard','guard','/scratch')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id,role,content_json,created_timestamp) VALUES ('guard','user',?1,1)",
+            [serde_json::json!([{"type":"text","text":"x".repeat(crate::lazy::INLINE_MAX + 1)}]).to_string()],
+        )
+        .unwrap();
+        struct Stop {
+            wal: PathBuf,
+            message: Option<Message>,
+        }
+        impl MessageSink for Stop {
+            fn message(&mut self, message: Message) -> Flow {
+                self.message = Some(message);
+                std::fs::write(&self.wal, b"changed sidecar").unwrap();
+                Flow::Stop
+            }
+        }
+        let mut stop = Stop {
+            wal: dir.join("sessions.db-wal"),
+            message: None,
+        };
+        let r = SessionRef::new("guard", Harness::Goose, path);
+        assert!(stream_db_opts(&conn, &r, &ParseOptions::lazy(), &mut stop).is_err());
+        let mut message = stop.message.unwrap();
+        assert!(message.materialize(&crate::lazy::Resolver::new(None)).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn checked_projection_invalid_body_retains_compaction_history() {
+        let dir = tempdir();
+        let path = dir.join("sessions.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id,description,working_dir) VALUES ('history','history','/scratch')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES ('history','user','not JSON',1,'{\"agentVisible\":false}')", []).unwrap();
+        conn.execute("INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES ('history','user','[{\"type\":\"text\",\"text\":\"summary\"}]',2,'{\"userVisible\":false,\"agentVisible\":true}')", []).unwrap();
+        let r = SessionRef::new("history", Harness::Goose, path);
+        let full = projected_session(&conn, &r, &ParseOptions::full());
+        assert_eq!(full.messages.len(), 2);
+        assert_eq!(full.messages[1].kind, MessageKind::CompactionSummary);
+        assert_eq!(
+            serde_json::to_value(projected_session(&conn, &r, &ParseOptions::lazy())).unwrap(),
+            serde_json::to_value(&full).unwrap()
+        );
+        assert_eq!(
+            kinds(&projected_session(&conn, &r, &ParseOptions::facts())),
+            kinds(&full)
+        );
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn tempdir() -> PathBuf {
