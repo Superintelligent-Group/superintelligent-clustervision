@@ -16,7 +16,14 @@ one further linked-record prune ownership defect; that fix and its strengthened 
 integrated. Current-schema fleet composition exposed guarded-empty freshness and duplicate-copy
 indexing defects; guarded-empty, canonical-copy and event-authority fixes are integrated. The
 corrected cold/unchanged/append/clean-reference composition passes with frozen primary stores
-plus guarded, observed-stable external sidecars (see the final fleet evidence below). Qwen has no local data, so its synthetic carrier work is explicitly deferred. This changes priority, not the correctness or fidelity requirements.
+plus guarded, observed-stable external sidecars (see the final fleet evidence below). The next
+batch follows three actual-operation counterexamples: same-harness complete rehoming (64 MiB
+ordinary body, 267 MB peak requested Rust heap), Unicode prune declassification (32 MiB body
+with one emoji, 67 MB), and Gemini export (32 MiB ordinary text, 134 MB). These are retained
+ownership defects, not throughput measurements. Changes must preserve complete output, metadata,
+acceptance and source-error semantics; shared checked readers/writers take priority over new
+format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
+This changes priority, not the correctness or fidelity requirements.
 
 | User operation | What we know | Next question / action |
 |---|---|---|
