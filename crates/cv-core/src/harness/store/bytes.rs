@@ -1,5 +1,29 @@
 //! Immutable operation-owned bytes, bounded in memory and spilled privately when necessary.
 pub(crate) const MEMORY_LIMIT: usize = 1024 * 1024;
+/// Darwin can fault while writing mmap-backed input into the same vnode. All arena append
+/// writes pass through independently owned bounded scratch, including serializer fast paths
+/// that bypass their own BufWriter for large windows.
+struct AppendWriter<'a> {
+    file: &'a mut std::fs::File,
+    scratch: Vec<u8>,
+}
+impl std::io::Write for AppendWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        for part in bytes.chunks(64 * 1024) {
+            self.scratch.clear();
+            if self.scratch.capacity() < part.len() {
+                self.scratch.reserve_exact(part.len());
+            }
+            self.scratch.extend_from_slice(part);
+            self.file.write_all(&self.scratch)?;
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Spill {
     file: Option<std::fs::File>,
@@ -136,7 +160,10 @@ impl ByteSource {
         let offset = file.metadata()?.len();
         // O_APPEND makes published prefixes immutable even while positioned readers run.
         // Failed appends remain unreachable; truncating could invalidate mapped views.
-        f(&mut file)?;
+        f(&mut AppendWriter {
+            file: &mut file,
+            scratch: Vec::new(),
+        })?;
         let end = file.metadata()?.len();
         Ok((offset, end - offset))
     }

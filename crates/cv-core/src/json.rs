@@ -1827,6 +1827,83 @@ mod tests {
     }
 
     #[test]
+    fn same_arena_unescaped_windows_copy_before_append_write() {
+        const CHILD: &str = "CV_TEST_SAME_ARENA_APPEND_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "json::tests::same_arena_unescaped_windows_copy_before_append_write",
+                ])
+                .env(CHILD, "1")
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "same-arena append child failed: {status}");
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    // A Darwin vnode deadlock can remain uninterruptible even after kill.
+                    // Do not block the test runner waiting for that kernel fault to unwind.
+                    let _ = child.try_wait();
+                    panic!("same-arena append child {} stalled for 30 seconds", child.id());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        let fixture = Fixture::new(b"compressed provenance placeholder");
+        let captured = JsonSource::capture(&fixture.path).unwrap();
+        let backing = Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+        let padding = " ".repeat(crate::lazy::INLINE_MAX + 1);
+        for argument in [
+            "true".to_owned(),
+            format!("{padding}true"),
+            format!("{padding}{{}}"),
+            format!("{padding}[]"),
+            padding,
+        ] {
+            let outer = serde_json::to_vec(&serde_json::json!({"arguments":argument})).unwrap();
+            let (offset, len) = backing
+                .append(|out| {
+                    out.write_all(&outer)?;
+                    Ok(())
+                })
+                .unwrap();
+            let value = captured
+                .read_backing_value(backing.clone(), offset, len, |view| {
+                    view.get("arguments")?.unwrap().encoded_argument()
+                })
+                .unwrap();
+            let expected = crate::harness::wire::openai::parse_arguments(Some(&serde_json::Value::String(argument)));
+            assert_eq!(value.resolve().unwrap().as_ref(), &expected);
+        }
+        // Tiny raw scalars and giant unescaped JSON strings both use borrowed writer fast paths.
+        // The destination is the same arena vnode as the mapped input, exercising the Darwin
+        // deadlock that producer-owned input buffers and escaped chunks did not reproduce.
+        for body in [serde_json::json!(true), serde_json::json!("x".repeat(3 * 64 * 1024))] {
+            let wire = serde_json::to_vec(&body).unwrap();
+            let (offset, len) = backing
+                .append(|out| {
+                    out.write_all(&wire)?;
+                    Ok(())
+                })
+                .unwrap();
+            let (copy_offset, copy_len) = captured
+                .read_backing_value(backing.clone(), offset, len, |view| {
+                    backing.append(|mut out| view.write_canonical(&mut out))
+                })
+                .unwrap();
+            let copied = captured
+                .read_backing_value(backing.clone(), copy_offset, copy_len, |view| view.to_json())
+                .unwrap();
+            assert_eq!(canonical(&copied), wire);
+        }
+    }
+
+    #[test]
     fn nested_encoded_document_uses_same_arena_without_read_append_deadlock() {
         let inner = format!("{{\"payload\":\"{}\"}}", "x".repeat(9000));
         let outer = serde_json::to_vec(&serde_json::json!({"arguments":inner})).unwrap();

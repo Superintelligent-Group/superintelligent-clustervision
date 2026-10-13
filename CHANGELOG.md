@@ -4,6 +4,7 @@
 
 - Diagnostics and affordance views request selected metadata facts; Claude and Cursor CLI avoid copying unrelated raw sidecars.
 - Lane summaries request response identities for usage deduplication without loading unrelated record metadata.
+- Shared payload staging copies bounded chunks before appending, preventing mapped-source writes from hanging on macOS.
 
 - Compaction summary scans propagate lazy source read failures and preserve full summary text.
 - Kimi Code keeps large step payloads lazy and reduces memory for doctor and filtered dataset reads.
