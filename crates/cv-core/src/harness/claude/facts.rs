@@ -125,16 +125,7 @@ impl<'de> Visitor<'de> for Object {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Value, A::Error> {
         let mut out = Map::new();
         while let Some(key) = map.next_key::<String>()? {
-            let nested = match (self.0, key.as_str()) {
-                (Shape::Top, "message") => Some(Shape::Message),
-                (Shape::Top, "attachment") => Some(Shape::Attachment),
-                (Shape::Top, "toolUseResult") => Some(Shape::AgentReturn),
-                (Shape::Top, "compactMetadata" | "compact_metadata") => Some(Shape::Compaction),
-                (Shape::Top, "origin") => Some(Shape::Origin),
-                (Shape::Top, "snapshot") => Some(Shape::Snapshot),
-                (Shape::Snapshot, "trackedFileBackups") => Some(Shape::Backups),
-                _ => None,
-            };
+            let nested = nested(self.0, &key);
             if let Some(shape) = nested {
                 out.insert(key, map.next_value_seed(Object(shape))?);
             } else if keep(self.0, &key) {
@@ -163,51 +154,115 @@ impl<'de> Visitor<'de> for Object {
         Ok(Value::Object(out))
     }
 }
-fn keep(shape: Shape, key: &str) -> bool {
-    match shape {
-        Shape::Message => matches!(key, "role" | "content" | "model" | "usage" | "id"),
-        Shape::Attachment => matches!(key, "type" | "systemPrompt"),
-        Shape::AgentReturn => matches!(key, "agentId" | "status"),
-        Shape::Compaction => matches!(key, "trigger" | "preTokens" | "durationMs"),
-        Shape::Origin => key == "kind",
-        Shape::Snapshot => false,
-        Shape::Backups => true,
-        Shape::Top => matches!(
-            key,
-            "type"
-                | "uuid"
-                | "parentUuid"
-                | "timestamp"
-                | "cwd"
-                | "gitBranch"
-                | "permissionMode"
-                | "isMeta"
-                | "isCompactSummary"
-                | "isApiErrorMessage"
-                | "scheduledTaskId"
-                | "scheduledFireId"
-                | "turnOrigin"
-                | "subtype"
-                | "content"
-                | "rendered"
-                | "hookCount"
-                | "hasOutput"
-                | "hookAdditionalContext"
-                | "hookInfos"
-                | "hookErrors"
-                | "isSnapshotUpdate"
-                | "snapshot"
-                | "trackingPath"
-                | "aiTitle"
-                | "customTitle"
-                | "summary"
-                | "agentName"
-                | "tag"
-                | "relocatedCwd"
-                | "continuedInSessionId"
-                | "prUrl"
-        ),
+fn nested(shape: Shape, key: &str) -> Option<Shape> {
+    match (shape, key) {
+        (Shape::Top, "message") => Some(Shape::Message),
+        (Shape::Top, "attachment") => Some(Shape::Attachment),
+        (Shape::Top, "toolUseResult") => Some(Shape::AgentReturn),
+        (Shape::Top, "compactMetadata" | "compact_metadata") => Some(Shape::Compaction),
+        (Shape::Top, "origin") => Some(Shape::Origin),
+        (Shape::Top, "snapshot") => Some(Shape::Snapshot),
+        (Shape::Snapshot, "trackedFileBackups") => Some(Shape::Backups),
+        _ => None,
     }
+}
+fn keys(shape: Shape) -> &'static [&'static str] {
+    match shape {
+        Shape::Message => &["role", "content", "model", "usage", "id"],
+        Shape::Attachment => &["type", "systemPrompt"],
+        Shape::AgentReturn => &["agentId", "status"],
+        Shape::Compaction => &["trigger", "preTokens", "durationMs"],
+        Shape::Origin => &["kind"],
+        Shape::Snapshot => &["trackedFileBackups"],
+        Shape::Backups => &[],
+        Shape::Top => &[
+            "type",
+            "uuid",
+            "parentUuid",
+            "timestamp",
+            "cwd",
+            "gitBranch",
+            "permissionMode",
+            "isMeta",
+            "isCompactSummary",
+            "isApiErrorMessage",
+            "scheduledTaskId",
+            "scheduledFireId",
+            "turnOrigin",
+            "subtype",
+            "content",
+            "rendered",
+            "hookCount",
+            "hasOutput",
+            "hookAdditionalContext",
+            "hookInfos",
+            "hookErrors",
+            "isSnapshotUpdate",
+            "snapshot",
+            "trackingPath",
+            "aiTitle",
+            "customTitle",
+            "summary",
+            "agentName",
+            "tag",
+            "relocatedCwd",
+            "continuedInSessionId",
+            "prUrl",
+            "message",
+            "attachment",
+            "toolUseResult",
+            "compactMetadata",
+            "compact_metadata",
+            "origin",
+        ],
+    }
+}
+fn keep(shape: Shape, key: &str) -> bool {
+    matches!(shape, Shape::Backups) || keys(shape).contains(&key)
+}
+
+/// Use the same selected shape as the borrowed compatibility codec after the producer's strict
+/// acceptance boundary. Descendants stay views until a retained interpreter field needs them.
+#[cfg(not(feature = "mmap"))]
+pub(super) fn parse_view(view: JsonView<'_>) -> Result<Value> {
+    project_view(view, Shape::Top)
+}
+#[cfg(not(feature = "mmap"))]
+fn project_view(view: JsonView<'_>, shape: Shape) -> Result<Value> {
+    use crate::harness::store::document::Fields;
+    if !view.is_object()? {
+        return Ok(Value::Null);
+    }
+    match shape {
+        Shape::AgentReturn => return agent_return(view),
+        Shape::Attachment => return attachment(view),
+        Shape::Compaction => return Ok(compact_metadata(view)?.unwrap_or(Value::Null)),
+        Shape::Backups => {
+            let mut values = Map::new();
+            view.for_each_entry(|key, _| {
+                values.insert(key.into(), Value::Null);
+                Ok(())
+            })?;
+            return Ok(Value::Object(values));
+        }
+        _ => {}
+    }
+    let fields = Fields::parse(view, keys(shape))?.context("Claude facts object")?;
+    let mut values = Map::new();
+    for &key in keys(shape) {
+        let Some(field) = fields.get(key) else { continue };
+        let value = if let Some(child) = nested(shape, key) {
+            project_view(field, child)?
+        } else if matches!((shape, key), (Shape::Top, "scheduledTaskId" | "scheduledFireId")) {
+            Value::Null
+        } else if matches!((shape, key), (Shape::Message, "id")) && !field.is_string()? {
+            Value::Null
+        } else {
+            field.resolve()?.into_owned()
+        };
+        values.insert(key.into(), value);
+    }
+    Ok(Value::Object(values))
 }
 
 #[cfg(test)]

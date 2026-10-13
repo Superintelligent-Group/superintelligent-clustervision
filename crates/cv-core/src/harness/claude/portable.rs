@@ -30,7 +30,7 @@ fn conversation(view: JsonView<'_>, opts: &ParseOptions) -> Result<Option<(Value
         "apiErrorStatus",
         "requestId",
     ];
-    if opts.extra {
+    if opts.wants_full_extra() {
         for &key in CLAUDE_EXTRA_TOP {
             if !keys.contains(&key) {
                 keys.push(key);
@@ -92,33 +92,30 @@ fn conversation(view: JsonView<'_>, opts: &ParseOptions) -> Result<Option<(Value
         meta.insert("origin".into(), Value::Object(origin.project(&["kind"])?));
     }
     if let Some(result) = top.get("toolUseResult") {
-        if opts.extra {
+        if opts.wants_full_extra() {
             meta.insert("toolUseResult".into(), result.resolve()?.into_owned());
-        } else if let Some(fields) = Fields::parse(result, &["agentId", "status"])? {
-            let mut result = fields.project(&["status"])?;
-            if fields.get("agentId").is_some() {
-                result.insert("agentId".into(), Value::Bool(true));
-            }
-            meta.insert("toolUseResult".into(), Value::Object(result));
+        } else {
+            meta.insert("toolUseResult".into(), facts::agent_return(result)?);
         }
     }
+
     let mut message = body.project(&["model", "usage"])?;
     let synthetic = ty == "assistant"
         && (meta.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true)
             || message.get("model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL));
-    if synthetic {
+    if synthetic && !opts.facts_only() {
         for key in ["error", "errorDetails", "apiErrorStatus", "requestId"] {
             if let Some(value) = top.value(key)? {
                 meta.insert(key.into(), value);
             }
         }
     }
-    if opts.extra {
+    if opts.wants_full_extra() {
         meta.extend(top.project(CLAUDE_EXTRA_TOP)?);
         message.extend(body.project(CLAUDE_EXTRA_MSG)?);
-    } else if opts.usage_identity {
-        if let Some(id) = body.value("id")? {
-            message.insert("id".into(), id);
+    } else if opts.usage_identity || opts.facts_only() {
+        if let Some(id) = body.string("id")? {
+            message.insert("id".into(), Value::String(id));
         }
     }
     let origin = user_origin_from(
@@ -188,7 +185,7 @@ fn block(view: JsonView<'_>) -> Result<Option<Block>> {
                         *content = text;
                         // The derived path/size demand needs the actual stub; ordinary giant output
                         // is never decoded into an owned string just to look for this prefix.
-                        let prefix = borrowed::view_prefix(value, false)?;
+                        let prefix = borrowed::view_prefix(value, true)?;
                         if prefix.starts_with("<persisted-output>") {
                             let decoded = value.resolve()?;
                             *details = decoded
@@ -329,6 +326,19 @@ fn fallback(
             Err(error) => return Err(error),
         }
     }
+    if opts.facts_only() {
+        let value = match source.read_range_value(range.offset, range.len, facts::parse_view) {
+            Ok(value) => value,
+            Err(error) if error.downcast_ref::<InvalidJson>().is_some() => return Ok(Flow::Continue),
+            Err(error) => return Err(error),
+        };
+        let ctx = SpanCtx {
+            slice: &[],
+            base_off: range.offset,
+            json_inputs: None,
+        };
+        return Ok(ingest_value(session, &value, opts, sink, Some(&ctx)));
+    }
     let lean = if !opts.extra && !opts.complete {
         Some(lean::parse_reader(ranges::reader(file, range)?))
     } else {
@@ -405,6 +415,7 @@ mod tests {
             json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":body,"signature":"sig"},{"type":"tool_use","id":"call","name":"custom","input":{"body":body}}]}}),
             json!({"type":"user","toolUseResult":{"agentId":"agent","status":"finished","stdout":body},"message":{"content":[{"type":"tool_result","tool_use_id":"call","content":body,"is_error":true}]}}),
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":[{"type":"text","text":format!("<persisted-output>\nOutput too large (66KB). Full output saved to: /tmp/output.txt\n\nPreview:\n{body}\n</persisted-output>") }]}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":format!("\u{2003}<persisted-output>\nOutput too large (66KB). Full output saved to: /tmp/output.txt\n\nPreview:\n{body}\n</persisted-output>")}]}}),
             json!({"type":"assistant","isApiErrorMessage":true,"errorDetails":{"body":body},"requestId":"request","message":{"model":"<synthetic>","content":[{"type":"text","text":body}]}}),
             json!({"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":body}},{"type":"document","title":"pdf","source":{"type":"file","file_id":"file"}}]}}),
         ];
@@ -420,6 +431,7 @@ mod tests {
         for mut opts in [
             ParseOptions::lazy(),
             ParseOptions::lazy_extra(),
+            ParseOptions::facts(),
             ParseOptions::bulk(),
             ParseOptions::full(),
             ParseOptions::complete(),

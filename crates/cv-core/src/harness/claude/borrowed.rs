@@ -856,6 +856,13 @@ fn text(raw: &RawValue, span: Option<&SpanCtx>) -> Option<Text> {
         // A JSON escape needs at most six raw bytes per decoded UTF-8 byte. Large strings thus
         // exceed the threshold without a second walk of their escapes; close cases are exact.
         if body.len() > INLINE_MAX * 6 || decoded_len(body)? > INLINE_MAX {
+            #[cfg(not(feature = "mmap"))]
+            if let Some(inputs) = ctx.json_inputs {
+                let Json::Source(range) = inputs.input(raw, ctx)? else {
+                    return None;
+                };
+                return Some(Text::Source(crate::lazy::SourceText::new(range)));
+            }
             return raw_string_span(raw, ctx).map(Text::Span);
         }
     }

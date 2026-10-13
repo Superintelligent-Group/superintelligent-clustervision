@@ -50,7 +50,7 @@ struct SpanCtx<'a> {
     json_inputs: Option<&'a JsonInputs>,
 }
 
-/// One captured native source shared by all validated tool inputs in a read. Byte-reader helpers
+/// One captured source shared by validated lazy fields in a read. Byte-reader helpers
 /// have no such capture: recording a provenance path does not establish where their bytes came from.
 struct JsonInputs {
     source: JsonSource,
@@ -95,12 +95,12 @@ impl JsonInputs {
                 .context("Claude tool input is outside its validated record")?;
             let end = relative
                 .checked_add(raw.get().len())
-                .context("Claude tool input range overflow")?;
-            anyhow::ensure!(end <= ctx.slice.len(), "Claude tool input exceeds its validated record");
+                .context("Claude lazy field range overflow")?;
+            anyhow::ensure!(end <= ctx.slice.len(), "Claude lazy field exceeds its validated record");
             let offset = ctx
                 .base_off
                 .checked_add(relative as u64)
-                .context("Claude tool input offset overflow")?;
+                .context("Claude lazy field offset overflow")?;
             self.source.validated_range(offset, raw.get().len() as u64)
         })();
         match result {

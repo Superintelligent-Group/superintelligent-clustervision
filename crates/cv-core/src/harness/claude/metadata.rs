@@ -238,6 +238,7 @@ impl Scan {
     #[cfg(not(feature = "mmap"))]
     pub(super) fn positioned(&mut self, file: &fs::File, source: &JsonSource) -> Result<()> {
         use crate::harness::store::{document::Fields, jsonl::ranges};
+        source.check_metadata(file.metadata()?)?;
         let mut rows = ranges::records(
             file,
             ranges::Range {
