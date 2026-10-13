@@ -2503,6 +2503,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_snapshot_rejects_wal_mutation_even_after_sink_failure() {
         let dir = std::env::temp_dir().join(format!("cv-opencode-wal-{}", uuid::Uuid::new_v4()));
