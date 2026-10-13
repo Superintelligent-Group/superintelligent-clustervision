@@ -25,12 +25,14 @@ operation controls pass. Matched whole-CLI instruction controls caught an 8.50-f
 Unicode regression; batching ordinary runs and removing the second source traversal repair it.
 The final late-Greek control executes 1.71% fewer instructions than baseline with exact output
 parity. MCP admission is now bounded through response publication, with composed protocol and
-lease checks passing. Full convergence remains deferred while the demonstrated SQLite
-snapshot-lifetime defect below is addressed and composed with MCP cancellation. A completion
-audit also found remaining whole-document copies in Cline/Roo and Continue/LM Studio emission,
-owned ordinary bodies in Gemini complete rehome, and whole-line ownership for malformed prune
-passthrough. These have targeted operation-control/implementation owners; the final gate batch
-waits for this source work to settle. Changes must preserve complete output, metadata, acceptance and source-error
+lease checks passing. SQLite owner leases reclaim abandoned copies after observed MCP child
+cancellation or a later standalone operation; actual cancellation/output/source controls pass,
+and the integrated core passes all 21 scoped SQLite tests. Malformed prune passthrough now has
+bounded ownership with exact bytes and fatal UTF-8 behavior preserved. Cline/Roo checked export
+is integrated: the 32 MiB Cline control falls from 134 MB to 276 KB requested live Rust heap,
+with exact files and fidelity report. Its matched instruction comparison is in progress.
+Continue/LM Studio emission and Gemini complete rehome have targeted fixes and controls underway;
+the final gate batch waits for this source work to settle. Changes must preserve complete output, metadata, acceptance and source-error
 semantics; shared checked readers/writers take priority over new format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
 This changes priority, not the correctness or fidelity requirements.
 
@@ -584,6 +586,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Portable/zstd Codex selected payload retention with matched clean release CPU and exact output controls.
 - [x] Shared reducer metadata demand; Claude/Cursor CLI facts preserve doctor, compaction and affordance outputs.
 - [x] Guard cold SQLite snapshots with operation-scoped byte-budgeted reuse and original DB/WAL/journal dependencies.
+- [x] Reclaim abandoned cold SQLite payloads with identity-bound kernel owner leases; live readers survive, standalone cleanup is eventual, and observed MCP disconnect joins child cleanup.
 - [x] Goose legacy discovery uses bounded strict header/count projections; whole-history rewrites deliberately decline resume.
 - [x] Catalog freshness for every primary, including quiet sessions and same-size replacements; guarded scanner cache publication.
 - [x] Frozen-fleet query reduction: successful full/unchanged/append paths, exact common counts and bounded parallel batches; timings exclude discovery.
@@ -597,6 +600,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Native Codex emission uses original guarded lazy sources and incremental whole-report fidelity verification; actual port controls improve memory and CPU.
 - [x] Claude checked output records, per-block Native/Text/Drop handling and streamed strict resumability verification; actual port allocation/fidelity and native/portable compatibility controls pass.
 - [x] Same-harness Claude/Codex complete preparation retains checked ordinary payloads while preserving complete carriers; checked Gemini emission preserves the frozen writer's output. Composed export/rehome controls pass; see the operation-specific evidence below.
+- [x] Shared Cline/Roo export streams checked Anthropic history; frozen native/portable file oracles and the actual Cline allocation control preserve output, fidelity and source-failure behavior.
 - [ ] Remaining emitters and same-harness Gemini complete preparation: distinguish required metadata ownership from avoidable ordinary-payload materialization using actual operations.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
@@ -604,7 +608,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Prune linked-record tool-input lookup reuses checked selected metadata, preserving exact output and flat heap; the existing Thinking gate now includes the linked-result composition.
 - [x] Unicode declassification retains bounded contextual lowercase matching with exact transcript/sidecar/source controls through 64 MiB; see PRUNE-UNICODE-EVIDENCE.json.
 - [x] Repair the demonstrated contextual Unicode CPU regression: batched single-pass matching executes 101.0M instructions versus 102.7M baseline on the late Greek-term control, preserving exact output; the initial 872.8M regression and intermediate repair are retained in the evidence.
-- [ ] Malformed prune passthrough: test and remove avoidable whole-line ownership while preserving exact bytes and the fatal invalid-UTF-8 contract. Demanded oversized metadata remains a separate ownership limit.
+- [x] Malformed prune passthrough removes both whole-line copies while preserving exact bytes, revival marker detection and the fatal invalid-UTF-8 contract. Demanded oversized metadata remains a separate ownership limit.
 - [x] Matched whole-operation Thinking+revival and usage-correction instruction controls, including attribution and repair of the initial usage framing regression.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
 - [x] Exact session-ranked search limits and pre-limit CLI/HTTP filters, including tied scores and current metadata.
