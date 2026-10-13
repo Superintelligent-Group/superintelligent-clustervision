@@ -48,3 +48,8 @@ sidecars and composed revival estimates. Native 16/64 MiB actual operations have
 requested peak: Thinking 269,950 bytes, ASCII declassification 332,541 bytes (revival below464KB).
 Unicode declassification preserves a whole demanded-string lowercase fallback; usage correction
 still owns selected rows at this milestone. See `PRUNE-TURN-EVIDENCE.json`; no timing claim.
+
+Revival correction now frames staged rows and projects only their usage metadata. Unchanged
+16/64 MiB Text or ignored root fields on a corrected row peak at 1,317,875 / 1,317,890 requested
+Rust bytes respectively, constant across sizes. Full native output/result fields match the owned
+f083 control. Oversized usage metadata remains owned; see `PRUNE-USAGE-EVIDENCE.json`.

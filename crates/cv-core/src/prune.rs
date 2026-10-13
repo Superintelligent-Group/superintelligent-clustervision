@@ -819,7 +819,7 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
     source.check()?;
     let output = output.into_inner().map_err(|e| e.into_error())?.finish()?;
     let (output, usage_rewritten, revive_tokens, revive_old_tokens) = if opts.revive {
-        revive_staged(output, &output_facts, &output_pruned, windowing, window_real)?
+        revive_staged(&source, output, &output_facts, &output_pruned, windowing, window_real)?
     } else {
         (output, 0, None, None)
     };
@@ -1907,6 +1907,7 @@ fn fact_est_tokens(v: &Value) -> u64 {
 /// **higher** supported figure so the gate errs on the safe side: it must never be talked into loading
 /// a session that would blow the real limit. Returns `(records rewritten, honest tokens, stale max)`.
 fn revive_staged(
+    source: &crate::json::JsonSource,
     output: ByteSource,
     parsed: &[Option<Value>],
     pruned: &[bool],
@@ -1931,44 +1932,49 @@ fn revive_staged(
     let mut stale_max = 0;
     let mut stage = std::io::BufWriter::with_capacity(64 * 1024, ByteStage::new());
     use std::io::BufRead;
+    let output = std::sync::Arc::new(output);
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, output.reader()?);
+    let mut position = 0u64;
     for (i, facts) in parsed.iter().enumerate() {
         let total = facts
             .as_ref()
             .filter(|v| !is_sidechain(v))
             .and_then(|v| v.pointer("/message/usage").and_then(Value::as_object).map(usage_total))
             .unwrap_or(0);
-        if i >= window && total > honest {
-            let mut bytes = Vec::new();
-            reader.read_until(b'\n', &mut bytes)?;
-            if bytes.last() == Some(&b'\n') {
-                bytes.pop();
+        let rewrite = i >= window && total > honest;
+        let mut start = None;
+        let mut end = position;
+        // Frame one private staged row without constructing its bytes. Rewritten rows need a
+        // trimmed complete-value range; untouched rows still copy their exact framing directly.
+        loop {
+            let bytes = reader.fill_buf()?;
+            anyhow::ensure!(!bytes.is_empty(), "staged transcript ended before its decision roster");
+            let newline = memchr::memchr(b'\n', bytes);
+            let n = newline.map_or(bytes.len(), |i| i + 1);
+            if rewrite {
+                for (offset, byte) in bytes[..n].iter().enumerate() {
+                    if !matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
+                        start.get_or_insert(position + offset as u64);
+                        end = position + offset as u64 + 1;
+                    }
+                }
+            } else {
+                stage.write_all(&bytes[..n])?;
             }
-            let mut v: Value = serde_json::from_slice(&bytes)?;
-            if v.get("_cv_orig_ctx").is_none() {
-                v["_cv_orig_ctx"] = Value::from(total);
+            reader.consume(n);
+            position += n as u64;
+            if newline.is_some() {
+                break;
             }
-            if let Some(usage) = v.pointer_mut("/message/usage").and_then(Value::as_object_mut) {
-                pin_usage(usage, honest);
-            }
-            serde_json::to_writer(&mut stage, &v)?;
+        }
+        if rewrite {
+            let start = start.context("usage row has no JSON value")?;
+            source.read_backing_value(output.clone(), start, end - start, |view| {
+                write_source_usage(view, total, honest, &mut stage)
+            })?;
             stage.write_all(b"\n")?;
             rewritten += 1;
             stale_max = stale_max.max(total);
-        } else {
-            // Usage metadata tells us this row is unchanged; copy its framed bytes without
-            // allocating a giant String just to discover that its usage doesn't need rewriting.
-            loop {
-                let bytes = reader.fill_buf()?;
-                anyhow::ensure!(!bytes.is_empty(), "staged transcript ended before its decision roster");
-                let newline = memchr::memchr(b'\n', bytes);
-                let n = newline.map_or(bytes.len(), |i| i + 1);
-                stage.write_all(&bytes[..n])?;
-                reader.consume(n);
-                if newline.is_some() {
-                    break;
-                }
-            }
         }
     }
     Ok((
@@ -1977,6 +1983,50 @@ fn revive_staged(
         (rewritten > 0).then_some(honest),
         (rewritten > 0).then_some(stale_max),
     ))
+}
+
+/// Keep source bodies untouched while applying the established owned usage correction. Only
+/// demanded usage metadata is materialized; rich/oversized usage itself retains that fallback.
+fn write_source_usage(view: crate::json::JsonView<'_>, total: u64, honest: u64, writer: &mut impl Write) -> Result<()> {
+    let usage = view
+        .get("message")?
+        .map(|message| message.get("usage"))
+        .transpose()?
+        .flatten();
+    let mut replacements = Vec::new();
+    if let Some(usage) = usage {
+        let mut owned = usage.resolve()?.into_owned();
+        if let Some(object) = owned.as_object_mut() {
+            pin_usage(object, honest);
+            replacements.push((usage.to_json()?, owned));
+        }
+    }
+    // Value's insertion order and final duplicate acceptance remain unchanged. An absent
+    // _cv_orig_ctx appends after existing keys, just as Value indexing does. Source children
+    // use the shared canonical writer, including the projected usage replacement.
+    anyhow::ensure!(view.is_object()?, "usage row is not an object");
+    let insert = view.get("_cv_orig_ctx")?.is_none();
+    let mut first = true;
+    writer.write_all(b"{")?;
+    view.for_each_entry(|key, child| {
+        if !first {
+            writer.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *writer, key)?;
+        writer.write_all(b":")?;
+        child.write_canonical_replacing(&replacements, writer)?;
+        first = false;
+        Ok(())
+    })?;
+    if insert {
+        if !first {
+            writer.write_all(b",")?;
+        }
+        writer.write_all(b"\"_cv_orig_ctx\":")?;
+        serde_json::to_writer(&mut *writer, &total)?;
+    }
+    writer.write_all(b"}")?;
+    Ok(())
 }
 
 /// Honest post-prune token size of `parsed[window..]`, combining recorded-usage deltas with byte

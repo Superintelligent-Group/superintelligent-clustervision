@@ -1,0 +1,62 @@
+{
+  "baseline_revision": "f08377be",
+  "measurement": "requested peak live Rust heap above baseline; native release probe-heap; no timing/RSS claim",
+  "operation": "actual prune_session revive; five nativeClaude rows with compact_boundary, fourturns and one overreporting assistantusage",
+  "fixture": "16/64MiB unchanged Text or ignoredroot field; cache_creation +auxiliary/request iterations; leading spaces +trailingCRLF",
+  "oracle": "Exact frozen f083 nativeSHA256 and all PruneResult/revivalfields; independent owned pin_usage+Value serialization test",
+  "limits": [
+    "Complete usage object remains owned; unusually oversized usage metadata can scale.",
+    "Canonical rewrite/validation traverse the output row; staging disk scales with artifact.",
+    "Malformed records and oversized selection/tool metadata retain established fallbacks."
+  ],
+  "controls": [
+    {
+      "case": "usage-text",
+      "decoded_payload_mib": 16,
+      "before_peak_bytes": 50616347,
+      "after_peak_bytes": 1317875,
+      "exact_result_and_output": true,
+      "usage_rewritten": 1,
+      "revive_tokens": 4793499,
+      "revive_old_tokens": 1000000032,
+      "transcript_bytes": 16778345,
+      "transcript_sha256": "861ed826ac84acab091f0a5a636287132e3c399a5bf327dc5e61da748de627f3"
+    },
+    {
+      "case": "usage-ignored",
+      "decoded_payload_mib": 16,
+      "before_peak_bytes": 50616381,
+      "after_peak_bytes": 1317890,
+      "exact_result_and_output": true,
+      "usage_rewritten": 1,
+      "revive_tokens": 12,
+      "revive_old_tokens": 1000000032,
+      "transcript_bytes": 16778360,
+      "transcript_sha256": "f8e9266682064ecc05d8eb3de6bb2edf3c3bd20a4bf671f0ab28b1889793b9cc"
+    },
+    {
+      "case": "usage-text",
+      "decoded_payload_mib": 64,
+      "before_peak_bytes": 201422363,
+      "after_peak_bytes": 1317875,
+      "exact_result_and_output": true,
+      "usage_rewritten": 1,
+      "revive_tokens": 19173970,
+      "revive_old_tokens": 1000000032,
+      "transcript_bytes": 67109995,
+      "transcript_sha256": "f9f1a6c93051f7fe06602fe7fba18934b5e1523c834597e918c1af27c0db7a21"
+    },
+    {
+      "case": "usage-ignored",
+      "decoded_payload_mib": 64,
+      "before_peak_bytes": 201422397,
+      "after_peak_bytes": 1317890,
+      "exact_result_and_output": true,
+      "usage_rewritten": 1,
+      "revive_tokens": 12,
+      "revive_old_tokens": 1000000032,
+      "transcript_bytes": 67110008,
+      "transcript_sha256": "835a2a22a52b94ca4e33db8a2b6c4d5ad0af9488abe176ec775d42b46a3c6e0e"
+    }
+  ]
+}

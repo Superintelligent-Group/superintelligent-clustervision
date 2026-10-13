@@ -1855,3 +1855,75 @@ fn large_noop_declassification_preserves_raw_duplicate_ids_and_spacing() -> Resu
     assert!(actual == expected.as_bytes(), "no-op record spacing or CRLF changed");
     Ok(())
 }
+
+#[test]
+fn source_usage_projection_matches_owned_order_and_iterations() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-usage-projection");
+    for (index, original_ctx) in [
+        None,
+        Some(Value::Null),
+        Some(Value::String("keep".into())),
+        Some(Value::from(7)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut original = serde_json::json!({"z":"first","message":{"content":[{"type":"text","text":"keep body λ"}],"usage":{
+            "output_tokens":8,"cache_read_input_tokens":4,"input_tokens":900,"cache_creation_input_tokens":3,
+            "cache_creation":{"unknown":"keep","ephemeral_5m_input_tokens":2},
+            "iterations":[null,{"type":"advisor_message","input_tokens":80},{"type":"compaction","input_tokens":90},
+                {"type":"fallback_message","output_tokens":4,"input_tokens":700,"cache_read_input_tokens":5,"cache_creation_input_tokens":6},
+                {"other":"still pinned"}],"unknown":{"a":[1,2,3]}
+        }},"a":"last"});
+        if let Some(value) = original_ctx {
+            original["_cv_orig_ctx"] = value;
+        }
+        let raw =
+            serde_json::to_string(&original)?.replace("\"z\":\"first\"", "\"z\":\"ignored duplicate\",\"z\":\"first\"");
+        let path = world.base.join(format!("{index}.json"));
+        std::fs::write(&path, &raw)?;
+        let source = crate::Json::source(&path, 0, raw.len() as u64)?;
+        let mut expected: Value = serde_json::from_str(&raw)?;
+        if expected.get("_cv_orig_ctx").is_none() {
+            expected["_cv_orig_ctx"] = Value::from(900);
+        }
+        pin_usage(
+            expected.pointer_mut("/message/usage").unwrap().as_object_mut().unwrap(),
+            31,
+        );
+        let mut actual = Vec::new();
+        source.with_view(|view| write_source_usage(view, 900, 31, &mut actual))?;
+        assert_eq!(actual, serde_json::to_vec(&expected)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn staged_usage_projection_preserves_mixed_raw_framing_and_source_guard() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-usage-staged");
+    let path = world.base.join("source.jsonl");
+    let mut row = serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"small"}],"usage":{"input_tokens":900,"output_tokens":7}}});
+    let raw = format!("invalid {{ \r\n  {row}  \r\nlast raw row\n");
+    std::fs::write(&path, &raw)?;
+    let source = crate::json::JsonSource::capture(&path)?;
+    let mut stage = ByteStage::new();
+    stage.write_all(raw.as_bytes())?;
+    let facts = [None, Some(decision_facts(&row, true)), None];
+    let (output, rewritten, honest, stale) = revive_staged(&source, stage.finish()?, &facts, &[false; 3], true, None)?;
+    assert_eq!(rewritten, 1);
+    assert_eq!(stale, Some(900));
+    row["_cv_orig_ctx"] = Value::from(900);
+    pin_usage(
+        row.pointer_mut("/message/usage").unwrap().as_object_mut().unwrap(),
+        honest.unwrap(),
+    );
+    let expected = format!("invalid {{ \r\n{row}\nlast raw row\n");
+    let mut actual = Vec::new();
+    output.reader()?.read_to_end(&mut actual)?;
+    assert_eq!(actual, expected.as_bytes());
+    let mut stage = ByteStage::new();
+    stage.write_all(raw.as_bytes())?;
+    std::fs::write(&path, b"changed source")?;
+    assert!(revive_staged(&source, stage.finish()?, &facts, &[false; 3], true, None).is_err());
+    Ok(())
+}

@@ -3019,3 +3019,26 @@ source replacement/rewrites/truncation, auxiliary change, count independence and
 An exact hit with deliberately corrupt continuation verifies that unchanged demand does not decode
 it. A pure no-feature clippy attempt exposes existing non-sqlite warnings in unrelated adapter/event
 paths and the older cache persist path; this lane adds no corresponding warning.
+
+
+### Prune staged usage projection (Sol, 2026-10-13)
+
+`revive_staged` now frames private output rows with its existing 64 KiB reader, retaining only
+trimmed positions for rows needing correction. It passes those ranges through the original
+`JsonSource::read_backing_value` guard/strict acceptance over the shared staged ByteSource.
+`write_source_usage` owns only the selected usage metadata, applies the unchanged `pin_usage`,
+and serializes checked canonical source children with that override. An absent `_cv_orig_ctx`
+appends exactly as Value indexing does; existing/null/string values and final duplicates retain
+insertion-order semantics. Unchanged and malformed passthrough rows preserve exact framed bytes.
+No source parser, guard cache or staging framework was added; publication boundaries are unchanged.
+
+Four actual native operation controls contain a compact boundary, four turns and one genuinely
+corrected usage record (including cache_creation/request/auxiliary iterations). For 16/64 MiB
+unchanged assistant Text, requested live Rust peak falls from 50,616,347 / 201,422,363 to
+1,317,875 bytes at both sizes; for an ignored root field it falls from 50,616,381 / 201,422,397
+to 1,317,890 bytes at both. Every frozen-f083 result/revival field and transcript hash matches.
+See `PRUNE-USAGE-EVIDENCE.json`; no timing/RSS claim. Owned-Value oracles cover field order,
+duplicates, existing `_cv_orig_ctx`, iteration behavior, mixed raw framing and changed source
+failure. Complete usage metadata remains an owned fallback if unusually large. Canonical
+validation/rewrite still traverses the row and stages artifact-sized disk; malformed/oversized
+selection/tool metadata and Unicode declassification fallback remain explicit.
