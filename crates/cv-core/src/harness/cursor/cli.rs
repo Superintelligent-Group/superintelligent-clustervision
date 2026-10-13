@@ -258,7 +258,7 @@ fn read_snapshot(
                 let length = backing.len()?;
                 (backing, 0, length)
             };
-            captured.read_backing_syntax(backing, offset, length, |view| {
+            captured.read_backing_value(backing, offset, length, |view| {
                 if counting {
                     Ok(message(projection::view(view)?, false, false))
                 } else {

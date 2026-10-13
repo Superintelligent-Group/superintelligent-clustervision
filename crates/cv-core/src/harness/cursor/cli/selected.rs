@@ -38,7 +38,8 @@ pub(super) fn model(view: JsonView<'_>) -> Result<Option<String>> {
 }
 
 pub(super) fn message(view: JsonView<'_>) -> Result<Option<Message>> {
-    anyhow::ensure!(view.accepts_value()?, "Cursor CLI message is not Value-compatible JSON");
+    // The snapshot's read_backing_value entry already validated the complete record, including
+    // ignored fields. Repeating validation here would rescan giant payloads before projection.
     let Some(fields) = Fields::parse(view, &["role", "id", "content", "providerOptions"])? else {
         return Ok(None);
     };

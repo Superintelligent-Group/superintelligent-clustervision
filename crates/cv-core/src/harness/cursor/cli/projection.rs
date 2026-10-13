@@ -2,10 +2,10 @@
 use super::*;
 
 /// Count/title metadata through the shared range grammar. Scalar validation and discarded
-/// bodies stay bounded even for escaped strings, unlike serde's whole-string scratch.
+/// bodies stay bounded even for escaped strings, unlike serde's whole-string scratch. The
+/// caller's read_backing_value entry validates the complete record before this projection.
 pub(super) fn view(view: crate::json::JsonView<'_>) -> Result<Value> {
     use crate::harness::store::document::Fields;
-    anyhow::ensure!(view.accepts_value()?, "Cursor CLI message is not Value-compatible JSON");
     let Some(fields) = Fields::parse(view, &["role", "content", "providerOptions"])? else {
         return Ok(Value::Null);
     };
@@ -136,5 +136,5 @@ pub(super) fn read(input: impl Read) -> Result<Value> {
     backing.copy_to(&mut file)?;
     let captured = crate::json::JsonSource::capture(&path)?;
     let length = backing.len()?;
-    captured.read_backing_syntax(backing, 0, length, view)
+    captured.read_backing_value(backing, 0, length, view)
 }
