@@ -114,3 +114,70 @@ impl SourceText {
         Ok(len)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{harness::store::bytes::ByteSource, json::JsonSource, lazy::Resolver};
+
+    #[test]
+    fn backed_text_retains_arena_and_checked_decoded_demands() {
+        let world = cv_testkit::World::in_process("source-text-demands");
+        let path = world.base.join("original");
+        std::fs::write(&path, "original compressed provenance").unwrap();
+        let source = JsonSource::capture(&path).unwrap();
+        let backing = Arc::new(ByteSource::arena().unwrap());
+        let body = format!("[error] {}", "🌙\n\"\\".repeat(8192));
+        let wire = serde_json::to_vec(&body).unwrap();
+        let (offset, len) = backing
+            .append(|out| {
+                out.write_all(&wire)?;
+                Ok(())
+            })
+            .unwrap();
+        let text = source
+            .read_backing_value(backing.clone(), offset, len, |view| view.source_text())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(text, crate::lazy::Text::Source(_)));
+        drop(source);
+        drop(backing);
+        let resolver = Resolver::new(None);
+        assert_eq!(text.try_resolve_prefix(&resolver, 11).unwrap(), "[error] ");
+        assert_eq!(text.try_decoded_len(&resolver).unwrap(), body.len());
+        let suffix = text.clone().with_skipped_prefix(8).unwrap();
+        assert_eq!(suffix.try_resolve(&resolver).unwrap(), &body[8..]);
+        let mut actual = String::new();
+        suffix
+            .try_for_each_chunk(&resolver, 7, |chunk| {
+                assert!(chunk.len() <= 10);
+                actual.push_str(chunk);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(actual, &body[8..]);
+        assert_eq!(
+            serde_json::to_string(&suffix).unwrap(),
+            serde_json::to_string(&body[8..]).unwrap()
+        );
+        let error = suffix
+            .try_for_each_chunk(&resolver, 7, |_| {
+                std::fs::write(&path, "mutated").unwrap();
+                anyhow::bail!("callback failed")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("changed"), "{error:#}");
+        assert!(suffix.try_decoded_len(&resolver).is_err());
+        assert!(suffix.try_resolve_prefix(&resolver, 0).is_err());
+        let mut message = crate::ir::Message::new(crate::ir::Role::Assistant);
+        message.content.push(crate::ir::Block::Text { text: suffix });
+        assert!(message.materialize(&resolver).is_err());
+        message.materialize_text(&resolver);
+        assert!(matches!(
+            &message.content[0],
+            crate::ir::Block::Text {
+                text: crate::lazy::Text::Source(_)
+            }
+        ));
+    }
+}

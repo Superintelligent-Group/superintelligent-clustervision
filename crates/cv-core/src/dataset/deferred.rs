@@ -223,6 +223,85 @@ mod tests {
     use crate::dataset::{Format, RecordWriter};
     use crate::ir::Role;
     #[test]
+    fn backed_text_spool_keeps_one_owner_and_exact_rendering() {
+        use crate::harness::store::bytes::ByteSource;
+        use crate::json::JsonSource;
+        use std::sync::Arc;
+        let world = cv_testkit::World::in_process("deferred-source-text");
+        let path = world.base.join("original");
+        std::fs::write(&path, "snapshot provenance").unwrap();
+        let source = JsonSource::capture(&path).unwrap();
+        let backing = Arc::new(ByteSource::arena().unwrap());
+        let body = format!("[error] {}", "🌙\n\"".repeat(8192));
+        let wire = serde_json::to_vec(&body).unwrap();
+        let (offset, len) = backing
+            .append(|out| {
+                out.write_all(&wire)?;
+                Ok(())
+            })
+            .unwrap();
+        let text = source
+            .read_backing_value(backing.clone(), offset, len, |view| view.source_text())
+            .unwrap()
+            .unwrap()
+            .with_skipped_prefix(8)
+            .unwrap();
+        let mut original = Message::new(Role::Assistant);
+        original.content.push(Block::Text { text });
+        let mut registry = SourceRegistry::default();
+        let mut ordered = crate::spill::Ordered::default();
+        for _ in 0..1000 {
+            ordered
+                .push(DeferredMessage::new(original.clone(), &mut registry))
+                .unwrap();
+        }
+        assert_eq!(registry.owner_counts(), (1, 1));
+        assert!(ordered.temporary_bytes().unwrap() < body.len() as u64 * 10);
+        drop(original);
+        drop(source);
+        drop(backing);
+        let resolver = crate::lazy::Resolver::new(None);
+        let mut owned = Message::new(Role::Assistant);
+        owned.content.push(Block::Text { text: body[8..].into() });
+        let mut expected = Vec::new();
+        let mut writer = RecordWriter::new(&mut expected, Format::Chatml, None);
+        writer.message(&owned, &resolver).unwrap();
+        writer.finish().unwrap();
+        let mut last = None;
+        for (index, row) in ordered.rows().unwrap().enumerate() {
+            let restored = row.unwrap().restore(&registry).unwrap();
+            assert!(matches!(
+                &restored.content[0],
+                Block::Text {
+                    text: crate::lazy::Text::Source(_)
+                }
+            ));
+            if index != 0 && index != 999 {
+                continue;
+            }
+            let mut actual = Vec::new();
+            let mut writer = RecordWriter::new(&mut actual, Format::Chatml, None);
+            writer.message(&restored, &resolver).unwrap();
+            writer.finish().unwrap();
+            assert_eq!(actual, expected);
+            let mut source_json = Vec::new();
+            let mut owned_json = Vec::new();
+            restored.write_json(&mut source_json, &resolver).unwrap();
+            owned.write_json(&mut owned_json, &resolver).unwrap();
+            assert_eq!(source_json, owned_json);
+            source_json.clear();
+            owned_json.clear();
+            restored.write_json_pretty(&mut source_json, &resolver).unwrap();
+            owned.write_json_pretty(&mut owned_json, &resolver).unwrap();
+            assert_eq!(source_json, owned_json);
+            last = Some(restored);
+        }
+        std::fs::write(&path, "changed snapshot").unwrap();
+        let restored = last.unwrap();
+        assert!(restored.write_json(&mut Vec::new(), &resolver).is_err());
+    }
+
+    #[test]
     fn spilled_sources_restore_exact_training_bytes_without_serializing_payloads() {
         let world = cv_testkit::World::in_process("deferred-dataset-source-spill");
         let path = world.base.join("source.json");

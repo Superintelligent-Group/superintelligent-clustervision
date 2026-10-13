@@ -6,6 +6,7 @@
 - Live search resolves lazy labels and reports demanded text failures instead of returning incomplete matches.
 
 - Warm token statistics reuse bounded, dependency-validated usage rows while preserving response deduplication and exact cost totals.
+- Staged dataset and JSON output retain checked source-backed text without copying decoded payloads into private transport.
 
 - LM Studio discovery projects source metadata and bounded titles without loading whole documents, including portable builds.
 - Cursor Agent CLI chat and ACP blob stores now expose native prompts, replies, tool calls, summaries, modes, and lineage.

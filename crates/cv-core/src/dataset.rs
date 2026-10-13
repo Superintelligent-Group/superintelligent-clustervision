@@ -496,7 +496,7 @@ fn write_json_escaped<W: std::io::Write + ?Sized>(w: &mut W, s: &str) -> std::io
 mod tests {
     use super::*;
     use crate::ir::{Harness, Message};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn msg(role: Role, blocks: Vec<Block>) -> Message {
         Message {
@@ -826,6 +826,93 @@ mod tests {
         write_json_escaped(&mut bytes, &text).unwrap();
         let expected = serde_json::to_string(&text).unwrap();
         assert_eq!(bytes, expected.as_bytes()[1..expected.len() - 1]);
+    }
+
+    #[test]
+    fn backed_text_survives_late_model_query_and_minimum_staging() {
+        struct Backed(Vec<Message>);
+        impl crate::harness::Adapter for Backed {
+            fn harness(&self) -> Harness {
+                Harness::Claude
+            }
+            fn roots(&self) -> Vec<std::path::PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> anyhow::Result<Vec<crate::ir::SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &crate::ir::SessionRef,
+                _: &crate::ParseOptions,
+                sink: &mut dyn crate::MessageSink,
+            ) -> anyhow::Result<Session> {
+                for message in &self.0 {
+                    sink.try_message(message.clone())?;
+                }
+                let mut session = Session::new(&r.id, r.harness);
+                session.source_path = Some(r.path.clone());
+                Ok(session)
+            }
+        }
+        let world = cv_testkit::World::in_process("dataset-backed-text-late-model");
+        let path = world.base.join("original");
+        std::fs::write(&path, "snapshot").unwrap();
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let backing = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+        let body = "🌙\n\"".repeat(8192);
+        let wire = serde_json::to_vec(&body).unwrap();
+        let (offset, len) = backing
+            .append(|out| {
+                out.write_all(&wire)?;
+                Ok(())
+            })
+            .unwrap();
+        let text = source
+            .read_backing_value(backing.clone(), offset, len, |view| view.source_text())
+            .unwrap()
+            .unwrap();
+        let mut first = Message::new(Role::User);
+        first.content.push(Block::Text { text });
+        let mut last = Message::new(Role::Assistant);
+        last.content.push(Block::Text {
+            text: "finished".into(),
+        });
+        last.model = Some("present".into());
+        let adapter = Backed(vec![first, last]);
+        drop(source);
+        drop(backing);
+        let reference = crate::ir::SessionRef::new("backed", Harness::Claude, &path);
+        let mut full = Session::new("backed", Harness::Claude);
+        full.source_path = Some(path);
+        full.messages = adapter.0.clone();
+        let mut expected = Vec::new();
+        assert!(write_record(&full, &mut expected, Format::Chatml, None).unwrap());
+        expected.push(b'\n');
+        for (minimum, expression, matched) in [
+            (0, "model:present", true),
+            (2, "model:present", true),
+            (3, "model:present", false),
+            (0, "model:absent", false),
+        ] {
+            let query = crate::SessionQuery::parse(expression).unwrap();
+            let staged = stage_record(
+                &adapter,
+                &reference,
+                Format::Chatml,
+                None,
+                minimum,
+                Some(&query),
+                &Default::default(),
+            )
+            .unwrap();
+            assert_eq!(staged.is_some(), matched);
+            if let Some(record) = staged {
+                let mut actual = Vec::new();
+                record.publish(&mut actual).unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

@@ -810,3 +810,18 @@ control remains near parity; no extra tier was added for an unmeasured benefit. 
 1,319,868/1,319,870/1,319,872 bytes, with no retained scratch at stage end. Five synthetic
 lazy/complete cases and 32 corpus sessions preserve message order, resolved bytes, metadata and
 discovery filters. Six exact-set tests include borrowed-key lifetime and collision/spill behavior.
+Shared retained text backing (2026-10-12): `Text::Source` stores a checked JSON-string range
+and a decoded prefix skip. It uses the existing original-source capture and append arena,
+including captured DB/WAL/optional-sidecar ReadSet guards. `source_text()` explicitly chooses
+that actual source; ordinary `text(true)` still supplies legacy file spans unless private backing
+is present. Checked chunks, decoded byte length, and decoded prefixes keep bounded scratch and
+check provenance after callback failure. Generic serde and explicit full materialization preserve
+the external string schema and intentionally allocate the demanded body.
+
+The private deferred dataset codec replaces source text with typed registry slots, retaining the
+source/range/decoded skip without serializing payloads. Native and portable scoped tests pass for
+1,000 escaped-Unicode text rows with exactly one original-source owner and one arena owner,
+exact ChatML and Message JSON bytes versus owned text, producer-owner drops, and original mutation
+failure. A synthetic adapter with a final assistant model fact exercises actual `model:present`
+deferred replay and minimum-message staging, including misses. These are composition tests;
+producer-specific compressed/SQLite heap bounds and CLI Session framing remain integration work.

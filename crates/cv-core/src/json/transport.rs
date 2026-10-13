@@ -16,21 +16,25 @@ pub(crate) struct SourceDescriptor {
 /// Structural state scales with distinct captured source identities and decoded arenas.
 /// One append arena is shared by all encoded arguments from a capture and survives transport.
 /// Different captured identities of a single path are deliberately separate accepted sources.
+type SourceKey = (
+    std::path::PathBuf,
+    super::Identity,
+    Option<std::sync::Arc<crate::source::ReadSet>>,
+);
+
 #[derive(Default)]
 pub(crate) struct SourceRegistry {
-    ids: HashMap<
-        (
-            std::path::PathBuf,
-            super::Identity,
-            Option<std::sync::Arc<crate::source::ReadSet>>,
-        ),
-        usize,
-    >,
+    ids: HashMap<SourceKey, usize>,
     sources: Vec<JsonSource>,
     decoded_ids: HashMap<usize, usize>,
     decoded: Vec<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
 }
 impl SourceRegistry {
+    #[cfg(test)]
+    pub(crate) fn owner_counts(&self) -> (usize, usize) {
+        (self.sources.len(), self.decoded.len())
+    }
+
     /// Replace a source value with an explicit transport placeholder without resolving its bytes.
     pub(crate) fn detach(&mut self, value: &mut Json) -> Option<SourceDescriptor> {
         let Json::Source(range) = value else { return None };
