@@ -442,6 +442,28 @@ fn model_reads(root: &Path) -> Result<ReadSet> {
     Ok(reads)
 }
 
+// Semantic identity is harness-qualified. Keep discovery's complete inventory, but plan one
+// live copy per identity so reuse, projection and final source validation share the same path.
+fn canonical_refs(refs: &[cv_core::SessionRef]) -> Vec<&cv_core::SessionRef> {
+    let mut selected: std::collections::BTreeMap<_, &cv_core::SessionRef> = std::collections::BTreeMap::new();
+    for r in refs {
+        selected
+            .entry((r.harness.as_str(), r.id.as_str()))
+            .and_modify(|old| {
+                // Unique identities need no extra filesystem probe; availability only decides copies.
+                if (!r.path.exists())
+                    .cmp(&(!old.path.exists()))
+                    .then_with(|| r.preferred_copy_cmp(old))
+                    .is_lt()
+                {
+                    *old = r;
+                }
+            })
+            .or_insert(r);
+    }
+    selected.into_values().collect()
+}
+
 // The three injected operations keep refresh/publication tests independent of model downloads.
 #[allow(clippy::too_many_arguments)]
 fn refresh(
@@ -454,6 +476,7 @@ fn refresh(
     mut encode: impl FnMut(&[String]) -> Result<Vec<Vec<f32>>>,
     mut save: impl FnMut(&Path, &Store) -> Result<()>,
 ) -> Result<usize> {
+    let refs = canonical_refs(refs);
     let mut old = if path.exists() {
         load_store(path)?
     } else {
@@ -469,26 +492,33 @@ fn refresh(
     let compatible = old.model == model
         && old.projection == projection
         && old.model_reads.as_ref().is_some_and(|r| r.fresh(&mut Probe::default()));
-    let lookup: std::collections::HashMap<_, _> = old
-        .meta
-        .iter()
-        .enumerate()
-        .map(|(i, r)| ((r.harness.as_str(), r.id.as_str()), i))
-        .collect();
+    // Old stores may contain duplicate identities from earlier refreshes. Ambiguous rows must
+    // all be replaced, even if one path's provenance looks fresh: do not silently choose a vector.
+    let mut lookup = std::collections::HashMap::new();
+    for (i, r) in old.meta.iter().enumerate() {
+        lookup
+            .entry((r.harness.as_str(), r.id.as_str()))
+            .and_modify(|index| *index = None)
+            .or_insert(Some(i));
+    }
     let mut keep = vec![false; old.meta.len()];
     let mut changed = Vec::new();
     let mut before = Probe::default();
-    for r in refs {
+    for &r in &refs {
         let snapshot = before.snapshot(r);
         let reused = compatible
-            && lookup.get(&(r.harness.as_str(), r.id.as_str())).is_some_and(|&i| {
-                let m = &old.meta[i];
-                let fresh = m.source_path.as_ref() == Some(&r.path)
-                    && m.hints.as_ref() == Some(&ReferenceHints::from(r))
-                    && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before));
-                keep[i] |= fresh;
-                fresh
-            });
+            && lookup
+                .get(&(r.harness.as_str(), r.id.as_str()))
+                .copied()
+                .flatten()
+                .is_some_and(|i| {
+                    let m = &old.meta[i];
+                    let fresh = m.source_path.as_ref() == Some(&r.path)
+                        && m.hints.as_ref() == Some(&ReferenceHints::from(r))
+                        && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before));
+                    keep[i] |= fresh;
+                    fresh
+                });
         if !reused {
             changed.push((r, snapshot));
         }
@@ -543,7 +573,7 @@ fn refresh(
         .iter()
         .map(|m| ((m.harness.as_str(), m.id.as_str()), m))
         .collect();
-    for r in refs {
+    for &r in &refs {
         let row = rows
             .get(&(r.harness.as_str(), r.id.as_str()))
             .context("semantic session missing after refresh")?;
@@ -1153,6 +1183,225 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("projection version changed"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_refresh_canonicalizes_duplicate_copies() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-copies-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let a = dir.join("a.jsonl");
+        let b = dir.join("b.jsonl");
+        std::fs::write(&a, "identical").unwrap();
+        std::fs::write(&b, "identical").unwrap();
+        let refs = [fixture_ref(&b, "same"), fixture_ref(&a, "same")];
+        let store = dir.join("store.bin");
+        let read = std::cell::Cell::new(0);
+        let encoded = std::cell::Cell::new(0);
+        let saved = std::cell::Cell::new(0);
+        assert_eq!(
+            refresh(
+                &store,
+                &refs,
+                "fake",
+                1,
+                ReadSet::default(),
+                |r| {
+                    read.set(read.get() + 1);
+                    fake_doc(r, None)
+                },
+                |bodies| {
+                    encoded.set(encoded.get() + bodies.len());
+                    fake_encode(bodies)
+                },
+                |p, s| {
+                    saved.set(saved.get() + 1);
+                    save_store(p, s)
+                }
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!((read.get(), encoded.get(), saved.get()), (1, 1, 1));
+        assert_eq!(load_store(&store).unwrap().meta[0].source_path.as_ref(), Some(&a));
+        refresh(
+            &store,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |_| panic!("warm copies must not read"),
+            |_| panic!("warm copies must not encode"),
+            |_, _| panic!("warm copies must not save"),
+        )
+        .unwrap();
+        let reversed = [refs[1].clone(), refs[0].clone()];
+        refresh(
+            &store,
+            &reversed,
+            "fake",
+            1,
+            ReadSet::default(),
+            |_| panic!("reordered copies must not read"),
+            |_| panic!("reordered copies must not encode"),
+            |_, _| panic!("reordered copies must not save"),
+        )
+        .unwrap();
+        let rebuilt = dir.join("rebuilt.bin");
+        refresh(
+            &rebuilt,
+            &reversed,
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            fake_encode,
+            save_store,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&store).unwrap(), std::fs::read(rebuilt).unwrap());
+        // Legacy duplicate rows are ambiguous even when their provenance is fresh. Poison one
+        // vector and require a new projection, rather than silently retaining the last row.
+        let mut legacy = load_store(&store).unwrap();
+        legacy
+            .meta
+            .push(serde_json::from_value(serde_json::to_value(&legacy.meta[0]).unwrap()).unwrap());
+        legacy.vectors.resize(legacy.vectors.len() + legacy.dim, 999.0);
+        save_store(&store, &legacy).unwrap();
+        read.set(0);
+        encoded.set(0);
+        saved.set(0);
+        refresh(
+            &store,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| {
+                read.set(read.get() + 1);
+                fake_doc(r, None)
+            },
+            |b| {
+                encoded.set(encoded.get() + b.len());
+                fake_encode(b)
+            },
+            |p, s| {
+                saved.set(saved.get() + 1);
+                save_store(p, s)
+            },
+        )
+        .unwrap();
+        assert_eq!((read.get(), encoded.get(), saved.get()), (1, 1, 1));
+        assert_eq!(load_store(&store).unwrap().meta.len(), 1);
+        assert_eq!(
+            load_store(&store).unwrap().vectors,
+            fake_encode(&["identical".into()]).unwrap().concat()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_refresh_prefers_live_newest_copy_and_keeps_harness_namespaces() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-copy-selection-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let a = dir.join("a.jsonl");
+        let b = dir.join("b.jsonl");
+        let c = dir.join("c.jsonl");
+        std::fs::write(&a, "older").unwrap();
+        std::fs::write(&b, "newer divergent content").unwrap();
+        std::fs::write(&c, "independent harness").unwrap();
+        let mut older = fixture_ref(&a, "same");
+        older.harness = cv_core::Harness::OpenClaw;
+        older.updated_at = chrono::DateTime::from_timestamp(10, 0);
+        let mut newer = fixture_ref(&b, "same");
+        newer.harness = cv_core::Harness::OpenClaw;
+        newer.created_at = chrono::DateTime::from_timestamp(20, 0); // creation fallback beats older update
+        let mut other = fixture_ref(&c, "same");
+        other.harness = cv_core::Harness::Gemini;
+        let refs = [older, other, newer];
+        let store = dir.join("store");
+        let run = || {
+            refresh(
+                &store,
+                &refs,
+                "fake",
+                1,
+                ReadSet::default(),
+                |r| fake_doc(r, None),
+                fake_encode,
+                save_store,
+            )
+        };
+        assert_eq!(run().unwrap(), 2);
+        let stored = load_store(&store).unwrap();
+        assert_eq!(
+            stored
+                .meta
+                .iter()
+                .find(|m| m.harness == "openclaw")
+                .unwrap()
+                .source_path
+                .as_ref(),
+            Some(&b)
+        );
+        assert_eq!(
+            stored.meta.iter().find(|m| m.harness == "openclaw").unwrap().preview,
+            "newer divergent content"
+        );
+        let rebuild = dir.join("rebuilt");
+        let reversed: Vec<_> = refs.iter().rev().cloned().collect();
+        refresh(
+            &rebuild,
+            &reversed,
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            fake_encode,
+            save_store,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&store).unwrap(), std::fs::read(rebuild).unwrap());
+        std::fs::remove_file(&b).unwrap();
+        assert_eq!(run().unwrap(), 2); // Missing preferred copy falls back to the older live copy.
+        assert_eq!(
+            load_store(&store)
+                .unwrap()
+                .meta
+                .iter()
+                .find(|m| m.harness == "openclaw")
+                .unwrap()
+                .source_path
+                .as_ref(),
+            Some(&a)
+        );
+        refresh(
+            &store,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |_| panic!("warm fallback must not read"),
+            |_| panic!("warm fallback must not encode"),
+            |_, _| panic!("warm fallback must not save"),
+        )
+        .unwrap();
+        let before = std::fs::read(&store).unwrap();
+        std::fs::remove_file(&a).unwrap();
+        assert!(
+            refresh(
+                &store,
+                &refs,
+                "fake",
+                1,
+                ReadSet::default(),
+                |r| fake_doc(r, None),
+                |_| panic!("all-missing copy must not encode"),
+                |_, _| panic!("all-missing copy must not save")
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&store).unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
