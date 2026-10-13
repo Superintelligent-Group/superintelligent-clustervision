@@ -5,6 +5,29 @@ use super::*;
 use crate::json::{InvalidJson, JsonView};
 use ranges::Range;
 
+/// Complete replay metadata keeps every field except first-class conversation content.
+/// The ordinary body is supplied separately as checked blocks; unknown carriers use fallback.
+fn complete_metadata(view: JsonView<'_>) -> Result<Map<String, Value>> {
+    let mut meta = Map::new();
+    view.for_each_entry(|key, value| {
+        let owned = if key == "message" {
+            let mut message = Map::new();
+            value.for_each_entry(|key, value| {
+                if key != "content" {
+                    message.insert(key.to_owned(), value.resolve()?.into_owned());
+                }
+                Ok(())
+            })?;
+            Value::Object(message)
+        } else {
+            value.resolve()?.into_owned()
+        };
+        meta.insert(key.to_owned(), owned);
+        Ok(())
+    })?;
+    Ok(meta)
+}
+
 /// Project retained metadata independently of content. Unknown fields and unrequested sidecars
 /// remain source ranges rather than an owned record tree.
 fn conversation(view: JsonView<'_>, opts: &ParseOptions) -> Result<Option<(Value, ConversationContent)>> {
@@ -65,55 +88,72 @@ fn conversation(view: JsonView<'_>, opts: &ParseOptions) -> Result<Option<(Value
     else {
         return Ok(None);
     };
-    let mut meta = top.project(&[
-        "type",
-        "uuid",
-        "parentUuid",
-        "timestamp",
-        "cwd",
-        "gitBranch",
-        "permissionMode",
-        "isMeta",
-        "isCompactSummary",
-        "isApiErrorMessage",
-        "turnOrigin",
-    ])?;
+    let mut meta = if opts.complete {
+        complete_metadata(view)?
+    } else {
+        top.project(&[
+            "type",
+            "uuid",
+            "parentUuid",
+            "timestamp",
+            "cwd",
+            "gitBranch",
+            "permissionMode",
+            "isMeta",
+            "isCompactSummary",
+            "isApiErrorMessage",
+            "turnOrigin",
+        ])?
+    };
     for key in ["scheduledTaskId", "scheduledFireId"] {
+        if opts.complete {
+            continue;
+        }
         if top.get(key).is_some() {
             meta.insert(key.into(), Value::Bool(true));
         }
     }
-    if let Some(origin) = top
-        .get("origin")
-        .map(|v| Fields::parse(v, &["kind"]))
-        .transpose()?
-        .flatten()
-    {
-        meta.insert("origin".into(), Value::Object(origin.project(&["kind"])?));
-    }
-    if let Some(result) = top.get("toolUseResult") {
-        if opts.wants_full_extra() {
-            meta.insert("toolUseResult".into(), result.resolve()?.into_owned());
-        } else {
-            meta.insert("toolUseResult".into(), facts::agent_return(result)?);
+    if !opts.complete {
+        if let Some(origin) = top
+            .get("origin")
+            .map(|v| Fields::parse(v, &["kind"]))
+            .transpose()?
+            .flatten()
+        {
+            meta.insert("origin".into(), Value::Object(origin.project(&["kind"])?));
         }
     }
-
-    let mut message = body.project(&["model", "usage"])?;
+    if !opts.complete {
+        if let Some(result) = top.get("toolUseResult") {
+            if opts.wants_full_extra() {
+                meta.insert("toolUseResult".into(), result.resolve()?.into_owned());
+            } else {
+                meta.insert("toolUseResult".into(), facts::agent_return(result)?);
+            }
+        }
+    }
+    let mut message = if opts.complete {
+        match meta.shift_remove("message") {
+            Some(Value::Object(message)) => message,
+            _ => Map::new(),
+        }
+    } else {
+        body.project(&["model", "usage"])?
+    };
     let synthetic = ty == "assistant"
         && (meta.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true)
             || message.get("model").and_then(Value::as_str) == Some(SYNTHETIC_MODEL));
-    if synthetic && !opts.facts_only() {
+    if synthetic && !opts.complete && !opts.facts_only() {
         for key in ["error", "errorDetails", "apiErrorStatus", "requestId"] {
             if let Some(value) = top.value(key)? {
                 meta.insert(key.into(), value);
             }
         }
     }
-    if opts.wants_full_extra() {
+    if opts.wants_full_extra() && !opts.complete {
         meta.extend(top.project(CLAUDE_EXTRA_TOP)?);
         message.extend(body.project(CLAUDE_EXTRA_MSG)?);
-    } else if opts.usage_identity || opts.facts_only() {
+    } else if !opts.complete && (opts.usage_identity || opts.facts_only()) {
         if let Some(id) = body.string("id")? {
             message.insert("id".into(), Value::String(id));
         }
@@ -253,7 +293,7 @@ pub(super) fn stream(
             flow = ingest_bytes(&mut session, bytes, raw.offset, opts, sink, inputs);
         } else if range.len == 0 {
             // A giant whitespace-only physical record has no JSON body.
-        } else if opts.spans && !opts.complete {
+        } else if opts.spans {
             let projected;
             let message_opts =
                 if opts.wants_full_extra() && sink.extra_projection() == crate::stream::ExtraProjection::Facts {

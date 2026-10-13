@@ -61,7 +61,7 @@ struct JsonInputs {
 
 impl JsonInputs {
     fn capture(path: &Path, opts: &ParseOptions) -> Result<Option<Self>> {
-        if !opts.spans || opts.complete {
+        if !opts.spans {
             return Ok(None);
         }
         Ok(Some(Self {
@@ -618,7 +618,7 @@ fn ingest_bytes(
         base_off: file_off + lead as u64,
         json_inputs,
     });
-    if !opts.complete {
+    if !opts.complete || opts.spans {
         let flow = borrowed::ingest(session, slice, opts, sink, ctx.as_ref());
         // A failed source capture/range is an operation error, never eligibility for the owned
         // fallback codec. In particular, do not materialize a giant input after invalidation.
@@ -2149,6 +2149,15 @@ fn collect_extra_complete(v: &Value, msg: &Value, extra: &mut Map<String, Value>
                 .entry(format!("{MESSAGE_EXTRA_PREFIX}{k}"))
                 .or_insert_with(|| val.clone());
         }
+    }
+}
+
+fn collect_extra_complete_owned(top: Map<String, Value>, message: Map<String, Value>, extra: &mut Map<String, Value>) {
+    for (key, value) in top {
+        extra.entry(key).or_insert(value);
+    }
+    for (key, value) in message {
+        extra.entry(format!("{MESSAGE_EXTRA_PREFIX}{key}")).or_insert(value);
     }
 }
 

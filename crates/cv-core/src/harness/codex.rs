@@ -259,6 +259,8 @@ impl Adapter for Codex {
                 return Ok(None);
             };
             if state.reading.flavor != Flavor::of(opts)
+                || state.ctx.complete != opts.complete
+                || (opts.complete && opts.spans && state.reading.complete_projection != 1)
                 || state.session.source_path.as_deref() != Some(r.path.as_path())
             {
                 return Ok(None);
@@ -341,6 +343,9 @@ impl Flavor {
 struct Reading {
     buffered: bool,
     flavor: Flavor,
+    // Older complete+spans readers could omit native carriers or truncate portable late events.
+    #[serde(default)]
+    complete_projection: u8,
 }
 
 impl ResumeState {
@@ -350,17 +355,14 @@ impl ResumeState {
                 source_path,
                 ..Session::new(String::new(), Harness::Codex)
             },
-            ctx: if buffered {
-                CodexCtx::for_opts(opts)
-            } else {
-                CodexCtx::default()
-            },
+            ctx: CodexCtx::for_opts(opts),
             has_events,
             meta_sent: false,
             skipped: 0,
             reading: Reading {
                 buffered,
                 flavor: Flavor::of(opts),
+                complete_projection: u8::from(opts.complete && opts.spans),
             },
         }
     }
@@ -898,7 +900,7 @@ fn stream_jsonl_spans_at(
                     source.read_borrowed_range_value(
                         base_off,
                         std::str::from_utf8(slice).map_err(|_| crate::json::InvalidJson)?,
-                        |view| selected::project(view, source, true, has_events),
+                        |view| selected::project(view, source, true, has_events, ctx.complete),
                     )
                 })
                 .transpose()
@@ -913,6 +915,14 @@ fn stream_jsonl_spans_at(
         };
         if let Some(projection) = projected {
             projection.dispatch(&mut s, &mut scratch, has_events, &mut ctx);
+        } else if ctx.complete {
+            match serde_json::from_slice::<Value>(slice) {
+                Ok(value) => dispatch_line(&mut s, &mut scratch, &value, has_events, &mut ctx),
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            }
         } else {
             match lean::parse(slice, giant) {
                 Ok(lean::LeanLine { mut v, output }) => match output {
@@ -2832,6 +2842,67 @@ mod tests {
         }
         eprintln!("codex buffered native files={files} exact suffix resumes={resumes}");
         assert!(files >= 16 && resumes > 100);
+    }
+
+    #[test]
+    fn checked_complete_resume_rejects_old_flavors_and_preserves_current_suffix() {
+        use std::io::Write as _;
+        let world = cv_testkit::World::in_process("codex-complete-resume-flavor");
+        let path = world.base.join("rollout-complete.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"cwd\":\"/synthetic\"}}\n",
+                "{\"type\":\"world_state\",\"payload\":{\"kept\":true}}\n"
+            ),
+        )
+        .unwrap();
+        let r = SessionRef::new("s", Harness::Codex, path);
+        let adapter = Codex::with_home(&world.home.join(".codex"));
+        let opts = ParseOptions {
+            spans: true,
+            ..ParseOptions::complete()
+        };
+        let mut prefix = BufferedKept::default();
+        buffered_pass(&r, &opts, &mut prefix);
+        let (count, checkpoint) = prefix.checkpoints.last().unwrap();
+        assert!(*count > 0);
+        assert_eq!(
+            checkpoint
+                .get::<ResumeState>(crate::stream::ADAPTER_LAYER)
+                .unwrap()
+                .reading
+                .complete_projection,
+            1
+        );
+        writeln!(fs::OpenOptions::new().append(true).open(&r.path).unwrap(), "{}",
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"appended"}]}})).unwrap();
+        for old_native in [false, true] {
+            let mut old = checkpoint.clone();
+            let layer = old.state.get_mut(crate::stream::ADAPTER_LAYER).unwrap();
+            layer["reading"].as_object_mut().unwrap().remove("complete_projection");
+            if old_native {
+                layer["ctx"]["complete"] = Value::Bool(false);
+                layer["reading"]["buffered"] = Value::Bool(false);
+            }
+            let mut sink = BufferedKept::default();
+            assert!(adapter.try_resume(&r, &opts, &mut sink, &old).unwrap().is_none());
+            assert!(sink.messages.is_empty());
+        }
+        let mut suffix = BufferedKept::default();
+        let mut resumed = adapter.try_resume(&r, &opts, &mut suffix, checkpoint).unwrap().unwrap();
+        resumed.messages = prefix.messages[..*count]
+            .iter()
+            .cloned()
+            .chain(suffix.messages)
+            .collect();
+        let mut whole = BufferedKept::default();
+        let mut expected = buffered_pass(&r, &opts, &mut whole);
+        expected.messages = whole.messages;
+        assert_eq!(
+            serde_json::to_vec(&resumed).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
     }
 
     #[test]

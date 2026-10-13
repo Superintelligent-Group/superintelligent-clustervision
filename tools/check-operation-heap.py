@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Small process-isolated whole-operation Rust heap gates, without timing thresholds.
 
-Synthetic inputs only. Eight cases; output validation runs after the measured operation.
+Synthetic inputs only. Nine cases; output validation runs after the measured operation.
 """
 import argparse
 import hashlib
@@ -313,6 +313,34 @@ CODEX_THINKING_EXPECTED = {'text': ['cc7670ce4e3e93f0ae3099f76bb771d2ff100c39348
                       {'field': 'message ids', 'before': '4', 'after': '0', 'expected': True},
                       {'field': 'message ids (tool turns)', 'before': '1', 'after': '0', 'expected': True}]}]}
 
+
+def claude_rehome_gate(binary, root, env):
+    directory = root / "claude-rehome"
+    directory.mkdir()
+    source = directory / "source.jsonl"
+    prune_fixture(source, "thinking", timestamp="2026-10-12T12:00:00Z", cwd="/synthetic/same-claude")
+    with source.open("ab") as output:
+        output.write(b'{"type":"future-meta","sessionId":"old","opaque":{"kept":true}}\n')
+    original = file_digest(source)
+    assert source.stat().st_size == 67117492
+    assert original == "e1ff8319b4025d0e008c0192bd68183bf20ee564a747028cf6d22316036592a4"
+    child = subprocess.run([str(binary), "claude", str(source), str(directory / "output"), "native"],
+                           env=env, text=True, capture_output=True)
+    assert child.returncode == 0, f"verified same-harness Claude port failed: {child.stderr[-2000:]}"
+    report = json.loads(child.stdout)
+    peak = checked_peak(json.loads(child.stderr))
+    output = Path(report["path"])
+    assert report["messages"] == 6 and report["fidelity"] == dict(deltas=[])
+    assert output.stat().st_size == 67117687
+    # Frozen owned complete parse/rehome: all bytes, including ordinary bodies and unknown carrier.
+    digest = file_digest(output)
+    assert digest == "f86d92ed9208134168092ec42e0e29ce22777d9a2239840dbc93be6ecfc95883"
+    assert file_digest(source) == original, "same-harness port modified its source"
+    print(json.dumps(dict(case="verified-claude-complete-rehome", peak_live_rust_bytes=peak,
+                          messages=6, output_bytes=output.stat().st_size, sha256=digest)), flush=True)
+    shutil.rmtree(directory)
+
+
 def window_binary(report_path):
     artifacts = [json.loads(line) for line in report_path.read_text().splitlines()]
     candidates = [item["executable"] for item in artifacts
@@ -382,6 +410,7 @@ def main():
         window_gate(window_binary(args.window_build_report), root, env)
         claude_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
         codex_thinking_gate(args.claude_port_probe.resolve(strict=True), root, env)
+        claude_rehome_gate(args.claude_port_probe.resolve(strict=True), root, env)
 
 
 if __name__ == "__main__":

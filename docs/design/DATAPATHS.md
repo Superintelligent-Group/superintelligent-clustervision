@@ -3507,3 +3507,29 @@ carrier ownership, which remains a separate deciding control rather than a claim
 passed all four jobs, including the fresh full workspace suite, all eight operation heap gates,
 packages, desktop, web and wasm. The same-harness and Unicode/Gemini controls recorded in the
 current priorities above identify the next batch; they are not covered by this revision's bounds.
+
+### Same-harness checked complete preparation (2026-10-13, Sol/opencode_parts)
+
+Actual Native Claude rehome previously used owned complete parsing followed by materialization.
+With fixed small metadata and an unknown carrier, ordinary reasoning/tool payloads of 8/64 MiB
+raised peak live Rust allocations from 33,397,797 to 267,060,266 B. Checked complete preparation
+retains supported bodies and preserves every complete metadata field and unsupported carrier;
+the final 64 MiB operation peaks at 284,635 B and matches all 67,117,687 emitted bytes of the
+frozen owned oracle, six messages and an empty fidelity report. The ninth operation heap case
+persistently enforces that oracle and the existing 4 MiB budget; nine driver unit controls pass.
+Default public complete parsing remains owned. Requested rich metadata and unknown carriers can
+still impose owned payload floors; output staging still writes output-sized temporary files.
+
+The same existing 8 MiB Codex Native rehome control falls from 25,703,768 to 1,399,929 B and
+preserves output and empty fidelity after normalizing only generated turn UUIDs. Allocation
+requests rise from 2,087 to 13,455 and cumulative requested bytes from 62,902,403 to 122,528,229;
+this is a live-memory improvement, not a CPU or I/O claim. Native complete fallback retains
+strict Value acceptance, and late event carriers retain their complete original records.
+A serde-defaulted complete-projection checkpoint tag rejects old complete+spans prefixes while
+preserving ordinary and default owned-complete warm reuse, without a global resume-format bump.
+
+Focused native/portable Claude and Codex complete comparisons cover serialized metadata order,
+extra=false/usage identity, Facts sink complete override, duplicate/malformed inputs, late
+carriers, exact wire/fidelity and changed-source output preservation. Native and portable
+checkpoint migration controls pass, as do both library clippy configurations. No timing or
+broad producer matrix was added.

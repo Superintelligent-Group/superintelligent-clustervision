@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Claude and Codex rehomes retain checked ordinary payloads while preserving complete metadata, unknown records and source freshness.
+
 - Codex Text and Drop thinking modes stream checked payloads without materializing discarded reasoning or cloning complete sessions.
 
 - Semantic refresh selects one live copy per harness-qualified session identity, preventing duplicate-store source errors and repairing old duplicate vector rows.

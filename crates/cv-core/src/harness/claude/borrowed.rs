@@ -1,5 +1,5 @@
-//! Borrowed conversational records for lean and rich readers. Complete parsing stays in the owned
-//! codec. Strings that become spans are validated and sized without constructing decoded Values;
+//! Borrowed conversations for lean, rich and explicitly lazy complete readers. Default complete
+//! parsing and unknown carriers stay owned. Spans are validated without decoded payload copies;
 //! escaped metadata strings use Cow rather than rejecting a valid record.
 
 use super::*;
@@ -88,24 +88,26 @@ struct Record<'a> {
 /// The shared rich roster selects only retained facts. Content is never materialized by this
 /// pass; duplicate selected keys have the owned Value codec's last-wins semantics.
 #[derive(Default)]
-struct ExtraFields {
+struct ExtraFields<const COMPLETE: bool = false> {
     top: Map<String, Value>,
     message: Map<String, Value>,
 }
-impl<'de> Deserialize<'de> for ExtraFields {
+impl<'de, const COMPLETE: bool> Deserialize<'de> for ExtraFields<COMPLETE> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = ExtraFields;
+        struct V<const COMPLETE: bool>;
+        impl<'de, const COMPLETE: bool> Visitor<'de> for V<COMPLETE> {
+            type Value = ExtraFields<COMPLETE>;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("a record object")
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut fields = ExtraFields::default();
+                let mut fields = ExtraFields::<COMPLETE>::default();
                 while let Some(Str(key)) = map.next_key::<Str<'de>>()? {
                     if key == "message" {
-                        fields.message = map.next_value::<MessageExtra>()?.0;
-                    } else if CLAUDE_EXTRA_TOP.contains(&key.as_ref()) {
+                        fields.message = map.next_value::<MessageExtra<COMPLETE>>()?.0;
+                    } else if (COMPLETE && !CLAUDE_FIRSTCLASS_TOP.contains(&key.as_ref()))
+                        || (!COMPLETE && CLAUDE_EXTRA_TOP.contains(&key.as_ref()))
+                    {
                         fields.top.insert(key.into_owned(), map.next_value()?);
                     } else {
                         map.next_value::<serde::de::IgnoredAny>()?;
@@ -114,22 +116,24 @@ impl<'de> Deserialize<'de> for ExtraFields {
                 Ok(fields)
             }
         }
-        d.deserialize_map(V)
+        d.deserialize_map(V::<COMPLETE>)
     }
 }
-struct MessageExtra(Map<String, Value>);
-impl<'de> Deserialize<'de> for MessageExtra {
+struct MessageExtra<const COMPLETE: bool = false>(Map<String, Value>);
+impl<'de, const COMPLETE: bool> Deserialize<'de> for MessageExtra<COMPLETE> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = MessageExtra;
+        struct V<const COMPLETE: bool>;
+        impl<'de, const COMPLETE: bool> Visitor<'de> for V<COMPLETE> {
+            type Value = MessageExtra<COMPLETE>;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("a message object")
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut fields = Map::new();
                 while let Some(Str(key)) = map.next_key::<Str<'de>>()? {
-                    if CLAUDE_EXTRA_MSG.contains(&key.as_ref()) {
+                    if (COMPLETE && !CLAUDE_FIRSTCLASS_MSG.contains(&key.as_ref()))
+                        || (!COMPLETE && CLAUDE_EXTRA_MSG.contains(&key.as_ref()))
+                    {
                         fields.insert(key.into_owned(), map.next_value()?);
                     } else {
                         map.next_value::<serde::de::IgnoredAny>()?;
@@ -138,7 +142,7 @@ impl<'de> Deserialize<'de> for MessageExtra {
                 Ok(MessageExtra(fields))
             }
         }
-        d.deserialize_map(V)
+        d.deserialize_map(V::<COMPLETE>)
     }
 }
 
@@ -376,7 +380,7 @@ pub(super) fn ingest(
             .user
             .unwrap_or_else(|| user_kind_from_head(user_origin, &head.text)),
     };
-    let (role, kind, origin) = classify_conversation(role, class, false);
+    let (role, kind, origin) = classify_conversation(role, class, opts.complete);
     // Strict Value compatibility above preserves full-extra record acceptance, including
     // unselected malformed sidecars. Only field construction follows the sink's demand.
     let facts_only = opts.facts_only()
@@ -384,7 +388,7 @@ pub(super) fn ingest(
             && opts.wants_full_extra()
             && sink.extra_projection() == crate::stream::ExtraProjection::Facts);
     let mut bag = Map::new();
-    if synthetic && !facts_only {
+    if synthetic && !opts.complete && !facts_only {
         if let Some(value) = record.is_api_error_message {
             bag.insert("isApiErrorMessage".into(), Value::Bool(value));
         }
@@ -406,6 +410,29 @@ pub(super) fn ingest(
         }
         if let Some(id) = serde_json::from_slice::<UsageIdentity>(slice).ok()?.0 {
             bag.insert("message.id".into(), Value::String(id));
+        }
+    } else if opts.complete {
+        let captured: ExtraFields<true> = serde_json::from_slice(slice).ok()?;
+        if opts.extra {
+            let top = CLAUDE_EXTRA_TOP
+                .iter()
+                .filter_map(|&key| captured.top.get(key).map(|v| (key.to_owned(), v.clone())))
+                .collect();
+            let message = CLAUDE_EXTRA_MSG
+                .iter()
+                .filter_map(|&key| captured.message.get(key).map(|v| (key.to_owned(), v.clone())))
+                .collect();
+            collect_extra_owned(top, message, &mut bag);
+        } else if opts.usage_identity {
+            if let Some(id) = captured.message.get("id").and_then(Value::as_str) {
+                bag.insert("message.id".into(), Value::String(id.to_owned()));
+            }
+        }
+        collect_extra_complete_owned(captured.top, captured.message, &mut bag);
+        if blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
+            if let Some(raw) = record.tool_use_result.0.filter(|v| v.get() != "null") {
+                attach_tool_use_result_owned(&mut blocks, serde_json::from_str(raw.get()).ok()?);
+            }
         }
     } else if opts.extra {
         let captured: ExtraFields = serde_json::from_slice(slice).ok()?;
@@ -440,7 +467,11 @@ pub(super) fn ingest(
         kind,
         origin,
         timestamp,
-        model: if synthetic { None } else { owned(record.message.model) },
+        model: if synthetic && !opts.complete {
+            None
+        } else {
+            owned(record.message.model)
+        },
         content: blocks,
         usage,
         extra,

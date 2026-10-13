@@ -39,6 +39,7 @@ pub(super) fn project(
     source: &JsonSource,
     spans: bool,
     events: bool,
+    complete: bool,
 ) -> Result<Option<Projection>> {
     let Some(top) = Fields::parse(view, &["type", "timestamp", "ordinal", "payload"])? else {
         return Ok(None);
@@ -94,6 +95,7 @@ pub(super) fn project(
         Ok(Value::Object(record))
     };
     match (record_type.as_str(), ty.as_str()) {
+        ("event_msg", "user_message" | "agent_message") if !events && complete => Ok(None),
         ("event_msg", "user_message" | "agent_message") if !events => Ok(Some(Projection::Blocks {
             record: make_record(p)?,
             blocks: Vec::new(),
