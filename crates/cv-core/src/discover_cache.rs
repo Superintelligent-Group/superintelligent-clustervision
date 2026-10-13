@@ -188,101 +188,106 @@ where
         .next()
 }
 
+fn persistence_cache(prune: bool) -> Option<&'static Cache> {
+    let cache = CACHE.get()?;
+    (cache.any_dirty.load(Ordering::Relaxed) || prune).then_some(cache)
+}
+
 /// Flush freshly-scanned entries to the catalog db in one transaction. With `prune`, also drop
 /// rows whose files no longer exist so the table doesn't grow without bound — pass it after a
 /// *full* [`crate::discover_all`] (the stat-per-row cost belongs on the slow path; per-harness
 /// probe refreshes skip it). Best-effort: a failed flush just means a re-scan next run.
 pub(crate) fn persist(prune: bool) {
-    let Some(cache) = CACHE.get() else {
-        return;
-    };
-    if !cache.any_dirty.load(Ordering::Relaxed) && !prune {
+    if persistence_cache(prune).is_none() {
         return;
     }
     #[cfg(feature = "sqlite")]
-    {
-        let Some(mut conn) = crate::catalog::open_db() else {
-            return;
-        };
-        clear_invalidated(cache);
-        // Full discovery still checks every persisted path, including malformed cache rows
-        // omitted by load. Pruning therefore keeps its existing completeness semantics.
-        let mut prune_paths: std::collections::HashSet<String> = if prune {
-            let Ok(mut stmt) = conn.prepare("SELECT path FROM scan_cache") else {
-                return;
-            };
-            let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
-                return;
-            };
-            let Ok(paths) = rows.collect::<rusqlite::Result<_>>() else {
-                return;
-            };
-            paths
-        } else {
-            Default::default()
-        };
-        let mut g = cache.entries.write().unwrap();
-        if prune {
-            // Match the previous flush-then-prune behavior for newly scanned files that
-            // vanished before publication, checking each persisted/dirty path only once.
-            prune_paths.extend(
-                g.iter()
-                    .filter(|(_, e)| e.dirty)
-                    .map(|(path, _)| path.to_string_lossy().into_owned()),
-            );
-        }
-        let vanished: Vec<_> = prune_paths.into_iter().filter(|p| !Path::new(p).exists()).collect();
-        if vanished.is_empty() && !g.values().any(|entry| entry.dirty) {
-            return;
-        }
-        let Ok(tx) = conn.transaction() else { return };
-        let mut written = Vec::new();
-        {
-            let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads) VALUES(?1,?2,?3,?4,?5,?6)") else { return };
-            for (path, e) in g.iter().filter(|(_, e)| e.dirty) {
-                let Ok(refs) = serde_json::to_string(&e.refs) else {
-                    continue;
-                };
-                let Ok(reads) = serde_json::to_string(&e.reads) else {
-                    continue;
-                };
-                if stmt
-                    .execute(rusqlite::params![
-                        path.to_string_lossy(),
-                        e.mtime_ns as i64,
-                        e.size as i64,
-                        refs,
-                        INTERPRETATION_VERSION,
-                        reads
-                    ])
-                    .is_err()
-                {
-                    return;
-                }
-                written.push(path.clone());
-            }
-        }
-        for path in &vanished {
-            if tx.execute("DELETE FROM scan_cache WHERE path=?1", [path]).is_err() {
-                return;
-            }
-        }
-        if tx.commit().is_err() {
-            return;
-        }
-        // A failed transaction retains dirty flags for retry rather than losing its writes.
-        for path in written {
-            if let Some(entry) = g.get_mut(&path) {
-                entry.dirty = false;
-            }
-        }
-        for path in vanished {
-            g.remove(Path::new(&path));
-        }
-        cache
-            .any_dirty
-            .store(g.values().any(|entry| entry.dirty), Ordering::Relaxed);
+    if let Some(mut conn) = crate::catalog::open_db() {
+        persist_in(&mut conn, prune);
     }
+}
+
+#[cfg(feature = "sqlite")]
+pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
+    let Some(cache) = persistence_cache(prune) else { return };
+    clear_invalidated(cache);
+    // Full discovery still checks every persisted path, including malformed cache rows
+    // omitted by load. Pruning therefore keeps its existing completeness semantics.
+    let mut prune_paths: std::collections::HashSet<String> = if prune {
+        let Ok(mut stmt) = conn.prepare("SELECT path FROM scan_cache") else {
+            return;
+        };
+        let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+            return;
+        };
+        let Ok(paths) = rows.collect::<rusqlite::Result<_>>() else {
+            return;
+        };
+        paths
+    } else {
+        Default::default()
+    };
+    let mut g = cache.entries.write().unwrap();
+    if prune {
+        // Match the previous flush-then-prune behavior for newly scanned files that
+        // vanished before publication, checking each persisted/dirty path only once.
+        prune_paths.extend(
+            g.iter()
+                .filter(|(_, e)| e.dirty)
+                .map(|(path, _)| path.to_string_lossy().into_owned()),
+        );
+    }
+    let vanished: Vec<_> = prune_paths.into_iter().filter(|p| !Path::new(p).exists()).collect();
+    if vanished.is_empty() && !g.values().any(|entry| entry.dirty) {
+        return;
+    }
+    let Ok(tx) = conn.transaction() else { return };
+    let mut written = Vec::new();
+    {
+        let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads) VALUES(?1,?2,?3,?4,?5,?6)") else { return };
+        for (path, e) in g.iter().filter(|(_, e)| e.dirty) {
+            let Ok(refs) = serde_json::to_string(&e.refs) else {
+                continue;
+            };
+            let Ok(reads) = serde_json::to_string(&e.reads) else {
+                continue;
+            };
+            if stmt
+                .execute(rusqlite::params![
+                    path.to_string_lossy(),
+                    e.mtime_ns as i64,
+                    e.size as i64,
+                    refs,
+                    INTERPRETATION_VERSION,
+                    reads
+                ])
+                .is_err()
+            {
+                return;
+            }
+            written.push(path.clone());
+        }
+    }
+    for path in &vanished {
+        if tx.execute("DELETE FROM scan_cache WHERE path=?1", [path]).is_err() {
+            return;
+        }
+    }
+    if tx.commit().is_err() {
+        return;
+    }
+    // A failed transaction retains dirty flags for retry rather than losing its writes.
+    for path in written {
+        if let Some(entry) = g.get_mut(&path) {
+            entry.dirty = false;
+        }
+    }
+    for path in vanished {
+        g.remove(Path::new(&path));
+    }
+    cache
+        .any_dirty
+        .store(g.values().any(|entry| entry.dirty), Ordering::Relaxed);
 }
 
 /// [`crate::catalog::fill_count`]'s scan-cache half: set `message_count = n` on the cached ref for

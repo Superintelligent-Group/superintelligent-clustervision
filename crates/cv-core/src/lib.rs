@@ -78,14 +78,36 @@ use anyhow::Result;
 /// [`sessions`] a trustworthy fast read afterwards. Most read-side callers want [`sessions`]
 /// instead; call this when you need a guaranteed-fresh scan (e.g. `cv ls --fresh`, indexers).
 pub fn discover_all() -> Vec<SessionRef> {
+    discover_all_with_catalog(catalog::Reader::open())
+}
+
+fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<SessionRef> {
     let _sources = source::read_scope();
     let adapters = harness::all();
+    let mut known = std::collections::HashMap::<Harness, Vec<SessionRef>>::new();
+    for r in catalog
+        .as_ref()
+        .and_then(catalog::Reader::all_sessions)
+        .unwrap_or_default()
+    {
+        known.entry(r.harness).or_default().push(r);
+    }
+
+    let jobs: Vec<_> = adapters
+        .into_iter()
+        .map(|a| {
+            let refs = known.remove(&a.harness()).unwrap_or_default();
+            (a, refs)
+        })
+        .collect();
+    drop(known);
 
     // Per-adapter outcome: refs on success, `None` on error (the catalog keeps that harness's
     // previous rows rather than wiping them over a transient failure). Rootless adapters are a
     // successful empty scan — their catalog rows (root deleted since last sync) must clear.
     fn run(
         a: &dyn Adapter,
+        known: Vec<SessionRef>,
     ) -> (
         Harness,
         Vec<std::path::PathBuf>,
@@ -97,7 +119,8 @@ pub fn discover_all() -> Vec<SessionRef> {
         if roots.is_empty() {
             return (h, roots, Some(Vec::new()), Default::default());
         }
-        let before = catalog::capture_primary_reads(a);
+        let before = catalog::capture_primary_reads_from(a, &known);
+        drop(known); // Retain source guards, not a second fleet of metadata, during discovery.
         match a.discover() {
             Ok(refs) => (h, roots, Some(refs), before),
             Err(e) => {
@@ -110,13 +133,20 @@ pub fn discover_all() -> Vec<SessionRef> {
     #[cfg(feature = "parallel")]
     let results: Vec<_> = {
         use rayon::prelude::*;
-        adapters.par_iter().map(|a| run(a.as_ref())).collect()
+        jobs.into_par_iter().map(|(a, known)| run(a.as_ref(), known)).collect()
     };
     #[cfg(not(feature = "parallel"))]
-    let results: Vec<_> = adapters.iter().map(|a| run(a.as_ref())).collect();
+    let results: Vec<_> = jobs.into_iter().map(|(a, known)| run(a.as_ref(), known)).collect();
 
     // Persist freshly-scanned metadata (pruning vanished files) so the next discovery reuses it.
-    discover_cache::persist(true);
+    if catalog.is_none() {
+        catalog = catalog::Reader::open();
+    }
+    if let Some(catalog) = &mut catalog {
+        catalog.persist_discovery(true);
+    } else {
+        discover_cache::persist(true);
+    }
 
     // Publish every successful harness in one SQL snapshot. Enumeration remains fresh;
     // unchanged rows can be retained only after comparing the complete ordered inventory.
@@ -127,7 +157,9 @@ pub fn discover_all() -> Vec<SessionRef> {
                 .map(|refs| (*h, refs.as_slice(), catalog::watches_for(*h, roots, refs), before))
         })
         .collect();
-    catalog::publish_all(&publications);
+    if let Some(catalog) = &mut catalog {
+        catalog.publish_all(&publications);
+    }
     results
         .into_iter()
         .filter_map(|(_, _, refs, _)| refs)
@@ -170,21 +202,25 @@ fn sessions_impl() -> (Vec<SessionRef>, bool) {
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(900);
-    let fresh_enough = catalog::last_full_sync().is_some_and(|t| (chrono::Utc::now().timestamp() - t) < max_stale);
+    let catalog = catalog::Reader::open();
+    let fresh_enough = catalog
+        .as_ref()
+        .and_then(catalog::Reader::last_full_sync)
+        .is_some_and(|t| (chrono::Utc::now().timestamp() - t) < max_stale);
     if fresh_enough {
-        if let Some(stale) = catalog::probe_stale() {
+        if let Some(stale) = catalog.as_ref().and_then(catalog::Reader::probe_stale) {
             if !stale.is_empty() {
                 for h in stale {
                     refresh_harness(h);
                 }
                 discover_cache::persist(false);
             }
-            if let Some(rows) = catalog::all_sessions() {
+            if let Some(rows) = catalog.as_ref().and_then(catalog::Reader::all_sessions) {
                 return (rows, false);
             }
         }
     }
-    (discover_all(), true)
+    (discover_all_with_catalog(catalog), true)
 }
 
 /// Re-discover one harness and replace its catalog rows + watches — the probe's scoped escalation.

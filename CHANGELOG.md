@@ -13,6 +13,8 @@
 - CLI JSON staging batches small writes through bounded operation buffers while preserving output, byte budgets, rollback and continuation hints.
 - Cat and rendered views report unavailable retained text instead of empty output or unresolved-text panics, while preserving lazy tool arguments.
 
+- Listing and discovery reuse catalog connections across read and publication stages, avoiding repeated schema initialization while retaining freshness checks.
+
 - Splice retains only selected messages and moves them into the composition, avoiding materialization and cloning of discarded histories.
 - Fresh discovery avoids rewriting unchanged catalog rows while preserving inventory freshness, session order, source guards, and vanished-file pruning.
 - Budgeted session JSON serializes lazy messages once, preserving compact byte limits and exact pretty output; archive spools reuse compact staging.

@@ -9,7 +9,7 @@
 //!
 //! The same rows now also serve [`crate::sessions`], which answers `cv ls`/`stats`
 //! without touching the fleet at all. Correctness rests on the **freshness probe**
-//! ([`probe_stale`]): every full discovery records, per harness, the directories that directly
+//! ([`Reader::probe_stale`]): every full discovery records, per harness, the directories that directly
 //! contain session files (plus all ancestors up to the harness root) and — for the SQLite-backed
 //! harnesses — the database files and their WAL sidecars, each with its mtime at scan time (the `watched`
 //! table). The probe re-stats those few hundred paths in milliseconds; any new/changed/vanished
@@ -25,6 +25,8 @@
 
 use crate::ir::{Harness, SessionRef};
 
+mod reader;
+pub(crate) use reader::Reader;
 mod writer;
 #[cfg(feature = "sqlite")]
 use std::path::{Path, PathBuf};
@@ -38,6 +40,20 @@ pub(crate) type Publication<'a> = (
     Vec<(std::path::PathBuf, i64)>,
     &'a PrimaryReads,
 );
+
+/// SQL row loading may precede parallel discovery; source identity capture must not.
+pub(crate) fn capture_primary_reads_from(a: &dyn crate::Adapter, refs: &[SessionRef]) -> PrimaryReads {
+    let mut out = PrimaryReads::default();
+    for r in refs {
+        let path = a.resume_source(r);
+        out.entry(path).or_insert_with_key(|path| {
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(path);
+            reads
+        });
+    }
+    out
+}
 
 #[cfg(feature = "sqlite")]
 mod imp {
@@ -80,7 +96,12 @@ mod imp {
         open()
     }
 
+    #[cfg(test)]
+    thread_local! { static OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
     fn open() -> Option<Connection> {
+        #[cfg(test)]
+        OPEN_COUNT.with(|n| n.set(n.get() + 1));
         let mut conn = Connection::open(db_path()?).ok()?;
         // WAL + a busy timeout so concurrent cv processes don't error each other out.
         conn.busy_timeout(Duration::from_secs(5)).ok()?;
@@ -286,23 +307,14 @@ mod imp {
     /// Bracket known primary sources before discovery. New uncached paths stay unknown until
     /// a later scoped pass; never bless an identity sampled after its metadata was read.
     pub(crate) fn capture_primary_reads(a: &dyn crate::Adapter) -> PrimaryReads {
-        let mut out = std::collections::HashMap::new();
-        let Some(conn) = open() else { return out };
+        let Some(conn) = open() else { return Default::default() };
         let Ok(mut stmt) = conn.prepare(&format!("SELECT {REF_COLUMNS} FROM sessions WHERE harness=?1")) else {
-            return out;
+            return Default::default();
         };
         let Ok(rows) = stmt.query_map([a.harness().as_str()], row_to_ref) else {
-            return out;
+            return Default::default();
         };
-        for r in rows.flatten().flatten() {
-            let path = a.resume_source(&r);
-            out.entry(path).or_insert_with_key(|path| {
-                let mut reads = crate::source::ReadSet::default();
-                reads.record(path);
-                reads
-            });
-        }
-        out
+        capture_primary_reads_from(a, &rows.flatten().flatten().collect::<Vec<_>>())
     }
 
     /// Replace one harness's catalog rows *and* its watch entries in a single transaction — the
@@ -351,12 +363,18 @@ mod imp {
 
     /// Compare and publish the full ordered output in one SQL snapshot. Cache guards are
     /// prepared before taking the writer lock, preserving the cache-to-SQL lock order.
-    pub(crate) fn publish_all(rows: &[Publication<'_>]) {
+    #[cfg(test)]
+    fn publish_all(rows: &[Publication<'_>]) {
+        if let Some(mut reader) = Reader::open() {
+            reader.publish_all(rows);
+        }
+    }
+
+    pub(super) fn publish_all_in(conn: &mut Connection, rows: &[Publication<'_>]) {
         let sources: Vec<_> = rows
             .iter()
             .map(|(h, refs, _, before)| prepare_sources(*h, refs, before))
             .collect();
-        let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
         let Ok(equal) = matches_sessions_in(&tx, rows.iter().flat_map(|(_, refs, _, _)| refs.iter())) else {
             return;
@@ -529,8 +547,7 @@ mod imp {
     ///
     /// A first session in a previously empty deeper directory can still escape the directory
     /// watch set until the time backstop. Primary metadata checks do not hash file contents.
-    pub(crate) fn probe_stale() -> Option<Vec<Harness>> {
-        let conn = open()?;
+    pub(super) fn probe_stale_in(conn: &Connection) -> Option<Vec<Harness>> {
         let mut stale: Vec<Harness> = Vec::new();
         fn mark(stale: &mut Vec<Harness>, h: Harness) {
             if !stale.contains(&h) {
@@ -548,7 +565,8 @@ mod imp {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
                 })
                 .ok()?;
-            for (h, path, recorded) in rows.flatten() {
+            for row in rows {
+                let (h, path, recorded) = row.ok()?;
                 let Some(h) = Harness::parse(&h) else { continue };
                 watched_harnesses.insert(h);
                 watched_paths.insert((h, path.clone()));
@@ -613,19 +631,23 @@ mod imp {
     /// order reproduces [`crate::discover_all`]'s output order exactly — which keeps `cv ls`'s
     /// stable sorts byte-identical even across rows whose timestamps tie. `None` on any sqlite
     /// error — callers fall back to a full discovery. Note `Some(vec![])` is a valid answer (a
-    /// machine with no sessions); cold-vs-empty is [`last_full_sync`]'s job.
+    /// machine with no sessions); cold-vs-empty is [`Reader::last_full_sync`]'s job.
     pub(crate) fn all_sessions() -> Option<Vec<SessionRef>> {
-        let conn = open()?;
+        Reader::open()?.all_sessions()
+    }
+
+    pub(super) fn all_sessions_in(conn: &Connection) -> Option<Vec<SessionRef>> {
         let mut stmt = conn
             .prepare(&format!("SELECT {REF_COLUMNS} FROM sessions ORDER BY rowid"))
             .ok()?;
         let rows = stmt.query_map([], row_to_ref).ok()?;
-        Some(rows.flatten().flatten().collect())
+        rows.filter_map(Result::transpose)
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .ok()
     }
 
     /// Seconds-since-epoch of the last completed full discovery, if any. Absent = cold catalog.
-    pub(crate) fn last_full_sync() -> Option<i64> {
-        let conn = open()?;
+    pub(super) fn last_full_sync_in(conn: &Connection) -> Option<i64> {
         conn.query_row("SELECT value FROM catalog_meta WHERE key='last_full_sync'", [], |r| {
             r.get::<_, String>(0)
         })
@@ -634,7 +656,12 @@ mod imp {
         .ok()
     }
 
-    /// Stamp "a full discovery just completed" (the [`last_full_sync`] the staleness backstop reads).
+    #[cfg(test)]
+    fn last_full_sync() -> Option<i64> {
+        Reader::open()?.last_full_sync()
+    }
+
+    /// Stamp "a full discovery just completed" (the [`Reader::last_full_sync`] the staleness backstop reads).
     fn stamp_full_sync_in(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute(
             "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('last_full_sync',?1)",
@@ -907,6 +934,95 @@ mod imp {
         }
 
         #[test]
+        fn reader_warm_sessions_initialize_catalog_once() {
+            let w = cv_testkit::World::in_process("reader-warm");
+            let path = w.home.join(".claude/projects/-reader/alpha.jsonl");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"alpha\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n").unwrap();
+            let old = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            for dir in path
+                .parent()
+                .unwrap()
+                .ancestors()
+                .take_while(|dir| dir.starts_with(&w.home))
+            {
+                std::fs::File::open(dir)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(old))
+                    .unwrap();
+            }
+            let discovered = crate::discover_all();
+            assert_eq!(discovered.len(), 1);
+            let count = || OPEN_COUNT.with(std::cell::Cell::get);
+            let before = count();
+            assert!(Reader::open().unwrap().last_full_sync().is_some());
+            assert!(Reader::open().unwrap().probe_stale().unwrap().is_empty());
+            let legacy = Reader::open().unwrap().all_sessions().unwrap();
+            assert_eq!(count() - before, 3, "prior three-open read recipe");
+            let before = count();
+            let (current, full) = crate::sessions_impl();
+            assert!(!full, "verified catalog read must stay on the warm route");
+            assert_eq!(
+                count() - before,
+                1,
+                "one owned operation connection/schema initialization"
+            );
+            assert_eq!(
+                serde_json::to_value(current).unwrap(),
+                serde_json::to_value(legacy).unwrap()
+            );
+        }
+
+        #[test]
+        fn reader_operations_follow_catalog_switch_and_replacement() {
+            let w = cv_testkit::World::in_process("reader-path");
+            let a = db_ref(Harness::Claude, w.base.join("first"));
+            sync(std::slice::from_ref(&a));
+            assert_eq!(Reader::open().unwrap().all_sessions().unwrap()[0].path, a.path);
+            std::fs::rename(w.cv_home.join("catalog.db"), w.cv_home.join("old-catalog.db")).unwrap();
+            let b = db_ref(Harness::Claude, w.base.join("replacement"));
+            sync(std::slice::from_ref(&b));
+            assert_eq!(Reader::open().unwrap().all_sessions().unwrap()[0].path, b.path);
+            let next = w.base.join("next-catalog");
+            std::env::set_var("CLUSTERVISION_HOME", &next);
+            let c = db_ref(Harness::Claude, w.base.join("switched"));
+            sync(std::slice::from_ref(&c));
+            assert_eq!(Reader::open().unwrap().all_sessions().unwrap()[0].path, c.path);
+            std::env::set_var("CLUSTERVISION_HOME", &w.cv_home);
+        }
+
+        #[test]
+        fn reader_statement_errors_remain_fallbacks_without_held_transactions() {
+            let _w = cv_testkit::World::in_process("reader-errors");
+            let reader = Reader::open().unwrap();
+            let conn = open().unwrap();
+            // Another writer can change schema while this operation owner is idle.
+            conn.execute_batch("BEGIN IMMEDIATE; DROP TABLE watched; COMMIT;")
+                .unwrap();
+            assert!(reader.probe_stale().is_none());
+            conn.execute_batch("DROP TABLE catalog_meta;").unwrap();
+            assert!(reader.last_full_sync().is_none());
+            conn.execute_batch("DROP TABLE sessions;").unwrap();
+            assert!(reader.all_sessions().is_none());
+        }
+
+        #[test]
+        fn reader_preload_does_not_capture_primary_identity_early() {
+            let w = cv_testkit::World::in_process("reader-before-source");
+            let path = w.base.join("session.jsonl");
+            std::fs::write(&path, "before").unwrap();
+            let r = db_ref(Harness::Claude, path.clone());
+            sync(std::slice::from_ref(&r));
+            let known = Reader::open().unwrap().all_sessions().unwrap();
+            std::fs::write(&path, "loaded").unwrap();
+            let adapter = crate::harness::for_harness(Harness::Claude).unwrap();
+            let captured = capture_primary_reads_from(adapter.as_ref(), &known);
+            assert!(captured[&path].fresh(&mut crate::source::Probe::default()));
+            std::fs::write(&path, "racing").unwrap();
+            assert!(!captured[&path].fresh(&mut crate::source::Probe::default()));
+        }
+
+        #[test]
         fn publication_preserves_full_tie_order_and_failed_harness_rows() {
             let w = cv_testkit::World::in_process("publication-order");
             let mut a = db_ref(Harness::Claude, w.base.join("a"));
@@ -1162,10 +1278,12 @@ pub use imp::{
     affordance_sig, fill_count, lookup, note_affordances, note_affordances_with_source, sync, AffordanceTable,
 };
 #[cfg(feature = "sqlite")]
-pub(crate) use imp::{
-    all_sessions, capture_primary_reads, last_full_sync, open_db, probe_stale, publish_all, replace_harness,
-    watches_for,
-};
+pub(crate) use imp::{all_sessions, capture_primary_reads, open_db, replace_harness, watches_for};
+
+#[cfg(all(feature = "sqlite", test))]
+pub(crate) fn last_full_sync() -> Option<i64> {
+    Reader::open()?.last_full_sync()
+}
 
 /// No-op fallbacks when sqlite is disabled — `find`/`sessions` simply always take the scan path.
 #[cfg(not(feature = "sqlite"))]
@@ -1226,9 +1344,6 @@ pub(crate) fn replace_harness(
 }
 
 #[cfg(not(feature = "sqlite"))]
-pub(crate) fn publish_all(_rows: &[Publication<'_>]) {}
-
-#[cfg(not(feature = "sqlite"))]
 pub(crate) fn capture_primary_reads(_a: &dyn crate::Adapter) -> PrimaryReads {
     Default::default()
 }
@@ -1241,14 +1356,6 @@ pub(crate) fn watches_for(
     Vec::new()
 }
 #[cfg(not(feature = "sqlite"))]
-pub(crate) fn probe_stale() -> Option<Vec<Harness>> {
-    None
-}
-#[cfg(not(feature = "sqlite"))]
 pub(crate) fn all_sessions() -> Option<Vec<SessionRef>> {
-    None
-}
-#[cfg(not(feature = "sqlite"))]
-pub(crate) fn last_full_sync() -> Option<i64> {
     None
 }

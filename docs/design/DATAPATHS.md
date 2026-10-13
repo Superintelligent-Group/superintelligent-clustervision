@@ -2050,3 +2050,21 @@ remain unchanged before publication. A later mutation between that check and pub
 still race; existing provenance checks leave such rows stale rather than certifying them. This
 change does not add source locks or broaden standalone event publication policy. Tests use private
 catalogs/targets and deterministic callback/writer counts; no timing measurement is claimed.
+
+Catalog operation owner (2026-10-13): an explicit private `catalog::Reader` initializes one
+connection/schema for the listing read sequence (last-full-sync, metadata freshness, ordered
+rows), and reuses the main-thread connection for full-discovery row preparation, cache flush
+and atomic catalog publication. No SQL transaction spans filesystem scans. Parallel adapters
+receive their own known-row buckets: capture source identities immediately before discovery,
+then drop those old metadata refs before accumulating newly discovered refs. Connection/schema
+initialization is not cached globally; separate operations reopen the current catalog path.
+Metadata-cache loading and other consumers keep their independent connection boundaries.
+
+A test-only thread-local opener counter compares the prior equivalent three-open read recipe
+with production verified-warm `sessions`: **3 → 1**, with exactly equal refs and no full scan.
+Scoped tests cover catalog replacement/path switching between operations, source mutation
+between SQL preload and identity capture, source mutation after capture, and SQL stepping
+errors on a reused connection. Stepping errors return the existing full-discovery fallback
+instead of disappearing through iterator flattening. Another writer can commit while the
+operation owner is idle; there is no held read transaction. Existing freshness/publication
+regressions retain quiet appends, new projects, replacements, removals and atomic error rollback.
