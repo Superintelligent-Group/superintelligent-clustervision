@@ -30,7 +30,8 @@ def probe(binary, args, env, mmap, fd_limit=None):
     def limit_files():
         import resource
         _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (min(fd_limit, hard), hard))
+        resource.setrlimit(resource.RLIMIT_NOFILE,
+                           (fd_limit if hard == resource.RLIM_INFINITY else min(fd_limit, hard), hard))
     result = subprocess.run([str(binary), *map(str, args)], env=env, text=True, capture_output=True,
                             preexec_fn=limit_files if fd_limit is not None else None)
     if result.returncode:
@@ -263,7 +264,7 @@ def selected_payloads(binary, root, env, formats=None):
                             assert row["detail"]["record_sha256"] == hashlib.sha256(b"").hexdigest()
                         peaks[operation].append(peak)
                         print(json.dumps({"case": f"selected-{format_name}-{shape}-{operation}",
-                                          "history": history, "escaped": escaped, "decoded_payload_bytes": size,
+                                          "history": history, "escaped": escaped, "open_file_limit": 64, "decoded_payload_bytes": size,
                                           "records": records, "peak_live_rust_bytes": peak}), flush=True)
                     shutil.rmtree(manifest["root"])
                 for operation, values in peaks.items():
