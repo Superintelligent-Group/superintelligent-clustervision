@@ -449,7 +449,8 @@ fn stream_projected(
 ) -> Result<Session> {
     use jsonl::ranges::{self, Range};
     let source = crate::json::JsonSource::capture(wire)?;
-    let end = file.metadata()?.len();
+    source.check_metadata(file.metadata()?)?;
+    let end = source.len();
     let mut records = ranges::records(
         file,
         Range {
