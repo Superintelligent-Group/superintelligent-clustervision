@@ -6,6 +6,7 @@ mod view;
 #[cfg(not(feature = "mmap"))]
 pub(super) use view::emit as emit_view;
 
+pub(super) mod output;
 use super::*;
 use crate::lazy::{Resolver, Span, Text, INLINE_MAX};
 use anyhow::Context as _;
@@ -16,6 +17,7 @@ pub(super) struct Payload<'a> {
     content: std::cell::RefCell<Vec<Block>>,
     results: std::cell::RefCell<Vec<Option<Text>>>,
     inputs: std::cell::RefCell<Vec<Option<crate::Json>>>,
+    thoughts: Option<std::cell::RefCell<Vec<Block>>>,
     tool_response: bool,
     resolver: &'a Resolver,
 }
@@ -27,6 +29,12 @@ impl Payload<'_> {
 
     pub fn take_result(&self, i: usize) -> Option<Text> {
         self.results.borrow_mut().get_mut(i).and_then(Option::take)
+    }
+
+    pub fn take_thoughts(&self) -> Option<Vec<Block>> {
+        self.thoughts
+            .as_ref()
+            .map(|thoughts| std::mem::take(&mut *thoughts.borrow_mut()))
     }
 
     pub fn take_input(&self, i: usize) -> Option<crate::Json> {
@@ -134,6 +142,7 @@ pub(super) struct Context<'a> {
     pub bytes: &'a [u8],
     pub base: u64,
     pub source: Option<&'a crate::json::JsonSource>,
+    pub arena: Option<&'a std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
 }
 impl Context<'_> {
     fn offset(self, raw: Raw<'_>) -> Result<u64> {
@@ -176,7 +185,6 @@ pub(super) fn emit(
         "timestamp",
         "model",
         "tokens",
-        "thoughts",
         "displayContent",
         "rewindTo",
     ] {
@@ -184,6 +192,18 @@ pub(super) fn emit(
             if let Ok(v) = serde_json::from_str(raw.get()) {
                 meta.insert(key.into(), v);
             }
+        }
+    }
+    let mut thoughts = Vec::new();
+    if let Some(raw) = rec.fields.get("thoughts") {
+        if let (Some(source), Some(arena)) = (ctx.source, ctx.arena) {
+            let (headers, blocks) = ctx
+                .argument(Some(*raw))?
+                .with_view(|view| output::Output { source, arena }.thoughts(view))?;
+            meta.insert("thoughts".into(), Value::Array(headers));
+            thoughts = blocks;
+        } else {
+            meta.insert("thoughts".into(), serde_json::from_str(raw.get())?);
         }
     }
     let mut content = Vec::new();
@@ -218,11 +238,14 @@ pub(super) fn emit(
                     inputs.push(Some(
                         ctx.argument(call.as_ref().and_then(|c| c.fields.get("args").copied()))?,
                     ));
-                    results.push(call.and_then(|call| {
-                        call.fields
-                            .get("result")
-                            .and_then(|raw| result_text(*raw, ctx, resolver))
-                            .or_else(|| call.fields.get("resultDisplay").and_then(|raw| string_text(*raw, ctx)))
+                    let result = call
+                        .as_ref()
+                        .and_then(|call| call.fields.get("result"))
+                        .map(|raw| result_text(*raw, ctx))
+                        .transpose()?
+                        .flatten();
+                    results.push(result.or_else(|| {
+                        call.and_then(|call| call.fields.get("resultDisplay").and_then(|raw| string_text(*raw, ctx)))
                     }));
                     Ok(Value::Object(call_meta))
                 })
@@ -234,6 +257,7 @@ pub(super) fn emit(
         content: std::cell::RefCell::new(content),
         results: std::cell::RefCell::new(results),
         inputs: std::cell::RefCell::new(inputs),
+        thoughts: (ctx.source.is_some() && ctx.arena.is_some()).then(|| std::cell::RefCell::new(thoughts)),
         tool_response,
         resolver,
     };
@@ -259,69 +283,22 @@ fn string_text(raw: Raw<'_>, ctx: Context<'_>) -> Option<Text> {
     }
 }
 
-fn value_text(raw: Raw<'_>, ctx: Context<'_>) -> Text {
-    if let Some(text) = string_text(raw, ctx) {
-        return text;
+fn value_text(raw: Raw<'_>, ctx: Context<'_>) -> Result<Text> {
+    if let (Some(source), Some(arena)) = (ctx.source, ctx.arena) {
+        return ctx
+            .argument(Some(raw))?
+            .with_view(|view| output::Output { source, arena }.value(view));
     }
-    if let Some(obj) = Record::parse(raw) {
-        for key in ["output", "error"] {
-            if let Some(text) = obj.fields.get(key).and_then(|r| string_text(*r, ctx)) {
-                return text;
-            }
-        }
-    }
-    serde_json::from_str::<Value>(raw.get())
-        .ok()
-        .map(|v| value_to_text(&v))
-        .unwrap_or_default()
-        .into()
+    Ok(value_to_text(&serde_json::from_str::<Value>(raw.get())?).into())
 }
 
-fn result_text(raw: Raw<'_>, ctx: Context<'_>, resolver: &Resolver) -> Option<Text> {
-    if let Some(text) = string_text(raw, ctx) {
-        return Some(text);
+fn result_text(raw: Raw<'_>, ctx: Context<'_>) -> Result<Option<Text>> {
+    if let (Some(source), Some(arena)) = (ctx.source, ctx.arena) {
+        return ctx
+            .argument(Some(raw))?
+            .with_view(|view| output::Output { source, arena }.result(view));
     }
-    if let Some(parts) = array(raw) {
-        let mut chunks = parts.into_iter().filter_map(|p| {
-            let chunk = result_part(p, ctx, true);
-            (!chunk.is_empty()).then_some(chunk)
-        });
-        let first = chunks.next()?;
-        let Some(second) = chunks.next() else {
-            return Some(first);
-        };
-        // A joined result has no contiguous source range. Only this genuinely composite field
-        // needs an owned string; individual large outputs stay lazy.
-        let mut joined = first.resolve(resolver).into_owned();
-        joined.push('\n');
-        joined.push_str(&second.resolve(resolver));
-        for chunk in chunks {
-            joined.push('\n');
-            joined.push_str(&chunk.resolve(resolver));
-        }
-        return Some(joined.into());
-    }
-    if Record::parse(raw).is_some() {
-        Some(result_part(raw, ctx, false))
-    } else {
-        None
-    }
-}
-
-fn result_part(raw: Raw<'_>, ctx: Context<'_>, text_part: bool) -> Text {
-    if let Some(obj) = Record::parse(raw) {
-        if let Some(fr) = obj.fields.get("functionResponse") {
-            return Record::parse(*fr)
-                .and_then(|fr| fr.fields.get("response").map(|r| value_text(*r, ctx)))
-                .unwrap_or_default();
-        }
-        if text_part {
-            if let Some(text) = obj.fields.get("text").and_then(|r| string_text(*r, ctx)) {
-                return text;
-            }
-        }
-    }
-    value_text(raw, ctx)
+    Ok(tool_result_text(Some(&serde_json::from_str::<Value>(raw.get())?)).map(Text::from))
 }
 
 fn content_blocks(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<()> {
@@ -370,6 +347,7 @@ fn part_block(raw: Raw<'_>, ctx: Context<'_>, out: &mut Vec<Block>) -> Result<()
                     .fields
                     .get("response")
                     .map(|r| value_text(*r, ctx))
+                    .transpose()?
                     .unwrap_or_default(),
                 is_error: false,
                 tool_name: Some(name),

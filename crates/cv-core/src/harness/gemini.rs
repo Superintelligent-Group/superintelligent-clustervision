@@ -472,6 +472,10 @@ fn stream_legacy_json_recording(
     let source = (opts.spans && !opts.complete)
         .then(|| crate::json::JsonSource::capture(path))
         .transpose()?;
+    let arena = source
+        .as_ref()
+        .map(|_| super::store::bytes::ByteSource::arena().map(std::sync::Arc::new))
+        .transpose()?;
     let bytes = map_file(path)?;
     if let Some(source) = &source {
         source.check_metadata(bytes.file.metadata()?)?;
@@ -529,6 +533,7 @@ fn stream_legacy_json_recording(
                     bytes: &bytes,
                     base: 0,
                     source: source.as_ref(),
+                    arena: arena.as_ref(),
                 },
                 harness,
                 &mut st,
@@ -550,7 +555,7 @@ fn stream_legacy_json_recording(
         }
     }
     if sink.finish()? {
-        let source = source.as_ref().expect("sourced argument has a capture");
+        let source = source.as_ref().expect("sourced payload has a capture");
         source.check_metadata(bytes.file.metadata()?)?;
         source.check()?;
     }
@@ -574,6 +579,7 @@ fn stream_legacy_views(path: &Path, harness: Harness, sink: &mut dyn MessageSink
         "kind",
     ];
     let captured = crate::json::JsonSource::capture(path)?;
+    let arena = std::sync::Arc::new(super::store::bytes::ByteSource::arena()?);
     if captured.len() == 0 {
         return Ok(None);
     }
@@ -629,7 +635,18 @@ fn stream_legacy_views(path: &Path, harness: Harness, sink: &mut dyn MessageSink
         let mut sink = input::SourceSink::new(Some(&captured), sink);
         for message in messages {
             let Some(message) = message? else { continue };
-            if lean::emit_view(message, harness, &mut st, &resolver, &mut sink)? == Flow::Stop {
+            if lean::emit_view(
+                message,
+                lean::output::Output {
+                    source: &captured,
+                    arena: &arena,
+                },
+                harness,
+                &mut st,
+                &resolver,
+                &mut sink,
+            )? == Flow::Stop
+            {
                 break;
             }
         }
@@ -713,6 +730,10 @@ fn stream_jsonl_recording(
     let source = (opts.spans && !opts.complete)
         .then(|| crate::json::JsonSource::capture(path))
         .transpose()?;
+    let arena = source
+        .as_ref()
+        .map(|_| super::store::bytes::ByteSource::arena().map(std::sync::Arc::new))
+        .transpose()?;
     let bytes = map_file(path)?;
     if let Some(source) = &source {
         source.check_metadata(bytes.file.metadata()?)?;
@@ -745,6 +766,7 @@ fn stream_jsonl_recording(
                     bytes: &bytes,
                     base: 0,
                     source: source.as_ref(),
+                    arena: arena.as_ref(),
                 },
                 harness,
                 &mut st,
@@ -765,7 +787,7 @@ fn stream_jsonl_recording(
         }
     }
     if sink.finish()? {
-        let source = source.as_ref().expect("sourced argument has a capture");
+        let source = source.as_ref().expect("sourced payload has a capture");
         source.check_metadata(bytes.file.metadata()?)?;
         source.check()?;
     }
@@ -827,6 +849,7 @@ fn stream_jsonl_ranges(path: &Path, harness: Harness, sink: &mut dyn MessageSink
         Marker(Value),
     }
     let captured = crate::json::JsonSource::capture(path)?;
+    let arena = std::sync::Arc::new(super::store::bytes::ByteSource::arena()?);
     let source = RangeSource::from_captured(captured.clone())?;
     let mut cursor = source.cursor(source.range())?;
     let mut line = Vec::new();
@@ -889,6 +912,7 @@ fn stream_jsonl_ranges(path: &Path, harness: Harness, sink: &mut dyn MessageSink
                         bytes: &line,
                         base: range.offset,
                         source: Some(&captured),
+                        arena: Some(&arena),
                     },
                     harness,
                     &mut st,
@@ -1377,7 +1401,9 @@ fn emit_record_message_with(
 
             // Thoughts → Thinking blocks (subject + description).
             let thoughts = obj.get("thoughts").and_then(Value::as_array);
-            if let Some(thoughts) = thoughts {
+            if let Some(thoughts) = payload.and_then(lean::Payload::take_thoughts) {
+                m.content.extend(thoughts);
+            } else if let Some(thoughts) = thoughts {
                 for t in thoughts {
                     let subj = t.get("subject").and_then(Value::as_str).unwrap_or("");
                     let desc = t.get("description").and_then(Value::as_str).unwrap_or("");
@@ -2180,6 +2206,65 @@ mod tests {
         assert!(json_inputs(&actual).iter().all(|j| matches!(j, crate::Json::Source(_))));
         actual.materialize().unwrap();
         assert_eq!(as_json(&actual), as_json(&expected));
+    }
+
+    #[test]
+    fn selected_composite_results_and_thoughts_match_owned_and_keep_source_guards() {
+        let world = cv_testkit::World::in_process("gemini-selected-results");
+        let chats = world.base.join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let body = "escaped\n\"quote\" β😀".repeat(7000);
+        let assistant = serde_json::json!({"type":"gemini","id":"a","content":[{"text":"duplicate thought","thought":true}],"thoughts":[{"subject":"subject","description":body},{"subject":"","description":body},{"subject":body,"description":""},null],"toolCalls":[
+            {"id":"composite","name":"custom","args":{},"status":"success","result":[null,{"text":""},{"text":body},{"functionResponse":{"response":{"output":body}}},{"future":body}]},
+            {"id":"canonical","name":"custom","status":"success","result":{"z":body,"a":1}},
+            {"id":"empty","name":"custom","status":"error","result":{"functionResponse":null},"resultDisplay":"unused"}
+        ]});
+        let adapter = Gemini { roots: vec![] };
+        for modern in [false, true] {
+            let path = chats.join(if modern {
+                "session-selected.jsonl"
+            } else {
+                "session-selected.json"
+            });
+            let bytes = if modern {
+                format!("{{\"sessionId\":\"selected\"}}\n{assistant}\n")
+            } else {
+                serde_json::json!({"sessionId":"selected","messages":[assistant]}).to_string()
+            };
+            fs::write(&path, &bytes).unwrap();
+            let reference = SessionRef::new("selected", Harness::Gemini, path.clone());
+            let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::full()).unwrap();
+            let mut actual = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+            assert!(matches!(
+                actual.messages[0].content[0],
+                Block::Thinking {
+                    text: crate::lazy::Text::Source(_),
+                    ..
+                }
+            ));
+            actual.materialize().unwrap();
+            assert_eq!(as_json(&actual), as_json(&expected));
+            let mut retained = crate::stream::collect_with(&adapter, &reference, &ParseOptions::lazy()).unwrap();
+            fs::write(&path, b"{}").unwrap();
+            assert!(retained.materialize().is_err());
+            for at in [1, 2] {
+                fs::write(&path, &bytes).unwrap();
+                let mut calls = 0;
+                let mut sink = crate::stream::TryFnSink::new(|_| {
+                    calls += 1;
+                    if calls == at {
+                        fs::write(&path, b"{}").unwrap();
+                        anyhow::bail!("consumer cap");
+                    }
+                    Ok(Flow::Continue)
+                });
+                let error = adapter
+                    .stream(&reference, &ParseOptions::lazy(), &mut sink)
+                    .unwrap_err();
+                assert!(format!("{error:#}").contains("changed"), "{error:#}");
+                assert!(!format!("{error:#}").contains("consumer cap"));
+            }
+        }
     }
 
     #[test]

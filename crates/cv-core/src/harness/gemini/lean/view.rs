@@ -6,6 +6,7 @@ use crate::json::JsonView;
 
 pub(crate) fn emit(
     view: JsonView<'_>,
+    output: output::Output<'_>,
     harness: Harness,
     st: &mut EmitState,
     resolver: &Resolver,
@@ -17,7 +18,6 @@ pub(crate) fn emit(
         "timestamp",
         "model",
         "tokens",
-        "thoughts",
         "displayContent",
         "rewindTo",
     ];
@@ -40,10 +40,16 @@ pub(crate) fn emit(
         return Ok(Flow::Continue);
     };
     let mut meta = rec.project(META)?;
+    let mut thoughts = Vec::new();
+    if let Some(value) = rec.get("thoughts") {
+        let (headers, blocks) = output.thoughts(value)?;
+        meta.insert("thoughts".into(), Value::Array(headers));
+        thoughts = blocks;
+    }
     let mut content = Vec::new();
     let mut tool_response = false;
     if let Some(raw) = rec.get("content") {
-        content_blocks(raw, &mut content)?;
+        content_blocks(raw, output, &mut content)?;
         if let Some(parts) = raw.array()? {
             let mut count = 0;
             tool_response = true;
@@ -73,12 +79,7 @@ pub(crate) fn emit(
                     .map(|v| v.argument(true))
                     .transpose()?
                     .unwrap_or_default();
-                let result = match call
-                    .get("result")
-                    .map(|v| result_text(v, resolver))
-                    .transpose()?
-                    .flatten()
-                {
+                let result = match call.get("result").map(|v| output.result(v)).transpose()?.flatten() {
                     Some(text) => Some(text),
                     None => call.get("resultDisplay").map(|v| v.text(true)).transpose()?.flatten(),
                 };
@@ -96,88 +97,24 @@ pub(crate) fn emit(
         content: std::cell::RefCell::new(content),
         results: std::cell::RefCell::new(results),
         inputs: std::cell::RefCell::new(inputs),
+        thoughts: Some(std::cell::RefCell::new(thoughts)),
         tool_response,
         resolver,
     };
     Ok(emit_record_message_with(harness, &meta, st, Some(&payload), sink))
 }
 
-fn value_text(view: JsonView<'_>) -> Result<Text> {
-    if let Some(text) = view.text(true)? {
-        return Ok(text);
-    }
-    if let Some(obj) = Fields::parse(view, &["output", "error"])? {
-        for key in ["output", "error"] {
-            if let Some(text) = obj.get(key).map(|v| v.text(true)).transpose()?.flatten() {
-                return Ok(text);
-            }
-        }
-    }
-    Ok(value_to_text(view.resolve()?.as_ref()).into())
-}
-
-fn result_text(view: JsonView<'_>, resolver: &Resolver) -> Result<Option<Text>> {
-    if let Some(text) = view.text(true)? {
-        return Ok(Some(text));
-    }
-    if let Some(parts) = view.array()? {
-        let mut first = None;
-        let mut joined = None::<String>;
-        for part in parts {
-            let text = result_part(part?, true)?;
-            if text.is_empty() {
-                continue;
-            }
-            if let Some(joined) = &mut joined {
-                joined.push('\n');
-                joined.push_str(&text.resolve(resolver));
-            } else if let Some(first) = first.take() {
-                let mut both = Text::resolve(&first, resolver).into_owned();
-                both.push('\n');
-                both.push_str(&text.resolve(resolver));
-                joined = Some(both);
-            } else {
-                first = Some(text);
-            }
-        }
-        return Ok(joined.map(Text::from).or(first));
-    }
-    if view.is_object()? {
-        Ok(Some(result_part(view, false)?))
-    } else {
-        Ok(None)
-    }
-}
-
-fn result_part(view: JsonView<'_>, text_part: bool) -> Result<Text> {
-    if let Some(obj) = Fields::parse(view, &["functionResponse", "text"])? {
-        if let Some(fr) = obj.get("functionResponse") {
-            return fr
-                .get("response")?
-                .map(value_text)
-                .transpose()
-                .map(|v| v.unwrap_or_default());
-        }
-        if text_part {
-            if let Some(text) = obj.get("text").map(|v| v.text(true)).transpose()?.flatten() {
-                return Ok(text);
-            }
-        }
-    }
-    value_text(view)
-}
-
-fn content_blocks(view: JsonView<'_>, out: &mut Vec<Block>) -> Result<()> {
+fn content_blocks(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Block>) -> Result<()> {
     if let Some(text) = view.text(true)? {
         if !text.is_empty() {
             out.push(Block::Text { text });
         }
     } else if let Some(parts) = view.array()? {
         for part in parts {
-            part_block(part?, out)?;
+            part_block(part?, output, out)?;
         }
     } else {
-        part_block(view, out)?;
+        part_block(view, output, out)?;
     }
     Ok(())
 }
@@ -189,7 +126,7 @@ fn object_field<'a>(fields: &Fields<'a>, key: &str) -> Result<Option<JsonView<'a
     }
 }
 
-fn part_block(view: JsonView<'_>, out: &mut Vec<Block>) -> Result<()> {
+fn part_block(view: JsonView<'_>, output: output::Output<'_>, out: &mut Vec<Block>) -> Result<()> {
     if let Some(text) = view.text(true)? {
         if !text.is_empty() {
             out.push(Block::Text { text });
@@ -231,7 +168,11 @@ fn part_block(view: JsonView<'_>, out: &mut Vec<Block>) -> Result<()> {
             let id = fr.string("id")?.unwrap_or_else(|| format!("{name}-call"));
             out.push(Block::ToolResult {
                 tool_use_id: id,
-                content: fr.get("response").map(value_text).transpose()?.unwrap_or_default(),
+                content: fr
+                    .get("response")
+                    .map(|v| output.value(v))
+                    .transpose()?
+                    .unwrap_or_default(),
                 is_error: false,
                 tool_name: Some(name),
                 status: None,

@@ -1,4 +1,4 @@
-//! Guard actual publication of captured JSON arguments. Tiny/owned messages do no filesystem work.
+//! Guard publication of captured JSON arguments and selected text. Owned messages do no filesystem work.
 use super::*;
 use crate::json::JsonSource;
 
@@ -41,14 +41,15 @@ impl MessageSink for SourceSink<'_> {
         if self.failed {
             return Flow::Stop;
         }
-        let sourced = m.content.iter().any(|b| {
-            matches!(
-                b,
-                Block::ToolUse {
-                    input: crate::Json::Source(_),
-                    ..
-                }
-            )
+        let sourced = m.content.iter().any(|b| match b {
+            Block::ToolUse {
+                input: crate::Json::Source(_),
+                ..
+            } => true,
+            Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => {
+                matches!(text, crate::lazy::Text::Source(_))
+            }
+            _ => false,
         });
         if sourced && !self.check() {
             return Flow::Stop;
