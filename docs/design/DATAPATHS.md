@@ -60,8 +60,8 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Claude JSONL | Typed borrowed mmap records and positioned portable projections; lazy text/arguments, Facts metadata, checkpoints and projected discovery/fork heads | Full details and uncommon fallback records remain owned; native/portable CPU convergence is measured separately |
 | Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; selected prompt/reply/reasoning/arguments/result ranges and checkpoints | Native giant escaped-body CPU regression; duplicate acceptance and mapping scans under investigation; full/unknown metadata remains owned |
 | Codex legacy JSON / zstd | Compressed modern JSONL decodes once into a shared private arena; legacy JSON remains separate | Legacy whole-document path; decoded disk extent is input-sized; no general compressed incremental marks |
-| Gemini legacy JSON | Native/positioned validated records; selected text, composite results and formatted thoughts share bounded backing | Full modes and rich metadata remain owned; output-sized arena disk |
-| Gemini JSONL | Native replay retains order + raw body ranges; selected composites/thoughts share bounded backing | Portable line intake and unused replay metadata projection in progress; `$set`/rewind changes old logical messages |
+| Gemini legacy JSON | Checked selected string/canonical/composite results and formatted thoughts; native mmap or portable range projections | Full/complete modes and rich display extras still own required payloads |
+| Gemini JSONL | Native mmap and portable checked-range replay retain compact order/keys; selected composite bodies use one session arena | Must scan complete history for replacements/rewinds; required metadata and rich display extras remain owned |
 | Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery counts without collecting; direct project JSONL resumes finalized records; record text remains owned |
 | Kimi | Context stream + pending usage message, rotated prefix dedup | Wire sidecar uses raw ranges and lazy output spans; structural lookup state and mutable trailing usage remain |
 | Kimi Code | Mutable finalized-step metadata with checked source-backed text/arguments/results; shared positioned framing and composite-result arena | Discovery wire Values; call/step metadata and selected owned fields; arena disk grows with flattened output |
@@ -1575,3 +1575,37 @@ streaming/canonicalization cost is explicit. `PRUNE-REROOT-EVIDENCE.json` contai
 Thirty-seven filtered prune tests pass; source helper/reroot portable tests and scoped clippy pass.
 Owned fallback remains for thinking, declassification, usage corrections, malformed giant records
 and large selected tool-input metadata.
+
+
+### Gemini selected composite payloads and portable replay (2026-10-12)
+
+Sol implemented selected composite/canonical tool results and formatted thoughts (`72b711c`),
+then portable JSONL range intake/emission and consumed replay metadata projection (`93c9033`).
+Full/complete ownership, actual lazy extras, result flattening/order, thought formatting/deduplication,
+strict acceptance, Unicode edge trimming, checkpoints, rewinds and source mutation errors stay exact.
+One shared session arena carries generated text; portable intake no longer retains encoded lines.
+
+Release `store_probe` evidence lives in the lane's scratch `gemini-evidence` directory. Valid
+escaped/Unicode fixtures grow from nominal 8 to 32 million payload characters (physical JSON
+sizes vary with encoding). Native peak requested Rust heap stays near 137 KB for composite
+results, 334 KB for canonical objects and 135 KB for thoughts, versus owned peaks of roughly
+50/100/67 MB at the large size. Portable JSONL peaks stay at 628/825/627 KB, within four bytes
+across the size pair; the previous selected path grew to roughly 68 MB. Two unused header/patch
+strings formerly drove native peak 16→64 MB and portable 24→97 MB; portable range projection
+now stays near 329 KB. Native unused-metadata projection is tested but has no new release heap
+measurement in this slice.
+
+All 90 synthetic and 190 scrubbed corpus five-mode resolved output hashes match the owned
+baseline. Scoped native/portable Gemini tests and both library clippy configurations pass.
+Five alternating heap-instrumented release JSONL samples compare the previous portable selected
+producer with range replay: composite 646.8→504.0 ms, canonical object 775.5→672.9 ms, formatted
+thought 559.4→387.0 ms. These are process-isolated adapter operation measurements, not complete
+CLI latency or allocator-free CPU measurements; concurrent machine load can affect timings.
+
+This improves payload selection, doctor and filtered reads without promising prefix I/O: effective
+JSONL state still requires complete history navigation before emission. Portable validation/navigation
+performs bounded reads and remains slower than native mmap for these giant records. Structural
+message keys/ranges and requested metadata grow with history; rich `displayContent` remains an
+owned extra in existing lazy/Facts behavior. No Facts policy change or additional representation is
+included. The new portable replay module reuses shared range/JSON transport; its local UTF-8 trim
+scanner preserves the earlier line-reader contract.
