@@ -158,7 +158,7 @@ def generate_sqlite(harness, root, size, records, escaped, shape):
                 db.execute("INSERT INTO cursorDiskKV VALUES(?,?)", (f"composerData:{SID}", j(composer)))
                 for i in range(records):
                     db.execute("INSERT INTO cursorDiskKV VALUES(?,?)", (f"bubbleId:{SID}:b{i}", j({"bubbleId": f"b{i}", "type": 2, "text": payload(i)})))
-    count = records * 2 + 1 if shape in ("selected", "selected-v2", "selected-ide") else 1 if shape in ("unselected", "parts") else records
+    count = records + 1 if shape == "selected-ide" else records * 2 + 1 if shape in ("selected", "selected-v2") else 1 if shape in ("unselected", "parts") else records
     return {"harness": harness, "id": "legacy:scale-tab" if harness == "cursor" and shape == "legacy" else SID, "root": str(root), "path": str(path), "shape": shape,
             "requested_payload_bytes": size, "decoded_payload_bytes": size, "selected_payload_bytes": size, "records": records, "expected_messages": count,
             "escaped": escaped, "physical_input_bytes": path.stat().st_size,

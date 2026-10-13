@@ -107,7 +107,7 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(manifest["decoded_payload_bytes"], 257)
                 self.assertEqual(manifest["selected_payload_bytes"], 257)
                 self.assertGreater(manifest["physical_input_bytes"], 257)
-                self.assertGreaterEqual(manifest["expected_messages"], 5)
+                self.assertGreaterEqual(manifest["expected_messages"], 3)
                 root = Path(manifest["root"])
                 if Path(manifest["path"]).is_file() and harness not in ("kimi-code", "opencode-files"):
                     with sqlite3.connect(manifest["path"]) as db:
