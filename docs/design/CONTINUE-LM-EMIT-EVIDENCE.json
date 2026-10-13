@@ -1,0 +1,62 @@
+{
+  "baseline_source": "56e94da5",
+  "candidate_source": "a3435944",
+  "operation": "Claude parse_for_emit -> emit_report (source parse, target staging, verification and full fidelity report)",
+  "configuration": "native debug probe-heap; no timing claim",
+  "source_bytes": 10066619,
+  "source_sha256": "57c933641b5880ba886ed253c901f515e0caa1f92b569a6eb02df8c23bb75111",
+  "binary_sha256": {
+    "baseline-probe": "e5c9c6cf9884ed6e73cdf02c96de9f2b262665c25e9c8131d7e5a51a2bcf4e3a",
+    "final-probe": "43577704827440c483bc2d7d63a51267bbf772879692c45e3ca113319a9508bd"
+  },
+  "cases": {
+    "continue": {
+      "baseline_heap": {
+        "baseline_live_bytes": 1206,
+        "peak_live_bytes": 34088731,
+        "peak_above_baseline_bytes": 34087525,
+        "stage_end_live_bytes": 8393135,
+        "allocation_requests": 3783,
+        "requested_bytes": 130722576
+      },
+      "final_heap": {
+        "baseline_live_bytes": 1200,
+        "peak_live_bytes": 275867,
+        "peak_above_baseline_bytes": 274667,
+        "stage_end_live_bytes": 4790,
+        "allocation_requests": 3486,
+        "requested_bytes": 21213954
+      },
+      "wire_bytes": 10066943,
+      "wire_sha256": "e736e9d5591252724454358953cb10a18ebb6cd883365eb6a3848003ca016e2d",
+      "wire_exact": true,
+      "fidelity_exact": true,
+      "messages": 2,
+      "index_exact": true
+    },
+    "lmstudio": {
+      "baseline_heap": {
+        "baseline_live_bytes": 1205,
+        "peak_live_bytes": 34088730,
+        "peak_above_baseline_bytes": 34087525,
+        "stage_end_live_bytes": 8393186,
+        "allocation_requests": 3817,
+        "requested_bytes": 147565740
+      },
+      "final_heap": {
+        "baseline_live_bytes": 1203,
+        "peak_live_bytes": 275646,
+        "peak_above_baseline_bytes": 274443,
+        "stage_end_live_bytes": 4853,
+        "allocation_requests": 3441,
+        "requested_bytes": 21275947
+      },
+      "wire_bytes": 10067323,
+      "wire_sha256": "4cef9e780f15e19688d186f4ec2f877f1e2ed485c5a24c3285885d137c840c83",
+      "wire_exact": true,
+      "fidelity_exact": true,
+      "messages": 2
+    }
+  },
+  "source_unchanged": true
+}

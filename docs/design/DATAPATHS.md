@@ -3806,3 +3806,35 @@ The persistent modern 32 MiB rehome gate uses the existing 4 MiB cap and frozen 
 db3bc67dc2b670cc5d61ec397ff43f6114c7863c6fd51e35f784f91bd19bb3c7; it peaks at 277,396 B,
 retains three generated message IDs and validates all 33,555,466 output bytes. Eleven operation
 driver unit controls pass. Output-sized private staging and metadata/cardinality costs remain.
+### Checked Continue and LM Studio exports (Sol, 2026-10-13)
+
+Actual Claude `parse_for_emit` → `emit_report` with an ordinary 8 MiB user prompt reproduces
+whole-session, output-Value and pretty-String ownership in both targets. Commit `a3435944`
+uses the existing checked wire fields, canonical quoted-argument builder, pretty formatter and
+private staged publication. Continue streams history and encoded tool arguments; LM Studio
+streams versions, steps and readable tool-call/result text. Source errors complete before
+transcript replacement. Continue's merged index remains the existing small owned metadata
+contract. Neither target needs another serializer or cache layer.
+
+The shared title reducer preserves first-user-only selection, joined Text blocks, whitespace
+acceptance, thinking-mode projection and 80-character truncation. It retains at most 81 selected
+characters and stops the existing checked chunk iterator once title and meaningful-content
+presence settle. Whitespace-only prefixes may still require traversal. Explicit titles retain
+precedence; later users do not rescue an empty first user. This differs intentionally from the
+listing synth_title policy.
+
+Independent frozen old-writer oracles compare exact pretty wire for Native/Text/Drop modes,
+including user reasoning, signature-only thinking, usage/model attachment, files/images and
+canonical tool arguments/results. Changed-source controls preserve an existing transcript.
+Native Continue/LM Studio scoped tests and both portable writer oracles pass, as do both library
+clippy configurations and pinned formatting. Cross-harness preparation selects checked sources;
+same-harness complete parsing retains its existing owned-carrier contract.
+
+The original ordinary-prompt control's committed candidate retains exact transcript bytes,
+Continue index bytes and the complete fidelity report against `56e94da5`. Requested live peak
+falls from about 34.1 MB to 276 KB in both targets; cumulative requested bytes fall from
+130.7 MB to 21.2 MB (Continue) and 147.6 MB to 21.3 MB (LM Studio). The aggregate includes
+binary/source hashes and exact final counters in
+[CONTINUE-LM-EMIT-EVIDENCE.json](CONTINUE-LM-EMIT-EVIDENCE.json). This is allocation evidence,
+not a timing, RSS or physical-I/O claim. Source message/block rosters, demanded owned metadata,
+merged index cardinality, output-sized private staging and verification work remain.
