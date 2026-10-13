@@ -24,8 +24,9 @@ paths reduce those peaks to approximately 285 KB, 270 KB and 277 KB respectively
 operation controls pass. Matched whole-CLI instruction controls caught an 8.50-fold contextual
 Unicode regression; batching ordinary runs and removing the second source traversal repair it.
 The final late-Greek control executes 1.71% fewer instructions than baseline with exact output
-parity. Full convergence remains deferred while the demonstrated SQLite snapshot-lifetime and
-MCP admission defects below are addressed. Changes must preserve complete output, metadata, acceptance and source-error
+parity. MCP admission is now bounded through response publication, with composed protocol and
+lease checks passing. Full convergence remains deferred while the demonstrated SQLite
+snapshot-lifetime defect below is addressed and composed with MCP cancellation. Changes must preserve complete output, metadata, acceptance and source-error
 semantics; shared checked readers/writers take priority over new format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
 This changes priority, not the correctness or fidelity requirements.
 
@@ -3656,3 +3657,8 @@ Protocol/control requests run on the reader and preserve successful replies thro
 MCP alone ignores SIGPIPE so its existing writer-error disconnect token actually runs instead of abruptly killing the server. `await_omen` checks that token without changing ordinary timeout results. Newly completed responses are dropped after cancellation; cancel-aware publication avoids handler joins blocking on a full response queue. After the EOF grace period, handlers cancel and join before main returns, allowing child reap and request-owned source cleanup. Other CLI commands retain their normal SIGPIPE behavior.
 
 Scoped tests cover lease release on panic, failed send and response drop; notification admission resume/cancellation; cancelled full-queue publication; 128 successful control IDs; saturated polls alongside an ordinary command; and actual EOF/closed-output shutdown. The existing generated-child kill/reap and long-poll responsiveness tests also pass. No throughput, CPU or absolute memory-byte claim is made by the scheduling count invariant. The bounded actual control retains exact IDs/results after stdout drains; its diagnostic report is `mcp-burst/bounded-reports.json` beside the original evidence.
+
+Root integration of MCP admission at `debf6b63` passes all three actual admission protocol
+checks and six lease/publication unit checks. The SQLite lease composition remains pending;
+no final full-repository gate run or push has occurred. Root logs are retained under
+`excellence-evidence/lifecycle-integration` outside the repository.
