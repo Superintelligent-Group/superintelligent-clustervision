@@ -261,5 +261,18 @@
       "input hashes unchanged"
     ],
     "release_cut": false
+  },
+  "remote_ci": {
+    "head_sha": "c8d16a92cc63d98bf220d78f215ebbc530f0e3e1",
+    "run_id": 38359909641,
+    "url": "https://github.com/emberian/cv/actions/runs/38359909641",
+    "conclusion": "success",
+    "jobs": {
+      "wasm build (cv-web)": "success",
+      "web UI (web/)": "success",
+      "build \u00b7 test \u00b7 clippy \u00b7 fmt": "success",
+      "desktop app (app/src-tauri)": "success"
+    },
+    "scope": "Pushed operation batch c8d16a92. Subsequent browser enrichment and in-flight implementation changes are outside this run."
   }
 }
