@@ -571,7 +571,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Catalog freshness for every primary, including quiet sessions and same-size replacements; guarded scanner cache publication.
 - [x] Frozen-fleet query reduction: successful full/unchanged/append paths, exact common counts and bounded parallel batches; timings exclude discovery.
 - [x] Limited CLI JSON listings rank first and stop fact reduction after exact top-K selection; text listings retain full filtering and exact totals.
-- [ ] Whole-operation limited-listing costs: discovery, text-index set preparation and rank metadata precede selected fact reduction.
+- [x] Whole-operation limited-listing work on a frozen 64-session control: exact full-filter oracle, cold/warm counts, refresh and zero-window checks; global discovery, text membership and rank preparation remain explicit costs.
 - [x] Generic generated MCP tools stage child stdout/stderr in bounded storage and stream response envelopes; continuation hints, errors and command semantics remain exact.
 - [x] MCP startup reuses one parsed clap tree and releases it after roster extraction; exact schema, owner lifetime and real operation parity verified.
 - [ ] MCP repeated generated reads still create one CLI child each and retain complete child/client payloads and private spool I/O; persistent read-state reuse remains separate.
@@ -2904,7 +2904,7 @@ Forced full warm discovery adds 64 exact keyed scan-cache lookups/encoded rows,
 no Claude metadata scans, and 128 metadata decoder invocations across existing
 known-inventory/publication boundaries. One controlled lower-ranked source append
 causes one scoped refresh: 64 cache lookups/63 hits, exactly one metadata scan
-navigating 679 physical bytes/four records; selected output and two body demands
+navigating 679 source bytes/four records; selected output and two body demands
 stay unchanged. This establishes the complete current boundary before the separate
 append-reuse lane; it does not claim limit bounds freshness or discovery work.
 
