@@ -248,7 +248,7 @@ def selected_payloads(binary, root, env, formats=None):
                             arguments = ["doctor", *common, "--mode", "facts"]
                         else:
                             query = "tool:gate-final" if operation == "dataset" else "tool:gate-missing"
-                            arguments = ["dataset-collect", *common, "--mode", "lazy", "--query", query, "--hash-output"]
+                            arguments = ["dataset", *common, "--mode", "lazy", "--query", query, "--hash-output"]
                         row, peak = probe(binary, arguments, env, True, fd_limit=64)
                         if operation in ("discard", "doctor"):
                             assert row["messages"] == manifest["expected_messages"], "selected payload messages skipped"

@@ -715,7 +715,8 @@ fn main() -> Result<()> {
             "effective_mode": match a.operation.as_str() {
                 "affordances" => "full",
                 "affordance-read" | "token-stats" => "production-defined",
-                "query" | "query-collect" | "tools" | "tools-collect" | "dataset" | "dataset-collect" => "lazy",
+                "dataset-collect" => &a.mode,
+                "query" | "query-collect" | "tools" | "tools-collect" | "dataset" => "lazy",
                 "baseline" | "discover" | "chunks" | "checked-chunks" | "prefix" | "checked-prefix" | "resolve" | "resolved-len" | "json-len" | "json-write" | "json-prefix" => "not-applicable",
                 _ => &a.mode,
             },
