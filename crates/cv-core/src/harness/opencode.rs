@@ -561,7 +561,19 @@ mod db {
     /// 2.x writes only the new tables, so they win). Either table set may be absent: a 1.x database
     /// has no `session_v2`, a database 2.x created has no `session`.
     pub(super) fn discover(db: &Path) -> Result<Vec<SessionRef>> {
+        let mut reads = crate::source::ReadSet::default();
+        let mut wal = db.as_os_str().to_owned();
+        wal.push("-wal");
+        reads.record(&PathBuf::from(wal));
+        let source = crate::json::JsonSource::capture_with_reads(db, &reads)?;
+        let result = discover_snapshot(db, &source);
+        source.check()?;
+        result
+    }
+
+    fn discover_snapshot(db: &Path, source: &crate::json::JsonSource) -> Result<Vec<SessionRef>> {
         let conn = open_ro(db)?;
+        let _transaction = conn.unchecked_transaction()?;
         let mut refs = if has_table(&conn, "session_v2") && has_table(&conn, "session_message") {
             discover_v2(&conn, db)?
         } else {
@@ -569,7 +581,11 @@ mod db {
         };
         if has_table(&conn, "session") && has_table(&conn, "message") {
             let seen: HashSet<String> = refs.iter().map(|r| r.id.clone()).collect();
-            refs.extend(discover_v1(&conn, db)?.into_iter().filter(|r| !seen.contains(&r.id)));
+            refs.extend(
+                discover_v1(&conn, db, source)?
+                    .into_iter()
+                    .filter(|r| !seen.contains(&r.id)),
+            );
         }
         Ok(refs)
     }
@@ -618,18 +634,50 @@ mod db {
         })
     }
 
-    /// The 1.x tables: `message_count` is user+assistant turns (the role lives inside the `data`
-    /// JSON — SQLite's built-in JSON functions read it).
-    fn discover_v1(conn: &rusqlite::Connection, db: &Path) -> Result<Vec<SessionRef>> {
+    /// Count the roles the actual Value-based reader accepts, including final duplicate keys.
+    /// Incremental cells keep old inline summary bodies out of SQLite's native value buffers.
+    fn discover_v1(
+        conn: &rusqlite::Connection,
+        db: &Path,
+        source: &crate::json::JsonSource,
+    ) -> Result<Vec<SessionRef>> {
         let mut counts: HashMap<String, usize> = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT session_id, COUNT(*) FROM message \
-                 WHERE json_extract(data, '$.role') IN ('user', 'assistant') GROUP BY session_id",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            for (sid, n) in rows.flatten() {
-                counts.insert(sid, n.max(0) as usize);
+        let (mut stmt, rowid) = match conn.prepare("SELECT session_id, rowid, typeof(data) FROM message") {
+            Ok(statement) => (statement, true),
+            Err(_) => (conn.prepare("SELECT session_id, data FROM message")?, false),
+        };
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let Ok(sid) = row.get::<_, String>(0) else { continue };
+            let backing = if rowid {
+                if row.get::<_, String>(2)? != "text" {
+                    continue;
+                }
+                let blob = conn.blob_open(rusqlite::DatabaseName::Main, "message", "data", row.get(1)?, true)?;
+                crate::harness::store::bytes::ByteSource::read(blob)?
+            } else {
+                let Ok(data) = row.get_ref(1)?.as_str() else { continue };
+                crate::harness::store::bytes::ByteSource::read(data.as_bytes())?
+            };
+            let len = backing.len()?;
+            if len == 0 {
+                continue;
+            }
+            let accepted = source.read_backing_syntax(std::sync::Arc::new(backing), 0, len, |view| {
+                if !view.accepts_value()? || !view.is_object()? {
+                    return Ok(false);
+                }
+                Ok(view
+                    .get("role")?
+                    .map(|role| role.resolve())
+                    .transpose()?
+                    .is_some_and(|role| matches!(role.as_str(), Some("user") | Some("assistant"))))
+            });
+            match accepted {
+                Ok(true) => *counts.entry(sid).or_default() += 1,
+                Ok(false) => {}
+                Err(error) if error.is::<crate::json::InvalidJson>() => {}
+                Err(error) => return Err(error),
             }
         }
         let mut stmt = conn.prepare(
@@ -2335,6 +2383,70 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_v1_discovery_counts_follow_readable_final_roles() {
+        let dir = std::env::temp_dir().join(format!("cv-opencode-role-count-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("opencode.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);").unwrap();
+        let cases = [
+            (
+                r#"{"role":"system","role":"assistant","summary":{"body":"body"}}"#,
+                0,
+                1,
+            ),
+            (
+                r#"{"role":"assistant","role":"system","summary":{"body":"body"}}"#,
+                1,
+                0,
+            ),
+            (r#"{role:'user',summary:{body:'body'}}"#, 1, 0),
+            (
+                r#"{"role":"assistant","summary":{"body":"body"},"ignored":1e400}"#,
+                1,
+                0,
+            ),
+            (
+                r#"{"role":"assistant","summary":{"body":"body"},"ignored":"\ud800"}"#,
+                1,
+                0,
+            ),
+            (r#"{"role":"\u0075ser","summary":{"body":"body"}}"#, 1, 1),
+        ];
+        for (index, (data, old, new)) in cases.iter().enumerate() {
+            let id = format!("s{index}");
+            connection
+                .execute("INSERT INTO session VALUES(?1,'/perf','roles',1,1)", [&id])
+                .unwrap();
+            connection
+                .execute("INSERT INTO message VALUES(?1,?1,1,?2)", rusqlite::params![id, data])
+                .unwrap();
+            let old_count: usize = connection.query_row("SELECT COUNT(*) FROM message WHERE session_id=?1 AND json_extract(data,'$.role') IN ('user','assistant')", [&id], |row| row.get(0)).unwrap();
+            assert_eq!(old_count, *old);
+            let adapter = OpenCode::with_db(path.clone());
+            let reference = adapter
+                .discover()
+                .unwrap()
+                .into_iter()
+                .find(|reference| reference.id == id)
+                .unwrap();
+            assert_eq!(reference.message_count, *new);
+            let session = adapter.parse(&reference).unwrap();
+            assert_eq!(
+                session
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(message.role, Role::User | Role::Assistant))
+                    .count(),
+                *new
+            );
+        }
+        drop(connection);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn sqlite_snapshot_rejects_wal_mutation_even_after_sink_failure() {
         let dir = std::env::temp_dir().join(format!("cv-opencode-wal-{}", uuid::Uuid::new_v4()));
