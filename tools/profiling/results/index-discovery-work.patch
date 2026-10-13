@@ -1,0 +1,303 @@
+diff --git a/crates/cv-core/src/harness/claude.rs b/crates/cv-core/src/harness/claude.rs
+index ffa8ea08..d1b93413 100644
+--- a/crates/cv-core/src/harness/claude.rs
++++ b/crates/cv-core/src/harness/claude.rs
+@@ -8,6 +8,14 @@
+ 
+ use super::{parse_ts, Adapter};
+ 
++// Diagnostic evidence patch only: byte extents and successful reader returns, no transcript data.
++#[cfg(feature = "probe-heap")]
++pub fn probe_index_work(stage: &str, offset: Option<u64>, bytes: u64) {
++    if std::env::var_os("CV_INDEX_WORK_PROBE").is_some() {
++        eprintln!("CV_INDEX_WORK {}", serde_json::json!({"stage": stage, "offset": offset, "bytes": bytes}));
++    }
++}
++
+ /// `cv adopt`: move a sub-agent stranded by a dead session into a live one — Claude-only byte
+ /// surgery on this store's layout, so it lives beside the adapter that knows it.
+ pub mod adopt;
+@@ -324,6 +332,8 @@ impl Adapter for Claude {
+             #[cfg(feature = "mmap")]
+             if opts.spans {
+                 if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
++                    #[cfg(feature = "probe-heap")]
++                    probe_index_work("stream_mmap_extent", Some(0), map.len() as u64);
+                     #[cfg(unix)]
+                     let _ = map.advise(memmap2::Advice::Sequential);
+                     let s = stream_bytes_at(
+@@ -390,6 +400,8 @@ impl Adapter for Claude {
+             #[cfg(feature = "mmap")]
+             if opts.spans {
+                 if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
++                    #[cfg(feature = "probe-heap")]
++                    probe_index_work("stream_mmap_extent", Some(0), map.len() as u64);
+                     #[cfg(unix)]
+                     let _ = map.advise(memmap2::Advice::Sequential);
+                     let bytes = usize::try_from(from.offset)
+@@ -559,6 +571,8 @@ fn stream_bytes_at(
+     sink: &mut dyn MessageSink,
+     json_inputs: Option<&JsonInputs>,
+ ) -> Session {
++    #[cfg(feature = "probe-heap")]
++    probe_index_work("stream_framer_input", Some(base_off), bytes.len() as u64);
+     let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, sink);
+     let sink = &mut spawns;
+     let mut start = 0;
+@@ -605,6 +619,8 @@ fn ingest_bytes(
+     sink: &mut dyn MessageSink,
+     json_inputs: Option<&JsonInputs>,
+ ) -> Flow {
++    #[cfg(feature = "probe-heap")]
++    probe_index_work("stream_record_input", Some(file_off), buf.len() as u64);
+     if let Some(inputs) = json_inputs {
+         if inputs.error.borrow().is_some() {
+             return Flow::Stop;
+@@ -1574,6 +1590,8 @@ fn scan(path: &std::path::Path) -> Result<SessionRef> {
+     let mut scan = metadata::Scan::new(path);
+     #[cfg(feature = "mmap")]
+     if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
++        #[cfg(feature = "probe-heap")]
++        probe_index_work("metadata_mmap_extent", Some(0), map.len() as u64);
+         #[cfg(unix)]
+         let _ = map.advise(memmap2::Advice::Sequential);
+         scan.bytes(&map);
+diff --git a/crates/cv-core/src/harness/claude/borrowed.rs b/crates/cv-core/src/harness/claude/borrowed.rs
+index d711a118..1ce4de04 100644
+--- a/crates/cv-core/src/harness/claude/borrowed.rs
++++ b/crates/cv-core/src/harness/claude/borrowed.rs
+@@ -307,9 +307,13 @@ pub(super) fn ingest(
+     if slice.first() != Some(&b'{') {
+         return None;
+     }
++    #[cfg(feature = "probe-heap")]
++    super::probe_index_work("stream_borrowed_grammar_attempt", span.map(|s| s.base_off), slice.len() as u64);
+     let record: Record<'_> = serde_json::from_slice(slice).ok()?;
+     // This is eligibility for the borrowed projection, not a new rejection policy. A failed
+     // check retries the existing lean codec, including its permissive ignored-sidecar behavior.
++    #[cfg(feature = "probe-heap")]
++    super::probe_index_work("stream_borrowed_strict_input", span.map(|s| s.base_off), slice.len() as u64);
+     if !super::super::store::json::value_compatible(slice) {
+         return None;
+     }
+diff --git a/crates/cv-core/src/harness/claude/fork.rs b/crates/cv-core/src/harness/claude/fork.rs
+index c66448e6..ac264da8 100644
+--- a/crates/cv-core/src/harness/claude/fork.rs
++++ b/crates/cv-core/src/harness/claude/fork.rs
+@@ -106,6 +106,8 @@ fn lines(path: &Path, limit: usize, mut visit: impl FnMut(&str) -> bool) -> Opti
+             .chain(std::iter::once(map.len()))
+             .take(limit)
+         {
++            #[cfg(feature = "probe-heap")]
++            super::probe_index_work("fork_head_or_candidate_line", Some(start as u64), (end - start) as u64);
+             let Ok(line) = std::str::from_utf8(&map[start..end]) else {
+                 break;
+             };
+diff --git a/crates/cv-core/src/harness/claude/metadata.rs b/crates/cv-core/src/harness/claude/metadata.rs
+index df9a03f1..59dc576f 100644
+--- a/crates/cv-core/src/harness/claude/metadata.rs
++++ b/crates/cv-core/src/harness/claude/metadata.rs
+@@ -172,6 +172,8 @@ impl Scan {
+     }
+ 
+     pub(super) fn line(&mut self, bytes: &[u8]) {
++        #[cfg(feature = "probe-heap")]
++        super::probe_index_work("metadata_utf8_input", None, bytes.len() as u64);
+         let Ok(text) = std::str::from_utf8(bytes) else {
+             return;
+         };
+@@ -179,6 +181,8 @@ impl Scan {
+         if text.is_empty() {
+             return;
+         }
++        #[cfg(feature = "probe-heap")]
++        super::probe_index_work("metadata_grammar_input", None, text.len() as u64);
+         let Ok(fields) = serde_json::from_str::<Fields<'_>>(text) else {
+             return;
+         };
+@@ -186,6 +190,8 @@ impl Scan {
+         // IgnoredAny/RawValue do not enforce Value's Unicode, finite-number or nesting acceptance;
+         // this separate boundary must also reject invalid ignored and overwritten fields.
+         // UTF-8 is already checked above, so reuse it rather than validating the bytes again.
++        #[cfg(feature = "probe-heap")]
++        super::probe_index_work("metadata_strict_input", None, text.len() as u64);
+         if !super::super::store::json::value_compatible_str_at_depth_with(text, 0, |_, _| {}) {
+             return;
+         }
+@@ -342,6 +348,8 @@ impl Scan {
+ 
+     #[cfg(feature = "mmap")]
+     pub(super) fn bytes(&mut self, bytes: &[u8]) {
++        #[cfg(feature = "probe-heap")]
++        super::probe_index_work("metadata_framer_input", Some(0), bytes.len() as u64);
+         let mut start = 0;
+         for end in memchr::memchr_iter(b'\n', bytes) {
+             self.line(&bytes[start..end]);
+diff --git a/crates/cv-core/src/lazy.rs b/crates/cv-core/src/lazy.rs
+index b6b1a38b..e54bf36b 100644
+--- a/crates/cv-core/src/lazy.rs
++++ b/crates/cv-core/src/lazy.rs
+@@ -444,6 +444,8 @@ impl<R: std::io::BufRead> std::io::BufRead for DemandReader<'_, R> {
+         }
+     }
+     fn consume(&mut self, n: usize) {
++        #[cfg(feature = "probe-heap")]
++        crate::harness::claude::probe_index_work("text_decoder_consumed", None, n as u64);
+         self.since_check = self.since_check.saturating_add(n);
+         self.inner.consume(n);
+     }
+@@ -455,6 +457,8 @@ impl<R: std::io::BufRead> std::io::Read for DemandReader<'_, R> {
+         let n = bytes.len().min(output.len());
+         output[..n].copy_from_slice(&bytes[..n]);
+         self.consume(n);
++        #[cfg(feature = "probe-heap")]
++        crate::harness::claude::probe_index_work("text_read_returned", None, n as u64);
+         Ok(n)
+     }
+ }
+@@ -498,6 +502,8 @@ impl Resolver {
+         if !maps.contains_key(&source.path) {
+             let file = source.file.try_clone()?;
+             let map = unsafe { memmap2::Mmap::map(&file)? };
++            #[cfg(feature = "probe-heap")]
++            crate::harness::claude::probe_index_work("text_mmap_extent", Some(0), map.len() as u64);
+             maps.insert(
+                 source.path.clone(),
+                 CheckedMap {
+@@ -519,6 +525,8 @@ impl Resolver {
+             .ok_or_else(|| anyhow::anyhow!("Text span overflows address space"))?;
+         anyhow::ensure!(end <= cached.map.len(), "Text span is outside mapped source");
+         let slice = &cached.map[start..end];
++        #[cfg(feature = "probe-heap")]
++        crate::harness::claude::probe_index_work("text_span_extent", Some(sp.offset), sp.len);
+         // SAFETY: checked mappings are never replaced/removed while this Resolver lives.
+         // File identity guards detect ordinary changes around each demand, not atomic snapshots.
+         Ok(unsafe { std::mem::transmute::<&[u8], &'a [u8]>(slice) })
+@@ -586,6 +594,8 @@ impl Resolver {
+         #[cfg(feature = "mmap")]
+         let (reader, offset) = {
+             let bytes = self.checked_bytes(sp, &source)?;
++            #[cfg(feature = "probe-heap")]
++            crate::harness::claude::probe_index_work("text_len_utf8_input", Some(sp.offset), bytes.len() as u64);
+             if !sp.escaped && std::str::from_utf8(bytes).is_ok() {
+                 state.finish(&source)?;
+                 return Ok(bytes.len());
+diff --git a/crates/cv-core/src/resume.rs b/crates/cv-core/src/resume.rs
+index b689e85f..cdb344e3 100644
+--- a/crates/cv-core/src/resume.rs
++++ b/crates/cv-core/src/resume.rs
+@@ -79,9 +79,34 @@ pub fn prefix_hash(path: &Path, offset: u64) -> Option<u64> {
+     prefix_guard(path, offset).map(|(_, hash)| hash)
+ }
+ 
++#[cfg(feature = "probe-heap")]
++struct IndexWorkFile(std::fs::File);
++#[cfg(feature = "probe-heap")]
++impl std::ops::Deref for IndexWorkFile {
++    type Target = std::fs::File;
++    fn deref(&self) -> &Self::Target { &self.0 }
++}
++#[cfg(feature = "probe-heap")]
++impl std::io::Read for IndexWorkFile {
++    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
++        let n = std::io::Read::read(&mut self.0, output)?;
++        crate::harness::claude::probe_index_work("resume_guard_file_read_returned", None, n as u64);
++        Ok(n)
++    }
++}
++#[cfg(feature = "probe-heap")]
++impl std::io::Seek for IndexWorkFile {
++    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
++        std::io::Seek::seek(&mut self.0, pos)
++    }
++}
++
+ fn prefix_guard(path: &Path, offset: u64) -> Option<(Option<(u64, u64)>, u64)> {
+     use std::io::{Read as _, Seek as _, SeekFrom};
++    #[allow(unused_mut)]
+     let mut f = std::fs::File::open(path).ok()?;
++    #[cfg(feature = "probe-heap")]
++    let mut f = IndexWorkFile(f);
+     let metadata = f.metadata().ok()?;
+     #[cfg(unix)]
+     let identity = {
+diff --git a/crates/cv-search/src/fts.rs b/crates/cv-search/src/fts.rs
+index b1e9be5f..3ba86da4 100644
+--- a/crates/cv-search/src/fts.rs
++++ b/crates/cv-search/src/fts.rs
+@@ -907,6 +907,9 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) ->
+                     open.insert(id);
+                 }
+                 Out::Doc(doc) => {
++                    #[cfg(feature = "probe-heap")]
++                    cv_core::harness::claude::probe_index_work("fts_document_body", None,
++                        doc.inner().get_first(f.body).and_then(|value| value.as_str()).map_or(0, |body| body.len()) as u64);
+                     #[cfg(test)]
+                     {
+                         ran.work.documents += 1;
+@@ -1857,6 +1860,8 @@ impl cv_core::MessageSink for ChunkSink<'_> {
+         );
+     }
+     fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
++        #[cfg(feature = "probe-heap")]
++        cv_core::harness::claude::probe_index_work("fts_message_callback", None, 0);
+         use cv_core::Block;
+         if self.failed || self.err.is_some() {
+             return cv_core::Flow::Stop;
+diff --git a/crates/cv-search/src/ingest.rs b/crates/cv-search/src/ingest.rs
+index 0acffc73..189aaf5b 100644
+--- a/crates/cv-search/src/ingest.rs
++++ b/crates/cv-search/src/ingest.rs
+@@ -107,7 +107,7 @@ pub(super) struct AdmittedDocument {
+     document: TantivyDocument,
+     _reservation: Reservation,
+ }
+-#[cfg(test)]
++#[cfg(any(test, feature = "probe-heap"))]
+ impl AdmittedDocument {
+     pub(super) fn inner(&self) -> &TantivyDocument {
+         &self.document
+diff --git a/crates/cv/src/cmd/search.rs b/crates/cv/src/cmd/search.rs
+index 717dfc42..e13b87de 100644
+--- a/crates/cv/src/cmd/search.rs
++++ b/crates/cv/src/cmd/search.rs
+@@ -229,8 +229,14 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool) -> Resul
+         if rebuild { "rebuilding" } else { "updating" },
+         if subagents { " (+ sub-agent forest)" } else { "" }
+     );
++    #[cfg(feature = "probe-heap")]
++    if std::env::var_os("CV_INDEX_WORK_PROBE").is_some() { eprintln!("CV_INDEX_PHASE discovery"); }
+     let refs = cv_core::discover_all();
++    #[cfg(feature = "probe-heap")]
++    if std::env::var_os("CV_INDEX_WORK_PROBE").is_some() { eprintln!("CV_INDEX_PHASE index"); }
+     let n = cv_search::index_sessions(None, refs.clone(), rebuild, subagents)?;
++    #[cfg(feature = "probe-heap")]
++    if std::env::var_os("CV_INDEX_WORK_PROBE").is_some() { eprintln!("CV_INDEX_PHASE complete"); }
+     println!(
+         "indexed {n} top-level session(s) → {}{}",
+         cv_search::default_tantivy_dir().display(),
+diff --git a/crates/cv-search/examples/index_work_snapshot.rs b/crates/cv-search/examples/index_work_snapshot.rs
+new file mode 100644
+index 00000000..dab79a26
+--- /dev/null
++++ b/crates/cv-search/examples/index_work_snapshot.rs
+@@ -0,0 +1,19 @@
++//! Diagnostic evidence patch: dump live stored documents for exact controlled parity.
++use anyhow::{Context, Result};
++use tantivy::{schema::document::Document, Index, TantivyDocument};
++fn main() -> Result<()> {
++    let path = std::env::args().nth(1).context("index path")?;
++    let index = Index::open_in_dir(path)?;
++    let searcher = index.reader()?.searcher();
++    let mut docs = Vec::new();
++    for segment in searcher.segment_readers() {
++        let store = segment.get_store_reader(0)?;
++        for id in segment.doc_ids_alive() {
++            let doc: TantivyDocument = store.get(id)?;
++            docs.push(doc.to_json(&index.schema()));
++        }
++    }
++    docs.sort();
++    serde_json::to_writer(std::io::stdout(), &docs)?;
++    Ok(())
++}

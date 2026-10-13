@@ -1,0 +1,716 @@
+{
+  "base_commit": "c8d16a92",
+  "fix_commit": "022e9475",
+  "platform": "native macOS aarch64",
+  "profile": "dev; pinned Rust 1.99.0; default mmap + SQLite, probe-heap instrumentation in core/search/CLI",
+  "worker_count": 1,
+  "synthetic": true,
+  "fixture": "one Claude primary: custom title, 65 initial messages; append one custom-title and two messages",
+  "initial_source_bytes": 8404110,
+  "append_bytes": 848,
+  "operations": {
+    "cold": {
+      "source_bytes": 8404110,
+      "source_sha256": "0507239121a0b04f56a77b266394542ee813064521709372db08d43929255b41",
+      "work": {
+        "discovery": {
+          "metadata_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404110,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_framer_input": {
+            "calls": 1,
+            "bytes": 8404110,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_utf8_input": {
+            "calls": 66,
+            "bytes": 8404044,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_grammar_input": {
+            "calls": 66,
+            "bytes": 8404044,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_strict_input": {
+            "calls": 66,
+            "bytes": 8404044,
+            "first_offset": null,
+            "last_offset": null
+          }
+        },
+        "index": {
+          "stream_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404110,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "stream_framer_input": {
+            "calls": 1,
+            "bytes": 8404110,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "stream_record_input": {
+            "calls": 66,
+            "bytes": 8404110,
+            "first_offset": 0,
+            "last_offset": 8272797
+          },
+          "stream_borrowed_grammar_attempt": {
+            "calls": 66,
+            "bytes": 8404044,
+            "first_offset": 0,
+            "last_offset": 8272797
+          },
+          "stream_borrowed_strict_input": {
+            "calls": 65,
+            "bytes": 8403875,
+            "first_offset": 170,
+            "last_offset": 8272797
+          },
+          "fts_message_callback": {
+            "calls": 65,
+            "bytes": 0,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "text_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404110,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "text_span_extent": {
+            "calls": 64,
+            "bytes": 8388608,
+            "first_offset": 511,
+            "last_offset": 8272901
+          },
+          "text_decoder_consumed": {
+            "calls": 64,
+            "bytes": 8388608,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "fts_document_body": {
+            "calls": 3,
+            "bytes": 8388680,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "fork_head_or_candidate_line": {
+            "calls": 2,
+            "bytes": 405,
+            "first_offset": 0,
+            "last_offset": 170
+          },
+          "resume_guard_file_read_returned": {
+            "calls": 2,
+            "bytes": 8192,
+            "first_offset": null,
+            "last_offset": null
+          }
+        }
+      },
+      "parity_sha256": {
+        "metadata": "f30a67e5c23f4296ddd7e69ad5a3d4a77f22c7b5e6da9a6ddefb89e461ff1f61",
+        "counts": "922c1adb7bbda69679eefdf83f9dbc172bbb362022bd103bd4b97ff8faeede77",
+        "events": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "docs": "176de2f4774c9324fc5871614bbb3c3ef361224b25656e09d38d0ab50556ad05",
+        "queries": "35ab6b6b3e9eddf4c66186056fa989d604115c1df59473ef16d15913487e297a"
+      },
+      "mark": [
+        [
+          8404110
+        ]
+      ],
+      "documents": 3,
+      "progress": [
+        "\u2726 updating full-text index\u2026",
+        "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+      ],
+      "messages": 65,
+      "event_rows": 0,
+      "counts": {
+        "_v": 4
+      }
+    },
+    "unchanged": {
+      "source_bytes": 8404110,
+      "source_sha256": "0507239121a0b04f56a77b266394542ee813064521709372db08d43929255b41",
+      "work": {},
+      "parity_sha256": {
+        "metadata": "f30a67e5c23f4296ddd7e69ad5a3d4a77f22c7b5e6da9a6ddefb89e461ff1f61",
+        "counts": "922c1adb7bbda69679eefdf83f9dbc172bbb362022bd103bd4b97ff8faeede77",
+        "events": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "docs": "176de2f4774c9324fc5871614bbb3c3ef361224b25656e09d38d0ab50556ad05",
+        "queries": "35ab6b6b3e9eddf4c66186056fa989d604115c1df59473ef16d15913487e297a"
+      },
+      "mark": [
+        [
+          8404110
+        ]
+      ],
+      "documents": 3,
+      "progress": [
+        "\u2726 updating full-text index\u2026",
+        "  \u21b3 index: 0 changed/new (0 read from where the last pass stopped), 0 removed, 1 unchanged, 0 errors"
+      ],
+      "messages": 65,
+      "event_rows": 0,
+      "counts": {
+        "_v": 4
+      }
+    },
+    "append": {
+      "source_bytes": 8404958,
+      "source_sha256": "dbf77df53e94c3451b5b436fa3fe1225d24358e88c4b0581d6198096d10c7e82",
+      "work": {
+        "discovery": {
+          "metadata_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_framer_input": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_utf8_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_grammar_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_strict_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          }
+        },
+        "index": {
+          "resume_guard_file_read_returned": {
+            "calls": 4,
+            "bytes": 16384,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "stream_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "stream_framer_input": {
+            "calls": 1,
+            "bytes": 848,
+            "first_offset": 8404110,
+            "last_offset": 8404110
+          },
+          "stream_record_input": {
+            "calls": 3,
+            "bytes": 848,
+            "first_offset": 8404110,
+            "last_offset": 8404456
+          },
+          "stream_borrowed_grammar_attempt": {
+            "calls": 3,
+            "bytes": 845,
+            "first_offset": 8404110,
+            "last_offset": 8404456
+          },
+          "stream_borrowed_strict_input": {
+            "calls": 2,
+            "bytes": 756,
+            "first_offset": 8404200,
+            "last_offset": 8404456
+          },
+          "fts_message_callback": {
+            "calls": 2,
+            "bytes": 0,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "fork_head_or_candidate_line": {
+            "calls": 2,
+            "bytes": 405,
+            "first_offset": 0,
+            "last_offset": 170
+          },
+          "fts_document_body": {
+            "calls": 2,
+            "bytes": 212,
+            "first_offset": null,
+            "last_offset": null
+          }
+        }
+      },
+      "parity_sha256": {
+        "metadata": "d31c81ac9a21ce6eecd5378595697b1e743b7e2f868b74cdf3ce78860c157f67",
+        "counts": "922c1adb7bbda69679eefdf83f9dbc172bbb362022bd103bd4b97ff8faeede77",
+        "events": "44635679fd451fba88b75e3945dd76e18f6259527be17dee044e69506c9999de",
+        "docs": "244acb721302ee7ee6938cdb5c8ce51063d593070d94121ad60d0ab32d8df60b",
+        "queries": "5745a00260ef1f6f61c0df822c4328fc37f9d34e957b11e2490b70168802f9f4"
+      },
+      "mark": [
+        [
+          8404110
+        ]
+      ],
+      "documents": 4,
+      "progress": [
+        "\u2726 updating full-text index\u2026",
+        "  \u21b3 index: 1 changed/new (1 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+      ],
+      "messages": 67,
+      "event_rows": 1,
+      "counts": {
+        "_v": 4
+      }
+    },
+    "append-full": {
+      "source_bytes": 8404958,
+      "source_sha256": "dbf77df53e94c3451b5b436fa3fe1225d24358e88c4b0581d6198096d10c7e82",
+      "work": {
+        "discovery": {
+          "metadata_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_framer_input": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_utf8_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_grammar_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_strict_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          }
+        },
+        "index": {
+          "stream_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "stream_framer_input": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "stream_record_input": {
+            "calls": 69,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 8404456
+          },
+          "stream_borrowed_grammar_attempt": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": 0,
+            "last_offset": 8404456
+          },
+          "stream_borrowed_strict_input": {
+            "calls": 67,
+            "bytes": 8404631,
+            "first_offset": 170,
+            "last_offset": 8404456
+          },
+          "fts_message_callback": {
+            "calls": 67,
+            "bytes": 0,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "text_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "text_span_extent": {
+            "calls": 64,
+            "bytes": 8388608,
+            "first_offset": 511,
+            "last_offset": 8272901
+          },
+          "text_decoder_consumed": {
+            "calls": 64,
+            "bytes": 8388608,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "fts_document_body": {
+            "calls": 4,
+            "bytes": 8388892,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "fork_head_or_candidate_line": {
+            "calls": 2,
+            "bytes": 405,
+            "first_offset": 0,
+            "last_offset": 170
+          },
+          "resume_guard_file_read_returned": {
+            "calls": 2,
+            "bytes": 8192,
+            "first_offset": null,
+            "last_offset": null
+          }
+        }
+      },
+      "parity_sha256": {
+        "metadata": "d31c81ac9a21ce6eecd5378595697b1e743b7e2f868b74cdf3ce78860c157f67",
+        "counts": "922c1adb7bbda69679eefdf83f9dbc172bbb362022bd103bd4b97ff8faeede77",
+        "events": "44635679fd451fba88b75e3945dd76e18f6259527be17dee044e69506c9999de",
+        "docs": "da9f5ac40ade0a6e429a1d30f2fcd42a3ce2c7fc43d133dce154af46c2bcbb7b",
+        "queries": "5745a00260ef1f6f61c0df822c4328fc37f9d34e957b11e2490b70168802f9f4"
+      },
+      "mark": [
+        [
+          8404110
+        ]
+      ],
+      "documents": 4,
+      "progress": [
+        "\u2726 updating full-text index\u2026",
+        "  \u21b3 index: 1 changed/new (0 read from where the last pass stopped), 0 removed, 0 unchanged, 0 errors"
+      ],
+      "messages": 67,
+      "event_rows": 1,
+      "counts": {
+        "_v": 4
+      }
+    },
+    "same-size-rewrite": {
+      "source_bytes": 8404958,
+      "source_sha256": "8bc27e5e10b40007acafb9b565bfa10b52c222069b315564888193bad032d96e",
+      "work": {
+        "discovery": {
+          "metadata_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_framer_input": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_utf8_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_grammar_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_strict_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          }
+        }
+      },
+      "parity_sha256": {
+        "metadata": "d31c81ac9a21ce6eecd5378595697b1e743b7e2f868b74cdf3ce78860c157f67",
+        "counts": "922c1adb7bbda69679eefdf83f9dbc172bbb362022bd103bd4b97ff8faeede77",
+        "events": "44635679fd451fba88b75e3945dd76e18f6259527be17dee044e69506c9999de",
+        "docs": "244acb721302ee7ee6938cdb5c8ce51063d593070d94121ad60d0ab32d8df60b",
+        "queries": "5745a00260ef1f6f61c0df822c4328fc37f9d34e957b11e2490b70168802f9f4"
+      },
+      "mark": [
+        [
+          8404110
+        ]
+      ],
+      "documents": 4,
+      "progress": [
+        "\u2726 updating full-text index\u2026",
+        "  \u21b3 index: 0 changed/new (0 read from where the last pass stopped), 0 removed, 1 unchanged, 0 errors"
+      ],
+      "messages": 67,
+      "event_rows": 1,
+      "counts": {
+        "_v": 4
+      }
+    },
+    "rewrite-full": {
+      "source_bytes": 8404958,
+      "source_sha256": "8bc27e5e10b40007acafb9b565bfa10b52c222069b315564888193bad032d96e",
+      "work": {
+        "discovery": {
+          "metadata_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_framer_input": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "metadata_utf8_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_grammar_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "metadata_strict_input": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": null,
+            "last_offset": null
+          }
+        },
+        "index": {
+          "stream_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "stream_framer_input": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "stream_record_input": {
+            "calls": 69,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 8404456
+          },
+          "stream_borrowed_grammar_attempt": {
+            "calls": 69,
+            "bytes": 8404889,
+            "first_offset": 0,
+            "last_offset": 8404456
+          },
+          "stream_borrowed_strict_input": {
+            "calls": 67,
+            "bytes": 8404631,
+            "first_offset": 170,
+            "last_offset": 8404456
+          },
+          "fts_message_callback": {
+            "calls": 67,
+            "bytes": 0,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "text_mmap_extent": {
+            "calls": 1,
+            "bytes": 8404958,
+            "first_offset": 0,
+            "last_offset": 0
+          },
+          "text_span_extent": {
+            "calls": 64,
+            "bytes": 8388608,
+            "first_offset": 511,
+            "last_offset": 8272901
+          },
+          "text_decoder_consumed": {
+            "calls": 64,
+            "bytes": 8388608,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "fts_document_body": {
+            "calls": 4,
+            "bytes": 8388892,
+            "first_offset": null,
+            "last_offset": null
+          },
+          "fork_head_or_candidate_line": {
+            "calls": 2,
+            "bytes": 405,
+            "first_offset": 0,
+            "last_offset": 170
+          },
+          "resume_guard_file_read_returned": {
+            "calls": 2,
+            "bytes": 8192,
+            "first_offset": null,
+            "last_offset": null
+          }
+        }
+      },
+      "parity_sha256": {
+        "metadata": "d31c81ac9a21ce6eecd5378595697b1e743b7e2f868b74cdf3ce78860c157f67",
+        "counts": "922c1adb7bbda69679eefdf83f9dbc172bbb362022bd103bd4b97ff8faeede77",
+        "events": "44635679fd451fba88b75e3945dd76e18f6259527be17dee044e69506c9999de",
+        "docs": "da9f5ac40ade0a6e429a1d30f2fcd42a3ce2c7fc43d133dce154af46c2bcbb7b",
+        "queries": "78afb4aedf4e59e0fdb7011ff853dcf67a867f3e1366b831f845183b7ce32648"
+      },
+      "mark": [
+        [
+          8404110
+        ]
+      ],
+      "documents": 4,
+      "progress": [
+        "\u2726 rebuilding full-text index\u2026"
+      ],
+      "messages": 67,
+      "event_rows": 1,
+      "counts": {
+        "_v": 4
+      }
+    }
+  },
+  "limits": [
+    "Separate boundary extents, parser submissions and actual File::Read returns; none is a physical-I/O count.",
+    "Unescaped lazy bodies consume BufRead slices; decoder consumption is not an underlying Read return.",
+    "Only controlled term queries and complete live stored fields are compared; searchable body is not stored.",
+    "Baseline title append intentionally fails stored-field/query parity, exposing the separately fixed bug.",
+    "Baseline timestamp-restored middle rewrite intentionally fails query parity, confirming documented tuple-only freshness.",
+    "Scores are recorded as baseline evidence; deleted-posting statistics can differ between incremental and fresh Tantivy indexes."
+  ],
+  "parity": {
+    "unchanged": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": true,
+      "queries": true
+    },
+    "append_vs_fresh": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": false,
+      "queries": true
+    },
+    "restored_mtime_rewrite_vs_rebuild": {
+      "metadata": true,
+      "counts": true,
+      "events": true,
+      "docs": false,
+      "queries": false
+    }
+  },
+  "public_queries_after_baseline_rewrite": {
+    "title:initial": {
+      "incremental": [
+        {
+          "id": "alpha",
+          "title": "Appended title",
+          "score": 0.6931471824645996
+        }
+      ],
+      "full": []
+    },
+    "title:appended": {
+      "incremental": [
+        {
+          "id": "alpha",
+          "title": "Appended title",
+          "score": 0.6931471824645996
+        }
+      ],
+      "full": [
+        {
+          "id": "alpha",
+          "title": "Appended title",
+          "score": 0.10536056011915207
+        }
+      ]
+    },
+    "title:initial AND body:stablemark00": {
+      "incremental": [
+        {
+          "id": "alpha",
+          "title": "Appended title",
+          "score": 1.5756019353866577
+        }
+      ],
+      "full": []
+    },
+    "title:appended AND body:stablemark00": {
+      "incremental": [],
+      "full": [
+        {
+          "id": "alpha",
+          "title": "Appended title",
+          "score": 0.9878153204917908
+        }
+      ]
+    },
+    "rewriteoldneedle": {
+      "incremental": [
+        {
+          "id": "alpha",
+          "title": "Appended title",
+          "score": 0.8824547529220581
+        }
+      ],
+      "full": []
+    },
+    "rewritenewneedle": {
+      "incremental": [],
+      "full": [
+        {
+          "id": "alpha",
+          "title": "Appended title",
+          "score": 0.8824547529220581
+        }
+      ]
+    }
+  }
+}

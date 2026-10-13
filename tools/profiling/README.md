@@ -257,3 +257,32 @@ SQLite/C, stacks, mmap and allocator overhead. No native elapsed-time or fleet-w
 claimed. Bulk SQL string copying and serialized-row retention still grow with cache size;
 this removes unrelated JSON decoding and nested allocations, not the complete first-use floor.
 The fixture is synthetic metadata, not a genuine harness corpus capture.
+
+`index-discovery-work.py` is an evidence-only native `cv index` control for one synthetic Claude
+primary. It requires the diagnostic [patch](results/index-discovery-work.patch), applied to
+`c8d16a92` in a separate worktree, and the snapshot example contained in that patch. Build the
+CLI with `--features probe-heap,cv-core/probe-heap,cv-search/probe-heap` and the example with
+`cargo build -p cv-search --example index_work_snapshot --no-default-features`, using an exclusive
+target and scratch catalog. Run with `--scratch NEW_DIRECTORY --cv FILE --snapshot FILE`.
+The script creates only scratch stores and keeps discovery, parser/framer, mmap admission,
+lazy-decoder consumption and actual prefix-guard `File::Read` return counts separate. The patch
+is not runtime telemetry shipped in production. No elapsed-time comparison is collected.
+
+The [native baseline](results/index-discovery-work-native.json) admits **8,404,110 bytes** in
+both cold discovery and indexing. An **848-byte** append makes discovery submit all **8,404,958
+bytes** to its metadata framer while resumed indexing supplies only the 848-byte suffix to its
+framer; the mapped extent is still the whole file. Unchanged input submits no source bytes at
+these instrumented boundaries. Required UTF-8/grammar/strict-compatibility inputs are separately
+reported, not added together as physical I/O. The unescaped decoder consumes borrowed slices;
+its consumption counters are not `Read` return counters.
+
+The baseline intentionally records two failed parity controls: title-changing resume retained
+obsolete body title postings, and a timestamp-restored same-size edit was skipped by tuple-only
+primary freshness. Metadata, counts and events agreed with the fresh oracle; complete stored
+fields and controlled public queries exposed the defects. Commit `022e9475` fixes the former
+with metadata guards and an indexing-only migration. The latter motivates separate primary
+identity authority. Query scores are evidence, not a universal fresh/incremental parity promise:
+Tantivy statistics can include deleted postings until merge. Indexed body text is not stored,
+so the snapshot oracle compares all live stored fields plus the explicitly listed term queries,
+not every possible query or complete IR fidelity. This fixed single-primary control establishes
+an overlap target; it does not rank a real fleet or measure physical storage I/O.
