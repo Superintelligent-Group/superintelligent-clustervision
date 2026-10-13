@@ -5,7 +5,7 @@
 
 use crate::util::{dim_cwd, parse_harness, session_row, short_id};
 use anyhow::Result;
-use cv_core::ir::{truncate, SessionRef};
+use cv_core::ir::{SessionRef, truncate};
 use cv_core::sanitize::sanitize_line;
 
 /// Apply a parsed query to a ref list in place. The two-phase filter itself is
@@ -46,6 +46,51 @@ fn enrich_head(adapter: &dyn cv_core::Adapter, r: &SessionRef) -> Option<cv_core
     Some(session)
 }
 
+/// Select the requested listing window. Text listings retain their exact-total contract;
+/// machine listings rank first and demand only facts needed for the selected rows.
+fn select_refs(
+    refs: &mut Vec<SessionRef>,
+    query: &Option<cv_core::SessionQuery>,
+    limit: usize,
+    sort_by: &str,
+    asc: bool,
+    json: bool,
+) -> Result<usize> {
+    if json && limit == 0 {
+        refs.clear();
+        return Ok(0);
+    }
+    if !json {
+        apply_query(refs, query)?;
+    }
+
+    match sort_by {
+        "created" => refs.sort_by_key(|r| std::cmp::Reverse(r.created_at.or(r.updated_at))),
+        "messages" => refs.sort_by_key(|r| std::cmp::Reverse(r.message_count)),
+        // "updated" (the default; clap's value_parser admits nothing else)
+        _ => refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at))),
+    }
+
+    if json {
+        if let Some(q) = query {
+            let presence = if asc {
+                cv_core::query::WindowPresence::Any
+            } else {
+                cv_core::query::WindowPresence::Existing
+            };
+            cv_core::query::filter_refs_limited(refs, q, &crate::cmd::query::text_sets(q), limit, presence)?;
+        }
+    }
+    let total = refs.len();
+    if asc {
+        // The SAME newest `limit` rows, read oldest → newest like a feed: select first, then flip,
+        // so `--asc` never changes which sessions are shown — only the order they print in.
+        refs.truncate(limit);
+        refs.reverse();
+    }
+    Ok(total)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_ls(
     harness: Option<String>,
@@ -74,22 +119,7 @@ pub(crate) fn cmd_ls(
             Some(c) => r.cwd.as_ref().is_some_and(|p| p.to_string_lossy().contains(c)),
         })
         .collect();
-    apply_query(&mut refs, &query)?;
-
-    match sort_by {
-        "created" => refs.sort_by_key(|r| std::cmp::Reverse(r.created_at.or(r.updated_at))),
-        "messages" => refs.sort_by_key(|r| std::cmp::Reverse(r.message_count)),
-        // "updated" (the default; clap's value_parser admits nothing else)
-        _ => refs.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at))),
-    }
-
-    let total = refs.len();
-    if asc {
-        // The SAME newest `limit` rows, read oldest → newest like a feed: select first, then flip,
-        // so `--asc` never changes which sessions are shown — only the order they print in.
-        refs.truncate(limit);
-        refs.reverse();
-    }
+    let total = select_refs(&mut refs, &query, limit, sort_by, asc, json)?;
     if json {
         // Machine-readable listing: the SAME rows the table below would print (same filters, sort,
         // exists() guard, and limit), as one JSON array on stdout — no header/footer, so it pipes
@@ -283,4 +313,61 @@ tokens ({} session(s) + {} sub-agent transcript(s){}{}):",
     println!();
     line(&t.total());
     println!("  (input excludes cache; uncached = input + cache writes + output)");
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn machine_windows_match_full_filter_sort_limit_with_missing_paths_and_ties() {
+        let world = cv_testkit::World::in_process("json_query_windows");
+        let mut refs: Vec<_> = (0..6)
+            .map(|i| {
+                let path = world.write_session(
+                    &format!("row-{i}"),
+                    &[serde_json::json!({
+                        "type":"user","message":{"role":"user","content":"hello"}
+                    })],
+                );
+                let mut r = SessionRef::new(format!("row-{i}"), cv_core::Harness::Claude, path);
+                r.message_count = i % 3;
+                r.created_at = chrono::DateTime::from_timestamp(100 + (i / 2) as i64, 1);
+                r.updated_at = chrono::DateTime::from_timestamp(200 + (i / 3) as i64, 2);
+                r
+            })
+            .collect();
+        refs[4].created_at = None;
+        refs[2].updated_at = None;
+        std::fs::remove_file(&refs[5].path).unwrap();
+        let query = Some(cv_core::SessionQuery::parse("msgs>=0").unwrap());
+        for sort in ["created", "updated", "messages"] {
+            for asc in [false, true] {
+                for limit in [0, 1, 3, 6, usize::MAX] {
+                    let mut baseline = refs.clone();
+                    apply_query(&mut baseline, &query).unwrap();
+                    match sort {
+                        "created" => baseline.sort_by_key(|r| std::cmp::Reverse(r.created_at.or(r.updated_at))),
+                        "messages" => baseline.sort_by_key(|r| std::cmp::Reverse(r.message_count)),
+                        _ => baseline.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at))),
+                    }
+                    if asc {
+                        baseline.truncate(limit);
+                        baseline.reverse();
+                    }
+                    let expected: Vec<_> = json_rows(baseline.iter(), limit)
+                        .into_iter()
+                        .map(|(_, row)| row)
+                        .collect();
+                    let mut actual = refs.clone();
+                    select_refs(&mut actual, &query, limit, sort, asc, true).unwrap();
+                    let actual: Vec<_> = json_rows(actual.iter(), limit)
+                        .into_iter()
+                        .map(|(_, row)| row)
+                        .collect();
+                    assert_eq!(actual, expected, "sort={sort},asc={asc},limit={limit}");
+                }
+            }
+        }
+    }
 }

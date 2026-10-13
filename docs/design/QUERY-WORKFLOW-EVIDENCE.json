@@ -115,5 +115,18 @@
     "Full selection must finish before first result; no partial output is emitted after a fallible read.",
     "The historical60s CountsOnly index budget is a different workload; full index and parallel CountsOnly remain unmeasured here.",
     "Limited machine requests still incur full-fleet filtering before sorting and truncation; rank-aware window selection is the next work-avoidance opportunity."
-  ]
+  ],
+  "limited_window_work": {
+    "method": "Deterministic native three-candidate has:plan correctness fixture, fresh scratch catalog; no timing campaign. Candidate 0 does not match, candidate 1 matches, candidate 2 is a matching tail.",
+    "limit0_fresh_count_rows": 0,
+    "initial_limit1_fresh_count_rows": 2,
+    "unchanged_limit1_fresh_count_rows": 2,
+    "full_selection_fresh_count_rows": 3,
+    "proxy_limit": "Fresh count rows prove successful counted reads were published, not every read or byte consumed. Unchanged rows alone do not prove zero body demands; cached cheap decisions are covered by the existing predicate engine and unneeded-error controls.",
+    "policy": "JSON ranks before predicate evaluation and stops once its window is complete. Required candidate errors remain errors; unread lower-ranked errors cannot invalidate the window. Text listings and aggregate stats retain full selection and exact totals.",
+    "global_work": "Nonzero counted queries still load one whole-catalog AffordanceTable and dependency table, then share one Probe, read scope and lazy catalog writer. Discovery and indexed text membership resolution remain separate upstream work. CLI limit zero skips text membership resolution and fact-table loading.",
+    "ordering": "Stable metadata ties and historical ascending select-then-reverse/existence rules are retained; CLI exact JSON row parity covers all three sorts and both directions.",
+    "warm_decision_control": "After initial publication, the shared planner returns definite False/True for the two required candidates, and Unknown for the uncounted tail; only Unknown invokes the body reducer. Parse-dependent predicates such as tool:edit still reduce required candidate bodies on repeat; affordance counts do not cache arbitrary predicates."
+  },
+  "metadata_precision_note": "Historical full-filter phases used second-precision frozen metadata; has:plan membership and counted-fact parity are unaffected. Ranked-window fixtures retain nanosecond metadata and stable ties."
 }

@@ -547,6 +547,118 @@ impl ExtFacts for RefFacts<'_> {
     }
 }
 
+/// One cheap fact table and dependency probe for an entire query selection.
+struct RefQuery<'a> {
+    query: &'a SessionQuery,
+    text_sets: &'a TextSets,
+    heavy: bool,
+    table: Option<crate::catalog::AffordanceTable>,
+    probe: crate::source::Probe,
+}
+
+impl<'a> RefQuery<'a> {
+    fn new(query: &'a SessionQuery, text_sets: &'a TextSets) -> Self {
+        Self {
+            query,
+            text_sets,
+            heavy: query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest(),
+            table: query.needs_counted().then(crate::catalog::AffordanceTable::load),
+            probe: crate::source::Probe::default(),
+        }
+    }
+
+    fn cheap(&mut self, r: &SessionRef) -> anyhow::Result<Tri> {
+        if !self.query.prefilter(r) {
+            return Ok(Tri::False);
+        }
+        if !self.heavy && !self.query.needs_counted() {
+            return Ok(Tri::True);
+        }
+        let facts = RefFacts {
+            id: &r.id,
+            text_sets: self.text_sets,
+            counts: self
+                .table
+                .as_ref()
+                .and_then(|t| t.counts_with_probe(r, &self.probe.snapshot(r), &mut self.probe)),
+        };
+        self.query.eval(&Facts {
+            r,
+            session: None,
+            ext: &facts,
+        })
+    }
+
+    fn reduce(&mut self, r: &SessionRef) -> anyhow::Result<StreamedMatch> {
+        match crate::harness::for_harness(r.harness) {
+            Some(adapter) => reduce_streamed(self.query, adapter.as_ref(), r, self.text_sets, &mut self.probe),
+            None => Err(anyhow::anyhow!("no adapter for {}", r.harness)),
+        }
+    }
+}
+
+/// Which matching refs occupy a ranked machine-readable window.
+#[derive(Clone, Copy)]
+pub enum WindowPresence {
+    /// Only refs with readable file metadata occupy the window (`ls --json`).
+    Existing,
+    /// Every matching ref occupies the window; existence is checked after selecting/reversing
+    /// it (`ls --json --asc` retains this historical selection rule).
+    Any,
+}
+
+/// Select at most `limit` matches from already-ranked refs. Unlike [`filter_refs`], this has no
+/// exact-total contract: only reads needed to decide the requested window can fail it. An
+/// unreadable lower-ranked tail is never evaluated. Stable ties and ranking belong to the caller;
+/// selected refs preserve their input order. A read error leaves the caller's list intact.
+/// Zero returns an empty window without loading fact tables or demanding any transcript body.
+pub fn filter_refs_limited(
+    refs: &mut Vec<SessionRef>,
+    query: &SessionQuery,
+    text_sets: &TextSets,
+    limit: usize,
+    presence: WindowPresence,
+) -> anyhow::Result<()> {
+    if limit == 0 {
+        refs.clear();
+        return Ok(());
+    }
+    let _reads = crate::source::read_scope();
+    let mut plan = RefQuery::new(query, text_sets);
+    let mut writer: Option<Option<crate::catalog::Writer>> = None;
+    let mut keep = vec![false; refs.len()];
+    let mut selected = 0;
+    for (index, r) in refs.iter().enumerate() {
+        // An absent ref cannot appear in an Existing window, so its body is not needed.
+        if matches!(presence, WindowPresence::Existing) && r.path.metadata().is_err() {
+            continue;
+        }
+        let matches = match plan.cheap(r)? {
+            Tri::True => true,
+            Tri::False => false,
+            Tri::Unknown => {
+                let matched = plan.reduce(r)?;
+                if let Some(counted) = matched.counted {
+                    if let Some(writer) = writer.get_or_insert_with(crate::catalog::Writer::open) {
+                        writer.record_counted(r, &matched.source, counted);
+                    }
+                }
+                matched.decision?
+            }
+        };
+        if matches {
+            keep[index] = true;
+            selected += 1;
+            if selected == limit {
+                break;
+            }
+        }
+    }
+    let mut decisions = keep.into_iter();
+    refs.retain(|_| decisions.next().expect("one decision per ref"));
+    Ok(())
+}
+
 /// Apply a parsed query to a ref list in place: prune with the catalog-cheap prefilter, then — if
 /// the query has any parse/index/events/forest/counted term — evaluate each survivor against the
 /// indexed text membership and catalog's affordance counts, keeping a definite match and dropping
@@ -554,33 +666,13 @@ impl ExtFacts for RefFacts<'_> {
 /// `cv serve`'s `/api/stats?q=` all go through here, so `-q` means the same thing on every door.
 pub fn filter_refs(refs: &mut Vec<SessionRef>, query: &SessionQuery, text_sets: &TextSets) -> anyhow::Result<()> {
     let _reads = crate::source::read_scope();
-    let heavy = query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest();
-    let table = query.needs_counted().then(crate::catalog::AffordanceTable::load);
-    let mut probe = crate::source::Probe::default();
+    let mut plan = RefQuery::new(query, text_sets);
     // Plan cheap decisions serially, sharing dependency probes. Do not mutate the caller's
     // list until every fallible decision succeeds.
     let mut keep = vec![false; refs.len()];
     let mut pending = Vec::new();
     for (index, r) in refs.iter().enumerate() {
-        if !query.prefilter(r) {
-            continue;
-        }
-        if !heavy && !query.needs_counted() {
-            keep[index] = true;
-            continue;
-        }
-        let cheap_facts = RefFacts {
-            id: &r.id,
-            text_sets,
-            counts: table
-                .as_ref()
-                .and_then(|t| t.counts_with_probe(r, &probe.snapshot(r), &mut probe)),
-        };
-        match query.eval(&Facts {
-            r,
-            session: None,
-            ext: &cheap_facts,
-        })? {
+        match plan.cheap(r)? {
             Tri::True => keep[index] = true,
             Tri::False => {}
             Tri::Unknown => pending.push(index),
@@ -664,6 +756,119 @@ mod tests {
                 HashSet::new()
             }
         })
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn limited_window_publishes_only_demanded_counts_and_reuses_them() {
+        let world = cv_testkit::World::in_process("query_window_work");
+        let refs: Vec<_> = (0..3)
+            .map(|i| {
+                let block = if i == 0 {
+                    serde_json::json!({"type":"text","text":"no tool"})
+                } else {
+                    serde_json::json!({"type":"tool_use","id":"call","name":"TodoWrite","input":{"todos":[{"content":"step","status":"pending"}]}})
+                };
+                let id = format!("candidate-{i}");
+                let path = world.write_session(
+                    &id,
+                    &[serde_json::json!({
+                        "type":"assistant","uuid":id,"message":{"role":"assistant","content":[block]}
+                    })],
+                );
+                SessionRef::new(id, crate::Harness::Claude, path)
+            })
+            .collect();
+        let query = SessionQuery::parse("has:plan").unwrap();
+        // Publication is a proxy for successful counted reads, not a byte/read counter.
+        let fresh = || {
+            let table = crate::catalog::AffordanceTable::load();
+            refs.iter().map(|r| table.counts(r).is_some()).collect::<Vec<_>>()
+        };
+        assert_eq!(fresh(), [false, false, false]);
+        let mut zero = refs.clone();
+        filter_refs_limited(&mut zero, &query, &TextSets::empty(), 0, WindowPresence::Existing).unwrap();
+        assert_eq!(fresh(), [false, false, false]);
+        let mut initial = refs.clone();
+        filter_refs_limited(&mut initial, &query, &TextSets::empty(), 1, WindowPresence::Existing).unwrap();
+        assert_eq!(initial[0].id, refs[1].id);
+        assert_eq!(fresh(), [true, true, false]);
+        let mut warm = refs.clone();
+        filter_refs_limited(&mut warm, &query, &TextSets::empty(), 1, WindowPresence::Existing).unwrap();
+        assert_eq!(warm[0].id, initial[0].id);
+        assert_eq!(fresh(), [true, true, false]);
+        // The warm prefix is decided by cheap cached facts; only Unknown invokes reduce.
+        let texts = TextSets::empty();
+        let mut plan = RefQuery::new(&query, &texts);
+        assert!(matches!(plan.cheap(&refs[0]).unwrap(), Tri::False));
+        assert!(matches!(plan.cheap(&refs[1]).unwrap(), Tri::True));
+        assert!(matches!(plan.cheap(&refs[2]).unwrap(), Tri::Unknown));
+        let mut full = refs.clone();
+        filter_refs(&mut full, &query, &TextSets::empty()).unwrap();
+        assert_eq!(
+            full.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            refs[1..].iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(fresh(), [true, true, true]);
+    }
+
+    #[test]
+    fn limited_window_reads_needed_candidates_and_ignores_lower_ranked_errors() {
+        let world = cv_testkit::World::in_process("query_window_errors");
+        let good = world.write_session(
+            "good",
+            &[serde_json::json!({
+                "type":"assistant","uuid":"good","message":{"role":"assistant","content":[
+                    {"type":"tool_use","id":"call","name":"Edit","input":{"file_path":"a.rs"}}
+                ]}
+            })],
+        );
+        let bad = world.home.join("unreadable-directory.jsonl");
+        std::fs::create_dir(&bad).unwrap();
+        let refs = vec![
+            SessionRef::new("good", crate::Harness::Claude, good),
+            SessionRef::new("bad", crate::Harness::Claude, bad),
+        ];
+        let query = SessionQuery::parse("tool:edit").unwrap();
+        let mut one = refs.clone();
+        filter_refs_limited(&mut one, &query, &TextSets::empty(), 1, WindowPresence::Existing).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].id, "good");
+        let mut two = refs.clone();
+        assert!(filter_refs_limited(&mut two, &query, &TextSets::empty(), 2, WindowPresence::Existing).is_err());
+        assert_eq!(
+            two.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            refs.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert!(filter_refs(&mut refs.clone(), &query, &TextSets::empty()).is_err());
+        let mut zero = refs;
+        filter_refs_limited(&mut zero, &query, &TextSets::empty(), 0, WindowPresence::Any).unwrap();
+        assert!(zero.is_empty());
+    }
+
+    #[test]
+    fn limited_window_presence_preserves_ascending_preselection_and_boolean_shortcircuit() {
+        let world = cv_testkit::World::in_process("query_window_presence");
+        let missing = missing_source();
+        let path = world.home.join("present-unreadable.jsonl");
+        std::fs::create_dir(&path).unwrap();
+        let present = SessionRef::new("present", crate::Harness::Claude, path);
+        let refs = vec![missing.clone(), present.clone()];
+        let query = SessionQuery::parse("tool:edit OR text:hit").unwrap();
+        let texts = TextSets::resolve(&query, |_| refs.iter().map(|r| r.id.clone()).collect());
+        let mut existing = refs.clone();
+        filter_refs_limited(&mut existing, &query, &texts, 1, WindowPresence::Existing).unwrap();
+        assert_eq!(existing[0].id, present.id);
+        let mut any = refs.clone();
+        filter_refs_limited(&mut any, &query, &texts, 1, WindowPresence::Any).unwrap();
+        assert_eq!(any[0].id, missing.id);
+        // All rows share rank in this input. Window selection retains the exact stable tie order.
+        let mut all = refs.clone();
+        filter_refs_limited(&mut all, &query, &texts, usize::MAX, WindowPresence::Any).unwrap();
+        assert_eq!(
+            all.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            refs.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -985,12 +1190,14 @@ mod tests {
         assert_eq!(crate::MessageSink::message(&mut sink, message), crate::Flow::Stop);
         assert!(crate::MessageSink::take_error(&mut sink).is_some());
         let mut refs = vec![r.clone()];
-        assert!(filter_refs(
-            &mut refs,
-            &SessionQuery::parse("tool:edit").unwrap(),
-            &TextSets::empty()
-        )
-        .is_err());
+        assert!(
+            filter_refs(
+                &mut refs,
+                &SessionQuery::parse("tool:edit").unwrap(),
+                &TextSets::empty()
+            )
+            .is_err()
+        );
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, r.id);
     }
