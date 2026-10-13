@@ -1,0 +1,371 @@
+diff --git a/crates/cv-core/src/discover_cache.rs b/crates/cv-core/src/discover_cache.rs
+index 362e12b9..d994a1ad 100644
+--- a/crates/cv-core/src/discover_cache.rs
++++ b/crates/cv-core/src/discover_cache.rs
+@@ -218,12 +218,28 @@ where
+ {
+     let mut reads = crate::source::ReadSet::default();
+     reads.record(path);
+-    let Some((mtime_ns, size)) = stat_key(path) else {
+-        return scan();
+-    };
++    let key = stat_key(path);
+     let context = read::Context::current();
+     let cache = context.cache();
+     clear_invalidated(&cache);
++    scan_captured(path, reads, key, scan, &context, &cache, false)
++}
++
++fn scan_captured<F>(
++    path: &Path,
++    reads: crate::source::ReadSet,
++    key: Option<(u64, u64)>,
++    scan: F,
++    context: &read::Context,
++    cache: &Cache,
++    persisted_checked: bool,
++) -> Vec<SessionRef>
++where
++    F: FnOnce() -> Vec<SessionRef>,
++{
++    #[cfg(not(feature = "sqlite"))]
++    let _ = (context, persisted_checked);
++    let Some((mtime_ns, size)) = key else { return scan() };
+     let candidate = {
+         let entries = cache.entries.read().unwrap();
+         entries
+@@ -239,21 +255,21 @@ where
+     }
+     // Do not reload an existing process entry, even when stale or invalid: a fresh scan replaces it.
+     #[cfg(feature = "sqlite")]
+-    if !cache.entries.read().unwrap().contains_key(path) {
++    if !persisted_checked && !cache.entries.read().unwrap().contains_key(path) {
+         #[cfg(test)]
+         context.note_lookup();
+         let loaded = context
+             .with_connection(|conn| load_entry(conn, path, (mtime_ns, size)))
+             .flatten();
+         // A lazy standalone open may migrate interpretation; clear before retaining this scan.
+-        clear_invalidated(&cache);
++        clear_invalidated(cache);
+         if let Some(mut entry) = loaded {
+             #[cfg(test)]
+             context.note_row();
+             // Decode outside locks, then choose the actual current process entry. A concurrent
+             // scan/count update must win over the older SQL snapshot, including on return.
+             entry.payload.parsed();
+-            let candidate = admit_loaded(&cache, path, entry, (mtime_ns, size), &reads);
++            let candidate = admit_loaded(cache, path, entry, (mtime_ns, size), &reads);
+             if let Some(refs) = candidate {
+                 if reads.fresh(&mut crate::source::Probe::default()) {
+                     return refs;
+@@ -282,6 +298,136 @@ where
+     refs
+ }
+ 
++/// Scan already-enumerated demands in bounded chunks. Only matching requested tuples are read;
++/// decoded entries never retain the SQL connection, and current process entries always win.
++pub(crate) fn cached_scan_batch<F>(paths: Vec<PathBuf>, scan: F) -> Vec<SessionRef>
++where
++    F: Fn(&Path) -> Vec<SessionRef> + Sync + Send,
++{
++    if paths.len() <= 1 {
++        return paths
++            .into_iter()
++            .flat_map(|path| cached_scan_many(&path, || scan(&path)))
++            .collect();
++    }
++    let context = read::Context::current();
++    let cache = context.cache();
++    clear_invalidated(&cache);
++    let mut paths = paths.into_iter();
++    let mut result = Vec::new();
++    loop {
++        // 128 bounds transient encoded payloads and SQLite parameters, not a crossover claim.
++        let chunk: Vec<_> = paths
++            .by_ref()
++            .take(128)
++            .map(|path| {
++                let mut reads = crate::source::ReadSet::default();
++                reads.record(&path);
++                let key = stat_key(&path);
++                (path, reads, key)
++            })
++            .collect();
++        if chunk.is_empty() {
++            break;
++        }
++        #[cfg(feature = "sqlite")]
++        let checked = {
++            let demands: Vec<_> = {
++                let entries = cache.entries.read().unwrap();
++                chunk
++                    .iter()
++                    .enumerate()
++                    .filter_map(|(index, (path, _, key))| {
++                        (!entries.contains_key(path))
++                            .then_some(key.map(|key| (index, path, key)))
++                            .flatten()
++                    })
++                    .collect()
++            };
++            let loaded = if demands.is_empty() {
++                Some(Vec::new())
++            } else {
++                #[cfg(test)]
++                context.note_lookup();
++                context
++                    .with_connection(|connection| load_batch(connection, &demands))
++                    .flatten()
++            };
++            clear_invalidated(&cache);
++            if let Some(loaded) = loaded {
++                for (index, entry) in loaded {
++                    #[cfg(test)]
++                    context.note_row();
++                    let (path, reads, _) = &chunk[index];
++                    admit_batch(&cache, path, entry, reads);
++                }
++                true // A successful negative query is already checked, including malformed rows.
++            } else {
++                false
++            } // Tolerant SQL failure preserves individual keyed fallback.
++        };
++        #[cfg(not(feature = "sqlite"))]
++        let checked = false;
++        result.extend(crate::par_flat_map(chunk, |(path, reads, key)| {
++            context.run(|| scan_captured(&path, reads, key, || scan(&path), &context, &cache, checked))
++        }));
++    }
++    result
++}
++
++#[cfg(feature = "sqlite")]
++fn admit_batch(cache: &Cache, path: &Path, mut entry: Entry, reads: &crate::source::ReadSet) {
++    entry.payload.parsed(); // Decode after releasing SQL lock.
++    if entry.payload.known().is_some_and(|(_, captured)| captured == reads) {
++        cache
++            .entries
++            .write()
++            .unwrap()
++            .entry(path.to_path_buf())
++            .or_insert(entry);
++    }
++}
++
++#[cfg(feature = "sqlite")]
++fn load_batch(conn: &rusqlite::Connection, demands: &[(usize, &PathBuf, (u64, u64))]) -> Option<Vec<(usize, Entry)>> {
++    use rusqlite::types::Value;
++    let mut sql = String::from("WITH requested(path,mtime_ns,size,slot) AS (VALUES ");
++    let mut parameters = Vec::with_capacity(demands.len() * 3 + 1);
++    for (i, (slot, path, key)) in demands.iter().enumerate() {
++        if i != 0 {
++            sql.push(',');
++        }
++        sql.push_str(&format!("(?,?,?,{slot})"));
++        parameters.extend([
++            Value::Text(path.to_string_lossy().into_owned()),
++            Value::Integer(key.0 as i64),
++            Value::Integer(key.1 as i64),
++        ]);
++    }
++    sql.push_str(") SELECT requested.slot,scan_cache.mtime_ns,scan_cache.size,refs,source_reads FROM requested JOIN scan_cache ON scan_cache.path=requested.path AND scan_cache.mtime_ns=requested.mtime_ns AND scan_cache.size=requested.size WHERE interpretation_version=?");
++    parameters.push(Value::Integer(INTERPRETATION_VERSION as i64));
++    let mut statement = conn.prepare_cached(&sql).ok()?;
++    let result = statement
++        .query_map(rusqlite::params_from_iter(parameters), |row| {
++            Ok((
++                row.get::<_, usize>(0)?,
++                Entry {
++                    mtime_ns: row.get::<_, i64>(1)? as u64,
++                    size: row.get::<_, i64>(2)? as u64,
++                    payload: Payload::Encoded {
++                        refs: row.get(3)?,
++                        reads: row.get(4)?,
++                    },
++                    dirty: false,
++                },
++            ))
++        })
++        .ok()?
++        .collect::<Result<Vec<_>, _>>()
++        .ok();
++    result
++}
++
+ /// Original before-read metadata, never a fresh post-discovery stamp.
+ #[cfg(feature = "sqlite")]
+ pub(crate) fn captured_reads(path: &Path) -> Option<crate::source::ReadSet> {
+@@ -665,6 +811,65 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn batched_snapshot_cannot_replace_newer_counts_or_hide_source_mutation() {
++        let world = cv_testkit::World::in_process("scan-batch-admission");
++        let path = world.base.join("source");
++        std::fs::write(&path, "metadata").unwrap();
++        cached_scan(&path, || {
++            Some(SessionRef::new("counted", crate::Harness::Claude, path.clone()))
++        });
++        persist(false);
++        let conn = crate::catalog::open_db().unwrap();
++        let key = stat_key(&path).unwrap();
++        let mut reads = crate::source::ReadSet::default();
++        reads.record(&path);
++        let (_, snapshot) = load_batch(&conn, &[(0, &path, key)]).unwrap().pop().unwrap();
++        fill_count(&conn, &path, crate::Harness::Claude, "counted", 7);
++        let cache = current_cache();
++        admit_batch(&cache, &path, snapshot, &reads);
++        let context = read::Context::current();
++        assert_eq!(
++            scan_captured(
++                &path,
++                reads.clone(),
++                Some(key),
++                || panic!("newer hit"),
++                &context,
++                &cache,
++                true
++            )[0]
++            .message_count,
++            7
++        );
++        std::fs::write(&path, "appended metadata").unwrap();
++        let result = scan_captured(
++            &path,
++            reads,
++            Some(key),
++            || vec![SessionRef::new("rescanned", crate::Harness::Claude, path.clone())],
++            &context,
++            &cache,
++            true,
++        );
++        assert_eq!(result[0].id, "rescanned");
++        assert_eq!(
++            cache.entries.read().unwrap()[&path].size,
++            key.1,
++            "before-read tuple stays conservative after a racing mutation"
++        );
++        assert_eq!(
++            cached_scan(&path, || Some(SessionRef::new(
++                "next",
++                crate::Harness::Claude,
++                path.clone()
++            )))
++            .unwrap()
++            .id,
++            "next"
++        );
++    }
++
+     #[test]
+     fn failed_flush_retries_and_prunes_newly_vanished_entries() {
+         let w = cv_testkit::World::in_process("scan-persist-retry");
+diff --git a/crates/cv-core/src/discover_cache/read.rs b/crates/cv-core/src/discover_cache/read.rs
+index 93c244d8..e0bd8992 100644
+--- a/crates/cv-core/src/discover_cache/read.rs
++++ b/crates/cv-core/src/discover_cache/read.rs
+@@ -183,6 +183,78 @@ mod tests {
+         (Context::from_connection(connection), weak)
+     }
+ 
++    #[test]
++    fn requested_batch_only_loads_matching_tuples_and_negative_results_are_final() {
++        let world = cv_testkit::World::in_process("scan-demand-batch");
++        let paths: Vec<_> = (0..5).map(|i| world.base.join(format!("source-{i}"))).collect();
++        for path in &paths[..4] {
++            std::fs::write(path, "metadata").unwrap();
++        }
++        let conn = crate::catalog::open_at(&world.base.join("catalog.db")).unwrap();
++        for (i, path) in paths[..4].iter().enumerate() {
++            row(&conn, path, &format!("stored-{i}"));
++        }
++        conn.execute(
++            "UPDATE scan_cache SET refs='malformed' WHERE path=?1",
++            [paths[1].to_string_lossy()],
++        )
++        .unwrap();
++        conn.execute("DELETE FROM scan_cache WHERE path=?1", [paths[2].to_string_lossy()])
++            .unwrap();
++        conn.execute(
++            "UPDATE scan_cache SET size=size+1 WHERE path=?1",
++            [paths[3].to_string_lossy()],
++        )
++        .unwrap();
++        let unrelated = world.base.join("unrelated");
++        std::fs::write(&unrelated, "metadata").unwrap();
++        row(&conn, &unrelated, "unrelated");
++        let context = Context::from_connection(Arc::new(std::sync::Mutex::new(conn)));
++        let scans = std::sync::atomic::AtomicUsize::new(0);
++        let refs = context.run(|| {
++            super::super::cached_scan_batch(paths.clone(), |_| {
++                scans.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                Vec::new()
++            })
++        });
++        assert_eq!(refs.len(), 1);
++        assert_eq!(refs[0].id, "stored-0");
++        assert_eq!(scans.load(std::sync::atomic::Ordering::Relaxed), 4);
++        assert_eq!(
++            context.work(),
++            (0, 1, 2),
++            "one SQL batch, including malformed demanded row, without duplicate negative lookups"
++        );
++        assert!(!context.cache().entries.read().unwrap().contains_key(&unrelated));
++    }
++
++    #[test]
++    fn failed_batch_query_preserves_keyed_fallback() {
++        let world = cv_testkit::World::in_process("scan-batch-failure");
++        let paths: Vec<_> = (0..3).map(|i| world.base.join(format!("source-{i}"))).collect();
++        for path in &paths {
++            std::fs::write(path, "metadata").unwrap();
++        }
++        let conn = crate::catalog::open_at(&world.base.join("catalog.db")).unwrap();
++        conn.execute_batch("DROP TABLE scan_cache").unwrap();
++        let context = Context::from_connection(Arc::new(std::sync::Mutex::new(conn)));
++        let refs = context.run(|| {
++            super::super::cached_scan_batch(paths.clone(), |path| {
++                vec![crate::SessionRef::new(
++                    path.file_name().unwrap().to_str().unwrap(),
++                    crate::Harness::Claude,
++                    path.to_path_buf(),
++                )]
++            })
++        });
++        assert_eq!(refs.len(), 3);
++        assert_eq!(
++            context.work(),
++            (0, 4, 0),
++            "failed batch plus three tolerant keyed fallback attempts"
++        );
++    }
++
+     #[test]
+     fn scoped_capability_restores_nested_and_early_drop_and_closes_connection() {
+         let world = cv_testkit::World::in_process("scan-scopes");
+diff --git a/crates/cv-core/src/harness/claude.rs b/crates/cv-core/src/harness/claude.rs
+index 3d2176e6..b3cbb091 100644
+--- a/crates/cv-core/src/harness/claude.rs
++++ b/crates/cv-core/src/harness/claude.rs
+@@ -301,14 +301,16 @@ impl Adapter for Claude {
+                     .is_some_and(|n| n.ends_with(".flat.jsonl"))
+             })
+             .collect();
+-        Ok(crate::par_discovery_filter_map(paths, |path| {
+-            crate::discover_cache::cached_scan(&path, || match scan(&path) {
++        Ok(crate::discover_cache::cached_scan_batch(paths, |path| {
++            match scan(path) {
+                 Ok(r) => Some(r),
+                 Err(e) => {
+                     eprintln!("cv: skipping {}: {e:#}", path.display());
+                     None
+                 }
+-            })
++            }
++            .into_iter()
++            .collect()
+         }))
+     }
+ 

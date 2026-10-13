@@ -318,3 +318,40 @@ raw profiles/fixtures/targets remain in `cv-cachegrind-control` under
 `/scratch/keyed-discovery-cpu`; host evidence/report is at
 `/Users/ember/dev/cv-worktrees/keyed-discovery-cpu-evidence`. Existing artifacts
 were retained; installed CLI and real stores were untouched.
+
+#### Rejected bounded requested-path batching
+
+[The negative experiment](results/discovery-request-batch-rejected-arm64.json)
+applies only [this retained patch](results/discovery-request-batch-rejected.patch)
+to frozen `b199c972`, preserving the original source inodes, seeds, canonical
+binary/catalog paths and output controls. Claude's enumerated demands are grouped
+in chunks of128; SQL admits only matching path/stat/version tuples, decoded outside
+locks, with newer process entries winning. Shared before-read scan guards avoid an
+extra stat; single demands and SQL failures retain keyed fallback. No schema or
+persistent cache was added. This implementation **does not land**.
+
+Full-demand counts536,559,625/536,460,083 recover only1.790% versus keyed and
+remain7.002% above the bulk baseline. Scoped counts3,948,611/3,948,615 preserve
+the scoped win. Exact old native/profiled/cross-revision outputs remain equal.
+Thirteen cache/read tests,10catalog controls, production core clippy and a
+no-default check pass (existing feature-related warnings); these establish safety
+of the rejected experiment, not sufficient operation benefit.
+
+Full attribution shows keyed versus bulk adds22.822M SQLite-source instructions,
+5.564M pthread mutex lock/unlock-source instructions,2.648M allocator and2.490M
+memcmp. Summed function attribution assigns1.503M added instructions to per-path
+Context::run,0.665M to admit_loaded and0.401M to load_entry. Direct source guard
+attribution stays2.257M→2.228M; this is not repeated large source-guard work.
+Batching saves8.394M SQLite-source instructions but adds3.551M allocator,
+0.655M formatting and0.561M memcpy. Function/source totals are disjoint source
+attributions, not inclusive call-tree costs; inlining/codegen can redistribute them.
+There is no supported simple IN-query hypothesis that removes the remaining
+indexed lookups while keeping demanded tuple guards. Retain the89% scoped benefit
+and explicit9% forced-full tradeoff rather than add machinery for1.8% recovery.
+
+[Hybrid reproduction](discovery-batch-rejected-control.py) reuses original frozen
+fixtures/seeds and profiles a separately built hybrid binary twice per case;
+only the retained patch is applied, with all affected crates forced to rebuild.
+Raw profiles, the final additional chunk-bound test patch and logs are retained at
+`/Users/ember/dev/cv-worktrees/keyed-discovery-batch-evidence` and container volume
+`/scratch/keyed-discovery-cpu`. The exclusive container is stopped after capture.

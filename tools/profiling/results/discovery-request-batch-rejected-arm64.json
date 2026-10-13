@@ -1,0 +1,571 @@
+{
+  "decision": "Rejected: extra batching machinery recovers only1.790% of keyed full-demand cost; no implementation change lands",
+  "measured_patch_sha256": "4a92f73eaee1b1404fc272032ffce12c0899db6d5c253985a31ad04c08d07b3a",
+  "measured_source": "b199c9721390cab54d241e194f1a6c1d38d280b9 plus retained experiment patch",
+  "full_bulk_vs_batch": {
+    "before_binary_sha256": "f098ae4e1d6d1c1d2900333210ab813868b5fc2518b56c73241b62f0e895ecc7",
+    "after_binary_sha256": "a17627d05585a58698658bdf3ef267649af33fd55f4bd20a41ce0a3855bfb103",
+    "before_Ir": [
+      501433563,
+      501373628
+    ],
+    "after_Ir": [
+      536559625,
+      536460083
+    ],
+    "mean_instruction_reduction_percent": -7.001596880252126,
+    "matched_control_fields": [
+      "command",
+      "input_sha256",
+      "input_metadata_sha256",
+      "seed_catalog_sha256",
+      "seed_metadata_sha256",
+      "catalog_home",
+      "harness_home",
+      "rayon_threads",
+      "catalog_max_stale_secs",
+      "runtime_rustflags",
+      "valgrind",
+      "architecture",
+      "output_mode",
+      "semantic_output",
+      "stderr_output"
+    ],
+    "build_controls_verified": true,
+    "matched_build_fields": [
+      "rustc",
+      "llvm",
+      "profile",
+      "core_features",
+      "rustflags",
+      "image_manifest",
+      "cpus",
+      "memory_bytes"
+    ]
+  },
+  "full_keyed_vs_batch": {
+    "before_binary_sha256": "c88db936cb9c377c46493a5562f00338e96f72762eab2e1a1f96d236c997b06a",
+    "after_binary_sha256": "a17627d05585a58698658bdf3ef267649af33fd55f4bd20a41ce0a3855bfb103",
+    "before_Ir": [
+      546727785,
+      545854238
+    ],
+    "after_Ir": [
+      536559625,
+      536460083
+    ],
+    "mean_instruction_reduction_percent": 1.7904664902215761,
+    "matched_control_fields": [
+      "command",
+      "input_sha256",
+      "input_metadata_sha256",
+      "seed_catalog_sha256",
+      "seed_metadata_sha256",
+      "catalog_home",
+      "harness_home",
+      "rayon_threads",
+      "catalog_max_stale_secs",
+      "runtime_rustflags",
+      "valgrind",
+      "architecture",
+      "output_mode",
+      "semantic_output",
+      "stderr_output"
+    ],
+    "build_controls_verified": true,
+    "matched_build_fields": [
+      "rustc",
+      "llvm",
+      "profile",
+      "core_features",
+      "rustflags",
+      "image_manifest",
+      "cpus",
+      "memory_bytes"
+    ]
+  },
+  "scoped_bulk_vs_batch": {
+    "before_binary_sha256": "f098ae4e1d6d1c1d2900333210ab813868b5fc2518b56c73241b62f0e895ecc7",
+    "after_binary_sha256": "a17627d05585a58698658bdf3ef267649af33fd55f4bd20a41ce0a3855bfb103",
+    "before_Ir": [
+      36874230,
+      36857176
+    ],
+    "after_Ir": [
+      3948611,
+      3948615
+    ],
+    "mean_instruction_reduction_percent": 89.28919651959437,
+    "matched_control_fields": [
+      "command",
+      "input_sha256",
+      "input_metadata_sha256",
+      "seed_catalog_sha256",
+      "seed_metadata_sha256",
+      "catalog_home",
+      "harness_home",
+      "rayon_threads",
+      "catalog_max_stale_secs",
+      "runtime_rustflags",
+      "valgrind",
+      "architecture",
+      "output_mode",
+      "semantic_output",
+      "stderr_output"
+    ],
+    "build_controls_verified": true,
+    "matched_build_fields": [
+      "rustc",
+      "llvm",
+      "profile",
+      "core_features",
+      "rustflags",
+      "image_manifest",
+      "cpus",
+      "memory_bytes"
+    ]
+  },
+  "hybrid_controls": {
+    "warm": {
+      "command": [
+        "/scratch/keyed-discovery-cpu/runtime/cv",
+        "ls",
+        "--json",
+        "--harness",
+        "claude",
+        "--limit",
+        "100000",
+        "--fresh"
+      ],
+      "binary_sha256": "a17627d05585a58698658bdf3ef267649af33fd55f4bd20a41ce0a3855bfb103",
+      "input_sha256": "c8e1104c20e18962cd8dd1f43f8703b43857725a6ec2d1db9e1f3ab3b02d0c15",
+      "input_metadata_sha256": "24a88d4afcf18b2a652ab7f3e244f2301cd6c7ff2663a64665135a83306148dd",
+      "seed_catalog_sha256": "de4f3b0168d0d2f73366caccf2de63cf7517ac1b48b6ade3c8561bb1a1675626",
+      "seed_metadata_sha256": "d40b5280225e68303f8b2d48cf4dcd36dd3e819e44ed8d8979b3d3afe1b82a3d",
+      "output_mode": "bytes",
+      "catalog_home": "/scratch/keyed-discovery-cpu/warm/catalog",
+      "harness_home": "/scratch/keyed-discovery-cpu/warm/home",
+      "rayon_threads": 1,
+      "runtime_rustflags": "",
+      "catalog_max_stale_secs": "3600",
+      "valgrind": "valgrind-3.24.0",
+      "architecture": "aarch64",
+      "Ir": [
+        536559625,
+        536460083
+      ],
+      "Ir_delta": -99542,
+      "stderr_output": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      "semantic_output": {
+        "sha256": "f54d014130b0ea12048e4d69315addf098c7756d487edb154ec96c1abdbbdb7a",
+        "bytes": 5599219
+      },
+      "parity": true,
+      "build": {
+        "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+        "llvm": "23.1.1",
+        "profile": "release opt-level3 thinLTO debug1",
+        "core_features": "default: mmap,sqlite,parallel",
+        "rustflags": "",
+        "image_manifest": [
+          "debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f"
+        ],
+        "cpus": 3,
+        "memory_bytes": 8589934592
+      }
+    },
+    "changed": {
+      "command": [
+        "/scratch/keyed-discovery-cpu/runtime/cv",
+        "ls",
+        "--json",
+        "--harness",
+        "claude",
+        "--limit",
+        "100000"
+      ],
+      "binary_sha256": "a17627d05585a58698658bdf3ef267649af33fd55f4bd20a41ce0a3855bfb103",
+      "input_sha256": "f35dd09c8d588d867430827f62e63f9ef085eb83879ced66400ab05c6d3f6ad8",
+      "input_metadata_sha256": "546dce5624621756256291f43d9136c9ec4e73a10ce00f0e1e000c02c00c2ee4",
+      "seed_catalog_sha256": "af8779d086e182f7d592d57af4a06b6b94b8c8fa1dfa09a7caf86212f348bb56",
+      "seed_metadata_sha256": "cdc513f4a34c7ab7a5303fb893e22497f2b29dd6104dda5d0850603dee7ff8ea",
+      "output_mode": "bytes",
+      "catalog_home": "/scratch/keyed-discovery-cpu/changed/catalog",
+      "harness_home": "/scratch/keyed-discovery-cpu/changed/home",
+      "rayon_threads": 1,
+      "runtime_rustflags": "",
+      "catalog_max_stale_secs": "3600",
+      "valgrind": "valgrind-3.24.0",
+      "architecture": "aarch64",
+      "Ir": [
+        3948611,
+        3948615
+      ],
+      "Ir_delta": 4,
+      "stderr_output": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      "semantic_output": {
+        "sha256": "8d218783397dff91077f4ec24ccac3881a951ad66a43120a643b37682dabaf55",
+        "bytes": 325
+      },
+      "parity": true,
+      "build": {
+        "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+        "llvm": "23.1.1",
+        "profile": "release opt-level3 thinLTO debug1",
+        "core_features": "default: mmap,sqlite,parallel",
+        "rustflags": "",
+        "image_manifest": [
+          "debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f"
+        ],
+        "cpus": 3,
+        "memory_bytes": 8589934592
+      }
+    }
+  },
+  "attribution": {
+    "bulk-to-keyed": {
+      "top_file_increases": [
+        {
+          "name": "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libsqlite3-sys-0.30.1/sqlite3/sqlite3.c",
+          "before": 41838251,
+          "after": 64660153,
+          "delta": 22821902
+        },
+        {
+          "name": "./nptl/./nptl/pthread_mutex_unlock.c",
+          "before": 1049230,
+          "after": 3867417,
+          "delta": 2818187
+        },
+        {
+          "name": "./nptl/./nptl/pthread_mutex_lock.c",
+          "before": 1041181,
+          "after": 3787095,
+          "delta": 2745914
+        },
+        {
+          "name": "./malloc/./malloc/malloc.c",
+          "before": 107042748,
+          "after": 109690794,
+          "delta": 2648046
+        },
+        {
+          "name": "./string/../sysdeps/aarch64/memcmp.S",
+          "before": 6185951,
+          "after": 8675827,
+          "delta": 2489876
+        },
+        {
+          "name": "???",
+          "before": 8992415,
+          "after": 10827420,
+          "delta": 1835005
+        },
+        {
+          "name": "/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/slice/index.rs",
+          "before": 4952203,
+          "after": 5965881,
+          "delta": 1013678
+        },
+        {
+          "name": "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/indexmap-2.14.0/src/inner.rs",
+          "before": 1499946,
+          "after": 2481552,
+          "delta": 981606
+        },
+        {
+          "name": "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hashbrown-0.17.1/src/table.rs",
+          "before": 0,
+          "after": 737280,
+          "delta": 737280
+        },
+        {
+          "name": "/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/str/lossy.rs",
+          "before": 1460950,
+          "after": 2189894,
+          "delta": 728944
+        }
+      ],
+      "cv_function_increases": [
+        {
+          "name": "<cv_core::discover_cache::read::Context>::run::<core::option::Option<cv_core::ir::SessionRef>, cv_core::par_discovery_filter_map<std::path::PathBuf, cv_core::ir::SessionRef, <cv_core::harness::claude::Claude as cv_core::harness::Adapter>::discover::{closure#5}>::{closure#0}::{closure#0}>",
+          "before": 0,
+          "after": 1503291,
+          "delta": 1503291
+        },
+        {
+          "name": "<cv_core::catalog::reader::Reader>::publish_all",
+          "before": 0,
+          "after": 701197,
+          "delta": 701197
+        },
+        {
+          "name": "cv_core::discover_cache::admit_loaded",
+          "before": 0,
+          "after": 664660,
+          "delta": 664660
+        },
+        {
+          "name": "cv_core::rows::session_row",
+          "before": 1875968,
+          "after": 2465792,
+          "delta": 589824
+        },
+        {
+          "name": "<rusqlite::statement::Statement>::query_row::<(alloc::string::String, alloc::string::String), &[&dyn rusqlite::types::to_sql::ToSql], cv_core::discover_cache::load_entry::{closure#0}>",
+          "before": 0,
+          "after": 581632,
+          "delta": 581632
+        }
+      ],
+      "top_function_increases": [
+        {
+          "name": "pthread_mutex_lock@@GLIBC_2.17",
+          "before": 1041181,
+          "after": 3787095,
+          "delta": 2745914
+        },
+        {
+          "name": "sqlite3VdbeExec",
+          "before": 17733284,
+          "after": 20422900,
+          "delta": 2689616
+        },
+        {
+          "name": "__pthread_mutex_unlock_usercnt",
+          "before": 967036,
+          "after": 3568443,
+          "delta": 2601407
+        },
+        {
+          "name": "bcmp",
+          "before": 6185951,
+          "after": 8675827,
+          "delta": 2489876
+        },
+        {
+          "name": "<hashbrown::table::HashTable<usize>>::entry::<indexmap::inner::equivalent<alloc::string::String, serde_json::value::Value, alloc::string::String>::{closure#0}, indexmap::inner::get_hash<alloc::string::String, serde_json::value::Value>::{closure#0}>",
+          "before": 0,
+          "after": 2155886,
+          "delta": 2155886
+        },
+        {
+          "name": "<core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next",
+          "before": 4177400,
+          "after": 6261857,
+          "delta": 2084457
+        },
+        {
+          "name": "vdbeRecordCompareString",
+          "before": 12481,
+          "after": 2056827,
+          "delta": 2044346
+        },
+        {
+          "name": "<indexmap::inner::Core<alloc::string::String, serde_json::value::Value>>::insert_full",
+          "before": 0,
+          "after": 2027520,
+          "delta": 2027520
+        },
+        {
+          "name": "sqlite3BtreeIndexMoveto",
+          "before": 12513,
+          "after": 1840352,
+          "delta": 1827839
+        },
+        {
+          "name": "<cv_core::discover_cache::read::Context>::run::<core::option::Option<cv_core::ir::SessionRef>, cv_core::par_discovery_filter_map<std::path::PathBuf, cv_core::ir::SessionRef, <cv_core::harness::claude::Claude as cv_core::harness::Adapter>::discover::{closure#5}>::{closure#0}::{closure#0}>",
+          "before": 0,
+          "after": 1503291,
+          "delta": 1503291
+        }
+      ]
+    },
+    "keyed-to-batch": {
+      "top_file_increases": [
+        {
+          "name": "./malloc/./malloc/malloc.c",
+          "before": 109690794,
+          "after": 113241633,
+          "delta": 3550839
+        },
+        {
+          "name": "/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/fmt/mod.rs",
+          "before": 24952,
+          "after": 680312,
+          "delta": 655360
+        },
+        {
+          "name": "./string/../sysdeps/aarch64/multiarch/../memcpy.S",
+          "before": 15876720,
+          "after": 16437428,
+          "delta": 560708
+        },
+        {
+          "name": "./string/../sysdeps/aarch64/memcmp.S",
+          "before": 8675827,
+          "after": 9143327,
+          "delta": 467500
+        },
+        {
+          "name": "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/indexmap-2.14.0/src/map.rs",
+          "before": 999424,
+          "after": 1368064,
+          "delta": 368640
+        },
+        {
+          "name": "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rusqlite-0.32.1/src/row.rs",
+          "before": 2409707,
+          "after": 2668459,
+          "delta": 258752
+        },
+        {
+          "name": "/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs",
+          "before": 111180,
+          "after": 353023,
+          "delta": 241843
+        },
+        {
+          "name": "/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/alloc/src/vec/mod.rs",
+          "before": 3040891,
+          "after": 3235543,
+          "delta": 194652
+        },
+        {
+          "name": "/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/iter/adapters/flatten.rs",
+          "before": 209666,
+          "after": 370456,
+          "delta": 160790
+        },
+        {
+          "name": "/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/alloc/src/string.rs",
+          "before": 688625,
+          "after": 815633,
+          "delta": 127008
+        }
+      ],
+      "cv_function_increases": [
+        {
+          "name": "cv_core::discover_cache::cached_scan_batch::<<cv_core::harness::claude::Claude as cv_core::harness::Adapter>::discover::{closure#5}>",
+          "before": 0,
+          "after": 1004011,
+          "delta": 1004011
+        },
+        {
+          "name": "<&cv_core::discover_cache::cached_scan_batch<<cv_core::harness::claude::Claude as cv_core::harness::Adapter>::discover::{closure#5}>::{closure#4} as core::ops::function::FnMut<((std::path::PathBuf, cv_core::source::ReadSet, core::option::Option<(u64, u64)>),)>>::call_mut",
+          "before": 0,
+          "after": 835294,
+          "delta": 835294
+        },
+        {
+          "name": "<alloc::collections::btree::map::BTreeMap<std::path::PathBuf, cv_core::source::Entry> as core::cmp::PartialEq>::eq",
+          "before": 626688,
+          "after": 1253376,
+          "delta": 626688
+        },
+        {
+          "name": "<rusqlite::statement::Statement>::query_map::<(usize, cv_core::discover_cache::Entry), rusqlite::params::ParamsFromIter<alloc::vec::Vec<rusqlite::types::value::Value>>, cv_core::discover_cache::load_batch::{closure#0}>",
+          "before": 0,
+          "after": 469792,
+          "delta": 469792
+        },
+        {
+          "name": "<core::iter::adapters::GenericShunt<rusqlite::row::MappedRows<cv_core::discover_cache::load_batch::{closure#0}>, core::result::Result<core::convert::Infallible, rusqlite::error::Error>> as core::iter::traits::iterator::Iterator>::next",
+          "before": 0,
+          "after": 398496,
+          "delta": 398496
+        }
+      ],
+      "top_function_increases": [
+        {
+          "name": "<indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>>::insert_full",
+          "before": 0,
+          "after": 2322432,
+          "delta": 2322432
+        },
+        {
+          "name": "_int_malloc",
+          "before": 37261264,
+          "after": 38433304,
+          "delta": 1172040
+        },
+        {
+          "name": "cv_core::discover_cache::cached_scan_batch::<<cv_core::harness::claude::Claude as cv_core::harness::Adapter>::discover::{closure#5}>",
+          "before": 0,
+          "after": 1004011,
+          "delta": 1004011
+        },
+        {
+          "name": "<&cv_core::discover_cache::cached_scan_batch<<cv_core::harness::claude::Claude as cv_core::harness::Adapter>::discover::{closure#5}>::{closure#4} as core::ops::function::FnMut<((std::path::PathBuf, cv_core::source::ReadSet, core::option::Option<(u64, u64)>),)>>::call_mut",
+          "before": 0,
+          "after": 835294,
+          "delta": 835294
+        },
+        {
+          "name": "_int_free_chunk",
+          "before": 9120427,
+          "after": 9798053,
+          "delta": 677626
+        },
+        {
+          "name": "<alloc::collections::btree::map::BTreeMap<std::path::PathBuf, cv_core::source::Entry> as core::cmp::PartialEq>::eq",
+          "before": 626688,
+          "after": 1253376,
+          "delta": 626688
+        },
+        {
+          "name": "malloc_consolidate",
+          "before": 5276378,
+          "after": 5866364,
+          "delta": 589986
+        },
+        {
+          "name": "__GI_memcpy",
+          "before": 15838786,
+          "after": 16399494,
+          "delta": 560708
+        },
+        {
+          "name": "<rusqlite::statement::Statement>::query_map::<(usize, cv_core::discover_cache::Entry), rusqlite::params::ParamsFromIter<alloc::vec::Vec<rusqlite::types::value::Value>>, cv_core::discover_cache::load_batch::{closure#0}>",
+          "before": 0,
+          "after": 469792,
+          "delta": 469792
+        },
+        {
+          "name": "bcmp",
+          "before": 8675827,
+          "after": 9143327,
+          "delta": 467500
+        }
+      ]
+    }
+  },
+  "selected_direct_source_Ir": {
+    "bulk": {
+      "/SOURCE/crates/cv-core/src/source.rs": 2256898,
+      "/SOURCE/crates/cv-core/src/discover_cache.rs": 643217,
+      "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap_builder-4.6.0/src/parser/matches/value_source.rs": 17,
+      "/SOURCE/crates/cv-core/src/catalog/reader.rs": 15
+    },
+    "keyed": {
+      "/SOURCE/crates/cv-core/src/source.rs": 2228226,
+      "/SOURCE/crates/cv-core/src/discover_cache.rs": 1007757,
+      "/SOURCE/crates/cv-core/src/discover_cache/read.rs": 197256,
+      "/SOURCE/crates/cv-core/src/catalog/reader.rs": 175,
+      "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap_builder-4.6.0/src/parser/matches/value_source.rs": 17
+    },
+    "batch": {
+      "/SOURCE/crates/cv-core/src/source.rs": 2318338,
+      "/SOURCE/crates/cv-core/src/discover_cache.rs": 845457,
+      "/SOURCE/crates/cv-core/src/discover_cache/read.rs": 66291,
+      "/SOURCE/crates/cv-core/src/catalog/reader.rs": 176,
+      "/scratch/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap_builder-4.6.0/src/parser/matches/value_source.rs": 17
+    }
+  }
+}
