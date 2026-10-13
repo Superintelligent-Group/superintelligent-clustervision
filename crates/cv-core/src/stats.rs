@@ -7,14 +7,14 @@
 //! the dashboard used to accumulate its own totals from whichever sessions the user had clicked,
 //! and said so in the UI.
 
-use crate::ir::{Harness, Message, SessionRef, Usage, home_rel};
+use crate::ir::{home_rel, Harness, Message, SessionRef, Usage};
 use crate::spill::{ExactStrings, Ordered, Record};
 use crate::stream::{Flow, ParseOptions};
 #[cfg(feature = "sqlite")]
 mod usage_cache;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
@@ -988,12 +988,10 @@ mod tests {
         check();
         #[cfg(feature = "sqlite")]
         for r in &refs[..3] {
-            assert!(
-                usage_cache::Cache::new()
-                    .unwrap()
-                    .load(r, &crate::source::Probe::default().snapshot(r))
-                    .is_some()
-            );
+            assert!(usage_cache::Cache::new()
+                .unwrap()
+                .load(r, &crate::source::Probe::default().snapshot(r))
+                .is_some());
         }
         refs.reverse();
         let reordered = TokenStats::compute(&refs).unwrap();
@@ -1038,12 +1036,10 @@ mod tests {
                 expected
             );
         }
-        assert!(
-            usage_cache::Cache::new()
-                .unwrap()
-                .load(&r, &crate::source::Probe::default().snapshot(&r))
-                .is_none()
-        );
+        assert!(usage_cache::Cache::new()
+            .unwrap()
+            .load(&r, &crate::source::Probe::default().snapshot(&r))
+            .is_none());
     }
 
     #[test]

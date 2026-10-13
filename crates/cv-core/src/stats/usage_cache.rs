@@ -3,7 +3,7 @@
 use super::{UsageBatch, UsageHit, UsageRecords};
 use crate::{ir::SessionRef, source::Snapshot, spill::Record};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::{
     io::{BufRead, Read, Write},
     sync::{Arc, Mutex},

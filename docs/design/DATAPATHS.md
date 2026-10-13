@@ -103,7 +103,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
 | Archive | Verified suffix read; bounded message spool and guarded canonical prefix copy; checked streaming payload output | Complete replacement artifact still writes O(output bytes); metadata width remains owned |
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
-| Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; usage rows stage in bounded private storage | Exact dedup disk I/O, repeated usage scans and model roster growth; preserve duplicate precedence and float addition order |
+| Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; ordered usage rows reuse a bounded dependency-validated cache | Cold ledger publication, exact dedup I/O and model roster growth; tiny native sources bypass caching |
 | Reshape/emit | Full IR or raw records, often several owned copies and verification rereads | Full output is required; simultaneous full copies generally are not |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
 
@@ -482,7 +482,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Checked lazy Text demands in JSON output, archive and search; failures propagate before publication.
 - [x] Dataset filter/output staging preserves late selection and byte fidelity with bounded history retention.
 - [x] Matched-query dataset spool CPU: bounded slice decoding preserves exact output and flat heap.
-- [ ] Final stats/Hermes cached-spill CPU and full semantic end-to-end evidence; ordered usage-row reuse is in progress.
+- [x] Ordered usage-row reuse: clean large/tiny CPU controls, exact totals and bounded warm heap.
+- [ ] Final Hermes cached-spill CPU and full semantic end-to-end evidence.
 - [x] Matched release controls for streamed native escaped output; adaptive validation and canonical short-escape bypass preserve exact output.
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
@@ -740,12 +741,36 @@ Rust strings. Forty-eight baseline/candidate native/portable SessionRef hash/len
 an independent oracle. In three alternating clean release pairs at 64 MiB, native first-user
 plain discovery improves 0.036374 to 0.026149 seconds; escaped stays near parity
 (0.184956/0.191024). Named native scans incur about 7/23 ms extra CPU (plain/escaped).
-Portable bounded discovery remains slower than the old whole-file scanner: named plain
-0.022480/0.079927 seconds, named escaped 0.196924/0.860296, first-user escaped
-0.202211/1.239459. This is unfinished work: repeated validation/traversal is being fused and the
-existing bounded native string-endpoint cache is being connected to portable views. The flat-heap
-result does not erase this CPU regression. CPU runs exclude allocation instrumentation and
-hashing; other agent work remained active on the host.
+The initial portable bounded reader regressed 4–6 times against the old whole-file scanner.
+The composed follow-up now fuses strict Value string validation with source admission and reuses
+a bounded cache of 1,024 long-string endpoints in positioned views. At 64 MiB, named escaped
+discovery falls 0.869 to 0.261 seconds, first-user 1.196 to 0.260, unused-body 1.069 to 0.262
+(70–78% less CPU). Against the old whole-file scanner, final escaped cases still cost 28–40%
+more CPU (about 56–73 ms); plain cases add about 4–16 ms. The four-record 16/64 MiB
+controls retain exactly 263,147 bytes plain and 263,144 escaped in both sizes, with constant
+allocation count and traffic. Twelve independent metadata oracles and composed eight range /
+31 JSON and transport tests pass. This is a measured memory/CPU tradeoff, not a universal speed
+claim. CPU runs exclude allocation instrumentation and hashing; other agent work remained active
+on the host.
 
 Integrated Cursor composition also passes the six corpus gates (golden summaries, doctor, query
 facts and secret/path checks), four offline scrub-codec tests and the explicit-root probe build.
+
+
+Warm token statistics now replay versioned ordered usage projections after complete source and
+conditional-dependency validation. Rows retain response identity, parent precedence, EOF fallback
+model and original cost bits; the fold still follows original source order. Corrupt rows discard
+the entire partial fold and restart from sources. SQLite chunks are capped at 64 KiB, source
+payload at 16 MiB, total logical payload at 256 MiB and retained source count at 65,536. These
+are payload budgets, not total SQLite/WAL disk bounds. Atomic source savepoints batch commits
+every 64 sources or 16 MiB; worker-chunk read snapshots release WAL pins. Indexed eviction and
+transactional budget counters avoid a growing full-cache scan per source.
+
+In three alternating clean release controls, 64,000 rows improve from 0.267836 to 0.126928
+seconds CPU warm (52.6% less); first publication costs 0.327402 seconds (22.2% more). A
+7,000-small-file control exposed counterproductive caching, so native Claude/Codex files below
+64 KiB bypass lookup and publication: final warm CPU is 1.003214 versus 0.991521 seconds full
+parse (1.2% difference), cold 1.131421. Both compare exact JSON totals. Separate instrumented
+32,000/64,000-row runs retain exactly 843,101 bytes of peak Rust heap above baseline. Eleven
+native and seven portable scoped tests cover ordering, dependency changes, corruption and budgets.
+These are synthetic controlled workloads; real-fleet token-stat latency remains unmeasured.
