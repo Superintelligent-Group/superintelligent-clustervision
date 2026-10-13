@@ -20,8 +20,11 @@ CARGO_TARGET_DIR=/tmp/my-probe-target CARGO_BUILD_JOBS=2 cargo build --release \
 cp /tmp/my-probe-target/release/examples/store_probe /tmp/my-probe-heap
 ```
 
-Run `OP HARNESS ID PATH`, optionally `--root DIR`, `--mode lazy|bulk|full|complete` and
-`--materialize`; `--mode lazy-extra` retains extras alongside lazy content. The default mode is lazy. The root defaults to the input's parent; for discovery
+Run `OP HARNESS ID PATH`, optionally `--root DIR`, `--mode lazy|lazy-extra|facts|bulk|full|complete` and
+`--materialize`; `--mode lazy-extra` retains full extras alongside lazy content.
+`--mode facts` requests the shared reducer metadata projection; adapters without a projection
+implementation retain full extras. Compare reducer outputs rather than Message JSON across these
+two modes. The default mode is lazy. The root defaults to the input's parent; for discovery
 pass the config/runtime root explicitly (`projects/`, `sessions/`, or `tmp/` lives beneath it).
 Continue expects its global directory containing `sessions/`; LM Studio expects the conversations
 directory containing `*.conversation.json` itself. OpenClaw expects its state directory.

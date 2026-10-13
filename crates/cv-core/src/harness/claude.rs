@@ -13,6 +13,7 @@ use super::{parse_ts, Adapter};
 pub mod adopt;
 mod borrowed;
 pub(crate) mod emit;
+mod facts;
 mod fork;
 mod lean;
 mod metadata;
@@ -624,9 +625,16 @@ fn ingest_bytes(
             return flow;
         }
     }
-    let lean = (!opts.extra && !opts.complete)
-        .then(|| lean::parse(slice).ok())
-        .flatten();
+    let lean = if opts.facts_only() {
+        match facts::parse(slice) {
+            Ok(value) => Some(value),
+            Err(_) => return Flow::Continue,
+        }
+    } else {
+        (!opts.extra && !opts.complete)
+            .then(|| lean::parse(slice).ok())
+            .flatten()
+    };
     let v: Value = match lean.map_or_else(|| serde_json::from_slice(slice), Ok) {
         Ok(v) => v,
         Err(_) => return Flow::Continue,
@@ -1128,7 +1136,7 @@ fn parse_attachment_message(v: &Value, opts: &ParseOptions, span: Option<&SpanCt
     m.parent_id = v.get("parentUuid").and_then(Value::as_str).map(String::from);
     m.timestamp = v.get("timestamp").and_then(Value::as_str).and_then(parse_ts);
     m.content = blocks;
-    let with_extra = opts.extra;
+    let with_extra = opts.wants_full_extra();
     let bag = m.harness_extra_mut(Harness::Claude);
     bag.insert("attachment_type".into(), Value::String(att_type.to_string()));
     if with_extra {
@@ -1610,7 +1618,7 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
     // `Block::ToolResult::details`, not in the harness bag. Gated on `opts.extra` because the
     // sidecar routinely dwarfs the visible transcript and the bulk text passes must not materialize
     // it (that gate is the whole point of `ParseOptions::extra`).
-    if opts.extra {
+    if opts.wants_full_extra() {
         if let Some(tur) = v.get("toolUseResult").filter(|t| !t.is_null()) {
             attach_tool_use_result(&mut blocks, tur);
         }
@@ -1638,7 +1646,7 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
 
     // Everything Claude-specific lands in `extra["claude"]`; the top level stays clean.
     let mut bag = Map::new();
-    if synthetic && !opts.complete {
+    if synthetic && !opts.complete && !opts.facts_only() {
         for key in [
             "isApiErrorMessage",
             "error",
@@ -1651,7 +1659,9 @@ fn parse_message(ty: &str, v: &Value, opts: &ParseOptions, span: Option<&SpanCtx
             }
         }
     }
-    if opts.extra {
+    if opts.facts_only() {
+        facts::collect_message(msg, &mut bag);
+    } else if opts.extra {
         collect_extra(v, msg, &mut bag);
     } else if opts.usage_identity {
         if let Some(id) = msg.get("id").and_then(Value::as_str) {
@@ -1807,7 +1817,9 @@ fn system_msg(v: &Value, text: Text, subtype: &str, opts: &ParseOptions) -> Opti
     };
 
     let mut bag = Map::new();
-    if opts.extra {
+    if opts.facts_only() {
+        facts::collect_compaction(v, &mut bag);
+    } else if opts.extra {
         if !subtype.is_empty() {
             bag.insert("subtype".into(), Value::String(subtype.to_string()));
         }

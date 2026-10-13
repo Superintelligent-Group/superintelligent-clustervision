@@ -51,7 +51,7 @@ fn args() -> Result<Args> {
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--root" => root = Some(PathBuf::from(argv.next().context("--root needs a path")?)),
-            "--mode" => mode = argv.next().context("--mode needs lazy|lazy-extra|bulk|full|complete")?,
+            "--mode" => mode = argv.next().context("--mode needs lazy|lazy-extra|facts|bulk|full|complete")?,
             "--materialize" => materialize = true,
             "--hash-output" => hash_output = true,
             "--prefix-bytes" => prefix_bytes = argv.next().context("--prefix-bytes needs a byte budget")?.parse()?,
@@ -73,7 +73,7 @@ fn args() -> Result<Args> {
                 ))
             }
             "--help" | "-h" => bail!(
-                "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|bulk|full|complete] \
+                "store_probe OP HARNESS ID PATH [--root DIR] [--mode lazy|lazy-extra|facts|bulk|full|complete] \
                  [--materialize] [--hash-output] [--hash-detail] [--raw-order] [--warm-discover] [--query EXPR] [--resume-from CHECKPOINT] [--span OFFSET:LENGTH --escaped --chunk-bytes N --prefix-bytes N]\n\
                  OP: baseline|discard|count|checkpoint|resume|collect|window|affordances|affordance-read|doctor|token-stats|dataset|dataset-collect|tools|tools-collect|query|query-collect|hash|discover|events|events-collected|chunks|checked-chunks|prefix|checked-prefix|resolve|resolved-len|json-len|json-write|json-prefix\n\
                  HARNESS: claude|codex|gemini|openclaw|continue|lmstudio|cline|kimi|kimi-code|grok|qwen|devin|zed|opensession|chatgpt-export|claude-export; use scratch CLUSTERVISION_HOME"
@@ -88,7 +88,10 @@ fn args() -> Result<Args> {
     let path = std::fs::canonicalize(&positional[3]).context("input path")?;
     let root = root.unwrap_or_else(|| path.parent().unwrap_or(Path::new("/")).to_path_buf());
     let root = std::fs::canonicalize(root).context("adapter root")?;
-    if !matches!(mode.as_str(), "lazy" | "lazy-extra" | "bulk" | "full" | "complete") {
+    if !matches!(
+        mode.as_str(),
+        "lazy" | "lazy-extra" | "facts" | "bulk" | "full" | "complete"
+    ) {
         bail!("unknown mode {mode}");
     }
     if chunk_bytes == 0 {
@@ -128,6 +131,7 @@ fn options(mode: &str) -> ParseOptions {
         "full" => ParseOptions::full(),
         "complete" => ParseOptions::complete(),
         "lazy-extra" => ParseOptions::lazy_extra(),
+        "facts" => ParseOptions::facts(),
         _ => ParseOptions::lazy(),
     }
 }

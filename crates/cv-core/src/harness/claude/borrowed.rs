@@ -374,7 +374,7 @@ pub(super) fn ingest(
     };
     let (role, kind, origin) = classify_conversation(role, class, false);
     let mut bag = Map::new();
-    if synthetic {
+    if synthetic && !opts.facts_only() {
         if let Some(value) = record.is_api_error_message {
             bag.insert("isApiErrorMessage".into(), Value::Bool(value));
         }
@@ -389,7 +389,11 @@ pub(super) fn ingest(
             }
         }
     }
-    if opts.extra {
+    if opts.facts_only() {
+        if let Some(id) = serde_json::from_slice::<UsageIdentity>(slice).ok()?.0 {
+            bag.insert("message.id".into(), Value::String(id));
+        }
+    } else if opts.extra {
         let captured: ExtraFields = serde_json::from_slice(slice).ok()?;
         collect_extra_owned(captured.top, captured.message, &mut bag);
         if blocks.iter().any(|b| matches!(b, Block::ToolResult { .. })) {
