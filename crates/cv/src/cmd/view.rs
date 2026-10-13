@@ -384,6 +384,7 @@ fn staged_session_json(
     document: bool,
 ) -> Result<(cv_core::bytes::ByteSource, Option<usize>)> {
     use cv_core::bytes::ByteStage;
+    use std::io::BufWriter;
     struct Selection {
         resolver: cv_core::Resolver,
         seen: usize,
@@ -391,7 +392,7 @@ fn staged_session_json(
         end: Option<usize>,
         tail: Option<usize>,
         tail_messages: std::collections::VecDeque<Message>,
-        stage: ByteStage,
+        stage: BufWriter<ByteStage>,
         budget: Option<usize>,
         bytes: usize,
         count: usize,
@@ -403,7 +404,8 @@ fn staged_session_json(
             if self.next.is_some() {
                 return Ok(());
             }
-            let before = self.stage.len();
+            // Pending bytes belong to the same logical spool; do not flush each frame.
+            let before = self.stage.get_ref().len() + self.stage.buffer().len() as u64;
             let remaining = (self.count > 0)
                 .then(|| self.budget.map(|budget| budget.saturating_sub(self.bytes)))
                 .flatten();
@@ -418,7 +420,8 @@ fn staged_session_json(
                     .budget
                     .is_some_and(|budget| size > budget.saturating_sub(self.bytes))
             {
-                self.stage.truncate(before)?;
+                self.stage.flush()?;
+                self.stage.get_mut().truncate(before)?;
                 self.next = Some(index);
                 return Ok(());
             }
@@ -468,7 +471,7 @@ fn staged_session_json(
         end,
         tail,
         tail_messages: Default::default(),
-        stage: ByteStage::default(),
+        stage: BufWriter::with_capacity(64 * 1024, ByteStage::default()),
         budget: max_bytes,
         bytes: 0,
         count: 0,
@@ -483,11 +486,14 @@ fn staged_session_json(
     for (i, message) in std::mem::take(&mut sink.tail_messages).into_iter().enumerate() {
         sink.accept(message, start + i)?;
     }
-    let frames = sink.stage.finish()?;
-    let mut output = ByteStage::default();
+    let frames = sink.stage.into_inner().map_err(|error| error.into_error())?.finish()?;
+    let mut output = BufWriter::with_capacity(64 * 1024, ByteStage::default());
     super::session_json::write_document(&mut output, &session, &frames, sink.count, document)?;
     output.write_all(b"\n")?;
-    Ok((output.finish()?, sink.next))
+    Ok((
+        output.into_inner().map_err(|error| error.into_error())?.finish()?,
+        sink.next,
+    ))
 }
 
 /// `show --json` / `export --format json`: the whole IR (incl. `extra`), windowed, and — under

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Pack excerpts include checked source-backed text and report unavailable prefixes instead of silently omitting conversational content.
+- CLI JSON staging batches small writes through bounded operation buffers while preserving output, byte budgets, rollback and continuation hints.
 
 - Splice retains only selected messages and moves them into the composition, avoiding materialization and cloning of discarded histories.
 - Fresh discovery avoids rewriting unchanged catalog rows while preserving inventory freshness, session order, source guards, and vanished-file pruning.

@@ -1904,3 +1904,19 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    Refutation: cold callback/prefix-decode counts with exact selected JSON and late EOF metadata,
    plus dependency mutation and independent endpoint-error controls. Existing verified API page
    continuations, watch EOF reuse and stats token-ledger reuse should remain intact.
+### CLI JSON staging write batching (2026-10-12)
+
+CLI selected-message frames and the final pretty Session/OpenSession document now use persistent
+64 KiB BufWriters over their private ByteStages. Frame offsets include pending bytes; rejected
+frames flush before truncation, and both stage finishes propagate deferred write errors. Accepted
+messages do not flush individually or allocate a fresh buffer. The generic budgeted-frame writer
+still counts and validates the complete message while retaining only the remaining-budget prefix;
+first-message soft-cap behavior and EOF metadata remain unchanged.
+
+A deterministic 128-message structural/tiny-fragment control produces identical bytes while
+reducing final document underlying writes from 787,241 to 22 for 1,431,257 output bytes. Compact
+frame writes also fall by over 100 times and remain at most one write per 64 KiB plus one. These
+are writer-call counts, not timing or syscall measurements. Two sequential staging buffers add
+bounded scratch (64 KiB each during their respective phases); private spool I/O and client payload
+sizes are unchanged. Scoped tests cover exact plain/document windows and continuations, rejected
+giant-frame extent/rollback, late-source validation, and deferred flush/finish errors.

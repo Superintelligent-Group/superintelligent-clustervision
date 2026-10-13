@@ -31,17 +31,17 @@ pub(crate) fn write_message_frame(
 /// Count the complete compact frame while retaining only its budget-sized prefix. Discarding
 /// bytes still reports successful writes, so all lazy demands and source checks run to completion.
 pub(crate) fn write_budgeted_message_frame(
-    stage: &mut cv_core::bytes::ByteStage,
+    stage: &mut impl Write,
     message: &cv_core::Message,
     resolver: &cv_core::Resolver,
     remaining: Option<usize>,
 ) -> Result<usize> {
-    struct Capped<'a> {
-        stage: &'a mut cv_core::bytes::ByteStage,
+    struct Capped<'a, W> {
+        stage: &'a mut W,
         count: usize,
         cap: Option<usize>,
     }
-    impl Write for Capped<'_> {
+    impl<W: Write> Write for Capped<'_, W> {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             let n = self
                 .cap
@@ -333,6 +333,76 @@ fn write_framed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Default)]
+    struct Calls {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+    impl Write for Calls {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn persistent_stage_buffers_batch_structural_frames_and_document_tokens() {
+        let mut message = cv_core::Message::new(cv_core::Role::Assistant);
+        message.content.push(cv_core::Block::ToolUse {
+            id: "call".into(), name: "tool".into(), namespace: None,
+            input: serde_json::json!({"rows": (0..128).map(|n| serde_json::json!({"n": n, "s": "x\n"})).collect::<Vec<_>>()}).into(),
+        });
+        let resolver = cv_core::Resolver::new(None);
+        let mut plain = Calls::default();
+        let mut buffered = io::BufWriter::with_capacity(64 * 1024, Calls::default());
+        for _ in 0..128 {
+            write_budgeted_message_frame(&mut plain, &message, &resolver, None).unwrap();
+            write_budgeted_message_frame(&mut buffered, &message, &resolver, None).unwrap();
+        }
+        let buffered = buffered.into_inner().map_err(|e| e.into_error()).unwrap();
+        assert_eq!(buffered.bytes, plain.bytes);
+        assert!(buffered.writes < plain.writes / 100);
+        assert!(buffered.writes <= plain.bytes.len().div_ceil(64 * 1024) + 1);
+        let mut stage = cv_core::bytes::ByteStage::new();
+        stage.write_all(&plain.bytes).unwrap();
+        let spool = stage.finish().unwrap();
+        let session = Session::new("buffered", cv_core::Harness::Codex);
+        let mut plain = Calls::default();
+        let mut buffered = io::BufWriter::with_capacity(64 * 1024, Calls::default());
+        write_document(&mut plain, &session, &spool, 128, true).unwrap();
+        write_document(&mut buffered, &session, &spool, 128, true).unwrap();
+        let buffered = buffered.into_inner().map_err(|e| e.into_error()).unwrap();
+        assert_eq!(buffered.bytes, plain.bytes);
+        assert!(buffered.writes < plain.writes / 100);
+        eprintln!(
+            "document writes {} -> {} for {} bytes",
+            plain.writes,
+            buffered.writes,
+            plain.bytes.len()
+        );
+    }
+
+    #[test]
+    fn buffered_stage_finish_reports_deferred_write_errors() {
+        struct Failed;
+        impl Write for Failed {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::Other.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = io::BufWriter::with_capacity(64 * 1024, Failed);
+        writer.write_all(b"pending frame").unwrap();
+        assert!(writer.flush().is_err());
+        assert!(writer.into_inner().is_err());
+    }
+
     #[test]
     fn rejected_giant_frames_stage_only_remaining_budget_and_still_demand_late_sources() {
         let world = cv_testkit::World::in_process("capped-session-frame");
@@ -343,17 +413,26 @@ mod tests {
         giant.content.push(cv_core::Block::Text {
             text: "giant\n🌙".repeat(1024 * 1024).into(),
         });
-        let mut stage = cv_core::bytes::ByteStage::new();
+        let mut stage = io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::new());
         let first_len = write_budgeted_message_frame(&mut stage, &first, &resolver, None).unwrap();
-        let accepted = stage.len();
+        let accepted = stage.get_ref().len() + stage.buffer().len() as u64;
         let remaining = 7;
         let size = write_budgeted_message_frame(&mut stage, &giant, &resolver, Some(remaining)).unwrap();
         assert!(size > remaining);
         // Stage writes only append here: the final extent is also its peak speculative extent.
-        assert_eq!(stage.len(), accepted + remaining as u64 + 1);
-        stage.truncate(accepted).unwrap();
+        assert_eq!(
+            stage.get_ref().len() + stage.buffer().len() as u64,
+            accepted + remaining as u64 + 1
+        );
+        stage.flush().unwrap();
+        stage.get_mut().truncate(accepted).unwrap();
         let mut session = Session::new("capped", cv_core::Harness::Codex);
-        let spool = stage.finish().unwrap();
+        let spool = stage
+            .into_inner()
+            .map_err(|e| e.into_error())
+            .unwrap()
+            .finish()
+            .unwrap();
         let mut output = Vec::new();
         write_session(&mut output, &session, &spool, None, None, 1).unwrap();
         session.messages.push(first);
