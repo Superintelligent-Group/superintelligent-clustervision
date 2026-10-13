@@ -242,8 +242,10 @@ def selected_payloads(binary, root, env, formats=None, operations=None):
                     reference = None
                     if "doctor" in peaks:
                         reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, True, fd_limit=64)
-                    dataset_reference, _ = probe(binary, ["dataset-collect", *common, "--mode", "full",
-                                                           "--query", "tool:gate-final", "--hash-output"], env, True, fd_limit=64)
+                    dataset_reference = None
+                    if "dataset" in peaks:
+                        dataset_reference, _ = probe(binary, ["dataset-collect", *common, "--mode", "full",
+                                                               "--query", "tool:gate-final", "--hash-output"], env, True, fd_limit=64)
                     for operation in peaks:
                         if operation == "discard":
                             arguments = ["discard", *common, "--mode", "lazy"]
