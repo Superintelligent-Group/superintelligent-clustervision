@@ -551,7 +551,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Fallible Json demands across consumers and native Claude large lazy argument activation; giant composed allocation/parity proof.
 - [x] Structured inputs retain checked Json sources across shared Anthropic/native SDK/export/OpenSession producers, Kimi Code, OpenCode, Goose, Gemini, Codex and Continue, including supported JSON-encoded arguments.
 - [x] Inventory remaining demanded owned details and uncommon producer fallbacks by consumer contract. Gemini display text, Continue system prompt and OpenCode rich/unknown metadata remain explicit owned contracts; OpenCode v2 shell output is a concrete avoidable-payload gap tracked below. This inventory does not assert universal bounds.
-- [ ] OpenCode v2 shell selected output: current native 2.0.25 shell records bypass selected replay and own/copy nested output even for Facts/doctor. Extend existing checked projection, retaining exact command/output fallback and metadata semantics.
+- [x] OpenCode v2 shell selected output uses checked command/output projection, preserving current native corpus, fallback formatting, full metadata and source-error behavior. Native/portable scoped controls and actual doctor allocation/report parity pass; a persistent single-case heap gate is being added.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
@@ -614,7 +614,9 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Continue/LM Studio checked export and bounded title fallback preserve frozen output and direct captured-source failures, including discarded fields and LM whitespace-thinking projection.
 - [ ] Remaining JSONL emitters: Grok, OpenClaw and Qwen still own ordinary session payloads and construct payload-bearing records. Reuse checked writers; preserve native output, thinking, sidecars and source-error behavior. Qwen local-store absence limits fleet evidence, not supported export scope.
 - [ ] SQLite exports (OpenCode/Hermes): retain checked session leaves and construct only demanded rows; reuse prepared inserts and publish an export in one transaction. Current per-row autocommits and whole-session ownership are avoidable. Test exact logical rows/FTS and rollback; row-sized native/contiguous TEXT costs remain explicit.
-- [ ] Same-harness complete preparation outside Claude/Codex/Gemini: establish independent complete-mode metadata/carrier/variant and wire/fidelity parity before enabling checked preparation. Cline/Roo/Continue/LM Studio are the first active group; newly checked writers need their own same-target assessment.
+- [x] Same-harness complete Cline/Roo/Continue/LM Studio preparation retains checked bodies, with independent native/portable complete IR, wire/fidelity, LM variant and late-source controls. Four actual reader-contract controls establish peak-memory savings; higher cumulative allocation on Cline task directories and LM remains an explicit cost under attribution.
+- [ ] Same-harness complete preparation for remaining checked writers: establish metadata/carrier/variant and wire/fidelity parity for OpenClaw/Grok/Qwen/OpenCode/Hermes as their writers become checked.
+- [ ] Native OpenCode 2.x export compatibility: the current writer emits v1 tables; pinned native 2.0.25 get/list reads only v2 tables, and its completed historical migration does not import newly emitted v1 rows. Implement explicit v2 output and native isolated acceptance; do not reset migration markers or use our reader alone as resumability proof.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
 - [x] Prune Thinking, ASCII declassification and ordinary usage-record projections, with whole-operation output parity and CI heap caps.
@@ -3959,3 +3961,19 @@ and an invalid duplicate preceding a valid winner. Native OpenCode scoped tests 
 portable shell/malformed checks pass, as do both library clippy configurations. Unknown types,
 full metadata costs and the WITHOUT ROWID whole-cell fallback remain unchanged. No broad
 producer matrix or timing campaign was added.
+
+
+Root follow-up: `85414ff9` integrates same-target eligibility and `93d32767` integrates OpenCode
+shell projection. Same-target peak reductions do not imply lower cumulative allocation: Cline
+task-directory requested bytes rise 74.7→99.2 MB and LM Studio 49.2→73.8 MB in those controls.
+The source of this additional allocation is under narrow review; the earlier accepted Cline
+cross-target instruction tradeoff is a different workload.
+
+Native OpenCode compatibility is now a confirmed separate gap on already-migrated stores.
+Local pinned v2.0.25 (`b44eea9e20`) and v2.0.26 source agree in `session/sql.ts`, `session/store.ts`
+and `database/v1-migration.bun.ts`: `SessionTable` is `session_v2`, `get`/`list` read that table,
+and migration returns immediately when `migration.v1-v2` has phase `completed`. The committed
+migrated corpus carries that marker. New v1 rows therefore cannot become native-visible through
+that import. Fresh bootstrap concerns remain source-derived until an isolated native check;
+they are not used as a substitute for testing explicit v2 output. Existing v1 output and the
+new transaction repair remain independently useful and retain their stated compatibility scope.
