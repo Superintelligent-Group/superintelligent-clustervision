@@ -2541,13 +2541,20 @@ mod tests {
         raw.extend_from_slice(br#"\ud800"}}"#);
         raw.extend_from_slice(b"\n{\"type\":\"turn_context\",\"payload\":{\"model\":\"late-model\"}}\n");
         std::fs::write(&path, &raw).unwrap();
-        let compressed_path = world.base.join("rollout-corrupt.jsonl.zst");
-        std::fs::write(
-            &compressed_path,
-            ruzstd::encoding::compress_to_vec(raw.as_slice(), ruzstd::encoding::CompressionLevel::Fastest),
-        )
-        .unwrap();
-        for path in [path, compressed_path] {
+        let paths = vec![path];
+        #[cfg(feature = "sqlite")]
+        let paths = {
+            let compressed_path = world.base.join("rollout-corrupt.jsonl.zst");
+            std::fs::write(
+                &compressed_path,
+                ruzstd::encoding::compress_to_vec(raw.as_slice(), ruzstd::encoding::CompressionLevel::Fastest),
+            )
+            .unwrap();
+            let mut paths = paths;
+            paths.push(compressed_path);
+            paths
+        };
+        for path in paths {
             let r = SessionRef::new("corrupt", Harness::Codex, &path);
             for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
                 let expected = old_buffered_oracle(&r, &opts);
