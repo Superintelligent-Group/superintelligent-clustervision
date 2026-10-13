@@ -2301,3 +2301,8 @@ match. Portable preparation also peaks at 1,167,734 bytes for both sizes (legacy
 Frozen-oracle controls cover Source text/arguments, Inline/Span parity, changed ignored Thinking,
 wrong JSON type, report/findings composition, native output and sidecar schema. CLI loader
 coverage proves checked Thinking is retained and findings matches full loading.
+
+Integration at `2c1d4d5f` passes eight core distill controls and four CLI distill controls;
+the preceding title integration passes four enrichment controls. Pinned-toolchain formatting
+also passes after normalizing the enrichment file. These are scoped combined-branch checks;
+the last full local/remote convergence and installed binary remain at `ef75a100`.

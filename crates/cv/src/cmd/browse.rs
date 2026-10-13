@@ -5,7 +5,7 @@
 
 use crate::util::{dim_cwd, parse_harness, session_row, short_id};
 use anyhow::Result;
-use cv_core::ir::{SessionRef, truncate};
+use cv_core::ir::{truncate, SessionRef};
 use cv_core::sanitize::sanitize_line;
 
 /// Apply a parsed query to a ref list in place. The two-phase filter itself is
@@ -584,11 +584,10 @@ mod enrich_tests {
                 .with_view(|view| Ok(view.source_text()?.unwrap()))
                 .unwrap();
             assert!(matches!(text, Text::Source(_)));
-            assert!(
-                text.try_resolve_prefix(&cv_core::Resolver::new(None), 32)
-                    .unwrap()
-                    .starts_with("first source prompt")
-            );
+            assert!(text
+                .try_resolve_prefix(&cv_core::Resolver::new(None), 32)
+                .unwrap()
+                .starts_with("first source prompt"));
             (
                 SessionRef::new(id, Harness::Claude, primary),
                 Scripted {
