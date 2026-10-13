@@ -212,7 +212,7 @@ impl Adapter for Goose {
         // Modern SQLite store.
         if let Some(db) = self.db_path() {
             if let Ok(conn) = open_ro(&db) {
-                if let Ok(refs) = discover_db(&conn, &db) {
+                if let Ok(refs) = conn.read(|reader| discover_db(reader, &db)) {
                     for r in refs {
                         seen_ids.insert(r.id.clone());
                         out.push(r);
@@ -256,8 +256,10 @@ impl Adapter for Goose {
             return Vec::new();
         };
         let data: Option<String> = conn
-            .query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
-                row.get(0)
+            .read(|reader| {
+                Ok(reader.query_row("SELECT extension_data FROM sessions WHERE id = ?1", [&r.id], |row| {
+                    row.get(0)
+                })?)
             })
             .ok()
             .flatten();
