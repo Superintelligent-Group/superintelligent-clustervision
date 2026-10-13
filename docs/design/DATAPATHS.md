@@ -556,7 +556,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Search activation for retained text and original dependency guards; checked labels and semantic cache invalidation.
 - [x] Audit transaction batching and avoid Tantivy writer startup for unchanged refreshes; retain pending compaction.
 - [x] Production byte-tier compaction on a copied 3.78 GB existing fleet index: tiny commits preserve large segments and exact query ID multisets; older-schema geometry, not a current-schema rebuild.
-- [ ] Current-schema full-fleet indexing/merge/query composition beyond existing-index geometry and isolated warm-refresh controls. The frozen current-schema cold sweep now succeeds for 6,889 refs across 13 harnesses with no errors; checksums and SQLite integrity pass. Its unchanged repeat exposes eight guarded-empty Kimi rereads and duplicate OpenClaw copy instability. Those fixes and corrected incremental/full-reference comparisons are active.
+- [x] Current-schema 6,889-reference store composition: cold/unchanged/resumed append/clean rebuild, exact stored-document and representative CLI-query oracles; stable external-sidecar and physical-work limits recorded. The frozen current-schema cold sweep now succeeds for 6,889 refs across 13 harnesses with no errors; checksums and SQLite integrity pass. Its unchanged repeat exposes eight guarded-empty Kimi rereads and duplicate OpenClaw copy instability. Those fixes and corrected incremental/full-reference comparisons are active.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
@@ -3371,3 +3371,49 @@ acquires an `Immediate` transaction before authority validation. A deterministic
 control reproduces the old `SQLITE_BUSY_SNAPSHOT`, then exercises the production transaction
 owner to establish write ownership before output mutation and preserve mismatch rejection.
 This changes lock acquisition, not busy timeouts or retry policy.
+
+### Current-schema production store composition (Sol, 2026-10-13)
+
+Scope is **frozen primary stores plus guarded, observed-stable external sidecars**. The owned
+APFS clone contains 138,156 files (132,873,105,121 logical bytes), with all 16 copied symlinks
+confined to the clone. Current discovery finds 6,889 references across 13 harnesses, resolving
+one duplicate copy into 6,888 global indexed IDs. This differs from the historical 5,960-reference
+adapter comparison. Absolute sidecar references embedded in transcripts still name 335 external
+paths: 287 present and 48 absent. Every captured external identity/existence agrees across the
+baseline, corrected and clean-reference catalogs and the final check. Original frozen file and
+symlink identities/inventories are unchanged. This is not an exhaustive filesystem access trace
+or a claim that every input was frozen; no real store or external sidecar was written.
+
+Actual default-feature release `cv index` cold admission and unchanged reuse run at `1d507ccd`.
+Cold succeeds with 6,888 changed logical sessions; unchanged reports zero changes and errors.
+An 812-byte native append to a 25,913,675-byte checkpointed Claude source preserves its explicit
+indexed title/cwd and adds two turns plus one Edit event. Append and the final independent fresh
+catalog use `9e9d622e`, which only corrects event-publication lock acquisition. The append reports
+8 changed sessions, including one real resumed pass, and zero errors. The independent clean
+reference succeeds over the same final sources. Phase executable hashes are recorded separately.
+
+All 16,035 live stored documents match as a complete multiset between cold/unchanged and between
+append/clean reference. Metadata, canonical counts and all 1,427,474 final event rows also match.
+Tantivy managed-file checksums and SQLite integrity checks pass. Raw `error`, `test`, `cache` and
+the unique append term preserve exact stored-ID multisets. Separately, actual CLI title-plus-text
+membership returns the same 76 rows byte-for-byte; unique append text, with and without its
+preserved title predicate, returns exactly the same one reference in both indexes. These are
+representative product checks, not universal postings, ranking-score or query-language equivalence.
+
+The seven additional append jobs are an accepted fork-inference guard cost: their unchanged
+primary files total **22,224,774 logical bytes**, and their captured sibling readsets contain
+**2,774 dependency records**. Each stamp changes only for the appended sibling. Inference may
+change after growth through mtime eligibility, provisional head completion or an appended compact
+boundary UUID; candidates order by first-record timestamp/path. FTS/events do not directly use
+lineage, but the combined pass publishes `Counter::finish`'s `Kind::Fork` and shares its guarded
+reads. Narrower metadata-only lineage refresh remains a possible future operation improvement,
+with no generalized dependency framework justified here. File lengths and record counts are
+not measured read bytes, physical I/O, stat calls, CPU, heap or latency.
+
+[Aggregate evidence](FTS-FLEET-COMPOSITION.json) preserves exact scope, phases and limits.
+The [streaming stored-document oracle](../../crates/cv-search/examples/fleet_snapshot.rs) avoids
+collecting document bodies. Narrow legacy authority/migration and deterministic lock-order proof
+remain in [event publication controls](../../crates/cv-core/src/events.rs), including
+`published_event_authority_tracks_copy_provenance_and_cwd_atomically` and
+`publication_owns_writer_before_authority_read_and_rejects_intervening_change`; the latter
+reproduces the old WAL snapshot-upgrade failure without another fleet rebuild.
