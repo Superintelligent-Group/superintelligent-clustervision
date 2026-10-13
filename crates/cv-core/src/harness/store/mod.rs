@@ -87,3 +87,5 @@ pub(crate) fn write_jsonl(path: &Path, lines: &[Value]) -> Result<()> {
     }
     stage.publish(path)
 }
+
+pub(crate) mod checked_lines;

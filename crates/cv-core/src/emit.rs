@@ -500,6 +500,8 @@ pub fn parse_for_emit(
                     | Harness::LmStudio
                     | Harness::Hermes
                     | Harness::OpenClaw
+                    | Harness::Grok
+                    | Harness::Qwen
             ));
     if checked {
         options.spans = true;

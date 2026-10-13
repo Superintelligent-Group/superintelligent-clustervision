@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub(crate) mod emit;
+mod selected;
 pub use emit::emit;
 
 pub struct Qwen {
@@ -108,7 +109,11 @@ impl Adapter for Qwen {
     fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             if is_session_jsonl(&r.path) {
-                return stream_session_jsonl(&r.path, sink);
+                return if opts.spans {
+                    selected::stream(&r.path, sink)
+                } else {
+                    stream_session_jsonl(&r.path, sink)
+                };
             }
             // The gemini-cli shape: the streaming machinery (mmap + RawValue for legacy whole-file
             // JSON, line streaming for JSONL recordings) is shared and re-tags the session as Qwen.
@@ -594,6 +599,17 @@ fn payload_str<'a>(rec: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str
 
 /// Translate one `ChatRecord` into 0..1 IR messages.
 fn emit_record(rec: &Map<String, Value>, s: &mut Session, st: &mut ReplayState, sink: &mut dyn MessageSink) -> Flow {
+    emit_record_with_content(rec, s, st, sink, None)
+}
+fn emit_record_with_content(
+    rec: &Map<String, Value>,
+    s: &mut Session,
+    st: &mut ReplayState,
+    sink: &mut dyn MessageSink,
+    content: Option<Vec<Block>>,
+) -> Flow {
+    let mut content = content;
+    let mut blocks = || content.take().unwrap_or_else(|| content_blocks(rec));
     let ty = rec.get("type").and_then(Value::as_str).unwrap_or("");
     let subtype = rec.get("subtype").and_then(Value::as_str);
     let provenance = rec.get("provenance").and_then(Value::as_str);
@@ -606,12 +622,18 @@ fn emit_record(rec: &Map<String, Value>, s: &mut Session, st: &mut ReplayState, 
                 Origin::Human
             };
             let mut m = Message::of_kind(Role::User, MessageKind::Prompt, origin);
-            let (hooked, rest): (Vec<Block>, Vec<Block>) = content_blocks(rec)
+            let (hooked, rest): (Vec<Block>, Vec<Block>) = blocks()
                 .into_iter()
-                .partition(|b| matches!(b, Block::Text { text } if text.trim_start().starts_with(HOOK_CONTEXT_TAG)));
+                .partition(|b| matches!(b, Block::Text { text } if selected::prefix(text, true).is_ok_and(|prefix| prefix.starts_with(HOOK_CONTEXT_TAG))));
             m.content = rest;
             if st.first_prompt.is_none() {
-                st.first_prompt = m.text().map(|t| crate::ir::truncate(&t, 80));
+                st.first_prompt = crate::harness::store::document::text_summary(
+                    m.content
+                        .iter()
+                        .filter_map(|b| if let Block::Text { text } = b { Some(text) } else { None }),
+                    &crate::lazy::Resolver::new(None),
+                    false,
+                );
             }
             if !hooked.is_empty() {
                 // A UserPromptSubmit hook's `additionalContext`: its own Hook turn, after the prompt.
@@ -634,12 +656,12 @@ fn emit_record(rec: &Map<String, Value>, s: &mut Session, st: &mut ReplayState, 
                 _ => Origin::Harness,
             };
             let mut m = Message::of_kind(Role::System, MessageKind::InjectedContext, origin);
-            m.content = content_blocks(rec);
+            m.content = blocks();
             m
         }
         ("assistant", _) => {
             let mut m = Message::of_kind(Role::Assistant, MessageKind::Reply, Origin::Model);
-            m.content = content_blocks(rec);
+            m.content = blocks();
             if let Some(model) = rec.get("model").and_then(Value::as_str) {
                 match st.session_model.as_deref() {
                     None => st.session_model = Some(model.to_string()),
@@ -666,7 +688,7 @@ fn emit_record(rec: &Map<String, Value>, s: &mut Session, st: &mut ReplayState, 
         }
         ("tool_result", _) => {
             let mut m = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
-            m.content = content_blocks(rec);
+            m.content = blocks();
             let tcr = rec.get("toolCallResult");
             let status = tcr.and_then(|t| t.get("status")).and_then(Value::as_str);
             let mut spawned = false;

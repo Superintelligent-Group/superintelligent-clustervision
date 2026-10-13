@@ -4083,8 +4083,8 @@ operations also completed, matching baseline payloads after generated UUID/sessi
 normalization and retaining the same Grok loss warnings; Qwen remained clean.
 
 Evidence stays outside the repository at `../grok-qwen-export-evidence`: preserved baseline
-binaries/results, candidate probe/CLI logs, and native/portable test logs. Same-harness complete
-preparation outside the existing Claude/Codex/Gemini eligibility remains unchanged pending
+binaries/results, candidate probe/CLI logs, and native/portable test logs. At this export milestone, same-harness complete
+preparation outside the existing Claude/Codex/Gemini/Cline/Roo/Continue/LM Studio eligibility remained unchanged pending
 reader-contract proof; this step removes checked export ownership, not every parser/fidelity
 allocation. No broad gates or release were run in this lane.
 ### Checked OpenClaw exports and flat verification reads (Sol, 2026-10-13)
@@ -4202,3 +4202,55 @@ with spans enabled and disabled. Every case rejects with source-changed rather t
 diagnostic. All 29 native OpenClaw tests and ten no-default checked controls pass. Native and
 portable SQLite-enabled library/tests clippy and pinned formatting pass. No operation allocation
 control was repeated for this freshness repair.
+
+
+### Grok/Qwen complete preparation and verification (2026-10-13, finish_grok_qwen)
+
+The export milestone's remaining peaks were concrete reader ownership: Grok ignored parse
+options and decoded complete history rows into Value; modern Qwen likewise decoded every
+ChatRecord and cloned its parts. Verification already requested spans, but these producers
+provided owned bodies. Both now offer actual checked producers when spans are requested.
+The shared JSONL framer scans offsets with a bounded buffer, validates complete Value acceptance,
+and preserves Unicode trimming, malformed/invalid UTF-8/overflow skipping and final EOF records.
+Rejected records get a bounded trim retry, without owning malformed physical rows. Hard I/O
+or captured-source failures propagate rather than establish a successful checked export.
+
+Grok retains the existing turn classifier and pending-reasoning grouping with bounded text
+representatives, checked text/tool arguments, encrypted reasoning, and status enrichment.
+Qwen retains its existing replay classifier with checked ordinary parts, deferred-call arguments,
+canonical tool responses, hook classification and bounded first-prompt title. Complete Grok/Qwen
+have no additional raw-record carrier contract: current owned-reader metadata is preserved.
+Qwen systemPayload bookkeeping and Grok summary/system-prompt metadata remain on their existing
+owned reader paths; the Qwen legacy branch continues through Gemini's established reader.
+Same-target complete preparation is now eligible because the producers support it.
+
+Four native and portable scoped controls passed: frozen all-mode wire/fidelity; real corpus
+wire/fidelity; source failure destination preservation; and complete selected-vs-owned IR parity
+over every corpus reference plus large synthetic text/argument/result/reasoning bodies,
+malformed/invalid UTF-8/overflow/scalar/
+Unicode-wrapper rows, all thinking modes, and changed-source rejection before publication.
+Additional native regressions passed 13 Grok and 10 Qwen adapter tests, including reasoning
+grouping, status/lineage, hooks, and checkpoint suffix behavior. The source inventory regression
+separately confirms a child beneath a sibling file is an observed absence, and becomes stale
+when that file is replaced by a directory with a real child. Other metadata errors still fail.
+
+The same preserved 8 MiB scratch source was exercised through actual complete same-target
+parse-for-emit + verified export, and through Claude-to-target parse-for-emit + verification.
+Independent baseline/candidate outputs and fidelity classifications matched, with only generated
+Qwen UUID/parent chains normalized after validating the original chains. Shared allocator counters:
+
+| Operation | Peak above baseline, owned → selected | Requested bytes, owned → selected | Stage-end live, owned → selected |
+| --- | ---: | ---: | ---: |
+| Grok complete same-target port | 50,288,477 → 345,705 | 168,387,305 → 1,074,164 | 8,395,410 → 7,293 |
+| Qwen complete same-target port | 41,679,004 → 277,133 | 117,010,715 → 996,908 | 8,395,056 → 6,950 |
+| Claude → Grok verified export | 50,287,629 → 344,805 | 151,306,778 → 982,578 | 8,395,167 → 6,826 |
+| Claude → Qwen verified export | 41,678,671 → 276,653 | 109,002,837 → 907,165 | 8,394,884 → 6,543 |
+
+Portable same-target operations also matched baseline output/fidelity; peaks were 1,517,138
+bytes for Grok and 1,448,912 bytes for Qwen, with 5,505,214 / 7,917,462 requested bytes and
+the same 7,293 / 6,950 stage-end live bytes. These include portable reader/backing buffers.
+
+Evidence remains in `../grok-qwen-export-evidence`: `owned-same-*`, `selected-same-*`,
+`selected-cross-*`, native/portable producer test logs and adapter regression logs. These are
+operation allocation measurements, not fleet/RSS/timing claims. No local Qwen fleet was available.
+Remaining owned bookkeeping is explicit rather than hidden behind a spans eligibility flag.

@@ -31,6 +31,7 @@
 //!   under `subagents/<child id>/meta.json` (→ the child's `lineage.parent`).
 
 pub(crate) mod emit;
+mod selected;
 pub use emit::emit;
 
 use super::store::{
@@ -99,16 +100,20 @@ impl Adapter for Grok {
         Ok(out)
     }
 
-    fn stream(&self, r: &SessionRef, _opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+    fn stream(&self, r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
             let sink: &mut dyn MessageSink = &mut spawns;
             let (s, enrich) = session_header(r);
             sink.meta(&s);
+            let source = opts
+                .spans
+                .then(|| crate::json::JsonSource::capture(&self.resume_source(r)))
+                .transpose()?;
             let file = fs::File::open(self.resume_source(r))
                 .with_context(|| format!("reading chat_history in {}", r.path.display()))?;
-            Ok(stream_history_at(
+            stream_history_at(
                 BufReader::new(file),
                 &self.resume_source(r),
                 0,
@@ -116,7 +121,8 @@ impl Adapter for Grok {
                 &enrich,
                 0,
                 sink,
-            ))
+                source.as_ref(),
+            )
         })
     }
 
@@ -159,7 +165,8 @@ impl Adapter for Grok {
                 &enrich,
                 state.skipped,
                 &mut spawns,
-            )))
+                None,
+            )?))
         })
     }
 
@@ -363,13 +370,13 @@ fn stream_history_at(
     enrich: &HashMap<String, ToolEnrich>,
     prior_skipped: u64,
     sink: &mut dyn MessageSink,
-) -> Session {
+    source: Option<&crate::json::JsonSource>,
+) -> Result<Session> {
     let session_model = s.model.clone();
     let mut pending: Option<Message> = None;
     let mut stopped = false;
-    let skipped = super::for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
-        let is_reasoning = v.get("type").and_then(Value::as_str) == Some("reasoning");
-        let Some(mut m) = chat_message(&v, enrich) else {
+    let mut accept = |is_reasoning, message: Option<Message>, offset, complete, skipped| {
+        let Some(mut m) = message else {
             return Flow::Continue;
         };
         if is_reasoning {
@@ -412,12 +419,25 @@ fn stream_history_at(
             sink.checkpoint(&mut checkpoint);
         }
         flow
-    });
+    };
+    let skipped = if let Some(source) = source {
+        selected::for_each(reader, at, source, enrich, &mut accept)?
+    } else {
+        super::for_each_json_line_at(reader, at, |v, offset, complete, skipped| {
+            accept(
+                v.get("type").and_then(Value::as_str) == Some("reasoning"),
+                chat_message(&v, enrich),
+                offset,
+                complete,
+                skipped,
+            )
+        })
+    };
     if let (Some(p), false) = (pending, stopped) {
         sink.message(p);
     }
     super::note_skipped_lines(&mut s, prior_skipped + skipped);
-    s
+    Ok(s)
 }
 
 fn fields(raw: Raw<'_>) -> Record<'_> {

@@ -8,6 +8,8 @@
 - Hermes rehomes keep large ordinary bodies in checked shared backing while preserving complete row visibility and native metadata.
 
 - OpenCode v1 and Hermes exports resolve checked fields per row, reuse prepared inserts, and roll back failed exports atomically.
+- Grok and Qwen rehomes retain checked ordinary payloads through complete preparation and verification while preserving native metadata and replay behavior.
+
 - Grok subagent preparation recognizes missing metadata beneath sibling files and invalidates that absence when a child later appears.
 
 - Grok and Qwen exports stream guarded JSONL payloads while preserving native output, thinking modes, and fidelity reports.

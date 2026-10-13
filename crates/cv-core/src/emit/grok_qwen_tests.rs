@@ -406,3 +406,112 @@ fn checked_grok_qwen_source_failure_preserves_every_destination() -> Result<()> 
     }
     Ok(())
 }
+
+#[test]
+fn checked_grok_qwen_complete_selected_producer_matches_owned() -> Result<()> {
+    let world = cv_testkit::World::in_process("grok-qwen-selected-complete");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    for (target, adapter) in [
+        (
+            Harness::Grok,
+            Box::new(crate::harness::grok::Grok::with_home(&root.join("grok/1.0.50/.grok"))) as Box<dyn Adapter>,
+        ),
+        (
+            Harness::Qwen,
+            Box::new(crate::harness::qwen::Qwen::with_home(&root.join("qwen/0.25.1/.qwen"))) as Box<dyn Adapter>,
+        ),
+    ] {
+        for reference in adapter.discover()? {
+            let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &ParseOptions::complete())?;
+            let selected = parse_for_emit(adapter.as_ref(), &reference, target)
+                .map_err(|error| anyhow::anyhow!("{target} {}: {error:#}", reference.path.display()))?;
+            let mut materialized = selected.clone();
+            materialized.materialize()?;
+            assert_eq!(
+                serde_json::to_value(&owned)?,
+                serde_json::to_value(&materialized)?,
+                "complete producer {target}"
+            );
+            for mode in ThinkingMode::ALL {
+                compare(
+                    &selected,
+                    target,
+                    mode,
+                    &world.base.join(format!("corpus-{target}-{}-{mode}", reference.id)),
+                )?;
+            }
+        }
+        let mut session = fixture(target);
+        session.messages[2].content.insert(
+            0,
+            Block::Text {
+                text: "body \" λ\n".repeat(1024 * 128).into(),
+            },
+        );
+        for block in &mut session.messages[2].content {
+            match block {
+                Block::ToolUse { input, .. } => {
+                    *input = serde_json::json!({"payload": "argument λ\n".repeat(128 * 1024)}).into()
+                }
+                Block::Thinking { text, .. } if !text.is_empty() => *text = "reasoning λ\n".repeat(128 * 1024).into(),
+                _ => {}
+            }
+        }
+        for block in &mut session.messages[3].content {
+            if let Block::ToolResult { content, .. } = block {
+                *content = "result λ\n".repeat(128 * 1024).into();
+            }
+        }
+        let result = emit(
+            &session,
+            target,
+            &world.base.join(format!("source-{target}")),
+            &EmitOptions {
+                new_id: Some("large-source".into()),
+                ..Default::default()
+            },
+        )?;
+        let reference = SessionRef::new("large-source", target, &result.path);
+        let wire = adapter.resume_source(&reference);
+        use std::io::Write;
+        let mut append = std::fs::OpenOptions::new().append(true).open(&wire)?;
+        append.write_all(b"\ninvalid-json\n\xff\n{\"n\":1e999}\n42\n")?;
+        let unicode = if target == Harness::Grok {
+            "\u{2003}{\"type\":\"user\",\"content\":\"unicode wrapper\"}\u{2003}\n"
+        } else {
+            "\u{2003}{\"type\":\"user\",\"message\":{\"parts\":[{\"text\":\"unicode wrapper\"}]}}\u{2003}\n"
+        };
+        append.write_all(unicode.as_bytes())?;
+        drop(append);
+        let owned = crate::stream::collect_with(adapter.as_ref(), &reference, &ParseOptions::complete())?;
+        let selected = parse_for_emit(adapter.as_ref(), &reference, target)
+            .map_err(|error| anyhow::anyhow!("{target} {}: {error:#}", reference.path.display()))?;
+        assert!(
+            selected.messages.iter().flat_map(|m| &m.content).any(|b| matches!(
+                b,
+                Block::Text {
+                    text: crate::Text::Source(_)
+                }
+            )),
+            "checked producer retains body {target}"
+        );
+        let mut materialized = selected.clone();
+        materialized.materialize()?;
+        assert_eq!(serde_json::to_value(&owned)?, serde_json::to_value(&materialized)?);
+        for mode in ThinkingMode::ALL {
+            compare(
+                &selected,
+                target,
+                mode,
+                &world.base.join(format!("large-{target}-{mode}")),
+            )?;
+        }
+        let wire = adapter.resume_source(&reference);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&wire)?;
+        file.write_all(b"\nchanged source\n")?;
+        let absent = world.base.join(format!("changed-{target}"));
+        assert!(emit(&selected, target, &absent, &EmitOptions::default()).is_err());
+        assert!(!absent.exists());
+    }
+    Ok(())
+}
