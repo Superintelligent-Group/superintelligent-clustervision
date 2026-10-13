@@ -745,7 +745,7 @@ mod imp {
     /// The counts a row holds, or `None` when an older view counted them (a new kind or a new
     /// reader could have found more): such a row is "not counted", and the next full read
     /// rewrites it.
-    fn counts_of(text: &str) -> Option<crate::affordance::Counts> {
+    pub(super) fn counts_of(text: &str) -> Option<crate::affordance::Counts> {
         let Ok(serde_json::Value::Object(o)) = serde_json::from_str(text) else {
             return None;
         };
@@ -1359,3 +1359,6 @@ pub(crate) fn watches_for(
 pub(crate) fn all_sessions() -> Option<Vec<SessionRef>> {
     None
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+mod counts_tests;

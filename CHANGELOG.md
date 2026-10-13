@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Distill sidecars serialize borrowed payloads through bounded staging, avoiding complete output strings while preserving existing destination behavior.
+- Limited affordance queries fetch candidate counts and provenance on demand instead of loading every cached session’s counts.
 
 - Distill prefixes materialize only messages selected by `--upto`, preserving final session metadata and original-count validation.
 

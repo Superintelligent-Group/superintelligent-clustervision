@@ -715,6 +715,22 @@ fn ensure_table(conn: &rusqlite::Connection) -> Option<()> {
     .ok()
 }
 
+/// Validate one SQL baseline with the same stamp rules and shared probe used by batch tables.
+/// The consumer row and this baseline must be read from one SQL snapshot by the caller.
+#[cfg(feature = "sqlite")]
+pub(crate) fn fresh_record(
+    old_primary: (i64, i64),
+    old_stamp: String,
+    primary: (i64, i64),
+    dependencies: &Option<Stamp>,
+    probe: &mut Probe,
+) -> bool {
+    old_primary == primary
+        && dependencies
+            .as_ref()
+            .is_some_and(|stamp| Stamp(old_stamp).matches(stamp, probe))
+}
+
 /// Check one previously recorded baseline without loading every session's records during writes.
 #[cfg(feature = "sqlite")]
 pub(crate) fn fresh_in(

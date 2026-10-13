@@ -7,18 +7,89 @@ use crate::Harness;
 pub(crate) struct Reader {
     #[cfg(feature = "sqlite")]
     conn: rusqlite::Connection,
+    #[cfg(all(test, feature = "sqlite"))]
+    counts_lookups: std::cell::Cell<usize>,
+    #[cfg(all(test, feature = "sqlite"))]
+    counts_rows: std::cell::Cell<usize>,
 }
 
 impl Reader {
     pub(crate) fn open() -> Option<Self> {
         #[cfg(feature = "sqlite")]
         {
-            super::imp::open_db().map(|conn| Self { conn })
+            super::imp::open_db().map(|conn| Self {
+                conn,
+                #[cfg(test)]
+                counts_lookups: std::cell::Cell::new(0),
+                #[cfg(test)]
+                counts_rows: std::cell::Cell::new(0),
+            })
         }
         #[cfg(not(feature = "sqlite"))]
         {
             None
         }
+    }
+
+    /// Demand one count record and its provenance in a single statement snapshot. Separate
+    /// candidates may observe different commits; no fleet snapshot or transaction spans body
+    /// reads/publication. Missing, stale, malformed or unreadable cache records are cache misses.
+    pub(crate) fn counts_with_probe(
+        &self,
+        r: &SessionRef,
+        source: &crate::source::Snapshot,
+        probe: &mut crate::source::Probe,
+    ) -> Option<crate::affordance::Counts> {
+        #[cfg(feature = "sqlite")]
+        {
+            #[cfg(test)]
+            self.counts_lookups.set(self.counts_lookups.get() + 1);
+            let (a, b, counts, mtime, size, stamp) = {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT a.sig_a,a.sig_b,a.counts,d.mtime,d.size,d.stamp
+                     FROM affordance_counts AS a JOIN source_dependencies AS d
+                     ON d.consumer='counts' AND d.harness=a.harness AND d.id=a.id AND d.path=a.path
+                     WHERE a.harness=?1 AND a.id=?2 AND a.path=?3",
+                    )
+                    .ok()?;
+                stmt.query_row(
+                    rusqlite::params![r.harness.as_str(), r.id, r.path.to_string_lossy()],
+                    |row| {
+                        let record = (
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
+                        );
+                        #[cfg(test)]
+                        self.counts_rows.set(self.counts_rows.get() + 1);
+                        Ok(record)
+                    },
+                )
+                .ok()?
+            }; // Reset the SQL statement before filesystem provenance checks or body reads.
+            if (a, b) != source.primary
+                || a == 0
+                || !crate::source::fresh_record((mtime, size), stamp, source.primary, &source.dependencies, probe)
+            {
+                return None;
+            }
+            super::imp::counts_of(&counts)
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            let _ = (r, source, probe);
+            None
+        }
+    }
+
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn counts_work(&self) -> (usize, usize) {
+        (self.counts_lookups.get(), self.counts_rows.get())
     }
 
     pub(crate) fn last_full_sync(&self) -> Option<i64> {

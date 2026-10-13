@@ -124,9 +124,32 @@
     "full_selection_fresh_count_rows": 3,
     "proxy_limit": "Fresh count rows prove successful counted reads were published, not every read or byte consumed. Unchanged rows alone do not prove zero body demands; cached cheap decisions are covered by the existing predicate engine and unneeded-error controls.",
     "policy": "JSON ranks before predicate evaluation and stops once its window is complete. Required candidate errors remain errors; unread lower-ranked errors cannot invalidate the window. Text listings and aggregate stats retain full selection and exact totals.",
-    "global_work": "Nonzero counted queries still load one whole-catalog AffordanceTable and dependency table, then share one Probe, read scope and lazy catalog writer. Discovery and indexed text membership resolution remain separate upstream work. CLI limit zero skips text membership resolution and fact-table loading.",
+    "global_work": "At 6296f7db, nonzero counted windows loaded one whole-catalog AffordanceTable and dependency table. The follow-up demand reader below replaces this limited-query load; full sweeps retain their batch tables.",
     "ordering": "Stable metadata ties and historical ascending select-then-reverse/existence rules are retained; CLI exact JSON row parity covers all three sorts and both directions.",
     "warm_decision_control": "After initial publication, the shared planner returns definite False/True for the two required candidates, and Unknown for the uncounted tail; only Unknown invokes the body reducer. Parse-dependent predicates such as tool:edit still reduce required candidate bodies on repeat; affordance counts do not cache arbitrary predicates."
   },
-  "metadata_precision_note": "Historical full-filter phases used second-precision frozen metadata; has:plan membership and counted-fact parity are unaffected. Ranked-window fixtures retain nanosecond metadata and stable ties."
+  "metadata_precision_note": "Historical full-filter phases used second-precision frozen metadata; has:plan membership and counted-fact parity are unaffected. Ranked-window fixtures retain nanosecond metadata and stable ties.",
+  "demand_counts_work": {
+    "method": "Scoped deterministic tests only, no timing campaign. Existing explicitly owned catalog Reader; one prepared keyed join fetches counts and source provenance together.",
+    "unrelated_inventory_rows": [
+      8,
+      1024
+    ],
+    "one_selected_candidate_work": {
+      "lookups": 1,
+      "decoded_sql_rows": 1
+    },
+    "subsequent_missing_candidate_cumulative_work": {
+      "lookups": 2,
+      "decoded_sql_rows": 1
+    },
+    "boolean_shortcircuit_work": "Metadata false AND counted, metadata true OR counted, and indexed text true OR counted settle through the existing three-valued evaluator without opening a counts Reader.",
+    "warm_two_candidate_prefix_work": {
+      "lookups": 2,
+      "decoded_sql_rows": 2
+    },
+    "snapshot_policy": "Count and provenance share a single statement snapshot per candidate; separate candidates may observe different committed records. No read transaction spans transcript reductions or catalog publication. SQL/cache errors remain misses; body read errors remain fallible.",
+    "freshness_oracle": "Demand reader agrees with batch reader for fresh/missing/old-view/malformed counts, mismatched primary or provenance tuples, old/malformed/missing provenance, incomplete read sets, WAL appearance, conditional-sidecar appearance and changed primary. Retained Reader observes later publications and does not observe partial uncommitted writes.",
+    "limits": "Counters measure demanded SQL lookups and successfully decoded joined rows, not page I/O, elapsed time or total listing work. Catalog initialization, discovered metadata inventory, stable ranking and text membership remain separate work; full sweeps keep batch counts loading."
+  }
 }

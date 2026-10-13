@@ -553,16 +553,24 @@ struct RefQuery<'a> {
     text_sets: &'a TextSets,
     heavy: bool,
     table: Option<crate::catalog::AffordanceTable>,
+    demand_counts: bool,
+    reader: Option<Option<crate::catalog::Reader>>,
     probe: crate::source::Probe,
 }
 
 impl<'a> RefQuery<'a> {
     fn new(query: &'a SessionQuery, text_sets: &'a TextSets) -> Self {
+        Self::with_counts_mode(query, text_sets, false)
+    }
+
+    fn with_counts_mode(query: &'a SessionQuery, text_sets: &'a TextSets, demand_counts: bool) -> Self {
         Self {
             query,
             text_sets,
             heavy: query.needs_parse() || query.needs_index() || query.needs_events() || query.needs_forest(),
-            table: query.needs_counted().then(crate::catalog::AffordanceTable::load),
+            table: (query.needs_counted() && !demand_counts).then(crate::catalog::AffordanceTable::load),
+            demand_counts,
+            reader: None,
             probe: crate::source::Probe::default(),
         }
     }
@@ -573,6 +581,35 @@ impl<'a> RefQuery<'a> {
         }
         if !self.heavy && !self.query.needs_counted() {
             return Ok(Tri::True);
+        }
+        if self.demand_counts {
+            // The existing evaluator may settle metadata/index Boolean branches without counts.
+            let without_counts = self.query.eval(&Facts {
+                r,
+                session: None,
+                ext: &RefFacts {
+                    id: &r.id,
+                    text_sets: self.text_sets,
+                    counts: None,
+                },
+            })?;
+            if !matches!(without_counts, Tri::Unknown) || !self.query.needs_counted() {
+                return Ok(without_counts);
+            }
+            let counts = self
+                .reader
+                .get_or_insert_with(crate::catalog::Reader::open)
+                .as_ref()
+                .and_then(|reader| reader.counts_with_probe(r, &self.probe.snapshot(r), &mut self.probe));
+            return self.query.eval(&Facts {
+                r,
+                session: None,
+                ext: &RefFacts {
+                    id: &r.id,
+                    text_sets: self.text_sets,
+                    counts,
+                },
+            });
         }
         let facts = RefFacts {
             id: &r.id,
@@ -612,6 +649,8 @@ pub enum WindowPresence {
 /// unreadable lower-ranked tail is never evaluated. Stable ties and ranking belong to the caller;
 /// selected refs preserve their input order. A read error leaves the caller's list intact.
 /// Zero returns an empty window without loading fact tables or demanding any transcript body.
+/// Counts and their source provenance are read atomically per demanded record, rather than as one
+/// fleet-table snapshot. No catalog read transaction spans body reductions or count publication.
 pub fn filter_refs_limited(
     refs: &mut Vec<SessionRef>,
     query: &SessionQuery,
@@ -624,7 +663,7 @@ pub fn filter_refs_limited(
         return Ok(());
     }
     let _reads = crate::source::read_scope();
-    let mut plan = RefQuery::new(query, text_sets);
+    let mut plan = RefQuery::with_counts_mode(query, text_sets, true);
     let mut writer: Option<Option<crate::catalog::Writer>> = None;
     let mut keep = vec![false; refs.len()];
     let mut selected = 0;
@@ -758,6 +797,24 @@ mod tests {
         })
     }
 
+    #[test]
+    fn demand_counts_follow_existing_boolean_shortcircuits_without_opening_reader() {
+        let r = missing_source();
+        for expression in [
+            "id:absent AND has:plan",
+            "id:indexed-session OR has:plan",
+            "text:hit OR has:plan",
+        ] {
+            let query = SessionQuery::parse(expression).unwrap();
+            let texts = text_sets(&query, &r);
+            let mut plan = RefQuery::with_counts_mode(&query, &texts, true);
+            let result = plan.cheap(&r).unwrap();
+            assert!(!matches!(result, Tri::Unknown), "{expression}");
+            assert!(plan.reader.is_none(), "{expression} should not demand counts");
+            assert!(plan.table.is_none());
+        }
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     fn limited_window_publishes_only_demanded_counts_and_reuses_them() {
@@ -799,10 +856,13 @@ mod tests {
         assert_eq!(fresh(), [true, true, false]);
         // The warm prefix is decided by cheap cached facts; only Unknown invokes reduce.
         let texts = TextSets::empty();
-        let mut plan = RefQuery::new(&query, &texts);
+        let mut plan = RefQuery::with_counts_mode(&query, &texts, true);
         assert!(matches!(plan.cheap(&refs[0]).unwrap(), Tri::False));
         assert!(matches!(plan.cheap(&refs[1]).unwrap(), Tri::True));
+        assert_eq!(plan.reader.as_ref().unwrap().as_ref().unwrap().counts_work(), (2, 2));
+        assert!(plan.table.is_none());
         assert!(matches!(plan.cheap(&refs[2]).unwrap(), Tri::Unknown));
+        assert_eq!(plan.reader.as_ref().unwrap().as_ref().unwrap().counts_work(), (3, 2));
         let mut full = refs.clone();
         filter_refs(&mut full, &query, &TextSets::empty()).unwrap();
         assert_eq!(
