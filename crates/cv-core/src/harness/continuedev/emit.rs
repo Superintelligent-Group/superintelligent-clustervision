@@ -375,4 +375,91 @@ mod tests {
         assert_eq!(fs::read(index).ok(), index_before);
         Ok(())
     }
+    #[test]
+    fn dropped_source_failure_matches_direct_owned_error_contract() -> Result<()> {
+        let world = cv_testkit::World::in_process("dropped-source-Continue");
+        let path = world.base.join("thinking.json");
+        fs::write(&path, serde_json::to_vec(&"private thought".repeat(3000))?)?;
+        let text = crate::Json::source(&path, 0, fs::metadata(&path)?.len())?
+            .with_view(|v| v.source_text()?.ok_or_else(|| anyhow::anyhow!("text source")))?;
+        assert!(matches!(text, crate::Text::Source(_)));
+        let mut session = Session::new("synthetic", Harness::Claude);
+        session.title = Some("explicit".into());
+        session.created_at =
+            Some(chrono::DateTime::parse_from_rfc3339("2026-10-13T12:00:00Z")?.with_timezone(&chrono::Utc));
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::Thinking {
+            text,
+            signature: None,
+            encrypted: None,
+            redacted: false,
+        });
+        session.messages.push(message);
+        let opts = crate::emit::EmitOptions {
+            new_id: Some("fixed".into()),
+            thinking: crate::emit::ThinkingMode::Drop,
+            ..Default::default()
+        };
+        let dest = world.base.join("new");
+        let emitted = super::super::emit(&session, &dest, &opts)?;
+        let before = fs::read(&emitted.path)?;
+        let index = dest.join("sessions.json");
+        let index_before = fs::read(&index).ok();
+        fs::remove_file(&path)?;
+        assert!(legacy_emit(&session, &world.base.join("old"), &opts).is_err());
+        assert!(super::super::emit(&session, &dest, &opts).is_err());
+        assert_eq!(fs::read(&emitted.path)?, before);
+        assert_eq!(fs::read(&index).ok(), index_before);
+        // Omitted legacy raw Spans retain best-effort materialization acceptance.
+        // Demanded raw Spans still use the checked output path.
+        fs::write(&path, b"short")?;
+        if let Block::Thinking { text, .. } = &mut session.messages[0].content[0] {
+            *text = crate::Text::Span(crate::lazy::Span {
+                source: Some(path.clone()),
+                offset: 0,
+                len: 99,
+                escaped: true,
+            });
+        }
+        let mut owned = session.clone();
+        owned.materialize()?;
+        crate::emit::project_owned_thinking_for_test(&mut owned, Harness::Continue, opts.thinking);
+        let oracle = legacy_emit(&owned, &world.base.join("span-oracle"), &opts)?;
+        let new = super::super::emit(&session, &dest, &opts)?;
+        assert_eq!(fs::read(oracle.path)?, fs::read(new.path)?);
+        assert_eq!(fs::read(&emitted.path)?, before);
+        assert_eq!(fs::read(index).ok(), index_before);
+        Ok(())
+    }
+    #[test]
+    fn ignored_user_argument_source_failure_preserves_transcript_and_index() -> Result<()> {
+        let world = cv_testkit::World::in_process("ignored-continue-arguments");
+        let path = world.base.join("arguments.json");
+        fs::write(&path, b"{}")?;
+        let mut session = Session::new("synthetic", Harness::Claude);
+        session.title = Some("explicit".into());
+        let mut user = Message::new(Role::User);
+        user.content.push(Block::ToolUse {
+            id: "ignored".into(),
+            name: "Read".into(),
+            input: crate::Json::source(&path, 0, 2)?,
+            namespace: None,
+        });
+        session.messages.push(user);
+        let dest = world.base.join("output");
+        let opts = crate::emit::EmitOptions {
+            new_id: Some("fixed".into()),
+            ..Default::default()
+        };
+        let emitted = super::super::emit(&session, &dest, &opts)?;
+        let before = fs::read(&emitted.path)?;
+        let index = dest.join("sessions.json");
+        let index_before = fs::read(&index)?;
+        fs::remove_file(path)?;
+        assert!(legacy_emit(&session, &world.base.join("old"), &opts).is_err());
+        assert!(super::super::emit(&session, &dest, &opts).is_err());
+        assert_eq!(fs::read(emitted.path)?, before);
+        assert_eq!(fs::read(index)?, index_before);
+        Ok(())
+    }
 }

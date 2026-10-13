@@ -3813,7 +3813,10 @@ whole-session, output-Value and pretty-String ownership in both targets. Commit 
 uses the existing checked wire fields, canonical quoted-argument builder, pretty formatter and
 private staged publication. Continue streams history and encoded tool arguments; LM Studio
 streams versions, steps and readable tool-call/result text. Source errors complete before
-transcript replacement. Continue's merged index remains the existing small owned metadata
+transcript replacement. A descriptor-only guard preserves direct-emitter failure for captured
+Text/Json sources even when thinking modes or target fields discard them, checking original
+identity, dependencies and retained backing bounds without decoding payloads. Omitted legacy raw
+Spans retain their earlier best-effort acceptance; demanded Spans use the checked writer path. Continue's merged index remains the existing small owned metadata
 contract. Neither target needs another serializer or cache layer.
 
 The shared title reducer preserves first-user-only selection, joined Text blocks, whitespace
@@ -3826,7 +3829,9 @@ listing synth_title policy.
 Independent frozen old-writer oracles compare exact pretty wire for Native/Text/Drop modes,
 including user reasoning, signature-only thinking, usage/model attachment, files/images and
 canonical tool arguments/results. Review added plain-whitespace user/assistant thinking to all
-three mode oracles: Text obeys the shared Drop fate; Native retains nonempty whitespace. Changed-source controls preserve an existing transcript.
+three mode oracles: Text obeys the shared Drop fate; Native retains nonempty whitespace. Changed-source controls preserve an existing transcript and Continue index, including late
+independent arguments, dropped captured thinking and ignored non-assistant tool inputs. An
+omitted invalid raw-Span oracle preserves the distinct legacy acceptance contract.
 Native Continue/LM Studio scoped tests and both portable writer oracles pass, as do both library
 clippy configurations and pinned formatting. Cross-harness preparation selects checked sources;
 same-harness complete parsing retains its existing owned-carrier contract.

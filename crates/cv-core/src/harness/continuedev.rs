@@ -267,6 +267,7 @@ fn optional_string(view: Option<JsonView<'_>>) -> Result<Option<String>> {
 /// The parser backfills `cwd`/`title` from the transcript itself, so writing the index is for
 /// `discover()` fidelity, not correctness; we still write it.
 pub fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOptions) -> Result<super::EmitResult> {
+    super::wire::write::check_source_fields(session)?;
     use anyhow::Context;
 
     let new_id = opts.new_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());

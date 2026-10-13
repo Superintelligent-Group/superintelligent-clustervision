@@ -161,6 +161,31 @@ pub(crate) fn joined_text<'a>(
     })
 }
 
+/// Preserve direct-emitter source failures even when a target/mode omits a lazy field.
+/// Source leaves were strictly validated at capture; recheck provenance and retained backing
+/// bounds without decoding their payloads or constructing fidelity features.
+pub(crate) fn check_source_fields(session: &crate::ir::Session) -> Result<()> {
+    for message in &session.messages {
+        for block in &message.content {
+            match block {
+                crate::ir::Block::Text { text }
+                | crate::ir::Block::Thinking { text, .. }
+                | crate::ir::Block::ToolResult { content: text, .. } => {
+                    if let Text::Source(source) = text {
+                        source.range.check_retained_bounds()?;
+                    }
+                }
+                crate::ir::Block::ToolUse {
+                    input: crate::Json::Source(source),
+                    ..
+                } => source.check_retained_bounds()?,
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct TitleReady;
 impl std::fmt::Display for TitleReady {
