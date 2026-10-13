@@ -73,6 +73,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -834,11 +835,8 @@ fn stream_conn(conn: &Connection, r: &SessionRef, opts: &ParseOptions, sink: &mu
                 continue;
             }
             // Dedup the replayed first user message at compression boundaries (`complete` keeps it).
-            if !opts.complete {
-                if dedup.is_duplicate(&m)? {
-                    continue;
-                }
-                dedup.observe(&m)?;
+            if !opts.complete && !dedup.admit(&m)? {
+                continue;
             }
             if sink.message(m) == Flow::Stop {
                 break 'lineage;
@@ -859,18 +857,16 @@ struct ReplayDedup {
 }
 
 impl ReplayDedup {
-    /// Mirror of the look-back in [`is_duplicate_replayed_user_message`].
-    fn is_duplicate(&mut self, msg: &Message) -> Result<bool> {
-        if msg.role != Role::User {
-            return Ok(false);
+    /// Admit a message and fold its look-back state once. Insertion provides exact membership,
+    /// avoiding a second whole-key hash and text copy for each new trailing prompt.
+    fn admit(&mut self, msg: &Message) -> Result<bool> {
+        if msg.role == Role::User {
+            if let Some(text) = single_text(msg).filter(|text| !text.is_empty()) {
+                return self.recent_user_texts.insert_borrowed(&text);
+            }
         }
-        let Some(text) = single_text(msg) else {
-            return Ok(false);
-        };
-        if text.is_empty() {
-            return Ok(false);
-        }
-        self.recent_user_texts.contains(&text)
+        self.observe(msg)?;
+        Ok(true)
     }
 
     /// Fold an *emitted* message into the look-back state.
@@ -879,7 +875,7 @@ impl ReplayDedup {
             Role::User => {
                 if let Some(text) = single_text(m) {
                     if !text.is_empty() {
-                        self.recent_user_texts.insert(text)?;
+                        self.recent_user_texts.insert(text.into_owned())?;
                     }
                 }
             }
@@ -959,10 +955,13 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
 /// The streaming equivalent is [`ReplayDedup`] (a bounded look-back over the trailing user run).
 ///
 /// Plain text of a message iff it is exactly one Text block (the shape Hermes replays as a string).
-fn single_text(m: &Message) -> Option<String> {
+fn single_text(m: &Message) -> Option<Cow<'_, str>> {
     if m.content.len() == 1 {
         if let Block::Text { text } = &m.content[0] {
-            return Some(text.to_string());
+            return Some(match text.inline_str() {
+                Some(text) => Cow::Borrowed(text),
+                None => Cow::Owned(text.to_string()),
+            });
         }
     }
     None

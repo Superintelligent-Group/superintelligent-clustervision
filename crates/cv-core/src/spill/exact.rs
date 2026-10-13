@@ -1,6 +1,7 @@
 //! Exact equality with a bounded in-memory fast path and a portable disk hash table.
 use super::Temporary;
 use anyhow::{bail, Context, Result};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::File;
 use std::hash::{BuildHasher, Hasher};
@@ -30,7 +31,7 @@ impl Default for ExactStrings {
     }
 }
 impl ExactStrings {
-    #[cfg(any(feature = "sqlite", test))]
+    #[cfg(test)]
     pub(crate) fn contains(&mut self, text: &str) -> Result<bool> {
         let hash = self.hash(text);
         match &mut self.spill {
@@ -41,7 +42,18 @@ impl ExactStrings {
 
     /// True only on first insertion. Empty strings, embedded NUL and hash collisions are exact.
     pub(crate) fn insert(&mut self, text: String) -> Result<bool> {
-        if self.spill.is_none() && self.memory.contains(&text) {
+        self.insert_text(Cow::Owned(text))
+    }
+
+    /// Borrow keys that only need writing/comparison after spill. In-memory retention still owns
+    /// its exact bytes, and uses the same payload-plus-slot budget as owned insertion.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn insert_borrowed(&mut self, text: &str) -> Result<bool> {
+        self.insert_text(Cow::Borrowed(text))
+    }
+
+    fn insert_text(&mut self, text: Cow<'_, str>) -> Result<bool> {
+        if self.spill.is_none() && self.memory.contains(text.as_ref()) {
             return Ok(false);
         }
         // Account table slots as well as payloads. This conservative upper bound exceeds the
@@ -55,7 +67,10 @@ impl ExactStrings {
             .saturating_mul(2);
         let estimated = self
             .bytes
-            .saturating_add(text.capacity())
+            .saturating_add(match &text {
+                Cow::Owned(text) => text.capacity(),
+                Cow::Borrowed(text) => text.len(),
+            })
             .saturating_add(slots.saturating_mul(std::mem::size_of::<String>() + 16));
         if self.spill.is_none() && estimated > self.limit {
             let mut disk = Disk::new(self.memory.len())?;
@@ -70,6 +85,7 @@ impl ExactStrings {
         match &mut self.spill {
             Some(disk) => disk.insert(text.as_bytes(), hash),
             None => {
+                let text = text.into_owned();
                 self.bytes += text.capacity();
                 Ok(self.memory.insert(text))
             }
@@ -417,6 +433,27 @@ mod tests {
         assert!(set.spill.is_none());
         assert!(!set.contains("").unwrap());
     }
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn borrowed_keys_survive_caller_changes_and_spill() {
+        let mut set = ExactStrings {
+            limit: 1024,
+            ..ExactStrings::default()
+        };
+        let mut caller = String::from("source\0λ");
+        assert!(set.insert_borrowed(&caller).unwrap());
+        caller.clear();
+        assert!(set.contains("source\0λ").unwrap());
+        let large = "bodyλ\0".repeat(1024);
+        assert!(set.insert_borrowed(&large).unwrap());
+        assert!(set.spill.is_some());
+        assert!(!set.insert_borrowed("source\0λ").unwrap());
+        assert!(!set.insert_borrowed(&large).unwrap());
+        assert!(set.insert_borrowed("").unwrap());
+        assert!(!set.insert_borrowed("").unwrap());
+        assert!(!set.contains("source").unwrap());
+    }
+
     #[test]
     fn cache_evictions_and_index_growth_keep_every_key() {
         let mut disk = Disk::new(0).unwrap();
