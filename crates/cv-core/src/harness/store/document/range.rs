@@ -49,7 +49,6 @@ impl RangeSource {
         source.check_identity()?;
         Ok(source)
     }
-    #[cfg(not(feature = "mmap"))]
     pub(crate) fn decoded(
         captured: crate::json::JsonSource,
         bytes: &std::sync::Arc<crate::harness::store::bytes::ByteSource>,

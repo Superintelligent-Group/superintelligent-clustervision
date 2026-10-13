@@ -1207,7 +1207,6 @@ fn decode_json_body_control(reader: &mut impl std::io::BufRead, f: &mut impl FnM
 /// Validate string syntax in bounded windows without requiring Unicode surrogate pairs.
 /// Like serde's IgnoredAny/RawValue, this accepts lone UTF-16 escapes. Value-compatible
 /// acceptance belongs to a separate boundary; callbacks never receive this validation view.
-#[cfg(any(not(feature = "mmap"), test))]
 pub(crate) fn validate_json_body_syntax(reader: &mut impl std::io::BufRead) -> Result<(), ()> {
     json_body_windows(reader, &mut |quoted| {
         serde_json::from_slice::<&serde_json::value::RawValue>(quoted).map_err(|_| ())?;

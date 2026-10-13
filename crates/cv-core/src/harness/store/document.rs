@@ -1,7 +1,9 @@
 //! Read-only document sources and borrowed structural slices. Strict scalar/depth validation
 //! remains in `store::json`; these indexes describe the bytes rather than retain their payloads.
 
-#[cfg(any(not(feature = "mmap"), test))]
+// Native bounded prefixes also use the positioned string reader; full document traversal
+// remains portable-only, so those methods are intentionally unused in native production.
+#[cfg_attr(feature = "mmap", allow(dead_code))]
 pub(crate) mod range;
 
 use crate::lazy::INLINE_MAX;

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Large retained-text previews read bounded windows instead of scanning complete bodies before returning a short prefix.
+
 - Gemini reads composite tool results and formatted thoughts with bounded selected-payload memory while preserving output.
 - Goose legacy discovery streams metadata and exact counts without retaining entire transcripts.
 

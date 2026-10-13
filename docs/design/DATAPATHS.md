@@ -1609,3 +1609,22 @@ message keys/ranges and requested metadata grow with history; rich `displayConte
 owned extra in existing lazy/Facts behavior. No Facts policy change or additional representation is
 included. The new portable replay module reuses shared range/JSON transport; its local UTF-8 trim
 scanner preserves the earlier line-reader contract.
+Bounded retained-text prefixes (2026-10-12): native `SourceText` prefix demands now reuse the
+positioned string reader already used by portable parsing. The previous native path mapped the
+complete retained value and checked UTF8 across its full extent before decoding even a tiny
+prefix. Scan previews, text heads, affordance previews, and producer prefix classification now
+read bounded windows, with original identity/dependency checks before and after early stops.
+Full-body chunk/length demands keep their existing paths, and strict initial acceptance is
+unchanged. No unchecked UTF8 cast or new carrier/cache is introduced. Native compilation now
+includes the existing positioned module; its full portable traversal methods remain unused.
+
+One native debug mechanism control at `c22128b0`, a strictly captured 64 MiB JSON string with
+32 alternating three/five-byte Unicode prefix demands, reduced the timed demand phase from
+6.986 seconds to 19.038 milliseconds. Both exact prefixes and zero-cap source-removal failures
+match. This excludes fixture creation/initial acceptance and establishes avoided whole-body
+work, not an end-to-end or release timing claim. Evidence is `bounded-prefix-control.json`
+in the encoded-arguments evidence directory. Native/portable scoped source tests cover quoted
+arena ownership, Unicode truncation, skipped prefixes, complete output, and source mutation.
+The likely user benefit is faster previews and selective consumers of giant bodies; operations
+that request full bodies still pay their requested decoding/output cost. Positioned prefix
+reads trade mapping for descriptor reads and bounded scratch rather than adding retained state.

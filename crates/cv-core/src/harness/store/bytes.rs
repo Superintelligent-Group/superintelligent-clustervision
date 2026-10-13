@@ -129,7 +129,6 @@ impl ByteSource {
     pub(crate) fn is_arena(&self) -> bool {
         matches!(self.bytes, Bytes::Arena { .. })
     }
-    #[cfg(any(not(feature = "mmap"), test))]
     pub(crate) fn memory_bytes(&self) -> Option<&[u8]> {
         match &self.bytes {
             Bytes::Memory(bytes) => Some(bytes),

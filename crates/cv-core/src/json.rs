@@ -14,7 +14,6 @@ mod transport;
 pub(crate) use transport::{SourceDescriptor, SourceRegistry};
 
 use crate::harness::store::document;
-#[cfg(not(feature = "mmap"))]
 use crate::harness::store::document::range::{Range, RangeSource};
 #[cfg(any(feature = "mmap", test))]
 use crate::harness::store::document::Raw;
@@ -171,11 +170,9 @@ impl JsonSource {
         }
         Ok(())
     }
-    #[cfg(any(not(feature = "mmap"), test))]
     pub(crate) fn path(&self) -> &Path {
         &self.0.path
     }
-    #[cfg(any(not(feature = "mmap"), test))]
     pub(crate) fn len(&self) -> u64 {
         self.0.identity.len
     }
@@ -444,6 +441,30 @@ impl JsonRange {
         self.check()?;
         result
     }
+    /// Bounded decoded demands must not map and UTF8-scan the entire retained string first.
+    /// The string was strictly accepted at capture; positioned decoding checks demanded bytes,
+    /// and original identity is checked even when the callback intentionally stops early.
+    pub(crate) fn for_each_string_prefix_chunk(&self, visit: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+        let source = match &self.decoded {
+            Some(bytes) => RangeSource::decoded(self.source.clone(), bytes)?,
+            None => RangeSource::from_captured(self.source.clone())?,
+        };
+        let range = Range {
+            offset: self.offset,
+            len: self.len,
+        };
+        let result = (|| {
+            anyhow::ensure!(
+                source.kind(range)? == Some(b'"'),
+                "source text backing is not a JSON string"
+            );
+            source.for_each_string_chunk_until(range, visit)
+        })();
+        source.check_identity()?;
+        self.check()?;
+        result
+    }
+
     pub(crate) fn with_view<T>(&self, f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>) -> Result<T> {
         self.with_validation(Validation::Cached, f)
     }

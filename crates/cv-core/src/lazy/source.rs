@@ -47,39 +47,49 @@ impl SourceText {
             .unwrap_or(usize::MAX)
             .saturating_sub(self.skip)
     }
-    pub fn try_for_each_chunk(&self, chunk: usize, mut f: impl FnMut(&str) -> Result<()>) -> Result<()> {
+    pub fn try_for_each_chunk(&self, chunk: usize, f: impl FnMut(&str) -> Result<()>) -> Result<()> {
+        self.chunks(chunk, false, f)
+    }
+    fn chunks(&self, chunk: usize, prefix: bool, mut f: impl FnMut(&str) -> Result<()>) -> Result<()> {
         let mut skip = self.skip;
         let mut scratch = String::new();
-        self.range.with_view(|view| {
-            anyhow::ensure!(
-                view.for_each_str_chunk(|mut part| {
-                    if skip >= part.len() {
-                        skip -= part.len();
-                        return Ok(());
-                    }
-                    part = part.get(skip..).context("source text prefix is not a UTF8 boundary")?;
-                    skip = 0;
-                    while !part.is_empty() {
-                        let mut end = part.len().min(chunk.max(1));
-                        while !part.is_char_boundary(end) {
-                            end += 1;
-                        }
-                        // Stable scratch remains valid if a callback mutates/truncates the original.
-                        scratch.clear();
-                        scratch.push_str(&part[..end]);
-                        let result = f(&scratch);
-                        self.range.check()?;
-                        result?;
-                        part = &part[end..];
-                    }
-                    Ok(())
-                })?,
-                "source text backing is not a JSON string"
-            );
-            anyhow::ensure!(skip == 0, "source text prefix is past end");
+        let mut visit = |mut part: &str| {
+            if skip >= part.len() {
+                skip -= part.len();
+                return Ok(());
+            }
+            part = part.get(skip..).context("source text prefix is not a UTF8 boundary")?;
+            skip = 0;
+            while !part.is_empty() {
+                let mut end = part.len().min(chunk.max(1));
+                while !part.is_char_boundary(end) {
+                    end += 1;
+                }
+                // Stable scratch remains valid if a callback mutates/truncates the original.
+                scratch.clear();
+                scratch.push_str(&part[..end]);
+                let result = f(&scratch);
+                self.range.check()?;
+                result?;
+                part = &part[end..];
+            }
             Ok(())
-        })
+        };
+        if prefix {
+            self.range.for_each_string_prefix_chunk(&mut visit)?;
+        } else {
+            self.range.with_view(|view| {
+                anyhow::ensure!(
+                    view.for_each_str_chunk(&mut visit)?,
+                    "source text backing is not a JSON string"
+                );
+                Ok(())
+            })?;
+        }
+        anyhow::ensure!(skip == 0, "source text prefix is past end");
+        Ok(())
     }
+
     pub fn try_resolve(&self) -> Result<String> {
         let mut output = String::new();
         self.try_for_each_chunk(64 * 1024, |part| {
@@ -96,7 +106,7 @@ impl SourceText {
     /// Revalidate the full source guard before treating the internal prefix cutoff as success.
     pub fn try_prefix_with_truncation(&self, cap: usize) -> Result<(String, bool)> {
         let mut output = String::with_capacity(cap.min(64 * 1024));
-        let result = self.try_for_each_chunk(64 * 1024, |part| {
+        let result = self.chunks(64 * 1024, true, |part| {
             let mut end = part.len().min(cap - output.len());
             while !part.is_char_boundary(end) {
                 end -= 1;
@@ -181,6 +191,28 @@ mod tests {
         let source = SourceText::new(range);
         std::fs::remove_file(path).unwrap();
         assert!(source.try_decoded_len().is_err());
+    }
+
+    #[test]
+    fn giant_prefix_demands_preserve_utf8_and_original_identity() {
+        let world = cv_testkit::World::in_process("source-text-prefix-window");
+        let path = world.base.join("original.json");
+        let body = format!("🌙\n{}", "x".repeat(1024 * 1024));
+        std::fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+        let source = JsonSource::capture(&path).unwrap();
+        let text = source
+            .read_range_value(0, source.len(), |v| v.source_text())
+            .unwrap()
+            .unwrap();
+        let resolver = Resolver::new(None);
+        for _ in 0..16 {
+            assert_eq!(text.try_resolve_prefix(&resolver, 3).unwrap(), "");
+            assert_eq!(text.try_resolve_prefix(&resolver, 5).unwrap(), "🌙\n");
+        }
+        let skipped = text.with_skipped_prefix(4).unwrap();
+        assert_eq!(skipped.try_resolve_prefix(&resolver, 2).unwrap(), "\nx");
+        std::fs::remove_file(&path).unwrap();
+        assert!(skipped.try_resolve_prefix(&resolver, 0).is_err());
     }
 
     #[test]
