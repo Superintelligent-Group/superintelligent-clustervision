@@ -2759,3 +2759,34 @@ auxiliary identity guards and discovery fingerprints do not currently strengthen
 consumer's primary skip authority. A shared primary identity capture, separate from append-safe
 auxiliary dependencies, is the next correctness question. Sampled resume marks still do not
 prove an arbitrary rewritten-and-grown prefix immutable.
+
+
+### Primary identity versus append authority (2026-10-13, Codex)
+
+Source record version 3 now retains the primary Entry captured before the consumer read,
+separately from declared auxiliary inventories and dynamic read sets. Unchanged reuse and
+publication compare that original primary identity; Unix inode/ctime catches equal-size edits
+with restored mtime and same-tuple replacements. Other platforms currently retain the
+length/mtime guarantee. This is metadata authority, not a content hash or proof that arbitrary
+rewritten-and-grown prefixes remain immutable. Older source records miss once and republish
+through each consumer's existing mechanism; this migration requires no additional index rebuild.
+
+Counts, event tables, demanded count rows, usage caches and semantic Snapshot freshness share
+the stronger unchanged check. FTS planning explicitly checks auxiliary authority independently
+from primary identity: skip requires both, while growth/resume relies on auxiliary freshness and
+its existing sampled checkpoint contract. Normal append does not lose resume merely because
+ctime changed. Before-read identity survives consumer read-set attachment; publication rechecks
+it with a fresh probe so a racing timestamp-restored edit cannot stamp old output fresh.
+
+The canonical small primary prefix compares without decoding auxiliary inventories. Empty
+dynamic-read auxiliary comparisons retain the existing allocation-free inventory-string path;
+when growth changes the prefix, only the small typed primary Entry is validated on that path.
+Noncanonical/malformed/legacy records conservatively miss. Each consumer retains its own
+baseline, so refreshing counts cannot refresh old events or embeddings.
+
+Focused controls cover restored-mtime middle rewrites, equal-tuple inode replacement, old and
+malformed records, publication mutation, unchanged zero FTS callbacks, and normal append
+resume. The real FTS rewrite control changes a middle tool from Read to Edit and removes a
+TodoWrite classification: postings, events and affordance counts match an independent full
+sweep. A fake-embedder semantic control rereads exactly the one restored-mtime changed source
+and requires no model/network. The six-session resumed/full corpus oracle remains exact.

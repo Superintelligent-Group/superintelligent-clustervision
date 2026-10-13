@@ -1,15 +1,17 @@
-//! Auxiliary source dependencies, distinct from a transcript's primary `(mtime, size)`.
+//! Primary identity and auxiliary source dependencies, with append-safe comparisons.
 //!
 //! Stamps retain canonical individual path records, including absence, rather than a lossy
 //! max-mtime/total-size aggregate. Each consumer owns its baseline: refreshing counts cannot
 //! make an older search index fresh. Missing baselines cause an incremental reread once.
 //!
-//! These are metadata freshness guards, not content verification. Primary transcripts retain
-//! the size/mtime tuple; timestamp-restored rewrites are outside that guarantee. The before-pass
-//! inventory covers known adapter-local files. Consumers additionally capture paths immediately
-//! before dynamic reads, including conditional fork siblings and adopted external output files.
-//! Version 2 records explicitly distinguish a complete read set (even empty) from an unrecorded
-//! one. Older baselines reread once through ordinary incremental refresh; no index rebuild.
+//! These are metadata freshness guards, not content verification. Version 3 captures primary
+//! identity before reads. On Unix, inode/ctime reject timestamp-restored rewrites/replacements;
+//! other platforms currently retain the length/mtime metadata guarantee.
+//! Append-safe dependency comparisons deliberately exclude that primary identity: immutable-prefix
+//! contracts and sampled resume marks still govern reuse during growth. The before-pass inventory
+//! covers adapter-local files; consumers additionally capture paths before dynamic reads. Complete
+//! read sets (even empty) remain distinct from unrecorded ones. Older baselines reread once through
+//! ordinary incremental refresh; no index rebuild.
 
 use crate::ir::{Harness, SessionRef};
 use serde::{Deserialize, Serialize};
@@ -55,10 +57,11 @@ struct FileState {
     identity: Option<(u64, u64, i64, i64)>,
 }
 
-/// Exact serialized metadata records for an auxiliary dependency set, not a content digest.
+/// Exact serialized primary and auxiliary metadata records, not a content digest.
 #[derive(Serialize, Deserialize)]
 struct Records {
     version: u32,
+    primary: Entry,
     entries: Vec<Entry>,
     /// None is a before-pass inventory, not a complete consumer read set.
     #[serde(default)]
@@ -81,17 +84,37 @@ impl Stamp {
 
     fn records(&self) -> Option<Records> {
         let records: Records = serde_json::from_str(&self.0).ok()?;
-        (records.version == 2).then_some(records)
+        (records.version == 3).then_some(records)
+    }
+
+    /// Canonical serialization puts the small primary record before the potentially large
+    /// inventory. The delimiter cannot occur inside an encoded path: its quotes would be escaped.
+    /// Compare it without decoding every auxiliary path. Older/noncanonical records miss.
+    fn canonical_parts(&self) -> Option<(&str, &str)> {
+        self.0.strip_prefix("{\"version\":3,\"primary\":{")?;
+        self.0.split_once(",\"entries\":")
+    }
+
+    fn same_primary(&self, current: &Stamp) -> bool {
+        self.canonical_parts()
+            .zip(current.canonical_parts())
+            .is_some_and(|((old, _), (now, _))| old == now)
     }
 
     fn matches(&self, current: &Stamp, probe: &mut Probe) -> bool {
-        // Canonical version-2 records with no dynamic reads compare without allocating all
-        // adapter-local paths three times. The generated base record strings must match exactly.
-        if self.0.strip_suffix("\"reads\":[]}").is_some_and(|base| {
-            current.0.strip_suffix("\"reads\":null}") == Some(base)
-                || current.0.strip_suffix("\"reads\":[]}") == Some(base)
-        }) {
-            return true;
+        // Auxiliary comparison is independent of primary growth. Canonical complete empty
+        // read sets compare the remaining inventory without decoding its owned paths.
+        if let Some(((old_primary, old), (now_primary, now))) = self.canonical_parts().zip(current.canonical_parts()) {
+            if old.strip_suffix("\"reads\":[]}").is_some_and(|base| {
+                now.strip_suffix("\"reads\":null}") == Some(base) || now.strip_suffix("\"reads\":[]}") == Some(base)
+            }) {
+                // Equal primary prefixes are already validated by the freshly generated stamp.
+                // A differing prefix must still be a well-formed typed record before resume.
+                return old_primary == now_primary
+                    || old_primary
+                        .strip_prefix("{\"version\":3,\"primary\":")
+                        .is_some_and(|entry| serde_json::from_str::<Entry>(entry).is_ok());
+            }
         }
         let Some(old) = self.records() else { return false };
         let Some(current) = current.records() else { return false };
@@ -256,7 +279,13 @@ impl Snapshot {
 
     /// Strict consumer freshness using operation-local metadata probes.
     pub fn fresh(&self, current: &Self, probe: &mut Probe) -> bool {
-        self.primary == current.primary && self.dependencies_fresh(current, probe)
+        self.primary == current.primary
+            && self
+                .dependencies
+                .as_ref()
+                .zip(current.dependencies.as_ref())
+                .is_some_and(|(old, now)| old.same_primary(now))
+            && self.dependencies_fresh(current, probe)
     }
 
     /// Attach the read set captured by this consumer's complete pass, never another consumer's.
@@ -341,7 +370,8 @@ impl Probe {
 
     fn dependencies_from(&mut self, r: &SessionRef, primary: &Path) -> Option<Stamp> {
         Stamp::serialize(&Records {
-            version: 2,
+            version: 3,
+            primary: self.entry(primary)?,
             entries: self.dependency_entries(r, primary)?,
             reads: None,
         })
@@ -593,9 +623,10 @@ pub fn unchanged(r: &SessionRef, snapshot: &Snapshot) -> bool {
 /// Publication guard against the concrete adapter's source path.
 pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bool {
     let mut probe = Probe::default();
-    let current_primary = probe
-        .entry(primary)
-        .and_then(|entry| entry.state)
+    let current_entry = probe.entry(primary);
+    let current_primary = current_entry
+        .as_ref()
+        .and_then(|entry| entry.state.as_ref())
         .map_or((0, 0), |state| (state.modified_ns as i64, state.len as i64));
     if current_primary != snapshot.primary {
         return false;
@@ -609,9 +640,18 @@ pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bo
     // Directory enumeration is complete. Only metadata probes are needed for dynamic reads;
     // release path lists before parsing the captured inventory's owned paths.
     probe.directories.clear();
-    let Some(Records { entries, reads, .. }) = stamp.records() else {
+    let Some(Records {
+        primary: captured_primary,
+        entries,
+        reads,
+        ..
+    }) = stamp.records()
+    else {
         return false;
     };
+    if current_entry.as_ref() != Some(&captured_primary) {
+        return false;
+    }
     let same = entries == now;
     drop(entries);
     drop(now);
@@ -633,7 +673,7 @@ fn key(r: &SessionRef) -> Key {
     )
 }
 
-/// A consumer's baselines, loaded once. Version 1/missing read sets reread once; even empty
+/// A consumer's baselines, loaded once. Older records/missing read sets reread once; even empty
 /// complete read sets have a row, so an old consumer cannot silently certify unresolved paths.
 #[derive(Default)]
 pub struct Table {
@@ -654,9 +694,33 @@ impl Table {
         probe: &mut Probe,
     ) -> bool {
         dependencies.as_ref().is_some_and(|current| {
+            self.rows.get(&key(r)).is_some_and(|(old_primary, old)| {
+                *old_primary == primary && old.same_primary(current) && old.matches(current, probe)
+            })
+        })
+    }
+
+    /// Only the primary identity, without rewalking auxiliary records. Combine this with
+    /// an already checked auxiliary baseline when deciding whether to skip a complete read.
+    pub fn primary_fresh(&self, r: &SessionRef, dependencies: &Option<Stamp>) -> bool {
+        dependencies
+            .as_ref()
+            .is_some_and(|current| self.rows.get(&key(r)).is_some_and(|(_, old)| old.same_primary(current)))
+    }
+
+    /// Append-safe auxiliary authority, bound to the primary tuple of this consumer's old
+    /// output. Primary growth is intentionally excluded; the adapter/checkpoint verifies reuse.
+    pub fn auxiliary_fresh_with_probe(
+        &self,
+        r: &SessionRef,
+        baseline_primary: (i64, i64),
+        dependencies: &Option<Stamp>,
+        probe: &mut Probe,
+    ) -> bool {
+        dependencies.as_ref().is_some_and(|current| {
             self.rows
                 .get(&key(r))
-                .is_some_and(|(old_primary, old)| *old_primary == primary && old.matches(current, probe))
+                .is_some_and(|(old_primary, old)| *old_primary == baseline_primary && old.matches(current, probe))
         })
     }
 
@@ -726,9 +790,10 @@ pub(crate) fn fresh_record(
     probe: &mut Probe,
 ) -> bool {
     old_primary == primary
-        && dependencies
-            .as_ref()
-            .is_some_and(|stamp| Stamp(old_stamp).matches(stamp, probe))
+        && dependencies.as_ref().is_some_and(|stamp| {
+            let old = Stamp(old_stamp);
+            old.same_primary(stamp) && old.matches(stamp, probe)
+        })
 }
 
 /// Check one previously recorded baseline without loading every session's records during writes.
@@ -748,7 +813,10 @@ pub(crate) fn fresh_in(
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
         )
         .ok()
-        .is_some_and(|(mtime, size, old)| (mtime, size) == primary && Stamp(old).matches(stamp, &mut Probe::default()))
+        .is_some_and(|(mtime, size, old)| {
+            let old = Stamp(old);
+            (mtime, size) == primary && old.same_primary(stamp) && old.matches(stamp, &mut Probe::default())
+        })
     })
 }
 
@@ -833,6 +901,86 @@ pub fn update(_consumer: &str, _updates: &[Update]) {}
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn primary_identity_rejects_restored_tuple_rewrites_and_replacements() {
+        let w = cv_testkit::World::in_process("primary-identity");
+        // Include the canonical delimiter in the filename to exercise JSON escaping.
+        let path = w.base.join("plain,\"entries\":.jsonl");
+        std::fs::write(&path, "old body").unwrap();
+        let r = SessionRef::new("s", Harness::Claude, &path);
+        let before = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        for consumer in ["counts", "events", "fts", "semantic"] {
+            update(consumer, &[(r.clone(), before.clone())]);
+            assert!(Table::load(consumer).fresh(&r, before.primary, &before.dependencies));
+        }
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, "new body").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let now = Probe::default().snapshot(&r);
+        assert_eq!(before.primary, now.primary);
+        assert!(!before.fresh(&now, &mut Probe::default()));
+        assert!(!unchanged(&r, &before));
+        assert!(
+            before.dependencies_fresh(&now, &mut Probe::default()),
+            "auxiliary prefix authority excludes primary identity"
+        );
+        for consumer in ["counts", "events", "fts", "semantic"] {
+            let table = Table::load(consumer);
+            assert!(!table.fresh(&r, now.primary, &now.dependencies));
+            assert!(table.auxiliary_fresh_with_probe(&r, before.primary, &now.dependencies, &mut Probe::default()));
+            assert!(!table.primary_fresh(&r, &now.dependencies));
+        }
+        // A publication racing the restored-tuple write cannot establish freshness.
+        update("counts", &[(r.clone(), before.clone())]);
+        assert!(!Table::load("counts").fresh(&r, now.primary, &now.dependencies));
+        let now = now.with_reads(&ReadSet::default());
+        update("counts", &[(r.clone(), now.clone())]);
+        assert!(Table::load("counts").fresh(&r, now.primary, &now.dependencies));
+        assert!(!Table::load("events").fresh(&r, now.primary, &now.dependencies));
+        // Replacement with equal bytes and restored timestamps is a different primary too.
+        let replacement = w.base.join("replacement");
+        std::fs::write(&replacement, "new body").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let replaced = Probe::default().snapshot(&r);
+        assert_eq!(now.primary, replaced.primary);
+        assert!(!now.fresh(&replaced, &mut Probe::default()));
+        assert!(!unchanged(&r, &now));
+        assert!(!Table::load("counts").fresh(&r, replaced.primary, &replaced.dependencies));
+    }
+
+    #[test]
+    fn primary_identity_legacy_and_malformed_records_miss_without_decoding_inventory() {
+        let w = cv_testkit::World::in_process("primary-legacy");
+        let path = w.base.join("primary.jsonl");
+        std::fs::write(&path, "body").unwrap();
+        let r = SessionRef::new("s", Harness::Claude, &path);
+        let now = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        let stamp = now.dependencies.as_ref().unwrap();
+        assert!(stamp.same_primary(stamp));
+        assert!(stamp.matches(stamp, &mut Probe::default()));
+        let mut legacy = serde_json::to_value(stamp.records().unwrap()).unwrap();
+        legacy["version"] = 2.into();
+        legacy.as_object_mut().unwrap().remove("primary");
+        let legacy = Stamp(serde_json::to_string(&legacy).unwrap());
+        assert!(!legacy.same_primary(stamp));
+        assert!(!legacy.matches(stamp, &mut Probe::default()));
+        let malformed = Stamp(stamp.0.replace("\"primary\":{", "\"primary\":null,\"ignored\":{"));
+        assert!(!malformed.same_primary(stamp));
+        assert!(!malformed.matches(stamp, &mut Probe::default()));
+    }
+
     #[test]
     fn sqlite_journal_creation_rewrite_and_removal_invalidate_inventory() {
         let world = cv_testkit::World::in_process("source-sqlite-journal");
@@ -1119,7 +1267,7 @@ mod tests {
         assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
         let mut table = Table::load("upgrade");
         for (_, stamp) in table.rows.values_mut() {
-            stamp.0 = stamp.0.replacen("\"version\":2", "\"version\":1", 1);
+            stamp.0 = stamp.0.replacen("\"version\":3", "\"version\":1", 1);
         }
         assert!(!table.fresh(&r, base.primary, &base.dependencies));
         assert!(Table::load("upgrade").fresh(&r, base.primary, &base.dependencies));
@@ -1197,7 +1345,7 @@ mod tests {
         let after = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
         // The finalized-step adapter now uses wire.jsonl as its concrete append primary.
         assert_ne!(before.primary, after.primary);
-        assert_eq!(before.dependencies, after.dependencies);
+        assert!(before.dependencies_fresh(&after, &mut Probe::default()));
         std::fs::write(session.join("state.json"), "after!").unwrap();
         assert_ne!(
             after.dependencies,
@@ -1256,9 +1404,19 @@ mod tests {
         };
         crate::catalog::open_db().unwrap();
         let source = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         crate::catalog::note_affordances_with_source(&r, &source, || {
-            // An edit while producing side-store counts cannot publish a newer primary tuple.
+            // Even an edit restoring the original tuple must not bless stale consumer output.
             std::fs::write(&path, "after!").unwrap();
+            #[cfg(unix)]
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            #[cfg(not(unix))]
+            let _ = modified;
             crate::affordance::Counts::new()
         });
         assert!(crate::catalog::AffordanceTable::load().stale(&r));

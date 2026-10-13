@@ -1199,6 +1199,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), initial);
+        #[cfg(unix)]
+        {
+            let modified = std::fs::metadata(&a).unwrap().modified().unwrap();
+            std::fs::write(&a, "c").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&a)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            count.set(0);
+            run("fake", 1, &count);
+            assert_eq!(count.get(), 1, "same-size restored-mtime primary cannot reuse vector");
+        }
         std::fs::write(&a, "changed primary").unwrap();
         count.set(0);
         run("fake", 1, &count);

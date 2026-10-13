@@ -6,6 +6,8 @@
 - Distill owns requested products per message; pack-only analysis skips sidecar rosters while preserving statistics, checked-source errors, tails and resume output.
 - Changed-session listing fetches only demanded discovery-cache rows and shares its catalog connection, avoiding unrelated serialized payload copies.
 - Serve prevents keepalive and preconnection bursts from stranding queued HTTP requests, preserving connection reuse and packaged transport behavior.
+- Cached consumers track primary file identity, detecting timestamp-restored rewrites and replacements on Unix while preserving verified append resume.
+
 - Incremental search rewrites changed session metadata, fixing stale title conjunctions; older indexes rebuild once to establish metadata guards.
 
 - Small unqueried JSON listings rank selected rows without fully ordering the inventory, preserving ties and missing-file behavior.

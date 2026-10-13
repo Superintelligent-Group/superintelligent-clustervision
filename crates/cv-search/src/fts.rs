@@ -26,8 +26,8 @@
 //! - `discovery_metadata` STORED — discovery inputs and provenance guarding skip/resume;
 //!   changed body facets require a whole rewrite because body text is not stored.
 //! - `size`       i64 STORED       — meta doc: file size, the primary incremental-index key for
-//!   append-only session logs, which can skip on unchanged size even when mtime was spuriously
-//!   bumped (touch, rsync, restore); non-append stores require both size and mtime to match.
+//!   append-only session logs. Skip also requires the captured primary identity and auxiliary
+//!   source guards; a changed tuple or identity requires a pass.
 //!
 //! Indexing is **incremental** by default: only sessions whose file signature changed (plus new ones)
 //! are (re)written, and sessions whose files vanished are deleted. A full rebuild is `rebuild=true`.
@@ -388,7 +388,6 @@ pub(crate) struct Swept {
     bodies: HashMap<String, BodySummary>,
 }
 
-/// One session a sweep must read, and what for.
 /// Inputs copied into retained body documents. Updated time and file signature live only on
 /// the replaceable meta document; body, preview and first-message boundaries come from the
 /// verified transcript prefix. Keep None distinct from an empty title or path.
@@ -449,6 +448,7 @@ impl DiscoveryMetadata {
     }
 }
 
+/// One session a sweep must read, and what for.
 struct Job {
     r: cv_core::SessionRef,
     mtime: i64,
@@ -671,7 +671,7 @@ impl SweepPlanner<'_> {
             seen.insert(r.id.clone());
             let source = probe.snapshot(r);
             let (mtime, size) = source.primary;
-            let dependencies_fresh = dependencies.fresh_with_probe(
+            let dependencies_fresh = dependencies.auxiliary_fresh_with_probe(
                 r,
                 existing.get(&r.id).copied().unwrap_or(source.primary),
                 &source.dependencies,
@@ -679,6 +679,7 @@ impl SweepPlanner<'_> {
             );
             let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size)
                 && dependencies_fresh
+                && dependencies.primary_fresh(r, &source.dependencies)
                 && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, &Default::default()));
             let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
             // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
@@ -710,7 +711,7 @@ impl SweepPlanner<'_> {
                     seen.insert(sr.id.clone());
                     let source = probe.snapshot(sr);
                     let (mtime, size) = source.primary;
-                    let dependencies_fresh = dependencies.fresh_with_probe(
+                    let dependencies_fresh = dependencies.auxiliary_fresh_with_probe(
                         sr,
                         existing.get(&sr.id).copied().unwrap_or(source.primary),
                         &source.dependencies,
@@ -723,6 +724,7 @@ impl SweepPlanner<'_> {
                     };
                     let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size)
                         && dependencies_fresh
+                        && dependencies.primary_fresh(sr, &source.dependencies)
                         && metadata.get(&sr.id) == Some(&DiscoveryMetadata::new(sr, &prov));
                     let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
                     if fts_fresh && !events {
@@ -5621,7 +5623,10 @@ mod tests {
             "tailneedle",
         ]
         .map(str::to_string);
-        assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r.clone()], &words));
+        assert_eq!(
+            observe(&dir, std::slice::from_ref(&r), &words),
+            whole_sweep(std::slice::from_ref(&r), &words)
+        );
 
         // The next append changes only replaceable updated_at and retains prefix docs.
         append(
@@ -5663,12 +5668,18 @@ mod tests {
             "cwd:changed AND body:bodyneedle",
         ]
         .map(str::to_string);
-        assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r.clone()], &words));
+        assert_eq!(
+            observe(&dir, std::slice::from_ref(&r), &words),
+            whole_sweep(std::slice::from_ref(&r), &words)
+        );
         assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().changed, 0);
         r.updated_at = chrono::DateTime::from_timestamp(10, 0);
         let updated = sweep(&dir, vec![r.clone()], false, false).unwrap();
         assert_eq!((updated.changed, updated.resumed, updated.errors), (1, 0, 0));
-        assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r.clone()], &words));
+        assert_eq!(
+            observe(&dir, std::slice::from_ref(&r), &words),
+            whole_sweep(std::slice::from_ref(&r), &words)
+        );
         let base = DiscoveryMetadata::new(&r, &Default::default());
         let mut alternatives = Vec::new();
         for field in 0..9 {
@@ -5696,6 +5707,68 @@ mod tests {
         updated.updated_at = None;
         assert_ne!(base, updated);
         assert!(base.same_body(&updated));
+        for d in [dir, sdir] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn primary_identity_restored_rewrite_refreshes_index_events_and_counts() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let path = sdir.join("identity.jsonl");
+        let body: String = (0..20).map(|i| {
+            let content = if i == 10 {
+                serde_json::json!([
+                    {"type":"text", "text":"oldneedle"},
+                    {"type":"tool_use", "id":"edit", "name":"Read", "input":{"file_path":"/old.rs","old_string":"old","new_string":"new"}},
+                    {"type":"tool_use", "id":"todo", "name":"TodoWrite", "input":{"todos":[{"content":"task","status":"pending"}]}}
+                ])
+            } else { serde_json::json!("ordinary ".repeat(500)) };
+            format!("{}\n", serde_json::json!({"type":if i==10 {"assistant"} else {"user"},
+                "uuid":format!("u{i}"), "message":{"role":if i==10 {"assistant"} else {"user"}, "content":content}}))
+        }).collect();
+        std::fs::write(&path, &body).unwrap();
+        let r = sref("identity", "stabletitle", path.to_string_lossy().into_owned());
+        sweep(&dir, vec![r.clone()], false, false).unwrap();
+        let old_counts = cv_core::catalog::AffordanceTable::load().counts(&r).unwrap();
+        let old_events = cv_core::events::events_for(r.harness.as_str(), &r.id, None);
+        let head = cv_core::resume::MarkTable::load().get(&r).unwrap().clone();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let rewritten = body
+            .replace("oldneedle", "newneedle")
+            .replace("\"Read\"", "\"Edit\"")
+            .replace("TodoWrite", "OtherTool")
+            .replace("/old.rs", "/new.rs");
+        assert_eq!(body.len(), rewritten.len());
+        std::fs::write(&path, rewritten).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert!(head.holds(&path, body.len() as u64, &head.version));
+        let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed, swept.errors), (1, 0, 0));
+        assert!(text_search(&dir, "oldneedle", 10).unwrap().is_empty());
+        assert_eq!(text_search(&dir, "newneedle", 10).unwrap().len(), 1);
+        assert_ne!(
+            old_counts,
+            cv_core::catalog::AffordanceTable::load().counts(&r).unwrap()
+        );
+        assert_ne!(
+            format!("{old_events:?}"),
+            format!("{:?}", cv_core::events::events_for(r.harness.as_str(), &r.id, None))
+        );
+        let words = ["oldneedle", "newneedle"].map(str::to_string);
+        assert_eq!(
+            observe(&dir, std::slice::from_ref(&r), &words),
+            whole_sweep(std::slice::from_ref(&r), &words)
+        );
+        let unchanged = sweep(&dir, vec![r], false, false).unwrap();
+        assert_eq!((unchanged.changed, unchanged.work.callbacks), (0, 0));
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }
