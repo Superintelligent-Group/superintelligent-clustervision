@@ -16,10 +16,10 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 | User operation | What we know | Next question / action |
 |---|---|---|
 | List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Cold discovery still derives counts from content. | Eight-session CLI instruction controls attribute 31–40% of work to SQLite source. Explicit catalog connection reuse is in progress; preserve freshness and exact counts. This small fixture does not rank the real fleet. |
-| Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection now stops at the required ranked prefix, preserves stable order, and fails on needed read errors. | Keep complete filtering for exact totals/statistics. Counted `has:plan` can reuse facts; parse predicates still inspect needed bodies. The fact table still loads fleet-wide, so total work is not bounded solely by the window size. |
+| Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection now stops at the required ranked prefix, preserves stable order, and fails on needed read errors. | Keep complete filtering for exact totals/statistics. The counted-fact table still loads fleet-wide; a demand lookup using the catalog Reader and existing primary-key indexes is in progress for limited queries. Preserve atomic counts/provenance pairs and source checks. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar retrieval still loads unrelated records; remove that work through existing checked projections. Persistent MCP read state remains separate. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Carry work accounting across the CLI discovery boundary; inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
-| Transform / export | Verified Codex port retains checked source-backed bodies. Prune/archive/dataset can still scan or stage whole output; archive replacement necessarily writes a new complete artifact. | Hold further Claude emitter work. Splice retains selected guarded messages; distill shares one prepared tail and skips unused findings products. Selected --upto loading and bounded sidecar serialization are in progress; full-source distill analysis still owns its input. |
+| Transform / export | Verified Codex port retains checked source-backed bodies. Prune/archive/dataset can still scan or stage whole output; archive replacement necessarily writes a new complete artifact. | Hold further Claude emitter work. Splice retains selected guarded messages; distill shares one prepared tail, skips unused findings products, and materializes only the selected --upto prefix. Bounded sidecar serialization and shared pack excerpt/event traversal are in progress. Full-source distill analysis still owns its input. |
 
 ### Measurement correction: count the work (2026-10-12)
 
@@ -1884,11 +1884,11 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
 1. **Distill shared products completed; input/output boundaries next.** CLI resume now prepares
    one tail instead of three, and findings skips unused elision copies, tails and token estimates.
    Frozen orchestration compares exact head/tail/findings/stats/sidecar/native output; work counters
-   and retained allocation addresses verify removal of duplicate work. `cmd/distill.rs::load`
-   still materializes every source before `--upto`; sidecar output still builds a complete String.
-   Reuse selected preparation and bounded JSONL staging for those boundaries. The full fact scan
+   and retained allocation addresses verify removal of duplicate work. `--upto` now uses selected
+   preparation with original-count validation, final EOF metadata and path-meta enrichment;
+   sidecar output still builds a complete String. Bounded JSONL staging is in progress. The full fact scan
    and analyzer's input ownership remain separate work.
-2. **Pack stale-event traversal composition, pending operation profiling.** `cmd/pack.rs::build_source`
+2. **Pack stale-event traversal composition, in progress with work-count controls.** `cmd/pack.rs::build_source`
    runs `best_window`, then `events::ingest_ref` reads the same source again when the event catalog
    is stale; both use lazy parsing and visit the complete message stream. Warm events already avoid
    the second parse. Compose the two consumers only on the stale branch through existing event
