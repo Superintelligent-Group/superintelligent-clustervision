@@ -69,12 +69,10 @@ pub(super) fn collect_message(msg: &Value, bag: &mut Map<String, Value>) {
 }
 
 pub(super) fn collect_compaction(v: &Value, bag: &mut Map<String, Value>) {
-    for key in ["compactMetadata"] {
-        if let Some(value) = v.get(key) {
-            // Owned views cannot produce source/provenance failures.
-            if let Some(projected) = compact_metadata(value.into()).expect("owned compaction projection") {
-                bag.insert(key.into(), projected);
-            }
+    if let Some(value) = v.get("compactMetadata") {
+        // Owned views cannot produce source/provenance failures.
+        if let Some(projected) = compact_metadata(value.into()).expect("owned compaction projection") {
+            bag.insert("compactMetadata".into(), projected);
         }
     }
 }
