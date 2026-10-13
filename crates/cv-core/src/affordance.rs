@@ -527,7 +527,11 @@ impl MessageSink for AffordanceSink<'_> {
                 }
             }
         }
-        refine_spawn(self.harness, &mut m, &mut self.open);
+        if let Err(error) = refine_spawn(self.harness, &mut m, &mut self.open) {
+            self.failed = true;
+            self.error = Some(error);
+            return Flow::Stop;
+        }
         match self.inner.try_message(m) {
             Ok(flow) => flow,
             Err(error) => {
@@ -558,7 +562,41 @@ impl MessageSink for AffordanceSink<'_> {
     }
 }
 
-fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMap<String, Returns>) {
+/// Match launch receipts without retaining their decoded payload. Keep only the marker overlap
+/// between chunks, and preserve checked source errors when an early match ends the demand.
+fn source_contains(source: &crate::lazy::SourceText, marker: &str) -> Result<bool> {
+    #[derive(Debug)]
+    struct Found;
+    impl std::fmt::Display for Found {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("receipt marker found")
+        }
+    }
+    impl std::error::Error for Found {}
+    let mut window = Vec::new();
+    let result = source.try_for_each_chunk(64 * 1024, |part| {
+        window.extend_from_slice(part.as_bytes());
+        if marker.is_empty()
+            || window
+                .windows(marker.len())
+                .any(|candidate| candidate == marker.as_bytes())
+        {
+            return Err(Found.into());
+        }
+        let keep = window.len().min(marker.len().saturating_sub(1));
+        let start = window.len() - keep;
+        window.copy_within(start.., 0);
+        window.truncate(keep);
+        Ok(())
+    });
+    match result {
+        Err(error) if error.is::<Found>() => Ok(true),
+        Err(error) => Err(error),
+        Ok(()) => Ok(marker.is_empty()),
+    }
+}
+
+fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMap<String, Returns>) -> Result<()> {
     match (m.role, m.kind) {
         (Role::Assistant, MessageKind::Reply) => {
             let mut spawned = false;
@@ -579,7 +617,7 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
         _ if !open.is_empty() && !m.content.is_empty() => {
             let all_results = m.content.iter().all(|b| matches!(b, Block::ToolResult { .. }));
             if !all_results {
-                return;
+                return Ok(());
             }
             let mut returned = false;
             for b in &m.content {
@@ -593,7 +631,8 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
                         Some(Returns::ResultUnless(marker)) => {
                             returned |= match content {
                                 crate::lazy::Text::Inline(t) => !t.contains(marker),
-                                crate::lazy::Text::Span(_) | crate::lazy::Text::Source(_) => true,
+                                crate::lazy::Text::Span(_) => true,
+                                crate::lazy::Text::Source(source) => !source_contains(source, marker)?,
                             }
                         }
                         _ => {}
@@ -607,6 +646,7 @@ fn refine_spawn(h: Harness, m: &mut Message, open: &mut std::collections::HashMa
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// The entries of a plan/goal tool's input (or a store's JSON), whatever the list is called:
@@ -1973,6 +2013,63 @@ mod tests {
         );
         assert_eq!(rows[0].summary, "1 rule: 1 deny");
         assert_eq!(rows[1].summary, "to msg_1 · snapshot 912f5c89");
+    }
+
+    #[test]
+    fn source_backed_subagent_receipts_match_inline_across_chunks() {
+        let dir = std::env::temp_dir().join(format!("cv-receipt-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("receipt.json");
+        for marker in [false, true] {
+            let mut payload = "a".repeat(65530);
+            if marker {
+                payload.push_str("in the background");
+            } else {
+                payload.push_str("finished answer");
+            }
+            payload.push_str(&"é\n".repeat(50000));
+            std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let backed = source.read_syntax(|view| view.source_text()).unwrap().unwrap();
+            let run = |text: crate::lazy::Text| {
+                let mut messages = Vec::new();
+                let mut target = |m| {
+                    messages.push(m);
+                    Flow::Continue
+                };
+                let mut sink = AffordanceSink::new(Harness::OpenCode, &mut target);
+                let mut call = Message::new(Role::Assistant);
+                call.content.push(Block::ToolUse {
+                    id: "call".into(),
+                    name: "subagent".into(),
+                    input: serde_json::json!({}).into(),
+                    namespace: None,
+                });
+                sink.try_message(call).unwrap();
+                let mut result = Message::of_kind(Role::Tool, MessageKind::ToolResult, Origin::Harness);
+                result.content.push(Block::ToolResult {
+                    tool_use_id: "call".into(),
+                    content: text,
+                    is_error: false,
+                    tool_name: Some("subagent".into()),
+                    status: None,
+                    details: None,
+                });
+                sink.try_message(result).unwrap();
+                drop(sink);
+                messages.into_iter().map(|m| (m.kind, m.origin)).collect::<Vec<_>>()
+            };
+            assert_eq!(run(backed), run(payload.into()));
+        }
+        // Stale retained backing is an error, rather than silently classifying the result.
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let backed = source.read_syntax(|view| view.source_text()).unwrap().unwrap();
+        std::fs::write(&path, b"\"changed\"").unwrap();
+        let crate::lazy::Text::Source(backed) = backed else {
+            panic!("large receipt backing")
+        };
+        assert!(source_contains(&backed, "in the background").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
