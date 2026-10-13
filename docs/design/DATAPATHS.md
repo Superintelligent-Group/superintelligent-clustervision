@@ -58,7 +58,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
 | Claude JSONL | Typed borrowed mmap records and positioned portable projections; lazy text/arguments, Facts metadata, checkpoints and projected discovery/fork heads | Full details and uncommon fallback records remain owned; native/portable CPU convergence is measured separately |
-| Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; selected giant outputs/assistant text retain checked ranges; checkpoints | Function arguments, nonstring outputs, body-dependent user classification and unknown shapes retain owned fallbacks |
+| Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; giant tool-output ranges and checkpoints | Giant native user/assistant text still owns Values during verified export; shared selected-record producer work is active |
 | Codex legacy JSON / zstd | Compressed modern JSONL decodes once into a shared private arena; legacy JSON remains separate | Legacy whole-document path; decoded disk extent is input-sized; no general compressed incremental marks |
 | Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
 | Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
@@ -449,7 +449,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Index-only text matching and deferred snippets.
 - [x] Bounded escaped-string chunk decoding, with and without mmap; serde windows replace the slower initial decoder.
 - [x] Process-isolated heap gates for growing histories and giant Claude/Codex/Gemini fields, plus escaped span decoding; negative baseline proof.
-- [ ] Extend scale fixtures and heap gates to the remaining store formats.
+- [x] Native selected-payload gates for Kimi Code, OpenCode files/v1/v2, Cursor CLI/IDE and Goose, with independent full-output oracles and FD64.
+- [ ] Extend selected-payload gates to portable configurations and remaining store formats.
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [x] Claude metadata discovery and fork-head projections, including giant first records.
@@ -476,7 +477,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
 - [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
-- [ ] Continue safe append checkpoints to the remaining formats; directory and portable producers are active lanes.
+- [x] Audit append checkpoints across every store: six append-safe producers support native/portable resume; mutable histories explicitly decline.
 - [x] Bound event extraction/publication retention and reuse the serial catalog writer connection; preserve rollback and append coverage.
 - [x] Byte-capacity document admission held through Tantivy consumption, including release/error behavior and mixed-sweep negative control.
 - [x] Composed giant plain/escaped canonical index-body parity and live-heap proof at production chunk settings.
@@ -498,7 +499,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Portable/zstd Codex selected payload retention with matched clean release CPU and exact output controls.
 - [x] Shared reducer metadata demand; Claude/Cursor CLI facts preserve doctor, compaction and affordance outputs.
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
-- [ ] Complete guarded cold SQLite snapshot integration, operation-scoped reuse and journal dependency propagation.
+- [x] Guard cold SQLite snapshots with operation-scoped byte-budgeted reuse and original DB/WAL/journal dependencies.
 - [x] Bounded retained MCP observation and staged HTTP selected-window payloads; owned-route/browser limits recorded.
 - [x] Native JSONL record/output staging for append-only emitters.
 - [ ] Native emission incremental fidelity verification, lazy source admission and Claude record rewrite retention.
@@ -1344,3 +1345,29 @@ Allocator-free alternating release trials show history default CPU 31.46→38.75
 with revival 33.42→39.33 ms; large ignored 64 MiB default 68.88→122.88 ms and revival
 75.84→151.33 ms. This substantially removes the prior 2–4× CPU costs, while retaining a residual
 strict scanning/staging cost. Exact-output oracle and focused tests remain unchanged.
+
+
+### Resume capability audit (2026-10-12)
+
+The implementation and writer audit closes the earlier generic "remaining append formats" item.
+API pages, watchers and FTS/count/event publication dispatch through the same adapter capability;
+there is no missing harness-specific consumer activation in those paths.
+
+| Producer | Accepted continuation boundary |
+|---|---|
+| Claude plain JSONL | Complete physical records, saved parser state and original dependencies |
+| Codex plain modern JSONL | Matching flavor/authority and finalized read state; legacy JSON and compressed archives decline |
+| Qwen project ChatRecords JSONL | Finalized records; legacy Gemini-style replay declines |
+| Grok chat_history.jsonl | Pending reasoning and enrichment state retained in the checkpoint |
+| Kimi context logs | Pending usage, rotated prefix identities and checked replay anchor |
+| Kimi Code wire.jsonl | Finalized logical steps; mutable trailing step remains uncommitted |
+
+All six have native and portable read routes. Existing sampled-prefix verification limitations
+remain as described above; continuation is not proof against arbitrary edits to unchecked bytes.
+Gemini/OpenClaw replay controls can change previous logical output; OpenCode parts, database forests,
+compressed blobs, snapshot documents and account exports can rewrite earlier messages. Those formats
+correctly reread instead of inventing append semantics. Goose legacy JSONL also rewrites its header
+and entire conversation into a truncated temporary file before replacement, as confirmed in the
+[Goose v1.9.0 writer](https://github.com/aaif-goose/goose/blob/v1.9.0/crates/goose/src/session/storage.rs#L1157).
+Its file extension does not justify a resumable byte suffix. New writer guarantees can reopen this
+capability assessment; current unsupported formats are explicit engineering decisions.
