@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -157,6 +158,73 @@ def usage_gate(binary, root, env):
     shutil.rmtree(directory)
 
 
+
+def claude_output_digest(path):
+    """Hash validated canonical probe JSONL as an array, normalizing only top-level UUIDs.
+
+    The emitter's uuid/parentUuid prefix is bounded; all remaining bytes are hashed unchanged.
+    This is an output check for this fixed probe, not a general JSON parser/canonicalizer.
+    """
+    uuid = rb"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    prefix_pattern = re.compile(rb'^\{"uuid":"(' + uuid + rb')","parentUuid":(null|"' + uuid + rb'"),')
+    names = {}
+    def name(value):
+        if value not in names:
+            names[value] = f"generated-{len(names)}".encode()
+        return b'"' + names[value] + b'"'
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    rows = 0
+    with path.open("rb") as source:
+        while prefix := source.readline(160):
+            match = prefix_pattern.match(prefix)
+            assert match, "unexpected Claude probe record prefix"
+            normalized_uuid = name(match[1])
+            parent = b"null" if match[2] == b"null" else name(match[2][1:-1])
+            if rows:
+                digest.update(b",")
+            prefix = b'{"uuid":' + normalized_uuid + b',"parentUuid":' + parent + b',' + prefix[match.end():]
+            while True:
+                if prefix.endswith(b"\n"):
+                    digest.update(prefix[:-1])
+                    break
+                digest.update(prefix)
+                prefix = source.readline(64 << 10)
+                assert prefix, "unterminated Claude probe record"
+            rows += 1
+    digest.update(b"]")
+    return digest.hexdigest(), rows
+
+
+def claude_port_gate(binary, root, env):
+    directory = root / "claude-port"
+    directory.mkdir()
+    source = directory / "source.jsonl"
+    generator = Path(__file__).parent / "profiling/claude-port-fixture.py"
+    subprocess.run([sys.executable, "-I", str(generator), str(source), "--characters", str(PAYLOAD)],
+                   env=env, check=True)
+    # Frozen fixture/output contract from claude-port-heap-native.json, native64M characters.
+    original = file_digest(source)
+    assert source.stat().st_size == 89479544
+    assert original == "0ce7431d3a56ccfeb3c5a565551557380e9eb04ff02f5de1dc1472210301584d"
+    child = subprocess.run([str(binary), "codex", str(source), str(directory / "output"), "native"],
+                           env=env, text=True, capture_output=True)
+    assert child.returncode == 0, f"verified Claude export failed: {child.stderr[-2000:]}"
+    report = json.loads(child.stdout)
+    peak = checked_peak(json.loads(child.stderr))
+    assert report["messages"] == 4 and report["fidelity"] == dict(deltas=[])
+    output = Path(report["path"])
+    assert output.stat().st_size == 74566782
+    digest, rows = claude_output_digest(output)
+    assert digest == "bb1364b6a0e47516873453e41eee4700f8c472f017b79820daf5489b5ae34119"
+    assert rows == 4
+    assert file_digest(source) == original, "Claude export modified its source"
+    print(json.dumps(dict(case="verified-claude-export", peak_live_rust_bytes=peak,
+                          messages=4, output_bytes=output.stat().st_size,
+                          normalized_sha256=digest)), flush=True)
+    shutil.rmtree(directory)
+
+
 def window_binary(report_path):
     artifacts = [json.loads(line) for line in report_path.read_text().splitlines()]
     candidates = [item["executable"] for item in artifacts
@@ -213,6 +281,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prune-probe", type=Path, required=True)
     parser.add_argument("--window-build-report", type=Path, required=True)
+    parser.add_argument("--claude-port-probe", type=Path, required=True)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="cv-operation-heap-") as directory:
         root = Path(directory)
@@ -223,6 +292,7 @@ def main():
         prune_gate(binary, root, env)
         usage_gate(binary, root, env)
         window_gate(window_binary(args.window_build_report), root, env)
+        claude_port_gate(args.claude_port_probe.resolve(strict=True), root, env)
 
 
 if __name__ == "__main__":

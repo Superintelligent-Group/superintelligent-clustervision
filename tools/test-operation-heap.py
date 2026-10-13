@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Budget enforcement controls; missing measurements must never pass CI."""
 import importlib.util
+import hashlib
+import json
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -35,6 +38,43 @@ class BudgetTests(unittest.TestCase):
 
     def test_measured_peak_with_platform_slack_passes(self):
         self.assertEqual(gate.checked_peak(self.measured(463595)), 463595)
+
+
+    def test_export_digest_normalizes_only_linked_top_level_ids(self):
+        first = "11111111-1111-4111-8111-111111111111"
+        second = "22222222-2222-4222-8222-222222222222"
+        body = 'λ\n' * 40000 + '"uuid":"' + first + '"'
+        rows = [dict(uuid=first, parentUuid=None, content=body, nested=dict(uuid=first)),
+                dict(uuid=second, parentUuid=first, content="kept result")]
+        expected = [dict(rows[0], uuid="generated-0"),
+                    dict(rows[1], uuid="generated-1", parentUuid="generated-0")]
+        expected_hash = hashlib.sha256(json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "output.jsonl"
+            def write():
+                path.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows))
+            write()
+            self.assertEqual(gate.claude_output_digest(path), (expected_hash, 2))
+            rows[0]["uuid"] = "33333333-3333-4333-8333-333333333333"
+            rows[1]["parentUuid"] = rows[0]["uuid"]
+            write()
+            self.assertEqual(gate.claude_output_digest(path), (expected_hash, 2))
+            rows[1]["content"] = "silently lost result"
+            write()
+            self.assertNotEqual(gate.claude_output_digest(path)[0], expected_hash)
+            rows[1]["content"] = "kept result"
+            rows[0]["nested"]["uuid"] = rows[0]["uuid"]
+            write()
+            self.assertNotEqual(gate.claude_output_digest(path)[0], expected_hash)
+
+    def test_export_digest_rejects_unexpected_header_and_incomplete_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "output.jsonl"
+            for wire in (b'{"content":"unexpected field order"}\n',
+                         b'{"uuid":"11111111-1111-4111-8111-111111111111","parentUuid":null,"content":"missing newline"}'):
+                path.write_bytes(wire)
+                with self.subTest(wire=wire), self.assertRaises(AssertionError):
+                    gate.claude_output_digest(path)
 
 
 if __name__ == "__main__":

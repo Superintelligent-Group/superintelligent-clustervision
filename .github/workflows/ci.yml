@@ -96,15 +96,15 @@ jobs:
       - name: Bounded CLI JSON output
         run: cargo test -p clustervision --bin cv --features probe-heap cmd::view::tests::staged_json_selected_payload_heap -- --ignored --exact --test-threads=1 --nocapture
 
-      - name: Whole-operation prune and unselected JSON-window heap budgets
+      - name: Whole-operation prune, JSON-window and export heap budgets
         run: |
           python3 -I tools/test-operation-heap.py
           operation_root=$(mktemp -d)
           trap 'rm -rf "$operation_root"' EXIT
           export CLUSTERVISION_HOME="$operation_root/catalog"
-          cargo build -j 2 --release -p clustervision-core --example prune_probe --features probe-heap
+          cargo build -j 2 --release -p clustervision-core --example prune_probe --example claude_port_probe --features probe-heap
           cargo test -j 2 -p clustervision --bin cv --features probe-heap --no-run --message-format=json > "$operation_root/window-build.jsonl"
-          python3 -I tools/check-operation-heap.py --prune-probe target/release/examples/prune_probe --window-build-report "$operation_root/window-build.jsonl"
+          python3 -I tools/check-operation-heap.py --prune-probe target/release/examples/prune_probe --window-build-report "$operation_root/window-build.jsonl" --claude-port-probe target/release/examples/claude_port_probe
 
       # Every `cv <cmd>` and MCP tool name the manual mentions exists in `cv schema --commands` or
       # a live `tools/list`. The roster is generated from the clap tree so the binary cannot skew;

@@ -3138,7 +3138,7 @@ Cursor, sharing `tools/profiling/window-extra.py` fixture generation. A mandator
 4 MiB cap apply to the actual command (native Claude/Cursor measure 329,084/328,829 bytes),
 while exact small expected Session JSON checks the selected
 prompt and late title/model/git/extra metadata. Fixture/catalog setup is outside the allocation
-interval. The five cases replace a repeated before/after/size/escape matrix in CI; each synthetic case is
+interval. These original five cases replace a repeated before/after/size/escape matrix in CI; each synthetic case is
 deleted after verification rather than retaining all large inputs/outputs together. The gates do not
 claim portable CLI coverage, CPU speed, mmap/RSS bounds, or bounded ownership of requested large
 output. Existing exact owned-operation controls remain separate evidence.
@@ -3210,3 +3210,23 @@ I/O or RSS claim. Staging writes output-sized private disk bytes; no new physica
 measurement is implied. Lazy IR and identity facts still grow with history, requested owned
 metadata still costs its size, and same-harness complete parsing remains owned to preserve
 carriers. Other emitters' non-native thinking paths are outside this Claude change.
+
+
+Verified Claude export CI control (2026-10-13): the operation heap gate now requires a sixth
+case through the existing `claude_port_probe`, including Codex source preparation,
+`emit_report`, resumability verification and fidelity reparse. It reuses
+`tools/profiling/claude-port-fixture.py` at 64 Mi characters (70,837,134 decoded UTF8 bytes of
+escaped Unicode reasoning) in native thinking mode. Positive heap peak/allocation-request/
+requested-byte counters are mandatory under the same 4 MiB ceiling; the owner's native diagnostic
+is about 1.40 MB. Four source messages and an empty fidelity delta report are required.
+
+After measurement, the driver checks the complete 74,566,782-byte generated transcript against
+the frozen legacy normalized SHA in `tools/profiling/results/claude-port-heap-native.json`.
+It accepts the known bounded top-level uuid/parentUuid header, consistently substitutes only
+those random IDs, and hashes all remaining canonical bytes unchanged in 64 KiB windows using
+the owner's array framing. Both preserved legacy and new output match the frozen digest; no
+giant Python Value or general JSON parser is introduced. Small negative controls prove that
+changed content/nested IDs, unexpected headers and incomplete records fail validation.
+The source's frozen size/hash and unchanged post-operation hash are also checked. Fixture
+creation and output hashing remain outside the measured Rust operation; no CPU, portable,
+SQLite/C-heap or physical-memory claim is added, and each synthetic case is removed after checking.
