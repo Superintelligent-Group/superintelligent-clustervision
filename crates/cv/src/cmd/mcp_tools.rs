@@ -132,32 +132,164 @@ impl CliTools {
         self.commands.iter().map(tool_descriptor).collect()
     }
 
-    /// Run one generated tool and return the child's stdout.
-    pub fn call(&self, tool: &str, args: &Value) -> Result<String> {
+    /// Run the generated CLI unchanged, retaining operation-owned bounded output.
+    pub fn call(&self, tool: &str, args: &Value, cancelled: &std::sync::atomic::AtomicBool) -> Result<CommandOutput> {
         let cmd = self
             .find(tool)
             .ok_or_else(|| anyhow!("unknown generated tool: {tool}"))?;
         let argv = build_argv(cmd, args)?;
-        // stdin is this server's JSON-RPC channel: a child that reads stdin (`cv hook`, a `-`
-        // body) must see EOF, never protocol bytes.
-        let out = std::process::Command::new(&self.bin)
-            .args(&argv)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .with_context(|| format!("running {} {}", self.bin.display(), argv.join(" ")))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let detail = if stderr.is_empty() { stdout } else { stderr };
-            let code = out
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".into());
-            anyhow::bail!("cv {} exited {code}: {detail}", argv.join(" "));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        run_command(&self.bin, &argv, cancelled)
+            .with_context(|| format!("running {} {}", self.bin.display(), argv.join(" ")))
     }
+}
+
+pub(crate) struct CapturedText {
+    pub bytes: cv_core::bytes::ByteSource,
+    pub len: u64,
+    pub trimmed: std::ops::Range<u64>,
+}
+impl CapturedText {
+    pub fn capture(input: impl std::io::Read) -> Result<Self> {
+        use std::io::Write;
+        let mut stage = cv_core::bytes::ByteStage::default();
+        let mut len = 0u64;
+        let mut first = None;
+        let mut end = 0;
+        cv_core::projection::for_each_lossy_utf8_chunk(input, |text| {
+            let head = text.trim_start();
+            if !head.is_empty() {
+                first.get_or_insert(len + (text.len() - head.len()) as u64);
+                end = len + text.trim_end().len() as u64;
+            }
+            stage.write_all(text.as_bytes())?;
+            len += text.len() as u64;
+            Ok(())
+        })?;
+        Ok(Self {
+            bytes: stage.finish()?,
+            len,
+            trimmed: first.unwrap_or(0)..end,
+        })
+    }
+    pub fn reader(&self, trimmed: bool) -> std::io::Result<Box<dyn std::io::Read + '_>> {
+        use std::io::Read;
+        let mut reader = self.bytes.reader()?;
+        let range = if trimmed { self.trimmed.clone() } else { 0..self.len };
+        std::io::copy(&mut reader.by_ref().take(range.start), &mut std::io::sink())?;
+        Ok(Box::new(reader.take(range.end - range.start)))
+    }
+}
+pub(crate) struct CommandOutput {
+    pub stdout: CapturedText,
+    pub stderr: CapturedText,
+    pub error_prefix: Option<String>,
+}
+struct Child(std::process::Child);
+impl Drop for Child {
+    fn drop(&mut self) {
+        // Only this invocation's child is owned here; kill/reap on error, panic or disconnect.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+pub(super) fn run_command(
+    bin: &std::path::Path,
+    argv: &[String],
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<CommandOutput> {
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::Ordering;
+    std::thread::scope(|scope| {
+        let mut child = Child(
+            Command::new(bin)
+                .args(argv)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+        );
+        let stdout = child.0.stdout.take().unwrap();
+        let stderr = child.0.stderr.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = tx.clone();
+        let out = scope.spawn(move || {
+            let _ = tx.send((
+                true,
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| CapturedText::capture(stdout))),
+            ));
+        });
+        let err = scope.spawn(move || {
+            let _ = other.send((
+                false,
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| CapturedText::capture(stderr))),
+            ));
+        });
+        let mut stdout = None;
+        let mut stderr = None;
+        let mut failure = None;
+        let mut collector_panic = None;
+        while stdout.is_none() || stderr.is_none() {
+            if cancelled.load(Ordering::Relaxed) {
+                let _ = child.0.kill();
+                failure.get_or_insert_with(|| anyhow!("MCP client disconnected"));
+            }
+            match rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok((is_stdout, result)) => {
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(panic) => {
+                            collector_panic = Some(panic);
+                            Err(anyhow!("output collector panicked"))
+                        }
+                    };
+                    if result.is_err() {
+                        let _ = child.0.kill();
+                    }
+                    if is_stdout {
+                        stdout = Some(result);
+                    } else {
+                        stderr = Some(result);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        for thread in [out, err] {
+            if let Err(panic) = thread.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        if let Some(panic) = collector_panic {
+            std::panic::resume_unwind(panic);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let stdout = stdout.context("stdout collector stopped")??;
+        let stderr = stderr.context("stderr collector stopped")??;
+        let status = loop {
+            if cancelled.load(Ordering::Relaxed) {
+                anyhow::bail!("MCP client disconnected");
+            }
+            if let Some(status) = child.0.try_wait()? {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let error_prefix = (!status.success()).then(|| {
+            let code = status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".into());
+            format!("error: cv {} exited {code}: ", argv.join(" "))
+        });
+        Ok(CommandOutput {
+            stdout,
+            stderr,
+            error_prefix,
+        })
+    })
 }
 
 /// Keep the commands in the four tool groups and the `task` subcommands, dropping bare dispatcher
@@ -640,5 +772,60 @@ mod tests {
     fn a_flag_given_a_non_boolean_is_an_invalid_param() {
         let e = build_argv(&show(), &json!({"id": "a", "last": 1, "subagents": "yes"})).unwrap_err();
         assert!(e.downcast_ref::<InvalidParams>().is_some(), "{e}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod transport_tests {
+    use super::*;
+    #[test]
+    fn staged_child_drains_both_pipes_and_preserves_exit_fallback() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let output = run_command(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "head -c 2097152 /dev/zero >&2; head -c 2097152 /dev/zero; exit 3".into(),
+            ],
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(output.stdout.len, 2097152);
+        assert_eq!(output.stderr.len, 2097152);
+        assert!(output.error_prefix.as_ref().unwrap().ends_with("exited 3: "));
+        let white = CapturedText::capture(" \n\u{2003}".as_bytes()).unwrap();
+        assert!(white.trimmed.is_empty());
+        let raw = [b' ', 0xff, b' ', b'\n'];
+        let text = CapturedText::capture(raw.as_slice()).unwrap();
+        let mut actual = String::new();
+        std::io::Read::read_to_string(&mut text.reader(true).unwrap(), &mut actual).unwrap();
+        assert_eq!(actual, "\u{fffd}");
+    }
+    #[test]
+    fn staged_cancelled_child_is_reaped() {
+        let dir = std::env::temp_dir().join(format!("cv-mcp-child-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let pid_path = dir.join("pid");
+        let script = format!(
+            "echo $$ > '{}'; exec sleep 10",
+            pid_path.display().to_string().replace('\'', "'\\''")
+        );
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..2000 {
+                    if pid_path.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            assert!(run_command(std::path::Path::new("/bin/sh"), &["-c".into(), script], &cancelled).is_err());
+        });
+        let pid: i32 = std::fs::read_to_string(&pid_path).unwrap().trim().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -17,7 +17,7 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 |---|---|---|
 | List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Cold discovery still derives counts from content. | Preserve warm paths. Distinguish inventory discovery, source validation and exact counting; investigate their coupling before tuning more line scanners. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection now stops at the required ranked prefix, preserves stable order, and fails on needed read errors. | Keep complete filtering for exact totals/statistics. Counted `has:plan` can reuse facts; parse predicates still inspect needed bodies. The fact table still loads fleet-wide, so total work is not bounded solely by the window size. |
-| Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP collects CLI stdout and loses persistent read state. | Finish staged MCP transport and continuation hints. Account for repeated traversals, copies and staged bytes before unifying read engines with different metadata contracts. |
+| Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP now stages CLI output in bounded memory and forwards continuation hints; it still loses persistent read state. | Preserve exact CLI semantics and bounded transport. Account for repeated traversals, copies and staged bytes before unifying read engines with different metadata contracts. |
 | Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still discovers the fleet first. | Carry work accounting across the CLI discovery boundary; inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
 | Transform / export | Verified Codex port retains checked source-backed bodies. Prune/archive/dataset can still scan or stage whole output; archive replacement necessarily writes a new complete artifact. | Hold further Claude emitter work. Count traversals and staged/output bytes for small selections from large histories; consolidate selection/emission where contracts align. |
 
@@ -149,7 +149,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter | Preserve cheap path; measure discovery separately |
 | Full discovery | Scans + cache persistence + catalog replacement/watch construction | Metadata reducers instead of collect-to-count; dependency-aware caching |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
-| JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP collects selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP selected payloads |
+| JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP stages selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP client payload size and subprocess startup |
 | Affordance view | Facts projection into classified rows; checked bounded text summaries | Unprojected adapters retain rich extras; side stores and result rows; escaped validation still traverses the whole field |
 | Doctor | Facts projection; checked text lengths and JSON writer counts | Attribution state, unsupported adapter rich/fallback parsing and demanded structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
@@ -1748,3 +1748,30 @@ affordance counts remain exact. All passes explicitly require zero errors. These
 test-only and do not measure input scans, metadata probes, instructions or timing; the existing
 small corpus uses the test 2 KiB chunk size rather than production's 4 MiB. This is a regression
 for avoided work, not a new performance estimate or telemetry framework.
+
+### Generated MCP output staging (2026-10-12)
+
+Generated tools keep the existing CLI subprocess and argument/window semantics, but concurrently
+drain stdout and stderr into operation-owned bounded ByteStages. The single response writer
+streams the fixed JSON-RPC envelope and serde-escaped lossy UTF-8 fragments, avoiding complete
+stdout strings, result Values and escaped response buffers. Failed commands retain their prior
+trimmed error text and isError classification. Successful stderr is a second text content block,
+so CLI continuation hints survive MCP. Disconnects and collector failures cancel and reap only
+the operation's child; stage ownership cleans up private spill storage.
+
+The same actual CLI child output in the isolated whole-transport allocator control produces
+39,147,683 wire bytes: old peak requested Rust heap 151,001,707 B becomes 1,054,227 B, with
+80 versus 34 allocation requests. The moderate 40,186-byte output changes peak 212,776 to
+139,247 B. These deterministic counters exclude child heap, mmap pages, allocator overhead
+and process RSS; they are not timing measurements. Large output adds a private spool write/read.
+The client still receives the complete selected payload; the first-message soft-cap exception
+is unchanged and can still produce a giant response. Subprocess startup and persistent read
+state remain separate work.
+
+Actual CLI/MCP parity checks cover first, adjacent, repeated and budgeted windows, giant default
+output and failed commands. All nine decoded first-text comparisons match CLI output, including
+the two continuation hints in second blocks. Narrow transport tests cover arbitrary request ids,
+UTF-8 splits and invalid bytes, stderr/failure trimming, broken response pipes, protocol errors,
+notifications, concurrent child drains and cancellation; a shared string oracle checks tiny and
+64 KiB reader boundaries. Private evidence: staged-protocol-parity.json and staged-transport-heap.json
+under /private/tmp/cv-mcp-http-operation-evidence/.

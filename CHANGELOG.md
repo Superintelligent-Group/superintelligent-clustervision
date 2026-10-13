@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Limited JSON queries evaluate only the ranked candidates needed for their window; unread lower-ranked transcripts cannot invalidate selected results.
+- Generated MCP tools stage large output in bounded memory and retain successful stderr, including continuation hints, as a second content block.
+
 - Cursor selected reads preserve empty editor-state fallbacks instead of failing on an empty backing range.
 - Portable Gemini replay retains checked record ranges without copying giant lines or unused metadata.
 
