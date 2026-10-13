@@ -1,12 +1,18 @@
 # Performance budget (2026-10-12)
 
+This is a historical measurement log. Current implementation status and remaining work live in
+[`DATAPATHS.md`](DATAPATHS.md); local convergence of the integrated pass is recorded in
+[`CONVERGENCE-2026-10-13.json`](CONVERGENCE-2026-10-13.json). The old timing targets below have
+not been re-established on the current live fleet. New optimization decisions use matched
+instruction counts, logical work and allocation evidence, rather than timings on the shared host.
+
 Where the time and bytes go per command, measured, and what each command may cost. The fleet:
 ember's machine, 12 cores, 96 GB RAM, ~6,750 cataloged sessions; claude + codex transcripts are
 5,195 files and 95 GB (codex 88 GB of it), the rest are sqlite stores. Every figure is
 `/usr/bin/time -l`, release build, best of 3 unless noted, against a copy of the real catalog
 and index (`CLUSTERVISION_HOME`), page cache warm except where it cannot be (95 GB).
 
-## Today (0.16.1)
+## Baseline (0.16.1, before perf-2)
 
 | command | real | RSS | where it goes (sampled with `sample`) |
 |---|---|---|---|
@@ -47,8 +53,9 @@ Parse throughput of the counting pass (a lazy stream with every message counted,
 | `cv ls`, warm / `has:` | ≤ 100 ms | manual |
 | `cv show --last N` | ≤ the counting pass of that session | manual |
 
-The gate compares throughput as a ratio to a `std::fs::read` of the same bytes in the same run,
-so a slow CI box moves both sides and the budget measures cv, not the runner.
+The legacy gate compares throughput with a `std::fs::read` of the same bytes in the same run.
+This partially controls runner speed, but shared load and cache state can affect the two paths
+differently. Passing it is a regression check, not evidence of a small performance improvement.
 
 ## After (branch perf-2, 2026-10-12)
 
@@ -79,7 +86,7 @@ What did it: parallel sweep (read on 12 cores, write on one); lean parses that s
 readers never open (codex `compacted` histories, claude `toolUseResult`/`attachment`); memchr line
 splitting; `madvise(SEQUENTIAL)`; checkpoints + verified resume marks; one meta doc per session.
 
-Not done, and why:
+Not done at the end of perf-2 (subsequent work is tracked in `DATAPATHS.md`):
 - **Seek anchors for `show --range/--last`**: not justified. After the parse work the worst real
   session is 1.0 s and only three sessions exceed 0.5 s. If wanted, the resume marks are the
   anchor: verified offset, message count, parser version.
@@ -167,11 +174,13 @@ process memory ceiling. Full output, rich metadata, selected SQLite blobs, non-m
 fallbacks, event queues and other stores still have separate bounds recorded in `DATAPATHS.md`.
 
 
-## Composed-path follow-up (2026-10-12, in progress)
+## Composed-path follow-up (measurements from 2026-10-12)
 
 Baseline for this follow-up is `28daf7c`, the completed first datapaths pass. These results
-cover individual changes; the combined implementation has not yet completed its final gates or
-whole-fleet after run. Requested Rust heap excludes native SQLite allocations and mapped input.
+cover individual changes. The combined implementation subsequently completed local convergence
+on 2026-10-13; see the linked report for exact coverage and test recovery. These observations do
+not establish a current whole-fleet after result. Requested Rust heap excludes native SQLite
+allocations and mapped input.
 
 | Operation/input | First-pass baseline | Follow-up |
 |---|---:|---:|
@@ -196,8 +205,10 @@ pairs, compact Unicode escapes and malformed raw fallback; all match.
 
 Claude discovery hashes match on 924 frozen references covering 6.8 GB. Paired median CPU on the
 189.8 MB session fell from 0.508 to 0.250 s. Native document-reader resolved message and metadata
-hashes match in lazy, full and complete modes on four escaped fixtures. Their portable cold path
-still owns encoded source bytes: approximately 16.8 → 67.3 MB plain and 21.4 → 85.9 MB escaped.
+hashes match in lazy, full and complete modes on four escaped fixtures. At this intermediate
+revision, their portable cold path still owned encoded source bytes: approximately 16.8 → 67.3 MB
+plain and 21.4 → 85.9 MB escaped. Shared positioned document views later removed that retention
+for the supported projected formats; current bounds and remaining owned paths are in `DATAPATHS.md`.
 Warm portable exports seek only the selected conversation. No universal document heap bound is
 claimed. Rich-query reducers match the old collector on 282 sessions across 15 harnesses,
 including exact affordance counts; unmatched relative paths can remain until final cwd is known.
@@ -213,10 +224,10 @@ The same baseline's first empty-catalog listing took 14.97 s, quiet warm listing
 and fresh listings a 1.14 s median. The fleet remained live and changed between operations, so
 these are observations rather than frozen before/after claims. An isolated 16.29 MB prefix plus
 623-byte append did resume and matched a complete rebuild's search results, counts and events.
-The candidate replay remains pending.
+No matched current-fleet replay is claimed; subsequent work uses isolated operation controls.
 
 
-Further composed checks, still before the final combined gate run:
+Further composed checks recorded before the final combined gate run:
 
 | Operation | Baseline | Updated |
 |---|---:|---:|

@@ -1,0 +1,96 @@
+{
+  "source_commit": "ef75a100",
+  "notes": [
+    "stream invocations include prefix-stopped passes; they are not all EOF traversals",
+    "inline text byte counts exclude metadata strings, skipped/non-inline payload decode and producer prefix classification",
+    "record extents are physical input ranges navigated, not measured read syscalls or exact parser bytes touched"
+  ],
+  "cases": [
+    {
+      "case": "first",
+      "records": 20000,
+      "selected": 200,
+      "window_callbacks": 201,
+      "head_callbacks": 20000,
+      "window_emitted_inline_text_bytes": 1005,
+      "head_emitted_inline_text_bytes": 100000,
+      "selected_text_bytes": 1000,
+      "window_navigated_record_bytes": 14764,
+      "head_source_extent": 1508962,
+      "window_system_prompt": null,
+      "warm_head_callbacks": 0,
+      "repeat_window_callbacks": 201,
+      "adapter_stream_invocations_cold_pair": 2,
+      "adapter_stream_invocations_total": 3
+    },
+    {
+      "case": "near_tail",
+      "records": 20000,
+      "selected": 200,
+      "window_callbacks": 20000,
+      "head_callbacks": 20000,
+      "window_emitted_inline_text_bytes": 100000,
+      "head_emitted_inline_text_bytes": 100000,
+      "selected_text_bytes": 1000,
+      "window_navigated_record_bytes": 1508890,
+      "head_source_extent": 1508962,
+      "window_system_prompt": "late EOF prompt",
+      "warm_head_callbacks": 0,
+      "repeat_window_callbacks": 20000,
+      "adapter_stream_invocations_cold_pair": 2,
+      "adapter_stream_invocations_total": 3
+    },
+    {
+      "case": "giant_first",
+      "records": 20000,
+      "selected": 200,
+      "window_callbacks": 201,
+      "head_callbacks": 20000,
+      "window_emitted_inline_text_bytes": 1000,
+      "head_emitted_inline_text_bytes": 99995,
+      "selected_text_bytes": 1049571,
+      "window_navigated_record_bytes": 1063335,
+      "head_source_extent": 2557533,
+      "window_system_prompt": null,
+      "warm_head_callbacks": 0,
+      "repeat_window_callbacks": 201,
+      "adapter_stream_invocations_cold_pair": 2,
+      "adapter_stream_invocations_total": 3
+    }
+  ],
+  "adjacent_page": {
+    "callbacks": 201,
+    "full_stream_invocations": 0,
+    "resumes": 1
+  },
+  "existing_claude_control": {
+    "pages": 100,
+    "selected": 20000,
+    "page_callbacks": 20099,
+    "head_requests": 5,
+    "head_callbacks": 20000
+  },
+  "existing_codex_control": {
+    "pages": 100,
+    "selected": 20000,
+    "page_callbacks": 20099,
+    "head_requests": 2,
+    "head_callbacks": 20000
+  },
+  "date": "2026-10-13",
+  "method": "Native Claude adapter over 20,000 synthetic messages, independent full-output oracle, late EOF metadata, fresh cache per cold pair; existing Claude/Codex sequential-page controls.",
+  "checks_passed": [
+    "browser_pair_diagnostic_work",
+    "sequential_pages_and_repeated_heads_read_work (ignored control)",
+    "plain_codex_pages_reuse_matching_reader_checkpoints"
+  ],
+  "decision": "Keep independent window/head routes; no coordinator or protocol change. First window remains independent of EOF metadata. Repeated tail and giant-prefix overlap remain scoped costs.",
+  "evidence_root": "/Users/ember/dev/cv-worktrees/excellence-evidence/browser-read-pair",
+  "diagnostic_source": "diagnostic.patch (test-only observer adaptation; no production change)",
+  "limits": [
+    "Record extents exclude whole-file admission passes and are not I/O counts.",
+    "Callback counters exclude catalog lookup and source verification.",
+    "These sequential endpoint controls quantify independent work, not concurrent request scheduling or latency.",
+    "Warm heads reuse EOF metadata; repeated windows do not cache messages."
+  ]
+}

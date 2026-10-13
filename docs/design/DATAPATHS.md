@@ -1912,11 +1912,32 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    parse. API windows deliberately allow prefix metadata while head promises exact EOF metadata;
    CLI also has different final-envelope requirements. The browser now publishes a ready window
    while head remains pending, with exact late metadata and navigation/paging race controls.
-   This removes a UI dependency without reducing backend traversals. Share sinks/traversal where a combined
-   demand is explicit, preserving existing contracts; do not add another cache or universal reader.
-   Refutation: cold callback/prefix-decode counts with exact selected JSON and late EOF metadata,
-   plus dependency mutation and independent endpoint-error controls. Existing verified API page
-   continuations, watch EOF reuse and stats token-ledger reuse should remain intact.
+   This removes a UI dependency without reducing backend traversals. The subsequent operation audit
+   below retains the independent routes: their current concurrent lifetimes provide no guaranteed
+   sharing benefit without more coordination. Existing verified API page continuations, watch EOF
+   reuse and stats token-ledger reuse remain intact.
+
+### Browser window/head work audit (2026-10-13)
+
+[`BROWSER-READ-WORK.json`](BROWSER-READ-WORK.json) records native adapter controls at `ef75a100`.
+An ordinary first page selects 200 of 20,000 messages through 201 callbacks; the independent cold
+head adds 20,000. That selected prefix covers 14,764 of 1,508,962 source-record bytes. With a 1 MiB
+opening body, the same 201 callbacks cover 1,063,335 of 2,557,533 bytes: callback count alone can
+hide substantial overlap. Head keeps that giant body lazy; only window output demands its decoded
+text. These are record extents and delivered inline-text counts, not total parser work or I/O.
+
+A cold near-tail window and head each deliver 20,000 callbacks. Warm heads add zero, but repeating
+the same tail window still costs 20,000: the retained continuation is after its start and cannot
+rewind. Adjacent pages resume; the existing Claude and Codex controls each select all 20,000
+messages in 100 pages with 20,099 callbacks. Exact window output and late EOF metadata pass all
+three focused controls. Lookup, source admission and dependency verification are outside these
+adapter callback measurements; no timing claim follows.
+
+Keep the independent routes and immediate first-window rendering. Opportunistic head resume or
+EOF-window publication could help a later ordered request, but cannot reliably help the current
+simultaneous cold pair. Guaranteeing one traversal would require coordinating worker lifetimes,
+errors and cancellation, or delaying a response. Repeated-tail and giant-prefix work remain
+specific future candidates; this audit does not justify that machinery or another message cache.
 
 ### CLI JSON staging write batching (2026-10-12)
 
