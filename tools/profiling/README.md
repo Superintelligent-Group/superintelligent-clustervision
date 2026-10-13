@@ -390,3 +390,13 @@ scratch CLUSTERVISION_HOME and fresh targets or touch exported inputs to avoid
 Cargo source-mtime reuse. The whole-operation artifact is in
 `docs/design/QUERY-WORKFLOW-EVIDENCE.json`; raw synthetic inputs, outputs, logs and
 counter files remain at `/Users/ember/dev/cv-worktrees/limited-list-operation-evidence`.
+
+`listing-append-composition.py --cv DEFAULT_CV --diagnostic-cv DIAGNOSTIC_CV
+--prepared-control PRIOR_CONTROL --output NEW_DIR` reruns only the existing known
+one-append operation, preparing a new continuation-bearing warm seed before it.
+Use the prior synthetic control generated above (its `control` directory), never
+a harness store: preparation removes/re-appends only its verified generated final
+record and preserves the final bytes and original seed. Build diagnostic source
+with [the composed patch](results/listing-append-composition-diagnostic.patch) at
+`99c8d421`; whole-operation counters include suffix framing **and** sampled-prefix
+validation. Exact source and result are recorded in QUERY-WORKFLOW-EVIDENCE.json.

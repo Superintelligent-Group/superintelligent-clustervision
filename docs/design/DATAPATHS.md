@@ -3042,3 +3042,27 @@ duplicates, existing `_cv_orig_ctx`, iteration behavior, mixed raw framing and c
 failure. Complete usage metadata remains an owned fallback if unusually large. Canonical
 validation/rewrite still traverses the row and stages artifact-sized disk; malformed/oversized
 selection/tool metadata and Unicode declassification fallback remain explicit.
+
+### Append continuation composed with actual limited listing
+
+At integrated `99c8d421`, the same one-append operation was repeated with normal CLI
+and exact full-filter/limited diagnostic oracles. The existing 64 synthetic source paths,
+body bytes and index are reused. A new warm seed is prepared before the known append so
+all 64 rows contain continuation state; the older seed is preserved. Setup is outside the
+measured commands, with source identities/content and seed frozen afterward.
+
+Changed metadata now starts at offset 518 and frames 161 appended bytes/one record,
+versus the earlier 679 bytes/four records. There are still 64 exact cache lookups, 63 hits
+and one scoped refresh; continuation adds one demanded lookup. Global work remains
+128 metadata decoder invocations, 64 primary guards, two watches, 21 adapter checks,
+64 rank candidates and 63 indexed matching IDs. Limited selection evaluates three
+candidates, with two count misses, two body reads and four callbacks. Full filtering reads
+63 bodies/127 callbacks, including the appended user. Default, limited, full-filter and
+prior one-append JSON are byte-identical.
+
+The 161-byte framing extent excludes validation: two sampled-prefix guard calls separately
+request 2,394 bytes. Overlapping head/tail samples total 1,036 bytes for the old 518-byte
+checkpoint and 1,358 bytes for the new 679-byte checkpoint. These counts do not measure
+kernel/page I/O, CPU or latency. Prefix validation retains the immutable-prefix append
+contract. This follow-up adds composition evidence and temporary diagnostic/reproduction
+artifacts without production changes.
