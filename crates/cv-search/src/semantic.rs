@@ -799,6 +799,77 @@ mod tests {
     }
 
     #[test]
+    fn semantic_carrier_guard_survives_cache_and_failed_read_never_encodes() {
+        use cv_core::MessageSink;
+        let dir = std::env::temp_dir().join(format!("cv-semantic-carrier-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let primary = dir.join("primary.jsonl");
+        let backing = dir.join("source.json");
+        let conditional = dir.join("database-wal");
+        let store_path = dir.join("vectors.bin");
+        std::fs::write(&primary, "primary unchanged").unwrap();
+        std::fs::write(&backing, serde_json::to_vec(&"guarded body ".repeat(20_000)).unwrap()).unwrap();
+        let refs = [fixture_ref(&primary, "a")];
+        let source = || {
+            let mut reads = ReadSet::default();
+            reads.record(&conditional);
+            cv_core::json::Json::source_with_reads(&backing, 0, std::fs::metadata(&backing).unwrap().len(), &reads)
+                .unwrap()
+                .with_view(|view| Ok(view.source_text()?.unwrap()))
+                .unwrap()
+        };
+        let encode_calls = std::cell::Cell::new(0);
+        let run = |text: Option<&cv_core::Text>| {
+            refresh(
+                &store_path,
+                &refs,
+                "fake",
+                PROJECTION_VERSION,
+                ReadSet::default(),
+                |r| {
+                    let text = text.expect("fresh carrier guard must avoid reading").clone();
+                    let mut sink = crate::semantic_corpus::DocSink::new(cv_core::Resolver::new(None));
+                    let mut message = cv_core::Message::new(cv_core::Role::User);
+                    message.content.push(cv_core::Block::Text { text });
+                    sink.message(message);
+                    if let Some(error) = sink.take_error() {
+                        return Err(error);
+                    }
+                    let (mut doc, _) = fake_doc(r, None)?;
+                    doc.body = sink.body.into_string();
+                    doc.title = sink.first_user_text;
+                    Ok((doc, sink.reads))
+                },
+                |bodies| {
+                    encode_calls.set(encode_calls.get() + 1);
+                    fake_encode(bodies)
+                },
+                save_store,
+            )
+        };
+        let captured = source();
+        run(Some(&captured)).unwrap();
+        assert_eq!(encode_calls.get(), 1);
+        let original = std::fs::read(&store_path).unwrap();
+        run(None).unwrap();
+        assert_eq!(encode_calls.get(), 1);
+        assert_eq!(std::fs::read(&store_path).unwrap(), original);
+        std::fs::write(&conditional, "conditional dependency adopted").unwrap();
+        assert!(run(Some(&captured)).is_err());
+        assert_eq!(
+            encode_calls.get(),
+            1,
+            "failed projection must not demand model encoding"
+        );
+        assert_eq!(std::fs::read(&store_path).unwrap(), original);
+        run(Some(&source())).unwrap();
+        assert_eq!(encode_calls.get(), 2);
+        run(None).unwrap();
+        assert_eq!(encode_calls.get(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn cached_model_revisions_and_mutated_artifacts_are_distinct_without_network() {
         let dir = std::env::temp_dir().join(format!("cv-model-identity-{}", uuid::Uuid::new_v4()));
         let cache = hf_hub::Cache::new(dir.clone());

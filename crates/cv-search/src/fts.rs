@@ -1477,23 +1477,37 @@ impl<'w> ChunkSink<'w> {
             self.dependencies.record(path);
         }
     }
+    fn record_text(&mut self, text: &cv_core::Text) {
+        match text {
+            cv_core::Text::Span(span) => self.record_span(span),
+            cv_core::Text::Source(source) => {
+                if source.path() != self.primary_path {
+                    self.dependencies.record(source.path());
+                }
+                if let Some(reads) = source.dependencies() {
+                    self.dependencies.merge(reads);
+                }
+            }
+            cv_core::Text::Inline(_) => {}
+        }
+    }
     /// Append a content `Text`: chunk-resolved from the source for a span (never owned whole), or the
     /// inline string. `r` is the session resolver (moved out of `self` to avoid a borrow conflict with
     /// the chunk callback, which mutates `self`).
     fn append_text(&mut self, r: &cv_core::Resolver, text: &cv_core::Text) {
-        if let Some(sp) = text.as_span() {
-            self.record_span(sp);
-            if let Err(error) = r.try_for_each_chunk(sp, CHUNK_BYTES, |s| {
-                self.push_chunk(s);
-                anyhow::ensure!(!self.failed && self.err.is_none(), "search document output failed");
-                Ok(())
-            }) {
-                if !self.failed && self.err.is_none() {
-                    self.err = Some(error.context("resolving search text"));
-                }
-            }
-        } else if let Some(s) = text.inline_str() {
+        if let Some(text) = text.inline_str() {
+            self.push_chunk(text);
+            return;
+        }
+        self.record_text(text);
+        if let Err(error) = text.try_for_each_chunk(r, CHUNK_BYTES, |s| {
             self.push_chunk(s);
+            anyhow::ensure!(!self.failed && self.err.is_none(), "search document output failed");
+            Ok(())
+        }) {
+            if !self.failed && self.err.is_none() {
+                self.err = Some(error.context("resolving search text"));
+            }
         }
     }
 
@@ -1513,6 +1527,9 @@ impl<'w> ChunkSink<'w> {
                 if let cv_core::json::Json::Source(range) = input {
                     if range.path() != self.primary_path {
                         self.dependencies.record(range.path());
+                    }
+                    if let Some(reads) = range.dependencies() {
+                        self.dependencies.merge(reads);
                     }
                 }
                 self.push_chunk(name);
@@ -1680,18 +1697,13 @@ impl cv_core::MessageSink for ChunkSink<'_> {
         if self.first_user.is_none() && m.role == cv_core::Role::User {
             for b in &m.content {
                 if let Block::Text { text } = b {
-                    let s = match text.as_span() {
-                        Some(sp) => {
-                            self.record_span(sp);
-                            match r.try_resolve_prefix(sp, 512) {
-                                Ok(text) => text,
-                                Err(error) => {
-                                    self.err = Some(error.context("reading search label"));
-                                    break;
-                                }
-                            }
+                    self.record_text(text);
+                    let s = match text.try_resolve_prefix(&r, 512) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            self.err = Some(error.context("reading search label"));
+                            break;
                         }
-                        None => text.resolve(&r),
                     };
                     let t = s.trim();
                     if !t.is_empty() {
@@ -2495,6 +2507,107 @@ mod tests {
         drop(sink);
         assert!(bodies.len() > 1);
         assert_eq!(bodies.concat(), expected);
+    }
+
+    #[test]
+    fn source_carriers_stream_exact_chunks_and_keep_auxiliary_guards() {
+        let dir = tmpdir();
+        let path = dir.join("source.json");
+        let conditional = dir.join("database-wal");
+        let f = fields_of(&build_schema()).unwrap();
+        let r = cv_core::SessionRef::new("source", cv_core::Harness::Claude, &path);
+        for source_text in [true, false] {
+            let decoded = "source label é🙂\\\"\n".repeat(20_000);
+            let value = if source_text {
+                serde_json::json!(decoded)
+            } else {
+                serde_json::json!({"arg": decoded})
+            };
+            let raw = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &raw).unwrap();
+            let mut guard = cv_core::source::ReadSet::default();
+            guard.record(&conditional);
+            let input = cv_core::json::Json::source_with_reads(&path, 0, raw.len() as u64, &guard).unwrap();
+            let block = if source_text {
+                cv_core::Block::Text {
+                    text: input.with_view(|view| Ok(view.source_text()?.unwrap())).unwrap(),
+                }
+            } else {
+                cv_core::Block::ToolUse {
+                    id: "call".into(),
+                    name: "tool".into(),
+                    input,
+                    namespace: None,
+                }
+            };
+            let expected = if source_text {
+                format!("{decoded}\n")
+            } else {
+                format!("tool {value}\n")
+            };
+            let mut bodies = Vec::new();
+            let mut out = |doc: TantivyDocument| -> Result<()> {
+                if let Some(body) = doc.get_first(f.body).and_then(|v| v.as_str()) {
+                    assert!(body.len() <= 2 * CHUNK_BYTES);
+                    bodies.push(body.to_owned());
+                }
+                Ok(())
+            };
+            let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
+            sink.append_block(&cv_core::Resolver::new(None), &block);
+            assert!(sink.buf.capacity() <= 2 * CHUNK_BYTES);
+            sink.finish().unwrap();
+            let stored: cv_core::source::ReadSet =
+                serde_json::from_slice(&serde_json::to_vec(&sink.dependencies).unwrap()).unwrap();
+            drop(sink);
+            assert_eq!(bodies.concat(), expected);
+            assert!(stored.fresh(&mut cv_core::source::Probe::default()));
+            // Primary append identity is separately tracked; native source ranges must not
+            // turn the auxiliary guard into a whole-primary append-reuse veto.
+            std::fs::write(&path, "primary changed").unwrap();
+            assert!(stored.fresh(&mut cv_core::source::Probe::default()));
+            std::fs::write(&conditional, "conditional appeared or changed").unwrap();
+            assert!(!stored.fresh(&mut cv_core::source::Probe::default()));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_text_mutation_during_successful_or_failed_flush_stays_failed() {
+        use cv_core::MessageSink;
+        let dir = tmpdir();
+        let path = dir.join("source.json");
+        let conditional = dir.join("conditional");
+        let f = fields_of(&build_schema()).unwrap();
+        let r = cv_core::SessionRef::new("source", cv_core::Harness::Claude, dir.join("primary"));
+        for fail_output in [false, true] {
+            for changed in [&path, &conditional] {
+                let raw = serde_json::to_vec(&"zqsourcecarrier ".repeat(2 * CHUNK_BYTES)).unwrap();
+                std::fs::write(&path, &raw).unwrap();
+                let mut guard = cv_core::source::ReadSet::default();
+                guard.record(&conditional);
+                let input = cv_core::json::Json::source_with_reads(&path, 0, raw.len() as u64, &guard).unwrap();
+                let text = input.with_view(|view| Ok(view.source_text()?.unwrap())).unwrap();
+                let mut emitted = 0;
+                let mut out = |_doc: TantivyDocument| -> Result<()> {
+                    emitted += 1;
+                    std::fs::write(changed, format!("mutation {fail_output} {emitted}"))?;
+                    anyhow::ensure!(!fail_output, "deliberate output failure");
+                    Ok(())
+                };
+                let mut sink = ChunkSink::new(&mut out, &f, &r, 1, 1, Default::default());
+                sink.append_text(&cv_core::Resolver::new(None), &text);
+                assert!(sink.take_error().is_some());
+                assert_eq!(
+                    sink.message(cv_core::Message::new(cv_core::Role::User)),
+                    cv_core::Flow::Stop
+                );
+                assert!(sink.finish().is_err());
+                drop(sink);
+                assert!(emitted > 0);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

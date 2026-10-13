@@ -55,10 +55,19 @@ impl DocSink {
         }
     }
     fn read_text(&mut self, text: &cv_core::Text) {
-        if let cv_core::Text::Span(span) = text {
-            if let Some(path) = &span.source {
-                self.reads.record(path);
+        match text {
+            cv_core::Text::Span(span) => {
+                if let Some(path) = &span.source {
+                    self.reads.record(path);
+                }
             }
+            cv_core::Text::Source(source) => {
+                self.reads.record(source.path());
+                if let Some(reads) = source.dependencies() {
+                    self.reads.merge(reads);
+                }
+            }
+            cv_core::Text::Inline(_) => {}
         }
     }
     /// Message::append_searchable's projection, plus persisted-output heads, within one budget.
@@ -82,6 +91,9 @@ impl DocSink {
                     if !self.body.full() {
                         if let cv_core::json::Json::Source(range) = input {
                             self.reads.record(range.path());
+                            if let Some(reads) = range.dependencies() {
+                                self.reads.merge(reads);
+                            }
                         }
                         if let Err(error) = self.body.push_json(input) {
                             self.error = Some(error);
@@ -200,6 +212,84 @@ mod tests {
             end -= 1;
         }
         &text[..end]
+    }
+
+    #[test]
+    fn semantic_source_text_bounds_heads_and_retains_full_conditional_guard() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-carrier-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("text.json");
+        let database = dir.join("database");
+        let wal = dir.join("database-wal");
+        let conditional = dir.join("optional-sidecar");
+        let decoded = format!("source label\n{}", "é🙂\\\"\n".repeat(100_000));
+        std::fs::write(&path, serde_json::to_vec(&decoded).unwrap()).unwrap();
+        std::fs::write(&database, "database identity").unwrap();
+        for dependency in [&database, &wal, &conditional] {
+            let mut guard = cv_core::source::ReadSet::default();
+            for dependency in [&database, &wal, &conditional] {
+                guard.record(dependency);
+            }
+            let value =
+                cv_core::json::Json::source_with_reads(&path, 0, std::fs::metadata(&path).unwrap().len(), &guard)
+                    .unwrap();
+            let text = value.with_view(|view| Ok(view.source_text()?.unwrap())).unwrap();
+            assert!(matches!(text, Text::Source(_)));
+            let mut projected = sink();
+            assert_eq!(
+                projected.message(message(Role::User, vec![Block::Text { text: text.clone() }])),
+                Flow::Stop
+            );
+            assert!(projected.take_error().is_none());
+            assert_eq!(projected.body.as_str(), prefix(&decoded, EMBED_HEAD_BYTES));
+            assert!(projected.body.capacity() <= EMBED_HEAD_BYTES);
+            assert_eq!(
+                projected.first_user_text.as_deref(),
+                Some(decoded.chars().take(LABEL_CHARS).collect::<String>().as_str())
+            );
+            assert!(projected.reads.fresh(&mut cv_core::source::Probe::default()));
+            std::fs::write(dependency, "dependency changed or appeared").unwrap();
+            assert!(!projected.reads.fresh(&mut cv_core::source::Probe::default()));
+            let mut stale = sink();
+            stale.body = Head::new(7);
+            assert_eq!(
+                stale.message(message(Role::Assistant, vec![Block::Text { text }])),
+                Flow::Stop
+            );
+            assert!(stale.take_error().is_some());
+            assert_eq!(stale.message(message(Role::User, vec![self::text("late")])), Flow::Stop);
+            assert!(stale.take_error().is_some());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantic_source_json_retains_auxiliary_guard_after_capped_projection() {
+        let dir = std::env::temp_dir().join(format!("cv-semantic-json-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("input.json");
+        let conditional = dir.join("sidecar");
+        let raw = serde_json::to_vec(&json!({"arg":"x".repeat(200_000)})).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let mut guard = cv_core::source::ReadSet::default();
+        guard.record(&conditional);
+        let input = cv_core::json::Json::source_with_reads(&path, 0, raw.len() as u64, &guard).unwrap();
+        let mut m = message(Role::Assistant, vec![tool(json!(null))]);
+        if let Block::ToolUse { input: value, .. } = &mut m.content[0] {
+            *value = input;
+        }
+        let mut projected = sink();
+        projected.body = Head::new(32);
+        projected.message(m.clone());
+        assert!(projected.take_error().is_none());
+        assert_eq!(projected.body.len(), 32);
+        std::fs::write(&conditional, "now adopted").unwrap();
+        assert!(!projected.reads.fresh(&mut cv_core::source::Probe::default()));
+        let mut stale = sink();
+        stale.body = Head::new(32);
+        stale.message(m);
+        assert!(stale.take_error().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

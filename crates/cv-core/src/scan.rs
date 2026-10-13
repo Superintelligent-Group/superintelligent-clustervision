@@ -69,8 +69,9 @@ impl MessageSink for CapSink {
         if self.first_user.is_none() && m.role == Role::User {
             for b in &m.content {
                 if let Block::Text { text } = b {
-                    // Inline text keeps its full non-whitespace test; lazy labels select the
-                    // same checked 512-raw-byte head used by indexed and semantic search.
+                    // Inline text keeps its full non-whitespace test. Lazy labels use the same
+                    // checked 512-byte head as indexed/semantic search: raw bytes for spans,
+                    // decoded UTF8 bytes for retained source strings.
                     let t = match text.try_resolve_prefix(&self.resolver, 512) {
                         Ok(text) => text,
                         Err(error) => {
@@ -224,6 +225,51 @@ mod tests {
         assert_eq!(sink.hay.as_str(), &complete[..floor_char(&complete, LIVE_HAY_BYTES)]);
         assert_eq!(sink.first_user.as_deref(), Some("prompt"));
         assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
+    }
+
+    #[test]
+    fn retained_source_text_keeps_bounded_body_label_policy_and_guard_errors() {
+        let dir = cv_testkit::temp_dir("live-head-retained-source");
+        let path = dir.join("source.json");
+        let conditional = dir.join("sidecar");
+        for late_whitespace in [false, true] {
+            let decoded = format!(
+                "{}{}",
+                if late_whitespace {
+                    " ".repeat(1024)
+                } else {
+                    "source label\n".into()
+                },
+                "é🙂".repeat(LIVE_HAY_BYTES)
+            );
+            std::fs::write(&path, serde_json::to_vec(&decoded).unwrap()).unwrap();
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(&conditional);
+            let value = crate::json::Json::source_with_reads(&path, 0, std::fs::metadata(&path).unwrap().len(), &reads)
+                .unwrap();
+            let text = value.with_view(|view| Ok(view.source_text()?.unwrap())).unwrap();
+            assert!(matches!(text, Text::Source(_)));
+            let mut message = Message::new(Role::User);
+            message.content.push(Block::Text { text: text.clone() });
+            let mut sink = CapSink::new(&path);
+            assert_eq!(
+                sink.message(message),
+                if late_whitespace { Flow::Continue } else { Flow::Stop }
+            );
+            assert!(sink.take_error().is_none());
+            assert_eq!(sink.hay.as_str().len(), floor_char(&decoded, LIVE_HAY_BYTES));
+            assert!(sink.hay.as_str() == &decoded[..floor_char(&decoded, LIVE_HAY_BYTES)]);
+            assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
+            assert_eq!(sink.first_user.is_none(), late_whitespace);
+            std::fs::write(&conditional, format!("dependency {late_whitespace}")).unwrap();
+            let mut stale = CapSink::new(&path);
+            stale.hay = Head::new(3);
+            let mut message = Message::new(Role::Assistant);
+            message.content.push(Block::Text { text });
+            assert!(stale.try_message(message).is_err());
+            assert!(stale.take_error().is_some());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

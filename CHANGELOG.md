@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Commit evidence scans tool results in bounded chunks and reports unreadable lazy sources instead of silently losing matches.
+- Search indexes source-backed text and retains complete database, WAL and sidecar freshness guards in semantic caches.
+
 - Live search resolves lazy labels and reports demanded text failures instead of returning incomplete matches.
 
 - Warm token statistics reuse bounded, dependency-validated usage rows while preserving response deduplication and exact cost totals.
