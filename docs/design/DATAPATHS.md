@@ -58,10 +58,10 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Store / format | Current traversal and retained state | Main unresolved cost |
 |---|---|---|
 | Claude JSONL | Typed borrowed mmap records and positioned portable projections; lazy text/arguments, Facts metadata, checkpoints and projected discovery/fork heads | Full details and uncommon fallback records remain owned; native/portable CPU convergence is measured separately |
-| Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; giant tool-output ranges and checkpoints | Giant native user/assistant text still owns Values during verified export; shared selected-record producer work is active |
+| Codex JSONL | mmap or positioned buffered scan; bounded authority prepass; selected prompt/reply/reasoning/arguments/result ranges and checkpoints | Native giant escaped-body CPU regression; duplicate acceptance and mapping scans under investigation; full/unknown metadata remains owned |
 | Codex legacy JSON / zstd | Compressed modern JSONL decodes once into a shared private arena; legacy JSON remains separate | Legacy whole-document path; decoded disk extent is input-sized; no general compressed incremental marks |
-| Gemini legacy JSON | mmap, validated raw records, lazy text spans; metadata discovery | Full modes, composite tool results, thoughts and rich extras still own payloads |
-| Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
+| Gemini legacy JSON | Native/positioned validated records; selected text, composite results and formatted thoughts share bounded backing | Full modes and rich metadata remain owned; output-sized arena disk |
+| Gemini JSONL | Native replay retains order + raw body ranges; selected composites/thoughts share bounded backing | Portable line intake and unused replay metadata projection in progress; `$set`/rewind changes old logical messages |
 | Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery counts without collecting; direct project JSONL resumes finalized records; record text remains owned |
 | Kimi | Context stream + pending usage message, rotated prefix dedup | Wire sidecar uses raw ranges and lazy output spans; structural lookup state and mutable trailing usage remain |
 | Kimi Code | Mutable finalized-step metadata with checked source-backed text/arguments/results; shared positioned framing and composite-result arena | Discovery wire Values; call/step metadata and selected owned fields; arena disk grows with flattened output |
@@ -69,12 +69,12 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
 | Continue | Native/positioned typed header and selected-record source views; lazy payloads and tool-answer dedup | JSON-encoded arguments, selected composites, answer-ID state and mutable snapshots remain |
-| OpenCode files | Ordered message descriptors and source-selected headers/parts; one shared payload arena per session | File inventory and publication metadata scale with part count; late-query miss gate still exposes redundant copies |
+| OpenCode files | Ordered message descriptors, selected headers/parts and shared payload arena; deduplicated source inventory released before publication | Necessary file inventory grows with part count; native and portable late-query miss gates now pass |
 | OpenCode SQLite | Indexed rows and source-selected parts; strict readable-role discovery counts; guarded original DB/WAL/journal dependencies | Encoded input CPU regression remains; full modes and structural metadata stay owned |
 | Cursor SQLite | CLI/ACP reachable-message replay and IDE composer projections; selected strings, Lexical rich text and structured results share private backing | Encoded rich-text CPU cost, owned identifiers/full metadata, WITHOUT ROWID fallback |
 | Devin SQLite | Compact structural forest projection, then selected full metadata per emitted row | Necessary navigation state grows with nodes; strict metadata projection has a measured CPU cost |
 | Hermes SQLite | Indexed rows; exact prompt suppression uses one borrowed-key admission per candidate and bounded spill | Flat retained prompt heap; prompt-only CPU still about 50% above original unbounded Vec |
-| Goose SQLite | Indexed selected message rows into guarded shared backing; typed Facts omit unrelated metadata bags | Full metadata and legacy JSONL remain owned; selected decoding CPU differs by shape |
+| Goose SQLite / legacy | Indexed selected rows with guarded backing and typed Facts; legacy discovery streams header/count projections | Full metadata and legacy message streaming remain owned; selected decoding CPU differs by shape |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
 | LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Bounded discovery title prefixes; Harmony decoding and arbitrary demanded output/metadata remain owned |
@@ -450,7 +450,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Bounded escaped-string chunk decoding, with and without mmap; serde windows replace the slower initial decoder.
 - [x] Process-isolated heap gates for growing histories and giant Claude/Codex/Gemini fields, plus escaped span decoding; negative baseline proof.
 - [x] Native selected-payload gates for Kimi Code, OpenCode files/v1/v2, Cursor CLI/IDE and Goose, with independent full-output oracles and FD64.
-- [ ] Extend selected-payload gates to portable configurations and remaining store formats.
+- [x] Portable selected-payload gates for the same seven formats: 224 checks retain native bounds and independent full-output/dataset oracles.
+- [ ] Extend selected-payload gates to additional Codex fields, Gemini composites and remaining store formats.
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [x] Claude metadata discovery and fork-head projections, including giant first records.
@@ -473,7 +474,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Kimi Code logical-step/selected payload retention, with native/portable resolved parity, late-query CPU controls and bounded deferred handles.
 - [x] Cursor CLI selected text and arguments, strict fused portable validation, and shared reducer facts.
 - [x] Cursor IDE selected strings, rich text and structured results with exact owned-output controls.
-- [ ] Cursor/OpenCode selected-path CPU convergence; source inventory retention for file-store late predicates.
+- [x] OpenCode file-store late predicates pass unchanged heap gates after source inventory path/lifetime reductions.
+- [ ] Cursor/OpenCode selected-path CPU convergence beyond the measured direct-result and generated-length improvements.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
 - [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
@@ -500,9 +502,13 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Shared reducer metadata demand; Claude/Cursor CLI facts preserve doctor, compaction and affordance outputs.
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
 - [x] Guard cold SQLite snapshots with operation-scoped byte-budgeted reuse and original DB/WAL/journal dependencies.
+- [x] Goose legacy discovery uses bounded strict header/count projections; whole-history rewrites deliberately decline resume.
+- [ ] Catalog freshness for every primary, including quiet sessions and same-size replacements; guarded scanner cache publication.
+- [ ] Frozen-fleet recount and cold query reduction: measure serial consumer costs and compose bounded parallel admission.
 - [x] Bounded retained MCP observation and staged HTTP selected-window payloads; owned-route/browser limits recorded.
 - [x] Native JSONL record/output staging for append-only emitters.
-- [ ] Native emission incremental fidelity verification, lazy source admission and Claude record rewrite retention.
+- [x] Native Codex emission uses original guarded lazy sources and incremental whole-report fidelity verification; actual port controls improve memory and CPU.
+- [ ] Claude output record rewrite retention and other emitter/non-native-thinking materialization.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [ ] Prune giant-record retention, shared restamp writing and CPU convergence.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
@@ -1534,3 +1540,18 @@ and `counted-length-cursor-cpu-control.json` under the encoded-arguments evidenc
 These controls establish this incremental win, without assigning earlier owned/lazy CPU gaps
 to the count alone. Native and portable scoped string construction tests cover exact Unicode,
 controls, fragmented escapes, source/journal mutation, backing truncation, and failed writes.
+
+### Goose legacy discovery (2026-10-12)
+
+Legacy discovery now projects only header metadata and exact conversational counts through the
+shared positioned record reader. It preserves duplicate-key/role/tool-only count behavior and
+whole-file UTF-8 rejection, including malformed ignored tails. Native and portable ten-fixture
+discovery hashes match the owned reference. Growing 16→64 MiB records retain about 133 KB native
+and 394 KB portable heap; the old 64 MiB cases used 134–179 MB. Selected cwd/time fields can still
+be owned, and this change does not bound legacy message streaming.
+
+Three alternating clean release controls at 64 MiB give native plain 35.25→31.97 ms and escaped
+243.77→166.47 ms; portable plain 34.05→48.32 ms and escaped 250.94→181.13 ms. Ordinary-record
+controls stay near baseline. Portable plain pays an explicit 14 ms traversal cost for bounded
+retention. Evidence and the writer capability audit are in the reboot evidence directory
+`goose-legacy-3adb291`; implementation `3adb291`.
