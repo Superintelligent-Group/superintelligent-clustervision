@@ -101,8 +101,15 @@ fn lines(path: &Path, limit: usize, mut visit: impl FnMut(&str) -> bool) -> Opti
     let file = fs::File::open(path).ok()?;
     #[cfg(feature = "mmap")]
     if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
-        for line in map.split(|byte| *byte == b'\n').take(limit) {
-            let Ok(line) = std::str::from_utf8(line) else { break };
+        let mut start = 0;
+        for end in memchr::memchr_iter(b'\n', &map)
+            .chain(std::iter::once(map.len()))
+            .take(limit)
+        {
+            let Ok(line) = std::str::from_utf8(&map[start..end]) else {
+                break;
+            };
+            start = end.saturating_add(1);
             if !visit(line) {
                 break;
             }
@@ -128,7 +135,7 @@ fn head(path: &Path) -> Option<Head> {
         };
         // Raw ignored values skip checks Value performs; retain its acceptance before using
         // timestamps, including malformed discarded and overwritten fields.
-        if !crate::harness::store::json::value_compatible(line.as_bytes()) {
+        if !crate::harness::store::json::value_compatible_str_at_depth_with(line, 0, |_, _| {}) {
             return true;
         }
         let at = string(v.timestamp).as_deref().and_then(super::parse_ts);
