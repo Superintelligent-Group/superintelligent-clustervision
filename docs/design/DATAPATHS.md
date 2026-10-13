@@ -30,8 +30,12 @@ cancellation or a later standalone operation; actual cancellation/output/source 
 and the integrated core passes all 21 scoped SQLite tests. Malformed prune passthrough now has
 bounded ownership with exact bytes and fatal UTF-8 behavior preserved. Cline/Roo checked export
 is integrated: the 32 MiB Cline control falls from 134 MB to 276 KB requested live Rust heap,
-with exact files and fidelity report. Its matched instruction comparison is in progress.
-Continue/LM Studio emission and Gemini complete rehome have targeted fixes and controls underway;
+with exact files and fidelity report. The first matched Cline instruction comparison refutes a
+speed claim: 990.55M to 1,113.94M instructions (about 12.46% more), with exact output parity.
+Attribution identifies repeated UTF-8/counting work in the shared single-string writer; repair
+and the original-workload recheck are in progress. Gemini complete rehome is also integrated,
+with native/portable frozen-output controls and a 277 KB peak for the 32 MiB operation.
+Continue/LM Studio emission has targeted fixes and controls underway;
 the final gate batch waits for this source work to settle. Changes must preserve complete output, metadata, acceptance and source-error
 semantics; shared checked readers/writers take priority over new format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
 This changes priority, not the correctness or fidelity requirements.
@@ -3675,8 +3679,9 @@ MCP alone ignores SIGPIPE so its existing writer-error disconnect token actually
 Scoped tests cover lease release on panic, failed send and response drop; notification admission resume/cancellation; cancelled full-queue publication; 128 successful control IDs; saturated polls alongside an ordinary command; and actual EOF/closed-output shutdown. The existing generated-child kill/reap and long-poll responsiveness tests also pass. No throughput, CPU or absolute memory-byte claim is made by the scheduling count invariant. The bounded actual control retains exact IDs/results after stdout drains; its diagnostic report is `mcp-burst/bounded-reports.json` beside the original evidence.
 
 Root integration of MCP admission at `debf6b63` passes all three actual admission protocol
-checks and six lease/publication unit checks. The SQLite lease composition remains pending;
-no final full-repository gate run or push has occurred. Root logs are retained under
+checks and six lease/publication unit checks. SQLite lease composition was pending at that
+point; the completed combined control is recorded below. No final full-repository gate run or
+push has occurred. Root logs are retained under
 `excellence-evidence/lifecycle-integration` outside the repository.
 
 The follow-up at `56e94da5` releases a previous input frame's buffer when its capacity exceeds
@@ -3726,6 +3731,15 @@ can remain if initialization or final empty-directory cleanup itself is interrup
 copied payload is created before owner publication, and its marker survives payload cleanup.
 The controls measure logical named extents, not RSS, APFS physical blocks or universal disk
 bounds. Other required output stages retain their existing lifetime contracts.
+
+Root integration at `50586168` additionally passes 21 SQLite core tests, all three MCP admission
+protocol tests and the actual CLI/MCP lifecycle control against the preserved pre-repair release
+binary. The composed control observes a stopped generated child, then verifies EPIPE-driven
+cancellation, server exit 0, child absence and no remaining database payload; only the 75-byte
+gate remains. Standalone SIGINT/SIGKILL copies are reclaimed on the next operation. Source bytes
+and identity stay unchanged, and doctor output matches the independent binary exactly within
+the same scratch paths. Root evidence is in `excellence-evidence/lifecycle-integration` outside
+the repository; output hashes from different scratch roots are not interchangeable.
 
 ### Malformed prune passthrough (Sol, 2026-10-13)
 
