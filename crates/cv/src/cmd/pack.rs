@@ -256,7 +256,8 @@ fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
         }
         for r in adapter.discover()? {
             let mut sink = CapSink::new(&r.path);
-            let meta = adapter.try_stream(&r, &ParseOptions::lazy(), &mut sink)
+            let meta = adapter
+                .try_stream(&r, &ParseOptions::lazy(), &mut sink)
                 .with_context(|| format!("scanning {}:{} for pack", r.harness, r.id))?;
             let low = sink.hay.as_str().to_lowercase();
             let mut score = words.iter().filter(|w| low.contains(**w)).count() as i64;
@@ -440,15 +441,25 @@ fn best_window(
         range: Option<(usize, usize)>,
         /// How many more following messages the current best window still wants.
         pending: usize,
+        error: Option<anyhow::Error>,
     }
     impl MessageSink for WindowSink {
+        fn take_error(&mut self) -> Option<anyhow::Error> {
+            self.error.take()
+        }
         fn message(&mut self, m: Message) -> Flow {
             let i = self.idx;
             self.idx += 1;
             if m.role == Role::Tool {
                 return Flow::Continue;
             }
-            let text = capped_text(&m, &self.resolver);
+            let text = match capped_text(&m, &self.resolver) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.error = Some(error);
+                    return Flow::Stop;
+                }
+            };
             if text.trim().is_empty() {
                 return Flow::Continue;
             }
@@ -490,31 +501,30 @@ fn best_window(
         window: Vec::new(),
         range: None,
         pending: 0,
+        error: None,
     };
-    adapter.stream(r, &ParseOptions::lazy(), &mut sink)?;
+    adapter.try_stream(r, &ParseOptions::lazy(), &mut sink)?;
     Ok((sink.window, sink.range))
 }
 
 /// A message's text blocks, span-aware (head-resolved) and trimmed to excerpt size with code
 /// fences kept intact.
-fn capped_text(m: &Message, resolver: &Resolver) -> String {
+fn capped_text(m: &Message, resolver: &Resolver) -> Result<String> {
     let mut s = String::new();
     for b in &m.content {
         if let Block::Text { text } = b {
             if !s.is_empty() {
                 s.push('\n');
             }
-            match text.as_span() {
-                Some(sp) => s.push_str(&resolver.resolve_prefix(sp, MSG_RESOLVE_BYTES)),
-                None => {
-                    if let Some(t) = text.inline_str() {
-                        s.push_str(&t[..floor_char(t, t.len().min(MSG_RESOLVE_BYTES as usize))]);
-                    }
-                }
+            let prefix = text.try_resolve_prefix(resolver, MSG_RESOLVE_BYTES)?;
+            if text.inline_str().is_some() {
+                s.push_str(&prefix[..floor_char(&prefix, prefix.len().min(MSG_RESOLVE_BYTES as usize))]);
+            } else {
+                s.push_str(&prefix);
             }
         }
     }
-    trim_excerpt(&s)
+    Ok(trim_excerpt(&s))
 }
 
 /// Trim to ~[`EXCERPT_SOFT_CHARS`], but never cut inside a fenced code block: an open fence
@@ -818,6 +828,76 @@ fn write_text(text: &str, out: Option<PathBuf>, what: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ExcerptFixture(Vec<Message>);
+    impl cv_core::Adapter for ExcerptFixture {
+        fn harness(&self) -> Harness {
+            Harness::OpenSession
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        fn discover(&self) -> Result<Vec<cv_core::SessionRef>> {
+            Ok(Vec::new())
+        }
+        fn stream(&self, r: &cv_core::SessionRef, _: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
+            for message in &self.0 {
+                if sink.message(message.clone()) == Flow::Stop {
+                    break;
+                }
+            }
+            Ok(Session::new(&r.id, r.harness))
+        }
+    }
+    #[test]
+    fn pack_excerpt_inline_span_and_source_match_with_bounded_prefix() -> Result<()> {
+        let world = cv_testkit::World::new("pack-excerpt-source");
+        let path = world.base.join("source.opensession.json");
+        let body = format!("chosen λ {} omitted-tail", "padding ".repeat(128 * 1024));
+        let mut original = Session::new("source", Harness::Claude);
+        let mut message = Message::new(Role::Assistant);
+        message.content.push(Block::Text {
+            text: body.clone().into(),
+        });
+        original.messages.push(message.clone());
+        let bytes = serde_json::to_vec(&cv_core::harness::opensession::document(&original))?;
+        let offset = bytes
+            .windows(body.len())
+            .position(|part| part == body.as_bytes())
+            .unwrap();
+        std::fs::write(&path, bytes)?;
+        let reference = cv_core::SessionRef::new("source", Harness::OpenSession, &path);
+        let source_text = cv_core::Json::source(&path, offset as u64 - 1, body.len() as u64 + 2)?
+            .with_view(|view| view.source_text()?.context("source string"))?;
+        assert!(matches!(&source_text, cv_core::Text::Source(_)));
+        let mut span = message.clone();
+        span.content = vec![Block::Text {
+            text: cv_core::Text::Span(cv_core::lazy::Span {
+                source: Some(path.clone()),
+                offset: offset as u64,
+                len: body.len() as u64,
+                escaped: false,
+            }),
+        }];
+        let mut source = message.clone();
+        source.content = vec![Block::Text { text: source_text }];
+        let resolver = Resolver::new(Some(path.clone()));
+        let expected_text = capped_text(&message, &resolver)?;
+        assert!(!expected_text.contains("omitted-tail"));
+        assert!(expected_text.len() < MSG_RESOLVE_BYTES as usize);
+        let expected_window = best_window(&ExcerptFixture(vec![message]), &reference, "chosen")?;
+        for selected in [&span, &source] {
+            assert_eq!(capped_text(selected, &resolver)?, expected_text);
+            assert_eq!(
+                best_window(&ExcerptFixture(vec![selected.clone()]), &reference, "chosen")?,
+                expected_window
+            );
+        }
+        std::fs::write(&path, b"changed")?;
+        assert!(capped_text(&source, &resolver).is_err());
+        assert!(best_window(&ExcerptFixture(vec![source]), &reference, "chosen").is_err());
+        Ok(())
+    }
 
     #[test]
     fn or_query_relaxes_multiword_tasks_only() {

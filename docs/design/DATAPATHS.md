@@ -1865,3 +1865,42 @@ and byte-identical final pretty output. Evidence: `session-stage-once-control.js
 encoded-arguments evidence directory. This removes a concrete duplicate lazy traversal for
 budgeted JSON reads; full requested output still requires bounded staging and copying, and no
 wall-clock speedup is claimed.
+
+
+### Pack checked source-text connection (Sol, 2026-10-12)
+
+`cmd/pack.rs::capped_text` previously handled only inline strings and legacy spans; `Text::Source`
+was silently omitted from excerpt scoring and output. It now uses the shared checked text-prefix
+mechanism, preserving the existing inline cap and span selection policy. `best_window` propagates
+prefix failures through `MessageSink::take_error` and the checked adapter boundary. An isolated
+1 MiB source fixture asserts exact Inline/Span/Source excerpt/window equality, excludes the distant
+tail, and rejects a changed source both in prefix extraction and in the actual window consumer.
+No parser, cache, scoring policy, event ingestion or timing experiment was added.
+
+
+### Ranked consumer follow-up (Sol audit, 2026-10-12)
+
+1. **Distill analysis products, before another lazy-parser expansion.** `cmd/distill.rs::load`
+   materializes every source; `cmd_distill` applies `--upto` afterwards. Separately, core
+   `distill.rs::render_tail` prepares the transformed tail, token accounting prepares it again,
+   and `resumable_session` prepares it a third time. `findings` calls full `distill` and discards
+   brief/tail/statistics/elided outputs, including copied complete tool outputs. Share analysis
+   products and one prepared tail first, keeping `--upto` and source preparation semantics fixed.
+   Refutation: legacy exact head/tail/finding/stats/sidecar/native-output oracle; count prepared-tail
+   constructions, copied elided bytes, and selected materialization requests at their actual boundaries.
+2. **Pack stale-event traversal composition, pending operation profiling.** `cmd/pack.rs::build_source`
+   runs `best_window`, then `events::ingest_ref` reads the same source again when the event catalog
+   is stale; both use lazy parsing and visit the complete message stream. Warm events already avoid
+   the second parse. Compose the two consumers only on the stale branch through existing event
+   spooling/publication mechanisms. Preserve the current independent event-error policy (pack
+   ignores ingestion failure); blindly substituting `TeeSink` would make those failures fatal.
+   Refutation: a counted real adapter boundary must change cold callbacks from 2N to N while
+   excerpt/range/events match, warm ingestion stays zero, and mutation/failure publication matches.
+3. **Compose read demands, pending operation profiling.** `web/components/cv-app.js:158` requests
+   `/messages` and `/head` together; `api/read.rs::head` traverses EOF, separately from the window
+   parse. API windows deliberately allow prefix metadata while head promises exact EOF metadata;
+   CLI also has different final-envelope requirements. Share sinks/traversal where a combined
+   demand is explicit, preserving existing contracts; do not add another cache or universal reader.
+   Refutation: cold callback/prefix-decode counts with exact selected JSON and late EOF metadata,
+   plus dependency mutation and independent endpoint-error controls. Existing verified API page
+   continuations, watch EOF reuse and stats token-ledger reuse should remain intact.
