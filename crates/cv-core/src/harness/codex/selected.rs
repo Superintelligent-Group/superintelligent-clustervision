@@ -18,7 +18,20 @@ impl Projection {
             Self::Text { record, .. } | Self::Blocks { record, .. } | Self::Input { record, .. } => record,
         };
         dispatch_line(s, scratch, record, events, ctx);
-        let Some(message) = scratch.get_mut(before) else { return };
+        self.replace(scratch.get_mut(before));
+    }
+
+    pub(super) fn dispatch_item(self, scratch: &mut Vec<Message>, ctx: &mut CodexCtx) {
+        let before = scratch.len();
+        let record = match &self {
+            Self::Text { record, .. } | Self::Blocks { record, .. } | Self::Input { record, .. } => record,
+        };
+        handle_item(record.get("payload"), false, None, scratch, ctx);
+        self.replace(scratch.get_mut(before));
+    }
+
+    fn replace(self, message: Option<&mut Message>) {
+        let Some(message) = message else { return };
         match self {
             Self::Text { text, .. } => match message.content.first_mut() {
                 Some(Block::Text { text: body }) | Some(Block::Thinking { text: body, .. }) => *body = text,
@@ -47,6 +60,44 @@ pub(super) fn project(
     let Some(payload_view) = top.get("payload") else {
         return Ok(None);
     };
+    let record_type = top.string("type")?.unwrap_or_default();
+    let make_record = |p| -> Result<Value> {
+        let mut record = Map::new();
+        record.insert("type".into(), record_type.clone().into());
+        record.insert("payload".into(), Value::Object(p));
+        for key in ["timestamp", "ordinal"] {
+            if let Some(value) = top.get(key) {
+                record.insert(key.into(), value.resolve()?.into_owned());
+            }
+        }
+        Ok(Value::Object(record))
+    };
+    project_payload(
+        payload_view,
+        source,
+        spans,
+        (events, complete),
+        &record_type,
+        make_record,
+    )
+}
+
+/// Legacy documents contain response payloads directly; retain the same body projection and
+/// item dispatcher without applying the modern envelope's metadata or carrier policies.
+pub(super) fn project_item(view: JsonView<'_>, source: &JsonSource, spans: bool) -> Result<Option<Projection>> {
+    project_payload(view, source, spans, (false, false), "response_item", |p| {
+        Ok(serde_json::json!({"type": "response_item", "payload": p}))
+    })
+}
+
+fn project_payload(
+    payload_view: JsonView<'_>,
+    source: &JsonSource,
+    spans: bool,
+    (events, complete): (bool, bool),
+    record_type: &str,
+    make_record: impl Fn(Map<String, Value>) -> Result<Value>,
+) -> Result<Option<Projection>> {
     let Some(payload) = Fields::parse(
         payload_view,
         &[
@@ -64,7 +115,6 @@ pub(super) fn project(
         return Ok(None);
     };
     let ty = payload.string("type")?.unwrap_or_default();
-    let record_type = top.string("type")?.unwrap_or_default();
     let mut p = Map::new();
     p.insert("type".into(), ty.clone().into());
     // The dispatcher reads these exact fields for recognized selected records, in every mode.
@@ -83,18 +133,7 @@ pub(super) fn project(
             p.insert(key.into(), value.resolve()?.into_owned());
         }
     }
-    let make_record = |p| -> Result<Value> {
-        let mut record = Map::new();
-        record.insert("type".into(), record_type.clone().into());
-        record.insert("payload".into(), Value::Object(p));
-        for key in ["timestamp", "ordinal"] {
-            if let Some(value) = top.get(key) {
-                record.insert(key.into(), value.resolve()?.into_owned());
-            }
-        }
-        Ok(Value::Object(record))
-    };
-    match (record_type.as_str(), ty.as_str()) {
+    match (record_type, ty.as_str()) {
         ("event_msg", "user_message" | "agent_message") if !events && complete => Ok(None),
         ("event_msg", "user_message" | "agent_message") if !events => Ok(Some(Projection::Blocks {
             record: make_record(p)?,

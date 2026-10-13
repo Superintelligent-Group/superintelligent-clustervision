@@ -40,6 +40,7 @@
 mod detect;
 mod emit;
 mod lean;
+mod legacy;
 mod metadata;
 mod portable;
 mod selected;
@@ -193,10 +194,7 @@ impl Adapter for Codex {
         crate::stream::checked(sink, |sink| {
             let is_jsonl = is_jsonl_path(&r.path);
             if !is_jsonl {
-                // 2025 legacy layout is a single JSON document — inherently whole-file. Parse it whole
-                // and replay (these sessions are rare and small).
-                let text = read_rollout_to_string(&r.path)?;
-                return crate::stream::replay(parse_str(&r.id, &text, false, Some(r.path.clone())), sink);
+                return legacy::stream(r, opts, sink);
             }
             // Modern `.jsonl` rollout: stream it. `has_events` is a whole-file property (do NL text
             // come from `event_msg`s or `response_item`s?), so we make a cheap first pass to detect it,
@@ -393,16 +391,6 @@ fn open_rollout(path: &Path) -> Result<Box<dyn BufRead>> {
         return Ok(Box::new(BufReader::new(dec)));
     }
     Ok(Box::new(BufReader::new(f)))
-}
-
-/// Whole-file read of a rollout, transparently decoding a `.jsonl.zst`.
-fn read_rollout_to_string(path: &Path) -> Result<String> {
-    use std::io::Read as _;
-    let mut text = String::new();
-    open_rollout(path)?
-        .read_to_string(&mut text)
-        .with_context(|| format!("reading {}", path.display()))?;
-    Ok(text)
 }
 
 /// Per-parse state shared by the full and streaming paths (both call [`dispatch_line`] per
