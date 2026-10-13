@@ -1,5 +1,6 @@
-//! Selected flat JSONL reads retain checked payload ranges, including complete ordinary messages.
-//! Complete unknown/control rows and tree/custom roles keep their existing owned policy. One captured descriptor/context serves the entire operation.
+//! JSONL reads retain checked ordinary payload ranges, including complete and branch-selected messages.
+//! Complete unknown/control rows and system/custom roles keep their existing owned policy.
+//! One captured original source serves navigation and payload replay.
 use super::*;
 use crate::harness::store::{document::Fields, jsonl::ranges};
 use crate::json::{InvalidJson, JsonSource, JsonView};
@@ -88,6 +89,101 @@ pub(super) fn stream(
     source.check_metadata(file.metadata()?)?;
     source.check()?;
     result
+}
+
+/// Branch selection retains only navigation fields and source ranges. Required O(events)
+/// navigation is distinct from owning every payload on both active and inactive branches.
+pub(super) fn tree(
+    r: &SessionRef,
+    facts: &KeyFacts,
+    opts: &ParseOptions,
+    sink: &mut dyn MessageSink,
+    source: &JsonSource,
+) -> Result<Session> {
+    let file = fs::File::open(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
+    source.check_metadata(file.metadata()?)?;
+    let result = (|| {
+        // The preceding whole-tree read_to_string rejected any invalid UTF-8, including
+        // off-branch/malformed rows. Keep that stronger policy than flat JSONL skipping.
+        let extent = ranges::Range {
+            offset: 0,
+            len: source.len(),
+        };
+        if !ranges::valid_utf8(&mut ranges::reader(&file, extent)?)? {
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into(),
+            );
+        }
+        let mut descriptors = Vec::new();
+        let mut records = Vec::new();
+        super::super::store::checked_lines::for_each(&file, 0, source, |view, _, _, _| {
+            descriptors.push(navigation_descriptor(view)?);
+            records.push(view.source_range()?.expect("tree records are source ranges"));
+            Ok(Flow::Continue)
+        })?;
+        let navigation = if descriptors.iter().any(is_leaf_control) {
+            select_navigation(&descriptors, opts.complete)
+        } else {
+            (0..descriptors.len())
+                .map(|index| NavigationRow {
+                    index,
+                    active: true,
+                    parent: None,
+                })
+                .collect()
+        };
+        drop(descriptors);
+        let rows = navigation.into_iter().map(|navigation| {
+            let (offset, len) = records[navigation.index];
+            source.read_range_value(offset, len, |view| {
+                let row = if opts.spans {
+                    project(view, source)?
+                } else {
+                    Some(Row::active(view.resolve()?.into_owned()))
+                };
+                Ok(row.map(|mut row| {
+                    row.active = navigation.active;
+                    row.parent = navigation.parent;
+                    row
+                }))
+            })
+        });
+        consume(rows, r, facts, opts, sink)
+    })();
+    source.check_metadata(file.metadata()?)?;
+    source.check()?;
+    result
+}
+
+fn navigation_descriptor(view: JsonView<'_>) -> Result<Value> {
+    const KEYS: &[&str] = &[
+        "type",
+        "id",
+        "parentId",
+        "appendMode",
+        "targetId",
+        "appendParentId",
+        "firstKeptEntryId",
+    ];
+    let Some(fields) = Fields::parse(view, KEYS)? else {
+        return Ok(Value::Null);
+    };
+    let mut descriptor = serde_json::Map::new();
+    for key in KEYS {
+        if let Some(field) = fields.get(key) {
+            // Only string/null values affect navigation. Preserve key presence and invalid
+            // type with a tiny sentinel rather than resolving arbitrary malformed metadata.
+            let value = if field.is_string()? {
+                field.resolve()?.into_owned()
+            } else if field.is_null()? {
+                Value::Null
+            } else {
+                Value::Bool(false)
+            };
+            descriptor.insert((*key).into(), value);
+        }
+    }
+    Ok(Value::Object(descriptor))
 }
 
 fn consume(
@@ -483,6 +579,93 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn checked_openclaw_tree_replays_compact_navigation_with_exact_owned_parity() -> Result<()> {
+        let world = cv_testkit::World::in_process("openclaw-tree-parity");
+        let path = world.base.join("tree.jsonl");
+        let adapter = OpenClaw { roots: vec![] };
+        for fixture in ["branchy-v4.jsonl", "reset-and-side-entries.jsonl", "v3-full.jsonl"] {
+            let original = fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/openclaw")
+                    .join(fixture),
+            )?;
+            let mut text = original;
+            text.push_str("\n{\"ignored\":1e999}\n{\"ignored\":\"\\ud800\"}\nmalformed\n");
+            text.push_str("\u{2003}{\"type\":\"future\",\"id\":\"future\",\"parentId\":null,\"payload\":{\"unknown\":true}}\u{2003}\n");
+            text.push_str("{\"type\":\"message\",\"id\":\"dup\",\"parentId\":null,\"parentId\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"first\",\"content\":\"last\"}}\n");
+            fs::write(&path, &text)?;
+            let r = SessionRef::new("tree", Harness::OpenClaw, &path);
+            for complete in [false, true] {
+                let options = ParseOptions {
+                    complete,
+                    spans: true,
+                    ..ParseOptions::full()
+                };
+                let expected = parse_text_with(&text, &r, &options);
+                let mut actual = collect(&adapter, &r, &options)?;
+                actual.materialize()?;
+                assert_eq!(
+                    serde_json::to_value(&expected)?,
+                    serde_json::to_value(actual)?,
+                    "{fixture}/complete={complete}"
+                );
+            }
+        }
+        // Required branch metadata remains tiny even when ordinary active and inactive bodies grow.
+        let mut entries: Vec<Value> =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/openclaw/branchy-v4.jsonl"))?
+                .lines()
+                .filter_map(parse_line)
+                .collect();
+        for value in &mut entries {
+            if matches!(value["id"].as_str(), Some("u1" | "a1" | "a2")) {
+                value["message"]["content"] = json!([{"type":"text","text":"giant λ\n".repeat(262144)}]);
+            }
+        }
+        let text = entries
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .join("\n");
+        fs::write(&path, &text)?;
+        let r = SessionRef::new("giant-tree", Harness::OpenClaw, &path);
+        for complete in [false, true] {
+            let options = ParseOptions {
+                complete,
+                spans: true,
+                ..ParseOptions::full()
+            };
+            let mut actual = collect(&adapter, &r, &options)?;
+            assert!(actual
+                .messages
+                .iter()
+                .filter(|m| matches!(m.id.as_deref(), Some("u1" | "a1" | "a2")))
+                .all(|m| m.content.iter().any(|b| matches!(
+                    b,
+                    Block::Text {
+                        text: crate::Text::Source(_)
+                    }
+                ))));
+            let expected = parse_text_with(&text, &r, &options);
+            actual.materialize()?;
+            assert_eq!(serde_json::to_value(expected)?, serde_json::to_value(actual)?);
+        }
+        fs::write(&path, [text.as_bytes(), b"\n\xff"].concat())?;
+        let r = SessionRef::new("bad-tree", Harness::OpenClaw, &path);
+        let error = collect(
+            &adapter,
+            &r,
+            &ParseOptions {
+                spans: true,
+                ..ParseOptions::full()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("valid UTF-8"));
         Ok(())
     }
 }

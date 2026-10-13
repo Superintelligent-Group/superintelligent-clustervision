@@ -1,0 +1,54 @@
+{
+  "baseline_source_revision": "4f324b5e (preserved preceding checked writer with owned tree reader)",
+  "source_sha256": "0da6b62aacd149474d9952d22c9d36327c3e2fae77d356ed0ba9fb557c60c881",
+  "source_identity_unchanged_across_candidate": [
+    16777233,
+    723105320,
+    19358947,
+    1791934269033944363,
+    1791934269033944363
+  ],
+  "normalization": "Only generated eight-hex entry IDs and their parent references.",
+  "results": {
+    "baseline": {
+      "report": {
+        "messages": 4,
+        "fidelity": {
+          "deltas": []
+        }
+      },
+      "heap": {
+        "baseline_live_bytes": 1310,
+        "peak_live_bytes": 53357522,
+        "peak_above_baseline_bytes": 53356212,
+        "stage_end_live_bytes": 16785596,
+        "allocation_requests": 3461,
+        "requested_bytes": 239406909
+      },
+      "binary_sha256": "c5c7b4d26583b2cfe5f1dd7f1467fb1b877b393ce380b2c95b7704823b242f22",
+      "transcript_bytes": 19359218,
+      "normalized_transcript_sha256": "cfba4628f61c731e2a711d4edea2b4e83d9e0fe6ff714c9b101de66621c39230",
+      "index_sha256": "9d6b305a300ed241d5c3d2b2ddcb3215ac2eb93406dd005976cfbc8962dc0d93"
+    },
+    "candidate": {
+      "report": {
+        "messages": 4,
+        "fidelity": {
+          "deltas": []
+        }
+      },
+      "heap": {
+        "baseline_live_bytes": 1324,
+        "peak_live_bytes": 280314,
+        "peak_above_baseline_bytes": 278990,
+        "stage_end_live_bytes": 8784,
+        "allocation_requests": 3132,
+        "requested_bytes": 2418176
+      },
+      "binary_sha256": "9353d11531ae962c88ca75bad3886ec1925aa4f04deebec56d99fb75e280f0ee",
+      "transcript_bytes": 19359218,
+      "normalized_transcript_sha256": "cfba4628f61c731e2a711d4edea2b4e83d9e0fe6ff714c9b101de66621c39230",
+      "index_sha256": "9d6b305a300ed241d5c3d2b2ddcb3215ac2eb93406dd005976cfbc8962dc0d93"
+    }
+  }
+}

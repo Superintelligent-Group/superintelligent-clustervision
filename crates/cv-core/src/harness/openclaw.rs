@@ -233,21 +233,13 @@ impl Adapter for OpenClaw {
             }
             with_jsonl_source(&r.path, |source| {
                 // A transcript with `leaf` controls is a tree: the visible branch must be selected over the
-                // whole file (see [`select_rows`]), so load it. Everything else streams one record at a time,
-                // peak memory O(largest line) — OpenClaw's own rule for flat readers.
+                // whole transcript (see [`select_navigation`]). Retain navigation fields and ranges,
+                // then replay payloads only for selected entries.
                 let facts = jsonl_key_facts(&r.path, &r.id);
                 let tree = file_has_leaf_controls(&r.path)?;
                 source.check()?;
                 if tree {
-                    let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
-                    let entries: Vec<Value> = text.lines().filter_map(parse_line).collect();
-                    return Ok(stream_rows(
-                        rows_from_values(entries, opts.complete).into_iter(),
-                        r,
-                        &facts,
-                        opts,
-                        sink,
-                    ));
+                    return selected::tree(r, &facts, opts, sink, source);
                 }
                 if opts.spans {
                     return selected::stream(r, &facts, opts, sink, source);
@@ -1773,7 +1765,7 @@ fn select_path(leaf: &Option<String>, nodes: &[TreeNode], by_id: &HashMap<String
 /// `session` header(s) plus the active entries in OpenClaw's order (a retained pre-reset/compaction
 /// prefix, then the visible path), each with its normalized parent. `complete`: every entry in file
 /// order, off-branch ones flagged inactive.
-fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
+fn select_navigation(entries: &[Value], complete: bool) -> Vec<NavigationRow> {
     let mut nodes: Vec<TreeNode> = Vec::new();
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut leaf: Option<String> = None;
@@ -1918,37 +1910,53 @@ fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
         .collect();
     let active_set: HashSet<usize> = active_order.iter().copied().collect();
 
-    let mut rows: Vec<Row> = Vec::new();
     if complete {
-        for (i, v) in entries.into_iter().enumerate() {
-            let header = entry_type(&v) == "session";
-            rows.push(Row {
-                parent: normalized.get(&i).cloned(),
-                active: header || active_set.contains(&i),
-                projected: None,
-                v,
-            });
-        }
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, v)| NavigationRow {
+                index,
+                parent: normalized.get(&index).cloned(),
+                active: entry_type(v) == "session" || active_set.contains(&index),
+            })
+            .collect()
     } else {
-        let mut taken: Vec<Option<Value>> = entries.into_iter().map(Some).collect();
-        // Headers first (never tree nodes), then the active entries in OpenClaw's order.
-        for slot in taken.iter_mut() {
-            if slot.as_ref().is_some_and(|v| entry_type(v) == "session") {
-                rows.push(Row::active(slot.take().unwrap()));
-            }
-        }
-        for i in active_order {
-            if let Some(v) = taken[i].take() {
-                rows.push(Row {
-                    parent: normalized.get(&i).cloned(),
-                    active: true,
-                    projected: None,
-                    v,
-                });
-            }
-        }
+        let mut seen = HashSet::new();
+        let headers = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| entry_type(v) == "session")
+            .map(|(i, _)| i);
+        headers
+            .chain(active_order)
+            .filter(|index| seen.insert(*index))
+            .map(|index| NavigationRow {
+                index,
+                parent: normalized.get(&index).cloned(),
+                active: true,
+            })
+            .collect()
     }
-    rows
+}
+
+struct NavigationRow {
+    index: usize,
+    active: bool,
+    parent: Option<Option<String>>,
+}
+
+fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
+    let selected = select_navigation(&entries, complete);
+    let mut entries: Vec<Option<Value>> = entries.into_iter().map(Some).collect();
+    selected
+        .into_iter()
+        .map(|row| Row {
+            v: entries[row.index].take().expect("navigation selects each entry once"),
+            projected: None,
+            active: row.active,
+            parent: row.parent,
+        })
+        .collect()
 }
 
 #[cfg(test)]

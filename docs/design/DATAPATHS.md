@@ -4410,3 +4410,43 @@ SQLite-native allocation: forest SQL role extraction, model/prefix SQL, native c
 page caches and overflow-page metadata remain. Selected quoted-cell backing still writes
 encoded data privately; prefix/system_prompt and demanded rich extras remain owned. No total
 process or largest-row native-memory bound is claimed.
+
+### Compact OpenClaw JSONL branch navigation and checked replay (Sol, 2026-10-13)
+
+OpenClaw's leaf-controlled JSONL path no longer reads the entire transcript into String and
+retains a Vec<Value> of every branch body. A strict accepted-row pass stores source ranges and
+only the seven fields used by the existing navigation algorithm. Nonstring/non-null navigation
+values use a tiny invalid-type sentinel, preserving field presence and the original selector's
+acceptance without owning arbitrary malformed metadata. The same selector returns indexed
+navigation decisions for the existing owned/SQLite callers and checked JSONL replay; there is
+one branch-selection policy. Headers-first lean order, normalized parents, reset prefixes,
+transparent/invalid leaf controls, side entries and complete inactive-branch tags are unchanged.
+
+Replay uses the existing source-backed block projection when spans are requested. Public owned
+parsing still owns each requested message, but no longer owns all raw branch bodies before
+selection. Complete ordinary messages retain checked bodies; unknown/control carriers and
+system/custom role composition retain their existing owned metadata contract. Tree UTF-8
+acceptance intentionally stays stricter than flat JSONL: any invalid UTF-8 rejects the whole
+leaf-controlled input, even off branch; malformed valid-UTF8 JSON rows are skipped. Original
+primary identity is captured before prepasses and remains checked across navigation, replay,
+callback errors and intentional stop. Required O(events) navigation, IDs/links and message
+rosters remain; SQLite branch payload ownership is unchanged.
+
+[One matched actual complete tree rehome](OPENCLAW-TREE-EVIDENCE.json) contains a giant user
+prompt on the active branch and a giant assistant body on the inactive branch, with a leaf
+selecting its sibling. Against the preserved preceding checked writer/owned tree reader,
+requested live Rust peak above baseline falls from 53,356,212 to 278,990 bytes; cumulative
+requested allocation falls from 239,406,909 to 2,418,176 bytes. Four complete messages, empty
+fidelity reports, full normalized transcript and exact index hashes match; only generated entry
+IDs and their parent references are normalized. Source hash/stat identity is unchanged across
+the candidate operation. Binaries, source, outputs and control.py are preserved outside the
+repository at /Users/ember/dev/cv-worktrees/openclaw-export-evidence/tree/.
+
+The existing 29 native OpenClaw controls passed after selector extraction; the new native giant
+branch/acceptance oracle and all 22 portable OpenClaw controls pass. The oracle compares exact
+materialized IR to the preceding owned selector over branch/reset/full fixtures, duplicate keys,
+Unicode wrapping, malformed/overflow/surrogate rows, complete unknown carriers, active/inactive
+giant ordinary bodies and fatal UTF-8 tails. No additional whole-operation matrix or timing
+campaign was run. Source grammar/navigation/replay still traverse captured ranges, mapped pages
+can contribute to RSS, and owned carrier/control/system metadata can scale with demanded bodies.
+These counters establish ordinary-body ownership, not CPU or memory-bandwidth improvements.
