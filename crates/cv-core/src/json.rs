@@ -249,6 +249,22 @@ impl JsonSource {
         self.range(offset, len)?
             .with_positioned_view(context, Validation::Syntax, f)
     }
+    /// Strict Value counterpart sharing an original-source positioned context across records.
+    #[cfg(not(feature = "mmap"))]
+    pub(crate) fn read_positioned_range_value<T>(
+        &self,
+        context: &RangeSource,
+        offset: u64,
+        len: u64,
+        f: impl for<'a> FnOnce(JsonView<'a>) -> Result<T>,
+    ) -> Result<T> {
+        anyhow::ensure!(
+            context.matches_original(self),
+            "JSON positioned context has different provenance"
+        );
+        self.range(offset, len)?
+            .with_positioned_view(context, Validation::Value, f)
+    }
     pub(crate) fn read_range_value<T>(
         &self,
         offset: u64,

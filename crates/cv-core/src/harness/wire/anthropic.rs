@@ -164,7 +164,7 @@ pub(crate) fn block_from_view(
     spans: bool,
 ) -> anyhow::Result<Option<Block>> {
     use super::super::store::document::Fields;
-    if !spans || q.flat_media.is_some() {
+    if !spans {
         return Ok(block_from(view.resolve()?.as_ref(), q));
     }
     let keys = [
@@ -201,6 +201,11 @@ pub(crate) fn block_from_view(
         }));
     }
     if matches!(ty.as_str(), "image" | "document") {
+        if q.flat_media.is_some() {
+            // Flat media has a deliberately truncated reference policy; text/tool fields still
+            // use the common checked projection rather than owning the entire content block.
+            return Ok(block_from(view.resolve()?.as_ref(), q));
+        }
         let src = record
             .get("source")
             .map(|v| Fields::parse(v, &["type", "media_type", "url", "file_id", "data"]))

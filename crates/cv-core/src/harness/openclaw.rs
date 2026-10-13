@@ -114,6 +114,7 @@
 
 mod emit;
 mod registry;
+mod selected;
 pub use emit::emit;
 
 #[cfg(feature = "sqlite")]
@@ -245,6 +246,9 @@ impl Adapter for OpenClaw {
                     sink,
                 ));
             }
+            if opts.spans && !opts.complete {
+                return selected::stream(r, &facts, opts, sink);
+            }
             // `filter_map`, not `map_while`: a single undecodable line (stray non-UTF8 bytes) must be
             // skipped like any other corrupt record — `map_while` would silently TRUNCATE the whole
             // rest of the transcript at it. The lint's run-forever concern doesn't apply: on a regular
@@ -279,18 +283,13 @@ fn parse_line(line: &str) -> Option<Value> {
 /// Does this JSONL transcript hold a `leaf` navigation control? A cheap substring pass (OpenClaw
 /// writes `JSON.stringify` output — no spaces around the colon) so flat transcripts keep streaming.
 fn file_has_leaf_controls(path: &Path) -> Result<bool> {
-    let file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
-    #[allow(clippy::lines_filter_map_ok)]
-    let found = BufReader::new(file)
-        .lines()
-        .filter_map(Result::ok)
-        .any(|l| l.contains("\"type\":\"leaf\""));
-    Ok(found)
+    selected::has_leaf_controls(path)
 }
 
 /// A transcript entry on its way to the sink, with the branch selection's verdict.
 struct Row {
     v: Value,
+    projected: Option<Vec<Message>>,
     /// On the visible branch (always true when no `leaf` control exists).
     active: bool,
     /// Parent id after active-branch normalization (`Some(_)` when the tree rewrote it).
@@ -301,6 +300,7 @@ impl Row {
     fn active(v: Value) -> Self {
         Row {
             v,
+            projected: None,
             active: true,
             parent: None,
         }
@@ -389,49 +389,56 @@ fn stream_rows<I: Iterator<Item = Row>>(
         if !row.active && !opts.complete {
             continue;
         }
-        let msgs = match ty {
-            "message" => parse_entry(&v),
-            "compaction" | "reset" | "branch_summary" | "custom_message" | "model_change" | "thinking_level_change" => {
-                parse_control_entry(&v)
-            }
-            // Session-level facts with a first-class home; the record itself only rides under
-            // `complete`, as the notice the user saw.
-            "session_info" => {
-                let name = v.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty());
-                if let Some(name) = name {
-                    // Discovery already applied OpenClaw's own precedence (store label /
-                    // display_name first, then this name — what its session list shows), so a
-                    // titled ref keeps its title and `cv ls` and `cv show` agree; the name is
-                    // still first-class in the bag. A bare JSONL parse has no ref title.
-                    if s.title.is_none() {
-                        s.title = Some(crate::ir::truncate(name, 80));
+        let msgs = if let Some(messages) = row.projected {
+            messages
+        } else {
+            match ty {
+                "message" => parse_entry(&v),
+                "compaction"
+                | "reset"
+                | "branch_summary"
+                | "custom_message"
+                | "model_change"
+                | "thinking_level_change" => parse_control_entry(&v),
+                // Session-level facts with a first-class home; the record itself only rides under
+                // `complete`, as the notice the user saw.
+                "session_info" => {
+                    let name = v.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty());
+                    if let Some(name) = name {
+                        // Discovery already applied OpenClaw's own precedence (store label /
+                        // display_name first, then this name — what its session list shows), so a
+                        // titled ref keeps its title and `cv ls` and `cv show` agree; the name is
+                        // still first-class in the bag. A bare JSONL parse has no ref title.
+                        if s.title.is_none() {
+                            s.title = Some(crate::ir::truncate(name, 80));
+                        }
+                        s.harness_extra_mut(Harness::OpenClaw)
+                            .insert("session_name".into(), Value::from(name));
                     }
-                    s.harness_extra_mut(Harness::OpenClaw)
-                        .insert("session_name".into(), Value::from(name));
+                    notice_if_complete(&v, opts, format!("[session named: {}]", name.unwrap_or("")))
                 }
-                notice_if_complete(&v, opts, format!("[session named: {}]", name.unwrap_or("")))
-            }
-            "label" => {
-                let target = v.get("targetId").and_then(Value::as_str);
-                let label = v.get("label").and_then(Value::as_str);
-                if let (Some(target), Some(label)) = (target, label) {
-                    let labels = s
-                        .harness_extra_mut(Harness::OpenClaw)
-                        .entry("labels")
-                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                    if let Some(map) = labels.as_object_mut() {
-                        map.insert(target.to_string(), Value::from(label));
+                "label" => {
+                    let target = v.get("targetId").and_then(Value::as_str);
+                    let label = v.get("label").and_then(Value::as_str);
+                    if let (Some(target), Some(label)) = (target, label) {
+                        let labels = s
+                            .harness_extra_mut(Harness::OpenClaw)
+                            .entry("labels")
+                            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                        if let Some(map) = labels.as_object_mut() {
+                            map.insert(target.to_string(), Value::from(label));
+                        }
                     }
+                    notice_if_complete(
+                        &v,
+                        opts,
+                        format!("[label {}: {}]", target.unwrap_or(""), label.unwrap_or("")),
+                    )
                 }
-                notice_if_complete(
-                    &v,
-                    opts,
-                    format!("[label {}: {}]", target.unwrap_or(""), label.unwrap_or("")),
-                )
+                // `custom` (extension state, not in context), `leaf` navigation controls and anything
+                // newer: bookkeeping, carried only under `complete`.
+                _ => carrier_if_complete(&v, opts),
             }
-            // `custom` (extension state, not in context), `leaf` navigation controls and anything
-            // newer: bookkeeping, carried only under `complete`.
-            _ => carrier_if_complete(&v, opts),
         };
         for (i, mut m) in msgs.into_iter().enumerate() {
             // A cron run's or a sub-agent's prompts were written by the scheduler / the parent
@@ -1905,6 +1912,7 @@ fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
             rows.push(Row {
                 parent: normalized.get(&i).cloned(),
                 active: header || active_set.contains(&i),
+                projected: None,
                 v,
             });
         }
@@ -1921,6 +1929,7 @@ fn select_rows(entries: Vec<Value>, complete: bool) -> Vec<Row> {
                 rows.push(Row {
                     parent: normalized.get(&i).cloned(),
                     active: true,
+                    projected: None,
                     v,
                 });
             }
