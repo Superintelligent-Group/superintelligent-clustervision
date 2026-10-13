@@ -1736,3 +1736,15 @@ last changes visible first-run semantics and needs a product/API decision; it is
 here. Keeping exact known counts and strict acceptance makes a first source scan necessary.
 Further local scanner improvements can reduce its CPU cost, but the warm path is already within
 target and cannot by itself eliminate the first-run content-read floor.
+
+
+Deterministic sweep work regression (2026-10-12): the existing six-source Claude/Codex append
+parity test now also checks delivered message callbacks, submitted documents, searchable body
+bytes and writer acquisition on the production sweep path. A successful unchanged refresh
+has zero callbacks/submissions/body bytes and does not open a writer; the writer-lock regression
+independently preserves this contract. Both successive append passes deliver fewer callbacks
+and searchable bytes than a whole rebuild, while stored documents, indexed queries, events and
+affordance counts remain exact. All passes explicitly require zero errors. These counters are
+test-only and do not measure input scans, metadata probes, instructions or timing; the existing
+small corpus uses the test 2 KiB chunk size rather than production's 4 MiB. This is a regression
+for avoided work, not a new performance estimate or telemetry framework.

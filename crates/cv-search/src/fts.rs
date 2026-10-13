@@ -330,6 +330,16 @@ pub fn index_sessions(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool,
     Ok(swept.total)
 }
 
+/// Successful-sweep delivered callbacks and document submissions, not input scans or timings.
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SweepWork {
+    callbacks: usize,
+    documents: usize,
+    body_bytes: usize,
+    writer_opened: bool,
+}
+
 /// What one [`sweep`] did.
 #[derive(Default)]
 pub(crate) struct Swept {
@@ -346,6 +356,8 @@ pub(crate) struct Swept {
     pub resumed: usize,
     #[cfg(test)]
     admission: (usize, usize, usize, usize),
+    #[cfg(test)]
+    work: SweepWork,
     #[cfg(all(test, feature = "probe-heap"))]
     bodies: HashMap<String, BodySummary>,
 }
@@ -389,6 +401,8 @@ enum Out {
         /// The pass resumed at the job's mark.
         resumed: bool,
         fts_reads: cv_core::source::ReadSet,
+        #[cfg(test)]
+        callbacks: usize,
     },
     /// A session's read failed: any docs it sent are deleted and it stays stale.
     Failed {
@@ -506,6 +520,11 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         first_error: ran.first_error,
         #[cfg(test)]
         admission: writer.admission.stats(),
+        #[cfg(test)]
+        work: SweepWork {
+            writer_opened: true,
+            ..ran.work
+        },
         #[cfg(all(test, feature = "probe-heap"))]
         bodies: ran.bodies,
     })
@@ -752,6 +771,8 @@ fn body_hash(mut hash: u64, bytes: &[u8]) -> u64 {
 /// What [`run_jobs`] did.
 #[derive(Default)]
 struct Ran {
+    #[cfg(test)]
+    work: SweepWork,
     errors: usize,
     first_error: Option<String>,
     /// Sessions whose FTS docs were rewritten.
@@ -866,17 +887,21 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
                     open.insert(id);
                 }
                 Out::Doc(doc) => {
-                    #[cfg(all(test, feature = "probe-heap"))]
-                    if std::env::var_os("CV_SWEEP_HASH_BODY").is_some() {
+                    #[cfg(test)]
+                    {
+                        ran.work.documents += 1;
                         let inner = doc.inner();
-                        if let (Some(id), Some(body)) = (
-                            inner.get_first(f.id).and_then(|value| value.as_str()),
-                            inner.get_first(f.body).and_then(|value| value.as_str()),
-                        ) {
-                            let summary = ran.bodies.entry(id.to_owned()).or_default();
-                            summary.bytes += body.len();
-                            summary.docs += 1;
-                            summary.hash = body_hash(summary.hash, body.as_bytes());
+                        if let Some(body) = inner.get_first(f.body).and_then(|value| value.as_str()) {
+                            ran.work.body_bytes += body.len();
+                            #[cfg(feature = "probe-heap")]
+                            if std::env::var_os("CV_SWEEP_HASH_BODY").is_some() {
+                                if let Some(id) = inner.get_first(f.id).and_then(|value| value.as_str()) {
+                                    let summary = ran.bodies.entry(id.to_owned()).or_default();
+                                    summary.bytes += body.len();
+                                    summary.docs += 1;
+                                    summary.hash = body_hash(summary.hash, body.as_bytes());
+                                }
+                            }
                         }
                     }
                     if failure.is_none() {
@@ -894,7 +919,13 @@ fn run_jobs(writer: &mut Writer, f: &Fields, jobs: Vec<Job>, consumer: &str) -> 
                     mark,
                     resumed,
                     fts_reads,
+                    #[cfg(test)]
+                    callbacks,
                 } => {
+                    #[cfg(test)]
+                    {
+                        ran.work.callbacks += callbacks;
+                    }
                     // Only stamp events after a complete pass: a parse error leaves the sync rows
                     // untouched so the session is retried next run.
                     let source = counted
@@ -1049,6 +1080,8 @@ fn run_job(job: Job, f: &Fields, tx: &std::sync::mpsc::SyncSender<Out>, admissio
                 mark,
                 resumed: p.resumed,
                 fts_reads: p.fts_reads,
+                #[cfg(test)]
+                callbacks: p.callbacks,
             }
         }
         Err(err) => Out::Failed { job, err },
@@ -1093,11 +1126,42 @@ fn resumable_from(job: &Job, version: &str) -> Option<cv_core::stream::Checkpoin
 
 /// What one pass over a job's session found.
 struct JobPass {
+    #[cfg(test)]
+    callbacks: usize,
     resumed: bool,
     fts_reads: cv_core::source::ReadSet,
     counted: Option<cv_core::stream::Counted>,
     events: Option<(usize, cv_core::events::EventSpool)>,
     last: Option<cv_core::stream::Checkpoint>,
+}
+
+/// Count actual adapter callbacks, not the cumulative counts restored from a checkpoint.
+#[cfg(test)]
+struct CallbackCounter<'a> {
+    inner: &'a mut dyn cv_core::MessageSink,
+    callbacks: usize,
+}
+#[cfg(test)]
+impl cv_core::MessageSink for CallbackCounter<'_> {
+    fn message(&mut self, message: cv_core::Message) -> cv_core::Flow {
+        self.callbacks += 1;
+        self.inner.message(message)
+    }
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.inner.take_error()
+    }
+    fn meta(&mut self, session: &cv_core::Session) {
+        self.inner.meta(session);
+    }
+    fn dependency(&mut self, path: &Path) {
+        self.inner.dependency(path);
+    }
+    fn wants_checkpoint(&mut self, offset: u64) -> bool {
+        self.inner.wants_checkpoint(offset)
+    }
+    fn checkpoint(&mut self, checkpoint: &mut cv_core::stream::Checkpoint) {
+        self.inner.checkpoint(checkpoint);
+    }
 }
 
 /// One pass over `job`'s session — from `from` when given — feeding what the job needs: FTS docs
@@ -1118,6 +1182,15 @@ fn job_pass(
     if !job.events {
         events = events.without_events();
     }
+    #[cfg(test)]
+    let mut measured = CallbackCounter {
+        inner: &mut events,
+        callbacks: 0,
+    };
+    #[cfg(test)]
+    let event_sink: &mut dyn cv_core::MessageSink = &mut measured;
+    #[cfg(not(test))]
+    let event_sink: &mut dyn cv_core::MessageSink = &mut events;
     let done = if job.fts {
         let delete = match (from, job.existing) {
             (Some(_), _) => Delete::From(first),
@@ -1146,24 +1219,27 @@ fn job_pass(
             &job.r,
             job.mtime,
             job.size,
-            Some(&mut events),
+            Some(event_sink),
             job.prov.clone(),
             from,
         )?
         .map(|(_, done, reads)| (done, reads))
     } else {
         let opts = cv_core::ParseOptions::lazy();
-        let sink: &mut dyn cv_core::MessageSink = &mut events;
-        cv_core::stream::stream_resumable(adapter, &job.r, &opts, sink, CHECKPOINT_EVERY, from)?
+        cv_core::stream::stream_resumable(adapter, &job.r, &opts, event_sink, CHECKPOINT_EVERY, from)?
             .map(|done| (done, cv_core::source::ReadSet::default()))
     };
     let Some((done, reads)) = done else { return Ok(None) };
+    #[cfg(test)]
+    let callbacks = measured.callbacks;
     let events = if job.events {
         Some((first, events.into_spool()?))
     } else {
         None
     };
     Ok(Some(JobPass {
+        #[cfg(test)]
+        callbacks,
         fts_reads: reads,
         resumed: from.is_some(),
         counted: done.counted,
@@ -4712,17 +4788,21 @@ mod tests {
 
     /// A whole sweep of the files as they are now, into a fresh index and catalog.
     fn whole_sweep(refs: &[cv_core::SessionRef], words: &[String]) -> Vec<String> {
+        whole_sweep_with_work(refs, words).0
+    }
+
+    fn whole_sweep_with_work(refs: &[cv_core::SessionRef], words: &[String]) -> (Vec<String>, SweepWork) {
         let (dir, home) = (tmpdir(), tmpdir());
         let prior = std::env::var_os("CLUSTERVISION_HOME");
         std::env::set_var("CLUSTERVISION_HOME", &home);
         let swept = sweep(&dir, refs.to_vec(), false, false).unwrap();
-        assert_eq!(swept.resumed, 0);
+        assert_eq!((swept.resumed, swept.errors), (0, 0));
         let seen = observe(&dir, refs, words);
         std::env::set_var("CLUSTERVISION_HOME", prior.unwrap());
         for d in [dir, home] {
             std::fs::remove_dir_all(d).ok();
         }
-        seen
+        (seen, swept.work)
     }
 
     /// Write the first `num/den` of each transcript, cut inside a line as a live writer leaves it.
@@ -4743,12 +4823,23 @@ mod tests {
         let fleet = resumable_fleet(&sdir, 6);
         let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
         write_heads(&fleet, 1, 3);
-        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().resumed, 0);
+        let fresh = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((fresh.resumed, fresh.errors), (0, 0));
+        assert!(fresh.work.callbacks > 0 && fresh.work.body_bytes > 0 && fresh.work.documents > 0);
+        assert!(fresh.work.writer_opened);
+        let warm = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(warm.errors, 0);
+        assert_eq!(
+            warm.work,
+            SweepWork::default(),
+            "unchanged refresh performs no parse or writer work"
+        );
         let marks = cv_core::resume::MarkTable::load();
         assert!(refs.iter().all(|r| marks.get(r).is_some()), "every head left a mark");
         for (num, den) in [(2, 3), (1, 1)] {
             write_heads(&fleet, num, den);
             let swept = sweep(&dir, refs.clone(), false, false).unwrap();
+            assert_eq!(swept.errors, 0);
             assert_eq!(
                 (swept.changed, swept.resumed),
                 (refs.len(), refs.len()),
@@ -4757,7 +4848,26 @@ mod tests {
             let words = some_words(&refs);
             assert!(words.len() > 50, "{} words", words.len());
             let resumed = observe(&dir, &refs, &words);
-            assert_eq!(resumed, whole_sweep(&refs, &words), "at {num}/{den}");
+            let (whole, work) = whole_sweep_with_work(&refs, &words);
+            assert_eq!(resumed, whole, "at {num}/{den}");
+            assert!(
+                swept.work.callbacks < work.callbacks,
+                "suffix callbacks {:?} versus whole {:?}",
+                swept.work,
+                work
+            );
+            assert!(
+                swept.work.body_bytes < work.body_bytes,
+                "suffix searchable bytes {:?} versus whole {:?}",
+                swept.work,
+                work
+            );
+            assert!(
+                swept.work.documents <= work.documents,
+                "suffix document submissions {:?} versus whole {:?}",
+                swept.work,
+                work
+            );
         }
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
@@ -5102,6 +5212,7 @@ mod tests {
             (swept.changed, swept.removed, swept.errors, swept.admission.1),
             (0, 0, 0, 0)
         );
+        assert_eq!(swept.work, SweepWork::default());
         assert_eq!(observe(&dir, &refs, &["zqwarm".into()]), before);
     }
 

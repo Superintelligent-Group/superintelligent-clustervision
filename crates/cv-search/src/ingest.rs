@@ -107,7 +107,7 @@ pub(super) struct AdmittedDocument {
     document: TantivyDocument,
     _reservation: Reservation,
 }
-#[cfg(all(test, feature = "probe-heap"))]
+#[cfg(test)]
 impl AdmittedDocument {
     pub(super) fn inner(&self) -> &TantivyDocument {
         &self.document
