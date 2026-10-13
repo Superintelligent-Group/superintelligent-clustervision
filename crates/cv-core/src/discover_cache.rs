@@ -20,11 +20,58 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 
+enum Payload {
+    #[cfg(feature = "sqlite")]
+    Encoded { refs: String, reads: String },
+    Parsed {
+        refs: Vec<SessionRef>,
+        reads: crate::source::ReadSet,
+    },
+    #[cfg(feature = "sqlite")]
+    Invalid,
+}
+
+impl Payload {
+    /// Decode only a demanded row. Invalid persisted metadata remains a cache miss; releasing
+    /// encoded strings after either outcome avoids retaining both representations.
+    fn parsed(&mut self) -> Option<(&mut Vec<SessionRef>, &crate::source::ReadSet)> {
+        #[cfg(feature = "sqlite")]
+        if let Self::Encoded { refs, reads } = self {
+            *self = serde_json::from_str(refs)
+                .and_then(|refs| serde_json::from_str(reads).map(|reads| Self::Parsed { refs, reads }))
+                .unwrap_or(Self::Invalid);
+        }
+        match self {
+            Self::Parsed { refs, reads } => Some((refs, reads)),
+            #[cfg(feature = "sqlite")]
+            _ => None,
+        }
+    }
+
+    fn known(&self) -> Option<(&Vec<SessionRef>, &crate::source::ReadSet)> {
+        match self {
+            Self::Parsed { refs, reads } => Some((refs, reads)),
+            #[cfg(feature = "sqlite")]
+            _ => None,
+        }
+    }
+
+    fn encoded(&self) -> bool {
+        #[cfg(feature = "sqlite")]
+        {
+            matches!(self, Self::Encoded { .. })
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            false
+        }
+    }
+}
+
 struct Entry {
     mtime_ns: u64,
     size: u64,
-    refs: Vec<SessionRef>,
-    reads: crate::source::ReadSet,
+    payload: Payload,
     /// Scanned this run and not yet written back to sqlite.
     dirty: bool,
 }
@@ -69,7 +116,8 @@ fn note_legacy_json() {
 }
 
 /// Bulk-load the persisted scan cache. Only ever runs on the discovery (slow) path — probe-only
-/// commands never touch this module. Unparseable rows are simply dropped (re-scanned, re-written).
+/// commands never touch this module. Keep serialized payloads until a matching path is demanded;
+/// a scoped refresh must not decode every unrelated session. Invalid payloads remain misses.
 fn load() -> Cache {
     note_legacy_json();
     #[allow(unused_mut)]
@@ -90,19 +138,12 @@ fn load() -> Cache {
             });
             if let Ok(rows) = rows {
                 for (path, mtime_ns, size, refs, reads) in rows.flatten() {
-                    let Ok(refs) = serde_json::from_str::<Vec<SessionRef>>(&refs) else {
-                        continue;
-                    };
-                    let Ok(reads) = serde_json::from_str(&reads) else {
-                        continue;
-                    };
                     entries.insert(
                         PathBuf::from(path),
                         Entry {
                             mtime_ns: mtime_ns as u64,
                             size: size as u64,
-                            refs,
-                            reads,
+                            payload: Payload::Encoded { refs, reads },
                             dirty: false,
                         },
                     );
@@ -144,13 +185,30 @@ where
     };
     let cache = CACHE.get_or_init(load);
     clear_invalidated(cache);
-    if let Some(e) = cache.entries.read().unwrap().get(path) {
-        if e.mtime_ns == mtime_ns
-            && e.size == size
-            && e.reads == reads
-            && reads.fresh(&mut crate::source::Probe::default())
-        {
-            return e.refs.clone();
+    let decode = {
+        let entries = cache.entries.read().unwrap();
+        if let Some(e) = entries.get(path).filter(|e| e.mtime_ns == mtime_ns && e.size == size) {
+            if let Some((refs, captured)) = e.payload.known() {
+                if captured == &reads && reads.fresh(&mut crate::source::Probe::default()) {
+                    return refs.clone();
+                }
+            }
+            e.payload.encoded()
+        } else {
+            false
+        }
+    };
+    if decode {
+        let mut entries = cache.entries.write().unwrap();
+        if let Some(e) = entries.get_mut(path) {
+            // Recheck after upgrading the lock; another scanner may have replaced the row.
+            if e.mtime_ns == mtime_ns && e.size == size {
+                if let Some((refs, captured)) = e.payload.parsed() {
+                    if captured == &reads && reads.fresh(&mut crate::source::Probe::default()) {
+                        return refs.clone();
+                    }
+                }
+            }
         }
     }
     let refs = scan();
@@ -162,8 +220,10 @@ where
             Entry {
                 mtime_ns,
                 size,
-                refs: refs.clone(),
-                reads,
+                payload: Payload::Parsed {
+                    refs: refs.clone(),
+                    reads,
+                },
                 dirty: true,
             },
         );
@@ -175,7 +235,20 @@ where
 /// Original before-read metadata, never a fresh post-discovery stamp.
 #[cfg(feature = "sqlite")]
 pub(crate) fn captured_reads(path: &Path) -> Option<crate::source::ReadSet> {
-    CACHE.get()?.entries.read().ok()?.get(path).map(|e| e.reads.clone())
+    let cache = CACHE.get()?;
+    {
+        let entries = cache.entries.read().ok()?;
+        let e = entries.get(path)?;
+        if let Some((_, reads)) = e.payload.known() {
+            return Some(reads.clone());
+        }
+        if !e.payload.encoded() {
+            return None;
+        }
+    }
+    let mut entries = cache.entries.write().ok()?;
+    let (_, reads) = entries.get_mut(path)?.payload.parsed()?;
+    Some(reads.clone())
 }
 
 /// Single-result convenience over [`cached_scan_many`].
@@ -211,8 +284,8 @@ pub(crate) fn persist(prune: bool) {
 pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
     let Some(cache) = persistence_cache(prune) else { return };
     clear_invalidated(cache);
-    // Full discovery still checks every persisted path, including malformed cache rows
-    // omitted by load. Pruning therefore keeps its existing completeness semantics.
+    // Full discovery still checks every persisted path, including deferred or malformed
+    // payloads. Pruning therefore keeps its existing completeness semantics.
     let mut prune_paths: std::collections::HashSet<String> = if prune {
         let Ok(mut stmt) = conn.prepare("SELECT path FROM scan_cache") else {
             return;
@@ -246,10 +319,13 @@ pub(crate) fn persist_in(conn: &mut rusqlite::Connection, prune: bool) {
     {
         let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads) VALUES(?1,?2,?3,?4,?5,?6)") else { return };
         for (path, e) in g.iter().filter(|(_, e)| e.dirty) {
-            let Ok(refs) = serde_json::to_string(&e.refs) else {
+            let Some((refs, reads)) = e.payload.known() else {
                 continue;
             };
-            let Ok(reads) = serde_json::to_string(&e.reads) else {
+            let Ok(refs) = serde_json::to_string(refs) else {
+                continue;
+            };
+            let Ok(reads) = serde_json::to_string(reads) else {
                 continue;
             };
             if stmt
@@ -309,7 +385,9 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
     if let Some(cache) = CACHE.get() {
         clear_invalidated(cache);
         if let Some(e) = cache.entries.write().unwrap().get_mut(path) {
-            fill(&mut e.refs);
+            if let Some((refs, _)) = e.payload.parsed() {
+                fill(refs);
+            }
         }
     }
     let key = path.to_string_lossy();
@@ -336,6 +414,109 @@ pub(crate) fn fill_count(conn: &rusqlite::Connection, path: &Path, harness: crat
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_payload_preserves_demand_guards_count_updates_and_malformed_fallback() {
+        let w = cv_testkit::World::in_process("scan-lazy");
+        let mut conn = crate::catalog::open_db().unwrap();
+        let paths: Vec<_> = ["valid", "invalid", "stale", "invalid-reads"]
+            .map(|name| w.base.join(name))
+            .into();
+        let mut expected = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            std::fs::write(path, "content").unwrap();
+            let r = SessionRef {
+                harness: crate::Harness::Claude,
+                id: format!("row-{i}"),
+                path: path.clone(),
+                cwd: None,
+                title: Some("metadata".into()),
+                created_at: None,
+                updated_at: None,
+                message_count: 0,
+            };
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(path);
+            let (mtime, size) = stat_key(path).unwrap();
+            conn.execute(
+                "INSERT INTO scan_cache(path,mtime_ns,size,refs,source_reads,interpretation_version) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![path.to_string_lossy(), mtime as i64, size as i64,
+                    if i == 0 || i == 3 { serde_json::to_string(std::slice::from_ref(&r)).unwrap() } else { "invalid".into() },
+                    if i == 3 { "invalid".into() } else { serde_json::to_string(&reads).unwrap() }, INTERPRETATION_VERSION],
+            ).unwrap();
+            expected.push((r, reads));
+        }
+        let loaded = load();
+        assert!(loaded.entries.read().unwrap().values().all(|e| e.payload.encoded()));
+        let cache = CACHE.get_or_init(load);
+        clear_invalidated(cache);
+        cache
+            .entries
+            .write()
+            .unwrap()
+            .extend(loaded.entries.into_inner().unwrap());
+        // Count publication may demand an encoded row before discovery does.
+        fill_count(&conn, &paths[0], crate::Harness::Claude, "row-0", 2);
+        assert_eq!(
+            cached_scan(&paths[0], || panic!("valid persisted row must hit"))
+                .unwrap()
+                .message_count,
+            2
+        );
+        assert_eq!(captured_reads(&paths[0]).unwrap(), expected[0].1);
+        assert!(
+            cache.entries.read().unwrap()[&paths[1]].payload.encoded(),
+            "unrelated malformed payload stays undecoded"
+        );
+        assert!(
+            captured_reads(&paths[1]).is_none(),
+            "invalid refs never publish otherwise valid guards"
+        );
+        assert!(matches!(
+            cache.entries.read().unwrap()[&paths[1]].payload,
+            Payload::Invalid
+        ));
+        let repaired = cached_scan(&paths[1], || Some(expected[1].0.clone())).unwrap();
+        assert_eq!(repaired.id, expected[1].0.id);
+        std::fs::write(&paths[2], "appended content").unwrap();
+        let fresh = cached_scan(&paths[2], || {
+            assert!(
+                cache.entries.read().unwrap()[&paths[2]].payload.encoded(),
+                "tuple mismatch precedes decoding"
+            );
+            Some(SessionRef {
+                message_count: 3,
+                ..expected[2].0.clone()
+            })
+        })
+        .unwrap();
+        assert_eq!(fresh.message_count, 3);
+        assert!(captured_reads(&paths[3]).is_none(), "invalid ReadSet must also miss");
+        assert_eq!(
+            cached_scan(&paths[3], || Some(expected[3].0.clone())).unwrap().id,
+            expected[3].0.id
+        );
+        persist_in(&mut conn, false);
+        let loaded = load();
+        let mut entries = loaded.entries.write().unwrap();
+        for (i, path) in paths.iter().enumerate() {
+            let (refs, reads) = entries.get_mut(path).unwrap().payload.parsed().unwrap();
+            assert_eq!(refs[0].message_count, [2, 0, 3, 0][i]);
+            assert!(reads.fresh(&mut crate::source::Probe::default()));
+        }
+        drop(entries);
+        std::fs::remove_file(&paths[1]).unwrap();
+        persist_in(&mut conn, true);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM scan_cache WHERE path=?1",
+                [paths[1].to_string_lossy()],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn interpretation_upgrade_rejects_persisted_and_process_scan_rows() {
@@ -519,11 +700,14 @@ mod tests {
         assert_eq!(fresh.id, "new");
         persist(false);
         let loaded = load();
-        let entries = loaded.entries.read().unwrap();
+        let mut entries = loaded.entries.write().unwrap();
         assert!(entries
-            .get(&path)
+            .get_mut(&path)
             .unwrap()
-            .reads
+            .payload
+            .parsed()
+            .unwrap()
+            .1
             .fresh(&mut crate::source::Probe::default()));
     }
 }
