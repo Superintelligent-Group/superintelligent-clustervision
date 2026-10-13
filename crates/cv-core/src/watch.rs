@@ -398,6 +398,7 @@ impl Watcher {
         strict: bool,
         retained: bool,
     ) -> anyhow::Result<bool> {
+        let _reads = crate::source::read_scope();
         let refs = self.discover();
         // Prune entries for sessions that vanished from discovery (deleted/pruned transcripts),
         // so a long-lived watcher (`cv watch`) doesn't grow `seen` without bound. The size check skips
@@ -496,6 +497,7 @@ impl Watcher {
         &mut self,
         mut take: impl FnMut(EventKind, &SessionRef, usize) -> Option<(usize, ReadState)>,
     ) -> usize {
+        let _reads = crate::source::read_scope();
         let refs = self.discover();
         if self.seen.len() > refs.len() {
             let live: std::collections::HashSet<String> = refs.iter().map(Self::key).collect();

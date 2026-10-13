@@ -1108,6 +1108,13 @@ fn run() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    // Long-running services scope reuse per request/poll, so cold private snapshots do not
+    // survive idle server time. Ordinary commands share one cache across their session reads.
+    let _reads = (!matches!(
+        &cli.cmd,
+        Cmd::Serve { .. } | Cmd::Mcp | Cmd::Watch { .. } | Cmd::Scry { .. } | Cmd::Workflow { follow: true, .. }
+    ))
+    .then(cv_core::source::read_scope);
     match cli.cmd {
         Cmd::Ls {
             harness,

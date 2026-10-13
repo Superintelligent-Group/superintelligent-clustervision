@@ -152,6 +152,7 @@ pub(crate) fn cmd_mcp(tree: &clap::Command) -> anyhow::Result<()> {
 }
 
 fn handle(method: &str, params: Option<Value>, id: Option<Value>) -> Option<Value> {
+    let _reads = cv_core::source::read_scope();
     // A request without an `id` is a JSON-RPC *notification*: the method still runs (a
     // notification tools/call may have side effects worth performing), but per spec the server
     // MUST NOT reply — not even with `id: null`.

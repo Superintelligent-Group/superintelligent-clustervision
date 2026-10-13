@@ -18,6 +18,7 @@ mod read;
 /// Route a decoded path (`["api", "session", "claude", "abc"]`) plus a raw query string.
 /// Never panics; an unknown path is a 404.
 pub fn route_json(parts: &[&str], query: &str) -> (u16, Value) {
+    let _reads = crate::source::read_scope();
     match parts {
         ["api", "health"] => ok(json!({
             "ok": true,
@@ -80,6 +81,7 @@ pub struct StagedJson {
 /// Bounded backend for the HTTP message-window route. Other routes keep `route_json`.
 /// Source and serialization failures are converted into a staged error before publication.
 pub fn route_staged(parts: &[&str], query: &str) -> anyhow::Result<Option<StagedJson>> {
+    let _reads = crate::source::read_scope();
     let ["api", "session", harness, id, "messages"] = parts else {
         return Ok(None);
     };
