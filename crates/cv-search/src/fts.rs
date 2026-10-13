@@ -204,11 +204,9 @@ fn open_writer(index: &Index, heap: usize) -> Result<Writer> {
     Ok(writer)
 }
 
-/// Merge the committed segments by size tier, synchronously: any tier holding [`TIER_FANOUT`]
-/// segments becomes one segment, and a segment past [`DEAD_RATIO`] is rewritten alone, until no
-/// rule fires. An unchanged index merges nothing; each byte is rewritten about once per tier it
-/// climbs, so the cost is amortized over the runs that wrote it. Returns the merges run.
-fn compact(dir: &Path, index: &Index, writer: &mut Writer) -> Result<usize> {
+/// The next full byte-size tier or mostly-deleted segment. Both planning and execution use
+/// this selection, so an unchanged refresh can skip its writer only when no compaction is pending.
+fn compaction_candidates(dir: &Path, index: &Index) -> Result<Option<Vec<tantivy::index::SegmentId>>> {
     let bytes = |m: &tantivy::index::SegmentMeta| -> u64 {
         m.list_files()
             .iter()
@@ -225,19 +223,27 @@ fn compact(dir: &Path, index: &Index, writer: &mut Writer) -> Result<usize> {
         }
         t
     };
+    let metas = index.searchable_segment_metas().context("listing segments")?;
+    let mut tiers: std::collections::BTreeMap<u32, Vec<tantivy::index::SegmentId>> = Default::default();
+    let mut pick: Option<Vec<tantivy::index::SegmentId>> = None;
+    for m in &metas {
+        if m.max_doc() > 0 && m.num_deleted_docs() as f32 / m.max_doc() as f32 > DEAD_RATIO {
+            pick = Some(vec![m.id()]);
+            break;
+        }
+        tiers.entry(tier(bytes(m))).or_default().push(m.id());
+    }
+    Ok(pick.or_else(|| tiers.into_values().find(|ids| ids.len() >= TIER_FANOUT)))
+}
+
+/// Merge the committed segments by size tier, synchronously: any tier holding [`TIER_FANOUT`]
+/// segments becomes one segment, and a segment past [`DEAD_RATIO`] is rewritten alone, until no
+/// rule fires. An unchanged index merges nothing; each byte is rewritten about once per tier it
+/// climbs, so the cost is amortized over the runs that wrote it. Returns the merges run.
+fn compact(dir: &Path, index: &Index, writer: &mut Writer) -> Result<usize> {
     let mut merges = 0;
     loop {
-        let metas = index.searchable_segment_metas().context("listing segments")?;
-        let mut tiers: std::collections::BTreeMap<u32, Vec<tantivy::index::SegmentId>> = Default::default();
-        let mut pick: Option<Vec<tantivy::index::SegmentId>> = None;
-        for m in &metas {
-            if m.max_doc() > 0 && m.num_deleted_docs() as f32 / m.max_doc() as f32 > DEAD_RATIO {
-                pick = Some(vec![m.id()]);
-                break;
-            }
-            tiers.entry(tier(bytes(m))).or_default().push(m.id());
-        }
-        let pick = pick.or_else(|| tiers.into_values().find(|ids| ids.len() >= TIER_FANOUT));
+        let pick = compaction_candidates(dir, index)?;
         let Some(ids) = pick else { break };
         writer.merge(&ids).wait().context("merging segments")?;
         merges += 1;
@@ -325,6 +331,7 @@ pub fn index_sessions(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool,
 }
 
 /// What one [`sweep`] did.
+#[derive(Default)]
 pub(crate) struct Swept {
     /// Top-level sessions seen.
     pub total: usize,
@@ -435,115 +442,56 @@ fn source_consumer(dir: &Path) -> Result<String> {
 /// holds their docs, so a crash between the two can never leave a mark ahead of the index.
 pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<Swept> {
     let (index, f) = open_or_create(dir)?;
+    let total = refs.len();
+    let planner = SweepPlanner {
+        index: &index,
+        f: &f,
+        dir,
+        refs: &refs,
+        rebuild,
+        subagents,
+    };
+    // Readers can decide an unchanged sweep without starting Tantivy worker threads. If a
+    // different writer publishes while we plan, retry against one stable committed snapshot.
+    let (plan, planned_meta) = loop {
+        let before = std::fs::read(dir.join("meta.json"))?;
+        let plan = planner.plan()?;
+        let compact = compaction_candidates(dir, &index)?.is_some();
+        if std::fs::read(dir.join("meta.json"))? != before {
+            continue;
+        }
+        if !rebuild && plan.jobs.is_empty() && plan.missing.is_empty() && !compact {
+            return Ok(Swept {
+                total,
+                ..Default::default()
+            });
+        }
+        break (plan, before);
+    };
     let mut writer = open_writer(&index, 50_000_000)?;
+    // The mutation plan must describe the metadata protected by the writer lock, rather than
+    // a previously observed index. Ordinary single-writer refreshes need no second plan.
+    let plan = planner.under_writer(plan, &planned_meta, &writer)?;
     if rebuild {
         writer.delete_all_documents().context("clearing index")?;
         writer.commit().context("commit after clear")?;
     }
-    // id → (mtime, size) for every live doc — the incremental skip-set — plus the set of ids that
-    // are folded-in sub-agent docs (they carry `parent_id`), which the reap below must leave alone
-    // on a plain (no --subagents) refresh.
-    let (existing, folded): (HashMap<String, (i64, i64)>, HashSet<String>) = if rebuild {
-        Default::default()
-    } else {
-        read_indexed_sigs(&index, &f).unwrap_or_default()
-    };
-    // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
-    let event_sync = cv_core::events::SyncTable::load();
-    let affordances = cv_core::catalog::AffordanceTable::load();
-    let marks = cv_core::resume::MarkTable::load();
-    let consumer = source_consumer(dir)?;
-    let dependencies = cv_core::source::Table::load(&consumer);
-    let mut probe = cv_core::source::Probe::default();
-
-    let total = refs.len();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut jobs: Vec<Job> = Vec::new();
-    for r in &refs {
-        seen.insert(r.id.clone());
-        let source = probe.snapshot(r);
-        let (mtime, size) = source.primary;
-        let dependencies_fresh = dependencies.fresh_with_probe(
-            r,
-            existing.get(&r.id).copied().unwrap_or(source.primary),
-            &source.dependencies,
-            &mut probe,
-        );
-        let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size) && dependencies_fresh;
-        let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
-        // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
-        if fts_fresh && !events && affordances.counts_with_probe(r, &source, &mut probe).is_some() {
-            continue;
-        }
-        jobs.push(Job {
-            r: r.clone(),
-            mtime,
-            size,
-            fts: !fts_fresh,
-            events,
-            existing: existing.contains_key(&r.id),
-            grew: existing
-                .get(&r.id)
-                .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
-            prov: Default::default(),
-            mark: marks.get(r).cloned(),
-            source,
-            dependencies_fresh,
-        });
-    }
-    // The sub-agent forest (opt-in): every claude session's `subagent_tree_of`, tagged with
-    // provenance; `seen` grows so a folded agent still on disk is not reaped.
-    if subagents {
-        for r in &refs {
-            for sub in cv_core::subagent_tree_of(r) {
-                let sr = &sub.session;
-                seen.insert(sr.id.clone());
-                let source = probe.snapshot(sr);
-                let (mtime, size) = source.primary;
-                let dependencies_fresh = dependencies.fresh_with_probe(
-                    sr,
-                    existing.get(&sr.id).copied().unwrap_or(source.primary),
-                    &source.dependencies,
-                    &mut probe,
-                );
-                let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size) && dependencies_fresh;
-                let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
-                if fts_fresh && !events {
-                    continue;
-                }
-                let prov = cv_core::events::Provenance {
-                    parent_id: Some(r.id.clone()),
-                    agent_id: Some(sub.agent_id().to_string()),
-                    workflow: sub.workflow.clone(),
-                };
-                jobs.push(Job {
-                    r: sr.clone(),
-                    mtime,
-                    size,
-                    fts: !fts_fresh,
-                    events,
-                    existing: existing.contains_key(&sr.id),
-                    grew: existing
-                        .get(&sr.id)
-                        .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
-                    prov,
-                    mark: marks.get(sr).cloned(),
-                    source,
-                    dependencies_fresh,
-                });
-            }
-        }
-    }
-    jobs.retain(|j| cv_core::harness::for_harness(j.r.harness).is_some());
-
+    let SweepPlan {
+        jobs,
+        missing,
+        consumer,
+    } = plan;
     let ran = run_jobs(&mut writer, &f, jobs, &consumer)?;
 
     // Reap sessions that disappeared from disk since the last index (incremental only). A plain
-    // refresh never reaps the folded sub-agent forest — see [`reap_missing`].
+    // refresh never reaps the folded sub-agent forest — see [`missing_ids`].
     let removed = if rebuild {
         0
     } else {
-        reap_missing(&mut writer, &f, &existing, &seen, &folded, subagents)
+        for id in &missing {
+            writer.delete_term(Term::from_field_text(f.id, id));
+        }
+        missing.len()
     };
     writer.commit().context("committing index")?;
     cv_core::resume::update(&ran.marks);
@@ -561,6 +509,143 @@ pub(crate) fn sweep(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, s
         #[cfg(all(test, feature = "probe-heap"))]
         bodies: ran.bodies,
     })
+}
+
+struct SweepPlan {
+    jobs: Vec<Job>,
+    missing: Vec<String>,
+    consumer: String,
+}
+
+struct SweepPlanner<'a> {
+    index: &'a Index,
+    f: &'a Fields,
+    dir: &'a Path,
+    refs: &'a [cv_core::SessionRef],
+    rebuild: bool,
+    subagents: bool,
+}
+
+impl SweepPlanner<'_> {
+    fn under_writer(&self, plan: SweepPlan, planned_meta: &[u8], _writer: &Writer) -> Result<SweepPlan> {
+        if std::fs::read(self.dir.join("meta.json"))? != planned_meta {
+            self.plan()
+        } else {
+            Ok(plan)
+        }
+    }
+
+    fn plan(&self) -> Result<SweepPlan> {
+        let Self {
+            index,
+            f,
+            dir,
+            refs,
+            rebuild,
+            subagents,
+        } = *self;
+        // id → (mtime, size) for every live doc — the incremental skip-set — plus the set of ids that
+        // are folded-in sub-agent docs (they carry `parent_id`), which the reap below must leave alone
+        // on a plain (no --subagents) refresh.
+        let (existing, folded): (HashMap<String, (i64, i64)>, HashSet<String>) = if rebuild {
+            Default::default()
+        } else {
+            read_indexed_sigs(index, f).unwrap_or_default()
+        };
+        // One query each for the event skip-table and the affordance counts `has:<kind>` reads.
+        let event_sync = cv_core::events::SyncTable::load();
+        let affordances = cv_core::catalog::AffordanceTable::load();
+        let marks = cv_core::resume::MarkTable::load();
+        let consumer = source_consumer(dir)?;
+        let dependencies = cv_core::source::Table::load(&consumer);
+        let mut probe = cv_core::source::Probe::default();
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut jobs: Vec<Job> = Vec::new();
+        for r in refs {
+            seen.insert(r.id.clone());
+            let source = probe.snapshot(r);
+            let (mtime, size) = source.primary;
+            let dependencies_fresh = dependencies.fresh_with_probe(
+                r,
+                existing.get(&r.id).copied().unwrap_or(source.primary),
+                &source.dependencies,
+                &mut probe,
+            );
+            let fts_fresh = fts_is_fresh(r, existing.get(&r.id), mtime, size) && dependencies_fresh;
+            let events = event_sync.needs_ingest_with_probe(r, &source, &mut probe);
+            // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
+            if fts_fresh && !events && affordances.counts_with_probe(r, &source, &mut probe).is_some() {
+                continue;
+            }
+            jobs.push(Job {
+                r: r.clone(),
+                mtime,
+                size,
+                fts: !fts_fresh,
+                events,
+                existing: existing.contains_key(&r.id),
+                grew: existing
+                    .get(&r.id)
+                    .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
+                prov: Default::default(),
+                mark: marks.get(r).cloned(),
+                source,
+                dependencies_fresh,
+            });
+        }
+        // The sub-agent forest (opt-in): every claude session's `subagent_tree_of`, tagged with
+        // provenance; `seen` grows so a folded agent still on disk is not reaped.
+        if subagents {
+            for r in refs {
+                for sub in cv_core::subagent_tree_of(r) {
+                    let sr = &sub.session;
+                    seen.insert(sr.id.clone());
+                    let source = probe.snapshot(sr);
+                    let (mtime, size) = source.primary;
+                    let dependencies_fresh = dependencies.fresh_with_probe(
+                        sr,
+                        existing.get(&sr.id).copied().unwrap_or(source.primary),
+                        &source.dependencies,
+                        &mut probe,
+                    );
+                    let fts_fresh = fts_is_fresh(sr, existing.get(&sr.id), mtime, size) && dependencies_fresh;
+                    let events = event_sync.needs_ingest_with_probe(sr, &source, &mut probe);
+                    if fts_fresh && !events {
+                        continue;
+                    }
+                    let prov = cv_core::events::Provenance {
+                        parent_id: Some(r.id.clone()),
+                        agent_id: Some(sub.agent_id().to_string()),
+                        workflow: sub.workflow.clone(),
+                    };
+                    jobs.push(Job {
+                        r: sr.clone(),
+                        mtime,
+                        size,
+                        fts: !fts_fresh,
+                        events,
+                        existing: existing.contains_key(&sr.id),
+                        grew: existing
+                            .get(&sr.id)
+                            .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
+                        prov,
+                        mark: marks.get(sr).cloned(),
+                        source,
+                        dependencies_fresh,
+                    });
+                }
+            }
+        }
+        jobs.retain(|j| cv_core::harness::for_harness(j.r.harness).is_some());
+
+        let missing = missing_ids(&existing, &seen, &folded, subagents);
+        Ok(SweepPlan {
+            jobs,
+            missing,
+            consumer,
+        })
+    }
 }
 
 /// Conservative primary-source pressure guard. This is not an allocated-heap estimate: mapped
@@ -1166,30 +1251,18 @@ fn index_session_clean(
     }
 }
 
-/// Delete every previously-indexed id that this sweep did not see on disk — with one carve-out:
-/// when `subagents` is false, ids belonging to the **folded sub-agent forest** (`folded`, the docs
-/// tagged with a `parent_id`) are kept. A plain refresh never walks the forest, so an unseen agent
-/// transcript is merely *unvisited*, not vanished — reaping it would silently unfold a forest the
-/// user deliberately folded in with `cv index --subagents`. Only a `--subagents` sweep (which does
-/// walk the forest and extends `seen` with every live agent) may decide an agent is gone. Returns
-/// the number of sessions reaped.
-fn reap_missing(
-    writer: &mut Writer,
-    f: &Fields,
+/// Select vanished sessions, preserving unvisited folded subagents on a plain refresh.
+fn missing_ids(
     existing: &HashMap<String, (i64, i64)>,
     seen: &HashSet<String>,
     folded: &HashSet<String>,
     subagents: bool,
-) -> usize {
-    let mut removed = 0usize;
-    for id in existing.keys() {
-        if seen.contains(id) || (!subagents && folded.contains(id)) {
-            continue;
-        }
-        writer.delete_term(Term::from_field_text(f.id, id));
-        removed += 1;
-    }
-    removed
+) -> Vec<String> {
+    existing
+        .keys()
+        .filter(|id| !seen.contains(*id) && (subagents || !folded.contains(*id)))
+        .cloned()
+        .collect()
 }
 
 /// The two kinds of doc a session is indexed as (the `kind` field).
@@ -5009,6 +5082,178 @@ mod tests {
         for d in [dir, sdir] {
             std::fs::remove_dir_all(d).ok();
         }
+    }
+
+    #[test]
+    fn unchanged_sweep_does_not_require_writer_lock() {
+        let home = IsolatedHome::new();
+        let dir = home.home.join("index");
+        let refs = vec![cv_core::SessionRef::new(
+            "warm",
+            cv_core::Harness::Claude,
+            write_claude(&home.home, "warm", "zqwarm"),
+        )];
+        sweep(&dir, refs.clone(), false, false).unwrap();
+        let before = observe(&dir, &refs, &["zqwarm".into()]);
+        let (index, _) = open_existing(&dir).unwrap();
+        let _writer_lock = open_writer(&index, 15_000_000).unwrap();
+        let swept = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(
+            (swept.changed, swept.removed, swept.errors, swept.admission.1),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(observe(&dir, &refs, &["zqwarm".into()]), before);
+    }
+
+    #[test]
+    fn sweep_plan_rechecks_publication_under_writer_lock() {
+        let home = IsolatedHome::new();
+        let dir = home.home.join("index");
+        let refs = vec![cv_core::SessionRef::new(
+            "warm",
+            cv_core::Harness::Claude,
+            write_claude(&home.home, "warm", "zqwarm"),
+        )];
+        sweep(&dir, refs.clone(), false, false).unwrap();
+        write_claude(&home.home, "warm", "zqchanged warm source");
+        let (index, f) = open_existing(&dir).unwrap();
+        let planner = SweepPlanner {
+            index: &index,
+            f: &f,
+            dir: &dir,
+            refs: &refs,
+            rebuild: false,
+            subagents: false,
+        };
+        let metadata = std::fs::read(dir.join("meta.json")).unwrap();
+        let plan = planner.plan().unwrap();
+        assert_eq!(plan.jobs.len(), 1);
+        assert!(plan.missing.is_empty());
+        // Another writer publishes a session after our optimistic plan but before acquisition.
+        {
+            let mut concurrent = open_writer(&index, 15_000_000).unwrap();
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.id, "vanished");
+            doc.add_text(f.kind, KIND_META);
+            doc.add_i64(f.mtime, 1);
+            doc.add_i64(f.size, 1);
+            concurrent.add_document(doc).unwrap();
+            concurrent.commit().unwrap();
+        }
+        let writer = open_writer(&index, 15_000_000).unwrap();
+        let replacement = planner.under_writer(plan, &metadata, &writer).unwrap();
+        assert_eq!(replacement.jobs.len(), 1);
+        assert_eq!(replacement.missing, ["vanished"]);
+        drop(writer);
+        let swept = sweep(&dir, refs, false, false).unwrap();
+        assert_eq!((swept.changed, swept.removed), (1, 1));
+    }
+
+    #[test]
+    fn unchanged_sweep_finishes_pending_compaction() {
+        let home = IsolatedHome::new();
+        let dir = home.home.join("index");
+        let refs = vec![cv_core::SessionRef::new(
+            "warm",
+            cv_core::Harness::Claude,
+            write_claude(&home.home, "warm", "zqwarm"),
+        )];
+        sweep(&dir, refs.clone(), false, false).unwrap();
+        let (index, f) = open_existing(&dir).unwrap();
+        {
+            let mut writer = open_writer(&index, 15_000_000).unwrap();
+            for _ in 1..TIER_FANOUT {
+                let mut doc = TantivyDocument::default();
+                doc.add_text(f.id, "warm");
+                doc.add_text(f.kind, KIND_BODY);
+                doc.add_text(f.body, "zqpending");
+                writer.add_document(doc).unwrap();
+                writer.commit().unwrap();
+            }
+        }
+        assert!(index.searchable_segment_ids().unwrap().len() >= TIER_FANOUT);
+        let before = observe(&dir, &refs, &["zqwarm".into(), "zqpending".into()]);
+        let swept = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((swept.changed, swept.removed, swept.errors), (0, 0, 0));
+        assert_eq!(index.searchable_segment_ids().unwrap().len(), 1);
+        assert_eq!(observe(&dir, &refs, &["zqwarm".into(), "zqpending".into()]), before);
+    }
+
+    #[test]
+    #[ignore = "explicit scratch warm sweep measurement"]
+    fn warm_sweep_transaction_probe() {
+        let home = IsolatedHome::new();
+        let dir = home.home.join("index");
+        let mut refs = Vec::new();
+        let sessions: usize = std::env::var("CV_FTS_WARM_SESSIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
+        let cpu = std::env::var_os("CV_FTS_WARM_CPU").is_some();
+        let runs = if cpu { 100 } else { 20 };
+        for n in 0..sessions {
+            let id = format!("warm{n}");
+            let path = write_claude(&home.home, &id, "zqwarm common body");
+            refs.push(cv_core::SessionRef::new(id, cv_core::Harness::Claude, path));
+        }
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, refs.len());
+        let expected = (!cpu).then(|| observe(&dir, &refs, &["zqwarm".into()]));
+        let meta_before = std::fs::read(dir.join("meta.json")).unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            let result = sweep(&dir, refs.clone(), false, false).unwrap();
+            assert_eq!(
+                (result.changed, result.removed, result.errors, result.admission.1),
+                (0, 0, 0, 0)
+            );
+        }
+        let millis = started.elapsed().as_secs_f64() * 1000.0;
+        if let Some(expected) = expected {
+            assert_eq!(observe(&dir, &refs, &["zqwarm".into()]), expected);
+        }
+        println!(
+            "warm sweep: {sessions} sessions x{runs}: {millis:.3}ms, meta_changed={}",
+            std::fs::read(dir.join("meta.json")).unwrap() != meta_before
+        );
+        if cpu {
+            return;
+        }
+        let (index, _) = open_existing(&dir).unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            let mut writer = open_writer(&index, 50_000_000).unwrap();
+            writer.commit().unwrap();
+            assert_eq!(compact(&dir, &index, &mut writer).unwrap(), 0);
+        }
+        println!(
+            "writer lifecycle alone x20: {:.3}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            assert_eq!(
+                read_indexed_sigs(&index, &fields_of(&index.schema()).unwrap())
+                    .unwrap()
+                    .0
+                    .len(),
+                refs.len()
+            );
+        }
+        println!(
+            "indexed signature query alone x20: {:.3}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            assert_eq!(
+                text_search_indexed(&dir, "zqwarm", 100).unwrap().len(),
+                sessions.min(100)
+            );
+        }
+        println!(
+            "ranked query alone x20: {:.3}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     /// One commit per run leaves one small segment per run: the writer itself never merges them

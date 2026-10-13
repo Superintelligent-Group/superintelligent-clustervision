@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Unchanged full-text refreshes avoid starting Tantivy writers while still completing pending compaction.
+
 - Guard Devin, Hermes and Zed database reads against source changes during streaming and discovery.
 
 - OpenCode discovery counts readable roles consistently, including duplicate keys and malformed headers; cached discovery refreshes once.

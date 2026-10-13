@@ -481,7 +481,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Byte-capacity document admission held through Tantivy consumption, including release/error behavior and mixed-sweep negative control.
 - [x] Composed giant plain/escaped canonical index-body parity and live-heap proof at production chunk settings.
 - [x] Search activation for retained text and original dependency guards; checked labels and semantic cache invalidation.
-- [ ] Transaction batching and final Tantivy merge/query costs.
+- [x] Audit transaction batching and avoid Tantivy writer startup for unchanged refreshes; retain pending compaction.
+- [ ] Large-fleet final Tantivy merge/query measurements beyond the isolated warm-refresh controls.
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
@@ -1296,3 +1297,38 @@ CPU accounting. Private raw trials: `opencode-parts-evidence/direct-result-relea
 `ascii-fast-release.json`, `encoded-stage-release.json`, and `direct-decoder-final-native.json`
 under `/Users/ember/dev/cv-worktrees/`. Native Json/OpenCode, portable SQLite/OpenCode, plain
 no-default OpenCode scoped tests and native library clippy pass.
+
+### Unchanged FTS refresh: shared planning before writer startup
+
+The transaction audit found no justification for batching across independent session publications.
+One catalog connection and cached event statements already span a sweep; events/counts keep their
+own source-checked transactions, and checkpoint/dependency writes batch after Tantivy commits.
+The 2 GiB primary-source admission and 64 MiB document reservations remain independent of these
+transactions. They do not estimate writer or merge allocations. Tantivy already uses synchronous
+byte-tier compaction rather than a background merge abandoned at process exit. Query predicate
+caches are capped at 64 session decisions per segment, and signature queries read tiny meta docs.
+
+The concrete waste was opening a Tantivy writer before knowing whether any work was needed.
+An empty commit does **not** rewrite `meta.json` (the initial hypothesis was refuted), but creating,
+joining and restarting worker threads still costs time. One `SweepPlanner` now calculates jobs
+and removals for both read-only and changing paths. A stable metadata snapshot with no jobs,
+removals or compaction candidates returns without a writer. If a different writer commits between
+planning and lock acquisition, the changing path recalculates the same plan under that lock.
+Compaction candidate selection is shared with the merge loop, so an unchanged refresh still finishes
+pending tiers/dead-document compaction. Schema, session publication and admission semantics are unchanged.
+
+Clean release controls use optimization level 3/thin LTO, without `probe-heap`, and three alternating
+baseline/candidate process pairs. For 256 scratch sessions and 100 unchanged sweeps, median warm
+wall time was 3729.501 → 2474.817 ms; total process user+system CPU was 3.14 → 2.81 s. For a
+one-session control, warm wall time was 1553.147 → 296.941 ms and process CPU was 0.59 → 0.31 s.
+Process timings include the identical initial index/setup; individual CPU differences vary, and
+these numbers do not claim a speedup for changed full-fleet indexing, parsing or large merges.
+RSS remained 41.5–47.4 MB for the 256-session runs and is dominated by initial indexing.
+Full measurements and executable hashes are in `FTS-WARM-REFRESH-CONTROLS.json`.
+
+Narrow oracles compare every live stored document, query result, event and affordance count before
+and after warm refresh. A concurrent-publication regression proves the under-lock replan; another
+leaves a full pending tier with no stale sources and proves compaction still runs without losing
+its docs/query/catalog outputs. The existing resumed-versus-whole corpus oracle also passes.
+Large-fleet merge/query costs remain an explicit measurement task; this audit supplies no evidence
+for replacing the current merge policy, exact session ranking or transaction boundaries.
