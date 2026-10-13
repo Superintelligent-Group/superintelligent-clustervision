@@ -4330,3 +4330,16 @@ text retains its presence marker. Native/portable scoped controls preserve 1/16/
 UTF-8 and newline boundaries, long Unicode whitespace and user-info/hook prefixes, rejected
 changed/malformed sources, and frozen all-mode wire/fidelity output. No new measurement
 campaign was run; the earlier allocation evidence still describes the producer change.
+
+
+### Post-restart export composition (root, 2026-10-13)
+
+Integration through `bbe5adb3` combines all registered checked exporters, Grok/Qwen selected
+preparation/verification, OpenClaw flat complete preparation and primary freshness, Hermes
+ordinary complete bodies, and native OpenCode 2.0.25 output/bootstrap/event frontier. The native
+`emit::` filter passed 97 of 98 checks; the remaining accumulator oracle supplied a UUID to
+all native targets. Allowing each target's normal ID generation corrects that obsolete fixture,
+and its focused rerun passes. The portable SQLite configuration passes all 98 composed checks.
+These are scoped export/prepare/fidelity checks, not full repository convergence or a release.
+The subsequent shared prefix repair at `078b14ff` has its own native/portable classification and
+frozen-output controls; faithful OpenCode complete replay remains in progress.
