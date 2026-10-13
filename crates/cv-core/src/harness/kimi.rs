@@ -88,6 +88,8 @@ use std::fs;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+mod records;
+
 pub struct Kimi {
     /// `<root>/sessions`, if it exists.
     sessions: Option<PathBuf>,
