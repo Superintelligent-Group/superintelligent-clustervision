@@ -28,6 +28,46 @@ pub(crate) fn write_message_frame(
     message.write_json(writer, resolver)
 }
 
+/// Count the complete compact frame while retaining only its budget-sized prefix. Discarding
+/// bytes still reports successful writes, so all lazy demands and source checks run to completion.
+pub(crate) fn write_budgeted_message_frame(
+    stage: &mut cv_core::bytes::ByteStage,
+    message: &cv_core::Message,
+    resolver: &cv_core::Resolver,
+    remaining: Option<usize>,
+) -> Result<usize> {
+    struct Capped<'a> {
+        stage: &'a mut cv_core::bytes::ByteStage,
+        count: usize,
+        cap: Option<usize>,
+    }
+    impl Write for Capped<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let n = self
+                .cap
+                .map_or(bytes.len(), |cap| bytes.len().min(cap.saturating_sub(self.count)));
+            if n != 0 {
+                self.stage.write_all(&bytes[..n])?;
+            }
+            self.count = self
+                .count
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("JSON size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.stage.flush()
+        }
+    }
+    let mut writer = Capped {
+        stage,
+        count: 0,
+        cap: remaining.map(|n| n.saturating_add(1)),
+    };
+    write_message_frame(&mut writer, message, resolver)?;
+    writer.count.checked_sub(1).context("JSON frame omitted boundary")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Prefix {
     pub start: u64,
@@ -293,6 +333,48 @@ fn write_framed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejected_giant_frames_stage_only_remaining_budget_and_still_demand_late_sources() {
+        let world = cv_testkit::World::in_process("capped-session-frame");
+        let resolver = cv_core::Resolver::new(None);
+        let mut first = cv_core::Message::new(cv_core::Role::User);
+        first.content.push(cv_core::Block::Text { text: "tiny".into() });
+        let mut giant = cv_core::Message::new(cv_core::Role::Assistant);
+        giant.content.push(cv_core::Block::Text {
+            text: "giant\n🌙".repeat(1024 * 1024).into(),
+        });
+        let mut stage = cv_core::bytes::ByteStage::new();
+        let first_len = write_budgeted_message_frame(&mut stage, &first, &resolver, None).unwrap();
+        let accepted = stage.len();
+        let remaining = 7;
+        let size = write_budgeted_message_frame(&mut stage, &giant, &resolver, Some(remaining)).unwrap();
+        assert!(size > remaining);
+        // Stage writes only append here: the final extent is also its peak speculative extent.
+        assert_eq!(stage.len(), accepted + remaining as u64 + 1);
+        stage.truncate(accepted).unwrap();
+        let mut session = Session::new("capped", cv_core::Harness::Codex);
+        let spool = stage.finish().unwrap();
+        let mut output = Vec::new();
+        write_session(&mut output, &session, &spool, None, None, 1).unwrap();
+        session.messages.push(first);
+        assert_eq!(output, serde_json::to_vec_pretty(&session).unwrap());
+        assert_eq!(first_len + 1, accepted as usize);
+
+        let path = world.base.join("late.json");
+        fs::write(&path, b"{\"late\":true}").unwrap();
+        let input = cv_core::Json::source(&path, 0, fs::metadata(&path).unwrap().len()).unwrap();
+        giant.content.push(cv_core::Block::ToolUse {
+            id: "late".into(),
+            name: "tool".into(),
+            namespace: None,
+            input,
+        });
+        fs::remove_file(&path).unwrap();
+        let mut stage = cv_core::bytes::ByteStage::new();
+        assert!(write_budgeted_message_frame(&mut stage, &giant, &resolver, Some(remaining)).is_err());
+        assert_eq!(stage.len(), remaining as u64 + 1);
+    }
+
     #[test]
     fn frame_stage_contains_exactly_one_compact_serialization() {
         let mut message = cv_core::Message::new(cv_core::Role::Assistant);

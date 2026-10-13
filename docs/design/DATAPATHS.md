@@ -1836,7 +1836,10 @@ One-pass staged Session JSON (2026-10-12): CLI JSON selection previously wrote e
 message through the compact serializer to count `max_bytes`, then traversed its lazy bodies
 again through the pretty serializer for the spool. The shared CLI/archive frame writer now
 stages RS plus one compact `Message::write_json` result. The compact frame length excluding RS
-is the exact existing budget measure. A rejected nonfirst candidate truncates only its
+is the exact existing budget measure. Speculative nonfirst staging stores at most the remaining
+compact budget plus RS; after this cap the same serializer counts/discards bytes and continues
+all lazy demands/source checks. Thus a giant rejected body incurs no giant speculative disk
+write, while late source errors retain precedence. A rejected candidate truncates only its
 unpublished `ByteStage` suffix; immutable `ByteSource` and shared append arenas have no rollback.
 The first selected message still exceeds the soft cap when needed. Selection continues to EOF
 for final metadata, and continuation indices/tail handling remain unchanged.
@@ -1850,8 +1853,10 @@ checked truncation repositions spilled files before the next write.
 
 The existing full-parse/window/budget oracle now asserts exactly one frame serialization per
 accepted message plus the single sized rejected candidate, across zero/finite/unlimited budgets
-and windows. Archive full pretty output/stable prefixes, source-change errors, physical chunk
-quote parity, and memory/spill rollback tests pass. A nested Unicode tool-message control
+and windows. Tiny-first/giant-second rejection tests verify bounded speculative stage extent,
+exact next index/EOF output, and a demanded invalid source after the capped giant body still
+fails. Archive full pretty output/stable prefixes, source-change errors, physical chunk quote
+parity, and memory/spill rollback tests pass. A nested Unicode tool-message control
 stages 171 bytes instead of 327 pretty-frame bytes, retaining the exact 170-byte compact budget
 and byte-identical final pretty output. Evidence: `session-stage-once-control.json` in the
 encoded-arguments evidence directory. This removes a concrete duplicate lazy traversal for

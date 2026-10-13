@@ -404,8 +404,15 @@ fn staged_session_json(
                 return Ok(());
             }
             let before = self.stage.len();
-            super::session_json::write_message_frame(&mut self.stage, &message, &self.resolver)?;
-            let size = usize::try_from(self.stage.len() - before - 1).context("JSON message size overflow")?;
+            let remaining = (self.count > 0)
+                .then(|| self.budget.map(|budget| budget.saturating_sub(self.bytes)))
+                .flatten();
+            let size = super::session_json::write_budgeted_message_frame(
+                &mut self.stage,
+                &message,
+                &self.resolver,
+                remaining,
+            )?;
             if self.count > 0
                 && self
                     .budget
@@ -1796,6 +1803,49 @@ mod tests {
         assert_eq!(first.system_prompt.as_deref(), Some("late system prompt"));
         assert_eq!(first.messages.len(), 1);
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn staged_budget_rejects_giant_second_message_with_exact_continuation_and_eof_metadata() {
+        let _world = cv_testkit::World::in_process("staged-budget-giant-reject");
+        struct Replay;
+        impl Adapter for Replay {
+            fn harness(&self) -> Harness {
+                Harness::Codex
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<Vec<SessionRef>> {
+                Ok(Vec::new())
+            }
+            fn stream(
+                &self,
+                r: &SessionRef,
+                _: &cv_core::ParseOptions,
+                sink: &mut dyn cv_core::MessageSink,
+            ) -> Result<Session> {
+                let mut session = Session::new(&r.id, r.harness);
+                sink.meta(&session);
+                for body in ["tiny".to_owned(), "giant\n🌙".repeat(1024 * 1024)] {
+                    let mut message = Message::new(Role::User);
+                    message.content.push(Block::Text { text: body.into() });
+                    assert_eq!(sink.message(message), cv_core::Flow::Continue);
+                }
+                session.title = Some("EOF title".into());
+                Ok(session)
+            }
+        }
+        let r = SessionRef::new("giant-reject", Harness::Codex, "/nonexistent/giant.jsonl");
+        let (expected, expected_next) = full_json_window(&Replay, &r, None, Some(128));
+        let (stage, next) = staged_session_json(&Replay, &r, None, Some(128), false).unwrap();
+        assert_eq!(next, Some(1));
+        assert_eq!(next, expected_next);
+        let mut output = Vec::new();
+        stage.copy_to(&mut output).unwrap();
+        let mut oracle = serde_json::to_vec_pretty(&expected).unwrap();
+        oracle.push(b'\n');
+        assert_eq!(output, oracle);
     }
 
     #[test]
