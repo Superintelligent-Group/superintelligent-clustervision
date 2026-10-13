@@ -4,6 +4,36 @@ Source audit: `c0f0044`, 2026-10-12; updated through the first pass and the ongo
 This is the working model and tracker for the performance pass. Measurements in `PERF.md` remain historical observations; their causal
 explanations are not all supported by the implementation. Paths below are relative to `crates/`.
 
+## Current priorities: whole operations (2026-10-12, user steering)
+
+Ember asked us to zoom out: giant-payload heap has dominated the investigation for too long.
+Performance means useful output delivered quickly with reasonable total machine work, disk usage,
+and implementation complexity. A bounded parser is one component, not the product scorecard.
+Finish coherent in-flight fixes; pause speculative adapter expansion and further emitter rewrites
+until the operation measurements justify them. Qwen has no local data, so its synthetic carrier
+work is explicitly deferred. This changes priority, not the correctness or fidelity requirements.
+
+| User operation | What we know | Next question / action |
+|---|---|---|
+| List / find a session | Fleet empty-catalog `ls` 9.845 s; warm 34–168 ms; explicit fresh with scan cache 802 ms. Known-ID lookup already bypasses fleet discovery. | Preserve warm paths. Finish all-primary freshness correctness; distinguish empty catalog, expired catalog and cold filesystem. Investigate discovery/count coupling before tuning more line scanners. |
+| Filter the fleet | First uncached `has:plan` reduces every undecided source serially; fresh counts answer repeats without parsing. Frozen baseline ran 317 s and failed on Cursor, so it is not a successful throughput result. | Fix actual failure, complete the real query, compare warm repeat and bounded parallel execution. Preserve cheap boolean short-circuiting, order and atomic result selection. |
+| Read / navigate | API has verified bounded continuations; CLI uses separate selection. Generated MCP spawns CLI, collects stdout and loses persistent read state. | Compare actual first / adjacent / repeated windows across MCP and HTTP. Rank startup, traversal, staging and response work before designing changes; reuse existing read engine rather than adding caches. |
+| Refresh / search | No-op FTS planning avoids writer startup, but CLI `index` still discovers the fleet first. Full-fleet merge/query and interactive latency during indexing are unmeasured. | Measure complete unchanged / append refresh and indexed query, then index alongside a read. Account for discovery, merge/publication and aggregate process resources. |
+| Transform / export | Verified Codex port has measured 23–29% CPU and large heap improvements. Prune/archive/dataset can still scan or stage whole output. | Hold further Claude emitter work. Measure small selections from large histories and actual bytes written before optimizing occasional whole-output operations. |
+
+Each representative operation needs cold/warm/one-change labels, time to first **useful** output,
+total elapsed time, CPU, output size, physical memory/RSS, source and temporary I/O, and peak/lifetime
+of cache or spool disk. Heap counters remain regression ceilings. A progress banner is not a result;
+a failed command is not a performance success. Filesystem cache and concurrent load must be reported.
+Measure concurrent index + interactive read after single-operation costs are understood. Avoid
+claiming that one process's byte permits bound the machine's total memory.
+
+Use existing benchmark/probe machinery and a small representative workload set. The selected-payload
+matrix tests exact output and allocation ceilings; it does not measure responsiveness, warm reuse,
+C allocations or disk cost. Finish the targeted Codex/Gemini counterexamples already underway,
+then hold matrix expansion. New implementations must remove repeated traversal or ownership through
+shared mechanisms where possible; review maintenance cost alongside measured runtime benefit.
+
 ## What cv does
 
 cv discovers sessions in heterogeneous stores, interprets their native histories into a common
