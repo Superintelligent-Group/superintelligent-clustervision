@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Gemini exports stream guarded text and arguments, preserving pretty output and fidelity without payload-sized session copies.
+
 - Codex thinking presence and emission fidelity checks stop decoding after the required character while preserving source validation.
 
 - Claude and Codex rehomes retain checked ordinary payloads while preserving complete metadata, unknown records and source freshness.

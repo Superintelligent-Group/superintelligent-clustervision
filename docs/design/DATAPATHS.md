@@ -3550,3 +3550,14 @@ Source escapes, malformed raw-Span fallback, bounds and changed-source controls 
 portable, along with the existing emitter tests. No validated-dispatch bypass or serde decoder
 scratch redesign was needed; actual output decoding and staging remain. These allocation counters
 are not timing or native allocator/RSS evidence.
+
+
+### Checked Gemini export (2026-10-13, encoded_arguments)
+
+Claude→Gemini export now prepares checked source payloads and streams the existing Gemini wire schema through shared JSON writers, pretty staging and publication. It retains legacy field order, tool-result association, Native/Text/Drop thinking behavior and complete metadata. Same-harness Gemini preparation remains owned; public complete parsing remains owned. Borrowed tool-result indexing and one per-message thinking decision replace payload copies and repeated presence scans.
+
+The existing ordinary-text 8/32 MiB whole-operation controls retain four messages, empty fidelity reports, unchanged sources and byte-identical pretty output after replacing only generated top-level message UUIDs with the frozen UUID. Peak Rust heap above baseline fell from 33,569,245/134,232,546 bytes to 276,501/276,507 bytes; cumulative requested allocation fell from 75,370,413/300,849,232 bytes to 734,801/735,014 bytes. No CPU or physical-memory claim is inferred. The persistent operation gate exercises the 32 MiB command with a 4 MiB cap, mandatory positive allocation counters and frozen output/source hashes.
+
+Native and portable scoped oracles compare all thinking modes against the frozen owned emitter, including empty thinking, complete fields, paired/orphan results and guarded failure before transcript publication. Shared publication preserves destination links and permissions. Checked production failures precede destination opening; later ordinary I/O failures retain the previous partial-write semantics. Output staging still writes the requested output to private storage, and metadata/message/tool-ID cardinality remains represented in memory.
+
+Preserved actual reports and comparison script: `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/gemini-export/candidate-native-final.json` and `compare.py`; frozen baseline: `/Users/ember/dev/cv-worktrees/excellence-evidence/gemini-export-control/baseline.json`. These controls were rerun after composing same-harness Claude/Codex preparation. Shared checked-prefix reducer changes subsequently passed the same native/portable emitter oracle.

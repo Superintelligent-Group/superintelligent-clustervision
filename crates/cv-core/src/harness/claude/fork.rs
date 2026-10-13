@@ -224,132 +224,6 @@ pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> 
         .and_then(|(_, p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn write(dir: &Path, name: &str, lines: &[Value]) -> PathBuf {
-        let p = dir.join(name);
-        let text: Vec<String> = lines.iter().map(Value::to_string).collect();
-        fs::write(&p, text.join("\n") + "\n").unwrap();
-        p
-    }
-
-    fn rec(uuid: &str, parent: Option<&str>, ts: &str) -> Value {
-        json!({"type": "user", "uuid": uuid, "parentUuid": parent, "timestamp": ts,
-               "message": {"role": "user", "content": "hi"}})
-    }
-
-    fn queued(ts: &str) -> Value {
-        json!({"type": "queue-operation", "operation": "enqueue", "timestamp": ts})
-    }
-
-    fn legacy_head(path: &Path) -> Option<Head> {
-        let mut newest: Option<DateTime<Utc>> = None;
-        for line in BufReader::new(fs::File::open(path).ok()?).lines().take(HEAD_LINES) {
-            let Ok(line) = line else { break };
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let at = v
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(super::super::parse_ts);
-            if let Some(uuid) = v.get("uuid").and_then(Value::as_str) {
-                let boundary = v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-                    && v.get("parentUuid").is_none_or(Value::is_null);
-                return Some(Head {
-                    uuid: uuid.into(),
-                    at,
-                    boundary,
-                    copied: boundary || matches!((at,newest), (Some(a),Some(n)) if a<n),
-                });
-            }
-            if let Some(a) = at {
-                newest = Some(newest.map_or(a, |n| n.max(a)));
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn projected_heads_match_value_validation_and_physical_line_limits() {
-        let w = cv_testkit::World::in_process("fork-head-projection");
-        let path = w.base.join("head.jsonl");
-        let uuid = r#"{"uuid":"shared","timestamp":"2026-09-19T00:00:00Z"}"#;
-        let queued = r#"{"timestamp":"2026-09-19T01:00:00Z"}"#;
-        let mut cases: Vec<Vec<u8>> = vec![
-            format!("{queued}\n{uuid}\n").into_bytes(),
-            format!("{}{uuid}\n", "\n".repeat(63)).into_bytes(),
-            format!("{}{uuid}\n", "\n".repeat(64)).into_bytes(),
-            format!("malformed\nnull\n[1,2]\n{uuid}\n").into_bytes(),
-            format!("\u{a0}{queued}\n{uuid}\n").into_bytes(),
-            format!("{{\"uuid\":\"bad\",\"ignored\":1e400}}\n{uuid}\n").into_bytes(),
-            format!("{{\"uuid\":\"bad\",\"ignored\":\"\\ud800\"}}\n{uuid}\n").into_bytes(),
-            br#"{"uuid":"first","uuid":17}
-{"uuid":"last","uuid":"final","subtype":"compact_boundary","parentUuid":null}
-"#
-            .to_vec(),
-            br#"{"uuid":"parent","subtype":"compact_boundary","parentUuid":false}
-"#
-            .to_vec(),
-            br#"{"uuid":"escaped\u0031","timestamp":[],"parentUuid":null}
-"#
-            .to_vec(),
-        ];
-        cases.push([b"\xff\n".as_slice(), uuid.as_bytes()].concat());
-        cases.push(format!("{{\"uuid\":\"giant\",\"message\":\"{}\"}}\n", "payload".repeat(150_000)).into_bytes());
-        cases.push(
-            format!(
-                "{{\"uuid\":\"escaped\",\"message\":\"{}\"}}\n",
-                "\\u0061".repeat(150_000)
-            )
-            .into_bytes(),
-        );
-        let observe = |head: Option<Head>| head.map(|h| (h.uuid, h.at, h.boundary, h.copied));
-        for (i, bytes) in cases.iter().enumerate() {
-            fs::write(&path, bytes).unwrap();
-            assert_eq!(observe(head(&path)), observe(legacy_head(&path)), "case {i}");
-        }
-        fs::write(&path, [b"prefix\n\xff\n".as_slice(), b"needle\n"].concat()).unwrap();
-        assert!(!holds(&path, "needle"), "invalid UTF-8 stops sibling traversal");
-    }
-
-    /// An uncompacted source: the fork starts with the same `uuid`, after its own newer queue
-    /// record. The source, a sibling fork, and an unrelated session are told apart.
-    #[test]
-    fn a_fork_of_an_uncompacted_session_names_its_source() {
-        let dir = std::env::temp_dir().join(format!("cv-claude-fork-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let t0 = "2026-10-11T20:00:00Z";
-        let src = write(
-            &dir,
-            "src.jsonl",
-            &[
-                queued(t0),
-                rec("u0", None, t0),
-                rec("u1", Some("u0"), "2026-10-11T20:00:05Z"),
-            ],
-        );
-        let fork_lines = [
-            json!({"type": "custom-title", "customTitle": "t"}),
-            queued("2026-10-11T21:00:00Z"),
-            rec("u0", None, t0),
-            rec("u1", Some("u0"), "2026-10-11T20:00:05Z"),
-            rec("f1", Some("u1"), "2026-10-11T21:00:01Z"),
-        ];
-        let fork = write(&dir, "fork.jsonl", &fork_lines);
-        let sibling = write(&dir, "sibling.jsonl", &fork_lines);
-        write(&dir, "other.jsonl", &[queued(t0), rec("o0", None, t0)]);
-        assert_eq!(source(&fork).as_deref(), Some("src"));
-        assert_eq!(source(&sibling).as_deref(), Some("src"));
-        assert_eq!(source(&src), None, "the source's head is not a copy");
-        let _ = fs::remove_dir_all(&dir);
-    }
-}
-
 #[cfg(not(feature = "mmap"))]
 fn head(path: &Path) -> Option<Head> {
     use crate::{
@@ -493,4 +367,130 @@ fn holds(path: &Path, needle: &str) -> bool {
         Ok(false)
     };
     run().unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn write(dir: &Path, name: &str, lines: &[Value]) -> PathBuf {
+        let p = dir.join(name);
+        let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+        fs::write(&p, text.join("\n") + "\n").unwrap();
+        p
+    }
+
+    fn rec(uuid: &str, parent: Option<&str>, ts: &str) -> Value {
+        json!({"type": "user", "uuid": uuid, "parentUuid": parent, "timestamp": ts,
+               "message": {"role": "user", "content": "hi"}})
+    }
+
+    fn queued(ts: &str) -> Value {
+        json!({"type": "queue-operation", "operation": "enqueue", "timestamp": ts})
+    }
+
+    fn legacy_head(path: &Path) -> Option<Head> {
+        let mut newest: Option<DateTime<Utc>> = None;
+        for line in BufReader::new(fs::File::open(path).ok()?).lines().take(HEAD_LINES) {
+            let Ok(line) = line else { break };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let at = v
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(super::super::parse_ts);
+            if let Some(uuid) = v.get("uuid").and_then(Value::as_str) {
+                let boundary = v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+                    && v.get("parentUuid").is_none_or(Value::is_null);
+                return Some(Head {
+                    uuid: uuid.into(),
+                    at,
+                    boundary,
+                    copied: boundary || matches!((at,newest), (Some(a),Some(n)) if a<n),
+                });
+            }
+            if let Some(a) = at {
+                newest = Some(newest.map_or(a, |n| n.max(a)));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn projected_heads_match_value_validation_and_physical_line_limits() {
+        let w = cv_testkit::World::in_process("fork-head-projection");
+        let path = w.base.join("head.jsonl");
+        let uuid = r#"{"uuid":"shared","timestamp":"2026-09-19T00:00:00Z"}"#;
+        let queued = r#"{"timestamp":"2026-09-19T01:00:00Z"}"#;
+        let mut cases: Vec<Vec<u8>> = vec![
+            format!("{queued}\n{uuid}\n").into_bytes(),
+            format!("{}{uuid}\n", "\n".repeat(63)).into_bytes(),
+            format!("{}{uuid}\n", "\n".repeat(64)).into_bytes(),
+            format!("malformed\nnull\n[1,2]\n{uuid}\n").into_bytes(),
+            format!("\u{a0}{queued}\n{uuid}\n").into_bytes(),
+            format!("{{\"uuid\":\"bad\",\"ignored\":1e400}}\n{uuid}\n").into_bytes(),
+            format!("{{\"uuid\":\"bad\",\"ignored\":\"\\ud800\"}}\n{uuid}\n").into_bytes(),
+            br#"{"uuid":"first","uuid":17}
+{"uuid":"last","uuid":"final","subtype":"compact_boundary","parentUuid":null}
+"#
+            .to_vec(),
+            br#"{"uuid":"parent","subtype":"compact_boundary","parentUuid":false}
+"#
+            .to_vec(),
+            br#"{"uuid":"escaped\u0031","timestamp":[],"parentUuid":null}
+"#
+            .to_vec(),
+        ];
+        cases.push([b"\xff\n".as_slice(), uuid.as_bytes()].concat());
+        cases.push(format!("{{\"uuid\":\"giant\",\"message\":\"{}\"}}\n", "payload".repeat(150_000)).into_bytes());
+        cases.push(
+            format!(
+                "{{\"uuid\":\"escaped\",\"message\":\"{}\"}}\n",
+                "\\u0061".repeat(150_000)
+            )
+            .into_bytes(),
+        );
+        let observe = |head: Option<Head>| head.map(|h| (h.uuid, h.at, h.boundary, h.copied));
+        for (i, bytes) in cases.iter().enumerate() {
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(observe(head(&path)), observe(legacy_head(&path)), "case {i}");
+        }
+        fs::write(&path, [b"prefix\n\xff\n".as_slice(), b"needle\n"].concat()).unwrap();
+        assert!(!holds(&path, "needle"), "invalid UTF-8 stops sibling traversal");
+    }
+
+    /// An uncompacted source: the fork starts with the same `uuid`, after its own newer queue
+    /// record. The source, a sibling fork, and an unrelated session are told apart.
+    #[test]
+    fn a_fork_of_an_uncompacted_session_names_its_source() {
+        let dir = std::env::temp_dir().join(format!("cv-claude-fork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let t0 = "2026-10-11T20:00:00Z";
+        let src = write(
+            &dir,
+            "src.jsonl",
+            &[
+                queued(t0),
+                rec("u0", None, t0),
+                rec("u1", Some("u0"), "2026-10-11T20:00:05Z"),
+            ],
+        );
+        let fork_lines = [
+            json!({"type": "custom-title", "customTitle": "t"}),
+            queued("2026-10-11T21:00:00Z"),
+            rec("u0", None, t0),
+            rec("u1", Some("u0"), "2026-10-11T20:00:05Z"),
+            rec("f1", Some("u1"), "2026-10-11T21:00:01Z"),
+        ];
+        let fork = write(&dir, "fork.jsonl", &fork_lines);
+        let sibling = write(&dir, "sibling.jsonl", &fork_lines);
+        write(&dir, "other.jsonl", &[queued(t0), rec("o0", None, t0)]);
+        assert_eq!(source(&fork).as_deref(), Some("src"));
+        assert_eq!(source(&sibling).as_deref(), Some("src"));
+        assert_eq!(source(&src), None, "the source's head is not a copy");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

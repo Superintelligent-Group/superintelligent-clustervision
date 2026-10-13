@@ -220,7 +220,7 @@ mod tests {
         let world = cv_testkit::World::new("port-prepare-complete");
         let path = world.base.join("session.jsonl");
         let body = "escaped\n\" λ".repeat(12000);
-        let rows = vec![
+        let rows = [
             serde_json::json!({"type":"user","uuid":"u","cwd":"/synthetic/complete","timestamp":"2026-10-12T12:00:00Z","message":{"role":"user","content":body}}),
             serde_json::json!({"type":"assistant","uuid":"synthetic","future_before":null,"isSidechain":false,"userType":"external","isApiErrorMessage":true,"errorDetails":{"small":"kept"},"requestId":"request","version":"v","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":body}],"future_message":17,"id":"provider-response-id","stop_reason":null,"stop_sequence":null,"stop_details":{"small":"kept"}}}),
             serde_json::json!({"type":"user","uuid":"compact","isCompactSummary":true,"message":{"role":"user","content":body}}),
