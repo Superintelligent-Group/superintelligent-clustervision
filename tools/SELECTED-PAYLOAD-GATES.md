@@ -2,6 +2,10 @@
 
 Run `tools/check-heap-budget.py PROBE --no-mmap-probe PORTABLE --only selected-payloads`.
 Both probes must have `probe-heap`; this selector measures the native mmap probe.
+`--only portable-selected-payloads` runs the same cases, oracles, and budgets against PORTABLE.
+That binary must enable SQLite without mmap:
+`cargo build --release -p clustervision-core --example store_probe --no-default-features --features sqlite,probe-heap`.
+The older no-SQLite portable gates keep their separate build; selected SQLite stores require this feature.
 Use repeated `--format` to focus Kimi Code, OpenCode files/SQLite, Cursor CLI/IDE, or Goose.
 
 The shared fixture generator creates native-shaped synthetic stores in new scratch directories.

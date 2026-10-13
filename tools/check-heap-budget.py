@@ -222,7 +222,7 @@ SELECTED_PAYLOAD_CASES = (("kimi-code", "selected"), ("opencode-files", "selecte
                           ("cursor", "selected"), ("cursor-ide", "selected-ide"), ("goose", "selected"))
 
 
-def selected_payloads(binary, root, env, formats=None, operations=None):
+def selected_payloads(binary, root, env, formats=None, operations=None, mmap=True):
     generator = Path(__file__).with_name("perf-fixture.py")
     for format_name, shape in SELECTED_PAYLOAD_CASES:
         if formats and format_name not in formats:
@@ -241,11 +241,11 @@ def selected_payloads(binary, root, env, formats=None, operations=None):
                     common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
                     reference = None
                     if "doctor" in peaks:
-                        reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, True, fd_limit=64)
+                        reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, mmap, fd_limit=64)
                     dataset_reference = None
                     if "dataset" in peaks:
                         dataset_reference, _ = probe(binary, ["dataset-collect", *common, "--mode", "full",
-                                                               "--query", "tool:gate-final", "--hash-output"], env, True, fd_limit=64)
+                                                               "--query", "tool:gate-final", "--hash-output"], env, mmap, fd_limit=64)
                     for operation in peaks:
                         if operation == "discard":
                             arguments = ["discard", *common, "--mode", "lazy"]
@@ -254,7 +254,7 @@ def selected_payloads(binary, root, env, formats=None, operations=None):
                         else:
                             query = "tool:gate-final" if operation == "dataset" else "tool:gate-missing"
                             arguments = ["dataset", *common, "--mode", "lazy", "--query", query, "--hash-output"]
-                        row, peak = probe(binary, arguments, env, True, fd_limit=64)
+                        row, peak = probe(binary, arguments, env, mmap, fd_limit=64)
                         if operation in ("discard", "doctor"):
                             assert row["messages"] == manifest["expected_messages"], "selected payload messages skipped"
                         if operation == "doctor":
@@ -269,7 +269,7 @@ def selected_payloads(binary, root, env, formats=None, operations=None):
                             assert row["detail"]["record_sha256"] == hashlib.sha256(b"").hexdigest()
                         peaks[operation].append(peak)
                         print(json.dumps({"case": f"selected-{format_name}-{shape}-{operation}",
-                                          "history": history, "escaped": escaped, "open_file_limit": 64, "decoded_payload_bytes": size,
+                                          "history": history, "escaped": escaped, "mmap": mmap, "open_file_limit": 64, "decoded_payload_bytes": size,
                                           "records": records, "peak_live_rust_bytes": peak}), flush=True)
                     shutil.rmtree(manifest["root"])
                 for operation, values in peaks.items():
@@ -496,17 +496,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "metadata-facts", "selected-payloads", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "metadata-facts", "selected-payloads", "portable-selected-payloads", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
     parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/metadata-facts/stats, separately check baseline behavior parity")
     parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed", "kimi-code", "opencode-files", "opencode", "cursor", "cursor-ide", "goose"),
                         help="repeat to focus --only active on selected native formats")
     args = parser.parse_args()
-    if args.format and args.only not in ("active", "portable-docs", "selected-payloads"):
-        parser.error("--format applies only to active/portable-docs/selected-payloads")
+    if args.format and args.only not in ("active", "portable-docs", "selected-payloads", "portable-selected-payloads"):
+        parser.error("--format applies only to active/portable-docs/selected-payloads/portable-selected-payloads")
     portable_formats = ("cline-sdk", "opensession", "chatgpt-export", "claude-export")
     if args.only == "active" and any(f not in (*portable_formats, "kimi", "zed") for f in args.format or []):
         parser.error("active supports document formats, kimi, and zed")
-    if args.only == "selected-payloads" and any(f not in {name for name, _ in SELECTED_PAYLOAD_CASES} for f in args.format or []):
+    if args.only in ("selected-payloads", "portable-selected-payloads") and any(f not in {name for name, _ in SELECTED_PAYLOAD_CASES} for f in args.format or []):
         parser.error("selected-payloads requires a selected payload case format")
     if args.only == "portable-docs" and any(f not in portable_formats for f in args.format or []):
         parser.error("portable-docs supports only document formats")
@@ -523,6 +523,8 @@ def main():
             metadata_facts(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
         elif args.only == "selected-payloads":
             selected_payloads(args.probe.resolve(), root, env, args.format)
+        elif args.only == "portable-selected-payloads":
+            selected_payloads(args.no_mmap_probe.resolve(), root, env, args.format, mmap=False)
         elif args.only == "query":
             queries(args.probe.resolve(), root, env)
         elif args.only == "events":

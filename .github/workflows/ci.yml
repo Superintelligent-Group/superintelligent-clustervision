@@ -78,6 +78,8 @@ jobs:
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only encoded-arguments
           python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only stats
           python3 tools/perf-sqlite-check.py --probe /tmp/cv-store-probe-mmap
+          cargo build --release -p clustervision-core --example store_probe --no-default-features --features sqlite,probe-heap
+          python3 -I tools/check-heap-budget.py /tmp/cv-store-probe-mmap --no-mmap-probe target/release/examples/store_probe --only portable-selected-payloads
 
       # Exercises the production worker/tee/channel/Tantivy path, not a queue-only mock.
       # Four 100MB arguments refute the old unbounded queue under the same 384MiB Rust cap.
