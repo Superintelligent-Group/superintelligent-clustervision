@@ -8,6 +8,8 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::Path;
 
+#[cfg(test)]
+pub(crate) mod export_tests;
 mod snapshots;
 
 /// A reader retains both its private backing (when needed) and the original provenance.

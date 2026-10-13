@@ -7,8 +7,18 @@ use cv_core::{
 #[cfg(feature = "probe-heap")]
 #[global_allocator]
 static ALLOCATOR: cv_testkit::heap::Allocator = cv_testkit::heap::Allocator;
+#[cfg(feature = "sqlite")]
+#[path = "store_probe/sqlite_heap.rs"]
+mod sqlite_heap;
 fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().collect();
+    let mut args: Vec<_> = std::env::args().collect();
+    #[cfg(feature = "sqlite")]
+    let sqlite_accounting = args
+        .iter()
+        .any(|a| a == "--sqlite-heap")
+        .then(sqlite_heap::Accounting::enable)
+        .transpose()?;
+    args.retain(|a| a != "--sqlite-heap");
     let source = Harness::parse(&args[1]).context("unknown source harness")?;
     let adapter = cv_core::harness::for_harness(source).context("source adapter")?;
     let reference = SessionRef::new("synthetic-source", source, &args[2]);
@@ -17,6 +27,8 @@ fn main() -> Result<()> {
         Some(value) => Harness::parse(value).context("unknown target harness")?,
         None => Harness::Claude,
     };
+    #[cfg(feature = "sqlite")]
+    let sqlite_baseline = sqlite_accounting.as_ref().map(|a| a.begin()).transpose()?;
     #[cfg(feature = "probe-heap")]
     let baseline = cv_testkit::heap::begin();
     let session = emit::parse_for_emit(adapter.as_ref(), &reference, target)?;
@@ -36,6 +48,10 @@ fn main() -> Result<()> {
         "{}",
         serde_json::json!({"path":result.path,"messages":session.messages.len(),"fidelity":report})
     );
+    #[cfg(feature = "sqlite")]
+    if let Some(accounting) = sqlite_accounting {
+        eprintln!("{}", serde_json::to_string(&accounting.end(sqlite_baseline.unwrap())?)?);
+    }
     #[cfg(feature = "probe-heap")]
     eprintln!("{}", serde_json::to_string(&heap)?);
     Ok(())

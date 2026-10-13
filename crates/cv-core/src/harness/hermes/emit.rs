@@ -18,11 +18,8 @@ use uuid::Uuid;
 /// the `\x00json:` sentinel prefix.
 #[cfg(feature = "sqlite")]
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    let session = crate::emit::materialized_session(session)?;
-    let session = session.as_ref();
-    use rusqlite::{params, Connection};
-
-    const MULTIMODAL_SENTINEL: &str = "\u{0}json:";
+    crate::harness::wire::write::check_source_fields(session)?;
+    use rusqlite::Connection;
 
     let new_id = opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -30,10 +27,22 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     // first root names — and the store is its `state.db`.
     let db_path = out_dir.join("state.db");
     fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-    let conn = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
+    let mut conn = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
+    write_database(session, opts, &new_id, &mut conn)?;
+    Ok(EmitResult {
+        path: db_path,
+        new_id: new_id.clone(),
+        resume_hint: Some(format!("hermes --resume {new_id}")),
+    })
+}
+
+fn write_database(session: &Session, opts: &EmitOptions, new_id: &str, conn: &mut rusqlite::Connection) -> Result<()> {
+    use rusqlite::params;
+    let resolver = session.resolver();
+    let tx = conn.transaction()?;
 
     // Create the (subset of) v14 schema if the DB is fresh. `IF NOT EXISTS` makes append safe.
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
@@ -83,7 +92,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     // `messages_fts`). The unicode61 table is part of bundled FTS5 and always available; the trigram
     // tokenizer is too in modern SQLite, but we still guard it so emit succeeds on any build that
     // lacks it. Created BEFORE inserting rows so the AFTER INSERT triggers populate the index.
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content);
          CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
              INSERT INTO messages_fts(rowid, content) VALUES (
@@ -124,7 +133,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                  COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
              );
          END;";
-    if let Err(e) = conn.execute_batch(trigram_sql) {
+    if let Err(e) = tx.execute_batch(trigram_sql) {
         eprintln!("cv: hermes trigram FTS unavailable, skipping ({e}); unicode61 FTS still active");
     }
 
@@ -162,13 +171,15 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     let cwd = effective_cwd(session, opts).map(|p| p.to_string_lossy().into_owned());
     let git_branch = branch_of(session);
 
-    conn.execute(
+    let mut session_insert = tx.prepare(
         "INSERT OR REPLACE INTO sessions \
          (id, source, user_id, model, model_config, system_prompt, started_at, ended_at, \
           end_reason, message_count, tool_call_count, input_tokens, output_tokens, \
           cache_read_tokens, cache_write_tokens, reasoning_tokens, title, cwd, git_branch) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-        params![
+    )?;
+    session_insert
+        .execute(params![
             new_id,
             source,
             user_id,
@@ -188,10 +199,11 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             session.title,
             cwd,
             git_branch,
-        ],
-    )
-    .context("inserting hermes session")?;
+        ])
+        .context("inserting hermes session")?;
 
+    let mut tool_insert = tx.prepare("INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, timestamp, token_count, finish_reason, platform_message_id, observed) VALUES (?1, 'tool', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
+    let mut message_insert = tx.prepare("INSERT INTO messages (session_id, role, content, tool_calls, timestamp, token_count, finish_reason, reasoning, reasoning_content, reasoning_details, codex_reasoning_items, codex_message_items, platform_message_id, observed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)")?;
     let mut base_ts = started;
     for msg in &session.messages {
         let ts = msg
@@ -209,6 +221,14 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             Role::Tool => "tool",
         };
 
+        let projected = msg
+            .content
+            .iter()
+            .map(|block| {
+                crate::emit::thinking::fate(block, Harness::Hermes, opts.thinking, &resolver).map(|fate| (block, fate))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         // Reasoning columns. For a lossless round-trip we prefer the verbatim source columns the
         // parser stashed in the Hermes fact bag (`extra["hermes"]`, IR-v2 nesting: `reasoning` /
         // `reasoning_content` / `reasoning_details` / `codex_*`) over reconstructing from the folded
@@ -216,43 +236,8 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         // recover the originals. We synthesize from Thinking blocks only when no verbatim column was
         // captured (a session built in-memory or ported from another harness).
         let hbag = msg.harness_extra(Harness::Hermes);
-        let extra_str =
-            |k: &str| -> Option<String> { hbag.and_then(|b| b.get(k)).and_then(Value::as_str).map(str::to_string) };
+        let extra_str = |k: &str| -> Option<&str> { hbag.and_then(|b| b.get(k)).and_then(Value::as_str) };
         let extra_json = |k: &str| -> Option<String> { hbag.and_then(|b| b.get(k)).map(|v| v.to_string()) };
-
-        let mut reasoning = extra_str(RAW_REASONING_KEY);
-        let reasoning_content = extra_str(RAW_REASONING_CONTENT_KEY);
-        // `reasoning_details` / codex items were stashed as parsed JSON; re-serialize them verbatim.
-        let mut reasoning_details = extra_json("reasoning_details");
-        let codex_reasoning_items = extra_json("codex_reasoning_items");
-        let codex_message_items = extra_json("codex_message_items");
-
-        // Fallback synthesis only when nothing verbatim was captured: a foreign/in-memory session
-        // still gets its Thinking text + encrypted blob persisted (matching the prior behaviour).
-        if reasoning.is_none() && reasoning_content.is_none() && reasoning_details.is_none() {
-            let mut text = String::new();
-            let mut enc: Option<&str> = None;
-            for b in &msg.content {
-                if let Block::Thinking { text: t, encrypted, .. } = b {
-                    if !t.is_empty() {
-                        if !text.is_empty() {
-                            text.push_str("\n\n");
-                        }
-                        text.push_str(t);
-                    }
-                    if enc.is_none() {
-                        enc = encrypted.as_deref();
-                    }
-                }
-            }
-            if !text.is_empty() {
-                reasoning = Some(text);
-            }
-            if let Some(enc) = enc {
-                reasoning_details =
-                    Some(json!([{ "type": "reasoning.encrypted_content", "encrypted_content": enc }]).to_string());
-            }
-        }
 
         let finish_reason = extra_str("finish_reason");
         let platform_message_id = extra_str("platform_message_id");
@@ -285,14 +270,15 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                     // dropping it here made every ported tool turn come back nameless. The optional
                     // per-row columns (token_count / finish_reason / platform_message_id / observed)
                     // can also ride a tool row, so write them back for a lossless round-trip.
-                    conn.execute(
-                        "INSERT INTO messages \
-                         (session_id, role, content, tool_call_id, tool_name, timestamp, \
-                          token_count, finish_reason, platform_message_id, observed) \
-                         VALUES (?1, 'tool', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        params![
+                    let mut body = String::new();
+                    content.try_for_each_chunk(&resolver, 64 * 1024, |chunk| {
+                        body.push_str(chunk);
+                        Ok(())
+                    })?;
+                    tool_insert
+                        .execute(params![
                             new_id,
-                            content.to_string(),
+                            body,
                             tool_use_id,
                             tool_name,
                             ts,
@@ -300,65 +286,62 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                             finish_reason,
                             platform_message_id,
                             observed,
-                        ],
-                    )
-                    .context("inserting hermes tool message")?;
+                        ])
+                        .context("inserting hermes tool message")?;
                 }
             }
             continue;
         }
 
-        // Content: plain text, or the multimodal sentinel form if there are images.
-        let has_image = msg.content.iter().any(|b| matches!(b, Block::Image { .. }));
-        let content: Option<String> = if has_image {
-            let mut parts = Vec::new();
-            for b in &msg.content {
-                match b {
-                    Block::Text { text } => parts.push(json!({ "type": "text", "text": text })),
-                    Block::Image { data_ref, .. } => {
-                        parts.push(json!({
-                            "type": "image_url",
-                            "image_url": { "url": data_ref.clone().unwrap_or_default() },
-                        }));
+        let mut reasoning = extra_str(RAW_REASONING_KEY).map(std::borrow::Cow::Borrowed);
+        let reasoning_content = extra_str(RAW_REASONING_CONTENT_KEY);
+        // `reasoning_details` / codex items were stashed as parsed JSON; re-serialize them verbatim.
+        let mut reasoning_details = extra_json("reasoning_details");
+        let codex_reasoning_items = extra_json("codex_reasoning_items");
+        let codex_message_items = extra_json("codex_message_items");
+
+        // Fallback synthesis only when nothing verbatim was captured: a foreign/in-memory session
+        // still gets its Thinking text + encrypted blob persisted (matching the prior behaviour).
+        if reasoning.is_none() && reasoning_content.is_none() && reasoning_details.is_none() {
+            let mut text = String::new();
+            let mut enc: Option<&str> = None;
+            for (b, fate) in &projected {
+                if *fate != ThinkingFate::Keep {
+                    continue;
+                }
+                if let Block::Thinking { text: t, encrypted, .. } = b {
+                    let mut first = true;
+                    t.try_for_each_chunk(&resolver, 64 * 1024, |chunk| {
+                        if !chunk.is_empty() {
+                            if first && !text.is_empty() {
+                                text.push_str("\n\n");
+                            }
+                            text.push_str(chunk);
+                            first = false;
+                        }
+                        Ok(())
+                    })?;
+                    if enc.is_none() {
+                        enc = encrypted.as_deref();
                     }
-                    _ => {}
                 }
             }
-            Some(format!(
-                "{MULTIMODAL_SENTINEL}{}",
-                serde_json::to_string(&Value::Array(parts))?
-            ))
-        } else {
-            msg.text()
-        };
-
-        // Assistant tool calls → OpenAI-shaped tool_calls JSON.
-        let tool_calls: Option<String> = {
-            let mut calls = Vec::new();
-            for block in &msg.content {
-                let rewrapped = crate::affordance::rewrap_deferred(Harness::Hermes, block)?;
-                let block = rewrapped.as_ref().unwrap_or(block);
-                if let Block::ToolUse { id, name, input, .. } = block {
-                    calls.push(json!({
-                        "id": id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": serde_json::to_string(input.resolve()?.as_ref())?,
-                        },
-                    }));
-                }
+            if !text.is_empty() {
+                reasoning = Some(std::borrow::Cow::Owned(text));
             }
-            (!calls.is_empty()).then(|| Value::Array(calls).to_string())
-        };
+            if let Some(enc) = enc {
+                reasoning_details =
+                    Some(json!([{ "type": "reasoning.encrypted_content", "encrypted_content": enc }]).to_string());
+            }
+        }
 
-        conn.execute(
-            "INSERT INTO messages \
-             (session_id, role, content, tool_calls, timestamp, token_count, finish_reason, \
-              reasoning, reasoning_content, reasoning_details, codex_reasoning_items, \
-              codex_message_items, platform_message_id, observed) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
+        // Resolve only the fields this row stores. SQLite TEXT binding requires this row's
+        // bytes to be contiguous; ownership scales with a row, not the session's total bodies.
+        let content = content(&projected, &resolver)?;
+        let tool_calls = tool_calls(&msg.content)?;
+
+        message_insert
+            .execute(params![
                 new_id,
                 role,
                 content,
@@ -373,14 +356,119 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 codex_message_items,
                 platform_message_id,
                 observed,
-            ],
-        )
-        .context("inserting hermes message")?;
+            ])
+            .context("inserting hermes message")?;
     }
 
-    Ok(EmitResult {
-        path: db_path,
-        new_id: new_id.clone(),
-        resume_hint: Some(format!("hermes --resume {new_id}")),
-    })
+    drop(message_insert);
+    drop(tool_insert);
+    drop(session_insert);
+    crate::harness::wire::write::check_source_fields(session)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn content(projected: &[(&Block, ThinkingFate)], resolver: &crate::lazy::Resolver) -> Result<Option<String>> {
+    use crate::harness::wire::write::{text, ObjectWriter};
+    if projected.iter().any(|(b, _)| matches!(b, Block::Image { .. })) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\0json:[");
+        let mut first = true;
+        for (block, fate) in projected {
+            let value = if let Block::Text { text } = block {
+                Some(std::borrow::Cow::Borrowed(text))
+            } else {
+                crate::emit::thinking::text_with_fate(block, *fate)
+            };
+            if let Some(value) = value {
+                if !first {
+                    bytes.push(b',');
+                }
+                first = false;
+                let mut part = ObjectWriter::new(&mut bytes)?;
+                part.field("type", "text")?;
+                part.field_with("text", |w| text(w, &value, resolver))?;
+                part.finish()?;
+            } else if let Block::Image { data_ref, .. } = block {
+                if !first {
+                    bytes.push(b',');
+                }
+                first = false;
+                serde_json::to_writer(
+                    &mut bytes,
+                    &json!({"type":"image_url","image_url":{"url":data_ref.as_deref().unwrap_or_default()}}),
+                )?;
+            }
+        }
+        bytes.push(b']');
+        Ok(Some(String::from_utf8(bytes)?))
+    } else {
+        let mut body = String::new();
+        for (block, fate) in projected {
+            let value = if let Block::Text { text } = block {
+                Some(std::borrow::Cow::Borrowed(text))
+            } else {
+                crate::emit::thinking::text_with_fate(block, *fate)
+            };
+            if let Some(value) = value {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                value.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
+                    body.push_str(chunk);
+                    Ok(())
+                })?;
+            }
+        }
+        Ok((!body.is_empty()).then_some(body))
+    }
+}
+
+fn tool_calls(blocks: &[Block]) -> Result<Option<String>> {
+    use crate::harness::wire::write::ObjectWriter;
+    let mut bytes = vec![b'['];
+    let mut first = true;
+    for block in blocks {
+        let rewrapped = crate::affordance::rewrap_deferred(Harness::Hermes, block)?;
+        let block = rewrapped.as_ref().unwrap_or(block);
+        if let Block::ToolUse { id, name, input, .. } = block {
+            if !first {
+                bytes.push(b',');
+            }
+            first = false;
+            let mut call = ObjectWriter::new(&mut bytes)?;
+            call.field("id", id)?;
+            call.field("type", "function")?;
+            call.field_with("function", |w| {
+                let mut f = ObjectWriter::new(w)?;
+                f.field("name", name)?;
+                f.field_with("arguments", |w| {
+                    crate::harness::store::text::generate_string(w, |builder| {
+                        input.with_view(|view| builder.push_json(view))
+                    })
+                })?;
+                f.finish()
+            })?;
+            call.finish()?;
+        }
+    }
+    bytes.push(b']');
+    Ok((!first).then(|| String::from_utf8(bytes)).transpose()?)
+}
+
+#[cfg(test)]
+mod legacy;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn checked_transactional_rows_match_legacy_and_roll_back() -> Result<()> {
+        crate::harness::store::sqlite::export_tests::exercise(
+            Harness::Hermes,
+            legacy::emit,
+            emit,
+            |session, options, connection| write_database(session, options, "fixed", connection),
+        )
+    }
 }

@@ -3977,3 +3977,35 @@ migrated corpus carries that marker. New v1 rows therefore cannot become native-
 that import. Fresh bootstrap concerns remain source-derived until an isolated native check;
 they are not used as a substitute for testing explicit v2 output. Existing v1 output and the
 new transaction repair remain independently useful and retain their stated compatibility scope.
+### Checked transactional SQLite exports (Sol, 2026-10-13)
+
+OpenCode v1 and Hermes now consume checked source-backed fields one database row at a time,
+rather than materializing the entire session before export. Each export owns one transaction
+covering schema, session, messages/parts and Hermes FTS triggers, and reuses three prepared
+INSERT shapes. Source identities are rechecked before commit. Text, tool-argument and SQL
+failures roll back previous rows, session replacement, fresh schema and FTS changes. This is
+the existing OpenCode v1 schema contract; native OpenCode 2.x compatibility is separate work.
+
+Frozen old-writer oracles compare logical rows and schema in Native/Text/Drop modes, including
+empty/Unicode/escaped text, signature-only thinking, duplicate arguments, orphan/paired tools,
+usage, native extras and FTS contents. SQLite trace run counters prove statement reuse and
+commit hooks observe exactly one successful commit. Late independent Text/Json mutations,
+last-row mutation and SQL rejection observe zero commits and unchanged prior logical state.
+The two export oracles pass both native and portable SQLite builds; the shared ASCII-escape
+chunk oracle also passes with short fields and 64 KiB boundaries.
+
+[SQLITE-EXPORT-EVIDENCE.json](SQLITE-EXPORT-EVIDENCE.json) records an actual 1,024-message,
+9,545,130-byte Claude parse_for_emit → emit_report control against 2a2d35f9. Logical table
+digests, normalized CLI output and complete fidelity reports match exactly. Requested Rust
+peak above baseline falls from 9,889,549 to 1,310,749 bytes (OpenCode) and 9,788,238 to
+1,209,438 bytes (Hermes). Cumulative requested bytes fall from 378,985,973 to 334,659,026 and
+65,286,001 to 53,561,090 respectively. These final candidate measurements include the
+shared escaped-string decoder capacity repair: reserve min(encoded body length, 64 KiB),
+preserving chunk boundaries without a 64 KiB allocation for every short escaped field.
+
+SQLite native accounting is separately verified and peaks at 2,578,400 bytes (OpenCode) and
+2,769,392 bytes (Hermes), returning to zero at stage end. Baseline SQLite-native counters were
+not collected, so no native-heap reduction is claimed. Rust requested bytes are allocation
+evidence, not timing, RSS or physical I/O. One largest encoded row, source/message/block
+rosters, tool-result indexing, owned metadata and SQLite page/FTS caches remain; transaction
+atomicity does not bound database size or provide filesystem-level replacement on direct emit.

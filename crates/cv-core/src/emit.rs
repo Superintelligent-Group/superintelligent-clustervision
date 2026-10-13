@@ -157,6 +157,8 @@ pub(crate) fn checked_target(target: Harness) -> bool {
             | Harness::Roo
             | Harness::Continue
             | Harness::LmStudio
+            | Harness::OpenCode
+            | Harness::Hermes
     )
 }
 
