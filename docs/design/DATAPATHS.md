@@ -1902,8 +1902,8 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
    **Active findings-only follow-up:** `distill --with` currently loads and materializes each peer
    before extracting findings. Ignored thinking is retained even though this product emits no
    thinking, tail or elisions. Carry checked sources through the caller and shared analyzer,
-   validate ignored source fields without retaining their decoded text, and keep one-result/argument
-   owned fallbacks where analysis requires them. Full distillation's output-sized ownership remains
+   validate ignored source fields without retaining their decoded text, and keep owned fallback
+   values where analysis requires them. Full distillation's output-sized ownership remains
    a separate contract; a library-only copy reduction would not fix the existing CLI load.
 2. **Pack stale-event traversal composition completed (2026-10-13).** `cmd/pack.rs::build_source`
    shares its lazy excerpt pass with optional borrowed event observation only when events are stale.
@@ -1925,8 +1925,10 @@ No parser, cache, scoring policy, event ingestion or timing experiment was added
 
 Listing enrichment follow-up: `cmd/browse.rs::enrich_head` currently collects every user message,
 while `Session::synth_title` needs only the first meaningful prompt unless an explicit final title
-wins. Investigate retaining just the title candidate through the same title policy. Preserve
-per-block prefix semantics, legacy Span/source resolver behavior, late git/title metadata and
+wins. Only a stable inline prefix can be reduced immediately: source-backed prompts resolve after
+EOF, using its source path, and a changed source can make a later prompt become the fallback.
+Keep that deferred suffix behavior. Reuse the existing title policy for the inline case, including
+its full Inline text and per-Span/Source-block prefix cap. Preserve late git/title metadata and
 the EOF pass used for count publication; this is a retention issue, not permission to stop early.
 
 ### Browser window/head work audit (2026-10-13)
