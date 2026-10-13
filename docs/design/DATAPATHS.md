@@ -1476,3 +1476,27 @@ Private aggregate evidence lives under
 `adapter-cold.json`, `claude-frozen-manifest.json`, and `claude-utf8-paired.json`.
 These are read-only fleet measurements and synthetic-free private snapshots, not new corpus
 captures; no transcript text or session identifiers appear in the reports.
+### Prune source user payloads and mirrors (2026-10-12)
+
+The source mutation path now covers ordinary user tool-result arrays (text/image/mixed/unknown
+blocks) and arbitrary `toolUseResult` mirrors. Decoded text statistics replace projected-text
+Strings for exact line counts and marker guards. Name/input lookup reads only the selected source
+input; image classification and mirror ids match `prune_user_line`. A no-op giant user row takes
+raw span copying, preserving its original formatting. First-kept rows without a nonnull parent can
+use this path in window/range modes as well.
+
+New mixed-image/mirror and string/mirror synthetic inputs total ~16/64 MiB. All 16 additional
+old/new native output/sidecar/result controls (default, revive, drop, window+revive) pass. Peak above
+baseline is constant across sizes: mixed default **272,515 bytes**, revival **464,750 bytes**,
+drop **269,047 bytes**, window+revival **464,259 bytes**; string+mirror default **270,929 bytes**,
+revival **464,732 bytes**, drop **263,419 bytes**, window+revival **464,241 bytes**. Owned baseline
+peaks ~80/320 MiB for both default/revival rich controls.
+
+Clean CPU medians (three alternating allocator-free release trials) for mixed default 16/64 MiB:
+33.16→31.79 / 103.06→103.55 ms; mixed revival 37.39→32.74 / 102.92→104.86 ms. String+mirror
+default 30.29→38.53 / 93.00→118.51 ms; revival 29.08→34.93 / 89.30→126.30 ms. The image
+case is approximately CPU-neutral; mirror strings retain a scanning cost. All counters/trials are
+in `PRUNE-RICH-EVIDENCE.json`. Filtered prune tests: 36 pass. Rich source/owned helper parity also
+passes through positioned portable views with mmap disabled. Nonnull-parent reroots, thinking,
+declassification, usage corrections, malformed giant records and large selected tool-input
+metadata still have owned fallbacks; this is not a bound for every prune option and record shape.

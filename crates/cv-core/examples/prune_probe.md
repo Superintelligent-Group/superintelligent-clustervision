@@ -38,3 +38,7 @@ records, usage corrections and malformed giant records retain an owned fallback.
 Large changed string tool-result controls now use source-backed canonical replacement and sidecar
 writing (269,475 bytes default / 463,553 bytes revival at both 16/64 MiB). Rich payloads and other
 mutation kinds retain owned fallback; see `docs/design/PRUNE-PAYLOAD-EVIDENCE.json`.
+
+The source user path also covers rich arrays and mirrors; mixed/image and string/mirror 16/64 MiB
+controls now have constant requested peak below 465 KB for default/revive/drop/window controls
+without a nonnull parent reroot. See `docs/design/PRUNE-RICH-EVIDENCE.json`.

@@ -629,13 +629,22 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             continue;
         }
-        if range.len >= LARGE_RECORD && is_old && ty == "user" && !opts.declassify && !needs_root {
-            if let Some(plan) = source_string_prune(&source, *range, opts, &new_id, idx, &tool_names)? {
+        if range.len >= LARGE_RECORD
+            && is_old
+            && ty == "user"
+            && !opts.declassify
+            && (!needs_root || !facts.get("_prune_parent").and_then(Value::as_bool).unwrap_or(true))
+        {
+            if needs_root {
+                rooted = true;
+            }
+            if let Some(plan) = source_user_prune(&source, *range, opts, &new_id, idx, &tool_names)? {
                 plan.record
                     .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut output))?;
                 output.write_all(b"\n")?;
                 pruned_count += plan.payloads.len();
                 est_tokens_saved += plan.saved;
+                image_blocks += plan.images;
                 if !opts.drop {
                     for payload in &plan.payloads {
                         write_source_payload(payload, &mut sidecar_stage)?;
@@ -648,8 +657,25 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
                     output_facts.push(Some(facts));
                     output_pruned.push(true);
                 }
-                continue;
+            } else {
+                // No mutation was selected; preserve the exact untouched raw record.
+                let mut scan = MarkerWriter::new(&mut output);
+                crate::restamp::write_restamped_spans(
+                    &source,
+                    &file,
+                    range.offset,
+                    range.len,
+                    &new_id,
+                    &mut id_spans.remove(&range.offset).unwrap_or_default(),
+                    &mut scan,
+                )?;
+                scan.write_all(b"\n")?;
+                if opts.revive {
+                    output_pruned.push(scan.found);
+                    output_facts.push(Some(facts));
+                }
             }
+            continue;
         }
         let line = read_line(&file, *range)?;
         let mut v: Value = serde_json::from_str(&line)?;
@@ -1106,7 +1132,7 @@ fn est_tokens_source(view: crate::json::JsonView<'_>) -> Result<u64> {
     Ok(total)
 }
 
-/// Marker evidence follows emitted bytes, including source chunks split by id surgery.
+/// Sidecar metadata retains a source descriptor rather than its original payload bytes.
 struct SourcePayload {
     entry: SidecarEntry,
     original: crate::json::Json,
@@ -1117,11 +1143,12 @@ struct SourcePrune {
     payloads: Vec<SourcePayload>,
     saved: u64,
     estimate: u64,
+    images: usize,
 }
 
-/// Common large string tool results can be replaced without owning their bytes. More complex
-/// mutations continue through the established Value path; planning has no output effects.
-fn source_string_prune(
+/// Plan user tool-result/mirror mutations without owning payload bytes. Planning has no output
+/// effects; other mutation kinds continue through the established Value path.
+fn source_user_prune(
     source: &crate::json::JsonSource,
     range: Range,
     opts: &PruneOptions,
@@ -1135,32 +1162,22 @@ fn source_string_prune(
         let Some(top) = Fields::parse(view, &["message", "uuid", "toolUseResult", "sessionId", "session_id"])? else {
             return Ok(None);
         };
-        // Mirror classification is intentionally left to the richer existing path for now.
-        if top
-            .get("toolUseResult")
-            .map(|value| value.is_null())
-            .transpose()?
-            .is_some_and(|is_null| !is_null)
-        {
-            return Ok(None);
-        }
-        let Some(message) = top
+        let message = top
             .get("message")
             .map(|value| Fields::parse(value, &["content"]))
             .transpose()?
-            .flatten()
-        else {
-            return Ok(None);
-        };
-        let Some(blocks) = message.get("content").map(|value| value.array()).transpose()?.flatten() else {
-            return Ok(None);
-        };
+            .flatten();
+        let content = message.as_ref().and_then(|message| message.get("content"));
+        let blocks = content.map(|value| value.array()).transpose()?.flatten();
         let key = top.string("uuid")?.unwrap_or_else(|| format!("L{idx}"));
         let mut replacements = Vec::new();
         let mut payloads = Vec::new();
         let mut saved = 0;
         let mut block_sources = Vec::new();
-        for (index, original_block) in blocks.enumerate() {
+        let mut images = 0;
+        let mut mirror_base = None;
+        let mut mirror_tuid = None;
+        for (index, original_block) in blocks.into_iter().flatten().enumerate() {
             let original_block = original_block?;
             block_sources.push(original_block.to_json()?);
             let Some(block) = Fields::parse(original_block, &["type", "tool_use_id", "content"])? else {
@@ -1169,68 +1186,31 @@ fn source_string_prune(
             if block.string("type")?.as_deref() != Some("tool_result") {
                 continue;
             }
+            let tuid = block.string("tool_use_id")?;
+            let id = tuid.clone().unwrap_or_else(|| format!("{key}#tr{index}"));
+            if mirror_base.is_none() {
+                mirror_base = Some(id.clone());
+                mirror_tuid = tuid.clone();
+            }
             let Some(content) = block.get("content") else { continue };
             if content.is_null()? {
-                continue;
-            }
-            if !content.is_string()? {
-                if value_byte_size_source(content)? > opts.min_size {
-                    return Ok(None);
-                }
                 continue;
             }
             let size = value_byte_size_source(content)?;
             if size <= opts.min_size {
                 continue;
             }
-            let mut prefix = String::new();
-            let mut newlines = 0;
-            let mut last = None;
-            content.for_each_str_chunk(|chunk| {
-                if prefix.len() < MARKER_PREFIX.len() {
-                    prefix.extend(chunk.chars().take(MARKER_PREFIX.len() - prefix.len()));
-                }
-                newlines += memchr::memchr_iter(b'\n', chunk.as_bytes()).count();
-                if let Some(byte) = chunk.as_bytes().last() {
-                    last = Some(*byte);
-                }
-                Ok(())
-            })?;
-            if prefix.starts_with(MARKER_PREFIX) {
+            if content.is_string()? && source_text_stats(content)?.prefix.starts_with(MARKER_PREFIX) {
                 continue;
             }
-            let line_count = (newlines + usize::from(last.is_some_and(|byte| byte != b'\n'))).max(1);
-            let tuid = block.string("tool_use_id")?;
-            let id = tuid.clone().unwrap_or_else(|| format!("{key}#tr{index}"));
-            let (name, input) =
-                if let Some((name, tool_range, block_index)) = tuid.as_deref().and_then(|id| tools.get(id)) {
-                    let input = source
-                        .validated_range(tool_range.offset, tool_range.len)?
-                        .with_view(|tool| {
-                            let Some(message) = tool.get("message")? else {
-                                return Ok(Value::Null);
-                            };
-                            let Some(content) = message.get("content")? else {
-                                return Ok(Value::Null);
-                            };
-                            let Some(mut blocks) = content.array()? else {
-                                return Ok(Value::Null);
-                            };
-                            let Some(block) = blocks.nth(*block_index).transpose()? else {
-                                return Ok(Value::Null);
-                            };
-                            Ok(block
-                                .get("input")?
-                                .map(|input| input.resolve().map(|value| value.into_owned()))
-                                .transpose()?
-                                .unwrap_or(Value::Null))
-                        })?;
-                    (name.clone(), input)
-                } else {
-                    ("unknown".into(), Value::Null)
-                };
-            let marker = build_marker(&id, &name, &input, "text", size, line_count, new_id, opts.drop);
-            saved += crate::ir::est_tokens_bytes(size, TEXT_BYTES_PER_TOKEN).saturating_sub(str_tokens(&marker));
+            let (kind, line_count, img) = classify_source(content)?;
+            if kind == "none" {
+                continue;
+            }
+            let (name, input) = source_tool_metadata(source, tuid.as_deref(), tools)?;
+            let marker = build_marker(&id, &name, &input, &kind, size, line_count, new_id, opts.drop);
+            saved += est_tokens_source(content)?.saturating_sub(str_tokens(&marker));
+            images += img;
             let original = content.to_json()?;
             replacements.push((original.clone(), Value::String(marker)));
             payloads.push(SourcePayload {
@@ -1243,9 +1223,45 @@ fn source_string_prune(
                     content: Value::Null,
                     size,
                     line_count,
-                    kind: "text".into(),
+                    kind,
                 },
             });
+        }
+        if let Some(mirror) = top.get("toolUseResult") {
+            if !mirror.is_null()? {
+                let size = value_byte_size_source(mirror)?;
+                let stats = if mirror.is_string()? {
+                    Some(source_text_stats(mirror)?)
+                } else {
+                    None
+                };
+                if size > opts.min_size
+                    && !stats
+                        .as_ref()
+                        .is_some_and(|stats| stats.prefix.starts_with(MARKER_PREFIX))
+                {
+                    let id = format!("{}{TUR_SUFFIX}", mirror_base.unwrap_or_else(|| key.clone()));
+                    let kind = if tur_is_image_source(mirror)? { "image" } else { "text" };
+                    let line_count = stats.as_ref().map(SourceTextStats::lines).unwrap_or(1);
+                    let (name, input) = source_tool_metadata(source, mirror_tuid.as_deref(), tools)?;
+                    let marker = build_marker(&id, &name, &input, kind, size, line_count, new_id, opts.drop);
+                    let original = mirror.to_json()?;
+                    replacements.push((original.clone(), Value::String(marker)));
+                    payloads.push(SourcePayload {
+                        original,
+                        entry: SidecarEntry {
+                            id,
+                            slot: "toolUseResult".into(),
+                            name,
+                            input,
+                            content: Value::Null,
+                            size,
+                            line_count,
+                            kind: kind.into(),
+                        },
+                    });
+                }
+            }
         }
         if payloads.is_empty() {
             return Ok(None);
@@ -1257,7 +1273,11 @@ fn source_string_prune(
                 }
             }
         }
-        let mut estimate = 0;
+        let mut estimate = if opts.revive && !content.map(|value| value.is_array()).transpose()?.unwrap_or(false) {
+            content.map(est_tokens_source).transpose()?.unwrap_or(0)
+        } else {
+            0
+        };
         if opts.revive {
             for block in block_sources {
                 block.with_view(|view| {
@@ -1285,16 +1305,140 @@ fn source_string_prune(
                 })?;
             }
         }
-        Ok(Some((replacements, payloads, saved, estimate)))
+        Ok(Some((replacements, payloads, saved, estimate, images)))
     })?;
-    Ok(planned.map(|(replacements, payloads, saved, estimate)| SourcePrune {
-        record,
-        replacements,
-        payloads,
-        saved,
-        estimate,
-    }))
+    Ok(
+        planned.map(|(replacements, payloads, saved, estimate, images)| SourcePrune {
+            record,
+            replacements,
+            payloads,
+            saved,
+            estimate,
+            images,
+        }),
+    )
 }
+#[derive(Default)]
+struct SourceTextStats {
+    bytes: usize,
+    newlines: usize,
+    last: Option<u8>,
+    prefix: String,
+}
+impl SourceTextStats {
+    fn append(&mut self, text: &str) {
+        if self.prefix.len() < MARKER_PREFIX.len() {
+            self.prefix
+                .extend(text.chars().take(MARKER_PREFIX.len() - self.prefix.len()));
+        }
+        self.bytes += text.len();
+        self.newlines += memchr::memchr_iter(b'\n', text.as_bytes()).count();
+        if let Some(byte) = text.as_bytes().last() {
+            self.last = Some(*byte);
+        }
+    }
+    fn lines(&self) -> usize {
+        (self.newlines + usize::from(self.last.is_some_and(|byte| byte != b'\n'))).max(1)
+    }
+}
+fn source_text_stats(value: crate::json::JsonView<'_>) -> Result<SourceTextStats> {
+    let mut stats = SourceTextStats::default();
+    value.for_each_str_chunk(|chunk| {
+        stats.append(chunk);
+        Ok(())
+    })?;
+    Ok(stats)
+}
+fn classify_source(value: crate::json::JsonView<'_>) -> Result<(String, usize, usize)> {
+    use crate::harness::store::document::Fields;
+    if value.is_string()? {
+        return Ok(("text".into(), source_text_stats(value)?.lines(), 0));
+    }
+    let Some(blocks) = value.array()? else {
+        return Ok(("none".into(), 1, 0));
+    };
+    let mut text = SourceTextStats::default();
+    let mut images = 0;
+    let mut any = false;
+    for block in blocks {
+        any = true;
+        let Some(block) = Fields::parse(block?, &["type", "text"])? else {
+            continue;
+        };
+        match block.string("type")?.as_deref() {
+            Some("text") => {
+                if let Some(value) = block.get("text") {
+                    if value.is_string()? {
+                        if text.bytes != 0 {
+                            text.append("\n");
+                        }
+                        value.for_each_str_chunk(|chunk| {
+                            text.append(chunk);
+                            Ok(())
+                        })?;
+                    }
+                }
+            }
+            Some("image") => images += 1,
+            _ => {}
+        }
+    }
+    let kind = match (images > 0, text.bytes > 0, any) {
+        (true, true, _) => "mixed",
+        (true, false, _) => "image",
+        (false, true, _) | (false, false, true) => "text",
+        _ => "none",
+    };
+    Ok((kind.into(), text.lines(), images))
+}
+fn source_tool_metadata(
+    source: &crate::json::JsonSource,
+    id: Option<&str>,
+    tools: &HashMap<String, (String, Range, usize)>,
+) -> Result<(String, Value)> {
+    let Some((name, range, index)) = id.and_then(|id| tools.get(id)) else {
+        return Ok(("unknown".into(), Value::Null));
+    };
+    let input = source.validated_range(range.offset, range.len)?.with_view(|tool| {
+        let Some(message) = tool.get("message")? else {
+            return Ok(Value::Null);
+        };
+        let Some(content) = message.get("content")? else {
+            return Ok(Value::Null);
+        };
+        let Some(mut blocks) = content.array()? else {
+            return Ok(Value::Null);
+        };
+        let Some(block) = blocks.nth(*index).transpose()? else {
+            return Ok(Value::Null);
+        };
+        Ok(block
+            .get("input")?
+            .map(|input| input.resolve().map(|value| value.into_owned()))
+            .transpose()?
+            .unwrap_or(Value::Null))
+    })?;
+    Ok((name.clone(), input))
+}
+fn tur_is_image_source(value: crate::json::JsonView<'_>) -> Result<bool> {
+    use crate::harness::store::document::Fields;
+    let Some(fields) = Fields::parse(value, &["type", "file"])? else {
+        return Ok(false);
+    };
+    if fields.string("type")?.as_deref() == Some("image") {
+        return Ok(true);
+    }
+    let Some(file) = fields
+        .get("file")
+        .map(|file| Fields::parse(file, &["base64", "type"]))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    Ok(file.get("base64").is_some() || file.string("type")?.is_some_and(|ty| ty.starts_with("image/")))
+}
+
 struct LengthWriter(usize);
 impl Write for LengthWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -1322,6 +1466,7 @@ fn write_source_payload(payload: &SourcePayload, writer: &mut impl Write) -> Res
     Ok(())
 }
 
+/// Marker evidence follows emitted bytes, including source chunks split by id surgery.
 struct MarkerWriter<'a, W> {
     output: &'a mut W,
     tail: Vec<u8>,

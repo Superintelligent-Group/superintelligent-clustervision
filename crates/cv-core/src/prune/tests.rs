@@ -1304,7 +1304,7 @@ fn source_string_mutation_matches_owned_output_sidecars_and_estimate() {
             revive: true,
             ..Default::default()
         };
-        let plan = source_string_prune(&source, range, &opts, "new", 0, &HashMap::new())
+        let plan = source_user_prune(&source, range, &opts, "new", 0, &HashMap::new())
             .unwrap()
             .unwrap();
         let mut sidecar = Vec::new();
@@ -1344,6 +1344,94 @@ fn source_string_mutation_matches_owned_output_sidecars_and_estimate() {
                 write_source_payload(payload, &mut actual).unwrap();
             }
             assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[test]
+fn source_user_mutation_matches_rich_payload_and_mirror_owned_oracle() {
+    let cases = [
+        serde_json::json!({"message":{"content":[{"type":"tool_result","content":[
+            {"type":"text","text":"first\n"},{"type":"text","text":""},
+            {"type":"image","source":{"data":"x".repeat(1024*1024)}},
+            {"type":"text","text":"tail"},{"type":"image"}
+        ]}]},"toolUseResult":{"file":{"base64":null},"text":"mirror"}}),
+        serde_json::json!({"message":{"content":[{"type":"tool_result","tool_use_id":"absent"},
+            {"type":"tool_result","content":[]},{"type":"tool_result","content":{}},
+            {"type":"tool_result","content":[{"unknown":"payload"}]}]},
+            "toolUseResult":{"type":"image","body":"mirror"}}),
+        serde_json::json!({"message":{"content":"prompt\n"},"toolUseResult":"mirror\nlines\n"}),
+        serde_json::json!({"message":{"content":[{"type":"tool_result","content":"[PRUNED already]"}]},
+            "toolUseResult":"[PRUNED mirror]"}),
+    ];
+    for original in cases {
+        for drop in [false, true] {
+            let world = cv_testkit::World::new("source-rich-user-prune");
+            let mut owned = original.clone();
+            owned["type"] = Value::String("user".into());
+            owned["sessionId"] = Value::String("old".into());
+            let raw = serde_json::to_string_pretty(&owned).unwrap();
+            let path = world.base.join("input.jsonl");
+            std::fs::write(&path, &raw).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let range = Range {
+                offset: 0,
+                len: raw.len() as u64,
+            };
+            source.read_range_value(0, range.len, |_| Ok(())).unwrap();
+            let opts = PruneOptions {
+                min_size: 4,
+                drop,
+                revive: true,
+                ..Default::default()
+            };
+            let plan = source_user_prune(&source, range, &opts, "new", 0, &HashMap::new()).unwrap();
+            let mut entries = Vec::new();
+            let mut count = 0;
+            let mut images = 0;
+            let mut saved = 0;
+            let mut modified = false;
+            prune_user_line(
+                &mut owned,
+                &opts,
+                &HashMap::new(),
+                "new",
+                "L0",
+                &mut entries,
+                &mut count,
+                &mut images,
+                &mut saved,
+                &mut modified,
+            );
+            let Some(plan) = plan else {
+                assert!(!modified);
+                continue;
+            };
+            assert!(modified);
+            assert_eq!(plan.images, images);
+            assert_eq!(plan.payloads.len(), count);
+            assert_eq!(plan.saved, saved);
+            assert_eq!(plan.estimate, line_est_tokens(&owned));
+            let mut actual = Vec::new();
+            plan.record
+                .with_view(|v| v.write_canonical_replacing(&plan.replacements, &mut actual))
+                .unwrap();
+            assert_eq!(
+                actual,
+                crate::restamp_line(&owned.to_string(), "new").unwrap().as_bytes()
+            );
+            if !drop {
+                let mut expected = Vec::new();
+                for entry in entries {
+                    serde_json::to_writer(&mut expected, &entry).unwrap();
+                    expected.push(b'\n');
+                }
+                let mut actual = Vec::new();
+                for payload in plan.payloads {
+                    write_source_payload(&payload, &mut actual).unwrap();
+                }
+                assert_eq!(actual, expected);
+            }
         }
     }
 }
