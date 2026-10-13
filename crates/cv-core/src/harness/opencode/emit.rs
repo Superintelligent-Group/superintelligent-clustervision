@@ -423,3 +423,6 @@ mod tests {
 
 #[cfg(feature = "sqlite")]
 mod v2;
+
+#[cfg(all(test, feature = "sqlite"))]
+mod complete_tests;

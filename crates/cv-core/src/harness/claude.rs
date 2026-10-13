@@ -1770,6 +1770,7 @@ fn parse_message_projected(
     }
 
     Some(Message {
+        complete_record: None,
         id,
         parent_id,
         role,
@@ -1952,6 +1953,7 @@ fn system_msg(v: &Value, text: Text, subtype: &str, opts: &ParseOptions) -> Opti
     }
 
     Some(Message {
+        complete_record: None,
         id,
         parent_id,
         role: Role::System,

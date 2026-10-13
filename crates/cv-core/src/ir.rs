@@ -9,6 +9,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub(crate) mod record;
+pub use record::CompleteRecord;
+
 /// Declares the [`Harness`] enum together with [`Harness::ALL`] and [`Harness::as_str`] from one
 /// variant list, so they can never drift apart (the old hand-maintained 17-element `ALL` array
 /// silently went stale whenever a variant was added). Adding a harness is now a single line here
@@ -511,11 +514,9 @@ impl Origin {
 }
 
 /// One message/turn in a conversation.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Message {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     /// WHO speaks.
     pub role: Role,
@@ -523,20 +524,56 @@ pub struct Message {
     pub kind: MessageKind,
     /// WHERE it came from. See [`Origin`].
     pub origin: Origin,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub content: Vec<Block>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     /// Harness-specific message facts, nested under the harness name
     /// (`extra["claude"]["attachment_type"]`). The only other top-level key allowed is
     /// [`CARRIER_KEY`](crate::harness::claude::CARRIER_KEY) (`"_record"`, the verbatim record under
     /// `ParseOptions::complete`). Shared concepts are first-class (`kind`, `origin`, `usage`,
     /// `Block::ToolResult::details`). See `docs/INTERFACE-V2.md` §4.
-    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
+    /// Checked complete native backing; serializes through `extra._record`, never as a new field.
+    #[doc(hidden)]
+    pub complete_record: Option<std::sync::Arc<CompleteRecord>>,
+}
+
+impl Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let count = 4
+            + usize::from(self.id.is_some())
+            + usize::from(self.parent_id.is_some())
+            + usize::from(self.timestamp.is_some())
+            + usize::from(self.model.is_some())
+            + usize::from(self.usage.is_some())
+            + usize::from(!self.extra.is_empty() || self.complete_record.is_some());
+        let mut out = serializer.serialize_struct("Message", count)?;
+        if let Some(value) = &self.id {
+            out.serialize_field("id", value)?;
+        }
+        if let Some(value) = &self.parent_id {
+            out.serialize_field("parent_id", value)?;
+        }
+        out.serialize_field("role", &self.role)?;
+        out.serialize_field("kind", &self.kind)?;
+        out.serialize_field("origin", &self.origin)?;
+        if let Some(value) = &self.timestamp {
+            out.serialize_field("timestamp", value)?;
+        }
+        if let Some(value) = &self.model {
+            out.serialize_field("model", value)?;
+        }
+        out.serialize_field("content", &self.content)?;
+        if let Some(value) = &self.usage {
+            out.serialize_field("usage", value)?;
+        }
+        if !self.extra.is_empty() || self.complete_record.is_some() {
+            out.serialize_field("extra", &record::Extra(self))?;
+        }
+        out.end()
+    }
 }
 
 /// Deserialize with `kind` / `origin` optional: IR JSON written before they existed (and
@@ -577,6 +614,7 @@ impl<'de> Deserialize<'de> for Message {
             content: w.content,
             usage: w.usage,
             extra: w.extra,
+            complete_record: None,
         })
     }
 }
@@ -620,6 +658,7 @@ impl Message {
             content: Vec::new(),
             usage: None,
             extra: serde_json::Map::new(),
+            complete_record: None,
         }
     }
 
@@ -663,6 +702,13 @@ impl Message {
             if let Block::ToolUse { input, .. } = block {
                 input.make_owned()?;
             }
+        }
+        if let Some(record) = &mut self.complete_record {
+            let record = std::sync::Arc::make_mut(record);
+            record.value.make_owned()?;
+            // Owned raw records use the native codec comparison at replay time; retaining
+            // an owned witness would duplicate payloads which are already in IR and _record.
+            record.projection.clear();
         }
         Ok(())
     }

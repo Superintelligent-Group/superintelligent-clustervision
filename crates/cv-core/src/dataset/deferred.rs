@@ -27,6 +27,7 @@ impl DeferredMessage {
         message.model = None;
         message.usage = None;
         message.extra = serde_json::Map::new();
+        message.complete_record = None;
         let mut sources = Vec::new();
         for (index, block) in message.content.iter_mut().enumerate() {
             let text = match &mut *block {

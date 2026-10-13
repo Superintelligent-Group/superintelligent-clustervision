@@ -167,6 +167,11 @@ pub(crate) fn joined_text<'a>(
 /// bounds without decoding their payloads or constructing fidelity features.
 pub(crate) fn check_source_fields(session: &crate::ir::Session) -> Result<()> {
     for message in &session.messages {
+        if let Some(record) = &message.complete_record {
+            if let crate::Json::Source(source) = &record.value {
+                source.check_retained_bounds()?;
+            }
+        }
         for block in &message.content {
             match block {
                 crate::ir::Block::Text { text }

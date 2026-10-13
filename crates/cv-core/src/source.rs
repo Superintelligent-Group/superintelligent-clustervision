@@ -205,6 +205,16 @@ impl ReadSet {
 
 /// Record the original and auxiliary sources retained by one message before a consumer demands it.
 pub(crate) fn record_message_reads(message: &crate::Message, primary: &std::path::Path, reads: &mut ReadSet) {
+    if let Some(record) = &message.complete_record {
+        if let crate::Json::Source(range) = &record.value {
+            if range.path() != primary {
+                reads.record(range.path());
+            }
+            if let Some(guard) = range.dependencies() {
+                reads.merge(guard);
+            }
+        }
+    }
     for block in &message.content {
         if let crate::Block::ToolUse {
             input: crate::Json::Source(range),

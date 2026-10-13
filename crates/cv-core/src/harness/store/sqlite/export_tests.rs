@@ -474,3 +474,27 @@ pub(crate) fn exercise_v2(
     );
     Ok(())
 }
+
+pub(crate) fn rollback_record_only_source(
+    session: &Session,
+    path: PathBuf,
+    writer: impl Fn(&Session, &mut Connection) -> Result<()>,
+) -> Result<()> {
+    let mut conn = Connection::open_in_memory()?;
+    let hooks = Hooks::new(&mut conn, Some(path));
+    assert!(writer(session, hooks.connection).is_err());
+    assert!(
+        hooks.counts.mutate.is_none(),
+        "record-only source changed inside the export"
+    );
+    assert_eq!(hooks.counts.commits, 0);
+    assert_eq!(
+        hooks.connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        0
+    );
+    Ok(())
+}

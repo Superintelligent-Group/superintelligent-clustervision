@@ -371,7 +371,11 @@ pub fn emit_report(
     // 836-message session, because the source's carriers (and the complete-mode roles of synthetic
     // notices) had no counterpart. Carriers are the tell — only a complete parse produces them —
     // and their presence is exactly what has to match on both sides.
-    let reparse_opts = if session.messages.iter().any(is_carrier) {
+    let reparse_opts = if session
+        .messages
+        .iter()
+        .any(|message| is_carrier(message) || message.complete_record.is_some())
+    {
         ParseOptions::complete()
     } else {
         ParseOptions::full()
@@ -502,6 +506,7 @@ pub fn parse_for_emit(
                     | Harness::OpenClaw
                     | Harness::Grok
                     | Harness::Qwen
+                    | Harness::OpenCode
             ));
     if checked {
         options.spans = true;

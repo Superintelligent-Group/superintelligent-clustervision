@@ -378,6 +378,7 @@ fn msgs_counts_user_assistant_only_in_matches_session() {
     // matches_session builds must count the same way, or prefilter and full match disagree.
     let mut s = sess(None, &[Some("m1"), Some("m2")]); // two assistant turns
     let extra = |role: Role| Message {
+        complete_record: None,
         id: None,
         parent_id: None,
         role,
@@ -411,6 +412,7 @@ fn sess(primary: Option<&str>, turn_models: &[Option<&str>]) -> Session {
         messages: turn_models
             .iter()
             .map(|m| Message {
+                complete_record: None,
                 id: None,
                 parent_id: None,
                 role: Role::Assistant,

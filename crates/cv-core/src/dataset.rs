@@ -500,6 +500,7 @@ mod tests {
 
     fn msg(role: Role, blocks: Vec<Block>) -> Message {
         Message {
+            complete_record: None,
             id: None,
             parent_id: None,
             role,

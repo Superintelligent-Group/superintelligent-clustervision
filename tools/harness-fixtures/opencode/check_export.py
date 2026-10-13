@@ -42,6 +42,7 @@ def main():
         table = "session_v2" if conn.execute("SELECT 1 FROM sqlite_master WHERE name='session_v2'").fetchone() else "session"
         directory = Path(conn.execute(f"SELECT directory FROM {table} WHERE id=?", (session,)).fetchone()[0])
         original_rows = conn.execute("SELECT id,type,seq,data FROM session_message WHERE session_id=? ORDER BY seq", (session,)).fetchall() if table == "session_v2" else []
+        expected_images=[file["data"] for row in original_rows if row[1]=="user" for file in json.loads(row[3]).get("files",[]) if file.get("mime","").startswith("image/") and file.get("data")]
     # Only create a project under our own artifact/scratch directory.
     if not directory.is_relative_to(source.parent) and not directory.is_relative_to(scratch):
         raise RuntimeError(f"export directory outside fixture scratch: {directory}")
@@ -57,7 +58,7 @@ def main():
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             request = json.loads(raw)
             encoded = json.dumps(request)
-            evidence["requests"].append({"path": self.path, "model": request.get("model"), "prior_prompt": "fixture prompt" in encoded, "prior_answer": "fixture answer" in encoded, "prior_tool_result": "fixture output" in encoded})
+            evidence["requests"].append({"path": self.path, "model": request.get("model"), "prior_prompt": "fixture prompt" in encoded, "prior_answer": "fixture answer" in encoded, "prior_tool_result": "fixture output" in encoded, "embedded_image_bytes": bool(expected_images) and all(data in encoded for data in expected_images)})
             import io
             self.rfile = io.BytesIO(raw)
             super().do_POST()
@@ -65,7 +66,7 @@ def main():
     proxy = HTTPServer(("127.0.0.1", 0), Stub)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
     port = free_port()
-    settings = {"autoupdate": False, "share": "disabled", "model": "clustervision/fixture-model", "small_model": "clustervision/fixture-model", "provider": {"clustervision": {"npm": "@ai-sdk/openai-compatible", "name": "local fixture", "options": {"baseURL": f"http://127.0.0.1:{proxy.server_port}/v1", "apiKey": "local-fixture"}, "models": {"fixture-model": {"name": "fixture", "limit": {"context": 128000, "output": 1024}}}}}}
+    settings = {"autoupdate": False, "share": "disabled", "model": "clustervision/fixture-model", "small_model": "clustervision/fixture-model", "provider": {"clustervision": {"npm": "@ai-sdk/openai-compatible", "name": "local fixture", "options": {"baseURL": f"http://127.0.0.1:{proxy.server_port}/v1", "apiKey": "local-fixture"}, "models": {"fixture-model": {"name": "fixture", "attachment": True, "limit": {"context": 128000, "output": 1024}}}}}}
     (config / "opencode/opencode.json").write_text(json.dumps(settings))
     env = dict(os.environ)
     for key in list(env):
@@ -121,6 +122,9 @@ def main():
             assert len({row[2] for row in after_rows}) == len(after_rows)
             evidence["sequence"]={"imported_rows":len(original_rows),"imported_max":original_rows[-1][2],"first_continued":continued[0][2],"original_history_preserved":True}
             assert any(r["prior_prompt"] and r["prior_answer"] and r["prior_tool_result"] for r in evidence["requests"]), evidence["requests"]
+            if expected_images:
+                assert any(request["embedded_image_bytes"] for request in evidence["requests"]), "native model request lost embedded image data"
+                evidence["embedded_image_bytes_in_model_request"]=True
             (scratch / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
             print(json.dumps({"native_version": evidence["native_version"], "schema_before": table, "get": True, "list": True, "messages": True, "context": True, "continuation": True, "prior_history_in_model_request": True}))
         finally:

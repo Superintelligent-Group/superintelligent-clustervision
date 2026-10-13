@@ -249,7 +249,11 @@ pub(super) struct Features {
 
 /// A verbatim meta record carried under `ParseOptions::complete` — never a conversational turn.
 pub(super) fn is_carrier(m: &Message) -> bool {
-    m.kind == MessageKind::Carrier || m.extra.contains_key(crate::harness::claude::CARRIER_KEY)
+    m.kind == MessageKind::Carrier
+        || (m.extra.contains_key(crate::harness::claude::CARRIER_KEY)
+            && m.harness_extra(Harness::OpenCode)
+                .and_then(|extra| extra.get("record_type"))
+                .is_none())
 }
 
 /// Whether `target`’s format can hold this block at all (the block-level half of

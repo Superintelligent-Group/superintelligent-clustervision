@@ -1035,7 +1035,7 @@ mod db {
             if rowid && row.get::<_, String>(3)? != "text" {
                 anyhow::bail!("OpenCode SQLite message data is not TEXT");
             }
-            let built = if opts.spans
+            let mut built = if opts.spans
                 && matches!(
                     ty.as_str(),
                     "user" | "synthetic" | "system" | "skill" | "shell" | "assistant" | "compaction"
@@ -1080,6 +1080,19 @@ mod db {
                         {
                             text = value.source_text()?;
                             data.insert(key.to_owned(), json!(if nonempty_string(value)? { "x" } else { "" }));
+                        } else if key == "files" && ty == "user" && value.is_array()? {
+                            let mut files = Vec::new();
+                            for file in value.array()?.unwrap() {
+                                let file = file?;
+                                let mut selected = Map::new();
+                                for key in ["mime", "source", "name"] {
+                                    if let Some(value) = file.get(key)? {
+                                        selected.insert(key.into(), value.resolve()?.into_owned());
+                                    }
+                                }
+                                files.push(Value::Object(selected));
+                            }
+                            data.insert(key.into(), Value::Array(files));
                         } else if key == "content" && ty == "assistant" && value.is_array()? {
                             for item in value.array()?.unwrap() {
                                 parts.push(ProjectedPart::read_inner(item?, source, arena, true)?);
@@ -1093,7 +1106,7 @@ mod db {
                         }
                         Ok(())
                     })?;
-                    Ok(Some(v2::build_projected(
+                    let mut built = v2::build_projected(
                         &id,
                         &ty,
                         &Value::Object(data),
@@ -1101,7 +1114,13 @@ mod db {
                         text.as_ref(),
                         Some(&parts),
                         shell.as_ref(),
-                    )))
+                    );
+                    if opts.complete {
+                        if let Ok(messages) = &mut built {
+                            v2::attach_complete(messages, &id, &ty, view.to_json()?);
+                        }
+                    }
+                    Ok(Some(built))
                 });
                 match result {
                     Ok(Some(Ok(built))) => built,
@@ -1138,13 +1157,30 @@ mod db {
                     continue;
                 };
                 match v2::build(&id, &ty, &data, opts) {
-                    Ok(b) => b,
+                    Ok(mut built) => {
+                        if opts.complete {
+                            v2::attach_complete(&mut built, &id, &ty, data.into());
+                        }
+                        built
+                    }
                     Err(()) => {
                         *unknown.entry(ty).or_default() += 1;
                         Vec::new()
                     }
                 }
             };
+            if let Some(record) = built.first_mut().and_then(|message| message.complete_record.as_mut()) {
+                let mut model = s.model.clone();
+                let record = std::sync::Arc::make_mut(record);
+                for original in &mut record.projection {
+                    if model.is_none() {
+                        model = original.model.clone();
+                    }
+                    if original.model.is_some() && original.model == model {
+                        original.model = None;
+                    }
+                }
+            }
             for mut m in built {
                 fold_into_session(&mut s, &mut m)?;
                 if sink.message(m) == Flow::Stop {

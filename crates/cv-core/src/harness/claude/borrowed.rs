@@ -461,6 +461,7 @@ pub(super) fn ingest(
     }
     note_conversation_metadata(session, s(&record.cwd), s(&record.git_branch), timestamp);
     let message = Message {
+        complete_record: None,
         id: owned(record.uuid),
         parent_id: owned(record.parent_uuid),
         role,

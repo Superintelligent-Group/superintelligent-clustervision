@@ -4468,3 +4468,39 @@ giant ordinary bodies and fatal UTF-8 tails. No additional whole-operation matri
 campaign was run. Source grammar/navigation/replay still traverse captured ranges, mapped pages
 can contribute to RSS, and owned carrier/control/system metadata can scale with demanded bodies.
 These counters establish ordinary-body ownership, not CPU or memory-bandwidth improvements.
+#### OpenCode complete replay and attachment convergence (2026-10-13, native lane)
+
+Complete records now use a shared checked `Json` slot on `Message`, serialized as the existing
+full `extra._record` contract. Bounded compact/pretty writers stream that actual record; ordinary
+serde deliberately materializes the requested public value. Explicit owned `_record` overrides
+the slot. Source records retain cheap projection descriptors, including grouped tool/summary
+rows; owned records use the native codec to compare rather than retain another owned body copy.
+Materialization clears the descriptor witness; the training spool drops unused complete records.
+All retained source fields are checked even when an edit or thinking mode makes replay ineligible.
+
+Native v2 replay retains row types, unknown fields, reasoning/provider state, tool segments and
+file bytes, emitting each original group once. Changed content, usage, effective model, envelope,
+deleted/reordered/duplicated derived rows or duplicated primary IDs prevent stale replay. A native
+user text edit overlays its current checked text while retaining unchanged native attachments;
+noninvertible edits use current IR mapping. Fresh IDs and native session revert references are
+rehomed. Unknown linked external sessions and shell stores are not copied by a single-session
+export. Generic cross-harness data URIs retain embedded base64; unresolved external image/file
+URIs produce visible unavailable-attachment text and an actual fidelity loss instead of empty
+native file slots.
+
+The focused oracle compares checked preparation with owned complete parsing, public serde IR
+roundtrip and explicit materialization; native mode compares full ordered native type/data rows.
+Producer composition additionally covers every 1.18.20 database session plus both parts-generation
+and summary-generation file fixtures. Guard controls cover text/tool clipping, usage/model edits,
+group deletion/reordering/duplication, changed owned idle records and raw-only source mutation
+under edited Drop fallback, including transactional bootstrap rollback. Native 2.0.25 acceptance
+uses isolated HOME/XDG and loopback model fixture; complete edited exports pass get/list/messages/
+context and continuation, preserve imported row bytes/order, advance sequence and send retained
+embedded image bytes to the actual native model request. Private evidence:
+`native-opencode-v2-rich-native-edited` under `/Users/ember/dev/cv-worktrees`.
+
+Convergence note: the expanded all-native-session oracle currently fails the background-subagent
+assistant row in `ses_ed362eed1ffebZR2VGSZEwUk4J`: guarded replay declines and generic output loses
+native streamed/completed timing and reasoning state. This remains an explicit fidelity blocker;
+the smaller tools/image/compact/skill controls and edit/source/group controls pass. Do not infer
+all-v2 complete replay coverage from those passing controls.

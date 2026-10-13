@@ -188,6 +188,23 @@ impl<W: Write> SerializeStruct for Fields<'_, W> {
             .map_err(OutputError::from)?;
         match (self.context, key) {
             (Context::Message(message), "content") => self.content(&message.content),
+            (Context::Message(message), "extra") if message.complete_record.is_some() => {
+                if self.pretty {
+                    crate::ir::record::write_extra(
+                        message,
+                        &mut PrettyJson {
+                            writer: &mut *self.writer,
+                            base: self.depth + 1,
+                            stack: Vec::new(),
+                            string: false,
+                            escape: false,
+                        },
+                    )
+                    .map_err(OutputError::from)
+                } else {
+                    crate::ir::record::write_extra(message, self.writer).map_err(OutputError::from)
+                }
+            }
             (Context::Block(block), _) => match block {
                 Block::Text { text } | Block::Thinking { text, .. } => {
                     if key == "text" {

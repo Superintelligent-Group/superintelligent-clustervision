@@ -29,6 +29,26 @@ use crate::ir::*;
 use crate::stream::ParseOptions;
 use serde_json::{json, Map, Value};
 
+pub(super) fn tag_complete(messages: &mut [Message], id: &str, ty: &str) {
+    if let Some(primary) = messages.first_mut() {
+        primary
+            .harness_extra_mut(Harness::OpenCode)
+            .insert("record_type".into(), json!(ty));
+    }
+    for derived in messages.iter_mut().skip(1) {
+        derived
+            .harness_extra_mut(Harness::OpenCode)
+            .insert("record_owner".into(), json!(id));
+    }
+}
+pub(super) fn attach_complete(messages: &mut [Message], id: &str, ty: &str, data: crate::Json) {
+    tag_complete(messages, id, ty);
+    let mut identity = Map::new();
+    identity.insert("id".into(), json!(id));
+    identity.insert("type".into(), json!(ty));
+    crate::ir::CompleteRecord::attach(messages, Harness::OpenCode, data, identity);
+}
+
 /// Map one `session_message` row to IR messages (0–2: a tool-bearing reply gets a trailing
 /// `ToolResult`, a completed compaction gets its summary). `Err(())` means an unknown `type`, which
 /// the caller tallies; it is still carried under `complete`.
