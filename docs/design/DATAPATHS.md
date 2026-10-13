@@ -1237,3 +1237,10 @@ shape/success booleans were retained in cursor-ide-genuine-read-only-parity.json
 installed output evidence, not a scrubbed native corpus capture. A separate read-only Lexical
 survey finds 12/12 sampled richText strings decode to JSON root objects with children arrays;
 cursor-ide-richtext-installed-shape.json contains aggregate shapes only.
+The first fix left the original files MISS growth gate above its unchanged 2 MiB allowance.
+Further inventory simplification stores cached state under one owned path instead of duplicating
+that path inside each `Entry`, stores inventory path/state pairs until final serialization, and
+shares cached directory lists. On the same isolated 256-turn control, publication absolute peak
+fell further from 2,173,149 to 1,765,968 bytes; external Snapshot size remained 299,289 bytes.
+Remaining source metadata still grows with file cardinality. The original MISS gate must be
+rerun after integration; this control is not a substitute for that activated consumer check.

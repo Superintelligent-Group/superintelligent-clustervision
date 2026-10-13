@@ -261,52 +261,55 @@ impl Snapshot {
 /// File and immediate-directory probes shared within one operation. It never descends recursively.
 #[derive(Default)]
 pub struct Probe {
-    entries: HashMap<PathBuf, Option<Entry>>,
-    directories: HashMap<PathBuf, Option<Vec<PathBuf>>>,
+    // The map key owns the path once; outer None is unavailable, inner None is absent.
+    entries: HashMap<PathBuf, Option<Option<FileState>>>,
+    directories: HashMap<PathBuf, Option<std::sync::Arc<Vec<PathBuf>>>>,
 }
 
 impl Probe {
     fn entry(&mut self, path: &Path) -> Option<Entry> {
         let path = absolute(path)?;
-        self.entries
+        let state = self
+            .entries
             .entry(path.clone())
-            .or_insert_with(|| {
-                let state = match std::fs::metadata(&path) {
-                    Ok(md) => {
-                        let modified = md
-                            .modified()
-                            .ok()?
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .ok()?
-                            .as_nanos() as u64;
-                        #[cfg(unix)]
-                        let identity = {
-                            use std::os::unix::fs::MetadataExt;
-                            Some((md.dev(), md.ino(), md.ctime(), md.ctime_nsec()))
-                        };
-                        #[cfg(not(unix))]
-                        let identity = None;
-                        Some(FileState {
-                            len: md.len(),
-                            modified_ns: modified,
-                            identity,
-                        })
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(_) => return None,
-                };
-                Some(Entry { path, state })
+            .or_insert_with(|| match std::fs::metadata(&path) {
+                Ok(md) => {
+                    let modified = md
+                        .modified()
+                        .ok()?
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()?
+                        .as_nanos() as u64;
+                    #[cfg(unix)]
+                    let identity = {
+                        use std::os::unix::fs::MetadataExt;
+                        Some((md.dev(), md.ino(), md.ctime(), md.ctime_nsec()))
+                    };
+                    #[cfg(not(unix))]
+                    let identity = None;
+                    Some(Some(FileState {
+                        len: md.len(),
+                        modified_ns: modified,
+                        identity,
+                    }))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+                Err(_) => None,
             })
-            .clone()
+            .clone()?;
+        Some(Entry { path, state })
     }
 
-    fn directory(&mut self, path: &Path) -> Option<Vec<PathBuf>> {
+    fn directory(&mut self, path: &Path) -> Option<std::sync::Arc<Vec<PathBuf>>> {
         let path = absolute(path)?;
         self.directories
             .entry(path.clone())
             .or_insert_with(|| match std::fs::read_dir(&path) {
-                Ok(rd) => rd.map(|e| e.ok().map(|e| e.path())).collect(),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+                Ok(rd) => rd
+                    .map(|e| e.ok().map(|e| e.path()))
+                    .collect::<Option<Vec<_>>>()
+                    .map(std::sync::Arc::new),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(std::sync::Arc::new(Vec::new())),
                 Err(_) => None,
             })
             .clone()
@@ -386,7 +389,7 @@ impl Probe {
                 if summary.get("session_kind").and_then(serde_json::Value::as_str) == Some("subagent") {
                     let group = r.path.parent()?;
                     files.push(group.to_path_buf());
-                    for sibling in self.directory(group)? {
+                    for sibling in self.directory(group)?.iter() {
                         files.push(sibling.join("subagents").join(&r.id).join("meta.json"));
                     }
                 }
@@ -503,7 +506,7 @@ impl Probe {
                     let messages = storage.join("message").join(&r.id);
                     // Parts are keyed by the parsed message ID. Read only the ID (other fields are
                     // ignored), and enumerate only this session's own message/part directories.
-                    for message in self.directory(&messages)? {
+                    for message in self.directory(&messages)?.iter() {
                         #[derive(Deserialize)]
                         struct MessageId {
                             #[serde(default)]
@@ -520,8 +523,14 @@ impl Probe {
         }
         let mut entries = BTreeMap::new();
         for dir in directories {
-            entries.insert(dir.clone(), self.entry(&dir)?);
-            files.extend(self.directory(&dir)?);
+            entries.insert(dir.clone(), self.entry(&dir)?.state);
+            for file in self.directory(&dir)?.iter() {
+                if primary != r.path && absolute(file)? == absolute(primary)? {
+                    continue;
+                }
+                let state = self.entry(file)?.state;
+                entries.insert(file.clone(), state);
+            }
         }
         for file in files {
             // A directory adapter's append file belongs to the primary signature and sampled
@@ -530,9 +539,16 @@ impl Probe {
             if primary != r.path && absolute(&file)? == absolute(primary)? {
                 continue;
             }
-            entries.insert(file.clone(), self.entry(&file)?);
+            let state = self.entry(&file)?.state;
+            entries.insert(file, state);
         }
-        Some(entries.into_values().collect())
+        entries
+            .into_iter()
+            .map(|(path, state)| {
+                let path = if path.is_absolute() { path } else { absolute(&path)? };
+                Some(Entry { path, state })
+            })
+            .collect()
     }
 
     pub fn snapshot(&mut self, r: &SessionRef) -> Snapshot {
