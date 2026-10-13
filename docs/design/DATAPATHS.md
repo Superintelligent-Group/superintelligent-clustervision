@@ -2922,3 +2922,35 @@ The CLI test also proves no catalog creation with `--fresh --enrich`, while inva
 harness/query inputs still fail. Production CLI clippy passes. Diagnostic counters,
 full-filter and legacy-zero switches remain only in a retained reproducible patch;
 no general telemetry, persistent cache, parser or query framework was added.
+
+
+### Prune turn projections (Sol, 2026-10-13)
+
+Large user/assistant turn mutations now share `source_turn_prune` and the existing source-range
+canonical overrides/sidecar staging, rather than owning their entire record. The same plan
+composes old tool results/mirrors, old Thinking and all-recency declassification in historical
+pass order; generated Thinking markers remain eligible for declassification. Thinking block size
+uses canonical length, reasoning line count uses checked fragments, and original blocks (including
+signature/unknown fields) retain checked source descriptors. Canonical stamping, root overrides,
+revival estimates, sidecar identity/order and drop semantics retain their contracts.
+
+ASCII declassification uses a bounded lowercase/token-overlap scan; it caps its own 64 KiB
+scratch even when the source traversal supplies a giant borrowed unescaped chunk. Unicode
+candidates retain the exact whole-field `str::to_lowercase` fallback, including contextual sigma;
+this can scale with that demanded text, but unrelated record fields no longer materialize.
+The owned path and Unicode fallback share the existing lowercase hit policy. Oversized demanded
+tool metadata/malformed rows and usage-correction ownership remain separate limits.
+
+Twenty-four actual native prune controls compare frozen f083 output/sidecar hashes and every
+result field: 16/64 MiB Thinking, giant signature-only Thinking, demanded ASCII declassification
+and giant unknown text-block fields, each default/revive/drop. Thinking requested live Rust peak
+falls from 84,024,213 / 335,682,453 to 269,950 bytes for both sizes (revive 463,595, drop 263,143).
+ASCII declassification falls from 50,471,306 / 201,466,250 to 332,541 bytes for both (revive
+463,620); giant unknown declassified-block fields peak at 269,994 bytes for both. These are
+requested Rust allocation controls, not RSS/CPU claims; staging still uses output-sized disk.
+See `PRUNE-TURN-EVIDENCE.json`. Scoped owned-helper oracles cover mixed tools/mirrors,
+signature-only/Unicode/nonstring prose, duplicate IDs, zero thresholds and composed passes;
+existing selection/publication/source-guard tests remain intact. The new no-op large-turn control
+retains duplicate-ID raw bytes and framing (leading spaces retained, trailing record whitespace
+trimmed), independently confirmed against the frozen actual operation. Estimation-only block
+rosters/projected clones are retained only with revival enabled.

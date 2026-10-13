@@ -42,3 +42,9 @@ mutation kinds retain owned fallback; see `docs/design/PRUNE-PAYLOAD-EVIDENCE.js
 The source user path also covers rich arrays and mirrors; mixed/image and string/mirror 16/64 MiB
 controls now have constant requested peak below 465 KB for default/revive/drop/window controls
 without a nonnull parent reroot. See `docs/design/PRUNE-RICH-EVIDENCE.json`.
+
+Large Thinking and ASCII declassification now share source turn projections, including their
+sidecars and composed revival estimates. Native 16/64 MiB actual operations have constant
+requested peak: Thinking 269,950 bytes, ASCII declassification 332,541 bytes (revival below464KB).
+Unicode declassification preserves a whole demanded-string lowercase fallback; usage correction
+still owns selected rows at this milestone. See `PRUNE-TURN-EVIDENCE.json`; no timing claim.

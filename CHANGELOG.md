@@ -4,6 +4,8 @@
 
 - JSON listings with `--limit 0` return an empty array after argument validation without loading inventory, querying indexes, or enriching transcripts.
 
+- Prune streams large Thinking and ASCII declassification mutations through checked source projections while preserving exact sidecars and revival estimates.
+
 - Forward JSON windows avoid constructing unselected Claude rich metadata, preserving record acceptance, selected details and final session metadata.
 - Claude checkpoint counts retain restorable result facts; cached counts from older views are recomputed.
 

@@ -634,11 +634,20 @@ pub fn prune_session(src_path: &Path, opts: &PruneOptions) -> Result<PruneResult
             }
             continue;
         }
-        if range.len >= LARGE_RECORD && is_old && ty == "user" && !opts.declassify {
+        if range.len >= LARGE_RECORD && is_turn_line {
             if needs_root {
                 rooted = true;
             }
-            if let Some(mut plan) = source_user_prune(&source, *range, opts, &new_id, idx, &tool_names)? {
+            if let Some(mut plan) = source_turn_prune(
+                &source,
+                *range,
+                opts,
+                &new_id,
+                idx,
+                &tool_names,
+                is_old && ty == "user",
+                is_old && ty == "assistant" && opts.thinking,
+            )? {
                 if needs_root {
                     if let Some(parent) = source_parent_override(&plan.record)? {
                         plan.replacements.push(parent);
@@ -1189,8 +1198,8 @@ struct SourcePrune {
     images: usize,
 }
 
-/// Plan user tool-result/mirror mutations without owning payload bytes. Planning has no output
-/// effects; other mutation kinds continue through the established Value path.
+/// Compatibility test entry for the source user pass; turn composition uses the same planner.
+#[cfg(test)]
 fn source_user_prune(
     source: &crate::json::JsonSource,
     range: Range,
@@ -1198,6 +1207,20 @@ fn source_user_prune(
     new_id: &str,
     idx: usize,
     tools: &HashMap<String, (String, Range, usize)>,
+) -> Result<Option<SourcePrune>> {
+    source_turn_prune(source, range, opts, new_id, idx, tools, true, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_turn_prune(
+    source: &crate::json::JsonSource,
+    range: Range,
+    opts: &PruneOptions,
+    new_id: &str,
+    idx: usize,
+    tools: &HashMap<String, (String, Range, usize)>,
+    user_old: bool,
+    thinking_old: bool,
 ) -> Result<Option<SourcePrune>> {
     use crate::harness::store::document::Fields;
     let record = source.validated_range(range.offset, range.len)?;
@@ -1215,18 +1238,113 @@ fn source_user_prune(
         let key = top.string("uuid")?.unwrap_or_else(|| format!("L{idx}"));
         let mut replacements = Vec::new();
         let mut payloads = Vec::new();
+        let mut declassified = Vec::new();
         let mut saved = 0;
         let mut block_sources = Vec::new();
+        let mut projected_blocks = HashMap::new();
+        let mut projected_content = None;
         let mut images = 0;
         let mut mirror_base = None;
         let mut mirror_tuid = None;
         for (index, original_block) in blocks.into_iter().flatten().enumerate() {
             let original_block = original_block?;
-            block_sources.push(original_block.to_json()?);
-            let Some(block) = Fields::parse(original_block, &["type", "tool_use_id", "content"])? else {
+            if opts.revive {
+                block_sources.push(original_block.to_json()?);
+            }
+            let Some(block) = Fields::parse(original_block, &["type", "tool_use_id", "content", "thinking", "text"])?
+            else {
                 continue;
             };
-            if block.string("type")?.as_deref() != Some("tool_result") {
+            let ty = block.string("type")?;
+            let mut projected = None;
+            if thinking_old && ty.as_deref() == Some("thinking") {
+                let size = value_byte_size_source(original_block)?;
+                let lines = block
+                    .get("thinking")
+                    .map(source_text_stats)
+                    .transpose()?
+                    .map(|stats| stats.lines())
+                    .unwrap_or(1);
+                let id = format!("{key}#think{index}");
+                let marker = build_marker(&id, "thinking", &Value::Null, "text", size, lines, new_id, opts.drop);
+                saved += crate::ir::est_tokens_bytes(size, TEXT_BYTES_PER_TOKEN).saturating_sub(str_tokens(&marker));
+                payloads.push(source_payload(
+                    original_block.to_json()?,
+                    id,
+                    "thinking",
+                    "thinking",
+                    size,
+                    lines,
+                ));
+                projected = Some(serde_json::json!({"type":"text", "text":marker}));
+            }
+            if opts.declassify {
+                if let Some(value) = projected.as_mut() {
+                    // This pass sees the generated thinking marker, as the owned pass does.
+                    let text = value.get("text").and_then(Value::as_str).unwrap_or("");
+                    let hits = declassify_hits(text, opts);
+                    if hits >= opts.declassify_min_hits {
+                        let size = text.len();
+                        let lines = text.lines().count().max(1);
+                        let id = format!("{key}#declass{index}");
+                        let marker = build_marker(
+                            &id,
+                            "declassified",
+                            &Value::Null,
+                            "text",
+                            size,
+                            lines,
+                            new_id,
+                            opts.drop,
+                        );
+                        saved += str_tokens(text).saturating_sub(str_tokens(&marker));
+                        declassified.push(source_payload(
+                            value.clone().into(),
+                            id,
+                            "content",
+                            "declassified",
+                            size,
+                            lines,
+                        ));
+                        *value = serde_json::json!({"type":"text", "text":marker});
+                    }
+                } else if ty.as_deref() == Some("text") {
+                    let text = block.get("text");
+                    let (stats, hits) = source_declassify_stats(text, opts)?;
+                    if hits >= opts.declassify_min_hits {
+                        let id = format!("{key}#declass{index}");
+                        let marker = build_marker(
+                            &id,
+                            "declassified",
+                            &Value::Null,
+                            "text",
+                            stats.bytes,
+                            stats.lines(),
+                            new_id,
+                            opts.drop,
+                        );
+                        saved += crate::ir::est_tokens_bytes(stats.bytes, TEXT_BYTES_PER_TOKEN)
+                            .saturating_sub(str_tokens(&marker));
+                        declassified.push(source_payload(
+                            original_block.to_json()?,
+                            id,
+                            "content",
+                            "declassified",
+                            stats.bytes,
+                            stats.lines(),
+                        ));
+                        projected = Some(serde_json::json!({"type":"text", "text":marker}));
+                    }
+                }
+            }
+            if let Some(projected) = projected {
+                if opts.revive {
+                    projected_blocks.insert(index, projected.clone());
+                }
+                replacements.push((original_block.to_json()?, projected));
+                continue;
+            }
+            if !user_old || ty.as_deref() != Some("tool_result") {
                 continue;
             }
             let tuid = block.string("tool_use_id")?;
@@ -1287,7 +1405,38 @@ fn source_user_prune(
                 },
             });
         }
-        if let Some(mirror) = top.get("toolUseResult") {
+        if opts.declassify && content.map(|value| value.is_string()).transpose()?.unwrap_or(false) {
+            let (stats, hits) = source_declassify_stats(content, opts)?;
+            if hits >= opts.declassify_min_hits {
+                let id = format!("{key}#declass");
+                let marker = build_marker(
+                    &id,
+                    "declassified",
+                    &Value::Null,
+                    "text",
+                    stats.bytes,
+                    stats.lines(),
+                    new_id,
+                    opts.drop,
+                );
+                saved +=
+                    crate::ir::est_tokens_bytes(stats.bytes, TEXT_BYTES_PER_TOKEN).saturating_sub(str_tokens(&marker));
+                let original = content.unwrap().to_json()?;
+                declassified.push(source_payload(
+                    original.clone(),
+                    id,
+                    "content",
+                    "declassified",
+                    stats.bytes,
+                    stats.lines(),
+                ));
+                if opts.revive {
+                    projected_content = Some(Value::String(marker.clone()));
+                }
+                replacements.push((original, Value::String(marker)));
+            }
+        }
+        if let Some(mirror) = top.get("toolUseResult").filter(|_| user_old) {
             if !mirror.is_null()? {
                 let stats = if mirror.is_string()? {
                     Some(source_text_stats(mirror)?)
@@ -1326,6 +1475,7 @@ fn source_user_prune(
                 }
             }
         }
+        payloads.extend(declassified);
         if payloads.is_empty() {
             return Ok(None);
         }
@@ -1337,12 +1487,19 @@ fn source_user_prune(
             }
         }
         let mut estimate = if opts.revive && !content.map(|value| value.is_array()).transpose()?.unwrap_or(false) {
-            content.map(est_tokens_source).transpose()?.unwrap_or(0)
+            match projected_content.as_ref() {
+                Some(value) => est_tokens(value),
+                None => content.map(est_tokens_source).transpose()?.unwrap_or(0),
+            }
         } else {
             0
         };
         if opts.revive {
-            for block in block_sources {
+            for (index, block) in block_sources.into_iter().enumerate() {
+                if let Some(projected) = projected_blocks.get(&index) {
+                    estimate += est_tokens(&Value::Array(vec![projected.clone()]));
+                    continue;
+                }
                 block.with_view(|view| {
                     let fields = Fields::parse(view, &["type", "text"])?;
                     let ty = fields
@@ -1381,6 +1538,82 @@ fn source_user_prune(
         }),
     )
 }
+fn source_payload(
+    original: crate::Json,
+    id: String,
+    slot: &str,
+    name: &str,
+    size: usize,
+    line_count: usize,
+) -> SourcePayload {
+    SourcePayload {
+        original,
+        entry: SidecarEntry {
+            id,
+            slot: slot.into(),
+            name: name.into(),
+            input: Value::Null,
+            content: Value::Null,
+            size,
+            line_count,
+            kind: "text".into(),
+        },
+    }
+}
+
+fn declassify_hits(text: &str, opts: &PruneOptions) -> usize {
+    let lower = text.to_lowercase();
+    opts.declassify_tokens
+        .iter()
+        .filter(|token| !token.is_empty() && lower.contains(token.as_str()))
+        .count()
+}
+
+/// ASCII lowercase/substrings stream exactly, retaining only the longest token's overlap.
+/// Unicode uses the established whole-string lowercase operation (including contextual sigma).
+fn source_declassify_stats(
+    text: Option<crate::json::JsonView<'_>>,
+    opts: &PruneOptions,
+) -> Result<(SourceTextStats, usize)> {
+    let mut stats = SourceTextStats::default();
+    let mut ascii = true;
+    let mut matched = vec![false; opts.declassify_tokens.len()];
+    let overlap = opts
+        .declassify_tokens
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let mut tail = String::new();
+    if let Some(text) = text {
+        text.for_each_str_chunk(|part| {
+            stats.append(part);
+            ascii &= part.is_ascii();
+            if ascii {
+                // A borrowed unescaped string may arrive in one artifact-sized callback.
+                // Bound our own lowercase scratch independently of the producer's framing.
+                for part in part.as_bytes().chunks(64 * 1024) {
+                    let part = std::str::from_utf8(part).expect("ASCII chunk");
+                    tail.push_str(&part.to_ascii_lowercase());
+                    for (hit, token) in matched.iter_mut().zip(&opts.declassify_tokens) {
+                        *hit |= !token.is_empty() && tail.contains(token);
+                    }
+                    if tail.len() > overlap {
+                        tail.drain(..tail.len() - overlap);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        if !ascii {
+            let owned = text.resolve()?;
+            return Ok((stats, declassify_hits(owned.as_str().unwrap_or(""), opts)));
+        }
+    }
+    Ok((stats, matched.into_iter().filter(|hit| *hit).count()))
+}
+
 #[derive(Default)]
 struct SourceTextStats {
     bytes: usize,
@@ -2094,13 +2327,7 @@ fn prune_declassify_text(
 ) {
     // Distinct security terms present (case-insensitive substring). Density, not raw frequency, so a
     // single benign mention ("the security fix shipped") never trips the snip.
-    let distinct_hits = |s: &str| -> usize {
-        let low = s.to_lowercase();
-        opts.declassify_tokens
-            .iter()
-            .filter(|t| !t.is_empty() && low.contains(t.as_str()))
-            .count()
-    };
+    let distinct_hits = |s: &str| declassify_hits(s, opts);
     let Some(content) = v.pointer_mut("/message/content") else {
         return;
     };

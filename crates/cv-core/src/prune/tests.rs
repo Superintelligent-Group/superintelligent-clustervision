@@ -1648,3 +1648,210 @@ fn retrieve_giant_unselected_fields_return_only_requested_content() {
         retrieve_legacy_oracle(&path, "absent").unwrap_err().to_string()
     );
 }
+
+#[test]
+fn source_turn_projection_matches_owned_pass_composition() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-turn-projection");
+    for (case, mut original) in [
+        serde_json::json!({"type":"assistant","uuid":"a","sessionId":"old","parentUuid":"p","message":{"content":[
+            {"type":"thinking","thinking":"reason\r\nsecond λ\n","signature":"signature","unknown":{"keep":true}},
+            {"type":"text","text":"ALPHA beta ΟΣ ΟΣΑ","extra":"retained in sidecar"},
+            {"type":"thinking","signature":"signature-only"},
+            {"type":"text","text":42},
+            {"type":"text","text":"benign"}
+        ]}}),
+        serde_json::json!({"type":"user","uuid":"u","sessionId":"old","message":{"content":[
+            {"type":"text","text":"ALPHA beta"},
+            {"type":"tool_result","tool_use_id":"call","content":"payload"},
+            {"type":"text","text":"benign"}
+        ]},"toolUseResult":{"mirror":"payload"}}),
+        serde_json::json!({"type":"user","uuid":"u","session_id":"old","message":{"content":"ALPHA beta\r\n"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        original["ignored"] = Value::String("not selected".repeat(100000));
+        let raw = serde_json::to_string_pretty(&original)?.replace(
+            "\"sessionId\": \"old\"",
+            "\"sessionId\":\"first\", \"sessionId\":\"old\"",
+        );
+        let path = world.base.join(format!("{case}.json"));
+        std::fs::write(&path, &raw)?;
+        for drop in [false, true] {
+            for thinking in [false, true] {
+                for min_hits in [0, 2] {
+                    let opts = PruneOptions {
+                        min_size: 1,
+                        drop,
+                        thinking,
+                        revive: true,
+                        declassify: true,
+                        declassify_min_hits: min_hits,
+                        declassify_tokens: vec!["alpha".into(), "beta".into(), "ος".into()],
+                        ..Default::default()
+                    };
+                    let mut owned = original.clone();
+                    let mut sidecar = Vec::new();
+                    let mut count = 0;
+                    let mut images = 0;
+                    let mut saved = 0;
+                    let mut modified = false;
+                    let user = owned["type"] == "user";
+                    if user {
+                        prune_user_line(
+                            &mut owned,
+                            &opts,
+                            &HashMap::new(),
+                            "new",
+                            "u",
+                            &mut sidecar,
+                            &mut count,
+                            &mut images,
+                            &mut saved,
+                            &mut modified,
+                        );
+                    } else if thinking {
+                        prune_assistant_thinking(
+                            &mut owned,
+                            &opts,
+                            "new",
+                            "a",
+                            &mut sidecar,
+                            &mut count,
+                            &mut saved,
+                            &mut modified,
+                        );
+                    }
+                    prune_declassify_text(
+                        &mut owned,
+                        &opts,
+                        "new",
+                        if user { "u" } else { "a" },
+                        &mut sidecar,
+                        &mut count,
+                        &mut saved,
+                        &mut modified,
+                    );
+                    let source = crate::json::JsonSource::capture(&path)?;
+                    let plan = source_turn_prune(
+                        &source,
+                        Range {
+                            offset: 0,
+                            len: raw.len() as u64,
+                        },
+                        &opts,
+                        "new",
+                        0,
+                        &HashMap::new(),
+                        user,
+                        thinking && !user,
+                    )?;
+                    if !modified {
+                        assert!(plan.is_none());
+                        continue;
+                    }
+                    let plan = plan.unwrap();
+                    assert_eq!(
+                        plan.payloads.len(),
+                        count,
+                        "case={case} drop={drop} thinking={thinking} min={min_hits}"
+                    );
+                    assert_eq!(plan.saved, saved);
+                    assert_eq!(plan.images, images);
+                    assert_eq!(plan.estimate, line_est_tokens(&owned));
+                    let mut actual = Vec::new();
+                    plan.record
+                        .with_view(|view| view.write_canonical_replacing(&plan.replacements, &mut actual))?;
+                    assert_eq!(
+                        actual,
+                        crate::restamp_line(&owned.to_string(), "new").unwrap().as_bytes()
+                    );
+                    if !drop {
+                        let mut expected = Vec::new();
+                        for entry in &sidecar {
+                            serde_json::to_writer(&mut expected, entry)?;
+                            expected.push(b'\n');
+                        }
+                        let mut actual = Vec::new();
+                        for payload in &plan.payloads {
+                            write_source_payload(payload, &mut actual)?;
+                        }
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn source_declassify_matches_case_and_line_semantics_across_chunks() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-declassify-chunks");
+    let options = PruneOptions {
+        declassify_tokens: vec![
+            "alpha".into(),
+            "beta".into(),
+            "alphabeta".into(),
+            "ALPHA".into(),
+            "".into(),
+            "alpha".into(),
+            "ος".into(),
+        ],
+        ..Default::default()
+    };
+    for (index, text) in [
+        format!("{}ALPHABETA\r\n{}\n", "x".repeat(65533), "x".repeat(65536)),
+        format!("{} ΟΣ ΟΣΑ\r\n", "x".repeat(65536)),
+        String::new(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = world.base.join(format!("{index}.json"));
+        let bytes = serde_json::to_vec(&text)?;
+        std::fs::write(&path, &bytes)?;
+        let json = crate::Json::source(&path, 0, bytes.len() as u64)?;
+        json.with_view(|view| {
+            let (stats, hits) = source_declassify_stats(Some(view), &options)?;
+            let lower = text.to_lowercase();
+            assert_eq!(
+                hits,
+                options
+                    .declassify_tokens
+                    .iter()
+                    .filter(|token| !token.is_empty() && lower.contains(token.as_str()))
+                    .count()
+            );
+            assert_eq!(stats.bytes, text.len());
+            assert_eq!(stats.lines(), text.lines().count().max(1));
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn large_noop_declassification_preserves_raw_duplicate_ids_and_spacing() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-noop-turn-source");
+    let path = world.base.join("source.jsonl");
+    let raw = format!("  {{\"type\":\"assistant\",\"sessionId\":\"first\",\"sessionId\":\"old\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":{}}}]}}}}  ",
+        serde_json::to_string(&"BENIGN prose\n".repeat(131072))?);
+    std::fs::write(&path, format!("{raw}\r\n"))?;
+    let result = prune_session(
+        &path,
+        &PruneOptions {
+            declassify: true,
+            declassify_tokens: vec!["alpha".into(), "beta".into()],
+            new_id: Some("new".into()),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(result.pruned_count, 0);
+    assert!(result.sidecar_path.is_none());
+    let actual = std::fs::read(result.new_path)?;
+    // Positioned JSONL framing keeps leading bytes and trims trailing record whitespace.
+    let expected = format!("{}\n", raw.trim_end());
+    assert!(actual == expected.as_bytes(), "no-op record spacing or CRLF changed");
+    Ok(())
+}
