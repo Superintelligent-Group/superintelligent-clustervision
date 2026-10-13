@@ -176,18 +176,13 @@ pub(crate) fn part_view(part: crate::json::JsonView<'_>, q: &Quirks) -> anyhow::
             }
             Some(url) => {
                 let value = if let Some(max) = q.image_ref_truncate {
-                    let mut prefix = String::new();
-                    let mut count = 0;
-                    url.for_each_str_chunk(|chunk| {
-                        for c in chunk.chars() {
-                            if count > max {
-                                break;
-                            }
-                            prefix.push(c);
-                            count += 1;
-                        }
-                        Ok(())
-                    })?;
+                    let text = url.source_text()?.unwrap();
+                    let (prefix, _) = crate::harness::store::document::text_head(
+                        &text,
+                        &crate::lazy::Resolver::new(None),
+                        max.saturating_add(1),
+                        false,
+                    )?;
                     crate::ir::truncate(&prefix, max)
                 } else {
                     url.resolve()?.as_str().unwrap().to_owned()

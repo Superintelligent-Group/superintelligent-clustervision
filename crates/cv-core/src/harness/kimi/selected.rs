@@ -103,22 +103,12 @@ fn classify(message: &mut Message) -> Result<()> {
     let Some(Block::Text { text }) = message.content.first() else {
         return Ok(());
     };
-    let mut head = String::new();
-    let mut begun = false;
-    let limit = COMPACTION_SUMMARY_TAG.len();
-    text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 4096, |chunk| {
-        for c in chunk.chars() {
-            if head.len() >= limit {
-                break;
-            }
-            if !begun && c.is_whitespace() {
-                continue;
-            }
-            begun = true;
-            head.push(c);
-        }
-        Ok(())
-    })?;
+    let (head, _) = crate::harness::store::document::text_head(
+        text,
+        &crate::lazy::Resolver::new(None),
+        COMPACTION_SUMMARY_TAG.chars().count(),
+        true,
+    )?;
     let (kind, origin) = if head.starts_with(COMPACTION_SUMMARY_TAG) {
         (MessageKind::CompactionSummary, Origin::Harness)
     } else if head.starts_with("<notification") {
