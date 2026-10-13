@@ -164,8 +164,9 @@ class CvApp extends HTMLElement {
   async _hydrateWindow(stub) {
     // Head scans through EOF, independently of the first useful message window.
     // Settle failure immediately so it cannot reject unhandled while the window is pending.
+    const windowReady = getMessages(stub, 0, PAGE);
     const headReady = getSessionHead(stub).catch(() => null);
-    const win = await getMessages(stub, 0, PAGE);
+    const win = await windowReady;
     if (win) {
       const present = (o) => Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v != null));
       const windowMeta = present(win.session);
@@ -190,6 +191,8 @@ class CvApp extends HTMLElement {
           else if (meta.message_count != null) full.message_count = meta.message_count;
         }
         if (this._transcript?.session === full) this._transcript.notifyMetadata();
+      }).catch((error) => {
+        console.warn("[clustervision] late session metadata failed:", error);
       });
       return full;
     }

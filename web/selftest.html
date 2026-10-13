@@ -763,7 +763,7 @@ const deferred = () => {
 };
 async function hydrationFixture(body) {
   const original = globalThis.fetch;
-  const heads = new Map(), windows = new Map();
+  const heads = new Map(), windows = new Map(), requests = [];
   const app = document.createElement("cv-app"); // detached: no init/sample fetch
   app._transcript = document.createElement("cv-transcript");
   app._transcript._mountEvents = () => {};
@@ -772,6 +772,7 @@ async function hydrationFixture(body) {
   app._setStatus = () => {};
   globalThis.fetch = async (url) => {
     const path = new URL(url).pathname;
+    requests.push(path);
     const id = path.split("/")[4];
     const source = path.endsWith("/head") ? heads : windows;
     const raw = await source.get(id).promise;
@@ -787,14 +788,16 @@ async function hydrationFixture(body) {
   const window = (extra = {}) => ({ messages: [{ role: "user", content: [{ type: "text", text: "ready" }] }],
     start: 0, end: 1, has_more: true, total_known: false, session: { title: "window", system_prompt: null }, ...extra });
   const settle = async () => { for (let n = 0; n < 30; n++) await Promise.resolve(); };
-  try { await body({ app, heads, windows, stub, window, settle }); }
+  try { await body({ app, heads, windows, requests, stub, window, settle }); }
   finally { globalThis.fetch = original; }
 }
 
-await acheck("window paints before head; final merged metadata matches the prior oracle", () => hydrationFixture(async ({ app, heads, windows, stub, window, settle }) => {
+await acheck("window paints before head; final merged metadata matches the prior oracle", () => hydrationFixture(async ({ app, heads, windows, requests, stub, window, settle }) => {
   const s = stub("first");
   const win = window();
   const opening = app._showSession(s);
+  truthy(requests[0].endsWith("/messages"), "window request starts before EOF head");
+  truthy(requests[1].endsWith("/head"), "head starts independently after window");
   windows.get(s.id).resolve(win);
   await opening; // head is deliberately unresolved
   const full = app._transcript.session;
