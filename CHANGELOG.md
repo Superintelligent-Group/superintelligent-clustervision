@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Small unqueried JSON listings rank selected rows without fully ordering the inventory, preserving ties and missing-file behavior.
+
 - MCP startup reuses the parsed command tree and releases parser state before serving requests, preserving generated tools and command results.
 
 - FTS compaction keeps segments above 8 MiB out of the bottom tier, avoiding repeated cold-segment rewrites during small appends.

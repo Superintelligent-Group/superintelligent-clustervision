@@ -2321,9 +2321,9 @@ builds were compared for behavior only, with no work or timing inference.
 - First-use scoped discovery currently loads and decodes the complete persisted scan cache.
   Investigate deferred decoding within existing cache entries, measuring unrelated-row growth;
   avoid per-file catalog opens, eager SQLite-only loading and new operation-scope machinery.
-- Small unqueried JSON listings fully sort an inventory whose tail is never emitted. Compare a
-  stable ordered heap with existing sorting, including ties, missing paths, ascending windows
-  and already-ordered inputs. Queried windows and exact text totals have different requirements.
+- Small unqueried JSON listings now heapify borrowed candidates and select in stable rank order;
+  the unrequested tail stays unordered. Queried windows and exact text totals keep full sorting.
+  The work/memory tradeoff and natural-run controls are recorded below.
 - Filtered ranked search can repeat a global metadata lookup for one ID across index segments.
   Share compact query-local decisions/addresses; retaining every full metadata document would
   create a new memory cost proportional to arbitrary title/cwd widths. Preserve legacy body-only
@@ -2370,3 +2370,31 @@ part of the generated contract. Retaining a worker or introducing another respon
 would require a concrete repeated-read operation benefit and its own lifecycle/coherence proof.
 This change removes demonstrated duplicate startup ownership without weakening those contracts
 or promising an end-to-end latency improvement.
+
+### Small listing windows: rank work and scratch memory (2026-10-13)
+
+Unqueried `ls --json` uses a borrowed-candidate heap when `8 * limit < inventory length`.
+The original ordinal breaks equal metadata keys, matching stable sorting. Descending rows retain
+the whole candidate tail until existing files fill the requested window; ascending rows select
+newest K, reverse, then apply existence checks, exactly as before. No extra stat seam or parser
+is introduced. Queried JSON, text totals and wide windows retain full sorting. The size threshold
+is a conservative heuristic, not a measured CPU crossover.
+
+[LISTING-RANK-WORK.json](LISTING-RANK-WORK.json) compares the actual prior owned-reference sort
+with this route for 20 rows from 20,000/100,000 refs. Shuffled message-count keys change comparisons
+282,658 → 37,749 and 1,709,691 → 187,666. Already sorted/tied keys remain near one comparison per
+candidate; reverse-sorted inputs roughly double comparisons. Exact rows match for all shapes,
+and separate controls cover all rank keys, ties, missing files and both output directions.
+
+An isolated existing-allocator control covers ranking and selected row projection, excluding
+inventory creation and final serialization. Requested peak heap above baseline falls from
+2,720,000 to about 678,000 bytes at 20,000 refs, and from 7,999,928 to about 3,238,000 at 100,000.
+The heap still uses 32 bytes per candidate. Missing-heavy inventories may drain much of the
+tail; there is no universal comparison or whole-CLI speedup claim. Catalog/discovery costs remain.
+
+Integration at `81f1252` passes all seven browse controls; MCP startup ownership/schema parity
+also passes on the combined branch. The session-list API separately moves prepared JSON rows
+directly into `Value::Array`, avoiding the previous serialization copy; its existing HTTP endpoint
+control passes, including sort, filter, row schema and limits. These are scoped checks, not a
+new full convergence run. MCP control scripts/results/logs are also retained outside temporary
+storage at `excellence-evidence/mcp-startup/`.

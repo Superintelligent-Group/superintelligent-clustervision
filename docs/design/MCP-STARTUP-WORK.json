@@ -133,5 +133,6 @@
     "four MCP transport tests: pass",
     "production bin clippy -D warnings: pass"
   ],
-  "private_evidence": "/private/tmp/cv-mcp-whole-operation-evidence/"
+  "private_evidence": "/private/tmp/cv-mcp-whole-operation-evidence/",
+  "retained_control_and_logs": "/Users/ember/dev/cv-worktrees/excellence-evidence/mcp-startup"
 }
