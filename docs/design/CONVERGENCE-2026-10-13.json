@@ -133,5 +133,18 @@
       "stale_tag_scan": "7f571f"
     },
     "filesystem_logs": false
+  },
+  "remote_ci": {
+    "head_sha": "ef75a100d0f70db3f82b95315d5d57adeb35172d",
+    "run_id": 38351106194,
+    "url": "https://github.com/emberian/cv/actions/runs/38351106194",
+    "conclusion": "success",
+    "jobs": {
+      "wasm build (cv-web)": "success",
+      "desktop app (app/src-tauri)": "success",
+      "web UI (web/)": "success",
+      "build \u00b7 test \u00b7 clippy \u00b7 fmt": "success"
+    },
+    "scope": "GitHub CI for the pushed integration revision; subsequent changes require their own scoped checks. Desktop CI checks compilation, not a native GUI launch."
   }
 }
