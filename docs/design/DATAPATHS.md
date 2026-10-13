@@ -4151,3 +4151,34 @@ decoded. SQLite native peak remains about 129.5 MB: the giant output row and FTS
 this one-row operation. This is a concrete retained-body improvement with an allocation/I/O
 tradeoff, not a speed claim or an operation-wide constant-memory result. Required row-sized
 output staging, SQLite/FTS native memory and owned raw extras remain future work.
+
+### Checked complete flat OpenClaw rehome (Sol, 2026-10-13)
+
+The existing flat selected reader now also serves complete+spans preparation. Ordinary
+user/assistant/tool-result rows have no additional complete raw-record contract in this adapter;
+unknown/control records retain their existing owned fallback and carriers, and system/custom
+roles retain the existing owned metadata composition. Public complete parsing remains owned.
+Same-target parse_for_emit now selects checked preparation. Tree navigation and SQLite readers
+are unchanged and retain their owned payload paths; this does not claim universal OpenClaw rehome
+bounds or redesign branch selection.
+
+[Matched complete-rehome evidence](OPENCLAW-REHOME-EVIDENCE.json) compares the preceding checked
+writer with owned preparation against complete checked preparation on one actual flat
+OpenClaw -> OpenClaw Native parse_for_emit -> emit_report operation. Two messages carry
+9,087,663 bytes of mixed Unicode/escaped ordinary prompt text. Requested live Rust peak above
+baseline falls from 37,264,928 to 275,942 bytes, and cumulative requested allocation falls from
+77,870,693 to 1,677,875 bytes. Full normalized transcript and exact index hashes, empty fidelity
+reports, two messages and original source hash/stat identity match. Only generated entry IDs and
+their parent references are normalized. Preserved binaries, reports and the reusable
+rehome-control.py are under /Users/ember/dev/cv-worktrees/openclaw-export-evidence/.
+
+Eight checked OpenClaw controls pass both natively and without default features. The new
+complete preparation oracle compares exact materialized serialized IR, Native/Text/Drop
+transcript/index bytes and fidelity classifications against owned complete parsing. It includes
+unknown carriers, labels/session facts, system/custom roles, tool details, provider/usage metadata,
+unknown blocks and late source replacement preserving existing destinations. The existing corrupt
+row oracle now exercises the actual checked complete route, preserving Value acceptance and
+duplicate-key behavior. Native and portable SQLite-enabled library/tests clippy and pinned
+formatting pass. Carrier bodies, demanded system prompts, tree/store paths, message/cardinality
+metadata and private output staging remain explicit ownership costs. No CPU, RSS or physical-I/O
+claim follows from this allocation control.
