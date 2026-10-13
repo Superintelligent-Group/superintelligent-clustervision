@@ -199,7 +199,7 @@ impl Adapter for KimiCode {
             let (s, wire) = session_header(r);
             sink.meta(&s);
             let Ok(file) = fs::File::open(&wire) else { return Ok(s) };
-            if opts.spans && !opts.complete {
+            if opts.spans {
                 stream_projected(&file, &wire, 0, s, Ctx::new(opts), 0, sink)
             } else {
                 Ok(stream_wire(BufReader::new(file), &wire, 0, s, Ctx::new(opts), 0, sink))
@@ -240,7 +240,7 @@ impl Adapter for KimiCode {
             // the checkpoint. The caller verifies those dependencies before accepting the suffix.
             let (s, _) = session_header(r);
             sink.meta(&s);
-            let session = if opts.spans && !opts.complete {
+            let session = if opts.spans {
                 stream_projected(
                     &file,
                     &wire,
@@ -892,7 +892,11 @@ impl<'a> Ctx<'a> {
         sink: &mut dyn MessageSink,
     ) -> Result<Flow> {
         let Some(record) = Fields::parse(view, &["type", "time", "event", "message"])? else {
-            return Ok(Flow::Continue);
+            return Ok(if self.opts.complete {
+                self.record(view.resolve()?.as_ref(), sink)
+            } else {
+                Flow::Continue
+            });
         };
         let ty = record.string("type")?.unwrap_or_default();
         if ty == "context.append_message" {
@@ -922,28 +926,31 @@ impl<'a> Ctx<'a> {
                 .unwrap_or(Value::Null);
             let projected = serde_json::json!({"message":metadata});
             let ts = record.value("time")?.as_ref().and_then(super::ts_from_value);
-            let flow = self.append_message(&projected, ts, sink, Some(blocks));
+            let raw = self.opts.complete.then(|| view.to_json()).transpose()?;
+            let flow = self.append_message(&projected, ts, sink, Some(blocks), raw);
             return Ok(if flow == Flow::Stop { self.stop() } else { flow });
         }
         if ty != "context.append_loop_event" {
             // Bookkeeping has no semantic output in lazy passes and need not become a Value.
-            if !matches!(
-                ty.as_str(),
-                "permission.set_mode"
-                    | "file_history.checkpoint"
-                    | "metadata"
-                    | "profile.bind"
-                    | "config.update"
-                    | "context.append_message"
-                    | "context.apply_compaction"
-                    | "task.terminated"
-                    | "subagent.spawned"
-                    | "subagent.completed"
-                    | "subagent.failed"
-                    | "context.undo"
-                    | "context.clear"
-                    | "turn.cancel"
-            ) {
+            if !self.opts.complete
+                && !matches!(
+                    ty.as_str(),
+                    "permission.set_mode"
+                        | "file_history.checkpoint"
+                        | "metadata"
+                        | "profile.bind"
+                        | "config.update"
+                        | "context.append_message"
+                        | "context.apply_compaction"
+                        | "task.terminated"
+                        | "subagent.spawned"
+                        | "subagent.completed"
+                        | "subagent.failed"
+                        | "context.undo"
+                        | "context.clear"
+                        | "turn.cancel"
+                )
+            {
                 return Ok(Flow::Continue);
             }
             return Ok(self.record(view.resolve()?.as_ref(), sink));
@@ -967,7 +974,11 @@ impl<'a> Ctx<'a> {
             ],
         )?
         else {
-            return Ok(Flow::Continue);
+            return Ok(if self.opts.complete {
+                self.record(view.resolve()?.as_ref(), sink)
+            } else {
+                Flow::Continue
+            });
         };
         let ts = record.value("time")?.as_ref().and_then(super::ts_from_value);
         let event_type = fields.string("type")?.unwrap_or_default();
@@ -1087,6 +1098,19 @@ impl<'a> Ctx<'a> {
                             .insert("traceId".into(), trace);
                     }
                 }
+                if self.opts.complete {
+                    let arena = source.decoded_backing()?;
+                    let (offset, len) = arena.append(|writer| {
+                        use crate::harness::wire::write::ObjectWriter;
+                        let mut out = ObjectWriter::new(writer)?;
+                        out.field("type", "context.append_loop_event")?;
+                        out.field_with("event", |mut writer| event.write_canonical(&mut writer))?;
+                        out.field("time", &ts.map(|t| t.timestamp_millis()))?;
+                        out.finish()
+                    })?;
+                    let raw = source.read_backing_syntax(arena, offset, len, |view| view.to_json())?;
+                    CompleteRecord::attach(std::slice::from_mut(&mut message), Harness::KimiCode, raw, Map::new());
+                }
                 if let Some(step) = &mut self.step {
                     step.results.push(message);
                     Flow::Continue
@@ -1121,6 +1145,7 @@ impl<'a> Ctx<'a> {
                 let projected = serde_json::json!({"event":metadata});
                 self.loop_event(&projected, ts, sink)
             }
+            _ if self.opts.complete => self.record(view.resolve()?.as_ref(), sink),
             _ => Flow::Continue,
         };
         Ok(if flow == Flow::Stop { self.stop() } else { flow })
@@ -1150,7 +1175,7 @@ impl<'a> Ctx<'a> {
                 self.carry(v, ts, sink)
             }
             "profile.bind" | "config.update" => self.system_prompt(v, ty, ts, sink),
-            "context.append_message" => self.append_message(v, ts, sink, None),
+            "context.append_message" => self.append_message(v, ts, sink, None, None),
             "context.append_loop_event" => self.loop_event(v, ts, sink),
             "context.apply_compaction" => {
                 let f = self.flush_step(sink);
@@ -1368,6 +1393,7 @@ impl<'a> Ctx<'a> {
         ts: Option<DateTime<Utc>>,
         sink: &mut dyn MessageSink,
         blocks: Option<Vec<Block>>,
+        record: Option<crate::json::Json>,
     ) -> Flow {
         let f = self.flush_step(sink);
         if f == Flow::Stop {
@@ -1402,7 +1428,9 @@ impl<'a> Ctx<'a> {
         }
         m.harness_extra_mut(Harness::KimiCode)
             .insert("origin_kind".into(), Value::String(origin_kind.to_string()));
-        if self.opts.complete {
+        if let Some(record) = record {
+            CompleteRecord::attach(std::slice::from_mut(&mut m), Harness::KimiCode, record, Map::new());
+        } else if self.opts.complete {
             m.extra.insert(CARRIER_KEY.into(), v.clone());
         }
         sink.message(m)
@@ -1599,37 +1627,7 @@ impl<'a> Ctx<'a> {
 
 /// Decode only bounded metadata; text/thinking payloads retain the validated wire source.
 fn part_view(part: JsonView<'_>) -> Result<Option<Block>> {
-    let Some(fields) = Fields::parse(part, &["type", "text", "think", "encrypted"])? else {
-        return Ok(None);
-    };
-    let ty = fields.string("type")?.unwrap_or_default();
-    if ty == "think" {
-        let text = fields
-            .get("think")
-            .map(|v| v.source_text())
-            .transpose()?
-            .flatten()
-            .unwrap_or_default();
-        let encrypted = fields.string("encrypted")?;
-        if text.is_empty() && encrypted.is_none() {
-            return Ok(None);
-        }
-        return Ok(Some(Block::Thinking {
-            text,
-            signature: None,
-            encrypted,
-            redacted: false,
-        }));
-    }
-    if super::wire::is_image_part(&ty) || matches!(ty.as_str(), "audio_url" | "video_url") {
-        return Ok(openai::part_to_block(part.resolve()?.as_ref(), &openai::KIMI_CODE));
-    }
-    Ok(fields
-        .get("text")
-        .map(|v| v.source_text())
-        .transpose()?
-        .flatten()
-        .map(|text| Block::Text { text }))
+    openai::part_view(part, &openai::KIMI_CODE)
 }
 
 /// Keep only candidate output-path lines while scanning decoded chunks. Last matching line wins,
@@ -1762,6 +1760,58 @@ mod tests {
     }
 
     #[test]
+    fn checked_complete_bodies_keep_raw_envelopes_and_guarded_replay() {
+        let world = cv_testkit::World::in_process("kimi_code_checked_complete");
+        let dir = world.home.join(".kimi-code/sessions/wd_test/session_checked");
+        fs::create_dir_all(dir.join("agents/main")).unwrap();
+        let path = main_wire(&dir);
+        let payload = "é\n\"\\".repeat(20_000);
+        let rows = [
+            serde_json::json!({"type":"metadata","protocol_version":"1.5"}),
+            serde_json::json!({"type":"context.append_message","time":1730000000,"message":{"role":"user","origin":{"kind":"user"},"content":payload},"extra_raw":payload}),
+            serde_json::json!({"type":"context.append_loop_event","time":1730000000.25,"event":{"type":"step.begin","uuid":"s","turnId":"t","step":1}}),
+            serde_json::json!({"type":"context.append_loop_event","time":1730000001,"event":{"type":"content.part","stepUuid":"s","part":{"type":"think","think":payload,"encrypted":"opaque"}}}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"tool.call","stepUuid":"s","toolCallId":"c","name":"Read","args":{"payload":payload}}}),
+            serde_json::json!({"type":"context.append_loop_event","time":"2024-10-27T03:33:22Z","event":{"type":"tool.result","toolCallId":"c","result":{"output":[{"text":payload},{"type":"image_url","image_url":{"url":"file:image"}},{"text":"output_path:/tmp/result"}],"isError":true,"note":{"why":"test"},"truncated":true},"traceId":"trace","unused":payload},"outer_is_not_in_synthesized_record":payload}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"step.end","uuid":"s","usage":{"inputOther":17,"output":2},"messageId":"native","finishReason":"stop"}}),
+            serde_json::json!({"type":"context.append_loop_event","event":{"type":"unknown","future":payload}}),
+            serde_json::json!({"type":"unknown","future":payload}),
+            serde_json::json!(42),
+        ];
+        let body = rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        fs::write(&path, &body).unwrap();
+        let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
+        let r = SessionRef::new("checked", Harness::KimiCode, &dir);
+        let opts = ParseOptions {
+            spans: true,
+            ..ParseOptions::complete()
+        };
+        let expected = old_wire_oracle(&r, &opts);
+        let mut kept = Kept::default();
+        let mut session = adapter.stream(&r, &opts, &mut kept).unwrap();
+        let raw_count = kept.messages.iter().filter(|m| m.complete_record.is_some()).count();
+        assert_eq!(raw_count, 2, "append + synthesized tool-result records");
+        let retained = kept
+            .messages
+            .iter()
+            .find(|m| m.kind == MessageKind::ToolResult)
+            .unwrap()
+            .clone();
+        session.messages = kept.messages;
+        assert_eq!(
+            serde_json::to_value(&session).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        session.materialize().unwrap();
+        assert_eq!(
+            serde_json::to_value(&session).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        fs::write(&path, format!("{body}\n")).unwrap();
+        assert!(serde_json::to_value(retained).is_err());
+    }
+
+    #[test]
     fn resume_checkpoints_match_old_corpus_and_every_selected_suffix() {
         let world = cv_testkit::World::in_process("kimi_code_resume_corpus");
         let adapter = KimiCode::with_home(&world.home.join(".kimi-code"));
@@ -1789,6 +1839,10 @@ mod tests {
                 ParseOptions::lazy_extra(),
                 ParseOptions::full(),
                 ParseOptions::complete(),
+                ParseOptions {
+                    spans: true,
+                    ..ParseOptions::complete()
+                },
             ] {
                 let expected = old_wire_oracle(&r, &opts);
                 let mut full = Kept::default();
