@@ -114,7 +114,7 @@
     "Darwin reported zero block I/O counters; page faults are available, but these counters do not prove zero storage I/O.",
     "Full selection must finish before first result; no partial output is emitted after a fallible read.",
     "The historical60s CountsOnly index budget is a different workload; full index and parallel CountsOnly remain unmeasured here.",
-    "Limited machine requests still incur full-fleet filtering before sorting and truncation; rank-aware window selection is the next work-avoidance opportunity."
+    "At the historical full-filter revisions above, limited machine requests still filtered the fleet before sorting and truncation. The later limited_window_work and demand_counts_work controls below document removal of that unnecessary fact reduction and whole-count-table loading."
   ],
   "limited_window_work": {
     "method": "Deterministic native three-candidate has:plan correctness fixture, fresh scratch catalog; no timing campaign. Candidate 0 does not match, candidate 1 matches, candidate 2 is a matching tail.",

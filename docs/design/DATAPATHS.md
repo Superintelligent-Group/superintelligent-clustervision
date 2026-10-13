@@ -125,7 +125,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Grok | History stream + pending reasoning; metadata-projected discovery and sidecars | One history record and retained tool metadata; enrichment can revise old messages |
 | Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
-| Continue | Native/positioned typed header and selected-record source views; lazy payloads and tool-answer dedup | JSON-encoded arguments, selected composites, answer-ID state and mutable snapshots remain |
+| Continue | Native/positioned typed header and selected-record source views; lazy payloads, checked encoded arguments and tool-answer dedup | Joined selected text, answer-ID state, rich metadata and mutable snapshots remain |
 | OpenCode files | Ordered message descriptors, selected headers/parts and shared payload arena; deduplicated source inventory released before publication | Necessary file inventory grows with part count; native and portable late-query miss gates now pass |
 | OpenCode SQLite | Indexed rows and source-selected parts; strict readable-role discovery counts; guarded original DB/WAL/journal dependencies | Encoded input CPU regression remains; full modes and structural metadata stay owned |
 | Cursor SQLite | CLI/ACP reachable-message replay and IDE composer projections; selected strings, Lexical rich text and structured results share private backing | Encoded rich-text CPU cost, owned identifiers/full metadata, WITHOUT ROWID fallback |
@@ -511,13 +511,15 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Process-isolated heap gates for growing histories and giant Claude/Codex/Gemini fields, plus escaped span decoding; negative baseline proof.
 - [x] Native selected-payload gates for Kimi Code, OpenCode files/v1/v2, Cursor CLI/IDE and Goose, with independent full-output oracles and FD64.
 - [x] Portable selected-payload gates for the same seven formats: 224 checks retain native bounds and independent full-output/dataset oracles.
-- [ ] Extend selected-payload gates to additional Codex fields, Gemini composites and remaining store formats.
+- [x] Additional Codex response/event text, reasoning and encoded-argument gates; Gemini legacy/JSONL composite results and formatted thoughts, native and portable, with exact full-output oracles and unchanged heap limits.
+- [ ] Remaining store-format coverage: prioritize demonstrated whole-operation regressions rather than expanding the selected-payload matrix by default.
 - [x] Gemini metadata discovery, strict raw validation, lazy text and mmap replay payload ranges.
 - [x] Claude typed borrowed hot records and mmap lazy lines; Codex giant-path metadata parity.
 - [x] Claude metadata discovery and fork-head projections, including giant first records.
 - [x] Claude conversational lazy-extra projections and bounded notification classification; raw serialized metadata order checked.
 - [x] Fallible Json demands across consumers and native Claude large lazy argument activation; giant composed allocation/parity proof.
-- [ ] Other structured-input producers, demanded details and uncommon Claude fallback record allocations.
+- [x] Structured inputs retain checked Json sources across shared Anthropic/native SDK/export/OpenSession producers, Kimi Code, OpenCode, Goose, Gemini, Codex and Continue, including supported JSON-encoded arguments.
+- [ ] Demanded owned details and uncommon producer fallbacks: identify concrete remaining shapes and consumer contracts before making broader bounded-memory claims.
 - [x] Per-consumer SQLite/WAL/known-sidecar freshness; atomic SQL publication; scan interpretation migration; inode resume guard.
 - [x] Consumer-recorded dependency read sets for conditional fork inference and adopted external outputs.
 - [x] Continue and LM Studio metadata-only discovery, including explicit-root isolation.
@@ -525,7 +527,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Shared positioned portable document views: 32 frozen count/discovery scale cases retain flat live Rust heap.
 - [x] LM Studio selected records and variants use schema projections in native/portable readers; lazy ordinary text and thinking retain source spans.
 - [x] Continue selected-record projections with native/portable typed acceptance and source-mutation checks.
-- [ ] Portable giant full-output/compatibility completion; encoded arguments and selected composite payloads.
+- [x] Supported native/portable encoded arguments and selected composite payloads have checked-source retention and independent resolved/full-output compatibility controls.
+- [ ] Giant serialization and compatibility coverage outside the represented producer shapes, including demanded rich metadata and explicit legacy fallbacks.
 - [x] OpenClaw SQLite row/tree replay and registry filtering without whole body collections.
 - [x] Kimi wire output ranges and Zed per-message blob replay.
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
@@ -565,14 +568,18 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Goose legacy discovery uses bounded strict header/count projections; whole-history rewrites deliberately decline resume.
 - [x] Catalog freshness for every primary, including quiet sessions and same-size replacements; guarded scanner cache publication.
 - [x] Frozen-fleet query reduction: successful full/unchanged/append paths, exact common counts and bounded parallel batches; timings exclude discovery.
-- [ ] Limited JSON queries: select exact top-K before reading irrelevant lower-ranked sessions; retain full filtering for totals.
-- [ ] Generic MCP response staging and continuation delivery; preserve command semantics without another read engine.
+- [x] Limited CLI JSON listings rank first and stop fact reduction after exact top-K selection; text listings retain full filtering and exact totals.
+- [ ] Whole-operation limited-listing costs: discovery, text-index set preparation and rank metadata precede selected fact reduction.
+- [x] Generic generated MCP tools stage child stdout/stderr in bounded storage and stream response envelopes; continuation hints, errors and command semantics remain exact.
+- [ ] MCP whole-operation costs: subprocess startup, complete child/client payloads and spool I/O; persistent read-state reuse remains separate.
 - [x] Bounded retained MCP observation and staged HTTP selected-window payloads; owned-route/browser limits recorded.
 - [x] Native JSONL record/output staging for append-only emitters.
 - [x] Native Codex emission uses original guarded lazy sources and incremental whole-report fidelity verification; actual port controls improve memory and CPU.
 - [ ] Claude output record rewrite retention and other emitter/non-native-thinking materialization.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
-- [ ] Prune giant-record retention, shared restamp writing and CPU convergence.
+- [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
+- [ ] Prune owned fallbacks: thinking, declassification, usage corrections, malformed giant records and large selected tool-input metadata.
+- [ ] Prune whole-operation CPU convergence: source validation/canonicalization and staged copying retain historical throughput tradeoffs; use work counts for further comparisons.
 - [x] Stream whole CLI JSON show/export through bounded staging; source-backed selected payloads avoid whole output copies.
 - [x] Exact session-ranked search limits and pre-limit CLI/HTTP filters, including tied scores and current metadata.
 - [x] Measure exact search collector stored-document costs; project stored IDs without decoding unrelated metadata, preserving existing indexes.
@@ -1336,8 +1343,10 @@ pass. Source hardlinks are checked before truncation; existing output inode/perm
 symlinks have regression coverage. No-default-features library checking passes with existing
 unrelated warnings; scoped clippy passes with the known baseline single-element-loop lint excluded.
 
-This is not a bound for changed records or malformed giant records: a single changed 16/64 MiB
-tool result still peaks at 64.070/256.070 MiB. History default peaks are 1.901/2.934 MiB and revival
+At this intermediate revision, a changed 16/64 MiB tool result still peaked at 64.070/256.070 MiB.
+Later source-backed string/user mutation and parent-reroot controls below supersede that result
+for their supported shapes; thinking, declassification, usage corrections and malformed giant
+records still have owned fallbacks. Historical default history peaks were 1.901/2.934 MiB and revival
 1.913/3.450 MiB. Clean allocator-free release timing remains a tradeoff: three alternating trials
 show default history CPU 25.85→56.54 ms (16 MiB), 93.21→202.26 ms (64 MiB); giant ignored CPU
 18.74→62.63 ms and 65.04→220.04 ms. Revival giant CPU 23.70→73.07 ms and 72.60→313.24 ms.
@@ -2160,3 +2169,21 @@ This is not a release or a claim that every pre-push gate has been rerun. The ig
 matrix, package/dist checks, separate desktop workspace, wasm-pack and browser selftest are
 separate gates; the earlier scoped browser result remains 62/62. No new wall-time comparison or
 instruction-count CI threshold was introduced.
+
+### Limited listing operation boundary (2026-10-13 audit)
+
+`cmd/browse.rs::select_refs` ranks JSON candidates before `query::filter_refs_limited`, which
+stops after selecting the required matches. Stable metadata ties, all three sort modes and the
+historical ascending select-then-reverse/existence policy are preserved. Required candidate
+errors still fail the operation; an unread lower-ranked tail cannot fail a completed window.
+Text listings retain full filtering because they print exact totals. A zero-sized selection
+avoids fact-table/body demand, but does not bypass earlier CLI discovery.
+
+The initial deterministic three-candidate control publishes two count rows for a one-match
+window, versus three for complete selection; it does not count every read or byte. The subsequent
+demand-counts change makes one keyed joined-row lookup for one needed cached candidate with
+either eight or 1,024 unrelated catalog rows. Boolean metadata/index decisions can avoid opening
+the counts Reader. These controls and their limits are recorded in
+[`QUERY-WORKFLOW-EVIDENCE.json`](QUERY-WORKFLOW-EVIDENCE.json), under `limited_window_work` and
+`demand_counts_work`. Discovery, rank metadata/sorting and text-index membership preparation
+remain whole-operation costs; this evidence makes no end-to-end speedup claim.
