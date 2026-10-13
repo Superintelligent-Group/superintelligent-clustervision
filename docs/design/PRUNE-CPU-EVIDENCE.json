@@ -1,0 +1,409 @@
+{
+  "controls": {
+    "tool": "valgrind3.24 instruction-only, cache/branch simulation disabled",
+    "architecture": "aarch64",
+    "rayon_workers": 1,
+    "canonical_binary": "/scratch/prune-cpu-control/run/prune_probe",
+    "source_base": "f08377be",
+    "candidate": "samef083 tree with only prune.rs8521d265 (combined701d6c09+8521d265)",
+    "normalization": "only probe seconds omitted; identical canonical paths need no path normalization",
+    "catalog": "fresh empty scratch catalog before each child"
+  },
+  "cases": {
+    "thinking": {
+      "variants": {
+        "before": {
+          "Ir": [
+            221524806,
+            221524539
+          ],
+          "binary_sha256": "06f4414991132cb389335ad4f6abf6297c0f12a510864b8b92d447e516ea1a9b",
+          "command": [
+            "/scratch/prune-cpu-control/run/prune_probe",
+            "/scratch/prune-cpu-control/run/input/source.jsonl",
+            "thinking",
+            "revive"
+          ],
+          "input_sha256": "6899d325fc0171d7b4a0eed399939a76e7b9e47c3a3223f22ec290dbb623f1c7",
+          "input_identity_sha256": "bb07dccc2c4423d216f6e8b46515121d835bfb2c5153dc6fb1de66f2d903fa41",
+          "semantic": {
+            "result": {
+              "result": {
+                "source_id": "old",
+                "new_id": "22222222-2222-4222-8222-222222222222",
+                "new_path": "/scratch/prune-cpu-control/run/input/22222222-2222-4222-8222-222222222222.jsonl",
+                "sidecar_path": "/scratch/prune-cpu-control/run/input/22222222-2222-4222-8222-222222222222.flat.jsonl",
+                "copied_resources": null,
+                "snipped_payloads": 1,
+                "image_blocks": 0,
+                "before_bytes": 8389180,
+                "after_bytes": 797,
+                "tokens_freed": 2396719,
+                "dropped_turns": 0,
+                "window_real_tokens": null,
+                "warnings": [],
+                "dry_run": false
+              },
+              "usage_rewritten": 0,
+              "revive_tokens": null,
+              "revive_old_tokens": null,
+              "heap": null
+            },
+            "generated": {
+              "22222222-2222-4222-8222-222222222222.flat.jsonl": {
+                "bytes": 8388805,
+                "sha256": "ab582f6b28290076c6c8da8df7da5ae524f07d0a37fe6ae6828db5a1af4e06bf"
+              },
+              "22222222-2222-4222-8222-222222222222.jsonl": {
+                "bytes": 797,
+                "sha256": "c0c4ac5e7d278cd7d67e6ce5edbb5b3e9616dd91d12602788664569476f804cb"
+              }
+            }
+          },
+          "native_profiled_parity": true
+        },
+        "after": {
+          "Ir": [
+            83679306,
+            83679717
+          ],
+          "binary_sha256": "929e675b4487e7a488cf986eced5134312e0a6bdd80562bbe5f1e9cf1ec91a02",
+          "command": [
+            "/scratch/prune-cpu-control/run/prune_probe",
+            "/scratch/prune-cpu-control/run/input/source.jsonl",
+            "thinking",
+            "revive"
+          ],
+          "input_sha256": "6899d325fc0171d7b4a0eed399939a76e7b9e47c3a3223f22ec290dbb623f1c7",
+          "input_identity_sha256": "bb07dccc2c4423d216f6e8b46515121d835bfb2c5153dc6fb1de66f2d903fa41",
+          "semantic": {
+            "result": {
+              "result": {
+                "source_id": "old",
+                "new_id": "22222222-2222-4222-8222-222222222222",
+                "new_path": "/scratch/prune-cpu-control/run/input/22222222-2222-4222-8222-222222222222.jsonl",
+                "sidecar_path": "/scratch/prune-cpu-control/run/input/22222222-2222-4222-8222-222222222222.flat.jsonl",
+                "copied_resources": null,
+                "snipped_payloads": 1,
+                "image_blocks": 0,
+                "before_bytes": 8389180,
+                "after_bytes": 797,
+                "tokens_freed": 2396719,
+                "dropped_turns": 0,
+                "window_real_tokens": null,
+                "warnings": [],
+                "dry_run": false
+              },
+              "usage_rewritten": 0,
+              "revive_tokens": null,
+              "revive_old_tokens": null,
+              "heap": null
+            },
+            "generated": {
+              "22222222-2222-4222-8222-222222222222.flat.jsonl": {
+                "bytes": 8388805,
+                "sha256": "ab582f6b28290076c6c8da8df7da5ae524f07d0a37fe6ae6828db5a1af4e06bf"
+              },
+              "22222222-2222-4222-8222-222222222222.jsonl": {
+                "bytes": 797,
+                "sha256": "c0c4ac5e7d278cd7d67e6ce5edbb5b3e9616dd91d12602788664569476f804cb"
+              }
+            }
+          },
+          "native_profiled_parity": true
+        }
+      },
+      "instruction_change_percent": -62.22564712289553,
+      "before_after_exact_parity": true
+    },
+    "usage": {
+      "variants": {
+        "before": {
+          "Ir": [
+            219858059,
+            219857820
+          ],
+          "binary_sha256": "06f4414991132cb389335ad4f6abf6297c0f12a510864b8b92d447e516ea1a9b",
+          "command": [
+            "/scratch/prune-cpu-control/run/prune_probe",
+            "/scratch/prune-cpu-control/run/input/source.jsonl",
+            "revive"
+          ],
+          "input_sha256": "b587f7f48b8caa517890b4d1df20168ee282e340a134d1ca593d7239f8408232",
+          "input_identity_sha256": "657227023e16e52b21d5e0a9d951b6a2f9efd3697a81d6b36fffcee31c876877",
+          "semantic": {
+            "result": {
+              "result": {
+                "source_id": "old",
+                "new_id": "22222222-2222-4222-8222-222222222222",
+                "new_path": "/scratch/prune-cpu-control/run/input/22222222-2222-4222-8222-222222222222.jsonl",
+                "sidecar_path": null,
+                "copied_resources": null,
+                "snipped_payloads": 0,
+                "image_blocks": 0,
+                "before_bytes": 8389606,
+                "after_bytes": 8389737,
+                "tokens_freed": 0,
+                "dropped_turns": 0,
+                "window_real_tokens": null,
+                "warnings": [],
+                "dry_run": false
+              },
+              "usage_rewritten": 1,
+              "revive_tokens": 2396754,
+              "revive_old_tokens": 1000000032,
+              "heap": null
+            },
+            "generated": {
+              "22222222-2222-4222-8222-222222222222.jsonl": {
+                "bytes": 8389737,
+                "sha256": "ded2f61cb711629fdddb24d6b8649d19af83a4cf0264d27e23b7afad46b2ca5c"
+              }
+            }
+          },
+          "native_profiled_parity": true
+        },
+        "after": {
+          "Ir": [
+            261876144,
+            261876144
+          ],
+          "binary_sha256": "929e675b4487e7a488cf986eced5134312e0a6bdd80562bbe5f1e9cf1ec91a02",
+          "command": [
+            "/scratch/prune-cpu-control/run/prune_probe",
+            "/scratch/prune-cpu-control/run/input/source.jsonl",
+            "revive"
+          ],
+          "input_sha256": "b587f7f48b8caa517890b4d1df20168ee282e340a134d1ca593d7239f8408232",
+          "input_identity_sha256": "657227023e16e52b21d5e0a9d951b6a2f9efd3697a81d6b36fffcee31c876877",
+          "semantic": {
+            "result": {
+              "result": {
+                "source_id": "old",
+                "new_id": "22222222-2222-4222-8222-222222222222",
+                "new_path": "/scratch/prune-cpu-control/run/input/22222222-2222-4222-8222-222222222222.jsonl",
+                "sidecar_path": null,
+                "copied_resources": null,
+                "snipped_payloads": 0,
+                "image_blocks": 0,
+                "before_bytes": 8389606,
+                "after_bytes": 8389737,
+                "tokens_freed": 0,
+                "dropped_turns": 0,
+                "window_real_tokens": null,
+                "warnings": [],
+                "dry_run": false
+              },
+              "usage_rewritten": 1,
+              "revive_tokens": 2396754,
+              "revive_old_tokens": 1000000032,
+              "heap": null
+            },
+            "generated": {
+              "22222222-2222-4222-8222-222222222222.jsonl": {
+                "bytes": 8389737,
+                "sha256": "ded2f61cb711629fdddb24d6b8649d19af83a4cf0264d27e23b7afad46b2ca5c"
+              }
+            }
+          },
+          "native_profiled_parity": true
+        }
+      },
+      "instruction_change_percent": 19.11152473981954,
+      "before_after_exact_parity": true
+    }
+  },
+  "source": {
+    "base": "f08377be",
+    "candidate_prune_revision": "8521d265",
+    "candidate_method": "onlyprune.rs8521d265 appliedto samef083 tree",
+    "source_tree_sha256": {
+      "before": "e5d85697a0cc2068c00519020cb56e99025d95af1e779a5f95a9284238c788ab",
+      "after": "080b59ca33b98b58b156863802554d6b33c39d4c0bb75c100d0e4fb6bed5f37e",
+      "fixed": "6084c28415b77cd30ee051a0a843a894ebcf2cff6e2608b9be93f8226f6bcfe5"
+    },
+    "source_hash_exclusion": "runtime Python __pycache__ only",
+    "archive_sha256": "79d9a593b41ae7191778418fd89572b91a96cb1bac1f394baa1305c33378cfa7",
+    "prune_rs_sha256": {
+      "before": "2f3c4d80de9c88d8a84a745e2e6f38fb84a25b89b819ead3ff23ee2b322cc37d",
+      "after": "3b95aa39d0fdc73ad0eb38947f7cb8afc95969ef253a6521de8c133b2f7c0237",
+      "fixed": "bcfc689df3314359b253cd5b296cdd0bbb47f6dbca1b1332a4c59eaa95e30b58"
+    },
+    "binary_sha256": {
+      "before": "06f4414991132cb389335ad4f6abf6297c0f12a510864b8b92d447e516ea1a9b",
+      "after": "929e675b4487e7a488cf986eced5134312e0a6bdd80562bbe5f1e9cf1ec91a02",
+      "fixed": "7ab09582e0f5ca73ab10c2de3dea10d8b9691c975d0973f6f80e1d616555325c"
+    },
+    "source_changes": [
+      "crates/cv-core/src/prune.rs"
+    ]
+  },
+  "build": {
+    "rustc": "1.99.0 b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+    "llvm": "23.1.1",
+    "profile": "release opt-level3 thinLTO debug1",
+    "core_features": "default: mmap,sqlite,parallel",
+    "rustflags": "",
+    "image_manifest": [
+      "debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f"
+    ],
+    "cpus": 3,
+    "memory_bytes": 8589934592
+  },
+  "fixtures": {
+    "thinking": {
+      "original": "/Users/ember/dev/cv-worktrees/prune-projection-evidence/thinking-16/source.jsonl",
+      "original_sha256": "8bd960e626d1c93a156192262475c521e2c49e4e0648e680c6ccf70ad6b392e2",
+      "derived_sha256": "6899d325fc0171d7b4a0eed399939a76e7b9e47c3a3223f22ec290dbb623f1c7",
+      "derived_bytes": 8389180,
+      "transformation": "one contiguous16MiB ASCII x demanded string reduced to8MiB; all other bytes unchanged",
+      "modes": [
+        "thinking",
+        "revive"
+      ]
+    },
+    "usage": {
+      "original": "/Users/ember/dev/cv-worktrees/prune-projection-evidence/usage-text-16/source.jsonl",
+      "original_sha256": "6e087fff794c79b37540f8bdb15446def85f9a15467cdc4bafe148f34f1ec8ba",
+      "derived_sha256": "b587f7f48b8caa517890b4d1df20168ee282e340a134d1ca593d7239f8408232",
+      "derived_bytes": 8389606,
+      "transformation": "one contiguous16MiB ASCII x demanded string reduced to8MiB; all other bytes unchanged",
+      "modes": [
+        "revive"
+      ]
+    }
+  },
+  "usage_attribution": {
+    "full_function_hot_deltas": [
+      {
+        "function": "cv_core::prune::revive_staged",
+        "before": 1545,
+        "after": 86393110,
+        "delta": 86391565
+      },
+      {
+        "function": "cv_core::json::write_raw::<alloc::io::buffered::bufwriter::BufWriter<cv_core::harness::store::bytes::ByteStage>>",
+        "before": 0,
+        "after": 7340589,
+        "delta": 7340589
+      },
+      {
+        "function": "memchr::memmem::searcher::searcher_kind_neon",
+        "before": 6291493,
+        "after": 12582986,
+        "delta": 6291493
+      },
+      {
+        "function": "cv_core::harness::store::json::value_compatible_str_at_depth_with::<cv_core::harness::store::document::accepts_value_at_depth::{closure#0}>",
+        "before": 2363774,
+        "after": 4727575,
+        "delta": 2363801
+      },
+      {
+        "function": "cv_core::harness::store::document::string_end",
+        "before": 12806,
+        "after": 32601,
+        "delta": 19795
+      },
+      {
+        "function": "cv_core::harness::store::document::value_end",
+        "before": 9358,
+        "after": 24159,
+        "delta": 14801
+      },
+      {
+        "function": "<memchr::arch::aarch64::neon::memchr::One>::find_raw",
+        "before": 3285,
+        "after": 8442,
+        "delta": 5157
+      },
+      {
+        "function": "cv_core::harness::store::json::valid_unicode_escapes",
+        "before": 4824,
+        "after": 9675,
+        "delta": 4851
+      },
+      {
+        "function": "<cv_core::harness::store::document::ObjectIter as core::iter::traits::iterator::Iterator>::next",
+        "before": 0,
+        "after": 4489,
+        "delta": 4489
+      },
+      {
+        "function": "<serde_json::de::Deserializer<serde_json::read::StrRead>>::ignore_value",
+        "before": 4317,
+        "after": 6952,
+        "delta": 2635
+      },
+      {
+        "function": "free",
+        "before": 58494,
+        "after": 61052,
+        "delta": 2558
+      }
+    ],
+    "source_line": {
+      "file": "crates/cv-core/src/prune.rs",
+      "line": 1956,
+      "instructions": 41945920,
+      "note": "direct source-line attribution; inlined iterator work is attributed separately"
+    },
+    "framing_proposal": "leadingposition onlyuntilfirstnonwhite + reverse-trailingboundary perbuffer; canonicalvalidation unchanged"
+  },
+  "usage_fixed": {
+    "Ir": [
+      177986646,
+      177986591
+    ],
+    "binary_sha256": "7ab09582e0f5ca73ab10c2de3dea10d8b9691c975d0973f6f80e1d616555325c",
+    "input_sha256": "b587f7f48b8caa517890b4d1df20168ee282e340a134d1ca593d7239f8408232",
+    "input_identity_sha256": "657227023e16e52b21d5e0a9d951b6a2f9efd3697a81d6b36fffcee31c876877",
+    "semantic": {
+      "result": {
+        "result": {
+          "source_id": "old",
+          "new_id": "22222222-2222-4222-8222-222222222222",
+          "new_path": "/scratch/prune-cpu-control/run/input/22222222-2222-4222-8222-222222222222.jsonl",
+          "sidecar_path": null,
+          "copied_resources": null,
+          "snipped_payloads": 0,
+          "image_blocks": 0,
+          "before_bytes": 8389606,
+          "after_bytes": 8389737,
+          "tokens_freed": 0,
+          "dropped_turns": 0,
+          "window_real_tokens": null,
+          "warnings": [],
+          "dry_run": false
+        },
+        "usage_rewritten": 1,
+        "revive_tokens": 2396754,
+        "revive_old_tokens": 1000000032,
+        "heap": null
+      },
+      "generated": {
+        "22222222-2222-4222-8222-222222222222.jsonl": {
+          "bytes": 8389737,
+          "sha256": "ded2f61cb711629fdddb24d6b8649d19af83a4cf0264d27e23b7afad46b2ca5c"
+        }
+      }
+    },
+    "native_profiled_before_after_parity": true,
+    "change_percent_vs_before": -19.044716372410107,
+    "change_percent_vs_candidate": -32.03404640783164
+  },
+  "fixed_production_commit": "44a1396b",
+  "fixed_isolation": "f08377be with onlyprune.rs from44a1396b; owner tests tracked separately",
+  "sampled_operations": 2,
+  "cachegrind_children": 10,
+  "native_children": 5,
+  "limits": [
+    "Linux ARM64 guest user-space instructions, not elapsed time or native Apple Silicon behavior.",
+    "Generated transcript/sidecar creation/publication and result serialization included; fixture/reset/hash/copy setup excluded.",
+    "Onlyprobe seconds omitted from semantic result; generated file lengths/SHA256 and every otherresult/revive field matched.",
+    "Thinking fixed8MiB+revive and one usage-corrected unchanged8MiB textbody only; no16/64matrix or arbitraryUnicode/whitespace scaling claim.",
+    "Exactsource trees differ onlyin prune.rs; runtimePython bytecode excludedfrom treefingerprints.",
+    "Sourcehashes and affectedcrate forcedcompilation plus distinctbinaryhashes establish variantidentity.",
+    "An initial19.112% usageCPU regression was found andfixed; originalcandidate evidence retained."
+  ]
+}

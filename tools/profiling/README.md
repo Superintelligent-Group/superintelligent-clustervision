@@ -400,3 +400,24 @@ record and preserves the final bytes and original seed. Build diagnostic source
 with [the composed patch](results/listing-append-composition-diagnostic.patch) at
 `99c8d421`; whole-operation counters include suffix framing **and** sampled-prefix
 validation. Exact source and result are recorded in QUERY-WORKFLOW-EVIDENCE.json.
+
+### Mutating prune operation CPU controls
+
+`prune-cpu-control.py` uses existing fingerprint/Valgrind controls on actual
+prune_probe: Thinking+revive and usage-corrected unchanged-body 8 MiB fixtures.
+Build default-feature release examples without probe-heap, at the same flags above.
+Task-owned paths `/scratch/prune-cpu-control/{before,after,target,prune-before,
+prune-after,fixtures}` are explicit in the driver. Before source is f08377be;
+after replaces only prune.rs with8521d265. For fixtures, copy the previous synthetic
+prune-projection thinking-16 and usage-text-16 sources, replacing their unique
+contiguous 16 MiB x string with 8 MiB; retain every other byte. Exact original/derived
+hashes and full build/source/binary controls are in PRUNE-CPU-EVIDENCE.json.
+
+The runner removes only generated sibling files and its own scratch catalog between
+children, keeping source inode/content/metadata fixed. Counted child writes its
+actual outputs; setup/fingerprinting is excluded. `prune-usage-framing-control.py`
+reuses the original usage source and baseline semantics for only the two focused
+fixed repeats (prune.rs44a1396b). Raw artifacts and warmed exclusive target remain
+in the stopped cv-cachegrind-control volume `/scratch/prune-cpu-control`; host copy
+and report: `/Users/ember/dev/cv-worktrees/prune-cpu-evidence`. No other container
+artifacts, installed binary or real stores were changed.

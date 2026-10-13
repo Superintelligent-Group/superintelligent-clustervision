@@ -3138,3 +3138,43 @@ interval. The five cases replace a repeated before/after/size/escape matrix in C
 deleted after verification rather than retaining all large inputs/outputs together. The gates do not
 claim portable CLI coverage, CPU speed, mmap/RSS bounds, or bounded ownership of requested large
 output. Existing exact owned-operation controls remain separate evidence.
+
+### Actual prune turn/usage instruction controls (Sol, 2026-10-13)
+
+The memory wins now have whole-operation CPU evidence in PRUNE-CPU-EVIDENCE.json.
+Pinned ARM64 Linux Cachegrind,3 CPUs / 8 GiB, Rust 1.99, release opt-level3/ThinLTO/
+debuginfo 1, default core features, no allocation instrumentation, one Rayon worker.
+The baseline is `f08377be`; the initial candidate is that **same source tree with
+only prune.rs from 8521d265** (combined701d6c09+8521d265), not unrelated integration.
+The fixed candidate substitutes only prune.rs from 44a1396b. Forced affected-crate
+compilation and distinct source-tree/binary hashes reject the earlier mtime pitfall.
+
+Two existing synthetic semantic fixtures retain all bytes except their single 16 MiB
+ASCII x string shortened to 8 MiB. Actual prune_probe includes transcript/sidecar
+staging, generated output publication and all result serialization. Setup, restored
+absent destinations/empty scratch catalog and hashes are outside the counted child.
+Only probe seconds are normalized; all other result/revive fields and full generated
+file lengths/SHA256 match native/profiled and old/new. No real stores or timing campaign.
+
+| Operation | f083 Ir repeats | Initial source projection Ir | Final Ir | Change versus f083 |
+|---|---:|---:|---:|---:|
+| Thinking+revive |221,524,806 /221,524,539|83,679,306 /83,679,717|unchanged control|62.226% fewer|
+| Usage-corrected unchanged Text+revive |219,858,059 /219,857,820|261,876,144 /261,876,144|177,986,646 /177,986,591|19.045% fewer|
+
+The initial usage route regressed 19.112%. Attribution credits41,945,920 instructions
+at the scalar whitespace-test source line; full function attribution (including
+inlined iterator work) grows revive_staged from 1,545 to 86,393,110. MarkerWriter's
+67,108,340 comparison-source instructions are unchanged, so removing its necessary
+marker scan would not address this regression. Source/function attribution is disjoint
+work with inline locations, not inclusive call-tree costs or elapsed time.
+
+The owner fixed only framing: leading position until the first nonwhite byte, then
+reverse trailing boundary per chunk, retaining prior end for whitespace-only chunks.
+Checked staged-value validation/canonical write/source guards remain. Two additional
+usage repeats on the original frozen source inode recover 32.034% versus the initial
+candidate and expose the 19.045% win versus f083. Owner oracles cover mixed framing,
+CRLF, two whole whitespace-only buffers at each boundary and truncated private EOF;
+clippy passes and the native 64 MiB heap peak remains 1,317,890 bytes. Ten instrumented
+children total (eight original matched controls plus two focused recovery runs), no
+second scale matrix. Unicode declassification/oversized usage and other operations
+retain their earlier explicit fallback boundaries; this is not an across-product CPU claim.
