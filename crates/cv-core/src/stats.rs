@@ -7,12 +7,14 @@
 //! the dashboard used to accumulate its own totals from whichever sessions the user had clicked,
 //! and said so in the UI.
 
-use crate::ir::{home_rel, Harness, Message, SessionRef, Usage};
+use crate::ir::{Harness, Message, SessionRef, Usage, home_rel};
 use crate::spill::{ExactStrings, Ordered, Record};
 use crate::stream::{Flow, ParseOptions};
+#[cfg(feature = "sqlite")]
+mod usage_cache;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
@@ -201,51 +203,111 @@ pub(crate) fn usage_key(h: Harness, m: &Message) -> Option<String> {
 /// A transcript is staged until EOF: failures discard every hit and missing per-message models
 /// use the final session model. The bounded spool preserves record and floating-point order.
 struct UsageBatch {
-    hits: Ordered<UsageHit>,
+    hits: UsageRecords,
     fallback_model: String,
+    #[cfg(feature = "sqlite")]
+    publication: Option<(SessionRef, crate::source::Snapshot)>,
+}
+enum UsageRecords {
+    Staged(Ordered<UsageHit>),
+    #[cfg(feature = "sqlite")]
+    Cached(usage_cache::CachedRows),
+}
+impl UsageRecords {
+    fn rows(self) -> Result<Box<dyn Iterator<Item = Result<UsageHit>>>> {
+        Ok(match self {
+            Self::Staged(hits) => Box::new(hits.rows()?),
+            #[cfg(feature = "sqlite")]
+            Self::Cached(rows) => Box::new(rows),
+        })
+    }
 }
 
-fn usage_hits(r: &SessionRef) -> Result<Option<UsageBatch>> {
+fn usage_hits(
+    r: &SessionRef,
+    #[cfg(feature = "sqlite")] cache: Option<&usage_cache::Cache>,
+) -> Result<Option<UsageBatch>> {
     let Some(adapter) = crate::harness::for_harness(r.harness) else {
         return Ok(None);
     };
-    let mut hits = Ordered::default();
-    let mut spill_error = None;
-    // Usage identity is selected without materializing unrelated rich sidecars.
-    let session = adapter.try_stream(r, &ParseOptions::usage(), &mut |m: Message| {
-        if let Some(usage) = m
-            .usage
-            .as_ref()
-            .filter(|u| u.total_tokens() > 0 || u.cost_usd.is_some())
-        {
-            if let Err(error) = hits.push(UsageHit {
-                key: usage_key(r.harness, &m),
-                harness: r.harness,
-                model: m.model.clone().unwrap_or_default(),
-                usage: usage.clone(),
-            }) {
-                spill_error = Some(error);
-                return Flow::Stop;
+    #[cfg(feature = "sqlite")]
+    // Tiny native transcripts cost less to parse than to validate and replay a ledger.
+    let cache = cache.filter(|_| {
+        !matches!(r.harness, Harness::Claude | Harness::Codex)
+            || std::fs::metadata(adapter.resume_source(r)).is_ok_and(|metadata| metadata.len() >= 64 * 1024)
+    });
+    #[cfg(feature = "sqlite")]
+    let source = cache.map(|_| crate::source::Probe::default().snapshot(r));
+    #[cfg(feature = "sqlite")]
+    if let Some(batch) = cache.and_then(|cache| cache.load(r, source.as_ref()?)) {
+        return Ok(Some(batch));
+    }
+    struct Sink {
+        hits: Ordered<UsageHit>,
+        harness: Harness,
+        error: Option<anyhow::Error>,
+        #[cfg(feature = "sqlite")]
+        reads: Option<crate::source::ReadSet>,
+    }
+    impl crate::MessageSink for Sink {
+        fn message(&mut self, m: Message) -> Flow {
+            if let Some(usage) = m
+                .usage
+                .as_ref()
+                .filter(|u| u.total_tokens() > 0 || u.cost_usd.is_some())
+            {
+                if let Err(error) = self.hits.push(UsageHit {
+                    key: usage_key(self.harness, &m),
+                    harness: self.harness,
+                    model: m.model.clone().unwrap_or_default(),
+                    usage: usage.clone(),
+                }) {
+                    self.error = Some(error);
+                    return Flow::Stop;
+                }
+            }
+            Flow::Continue
+        }
+        #[cfg(feature = "sqlite")]
+        fn dependency(&mut self, path: &std::path::Path) {
+            if let Some(reads) = &mut self.reads {
+                reads.record(path);
             }
         }
-        Flow::Continue
-    });
-    if let Some(error) = spill_error {
+    }
+    let mut sink = Sink {
+        hits: Ordered::default(),
+        harness: r.harness,
+        error: None,
+        #[cfg(feature = "sqlite")]
+        reads: source.as_ref().map(|_| Default::default()),
+    };
+    #[cfg(feature = "sqlite")]
+    if let Some(reads) = &mut sink.reads {
+        reads.record(&adapter.resume_source(r));
+    }
+    // Usage identity is selected without materializing unrelated rich sidecars.
+    let session = adapter.try_stream(r, &ParseOptions::usage(), &mut sink);
+    if let Some(error) = sink.error.take() {
         return Err(error);
     }
     let Ok(session) = session else {
         return Ok(None);
     };
     Ok(Some(UsageBatch {
-        hits,
+        hits: UsageRecords::Staged(sink.hits),
         fallback_model: session.model.unwrap_or_else(|| "(unknown)".into()),
+        #[cfg(feature = "sqlite")]
+        publication: source
+            .zip(sink.reads)
+            .map(|(source, reads)| (r.clone(), source.with_reads(&reads))),
     }))
 }
 
 /// Binary usage rows keep cost bits exactly; serializing floats through a JSON staging codec
 /// would add a second conversion and could change rounding before the ordered sum.
 impl Record for UsageHit {
-    type ReadState = ();
+    type ReadState = Option<usize>;
     fn heap_bytes(&self) -> usize {
         self.key.as_ref().map_or(0, String::capacity) + self.model.capacity()
     }
@@ -268,12 +330,12 @@ impl Record for UsageHit {
         }
         Ok(())
     }
-    fn read(reader: &mut impl BufRead, _: &mut ()) -> Result<Self> {
-        let key = read_string(reader)?;
-        let harness = read_string(reader)?
+    fn read(reader: &mut impl BufRead, limit: &mut Option<usize>) -> Result<Self> {
+        let key = read_string(reader, *limit)?;
+        let harness = read_string(reader, *limit)?
             .and_then(|s| Harness::parse(&s))
             .context("invalid usage spool harness")?;
-        let model = read_string(reader)?.context("missing usage spool model")?;
+        let model = read_string(reader, *limit)?.context("missing usage spool model")?;
         let mut fields = [None; 6];
         for field in &mut fields {
             let mut flag = [0];
@@ -311,7 +373,7 @@ fn write_string(writer: &mut impl Write, value: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
-fn read_string(reader: &mut impl BufRead) -> Result<Option<String>> {
+fn read_string(reader: &mut impl BufRead, limit: Option<usize>) -> Result<Option<String>> {
     let mut flag = [0];
     reader.read_exact(&mut flag)?;
     match flag[0] {
@@ -320,6 +382,10 @@ fn read_string(reader: &mut impl BufRead) -> Result<Option<String>> {
             let mut bytes = [0; 8];
             reader.read_exact(&mut bytes)?;
             let len = usize::try_from(u64::from_le_bytes(bytes)).context("usage spool string too large")?;
+            anyhow::ensure!(
+                limit.is_none_or(|limit| len <= limit),
+                "usage cache string exceeds source budget"
+            );
             let mut bytes = vec![0; len];
             reader.read_exact(&mut bytes)?;
             Ok(Some(String::from_utf8(bytes).context("invalid usage spool UTF-8")?))
@@ -346,22 +412,56 @@ fn parse_workers() -> usize {
     }
 }
 
-fn parse_chunk(refs: &[SessionRef]) -> Vec<Result<Option<UsageBatch>>> {
+fn parse_chunk(
+    refs: &[SessionRef],
+    #[cfg(feature = "sqlite")] cache: Option<&usage_cache::Cache>,
+) -> Vec<Result<Option<UsageBatch>>> {
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
         // Indexed collection preserves input order even when workers finish out of order.
-        refs.par_iter().map(usage_hits).collect()
+        refs.par_iter()
+            .map(|r| {
+                usage_hits(
+                    r,
+                    #[cfg(feature = "sqlite")]
+                    cache,
+                )
+            })
+            .collect()
     }
     #[cfg(not(feature = "parallel"))]
     {
-        refs.iter().map(usage_hits).collect()
+        refs.iter()
+            .map(|r| {
+                usage_hits(
+                    r,
+                    #[cfg(feature = "sqlite")]
+                    cache,
+                )
+            })
+            .collect()
     }
 }
 
 impl TokenStats {
     /// Ordinary source parse failures are counted; temporary storage failures are returned.
     pub fn compute(refs: &[SessionRef]) -> Result<TokenStats> {
+        let result = Self::compute_pass(refs, true);
+        #[cfg(feature = "sqlite")]
+        if result
+            .as_ref()
+            .is_err_and(|error| error.downcast_ref::<usage_cache::ReadError>().is_some())
+        {
+            // No totals leave a failed pass. Corrupt cached bytes are evicted and a complete
+            // source pass recovers the result; the ordered exact-ID fold starts afresh.
+            return Self::compute_pass(refs, false);
+        }
+        result
+    }
+    fn compute_pass(refs: &[SessionRef], _reuse: bool) -> Result<TokenStats> {
+        #[cfg(feature = "sqlite")]
+        let cache = usage_cache::Cache::new();
         let mut stats = TokenStats {
             sessions: refs.len(),
             ..TokenStats::default()
@@ -373,22 +473,48 @@ impl TokenStats {
         // Main sessions precede every subagent, matching the existing first-response-ID oracle.
         for group in [refs, subs.as_slice()] {
             for chunk in group.chunks(parse_workers()) {
-                let parsed = parse_chunk(chunk);
+                let parsed = parse_chunk(
+                    chunk,
+                    #[cfg(feature = "sqlite")]
+                    if _reuse { cache.as_ref() } else { None },
+                );
                 for batch in parsed {
                     match batch? {
                         None => stats.failed += 1,
                         Some(batch) => {
+                            #[cfg(feature = "sqlite")]
+                            let mut publisher = batch.publication.and_then(|(r, source)| {
+                                cache
+                                    .as_ref()
+                                    .and_then(|cache| cache.publisher(r, source, &batch.fallback_model))
+                            });
                             for hit in batch.hits.rows()? {
                                 let mut hit = hit?;
+                                #[cfg(feature = "sqlite")]
+                                if let Some(publisher) = &mut publisher {
+                                    publisher.hit(&hit);
+                                }
                                 if hit.model.is_empty() {
                                     hit.model.clone_from(&batch.fallback_model);
                                 }
                                 fold.add(hit)?;
                             }
+                            #[cfg(feature = "sqlite")]
+                            if let Some(publisher) = publisher {
+                                publisher.finish();
+                            }
                         }
                     }
                 }
+                #[cfg(feature = "sqlite")]
+                if let Some(cache) = &cache {
+                    cache.finish_chunk();
+                }
             }
+        }
+        #[cfg(feature = "sqlite")]
+        if let Some(cache) = &cache {
+            cache.finish();
         }
         fold.finish(&mut stats);
         Ok(stats)
@@ -711,7 +837,7 @@ mod tests {
             );
             let mut bytes = Vec::new();
             row.write(&mut bytes).unwrap();
-            let decoded = UsageHit::read(&mut std::io::Cursor::new(bytes), &mut ()).unwrap();
+            let decoded = UsageHit::read(&mut std::io::Cursor::new(bytes), &mut None).unwrap();
             assert_eq!(decoded.usage.cost_usd.unwrap().to_bits(), cost.to_bits());
         }
     }
@@ -792,7 +918,7 @@ mod tests {
         let world = cv_testkit::World::in_process("token-stats-parallel-oracle");
         let mut refs = Vec::new();
         for (i, model) in ["first", "ignored", "ignored-again"].into_iter().enumerate() {
-            let value = json!({"type":"assistant","uuid":format!("a{i}"),"message":{
+            let value = json!({"padding":"x".repeat(64 * 1024),"type":"assistant","uuid":format!("a{i}"),"message":{
                 "id":"shared-response","role":"assistant","model":model,
                 "content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":i + 1,"output_tokens":2}}});
             let path = world.write_session(&format!("claude-{i}"), &[value]);
@@ -860,6 +986,64 @@ mod tests {
         }
         #[cfg(not(feature = "parallel"))]
         check();
+        #[cfg(feature = "sqlite")]
+        for r in &refs[..3] {
+            assert!(
+                usage_cache::Cache::new()
+                    .unwrap()
+                    .load(r, &crate::source::Probe::default().snapshot(r))
+                    .is_some()
+            );
+        }
+        refs.reverse();
+        let reordered = TokenStats::compute(&refs).unwrap();
+        assert_eq!(reordered.to_json(), legacy_compute(&refs).to_json());
+        #[cfg(feature = "sqlite")]
+        {
+            // Damaged persistent bytes must restart the entire ordered fold, including IDs
+            // already encountered in earlier files, and replace the cache from real sources.
+            let r = refs
+                .iter()
+                .find(|r| r.harness == Harness::Claude && r.id != "missing")
+                .unwrap();
+            crate::catalog::open_db()
+                .unwrap()
+                .execute(
+                    "UPDATE usage_chunks SET payload=zeroblob(65537) WHERE harness=?1 AND id=?2 AND path=?3",
+                    rusqlite::params![r.harness.as_str(), r.id, r.path.to_string_lossy()],
+                )
+                .unwrap();
+            assert_eq!(
+                TokenStats::compute(&refs).unwrap().to_json(),
+                legacy_compute(&refs).to_json()
+            );
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn tiny_native_sources_parse_without_publishing_usage_cache() {
+        let world = cv_testkit::World::in_process("token-stats-tiny");
+        let path = world.write_session(
+            "tiny",
+            &[json!({"type":"assistant","message":{
+            "id":"one","role":"assistant","model":"small","content":[],
+            "usage":{"input_tokens":3,"output_tokens":7}}})],
+        );
+        let r = SessionRef::new("tiny", Harness::Claude, path);
+        let expected = legacy_compute(std::slice::from_ref(&r)).to_json();
+        for _ in 0..2 {
+            assert_eq!(
+                TokenStats::compute(std::slice::from_ref(&r)).unwrap().to_json(),
+                expected
+            );
+        }
+        assert!(
+            usage_cache::Cache::new()
+                .unwrap()
+                .load(&r, &crate::source::Probe::default().snapshot(&r))
+                .is_none()
+        );
     }
 
     #[test]
@@ -874,7 +1058,8 @@ mod tests {
         std::fs::create_dir_all(&subs).unwrap();
         let line = |uuid: &str, id: &str, model: &str, text: &str| {
             format!(
-                r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"2026-09-01T00:00:00Z","message":{{"id":"{id}","role":"assistant","model":"{model}","content":[{{"type":"text","text":"{text}"}}],"usage":{{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":20,"output_tokens":7}}}}}}"#
+                r#"{{"padding":"{}","type":"assistant","uuid":"{uuid}","timestamp":"2026-09-01T00:00:00Z","message":{{"id":"{id}","role":"assistant","model":"{model}","content":[{{"type":"text","text":"{text}"}}],"usage":{{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":20,"output_tokens":7}}}}}}"#,
+                "x".repeat(64 * 1024)
             )
         };
         let parent = proj.join("sess.jsonl");
@@ -898,6 +1083,8 @@ mod tests {
             message_count: 1,
         };
         let t = TokenStats::compute(&[sref("sess", &parent), sref("resumed", &resumed)]).unwrap();
+        let warm = TokenStats::compute(&[sref("sess", &parent), sref("resumed", &resumed)]).unwrap();
+        assert_eq!(warm.to_json(), t.to_json());
         std::fs::remove_dir_all(&root).ok();
 
         assert_eq!((t.sessions, t.subagents, t.failed), (2, 1, 0));
