@@ -117,6 +117,7 @@ impl std::fmt::Display for ThinkingMode {
 }
 
 /// An emitter: writes one IR session into one harness's native on-disk format.
+/// Registered writers must accept guarded lazy fields and apply thinking policy per block.
 type EmitFn = fn(&Session, &Path, &EmitOptions) -> Result<EmitResult>;
 
 /// The ONE emit registry: which harnesses can be written, and by what. [`emit`] dispatches through
@@ -146,25 +147,6 @@ fn emitter_for(target: Harness) -> Option<EmitFn> {
     })
 }
 
-/// Targets whose native writer consumes guarded lazy leaves without owning their payloads.
-pub(crate) fn checked_target(target: Harness) -> bool {
-    matches!(
-        target,
-        Harness::Claude
-            | Harness::Codex
-            | Harness::Gemini
-            | Harness::Cline
-            | Harness::Roo
-            | Harness::Continue
-            | Harness::LmStudio
-            | Harness::OpenCode
-            | Harness::Hermes
-            | Harness::Grok
-            | Harness::Qwen
-            | Harness::OpenClaw
-    )
-}
-
 /// Emit `session` into `target`'s native format under `out_dir` (the target harness's storage root,
 /// or any directory for a dry run). Returns where it was written + how to resume it.
 pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
@@ -175,32 +157,9 @@ pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptio
     let Some(f) = emitter_for(target) else {
         anyhow::bail!("emit to {target} is not supported yet");
     };
-    // Guard: emitters read content via `msg.text()`/`Deref`, which PANICS on an unresolved lazy
-    // [`Span`](crate::lazy::Span) — and a span that reached `serde_json::to_value` would serialize
-    // as its `{source,off,len}` struct, shipping garbage into the target file. A lazily-parsed
-    // session must be resolved before it hits an emitter; do it here (on a clone, since `emit`
-    // takes `&Session`) so no caller can forget. Checked targets consume lazy fields
-    // directly through staged writers. Checked writers project all thinking modes
-    // per block, preserving direct-emitter and dispatch equality without materializing the session.
-    //
-    // [`ThinkingMode`] is applied in the same place and on the same clone, for the same reason: it
-    // remains the shared fallback for emitters without a checked block writer. It runs AFTER
-    // materialization (it reads `Thinking.text`).
-    let mut owned: Option<Session> = None;
-    if checked_target(target) {
-        return f(session, out_dir, opts);
-    }
-    if has_unresolved_spans(session) {
-        let mut s = session.clone();
-        s.materialize()?;
-        owned = Some(s);
-    }
-    if opts.thinking != ThinkingMode::Native {
-        let mut s = owned.take().unwrap_or_else(|| session.clone());
-        apply_thinking_mode(&mut s, target, opts.thinking);
-        owned = Some(s);
-    }
-    f(owned.as_ref().unwrap_or(session), out_dir, opts)
+    // Every registered writer consumes guarded fields and projects thinking per block.
+    // Keep that contract at the writer boundary so direct and dispatched emission agree.
+    f(session, out_dir, opts)
 }
 
 #[cfg(test)]
@@ -212,6 +171,7 @@ pub(crate) fn project_owned_thinking_for_test(session: &mut Session, target: Har
 /// A no-op under [`ThinkingMode::Native`] (the emitters' own drop-what-I-cannot-write behaviour is
 /// already that mode). [`thinking_fate`] is the single decision function, shared with
 /// [`block_survives`] so the verifier's idea of what survives cannot drift from what is written.
+#[cfg(test)]
 fn apply_thinking_mode(session: &mut Session, target: Harness, mode: ThinkingMode) {
     if mode == ThinkingMode::Native {
         return;
@@ -348,6 +308,7 @@ fn has_unresolved_spans(session: &Session) -> bool {
 
 /// Resolve complete values before a full-output consumer touches them. Ordinary owned sessions
 /// borrow without a clone; a failed source read returns before native output is created.
+#[cfg(test)]
 pub(crate) fn materialized_session(session: &Session) -> Result<std::borrow::Cow<'_, Session>> {
     if has_unresolved_spans(session) {
         let mut owned = session.clone();
@@ -512,9 +473,9 @@ pub fn prepare_selected(
     prepare::selected(adapter, reference, &options, start, end)
 }
 
-/// Parse at native emission fidelity. Checked Claude, Codex, Gemini, Cline/Roo, Continue and
-/// LM Studio targets retain guarded full or complete bodies. Other targets and unsupported
-/// producer shapes keep owned compatibility paths. Public full and complete parsing still own
+/// Parse at native emission fidelity. Every supported writer accepts guarded full bodies;
+/// same-target complete preparation opts in only for verified producer contracts. Unsupported
+/// producer shapes keep their owned compatibility paths. Public full and complete parsing still own
 /// bodies by default; this preparation explicitly opts into checked sources.
 pub fn parse_for_emit(
     adapter: &dyn crate::harness::Adapter,
@@ -526,7 +487,7 @@ pub fn parse_for_emit(
     } else {
         ParseOptions::full()
     };
-    let checked = checked_target(target)
+    let checked = emitter_for(target).is_some()
         && (reference.harness != target
             || matches!(
                 target,
