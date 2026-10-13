@@ -1,9 +1,13 @@
 //! Strict metadata/validation before selected messages. Stream operations decode once into
 //! bounded memory or a private spill; compressed offsets never become transcript spans.
 
+mod count;
+
 use super::{legacy_message, modern_message};
 use crate::harness::store::{bytes::ByteSource, DiscardValue};
-use crate::ir::{Message, Role};
+use crate::ir::Message;
+#[cfg(test)]
+use crate::ir::Role;
 use crate::stream::Flow;
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
@@ -257,16 +261,10 @@ impl<'de> Visitor<'de> for Root<'_> {
             if key == "messages" {
                 out.last_messages = Some(member);
                 let mut count = 0;
-                if self.count || self.target == Some(member) {
-                    let mut emit = |m: Message| {
-                        if self.count {
-                            count += usize::from(matches!(m.role, Role::User | Role::Assistant));
-                            Flow::Continue
-                        } else {
-                            (self.f)(m)
-                        }
-                    };
-                    map.next_value_seed(Messages(&mut emit))?;
+                if self.count {
+                    count = map.next_value_seed(count::Messages)?;
+                } else if self.target == Some(member) {
+                    map.next_value_seed(Messages(self.f))?;
                 } else {
                     map.next_value::<DiscardValue>()?;
                 }
