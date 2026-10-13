@@ -15,9 +15,9 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 
 | User operation | What we know | Next question / action |
 |---|---|---|
-| List / find a session | Fleet empty-catalog `ls` 9.845 s; warm 34–168 ms; explicit fresh with scan cache 802 ms. Known-ID lookup already bypasses fleet discovery. | Preserve warm paths. Finish all-primary freshness correctness; distinguish empty catalog, expired catalog and cold filesystem. Investigate discovery/count coupling before tuning more line scanners. |
-| Filter the fleet | First uncached `has:plan` reduces every undecided source serially; fresh counts answer repeats without parsing. Frozen baseline ran 317 s and failed on Cursor, so it is not a successful throughput result. | Empty Cursor editor-state fallback is fixed with native/portable and real-session parity; complete the real query, compare warm repeat and bounded parallel execution. Preserve cheap boolean short-circuiting, order and atomic result selection. |
-| Read / navigate | API has verified bounded continuations; CLI uses separate selection. Generated MCP spawns CLI, collects stdout and loses persistent read state. | Compare actual first / adjacent / repeated windows across MCP and HTTP. Rank startup, traversal, staging and response work before designing changes; reuse existing read engine rather than adding caches. |
+| List / find a session | Fleet empty-catalog `ls` 9.845 s; warm 34–168 ms; explicit fresh with scan cache 802 ms. Known-ID lookup already bypasses fleet discovery. | Preserve warm paths. All-primary freshness now passes native/portable and integrated checks; warmed fleet listing remains 62 ms. Distinguish empty catalog, expired catalog and cold filesystem. Investigate discovery/count coupling before tuning more line scanners. |
+| Filter the fleet | Frozen 6,883-session query now completes in 133.4 s; unchanged 0.59 s and one appended turn 0.83 s. All 6,714 common count maps match the earlier failed serial run. These are query-phase timings under shared load, not complete CLI timings. | Implement exact top-K selection for limited JSON listings before reading lower-ranked candidates. Keep complete filtering for exact totals/statistics, stable ordering and errors in needed candidates. |
+| Read / navigate | API has verified bounded continuations; CLI uses separate selection. Generated MCP spawns CLI, collects stdout and loses persistent read state. | Measured moderate warm MCP 30 ms vs HTTP 2–3 ms; CLI startup ~6 ms. CLI final metadata requires more work than partial API pages. First fix generic staged MCP response transport and missing continuation hints; defer broad engine unification until its differing contracts are explicit. |
 | Refresh / search | No-op FTS planning avoids writer startup, but CLI `index` still discovers the fleet first. Full-fleet merge/query and interactive latency during indexing are unmeasured. | Measure complete unchanged / append refresh and indexed query, then index alongside a read. Account for discovery, merge/publication and aggregate process resources. |
 | Transform / export | Verified Codex port has measured 23–29% CPU and large heap improvements. Prune/archive/dataset can still scan or stage whole output. | Hold further Claude emitter work. Measure small selections from large histories and actual bytes written before optimizing occasional whole-output operations. |
 
@@ -533,8 +533,10 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [ ] Remaining portable cold-admission costs and composed adapter CPU, including escaped doctor and metadata traversal.
 - [x] Guard cold SQLite snapshots with operation-scoped byte-budgeted reuse and original DB/WAL/journal dependencies.
 - [x] Goose legacy discovery uses bounded strict header/count projections; whole-history rewrites deliberately decline resume.
-- [ ] Catalog freshness for every primary, including quiet sessions and same-size replacements; guarded scanner cache publication.
-- [ ] Frozen-fleet recount and cold query reduction: measure serial consumer costs and compose bounded parallel admission.
+- [x] Catalog freshness for every primary, including quiet sessions and same-size replacements; guarded scanner cache publication.
+- [x] Frozen-fleet query reduction: successful full/unchanged/append paths, exact common counts and bounded parallel batches; timings exclude discovery.
+- [ ] Limited JSON queries: select exact top-K before reading irrelevant lower-ranked sessions; retain full filtering for totals.
+- [ ] Generic MCP response staging and continuation delivery; preserve command semantics without another read engine.
 - [x] Bounded retained MCP observation and staged HTTP selected-window payloads; owned-route/browser limits recorded.
 - [x] Native JSONL record/output staging for append-only emitters.
 - [x] Native Codex emission uses original guarded lazy sources and incremental whole-report fidelity verification; actual port controls improve memory and CPU.
