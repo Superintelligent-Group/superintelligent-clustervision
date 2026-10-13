@@ -64,7 +64,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Gemini JSONL | Native mmap replay retains order + raw body ranges; buffered fallback without mmap | Per-record navigation; `$set`/rewind changes old logical messages; non-mmap history remains owned |
 | Qwen modern JSONL | Line stream, call/spawn state; keeps reading after sink stops for metadata | Discovery counts without collecting; direct project JSONL resumes finalized records; record text remains owned |
 | Kimi | Context stream + pending usage message, rotated prefix dedup | Wire sidecar uses raw ranges and lazy output spans; structural lookup state and mutable trailing usage remain |
-| Kimi Code | One LLM step buffered; source-projected inventory; sidecar output references | Step and structured carriers can be large; mutable state/wire semantics |
+| Kimi Code | Mutable finalized-step metadata with checked source-backed text/arguments/results; shared positioned framing and composite-result arena | Discovery wire Values; call/step metadata and selected owned fields; arena disk grows with flattened output |
 | Grok | History stream + pending reasoning; metadata-projected discovery and sidecars | One history record and retained tool metadata; enrichment can revise old messages |
 | Cline/Roo legacy | Shared selected-record source views, lazy text/arguments and bounded workspace extraction | Rich metadata, encoded arguments and selected composite output remain |
 | Cline SDK | Shared source views, raw records and Anthropic block dispatch; large arguments use Json ranges | Selected rich fields and compatibility edge cases; giant full-output parity remains separate |
@@ -467,7 +467,8 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Grok metadata/sidecar projection, Kimi Code inventory projection and Zed incremental SQLite blobs.
 - [x] Devin compact forest metadata and Hermes exact-key prompt spill, with measured native/Rust bounds and output parity.
 - [x] Hermes exact-set CPU/heap controls and corpus parity; remaining prompt-only CPU tradeoff recorded.
-- [ ] Kimi Code logical-step/selected payloads, Cursor inline composers and OpenCode many-part records.
+- [x] Kimi Code logical-step/selected payload retention, with native/portable resolved parity, late-query CPU controls and bounded deferred handles.
+- [ ] Cursor inline composers and OpenCode many-part records.
 - [x] Native Qwen finalized-record checkpoints with composed count/event/FTS parity; replay formats decline reuse.
 - [x] Verified watcher/archive continuation, unchanged artifact skips, bounded pending polls and single consumer reads.
 - [x] Bounded archive history/prefix/output retention with exact pretty JSON and explicit staged I/O.
@@ -926,3 +927,55 @@ owned text, and source-backed subagent launch receipts use checked bounded marke
 Compaction keeps full requested summaries (which may be large) and propagates read failures;
 count-only passes do not read summary bodies. These checks concern output fidelity and source
 identity, not a universal bound on requested output size.
+
+### Kimi Code finalized-step payloads (2026-10-12)
+
+`e757cc0`, integrated as `5145f1a2`, retains lazy text/thinking, tool arguments and string results
+through checked source descriptors bound to the actual wire file. Shared positioned JSONL framing
+removes the largest-line allocation floor; header peeks select metadata. Composite result parts
+flatten into one append arena per captured source, preserving text/newline/image-placeholder
+semantics and `output_path` details without one file handle per step. The mutable assistant step,
+results-before-`step.end` ordering, late usage and immutable checkpoint boundaries remain intact.
+Full/complete reads retain their original inline dispatcher.
+
+Generated controls use one step with 2 MiB text and eight 2 MiB argument/result pairs, or 32 steps
+with 512 KiB text, argument and result fields. Allocation numbers are debug requested Rust heap
+above baseline, excluding native allocations/mapped pages; CPU is clean release user+system time,
+median of three alternating baseline/candidate pairs with one Rayon worker. Dataset reads use the
+actual matching `model:kimi-test` filter through deferred production output.
+
+| Case / operation | Previous peak heap → candidate (B) | Previous CPU → candidate (s) |
+|---|---:|---:|
+| Single step / discard | 41,861,522 → 87,595 | 0.020444 → 0.017466 |
+| Single step / doctor | 41,861,522 → 153,131 | 0.025866 → 0.023919 |
+| Single step / matched dataset | 41,930,495 → 3,361,456 | 0.411633 → 0.200384 |
+| 32 steps / discard | 3,135,486 → 77,687 | 0.023851 → 0.029845 |
+| 32 steps / doctor | 3,139,416 → 147,153 | 0.028525 → 0.043366 |
+| 32 steps / matched dataset | 3,344,904 → 2,272,189 | 0.590074 → 0.302649 |
+
+Matched dataset CPU falls 51.3%/48.7%. Smaller-step discard/doctor instead cost 25.1%/52.0% more
+(about 6/15 ms), so source validation has a measured throughput tradeoff. All operation details
+match. Dataset bytes and SHA-256 match the original producer in both cases and in the composed
+3,000/12,000-step controls:
+
+| Matched dataset case | Output bytes | Baseline and candidate SHA-256 |
+|---|---:|---|
+| Single step | 35,652,643 | `fd0a1316057c49ae9e5af41db47e149661240d03f3f1ee3b96e7fd13db03f42e` |
+| 32 steps | 50,336,569 | `9f10dd12556edb4e29dbcb48915e2c634ffa1231dd089d56f35dc15f29e34976` |
+| 3,000 composite-result steps | 15,192,053 | `418cf8987ddcccfb1a95686b1cb6d1c5c33a9da3aef8cf64ecb4ef21b276275e` |
+| 12,000 composite-result steps | 60,768,053 | `99c1f5158799d4d4cc04cf239ef8a4733ea74e59694c4198670964ac5ac30123` |
+
+Both composite-result late queries succeed under `ulimit -n 64`; requested peak heap stays at
+1,339,273/1,339,409 B. Twelve native and twelve portable adapter tests cover committed corpus
+resolved output, full/complete fidelity, checkpoint/suffix oracles, partial EOF/invalid UTF-8,
+large escaped payloads, composite coercion, output paths and changed-source failures.
+
+This bounds selected payload retention, not every Kimi allocation. Discovery wire scans still
+construct Values; call-name/step metadata tracks actual records. Image URLs, encrypted blobs and
+selected Value facts remain owned. Full/complete modes demand owned output; the shared temporary
+arena uses disk proportional to flattened composite output through the operation. No constant
+whole-adapter heap, disk or RSS bound is claimed.
+
+Private evidence: `/Users/ember/dev/cv-worktrees/resume-kimi-evidence/summary.json`,
+`clean-cpu.json`, `before-heap.json`, `after-heap.json`, `composite-ulimit64-heap.json` and
+`composite-ulimit64-fidelity.json`; `clean_bench.py` retains the clean comparison driver.

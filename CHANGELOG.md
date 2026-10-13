@@ -6,6 +6,7 @@
 - Lane summaries request response identities for usage deduplication without loading unrelated record metadata.
 
 - Compaction summary scans propagate lazy source read failures and preserve full summary text.
+- Kimi Code keeps large step payloads lazy and reduces memory for doctor and filtered dataset reads.
 
 - Affordance rows and counts propagate source text read failures instead of classifying incomplete content.
 
