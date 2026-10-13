@@ -56,7 +56,7 @@ class DriverTests(unittest.TestCase):
     def test_metadata_fixture_payload_budgets_and_native_cli_references(self):
         generator = Path(__file__).with_name("perf-fixture.py")
         with tempfile.TemporaryDirectory(prefix="cv-test-facts-") as directory:
-            for harness in ("claude", "cursor"):
+            for harness in ("claude", "cursor", "goose"):
                 for escaped in (False, True):
                     command = [sys.executable, str(generator), harness,
                                str(Path(directory) / f"{harness}-{escaped}"), "--shape", "metadata",
@@ -71,6 +71,12 @@ class DriverTests(unittest.TestCase):
                         payload = sum(len(row.get("toolUseResult", {}).get("stdout", ""))
                                       + len(row.get("compactMetadata", {}).get("unusedPayload", ""))
                                       + len(row.get("attachment", {}).get("unusedPayload", "")) for row in rows)
+                    elif harness == "goose":
+                        with sqlite3.connect(manifest["path"]) as db:
+                            rows = [json.loads(raw) for raw, in db.execute("SELECT metadata_json FROM messages")]
+                            self.assertEqual(len(rows), manifest["expected_messages"])
+                            payload = sum(len(operation["ignoredPayload"]) for row in rows
+                                          for operation in row.get("operations", []))
                     else:
                         with sqlite3.connect(manifest["path"]) as db:
                             metadata = json.loads(bytes.fromhex(db.execute("SELECT value FROM meta WHERE key='0'").fetchone()[0]))

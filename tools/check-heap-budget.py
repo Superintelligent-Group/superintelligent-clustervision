@@ -178,14 +178,14 @@ def doctors(binary, root, env, baseline=None):
     metadata_facts(binary, root, env, baseline)
 
 
-def metadata_facts(binary, root, env, baseline=None):
+def metadata_facts(binary, root, env, baseline=None, harnesses=None):
     """Actual doctor reducers must not decode unrelated rich sidecars to keep tiny facts.
 
     Full report references run in separate processes; their allocation is intentionally outside
     the facts budget. Both sizes hold record count and all demanded content/facts constant.
     """
     generator = Path(__file__).with_name("perf-fixture.py")
-    for harness in ("claude", "cursor"):
+    for harness in harnesses or ("claude", "cursor", "goose"):
         for escaped in (False, True):
             peaks = []
             reports = []
@@ -210,6 +210,7 @@ def metadata_facts(binary, root, env, baseline=None):
                                   "physical_input_bytes": manifest["physical_input_bytes"],
                                   "messages": row["messages"], "peak_live_rust_bytes": peak,
                                   "full_reference_peak_live_rust_bytes": reference_peak}), flush=True)
+                shutil.rmtree(manifest["root"])
             assert reports[0] == reports[1], "unused metadata changed the demanded doctor report"
             bound(peaks, MIB, MIB // 4, f"doctor metadata facts {harness} escaped={escaped}")
 

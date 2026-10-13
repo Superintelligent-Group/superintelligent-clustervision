@@ -21,3 +21,8 @@ These counters exclude SQLite native allocations, mapped pages, filesystem cache
 storage. Arbitrary record/file counts, rich full metadata, complete mode, images/encrypted URLs,
 and unrepresented malformed/legacy fallbacks are outside this selected-payload promise.
 The fixtures are synthetic and never regenerate committed harness corpora or write user stores.
+
+`--only metadata-facts` separately checks Claude, Cursor CLI, and Goose unused rich sidecars.
+Its doctor Facts report must equal full mode and remain unchanged across 16/64 MiB at fixed
+message count. Its stricter budget is 1 MiB live Rust heap and 256 KiB growth. Goose puts the
+payload in native `metadata_json.operations` while retaining tiny successful tool messages.

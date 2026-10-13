@@ -16,7 +16,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 def generate_sqlite(harness, root, size, records, escaped, shape):
     allowed = {"devin": ("history", "metadata", "unselected"),
-               "hermes": ("history", "prompt-only"), "goose": ("history", "selected"),
+               "hermes": ("history", "prompt-only"), "goose": ("history", "selected", "metadata"),
                "opencode": ("history", "parts", "selected", "selected-v2"), "cursor": ("history", "inline", "legacy", "metadata", "selected", "selected-ide")}
     if shape not in allowed[harness]:
         raise ValueError(f"{harness} supports shapes {allowed[harness]}")
@@ -60,7 +60,18 @@ def generate_sqlite(harness, root, size, records, escaped, shape):
         elif harness == "goose":
             db.executescript("CREATE TABLE sessions(id TEXT PRIMARY KEY,name TEXT,working_dir TEXT,created_at TEXT,updated_at TEXT); CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content_json TEXT,created_timestamp INTEGER); CREATE INDEX messages_session ON messages(session_id,created_timestamp,id);")
             db.execute("INSERT INTO sessions VALUES(?,'scale fixture','/perf','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", (SID,))
-            if shape == "selected":
+            if shape == "metadata":
+                db.execute("ALTER TABLE messages ADD COLUMN metadata_json TEXT")
+                for i in range(records):
+                    request = [{"type": "toolRequest", "id": f"call-{i}", "toolCall": {"status": "success",
+                                "value": {"name": "shell", "arguments": {"command": "fixture"}}}}]
+                    result = [{"type": "toolResponse", "id": f"call-{i}", "toolResult": {"status": "success",
+                               "value": {"content": [{"type": "text", "text": "tiny result"}]}}}]
+                    metadata = {"userVisible": True, "agentVisible": True, "operations": [{"ignoredPayload": payload(i)}],
+                                "usage": {"input_tokens": 10, "output_tokens": 2}}
+                    db.execute("INSERT INTO messages VALUES(?,?,'assistant',?,?,?)", (2 * i, SID, j(request), 1767225600 + 2 * i, j(metadata)))
+                    db.execute("INSERT INTO messages VALUES(?,?,'user',?,?,?)", (2 * i + 1, SID, j(result), 1767225601 + 2 * i, "{}"))
+            elif shape == "selected":
                 for i in range(records):
                     text = payload(i)
                     quarter = len(text) // 4
@@ -158,8 +169,9 @@ def generate_sqlite(harness, root, size, records, escaped, shape):
                 db.execute("INSERT INTO cursorDiskKV VALUES(?,?)", (f"composerData:{SID}", j(composer)))
                 for i in range(records):
                     db.execute("INSERT INTO cursorDiskKV VALUES(?,?)", (f"bubbleId:{SID}:b{i}", j({"bubbleId": f"b{i}", "type": 2, "text": payload(i)})))
-    count = records + 1 if shape == "selected-ide" else records * 2 + 1 if shape in ("selected", "selected-v2") else 1 if shape in ("unselected", "parts") else records
+    count = records * 2 if harness == "goose" and shape == "metadata" else records + 1 if shape == "selected-ide" else records * 2 + 1 if shape in ("selected", "selected-v2") else 1 if shape in ("unselected", "parts") else records
     return {"harness": harness, "id": "legacy:scale-tab" if harness == "cursor" and shape == "legacy" else SID, "root": str(root), "path": str(path), "shape": shape,
+            **({"decoded_metadata_payload_bytes": size, "expected_compactions": 0} if harness == "goose" and shape == "metadata" else {}),
             "requested_payload_bytes": size, "decoded_payload_bytes": size, "selected_payload_bytes": size, "records": records, "expected_messages": count,
             "escaped": escaped, "physical_input_bytes": path.stat().st_size,
             "synthetic": True, "provenance": "adapter-supported native schema; made-up IDs and payloads"}
