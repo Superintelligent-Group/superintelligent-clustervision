@@ -1569,49 +1569,217 @@ fn declassify_hits(text: &str, opts: &PruneOptions) -> usize {
         .count()
 }
 
-/// ASCII lowercase/substrings stream exactly, retaining only the longest token's overlap.
-/// Unicode uses the established whole-string lowercase operation (including contextual sigma).
+/// Match lowercase substrings with token-sized overlap, retaining valid UTF-8 boundaries.
+struct DeclassMatcher<'a> {
+    tokens: &'a [String],
+    matched: Vec<bool>,
+    overlap: usize,
+    tail: String,
+}
+impl<'a> DeclassMatcher<'a> {
+    fn new(tokens: &'a [String]) -> Self {
+        Self {
+            tokens,
+            matched: vec![false; tokens.len()],
+            overlap: tokens.iter().map(String::len).max().unwrap_or(0).saturating_sub(1),
+            tail: String::new(),
+        }
+    }
+    fn feed(&mut self, lowered: &str) {
+        self.tail.push_str(lowered);
+        for (hit, token) in self.matched.iter_mut().zip(self.tokens) {
+            *hit |= !token.is_empty() && self.tail.contains(token);
+        }
+        let mut start = self.tail.len().saturating_sub(self.overlap);
+        while !self.tail.is_char_boundary(start) {
+            start -= 1;
+        }
+        self.tail.drain(..start);
+    }
+    fn copy_from(&mut self, source: &Self) {
+        self.matched.clone_from(&source.matched);
+        self.tail.clone_from(&source.tail);
+    }
+    fn complete(&self) -> bool {
+        self.matched
+            .iter()
+            .zip(self.tokens)
+            .all(|(hit, token)| token.is_empty() || *hit)
+    }
+    fn hits(&self) -> usize {
+        self.matched.iter().filter(|hit| **hit).count()
+    }
+    fn fold_chunks(&mut self, mut text: &str) {
+        while !text.is_empty() && !self.complete() {
+            let mut end = text.len().min(64 * 1024);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.feed(&text[..end].to_lowercase());
+            text = &text[end..];
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SigmaClass {
+    Cased,
+    Ignorable,
+    Boundary,
+}
+
+/// Query the running std's own context rules, rather than maintaining another Unicode table.
+/// Final sigma ignores Case_Ignorable even when it is also Cased (e.g. U+0345):
+///                         `{c}Σ` ends ς    `A{c}Σ` ends ς
+/// Cased && !Ignorable          true              true
+/// Ignorable                   false             true
+/// !Cased && !Ignorable         false             false
+/// The impossible true/false combination cannot occur. These constant-size probes therefore
+/// classify the three behaviors exactly, including titlecase and overlapping properties.
+fn sigma_class(character: char) -> SigmaClass {
+    if format!("{character}Σ").to_lowercase().ends_with('ς') {
+        SigmaClass::Cased
+    } else if format!("A{character}Σ").to_lowercase().ends_with('ς') {
+        SigmaClass::Ignorable
+    } else {
+        SigmaClass::Boundary
+    }
+}
+
+/// Only capital Σ needs contextual lowercase. A pending sigma can precede an arbitrarily long
+/// ignorable run: advance two bounded matcher states instead of retaining that run's text.
+struct SigmaMatcher<'a> {
+    current: DeclassMatcher<'a>,
+    normal: DeclassMatcher<'a>,
+    final_sigma: DeclassMatcher<'a>,
+    pending: bool,
+    before_cased: bool,
+    buffer: String,
+    classes: [Option<(char, SigmaClass)>; 128],
+}
+impl<'a> SigmaMatcher<'a> {
+    fn new(tokens: &'a [String]) -> Self {
+        Self {
+            current: DeclassMatcher::new(tokens),
+            normal: DeclassMatcher::new(tokens),
+            final_sigma: DeclassMatcher::new(tokens),
+            pending: false,
+            before_cased: false,
+            buffer: String::with_capacity(64 * 1024),
+            classes: [None; 128],
+        }
+    }
+    fn flush(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+        if self.pending {
+            self.normal.feed(&self.buffer);
+            self.final_sigma.feed(&self.buffer);
+        } else {
+            self.current.feed(&self.buffer);
+        }
+        self.buffer.clear();
+    }
+    fn class(&mut self, character: char) -> SigmaClass {
+        let index = character as usize % self.classes.len();
+        if let Some((cached, class)) = self.classes[index] {
+            if cached == character {
+                return class;
+            }
+        }
+        let class = sigma_class(character);
+        self.classes[index] = Some((character, class));
+        class
+    }
+    fn complete(&self) -> bool {
+        if self.pending {
+            self.normal.complete() && self.final_sigma.complete()
+        } else {
+            self.current.complete()
+        }
+    }
+    fn push(&mut self, text: &str) {
+        for character in text.chars() {
+            // Hit bits never unset. Only stop a pending branch when both possible spellings
+            // already match every nonempty token; stats and checked decoding continue outside.
+            if self.complete() {
+                return;
+            }
+            let class = self.class(character);
+            if class != SigmaClass::Ignorable && self.pending {
+                self.flush();
+                if class == SigmaClass::Cased {
+                    std::mem::swap(&mut self.current, &mut self.normal);
+                } else {
+                    std::mem::swap(&mut self.current, &mut self.final_sigma);
+                }
+                self.pending = false;
+            }
+            if character == 'Σ' && self.before_cased {
+                // Flush before copying so only token overlap and match bits are copied. Reuse
+                // both branches' allocations: repeated sigmas do not create new matcher buffers.
+                self.flush();
+                self.normal.copy_from(&self.current);
+                self.final_sigma.copy_from(&self.current);
+                self.normal.feed("σ");
+                self.final_sigma.feed("ς");
+                self.pending = true;
+            } else {
+                for lowered in character.to_lowercase() {
+                    if self.buffer.len() + lowered.len_utf8() > 64 * 1024 {
+                        self.flush();
+                    }
+                    self.buffer.push(lowered);
+                }
+            }
+            if class != SigmaClass::Ignorable {
+                self.before_cased = class == SigmaClass::Cased;
+            }
+        }
+    }
+    fn finish(mut self) -> usize {
+        self.flush();
+        if self.pending {
+            std::mem::swap(&mut self.current, &mut self.final_sigma);
+        }
+        self.current.hits()
+    }
+}
+
+/// Piece-local sigma choices differ only at the complete UTF-8 scalar σ/ς. A valid String
+/// needle containing neither cannot cover that position, so only sigma-sensitive token demand
+/// needs contextual replay. Original stats and checked decoding always traverse the full value.
 fn source_declassify_stats(
     text: Option<crate::json::JsonView<'_>>,
     opts: &PruneOptions,
 ) -> Result<(SourceTextStats, usize)> {
     let mut stats = SourceTextStats::default();
-    let mut ascii = true;
-    let mut matched = vec![false; opts.declassify_tokens.len()];
-    let overlap = opts
+    let mut matcher = DeclassMatcher::new(&opts.declassify_tokens);
+    let sigma_sensitive = opts
         .declassify_tokens
         .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or(0)
-        .saturating_sub(1);
-    let mut tail = String::new();
+        .any(|token| token.contains('σ') || token.contains('ς'));
+    let mut has_sigma = false;
     if let Some(text) = text {
         text.for_each_str_chunk(|part| {
             stats.append(part);
-            ascii &= part.is_ascii();
-            if ascii {
-                // A borrowed unescaped string may arrive in one artifact-sized callback.
-                // Bound our own lowercase scratch independently of the producer's framing.
-                for part in part.as_bytes().chunks(64 * 1024) {
-                    let part = std::str::from_utf8(part).expect("ASCII chunk");
-                    tail.push_str(&part.to_ascii_lowercase());
-                    for (hit, token) in matched.iter_mut().zip(&opts.declassify_tokens) {
-                        *hit |= !token.is_empty() && tail.contains(token);
-                    }
-                    if tail.len() > overlap {
-                        tail.drain(..tail.len() - overlap);
-                    }
-                }
+            has_sigma |= sigma_sensitive && !part.is_ascii() && part.contains('Σ');
+            if !has_sigma {
+                matcher.fold_chunks(part);
             }
             Ok(())
         })?;
-        if !ascii {
-            let owned = text.resolve()?;
-            return Ok((stats, declassify_hits(owned.as_str().unwrap_or(""), opts)));
+        if has_sigma {
+            let mut matcher = SigmaMatcher::new(&opts.declassify_tokens);
+            text.for_each_str_chunk(|part| {
+                matcher.push(part);
+                Ok(())
+            })?;
+            return Ok((stats, matcher.finish()));
         }
     }
-    Ok((stats, matched.into_iter().filter(|hit| *hit).count()))
+    Ok((stats, matcher.hits()))
 }
 
 #[derive(Default)]

@@ -2030,3 +2030,188 @@ fn linked_tool_input_projection_matches_frozen_owned_lookup() -> Result<()> {
     assert!(owned_lookup(&file, &user, &tools).is_err());
     Ok(())
 }
+
+#[test]
+fn unicode_sigma_classes_and_chunked_matching_equal_std() -> Result<()> {
+    // Cased+ignorable overlaps must be ignored, not treated as word context.
+    for character in ['\u{0345}', '\u{02b0}', '\u{200d}', '\u{00ad}', '\'', '.', ':', '`'] {
+        assert_eq!(sigma_class(character), SigmaClass::Ignorable, "{character:?}");
+    }
+    for character in ['A', 'a', 'Σ', 'ς', 'ǅ', 'Ⅳ', 'µ'] {
+        assert_eq!(sigma_class(character), SigmaClass::Cased, "{character:?}");
+    }
+    for character in [' ', '\n', '0', '🙂', '京'] {
+        assert_eq!(sigma_class(character), SigmaClass::Boundary, "{character:?}");
+    }
+    let tokens: Vec<String> = [
+        "",
+        "Σ",
+        "A",
+        "σ",
+        "ς",
+        "σς",
+        "σσ",
+        "aσ",
+        "aς",
+        "aσ",
+        "i\u{0307}",
+        "σ\u{0345}",
+        "ς\u{0345}",
+        "aσ\u{0345}a",
+        "aς\u{0345}a",
+        "ǆς",
+        "🙂 alpha",
+        "beta",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    for text in [
+        "🙂 ALPHA beta İ",
+        "Σ",
+        "AΣ",
+        "ΣΣ",
+        "AΣΣA",
+        "\u{0345}Σ",
+        "AΣ\u{0345}",
+        "AΣ\u{0345}A",
+        "AΣ\u{0345}AΣ",
+        "AΣ\u{02b0} ",
+        "ǅΣ",
+        "AΣǅ",
+        "ⅣΣ\u{200d}",
+        "AΣ\u{00ad} ",
+        "AΣ:\u{0345}.",
+        "ΣAΣAΣ",
+    ] {
+        let lowered = text.to_lowercase();
+        let expected = tokens
+            .iter()
+            .filter(|token| !token.is_empty() && lowered.contains(token.as_str()))
+            .count();
+        for cut in text.char_indices().map(|(offset, _)| offset).chain([text.len()]) {
+            let mut matcher = SigmaMatcher::new(&tokens);
+            matcher.push(&text[..cut]);
+            matcher.push(&text[cut..]);
+            assert_eq!(matcher.finish(), expected, "text={text:?}, cut={cut}");
+        }
+    }
+    // Repeated sigmas reuse all three matched-bit allocations, even when choosing both branches.
+    let mut matcher = SigmaMatcher::new(&tokens);
+    let pointers = [
+        matcher.current.matched.as_ptr(),
+        matcher.normal.matched.as_ptr(),
+        matcher.final_sigma.matched.as_ptr(),
+    ];
+    let repeated = "AΣ AΣA ".repeat(4096);
+    matcher.push(&repeated);
+    for pointer in [
+        matcher.current.matched.as_ptr(),
+        matcher.normal.matched.as_ptr(),
+        matcher.final_sigma.matched.as_ptr(),
+    ] {
+        assert!(pointers.contains(&pointer));
+    }
+    let lowered = repeated.to_lowercase();
+    assert_eq!(
+        matcher.finish(),
+        tokens
+            .iter()
+            .filter(|token| !token.is_empty() && lowered.contains(token.as_str()))
+            .count()
+    );
+    Ok(())
+}
+
+#[test]
+fn unicode_declassification_source_replay_preserves_stats_and_pending_branches() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-unicode-context");
+    let options = PruneOptions {
+        declassify_tokens: [
+            "",
+            "aσ",
+            "aς",
+            "aσ",
+            "σ\u{0345}",
+            "ς\u{0345}",
+            "Σ",
+            "i\u{0307}",
+            "🙂 alpha",
+            "beta",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        ..Default::default()
+    };
+    let ignorable = "\u{0345}\u{200d}\u{02b0}".repeat(32768);
+    for (index, text) in [
+        format!("{}🙂 ALPHA beta İ\r\n", "x".repeat(65533)),
+        format!("AΣ{ignorable} \r\n"),
+        format!("AΣ{ignorable}A\r\n"),
+        format!("\u{0345}Σ{ignorable} ΣΣ\n"),
+        format!("{}AΣ{}", "x".repeat(65535), "\u{0345}".repeat(65536)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Exercise literal UTF-8 and escaped JSON independently of callback framing.
+        let literal = serde_json::to_string(&text)?;
+        let escaped = literal
+            .chars()
+            .map(|c| {
+                if c.is_ascii() {
+                    c.to_string()
+                } else {
+                    let mut units = [0u16; 2];
+                    c.encode_utf16(&mut units)
+                        .iter()
+                        .map(|u| format!("\\u{u:04x}"))
+                        .collect::<String>()
+                }
+            })
+            .collect::<String>();
+        for (kind, bytes) in [("literal", literal), ("escaped", escaped)] {
+            let path = world.base.join(format!("{index}-{kind}.json"));
+            std::fs::write(&path, &bytes)?;
+            let source = crate::Json::source(&path, 0, bytes.len() as u64)?;
+            source.with_view(|view| {
+                let (stats, hits) = source_declassify_stats(Some(view), &options)?;
+                assert_eq!(stats.bytes, text.len());
+                assert_eq!(stats.lines(), text.lines().count().max(1));
+                assert_eq!(hits, declassify_hits(&text, &options), "case={index}/{kind}");
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn sigma_insensitive_tokens_keep_exact_hits_across_context_boundaries() -> Result<()> {
+    let world = cv_testkit::World::in_process("prune-sigma-demand");
+    let options = PruneOptions {
+        declassify_tokens: ["alpha", "βeta", "🙂", "Σ", "A", "", "alpha", "Alpha"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        ..Default::default()
+    };
+    let text = format!(
+        "{}AΣ{} AΣA ALPHA βeta 🙂\r\n",
+        "x".repeat(65535),
+        "\u{0345}".repeat(65536)
+    );
+    let bytes = serde_json::to_vec(&text)?;
+    let path = world.base.join("source.json");
+    std::fs::write(&path, &bytes)?;
+    let source = crate::Json::source(&path, 0, bytes.len() as u64)?;
+    source.with_view(|view| {
+        let (stats, hits) = source_declassify_stats(Some(view), &options)?;
+        assert_eq!(hits, declassify_hits(&text, &options));
+        assert_eq!(stats.bytes, text.len());
+        assert_eq!(stats.lines(), text.lines().count().max(1));
+        Ok(())
+    })?;
+    Ok(())
+}

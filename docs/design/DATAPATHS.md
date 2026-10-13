@@ -3561,3 +3561,25 @@ The existing ordinary-text 8/32 MiB whole-operation controls retain four message
 Native and portable scoped oracles compare all thinking modes against the frozen owned emitter, including empty thinking, complete fields, paired/orphan results and guarded failure before transcript publication. Shared publication preserves destination links and permissions. Checked production failures precede destination opening; later ordinary I/O failures retain the previous partial-write semantics. Output staging still writes the requested output to private storage, and metadata/message/tool-ID cardinality remains represented in memory.
 
 Preserved actual reports and comparison script: `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/gemini-export/candidate-native-final.json` and `compare.py`; frozen baseline: `/Users/ember/dev/cv-worktrees/excellence-evidence/gemini-export-control/baseline.json`. These controls were rerun after composing same-harness Claude/Codex preparation. Shared checked-prefix reducer changes subsequently passed the same native/portable emitter oracle.
+
+### Unicode prune matching (Sol, 2026-10-13)
+
+`prune::source_declassify_stats` no longer resolves and lowercases the entire field when
+any Unicode appears. UTF-8 bounded std lowercase pieces feed one shared substring matcher;
+only caller needles containing σ or ς demand contextual replay when capital Σ occurs.
+That replay uses std-derived Cased/Case_Ignorable behavioral probes and two private pending
+match states, so long ignorable runs and overlapping Unicode properties retain exact
+`str::to_lowercase().contains()` semantics. Empty tokens, duplicates and original-case
+caller tokens retain their previous meanings; source decoding/guards and decoded statistics
+continue even after all matches are known. Contextual replay adds a source pass and can do
+more CPU work; this is a bounded ownership claim, pending the independent instruction control.
+
+One emoji before `ALPHA beta` previously made actual native prune hold 16.913/67.245/134.354 MB
+of requested live Rust heap for 8/32/64 MiB payloads. It now requests peak 270,110/270,116/270,116 B,
+with 450 allocation requests at each scale. Transcript, full sidecar, source and non-path
+result fields equal the independent preserved production oracle. These are live allocation
+requests, not RSS or timings; see `PRUNE-UNICODE-EVIDENCE.json` for frozen hashes. Native
+50 scoped prune tests and portable Unicode controls cover every character split, contextual
+Σ/EOF, titlecase, Cased+Ignorable overlap, long ignorable runs, escaped UTF-16, branch-private
+hits and insensitive needles; clippy passes. `check-operation-heap.py` adds one 64 MiB emoji
+declassification control under the existing 4 MiB cap with frozen source/output/sidecar hashes.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prune declassifies Unicode prose with bounded matching while preserving contextual lowercase, token counts, sidecars and source checks.
+
 - Gemini exports stream guarded text and arguments, preserving pretty output and fidelity without payload-sized session copies.
 
 - Codex thinking presence and emission fidelity checks stop decoding after the required character while preserving source validation.

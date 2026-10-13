@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Small process-isolated whole-operation Rust heap gates, without timing thresholds.
 
-Synthetic inputs only. Nine cases; output validation runs after the measured operation.
+Synthetic inputs only; output validation runs after each measured operation.
 """
 import argparse
 import hashlib
@@ -63,7 +63,10 @@ def prune_fixture(path, case, timestamp=None, cwd=None, payload_bytes=None):
                 cache_read_input_tokens=0, cache_creation_input_tokens=0)
         rows.insert(2, row("user", "result", [dict(type="tool_result", tool_use_id="linked",
             content="small result\n" * 512)]))
-    write_rows(path, rows, "" if case == "thinking" else "ALPHA beta ", payload_bytes=payload_bytes)
+    prefix = "" if case == "thinking" else "ALPHA beta "
+    if case == "unicode-declass":
+        prefix = "🙂 " + prefix
+    write_rows(path, rows, prefix, payload_bytes=payload_bytes)
 
 
 def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n", payload_bytes=None):
@@ -84,12 +87,13 @@ def write_rows(path, rows, payload_prefix="", row_prefix=b"", row_suffix=b"\n", 
             output.write(row_suffix)
 
 
-def prune_gate(binary, root, env, cases=("thinking", "ascii-declass")):
+def prune_gate(binary, root, env, cases=("thinking", "ascii-declass", "unicode-declass")):
     # Frozen native sidecars from PRUNE-TURN/PRUNE-LINKED-INPUT-EVIDENCE.json. Hashes cover the
     # full decoded payload and metadata, without building a second giant owned Value tree.
     expected = {
         "thinking": ("a#think0", 67116376, "68c8fcaf6c42fa65fcd367f4eca3e8334dfb412f08637b2a206a97cfa3ad4822"),
         "ascii-declass": ("a#declass0", 67109028, "e02a472d3c4aa721b5199b991ef3c3aa1b1c73420f1885adaa73d1574a9c0b1f"),
+        "unicode-declass": ("a#declass0", 67109033, "f33abf0c9f6c74196c646e4e57da3415f1da247097dbc964ccc6fdbd79d547dd"),
     }
     for case in cases:
         stash_id, sidecar_size, sidecar_hash = expected[case]
@@ -101,6 +105,9 @@ def prune_gate(binary, root, env, cases=("thinking", "ascii-declass")):
         if case == "thinking":
             assert source.stat().st_size == 67117078
             assert original == "aa73756329ab751759a30b8c22fd0113728c9153b27a092634a3523cbb60407b"
+        if case == "unicode-declass":
+            assert source.stat().st_size == 67109416
+            assert original == "1f357173a16bdbe9a790f72b95fd830d5eb301f284198f3c7f5f60665d42798e"
         flags = ["thinking", "revive"] if case == "thinking" else ["declassify"]
         child = subprocess.run([str(binary), str(source), *flags], env=env,
                                text=True, capture_output=True)
@@ -118,6 +125,9 @@ def prune_gate(binary, root, env, cases=("thinking", "ascii-declass")):
         if case == "thinking":
             assert output_path.stat().st_size == 1521
             assert file_digest(output_path) == "a22fa06f173a2222433de567d4548e1d62fc8c09133759e8070a8ea3c9d943b5"
+        if case == "unicode-declass":
+            assert output_path.stat().st_size == 823
+            assert file_digest(output_path) == "02277ad8d3b8e96ae49402adf892f2d905d5de5678013df342fa230beec32305"
         output = [json.loads(line) for line in output_path.read_text().splitlines()]
         assert all(row["sessionId"] == NEW_ID for row in output)
         assert [row["uuid"] for row in output] == (["u", "a", "result", "v", "z"]
