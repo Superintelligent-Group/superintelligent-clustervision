@@ -834,3 +834,42 @@ counts do not demand summary bodies. Scoped native/portable oracles compare exis
 Span semantics (including malformed escaped-body raw fallback), retained-backed text rows/counts,
 mutation errors, and unchanged counts when a demanded classification fails. This closes swallowed
 read errors; it is not a new allocation-performance claim.
+### Portable Codex positioned records and retained text
+
+Modern file-backed buffered replay frames JSONL with shared `store::jsonl::ranges`: positioned
+64 KiB reads produce raw ranges, preserve Unicode trim/partial EOF and expose consumed checkpoint
+offsets. Producers still choose strict versus tolerant acceptance and own source identity. Plain
+Codex reads use their verified original capture; zstd decodes once into one private arena per
+source. Both authority and replay scans stay within that initial decoded extent, even if later
+argument decoding appends to the arena. Selected tool-output strings and authoritative assistant
+events retain checked `SourceText`; decoded error-prefix removal uses the shared prefix API.
+Known metadata rosters and the existing dispatcher preserve inheritance, usage attachment and
+EOF facts. Strict range validation uses the fused portable Value scan; lean fallback separately
+keeps its established ignored-field policy. Full/complete modes still own their demanded text.
+
+Generated escaped tool outputs repeat the three bytes `x`, backslash and `n` to
+12,583,179/50,331,915 raw source bytes,
+followed by late model/cwd metadata. Actual no-mmap `store_probe discard codex portable INPUT --mode lazy`
+peak requested heap above baseline is flat at **373,643 bytes** plain and **6,317,736 bytes** zstd (fixed decoder
+workspace). The old 50 MB buffered producer retains **133,963,819/138,175,555 bytes** respectively.
+The final plain probes make 277 allocations/1,694,769 cumulative requested bytes at both sizes;
+zstd makes 897/2,625 allocations and requests 9,941,951/10,213,823 cumulative bytes. The 50 MB
+assistant-event control, including held usage, retains 328,485 bytes plain/6,317,631 zstd.
+Debug wall observations improve from 4.085/5.643 s old plain/zstd to 3.383/3.772 s; these are not
+release CPU gates. The intermediate syntax-then-acceptance implementation regressed to 13.494 s,
+so the fused shared validator is required for the composed result, not an optional follow-up.
+
+Scoped native/portable old-buffered-parser oracles cover all five modes, committed Codex corpus,
+duplicate keys, giant escaped error markers, long Unicode boundary whitespace, corrupt raw UTF-8,
+invalid surrogates, structured fallback, event authority, inherited history, partial EOF and late
+metadata/usage. Retained plain/zstd text rejects original-source changes after return or inside a
+stopping callback; full-mode text stays owned. Shared framing has its own buffered-line oracle.
+
+Limits: function-call arguments, generic non-string outputs/unknown complete records and
+body-dependent user classification still use reader-based owned projections; demanded large
+IDs/timestamps may also remain owned.
+The generic arbitrary-reader `stream_jsonl` and prefix-count helper retain their older line scratch.
+Plain discovery keeps its existing 8 MiB full-file cap and 1 MiB head/tail sampling. Compressed
+discovery reuses positioned known-record metadata without retaining giant tool/assistant bodies.
+The private decoded arena uses disk proportional to decoded source size; it is not a persistent
+cache or a claim of bounded disk/RSS.

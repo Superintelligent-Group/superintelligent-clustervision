@@ -40,6 +40,19 @@ pub(super) fn parse(slice: &[u8], giant: bool) -> serde_json::Result<LeanLine<'_
     Ok(LeanLine { v, output })
 }
 
+/// Buffered transports can prune a record without first retaining its complete raw line.
+pub(super) fn parse_reader(reader: impl std::io::Read) -> serde_json::Result<Value> {
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    let mut output = None;
+    let value = Top {
+        giant: false,
+        output: &mut output,
+    }
+    .deserialize(&mut de)?;
+    de.end()?;
+    Ok(value)
+}
+
 struct Top<'s, 'a> {
     giant: bool,
     output: &'s mut Option<&'a RawValue>,

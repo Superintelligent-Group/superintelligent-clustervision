@@ -175,6 +175,19 @@ fn project_with_counts(line: &str, scan: &CodexScan, counting: bool) -> Option<V
     Some(value)
 }
 
+fn project_reader(reader: impl std::io::Read, scan: &CodexScan) -> Option<Value> {
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    let value = Project {
+        shape: Shape::Record,
+        title_needed: scan.title.is_none(),
+        counting: true,
+    }
+    .deserialize(&mut de)
+    .ok()?;
+    de.end().ok()?;
+    Some(value)
+}
+
 /// Counts depend on text presence and injected-prefix classification, not message bodies.
 /// Preserve empty versus whitespace-only strings and enough leading characters for every
 /// injected prefix. The original first-title projection is reduced after the title is captured.
@@ -267,9 +280,18 @@ pub(super) struct Turns {
 }
 impl Turns {
     pub(super) fn feed_line(&mut self, line: &str, scan: &mut CodexScan) {
-        let Some(mut value) = project_with_counts(line, scan, true) else {
+        let Some(value) = project_with_counts(line, scan, true) else {
             return;
         };
+        self.feed_value(value, scan);
+    }
+    pub(super) fn feed_reader(&mut self, reader: impl std::io::Read, scan: &mut CodexScan) {
+        let Some(value) = project_reader(reader, scan) else {
+            return;
+        };
+        self.feed_value(value, scan);
+    }
+    pub(super) fn feed_value(&mut self, mut value: Value, scan: &mut CodexScan) {
         scan.feed(&value);
         reduce_bodies(&mut value);
         if !self.decided {

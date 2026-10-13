@@ -41,6 +41,7 @@ mod detect;
 mod emit;
 mod lean;
 mod metadata;
+mod portable;
 pub use emit::emit;
 
 use super::wire::{openai, text_parts};
@@ -54,7 +55,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -227,15 +228,7 @@ impl Adapter for Codex {
                     }
                 }
             }
-            let has_events = detect_has_events(open_rollout(&r.path)?);
-            Ok(stream_jsonl(
-                &r.id,
-                open_rollout(&r.path)?,
-                Some(r.path.clone()),
-                has_events,
-                opts,
-                sink,
-            ))
+            portable::stream(r, opts, sink)
         })
     }
 
@@ -266,19 +259,7 @@ impl Adapter for Codex {
                 return Ok(None);
             }
             if state.reading.buffered {
-                let mut file = fs::File::open(&r.path).with_context(|| format!("opening {}", r.path.display()))?;
-                if file.metadata()?.len() < from.offset || detect_has_events(open_rollout(&r.path)?) != state.has_events
-                {
-                    return Ok(None);
-                }
-                file.seek(SeekFrom::Start(from.offset))?;
-                return Ok(Some(stream_jsonl_at(
-                    &r.id,
-                    BufReader::new(file),
-                    state,
-                    from.offset,
-                    sink,
-                )));
+                return portable::resume(r, state, from.offset, sink);
             }
             #[cfg(feature = "mmap")]
             {
@@ -2286,12 +2267,7 @@ fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
     let mut turns = metadata::Turns::default();
 
     if is_zst_path(path) {
-        // Compressed (cold, > 7 days) rollout: no seeking, so stream the whole decode — these are
-        // exactly the files whose bytes we never mmap.
-        for line in open_rollout(path)?.lines() {
-            let Ok(line) = line else { continue };
-            turns.feed_line(&line, &mut s);
-        }
+        portable::scan(path, &mut s, &mut turns)?;
         s.message_count = turns.count();
     } else if is_jsonl {
         if size <= full_scan_cap {
@@ -2437,6 +2413,235 @@ mod tests {
         }
         s.messages = sink.messages;
         s
+    }
+
+    #[test]
+    fn portable_records_match_old_buffered_oracle_in_all_modes() {
+        let world = cv_testkit::World::in_process("codex-portable-oracle");
+        let giant = "月🌙é\n\t\"\\".repeat(2048);
+        let mut records = vec![
+            serde_json::json!({"type":"session_meta", "timestamp":"2026-10-01T00:00:00Z",
+                "payload":{"id":"portable", "cwd":"/old", "subagent_history_start_ordinal":2,
+                    "parent_thread_id":"parent", "base_instructions":{"text":"system"}}})
+            .to_string(),
+            serde_json::json!({"type":"response_item","ordinal":1,"timestamp":"2026-10-01T00:00:01Z",
+                "payload":{"type":"function_call_output","call_id":"inherited", "output":giant}})
+            .to_string(),
+            serde_json::json!({"type":"response_item","ordinal":2,"payload":{"type":"message",
+                "role":"user","content":[{"type":"input_text","text":"native prompt"}]}})
+            .to_string(),
+            serde_json::json!({"type":"response_item","ordinal":3,"timestamp":"2026-10-01T00:00:03Z",
+                "payload":{"type":"custom_tool_call_output","call_id":"custom", "name":"tool", "namespace":"ns",
+                    "output":format!("[error] {giant}")}, "ignored": giant})
+            .to_string()
+            .replace("[error] ", "\\u005b\\u0065\\u0072\\u0072\\u006f\\u0072\\u005d\\u0020"),
+            serde_json::json!({"payload":{"output":giant, "name":"shell", "namespace":"ns", "call_id":"call",
+                "type":"function_call_output"}, "ordinal":4,"type":"response_item", "timestamp":"2026-10-01T00:00:04Z"})
+            .to_string(),
+            serde_json::json!({"type":"event_msg","payload":{"type":"user_message", "message":"native prompt"}})
+                .to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output", "call_id":"object",
+                "output":{"success":false,"content":giant}}})
+            .to_string(),
+            serde_json::json!({"type":"compacted","payload":{"message":"compacted", "replacement_history":[
+                {"payload":giant}], "guardian_history":giant}})
+            .to_string(),
+            format!(
+                r#"{{"type":"compacted","payload":{{"message":"{}","guardian_history":"\ud800"}}}}"#,
+                "x".repeat(5000)
+            ),
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"function_call_output","call_id":"duplicate","output":"{}","output":"final"}}}}"#,
+                giant
+                    .replace('\\', "\\\\")
+                    .replace('\"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\t', "\\t")
+            ),
+            "{corrupt".into(),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant",
+                "content":[{"type":"output_text","text":"answer"}]}})
+            .to_string(),
+            serde_json::json!({"type":"event_msg","payload":{"type":"agent_message","message":giant}}).to_string(),
+            serde_json::json!({"type":"event_msg","payload":{"type":"token_count", "info":{"last_token_usage":{
+                "input_tokens":12,"output_tokens":4,"total_tokens":16}, "total_token_usage":{"total_tokens":16}}}})
+            .to_string(),
+            serde_json::json!({"type":"turn_context","payload":{"model":"late-model","cwd":"/late"}}).to_string(),
+        ];
+        records[3] = format!(
+            "{}{}{}\r",
+            "\u{2003}".repeat(30_000),
+            records[3],
+            "\u{2002}".repeat(30_000)
+        );
+        let raw = records.join("\n"); // final record deliberately has no newline
+        for compressed in [false, true] {
+            if compressed && !cfg!(feature = "sqlite") {
+                continue;
+            }
+            let path = world.base.join(if compressed {
+                "rollout-portable.jsonl.zst"
+            } else {
+                "rollout-portable.jsonl"
+            });
+            if compressed {
+                #[cfg(feature = "sqlite")]
+                std::fs::write(
+                    &path,
+                    ruzstd::encoding::compress_to_vec(raw.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest),
+                )
+                .unwrap();
+            } else {
+                std::fs::write(&path, &raw).unwrap();
+            }
+            let r = SessionRef::new("portable", Harness::Codex, &path);
+            let mut expected_scan = CodexScan::default();
+            let mut expected_turns = metadata::Turns::default();
+            for line in raw.lines() {
+                expected_turns.feed_line(line, &mut expected_scan);
+            }
+            expected_scan.message_count = expected_turns.count();
+            let mut actual_scan = CodexScan::default();
+            let mut actual_turns = metadata::Turns::default();
+            portable::scan(&path, &mut actual_scan, &mut actual_turns).unwrap();
+            actual_scan.message_count = actual_turns.count();
+            assert_eq!(actual_scan, expected_scan, "metadata compressed={compressed}");
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::bulk(),
+                ParseOptions::full(),
+                ParseOptions::complete(),
+            ] {
+                let expected = old_buffered_oracle(&r, &opts);
+                let mut sink = crate::stream::CollectSink::default();
+                let mut actual = portable::stream(&r, &opts, &mut sink).unwrap();
+                actual.messages = sink.messages;
+                actual.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(&actual).unwrap(),
+                    serde_json::to_value(&expected).unwrap(),
+                    "compressed={compressed}, opts={opts:?}"
+                );
+                assert_eq!(actual.model.as_deref(), Some("late-model"));
+            }
+        }
+    }
+
+    #[test]
+    fn portable_corrupt_raw_records_match_old_buffered_rejections() {
+        let world = cv_testkit::World::in_process("codex-portable-corrupt");
+        let path = world.base.join("rollout-corrupt.jsonl");
+        let mut raw = br#"{"type":"compacted","payload":{"guardian_history":""#.to_vec();
+        raw.extend(std::iter::repeat_n(b'x', 8192));
+        raw.push(0xff);
+        raw.extend_from_slice(b"\"}}\n");
+        raw.extend_from_slice(br#"{"type":"response_item","payload":{"type":"function_call_output","output":""#);
+        raw.extend(std::iter::repeat_n(b'x', 8192));
+        raw.extend_from_slice(br#"\ud800"}}"#);
+        raw.extend_from_slice(b"\n{\"type\":\"turn_context\",\"payload\":{\"model\":\"late-model\"}}\n");
+        std::fs::write(&path, &raw).unwrap();
+        let compressed_path = world.base.join("rollout-corrupt.jsonl.zst");
+        std::fs::write(
+            &compressed_path,
+            ruzstd::encoding::compress_to_vec(raw.as_slice(), ruzstd::encoding::CompressionLevel::Fastest),
+        )
+        .unwrap();
+        for path in [path, compressed_path] {
+            let r = SessionRef::new("corrupt", Harness::Codex, &path);
+            for opts in [ParseOptions::lazy(), ParseOptions::full(), ParseOptions::complete()] {
+                let expected = old_buffered_oracle(&r, &opts);
+                let mut sink = crate::stream::CollectSink::default();
+                let mut actual = portable::stream(&r, &opts, &mut sink).unwrap();
+                actual.messages = sink.messages;
+                actual.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn portable_decoded_text_keeps_source_identity_and_rejects_mid_read_changes() {
+        let world = cv_testkit::World::in_process("codex-portable-source-change");
+        let text = "output\n\"🌙\\".repeat(8192);
+        let record = serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"call","output":text}})
+        .to_string();
+        let compressed =
+            ruzstd::encoding::compress_to_vec(record.as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
+        for (path, bytes) in [
+            (world.base.join("rollout-source.jsonl"), record.into_bytes()),
+            (world.base.join("rollout-source.jsonl.zst"), compressed),
+        ] {
+            std::fs::write(&path, &bytes).unwrap();
+            let r = SessionRef::new("source", Harness::Codex, &path);
+            let mut sink = crate::stream::CollectSink::default();
+            let session = portable::stream(&r, &ParseOptions::lazy(), &mut sink).unwrap();
+            assert_eq!(session.source_path.as_deref(), Some(path.as_path()));
+            let Block::ToolResult { content, .. } = &sink.messages[0].content[0] else {
+                panic!("missing result")
+            };
+            assert!(content.inline_str().is_none());
+            let resolver = session.resolver();
+            assert_eq!(content.try_resolve(&resolver).unwrap(), text);
+            let mut owned = crate::stream::CollectSink::default();
+            portable::stream(&r, &ParseOptions::full(), &mut owned).unwrap();
+            let Block::ToolResult {
+                content: owned_text, ..
+            } = &owned.messages[0].content[0]
+            else {
+                panic!("missing owned result")
+            };
+            assert_eq!(owned_text.inline_str(), Some(text.as_str()));
+            std::fs::write(&path, b"replaced original source").unwrap();
+            assert!(content.try_resolve(&resolver).is_err());
+            assert!(content.try_resolve_prefix(&resolver, 128).is_err());
+            assert_eq!(owned_text.inline_str(), Some(text.as_str()));
+            std::fs::write(&path, &bytes).unwrap();
+            let mut mutate = |_: Message| {
+                std::fs::write(&path, b"changed during read").unwrap();
+                Flow::Stop
+            };
+            assert!(portable::stream(&r, &ParseOptions::lazy(), &mut mutate).is_err());
+        }
+    }
+
+    #[test]
+    fn portable_native_corpus_matches_old_buffered_oracle() {
+        let _world = cv_testkit::World::in_process("codex-portable-corpus");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/codex");
+        let mut files = 0;
+        for entry in WalkDir::new(&root).into_iter().filter_map(|entry| entry.ok()) {
+            if entry.path().extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let r = SessionRef::new("corpus", Harness::Codex, entry.path());
+            for opts in [
+                ParseOptions::lazy(),
+                ParseOptions::lazy_extra(),
+                ParseOptions::bulk(),
+                ParseOptions::full(),
+                ParseOptions::complete(),
+            ] {
+                let expected = old_buffered_oracle(&r, &opts);
+                let mut sink = crate::stream::CollectSink::default();
+                let mut actual = portable::stream(&r, &opts, &mut sink).unwrap();
+                actual.messages = sink.messages;
+                actual.materialize().unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap(),
+                    "{} {opts:?}",
+                    entry.path().display()
+                );
+            }
+            files += 1;
+        }
+        assert!(files > 0);
     }
 
     #[test]
@@ -3663,7 +3868,7 @@ mod tests {
             s.messages.iter().filter_map(|m| m.text()).collect::<Vec<_>>(),
             vec!["cold storage question", "cold storage answer"]
         );
-        // streaming (lazy spans requested, but a compressed file never spans) matches
+        // Resolved lazy streaming matches the full compressed parse.
         let mut sink = crate::stream::CollectSink::default();
         let mut st = cx.stream(r, &ParseOptions::lazy(), &mut sink).unwrap();
         st.messages = sink.messages;
@@ -3783,7 +3988,19 @@ mod tests {
                 .cloned();
             eprintln!(
                 "{}: id={} title={:?} msgs={} scan_count={} item_notes={} agent_msgs={} usage={} (from record {}) usage_carriers={} model={:?} agent_path={:?} inherit_before={:?}",
-                path.file_name().unwrap().to_string_lossy(), parsed.id, r.title, parsed.messages.len(), r.message_count, notes, agent_msgs, with_usage, from_record, carriers, parsed.model, parsed.lineage.agent_path, inherit
+                path.file_name().unwrap().to_string_lossy(),
+                parsed.id,
+                r.title,
+                parsed.messages.len(),
+                r.message_count,
+                notes,
+                agent_msgs,
+                with_usage,
+                from_record,
+                carriers,
+                parsed.model,
+                parsed.lineage.agent_path,
+                inherit
             );
             assert!(from_record > 0, "paginated files carry token_usage_records");
             // A response whose only item was a tool call is followed by the call's OUTPUT before
