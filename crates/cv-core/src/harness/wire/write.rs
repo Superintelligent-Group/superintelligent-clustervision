@@ -128,6 +128,16 @@ pub(crate) fn text(writer: &mut dyn Write, value: &Text, resolver: &Resolver) ->
     if let Some(inline) = value.inline_str() {
         return serde_json::to_writer(writer, inline).map_err(Into::into);
     }
+    if let Text::Source(source) = value {
+        if source.skip == 0 {
+            // One complete string needs no concatenation/counting pass. Canonical publication
+            // still checks strict string acceptance and the retained source before/after demand.
+            return source.json().with_view(|view| {
+                anyhow::ensure!(view.is_string()?, "expected source text string");
+                view.write_canonical(&mut &mut *writer)
+            });
+        }
+    }
     text::generate_string(writer, |builder| {
         append(builder, value, resolver)?;
         Ok(())
@@ -149,4 +159,116 @@ pub(crate) fn joined_text<'a>(
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod text_publication_tests {
+    use super::*;
+    use crate::{lazy::SourceText, Harness, Json, Session};
+
+    fn captured(path: &std::path::Path, bytes: &[u8]) -> Result<Text> {
+        std::fs::write(path, bytes)?;
+        crate::json::JsonSource::capture(path)?.read_syntax(|view| {
+            let Json::Source(range) = view.to_json()? else {
+                unreachable!()
+            };
+            // Force Source for empty/tiny strings and syntax-only malformed Unicode so the
+            // publication boundary, not only the normal capture factory, proves acceptance.
+            Ok(Text::Source(SourceText::new(range)))
+        })
+    }
+
+    #[test]
+    fn canonical_source_text_matches_serde_and_skipped_fallback() -> Result<()> {
+        let world = cv_testkit::World::in_process("wire-single-source-string");
+        let resolver = Session::new("source", Harness::Claude).resolver();
+        for (i, value) in [
+            "".to_owned(),
+            "plain λ雪".repeat(15000),
+            "prefix: escaped\n\"\\\tλ".repeat(6000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let raw = serde_json::to_vec(&value)?;
+            let source = captured(&world.base.join(format!("text-{i}.json")), &raw)?;
+            let mut result = Vec::new();
+            text(&mut result, &source, &resolver)?;
+            assert_eq!(result, serde_json::to_vec(&value)?);
+            if i == 2 {
+                let skipped = source.with_skipped_prefix(8)?;
+                let mut result = Vec::new();
+                text(&mut result, &skipped, &resolver)?;
+                assert_eq!(result, serde_json::to_vec(&value[8..])?);
+            }
+        }
+        let raw = br#""\u0061\/\u03bb\ud83d\ude00\t\"\\""#;
+        let source = captured(&world.base.join("escapes.json"), raw)?;
+        let mut result = Vec::new();
+        text(&mut result, &source, &resolver)?;
+        let expected: String = serde_json::from_slice(raw)?;
+        assert_eq!(result, serde_json::to_vec(&expected)?);
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_source_text_rejects_nonstring_and_invalid_unicode() -> Result<()> {
+        let world = cv_testkit::World::in_process("wire-invalid-source-string");
+        let resolver = Session::new("source", Harness::Claude).resolver();
+        for (i, raw) in [b"null".as_slice(), br#""\ud800""#, br#""\udc00""#]
+            .into_iter()
+            .enumerate()
+        {
+            let source = captured(&world.base.join(format!("invalid-{i}.json")), raw)?;
+            assert!(text(&mut Vec::new(), &source, &resolver).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_source_text_checks_identity_even_when_writer_fails() -> Result<()> {
+        let world = cv_testkit::World::in_process("wire-source-writer-failure");
+        let resolver = Session::new("source", Harness::Claude).resolver();
+        let path = world.base.join("source.json");
+        struct Fail<'a> {
+            source: &'a std::path::Path,
+            replacement: Option<&'a std::path::Path>,
+        }
+        impl Write for Fail<'_> {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                if let Some(replacement) = self.replacement.take() {
+                    std::fs::rename(replacement, self.source)?;
+                }
+                Err(std::io::Error::other("deliberate writer failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let source = captured(&path, br#""checked source""#)?;
+        let error = text(
+            &mut Fail {
+                source: &path,
+                replacement: None,
+            },
+            &source,
+            &resolver,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("deliberate writer failure"));
+        let replacement = world.base.join("replacement.json");
+        std::fs::write(&replacement, br#""changed source""#)?;
+        let error = text(
+            &mut Fail {
+                source: &path,
+                replacement: Some(&replacement),
+            },
+            &source,
+            &resolver,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("source changed"), "{error}");
+        assert!(text(&mut Vec::new(), &source, &resolver).is_err());
+        Ok(())
+    }
 }
