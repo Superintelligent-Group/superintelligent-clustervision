@@ -4319,3 +4319,14 @@ root. V2 explicit IDs now match native's exact `startsWith("ses")` predicate bef
 invalid IDs fail without publishing rows. Existing v1 ID behavior is unchanged. Attachment base64
 preservation remains part of the complete native-row replay follow-up, rather than a claimed
 capability of the generic foreign IR attachment projection.
+
+Grok/Qwen classifier follow-up (2026-10-13): bounded retained state alone had left an
+unnecessary full traversal in Grok's 16-character representative and Qwen's 80-character
+hook prefix. The shared checked `document::text_head` now uses the established typed
+intentional-stop mechanism; source guards revalidate before treating early termination as
+success. Qwen ordinary text/thought presence demands one character. Leading-whitespace
+classification continues until the first meaningful character, while whitespace-only Grok
+text retains its presence marker. Native/portable scoped controls preserve 1/16/80-character
+UTF-8 and newline boundaries, long Unicode whitespace and user-info/hook prefixes, rejected
+changed/malformed sources, and frozen all-mode wire/fidelity output. No new measurement
+campaign was run; the earlier allocation evidence still describes the producer change.

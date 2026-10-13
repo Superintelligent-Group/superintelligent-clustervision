@@ -32,23 +32,7 @@ fn join(view: Option<JsonView<'_>>, source: &JsonSource) -> Result<Text> {
     })
 }
 fn representative(text: &Text) -> Result<String> {
-    let mut head = String::new();
-    let mut present = false;
-    text.try_for_each_chunk(&crate::lazy::Resolver::new(None), 4096, |chunk| {
-        present |= !chunk.is_empty();
-        if head.chars().count() >= 16 {
-            return Ok(());
-        }
-        for c in chunk.chars() {
-            if head.is_empty() && c.is_whitespace() {
-                continue;
-            }
-            if head.chars().count() < 16 {
-                head.push(c);
-            }
-        }
-        Ok(())
-    })?;
+    let (mut head, present) = document::text_head(text, &crate::lazy::Resolver::new(None), 16, true)?;
     if head.is_empty() && present {
         head.push(' ');
     }

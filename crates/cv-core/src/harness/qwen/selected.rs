@@ -6,25 +6,9 @@ use crate::{
 };
 
 pub(super) fn prefix(text: &Text, trim: bool) -> Result<String> {
-    let mut head = String::new();
-    let mut count = 0;
-    text.try_for_each_chunk(&Resolver::new(None), 4096, |chunk| {
-        if count >= 80 {
-            return Ok(());
-        }
-        for c in chunk.chars() {
-            if trim && head.is_empty() && c.is_whitespace() {
-                continue;
-            }
-            if count < 80 {
-                head.push(c);
-                count += 1;
-            }
-        }
-        Ok(())
-    })?;
-    Ok(head)
+    Ok(super::super::store::document::text_head(text, &Resolver::new(None), 80, trim)?.0)
 }
+
 fn string(view: JsonView<'_>, key: &str) -> Result<Option<String>> {
     Ok(view
         .get(key)?
@@ -106,7 +90,7 @@ fn content(view: JsonView<'_>, source: &JsonSource) -> Result<Vec<Block>> {
                 source: string(file, "fileUri")?,
             });
         } else if let Some(text) = part.get("text")?.map(|v| v.source_text()).transpose()?.flatten() {
-            if prefix(&text, false)?.is_empty() {
+            if !super::super::store::document::text_head(&text, &Resolver::new(None), 1, false)?.1 {
                 continue;
             }
             if part.get("thought")?.map(|v| v.as_bool()).transpose()?.flatten() == Some(true) {

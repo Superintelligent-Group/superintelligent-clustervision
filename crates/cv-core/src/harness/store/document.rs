@@ -470,6 +470,45 @@ fn value_end(b: &[u8], mut i: usize, index: &Index) -> Option<usize> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("requested text head complete")]
+struct HeadComplete;
+
+/// Decode only the requested characters after optional leading whitespace. Accepted source
+/// strings retain their complete capture validation and recheck provenance at the early stop.
+pub(crate) fn text_head(
+    text: &crate::Text,
+    resolver: &crate::lazy::Resolver,
+    max_chars: usize,
+    trim_leading: bool,
+) -> Result<(String, bool)> {
+    let mut head = String::new();
+    let mut chars = 0;
+    let mut present = false;
+    match text.try_for_each_chunk(resolver, 4096, |chunk| {
+        present |= !chunk.is_empty();
+        for ch in chunk.chars() {
+            if trim_leading && head.is_empty() && ch.is_whitespace() {
+                continue;
+            }
+            if chars == max_chars {
+                return Err(HeadComplete.into());
+            }
+            head.push(ch);
+            chars += 1;
+            if chars == max_chars {
+                return Err(HeadComplete.into());
+            }
+        }
+        Ok(())
+    }) {
+        Ok(()) => {}
+        Err(error) if error.is::<HeadComplete>() => {}
+        Err(error) => return Err(error),
+    }
+    Ok((head, present))
+}
+
 /// The same joined text/title as Message::text, retaining only the first 81 characters. When
 /// discovery filters whitespace-only text, scan any remaining whitespace with bounded state.
 pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
@@ -524,6 +563,48 @@ pub(crate) fn text_summary<T: std::borrow::Borrow<crate::lazy::Text>>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_text_heads_preserve_classification_boundaries_and_source_errors() -> Result<()> {
+        let world = cv_testkit::World::in_process("checked-text-heads");
+        let path = world.base.join("text.json");
+        let resolver = crate::lazy::Resolver::new(None);
+        for body in [
+            String::new(),
+            " ".into(),
+            "\n\u{2003}".repeat(8192),
+            format!("{}<user_info>\nλ followed by payload", " \n\u{2003}".repeat(8192)),
+            format!("{}<qwen:user-prompt-submit-context>hook", " \n\u{2003}".repeat(8192)),
+            format!("{}\nλ tail", "界".repeat(80)),
+            format!("\\n{}", "λ".repeat(8192)),
+        ] {
+            let bytes = serde_json::to_vec(&body)?;
+            std::fs::write(&path, &bytes)?;
+            let crate::Json::Source(range) = crate::Json::source(&path, 0, bytes.len() as u64)? else {
+                unreachable!()
+            };
+            let text = crate::Text::Source(crate::lazy::SourceText::new(range));
+            for max_chars in [1, 16, 80] {
+                for trim in [false, true] {
+                    let expected: String = if trim { body.trim_start() } else { &body }
+                        .chars()
+                        .take(max_chars)
+                        .collect();
+                    assert_eq!(
+                        text_head(&text, &resolver, max_chars, trim)?,
+                        (expected, !body.is_empty())
+                    );
+                }
+            }
+            std::fs::write(&path, b"changed source")?;
+            assert!(text_head(&text, &resolver, 16, true).is_err());
+            assert!(text_head(&text, &resolver, 80, false).is_err());
+        }
+        let malformed = br#""usable prefix followed by \ud800""#;
+        std::fs::write(&path, malformed)?;
+        assert!(crate::Json::source(&path, 0, malformed.len() as u64).is_err());
+        Ok(())
+    }
+
     use super::*;
 
     #[test]
