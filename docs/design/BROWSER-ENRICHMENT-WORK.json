@@ -60,7 +60,27 @@
   "limits": [
     "Counts are browser requests, not backend parser bytes, physical I/O or latency.",
     "The first window and independent final head retain their existing separate reads.",
-    "Some earlier browser navigations timed out; one control failed on undefined-versus-absent diagnostic fields before JSON normalization. Successful baseline/candidate controls are reported here. Intermittent connection startup is under independent investigation, not claimed fixed.",
+    "The earlier baseline/candidate runs encountered intermittent startup stalls. The later combined transport check and deterministic regression tests address the diagnosed connection scheduling defect; the initial enrichment control alone does not establish that fix.",
     "Browser and CLI run only against scratch inputs/catalog. This does not measure native desktop GUI startup."
-  ]
+  ],
+  "combined_transport_check": {
+    "revision": "cv 0.16.1 (b86e49a4e237)",
+    "code_revision": "b86e49a4",
+    "pages": 4,
+    "first_window_messages": 200,
+    "messages": 768,
+    "exact_role_content_parity": true,
+    "final_title_matches_cli": true,
+    "final_prompt_matches_cli": true,
+    "input_hash_unchanged": true,
+    "page_errors": [],
+    "request_counts": {
+      "events": 1,
+      "subagents": 1,
+      "message_windows": 4,
+      "heads": 1
+    },
+    "evidence_root": "/Users/ember/dev/cv-worktrees/excellence-evidence/browser-combined-b86e49a4",
+    "scope": "Actual combined debug server and web sources, system Chrome, synthetic scratch fixture; no external rescue request or latency claim. Transport regression tests separately force the previously failing scheduling interleaving."
+  }
 }
