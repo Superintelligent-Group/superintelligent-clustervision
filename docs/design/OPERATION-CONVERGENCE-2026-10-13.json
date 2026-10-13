@@ -248,5 +248,18 @@
     "packaging": "/Users/ember/dev/cv-worktrees/cold-discovery-work-home/verify-1377fdc9/summary.json",
     "desktop_web_wasm": "/Users/ember/dev/cv-worktrees/desktop-web-wasm-final-evidence/SUMMARY.json",
     "corpus_tools": "Completed tool invocation: 9 tests passed; no separate filesystem log captured."
+  },
+  "local_install": {
+    "revision": "c8d16a92cc63d98bf220d78f215ebbc530f0e3e1",
+    "version": "cv 0.16.1 (c8d16a92cc63)",
+    "evidence": "/Users/ember/dev/cv-worktrees/excellence-evidence/operation-installed-smoke/results.json",
+    "checks": [
+      "eight scratch sessions: cold/warm listing identical",
+      "initial index: eight changed, zero errors",
+      "unchanged index: zero changed, eight unchanged, zero errors",
+      "installed list/show match built release binary exactly",
+      "input hashes unchanged"
+    ],
+    "release_cut": false
   }
 }

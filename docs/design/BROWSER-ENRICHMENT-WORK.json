@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-13",
+  "baseline_revision": "c8d16a92cc63d98bf220d78f215ebbc530f0e3e1",
+  "candidate_revision": "2c81d41d24ef2096011eed94f37dba6347a36768",
+  "server_binary": "cv 0.16.1 (c8d16a92cc63)",
+  "node": "22.23.3",
+  "browser": "system Chrome through Playwright 1.62.1",
+  "fixture": "256 synthetic Claude history groups, 768 messages; explicit final title and prompt at EOF",
+  "operation": "Open session, read first 200 messages, load all four pages",
+  "request_counts": {
+    "before": {
+      "events": 2,
+      "subagents": 2,
+      "message_windows": 4,
+      "heads": 1
+    },
+    "after": {
+      "events": 1,
+      "subagents": 1,
+      "message_windows": 4,
+      "heads": 1
+    }
+  },
+  "before_requests": [
+    "/api/sessions",
+    "/api/search?q=cv&limit=1",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/subagents",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/events",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=0&end=200",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/head",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/subagents",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/events",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=200&end=400",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=400&end=600",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=600&end=800"
+  ],
+  "after_requests": [
+    "/api/sessions",
+    "/api/search?q=cv&limit=1",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=0&end=200",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/head",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/subagents",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/events",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=200&end=400",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=400&end=600",
+    "/api/session/claude/00000000-0000-4000-8000-000000000001/messages?start=600&end=800"
+  ],
+  "output": {
+    "messages": 768,
+    "role_content_json_matches_full_cli": true,
+    "final_metadata_matches_full_cli": true,
+    "input_hashes_unchanged": true,
+    "page_errors": []
+  },
+  "checks": [
+    "63/63 web selftests; loading-header control demands zero enrichment requests, then one per hydrated panel",
+    "Actual production HTTP server/browser operation; no mock API for request counts or message parity"
+  ],
+  "evidence_root": "/Users/ember/dev/cv-worktrees/excellence-evidence/production-browser-smoke",
+  "limits": [
+    "Counts are browser requests, not backend parser bytes, physical I/O or latency.",
+    "The first window and independent final head retain their existing separate reads.",
+    "Some earlier browser navigations timed out; one control failed on undefined-versus-absent diagnostic fields before JSON normalization. Successful baseline/candidate controls are reported here. Intermittent connection startup is under independent investigation, not claimed fixed.",
+    "Browser and CLI run only against scratch inputs/catalog. This does not measure native desktop GUI startup."
+  ]
+}

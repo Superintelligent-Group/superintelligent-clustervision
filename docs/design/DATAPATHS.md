@@ -2490,3 +2490,20 @@ initial counts require source inspection without another authoritative index; fi
 mutable replay reconciliation and requested rich output impose real work. Treat those as explicit
 contracts, and remaining format/large-fleet/native-memory coverage as evidence gaps, rather than
 asserting every unchecked item is a demonstrated performance defect.
+
+### Browser loading-header enrichment (2026-10-13)
+
+The actual `cv serve --web` path exposed work outside the earlier window/head pair control:
+`_showSession` paints a metadata stub before awaiting messages, and the transcript renderer
+started events/sub-agent reads for that temporary DOM. Hydrated rendering then issued both
+requests again. The loading stub now paints its header without starting enrichment; the first
+message page renders before requesting those panels. Hydrated and imported sessions retain their
+panels, and independent final-head metadata and pagination are unchanged.
+
+[BROWSER-ENRICHMENT-WORK.json](BROWSER-ENRICHMENT-WORK.json) records an actual browser/server
+operation on 768 synthetic messages: events requests 2 → 1, sub-agent requests 2 → 1, with four
+message pages and one head in both. Every message's role/content JSON matches the full CLI oracle;
+final title/prompt and input hashes match, with no page errors. All 63 web selftests pass, including
+the new loading-header/panel-demand control. These are request counts, not backend byte counts or
+latency. Intermittent browser navigation timeouts observed while setting up the control are under
+separate server/connection investigation; this change does not claim to resolve them.
