@@ -77,7 +77,7 @@ can decode a whole field first. Each bound must hold across the composed path.
 | Goose SQLite | Indexed message rows | Preserve efficient query shape; measure before changing |
 | OpenClaw JSONL / SQLite | SQLite row cursors, compact tree navigation and selected payload replay | Tree metadata grows with events; selected row blobs remain owned; extra validation costs CPU |
 | Zed SQLite | Metadata-only ordered rows and incremental blobs under one snapshot; stream decodes once into owned spill, then validated message replay | Decoder/one message/known metadata; decoded file pages and temporary I/O; WITHOUT ROWID fallback retains one native cell |
-| LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Harmony decoding and demanded output/metadata remain owned; discovery uses bounded title prefixes; Harmony and arbitrary demanded metadata need separate limits |
+| LM Studio | Schema-selected document/turn views, selected lazy text spans and incremental variants; mapped or positioned sources | Bounded discovery title prefixes; Harmony decoding and arbitrary demanded output/metadata remain owned |
 | ChatGPT / Claude account exports | Bounded metadata cache and positioned source views; selected-conversation replay | Branch descriptors, joined text, selected owned output and sender/empty-archive compatibility edges |
 | OpenSession | Shared source validation/views and per-message IR projection | Selected authoritative rich fields remain owned; giant serialization proof separate from count/discovery |
 
@@ -634,7 +634,7 @@ a buffered fallback for oversized records. The matched 48,000-record, 45.9 MB so
 reduces matched-query CPU from 0.775718 to 0.333713 s (57%); rejected-query CPU stays near parity
 (0.183512/0.184421 s). Output is exactly 40,968,015 bytes with unchanged SHA-256. At 12,000 and
 48,000 records, matched-query peak Rust heap stays 1,249,147 bytes, rejected-query 380,636 bytes.
-This measures spool decoding; the separate decoded-argument lifetime work remains in progress.
+This measures spool decoding; decoded-argument lifetime is addressed by the shared arena below.
 
 LM Studio discovery now uses the same checked source document views as its selected reader.
 The portable whole-file read previously retained 16.8/67.1 MB for 16/64 MiB named plain sessions;
@@ -710,3 +710,12 @@ discard stays 395,305 bytes. Native/portable 16 MiB plain and escaped complete-m
 metadata digests match the established owned bulk parser. The portable accepted-output probes
 use the same late-model inputs/query as the native arena probes; generic serialization/hash
 oracles deliberately materialize values and are separate from allocation runs.
+
+
+CI now runs `check-heap-budget.py --only encoded-arguments`: independently generated Continue
+sessions place the queried model only on the final turn. At 3,000/12,000 calls, composed deferred
+export retains 1,199,885/1,199,888 native and 1,355,203/1,355,206 portable Rust bytes. Both outputs
+match independent incremental Python ChatML hashes and lengths (24,804,015/99,216,015 bytes).
+The gate caps heap at 2 MiB with 256 KiB growth allowance; generation is outside the measured
+child. These debug allocation probes make no throughput claim. Root composition checks also
+pass 29 JSON/transport/output tests, 14 dataset tests and the native core library lint gate.

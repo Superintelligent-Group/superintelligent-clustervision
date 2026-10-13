@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--records", type=int, default=1)
     parser.add_argument("--escaped", action="store_true")
     parser.add_argument("--entropy", action="store_true", help="Zed only: deterministic low-compressibility payloads")
-    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "legacy", "parts", "usage", "sweep-arguments"], default="history")
+    parser.add_argument("--shape", choices=["history", "unrelated", "sidecar-unmatched", "sidecar-selected", "tool-arguments", "metadata", "unselected", "prompt-only", "inline", "legacy", "parts", "usage", "sweep-arguments", "encoded-arguments"], default="history")
     args = parser.parse_args()
     if args.payload_bytes < 0 or args.records < 1:
         parser.error("payload bytes must be nonnegative and records positive")
@@ -59,8 +59,11 @@ def main():
         (root / "PERF-FIXTURE.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(manifest))
         return
-    if args.shape != "history" and not (args.shape == "tool-arguments" and args.harness in ("claude", "codex")):
-        parser.error("this harness supports history; Claude/Codex also support tool-arguments")
+    if args.shape != "history" and not (
+        args.shape == "tool-arguments" and args.harness in ("claude", "codex")
+        or args.shape == "encoded-arguments" and args.harness == "continue"
+    ):
+        parser.error("unsupported harness/shape combination")
     sid = "00000000-0000-4000-8000-000000000001"
     stamp = "2026-01-01T00:00:00Z"
     if args.harness == "claude":
@@ -91,7 +94,16 @@ def main():
             for i in range(args.records):
                 if i:
                     f.write(",")
-                json.dump({"id": f"m{i}", "message": {"role": "assistant", "content": payload(i)}}, f,
+                if args.shape == "encoded-arguments":
+                    argument = json.dumps({"payload": payload(i)}, ensure_ascii=False, separators=(",", ":"))
+                    message = {"role": "assistant", "toolCalls": [
+                        {"id": str(i), "function": {"name": "read", "arguments": argument}}]}
+                    # A model query cannot be settled from earlier turns or the SessionRef.
+                    if i == args.records - 1:
+                        message["usage"] = {"model": "present"}
+                else:
+                    message = {"role": "assistant", "content": payload(i)}
+                json.dump({"id": f"m{i}", "message": message}, f,
                           ensure_ascii=False, separators=(",", ":"))
             f.write("]}\n")
         elif args.harness == "lmstudio":

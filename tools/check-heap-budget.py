@@ -282,6 +282,45 @@ def selected_documents(native, portable, root, env):
                 bound(values, 2 * MIB, MIB // 4, f"selected {harness} escaped={escaped} {key}")
 
 
+def encoded_arguments(native, portable, root, env):
+    """Late model selection must retain shared source ownership, not one backing per call."""
+    generator = Path(__file__).with_name("perf-fixture.py")
+    peaks = {True: [], False: []}
+    for records in (3000, 12000):
+        manifest = json.loads(subprocess.check_output([
+            sys.executable, str(generator), "continue", str(root / f"encoded-{records}"),
+            "--shape", "encoded-arguments", "--records", str(records),
+            "--payload-bytes", str(records * 8192)], env=env, text=True))
+        # Independent ChatML oracle; hash incrementally outside the measured child.
+        payload = ("plain payload " * 586)[:8192]
+        argument = json.dumps({"payload": payload}, separators=(",", ":"))
+        message = json.dumps({"content": "```tool_call\nread " + argument + "\n```",
+                              "role": "assistant"}, separators=(",", ":")).encode()
+        digest = hashlib.sha256(b'{"messages":[')
+        expected_bytes = len(b'{"messages":[')
+        for i in range(records):
+            piece = (b"," if i else b"") + message
+            digest.update(piece)
+            expected_bytes += len(piece)
+        digest.update(b"]}\n")
+        expected_bytes += 3
+        for mmap, binary in ((True, native), (False, portable)):
+            row, peak = probe(binary, ["dataset", "continue", manifest["id"], manifest["path"],
+                                      "--root", manifest["root"], "--query", "model:present",
+                                      "--hash-output"], env, mmap)
+            detail = row["detail"]
+            assert detail["record_written"] is True, "late model query incorrectly rejected output"
+            assert detail["serialized_record_bytes"] == expected_bytes, "encoded arguments were skipped or changed"
+            assert detail["record_sha256"] == digest.hexdigest(), "encoded argument output differs from independent oracle"
+            peaks[mmap].append(peak)
+            print(json.dumps({"case": "encoded-late-model-dataset", "mmap": mmap, "records": records,
+                              "decoded_payload_bytes": records * 8192,
+                              "physical_input_bytes": manifest["physical_input_bytes"],
+                              "output_bytes": expected_bytes, "peak_live_rust_bytes": peak}), flush=True)
+    for mmap, values in peaks.items():
+        bound(values, 2 * MIB, MIB // 4, f"encoded deferred arguments mmap={mmap}")
+
+
 def token_stats(binary, root, env, mmap, baseline=None):
     """Bound usage history and exact dedup, preserving independent provider token arithmetic."""
     generator = Path(__file__).with_name("perf-fixture.py")
@@ -349,7 +388,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "doctor", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
     parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/stats, separately check baseline behavior parity")
     parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
                         help="repeat to focus --only active on selected native formats")
@@ -379,6 +418,8 @@ def main():
         elif args.only == "portable-docs":
             active_formats(args.no_mmap_probe.resolve(), root, env, args.probe.resolve(),
                            args.format or portable_formats, mmap=False)
+        elif args.only == "encoded-arguments":
+            encoded_arguments(args.probe.resolve(), args.no_mmap_probe.resolve(), root, env)
         elif args.only == "selected-docs":
             selected_documents(args.probe.resolve(), args.no_mmap_probe.resolve(), root, env)
         elif args.only == "active":
