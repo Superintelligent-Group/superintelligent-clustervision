@@ -531,9 +531,9 @@ fn pass(r: &SessionRef) -> Result<Pass> {
     let adapter = crate::harness::for_harness(r.harness).context("unsupported lane harness")?;
     let mut p = Pass::default();
     let mut seen = std::collections::HashSet::new();
-    // Keep rich usage metadata and source-backed arguments. Only text is materialized for the
-    // demanded assistant report; tool summaries and endpoints project their own bounded facts.
-    let opts = ParseOptions::lazy_extra();
+    // Only response identity is needed beyond the ordinary IR. Keep source-backed arguments
+    // without unrelated raw result metadata; demanded assistant reports retain their full text.
+    let opts = ParseOptions::usage();
     let resolver = crate::lazy::Resolver::new(Some(r.path.clone()));
     let session = adapter.try_stream(
         r,
@@ -548,18 +548,19 @@ fn pass(r: &SessionRef) -> Result<Pass> {
             if m.role == Role::Assistant {
                 let calls_a_tool = m.content.iter().any(|b| matches!(b, Block::ToolUse { .. }));
                 let report = (m.kind == MessageKind::Reply)
-                    .then(|| {
+                    .then(|| -> Result<String> {
                         let mut output = String::new();
                         for block in &m.content {
                             if let Block::Text { text } = block {
                                 if !output.is_empty() {
                                     output.push('\n');
                                 }
-                                output.push_str(&text.resolve(&resolver));
+                                output.push_str(&text.try_resolve(&resolver)?);
                             }
                         }
-                        output
+                        Ok(output)
                     })
+                    .transpose()?
                     .filter(|text| !text.trim().is_empty());
                 let has_text = report.is_some();
                 if calls_a_tool {
@@ -776,14 +777,14 @@ mod tests {
         let giant = "unneeded λ\n".repeat(10_000);
         let records = [
             serde_json::json!({"type":"user","uuid":"u","message":{"role":"user","content":giant}}),
-            serde_json::json!({"type":"assistant","uuid":"a","message":{"role":"assistant","content":[
+            serde_json::json!({"type":"assistant","uuid":"a","message":{"id":"same-response","role":"assistant","usage":{"input_tokens":5,"output_tokens":7},"content":[
                 {"type":"thinking","thinking":giant},
                 {"type":"tool_use","id":"t","name":"Bash","input":{"command":"CV_ENDPOINT=lane:test; echo ready"}}
             ]}}),
-            serde_json::json!({"type":"user","uuid":"r","message":{"role":"user","content":[
+            serde_json::json!({"type":"user","uuid":"r","toolUseResult":{"stdout":giant,"unused":giant},"message":{"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"t","content":giant}
             ]}}),
-            serde_json::json!({"type":"assistant","uuid":"done","message":{"role":"assistant","content":[
+            serde_json::json!({"type":"assistant","uuid":"done","message":{"id":"same-response","role":"assistant","usage":{"input_tokens":50,"output_tokens":70},"content":[
                 {"type":"text","text":""},{"type":"text","text":"ready λ"},
                 {"type":"text","text":""},{"type":"text","text":"last line"}
             ]}}),
@@ -806,6 +807,8 @@ mod tests {
         assert_eq!(summary.last_text, whole.messages.last().unwrap().text());
         assert!(summary.ends_in_report);
         assert_eq!(summary.tool_calls, 1);
+        assert_eq!(summary.tokens.calls, 1);
+        assert_eq!((summary.tokens.input, summary.tokens.output), (5, 7));
         assert_eq!(summary.endpoint.as_deref(), Some("lane:test"));
         assert_eq!(
             summary.last_tool.as_deref(),
