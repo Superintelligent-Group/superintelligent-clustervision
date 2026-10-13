@@ -6,7 +6,9 @@
 //! makes a single forward pass (index, export, dataset, live-search).
 //!
 //! [`Adapter::stream`](crate::harness::Adapter::stream) instead hands each [`Message`] to a
-//! [`MessageSink`] and drops it before reading the next, so peak memory is O(largest message). The
+//! [`MessageSink`] and drops it before reading the next. Retention depends on the adapter and
+//! consumer: selected payloads may remain checked source ranges, while owned fallbacks still
+//! scale with their largest message. A collecting sink retains the entire history. The
 //! whole-`Session` `parse` is recovered for free as "stream into a [`CollectSink`]" (see
 //! [`collect`]). Adapters override **one** of the two: a native `stream` (memory-savings) *or* the
 //! existing `parse` (and inherit a `stream` that bridges through it). No mutual recursion, so
@@ -59,7 +61,7 @@ pub enum ExtraProjection {
 ///
 /// - [`full()`](ParseOptions::full) — you will **re-emit or round-trip** the session (convert,
 ///   port, `--json`, splice/loom, redact-to-file). Everything materialized, inline. Most
-///   expensive; wrong for anything that only *reads*.
+///   expensive; rich read-only consumers can use lazy metadata or reducer facts.
 /// - [`bulk()`](ParseOptions::bulk) — you read **all** the text once, forward-only, and never
 ///   touch `extra` (live search over small/whole-doc harnesses, dataset-style flattening of
 ///   sessions you'll fully consume). Inline content, no sidecars.
@@ -71,7 +73,12 @@ pub enum ExtraProjection {
 ///   choose otherwise. Adapters without a span path just hand you inline content, so `lazy()` is
 ///   never *less* correct than `bulk()`, only cheaper when spans exist.
 ///
-/// Rule of thumb: emit ⇒ `full`, read-everything ⇒ `bulk`, read-some/bounded ⇒ `lazy`.
+/// - [`facts()`](ParseOptions::facts) — doctor, compaction and affordance reducers need their
+///   shared metadata facts, but not unrelated raw sidecars. Unsupported adapters may still return
+///   full metadata. Use [`lazy_extra()`](ParseOptions::lazy_extra) when all extras are part of the
+///   requested output.
+///
+/// Rule of thumb: owned round-trip ⇒ `full`, bounded content ⇒ `lazy`, reducers ⇒ `facts`.
 #[derive(Debug, Clone, Default)]
 pub struct ParseOptions {
     /// Populate the harness-specific `extra` maps — most importantly Claude's `toolUseResult`
@@ -148,7 +155,7 @@ impl ParseOptions {
     /// [`lazy()`](ParseOptions::lazy) **plus** the harness-specific `extra` sidecars and metadata
     /// (`subtype`, `compactMetadata`, `isCompactSummary`, attribution, …).
     /// Sidecars and other rich metadata can themselves be large: only supported content fields
-    /// become spans. For metadata scans and bounded decoded-text reducers (e.g. doctor).
+    /// become spans. For rich lazy output; bounded reducers should request [`facts()`](Self::facts).
     pub fn lazy_extra() -> Self {
         ParseOptions {
             spans: true,
