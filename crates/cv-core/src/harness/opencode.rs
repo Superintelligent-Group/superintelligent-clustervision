@@ -525,7 +525,7 @@ mod db {
     pub(super) fn todos(r: &SessionRef) -> Option<crate::affordance::Affordance> {
         let conn = open_ro(&r.path).ok()?;
         conn.read(|conn| {
-            if !has_table(&conn, "todo") {
+            if !has_table(conn, "todo") {
                 return Ok(None);
             }
             let mut st = conn.prepare("SELECT content, status FROM todo WHERE session_id = ?1 ORDER BY position")?;
@@ -581,15 +581,15 @@ mod db {
         conn: &rusqlite::Connection,
     ) -> Result<Vec<SessionRef>> {
         let _transaction = conn.unchecked_transaction()?;
-        let mut refs = if has_table(&conn, "session_v2") && has_table(&conn, "session_message") {
-            discover_v2(&conn, db)?
+        let mut refs = if has_table(conn, "session_v2") && has_table(conn, "session_message") {
+            discover_v2(conn, db)?
         } else {
             Vec::new()
         };
-        if has_table(&conn, "session") && has_table(&conn, "message") {
+        if has_table(conn, "session") && has_table(conn, "message") {
             let seen: HashSet<String> = refs.iter().map(|r| r.id.clone()).collect();
             refs.extend(
-                discover_v1(&conn, db, source)?
+                discover_v1(conn, db, source)?
                     .into_iter()
                     .filter(|r| !seen.contains(&r.id)),
             );
@@ -746,7 +746,7 @@ mod db {
         let _transaction = conn.unchecked_transaction()?;
         let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
         // The 2.x tables win for a session in both (a migrated database; module doc of `v2`).
-        let v2 = has_table(&conn, "session_v2")
+        let v2 = has_table(conn, "session_v2")
             && conn
                 .query_row(
                     "SELECT 1 FROM session_v2 WHERE id = ?1",
@@ -823,7 +823,7 @@ mod db {
         }
         sink.meta(&s);
         if v2 {
-            return stream_v2(&conn, s, opts, sink, source, &arena);
+            return stream_v2(conn, s, opts, sink, source, &arena);
         }
 
         let (mut msgs, message_rowid) = if opts.spans {
@@ -864,7 +864,7 @@ mod db {
                     if row.get::<_, String>(2)? != "text" {
                         anyhow::bail!("OpenCode SQLite message data is not TEXT");
                     }
-                    crate::harness::store::sqlite::append_cell(&conn, "message", "data", row.get(1)?, &arena)?
+                    crate::harness::store::sqlite::append_cell(conn, "message", "data", row.get(1)?, &arena)?
                 } else {
                     let data = row.get_ref(1)?.as_str()?;
                     arena.append(|writer| {
@@ -919,7 +919,7 @@ mod db {
                 }
                 if opts.spans {
                     let (offset, len) = if part_rowid {
-                        crate::harness::store::sqlite::append_cell(&conn, "part", "data", pr.get(0)?, &arena)?
+                        crate::harness::store::sqlite::append_cell(conn, "part", "data", pr.get(0)?, &arena)?
                     } else {
                         let pdata = pr.get_ref(1)?.as_str()?;
                         arena.append(|writer| {
