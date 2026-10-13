@@ -47,7 +47,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The CLI-generated tools, built once at startup from the clap tree.
@@ -62,8 +62,99 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// A request handler's stack. Tool bodies parse whole transcripts; give them main's room.
 const HANDLER_STACK: usize = 8 * 1024 * 1024;
 
+// Permits cover execution AND completed response ownership. Blocking polls cannot occupy
+// ordinary tool slots. Control requests run on the reader and backpressure on the response queue.
+const ORDINARY_CALLS: usize = 4;
+const BLOCKING_POLLS: usize = 2;
+const RESPONSE_QUEUE: usize = 8;
+
+struct Admission {
+    used: Mutex<usize>,
+    available: Condvar,
+    limit: usize,
+}
+impl Admission {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            used: Mutex::new(0),
+            available: Condvar::new(),
+            limit,
+        })
+    }
+    fn acquire(self: &Arc<Self>, wait: bool, cancelled: &AtomicBool) -> Option<Permit> {
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            if *used < self.limit {
+                *used += 1;
+                return Some(Permit(Arc::new(Lease(self.clone()))));
+            }
+            if !wait {
+                return None;
+            }
+            used = self
+                .available
+                .wait_timeout(used, Duration::from_millis(10))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+struct Permit(Arc<Lease>);
+impl Clone for Permit {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+struct Lease(Arc<Admission>);
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let mut used = self.0.used.lock().unwrap_or_else(|e| e.into_inner());
+        *used -= 1;
+        self.0.available.notify_one();
+    }
+}
+struct Pending {
+    response: Response,
+    _permit: Option<Permit>,
+}
+impl Pending {
+    fn control(response: Response) -> Self {
+        Self {
+            response,
+            _permit: None,
+        }
+    }
+}
+
+fn enqueue_tool_response(tx: &mpsc::SyncSender<Pending>, response: Response, permit: Permit, cancelled: &AtomicBool) {
+    let mut pending = Pending {
+        response,
+        _permit: Some(permit),
+    };
+    loop {
+        // Flush pre-disconnect frames, but do not keep a handler blocked behind a dead peer.
+        if cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        match tx.try_send(pending) {
+            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => return,
+            Err(mpsc::TrySendError::Full(frame)) => pending = frame,
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Serve MCP over stdio until stdin closes.
 pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
+    // Unlike a pipeline command, MCP owns children that must be cancelled/reaped when its
+    // output peer disappears. Let the writer observe EPIPE instead of terminating on SIGPIPE.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     eprintln!("cv mcp: clustervision MCP server starting (stdio JSON-RPC)");
     let generated = match CliTools::from_owned_tree(tree) {
         Ok(c) => {
@@ -83,12 +174,14 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
     // complete out of order — JSON-RPC ties a reply to its request by `id`, so that's fine.
     let cancelled = Arc::new(AtomicBool::new(false));
     let writer_cancelled = cancelled.clone();
-    let (resp_tx, resp_rx) = mpsc::channel::<Response>();
+    let (resp_tx, resp_rx) = mpsc::sync_channel::<Pending>(RESPONSE_QUEUE);
+    let ordinary = Admission::new(ORDINARY_CALLS);
+    let polls = Admission::new(BLOCKING_POLLS);
     let (done_tx, done_rx) = mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut stdout = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
         for msg in resp_rx {
-            if let Err(e) = write_message(&mut stdout, &msg) {
+            if let Err(e) = write_message(&mut stdout, &msg.response) {
                 eprintln!("cv mcp: stdout write failed: {e:#}");
                 break;
             }
@@ -100,6 +193,7 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
         let _ = done_tx.send(());
     });
 
+    let mut handlers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut reader = std::io::stdin().lock();
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -128,11 +222,11 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
             Ok(v) => v,
             Err(e) => {
                 // Parse error: id unknown, reply with null id per JSON-RPC.
-                let _ = resp_tx.send(Response::Json(error_response(
+                let _ = resp_tx.send(Pending::control(Response::Json(error_response(
                     Value::Null,
                     -32700,
                     &format!("Parse error: {e}"),
-                )));
+                ))));
                 continue;
             }
         };
@@ -140,24 +234,101 @@ pub(crate) fn cmd_mcp(tree: clap::Command) -> anyhow::Result<()> {
         let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
         let params = req.get("params").cloned();
 
-        // Each request on its own thread so slow handlers never block the read loop.
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        // Protocol/control bursts retain their replies, without starting handler threads.
+        if method != "tools/call" {
+            if let Some(response) = handle(&method, params, id, &cancelled) {
+                if resp_tx.send(Pending::control(response)).is_err() {
+                    break;
+                }
+            }
+            continue;
+        }
+        let blocking = params.as_ref().and_then(|p| p.get("name")).and_then(Value::as_str) == Some("await_omen");
+        let admission = if blocking { &polls } else { &ordinary };
+        // Side-effect notifications wait: silently dropping them would change the protocol.
+        let Some(permit) = admission.acquire(id.is_none(), &cancelled) else {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Some(id) = id {
+                let response = Response::Json(error_response(
+                    id,
+                    -32000,
+                    "MCP tool capacity is busy; retry after an outstanding call completes",
+                ));
+                if resp_tx.send(Pending::control(response)).is_err() {
+                    break;
+                }
+            }
+            continue;
+        };
+        // Completed thread handles do not accumulate with request history.
+        let mut i = 0;
+        while i < handlers.len() {
+            if handlers[i].is_finished() {
+                let _ = handlers.swap_remove(i).join();
+            } else {
+                i += 1;
+            }
+        }
+        // A released execution lease may precede the OS's finished-thread flag by a few
+        // instructions. Do not accumulate even those epilogues across a sustained burst.
+        while handlers.len() >= ORDINARY_CALLS + BLOCKING_POLLS {
+            if let Some(i) = handlers.iter().position(std::thread::JoinHandle::is_finished) {
+                let _ = handlers.swap_remove(i).join();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let failure_id = id.clone();
         let tx = resp_tx.clone();
         let cancelled = cancelled.clone();
         let spawned = std::thread::Builder::new().stack_size(HANDLER_STACK).spawn(move || {
-            if let Some(resp) = handle(&method, params, id, &cancelled) {
-                let _ = tx.send(resp);
+            let _execution = permit.clone();
+            let panic_id = id.clone();
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(&method, params, id, &cancelled)));
+            let response = match result {
+                Ok(response) => response,
+                Err(_) => panic_id
+                    .map(|id| Response::Json(error_response(id, -32603, "internal error: the request panicked"))),
+            };
+            if let Some(response) = response {
+                enqueue_tool_response(&tx, response, permit, &cancelled);
             }
         });
-        if let Err(e) = spawned {
+        if let Ok(handler) = spawned {
+            handlers.push(handler);
+        } else if let Err(e) = spawned {
             eprintln!("cv mcp: could not start a request thread: {e}");
+            if let Some(id) = failure_id {
+                let response = Response::Json(error_response(
+                    id,
+                    -32603,
+                    &format!("could not start a request thread: {e}"),
+                ));
+                if resp_tx.send(Pending::control(response)).is_err() {
+                    break;
+                }
+            }
         }
     }
 
     // Flush responses already queued (or about to land) before exiting; don't hang around for the
     // full length of an in-flight long-poll — the host that would read its answer is gone.
     drop(resp_tx);
-    if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+    let finished = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    if !finished {
         cancelled.store(true, Ordering::Relaxed);
+    }
+    // Child kill/reap and request-owned read scopes must finish before main exits.
+    for handler in handlers {
+        let _ = handler.join();
+    }
+    if !finished {
         let _ = done_rx.recv_timeout(Duration::from_secs(1));
     }
     Ok(())
@@ -411,7 +582,7 @@ enum ToolOutput {
 }
 fn call_tool(name: &str, args: &Value, cancelled: &AtomicBool) -> anyhow::Result<ToolOutput> {
     match name {
-        "await_omen" => await_omen(args).map(ToolOutput::Text),
+        "await_omen" => await_omen(args, cancelled).map(ToolOutput::Text),
         "observe_stream" => observe_stream(args).map(ToolOutput::Text),
         // Removed in 0.15.0 (the coordination board): a pointer, never a silent "unknown tool".
         n if n.starts_with("board_") => anyhow::bail!(
@@ -436,7 +607,7 @@ fn call_tool(name: &str, args: &Value, cancelled: &AtomicBool) -> anyhow::Result
 
 /// Block until a newly-emitted message matches `regex` (or `timeout_secs` elapses). The polling loop
 /// runs on its request's own thread, so blocking is fine.
-fn await_omen(args: &Value) -> anyhow::Result<String> {
+fn await_omen(args: &Value, cancelled: &AtomicBool) -> anyhow::Result<String> {
     let pattern = arg_str(args, "regex").context("`regex` is required")?;
     let re = regex::Regex::new(pattern).with_context(|| format!("invalid regex: {pattern:?}"))?;
     let filter = Filter {
@@ -447,9 +618,15 @@ fn await_omen(args: &Value) -> anyhow::Result<String> {
     let interval = Duration::from_secs(arg_usize(args, "interval_secs", 2)?.max(1) as u64);
 
     // Only react to activity from now on (not the existing backlog).
+    if cancelled.load(Ordering::Relaxed) {
+        anyhow::bail!("MCP client disconnected");
+    }
     let mut watcher = Watcher::new(filter, false);
     let start = Instant::now();
     loop {
+        if cancelled.load(Ordering::Relaxed) {
+            anyhow::bail!("MCP client disconnected");
+        }
         for ev in watcher.poll() {
             for m in &ev.new_messages {
                 let text = message_text(m)?;
@@ -475,7 +652,13 @@ fn await_omen(args: &Value) -> anyhow::Result<String> {
                 "waited_secs": start.elapsed().as_secs(),
             }))?);
         }
-        std::thread::sleep(interval);
+        let sleep_start = Instant::now();
+        while sleep_start.elapsed() < interval {
+            if cancelled.load(Ordering::Relaxed) {
+                anyhow::bail!("MCP client disconnected");
+            }
+            std::thread::sleep((interval - sleep_start.elapsed().min(interval)).min(Duration::from_millis(100)));
+        }
     }
 }
 
@@ -970,5 +1153,132 @@ mod transport_heap_probe {
             "MCP_TRANSPORT_HEAP {}",
             json!({"mode":mode,"wire_bytes":sink.0,"heap":heap})
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn permit_covers_queued_response_and_releases_on_disconnect_and_panic() {
+        let cancelled = AtomicBool::new(false);
+        let pool = Admission::new(1);
+        let permit = pool.acquire(false, &cancelled).unwrap();
+        let execution = permit.clone();
+        drop(permit);
+        assert!(
+            pool.acquire(false, &cancelled).is_none(),
+            "execution still owns the shared lease"
+        );
+        drop(execution);
+        let permit = pool.acquire(false, &cancelled).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Pending {
+            response: Response::Json(json!({})),
+            _permit: Some(permit),
+        })
+        .unwrap_or_else(|_| panic!("send failed"));
+        assert!(
+            pool.acquire(false, &cancelled).is_none(),
+            "completed responses retain admission"
+        );
+        drop(rx);
+        assert!(
+            pool.acquire(false, &cancelled).is_some(),
+            "disconnect drops queued ownership"
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = pool.acquire(false, &cancelled).unwrap();
+            panic!("handler failure");
+        }));
+        assert!(result.is_err());
+        assert!(pool.acquire(false, &cancelled).is_some());
+        let permit = pool.acquire(false, &cancelled).unwrap();
+        assert!(tx
+            .send(Pending {
+                response: Response::Json(json!({})),
+                _permit: Some(permit)
+            })
+            .is_err());
+        assert!(
+            pool.acquire(false, &cancelled).is_some(),
+            "failed send releases admission"
+        );
+    }
+
+    #[test]
+    fn notification_wait_is_cancelled_and_poll_capacity_is_separate() {
+        let ordinary = Admission::new(ORDINARY_CALLS);
+        let polls = Admission::new(BLOCKING_POLLS);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let held: Vec<_> = (0..BLOCKING_POLLS)
+            .map(|_| polls.acquire(false, &cancelled).unwrap())
+            .collect();
+        assert!(polls.acquire(false, &cancelled).is_none());
+        assert!(ordinary.acquire(false, &cancelled).is_some());
+        let other = cancelled.clone();
+        let pool = polls.clone();
+        let waiter = std::thread::spawn(move || pool.acquire(true, &other).is_none());
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(waiter.join().unwrap());
+        drop(held);
+        assert_eq!(*polls.used.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn completed_after_disconnect_is_dropped_before_publication() {
+        let cancelled = AtomicBool::new(false);
+        let admission = Admission::new(1);
+        let permit = admission.acquire(false, &cancelled).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        cancelled.store(true, Ordering::Relaxed);
+        enqueue_tool_response(&tx, Response::Json(json!({"id":1})), permit, &cancelled);
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(*admission.used.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn publication_wait_stops_on_disconnect_even_with_full_queue() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let admission = Admission::new(1);
+        let permit = admission.acquire(false, &cancelled).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Pending::control(Response::Json(json!({"id":0}))))
+            .unwrap_or_else(|_| panic!("send failed"));
+        let other = cancelled.clone();
+        let worker =
+            std::thread::spawn(move || enqueue_tool_response(&tx, Response::Json(json!({"id":1})), permit, &other));
+        cancelled.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        assert_eq!(*admission.used.lock().unwrap(), 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Pending {
+                response: Response::Json(_),
+                ..
+            })
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn disconnected_poll_does_not_enter_watcher() {
+        let cancelled = AtomicBool::new(true);
+        let error = await_omen(&json!({"regex":"never"}), &cancelled).unwrap_err();
+        assert_eq!(error.to_string(), "MCP client disconnected");
+    }
+
+    #[test]
+    fn notification_wait_resumes_after_response_is_dropped() {
+        let pool = Admission::new(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let held = pool.acquire(false, &cancelled).unwrap();
+        let other = cancelled.clone();
+        let admission = pool.clone();
+        let waiter = std::thread::spawn(move || admission.acquire(true, &other));
+        drop(held);
+        assert!(waiter.join().unwrap().is_some());
+        assert_eq!(*pool.used.lock().unwrap(), 0);
     }
 }

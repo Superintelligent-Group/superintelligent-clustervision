@@ -3644,3 +3644,15 @@ diagnostic history. Native and instrumented stdout/stderr/transcript/full 8 MiB
 sidecar bytes match, with frozen source/catalog identity. Sixteen scoped
 Cachegrind children, no timing or broad matrix; memory ownership remains covered
 by the separate Unicode operation gates.
+
+### MCP bounded admission and publication (2026-10-13, encoded_arguments)
+
+MCP previously started an 8 MiB-stack handler for every frame and queued completed responses without limit. Each generated command additionally owns a child and two output collectors. A scratch-only 32/128 `tools/list` burst with unread stdout produced 1,757,846/7,031,442 bytes of successful responses; process RSS was diagnostic only, not an isolated allocator measurement. Preserved controls: `/Users/ember/dev/cv-worktrees/encoded-arguments-evidence/mcp-burst/{control.py,reports.json}`.
+
+The repaired scheduler admits at most four ordinary tool calls and two genuinely blocking `await_omen` calls. `observe_stream` remains ordinary. A shared lease covers both execution completion and response publication/drop; handler handles are reaped and capped at six. The response queue holds eight frames, the writer one, and the reader at most one pending control response/frame. Thus request history cannot grow execution slots, collectors, completed response owners or handler handles; arbitrary single input/output sizes are a separate contract. Generated commands occupy at most four simultaneous child slots and eight collectors.
+
+Protocol/control requests run on the reader and preserve successful replies through output backpressure. Saturated tool requests receive an ID-preserving busy error before execution; side-effect notifications wait for admission and never silently disappear. Separate poll slots preserve ordinary-call responsiveness. Slow-output backpressure can delay later input, including EOF behind an admission-blocked notification; a second finite queue would only relocate that boundary. Per-request cancellation notifications remain unsupported as before.
+
+MCP alone ignores SIGPIPE so its existing writer-error disconnect token actually runs instead of abruptly killing the server. `await_omen` checks that token without changing ordinary timeout results. Newly completed responses are dropped after cancellation; cancel-aware publication avoids handler joins blocking on a full response queue. After the EOF grace period, handlers cancel and join before main returns, allowing child reap and request-owned source cleanup. Other CLI commands retain their normal SIGPIPE behavior.
+
+Scoped tests cover lease release on panic, failed send and response drop; notification admission resume/cancellation; cancelled full-queue publication; 128 successful control IDs; saturated polls alongside an ordinary command; and actual EOF/closed-output shutdown. The existing generated-child kill/reap and long-poll responsiveness tests also pass. No throughput, CPU or absolute memory-byte claim is made by the scheduling count invariant. The bounded actual control retains exact IDs/results after stdout drains; its diagnostic report is `mcp-burst/bounded-reports.json` beside the original evidence.

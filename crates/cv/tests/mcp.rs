@@ -593,3 +593,76 @@ fn observe_stream_unusable_cursor_is_a_fresh_baseline() {
         assert_eq!(v["count"], 0, "{text}");
     }
 }
+
+#[test]
+fn admission_control_burst_preserves_successful_ids() {
+    let mut server = Server::spawn("mcp-admission-controls");
+    for id in 0..128 {
+        server.send(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/list"}));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..128 {
+        let response = server.recv();
+        assert!(response["result"]["tools"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(seen.insert(response["id"].as_u64().unwrap()));
+        assert!(response.get("error").is_none());
+    }
+    assert_eq!(seen, (0..128).collect());
+}
+
+#[test]
+fn admission_poll_saturation_keeps_ordinary_calls_responsive() {
+    let mut server = Server::spawn("mcp-admission-polls");
+    for id in 1..=3 {
+        server.send(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{
+            "name":"await_omen", "arguments":{"regex":"NEVER_MATCHES", "cwd_contains":"/nowhere", "timeout_secs":4,"interval_secs":1}}}));
+    }
+    let busy = server.recv();
+    assert_eq!(busy["id"], 3);
+    assert_eq!(busy["error"]["code"], -32000);
+    server.send(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"task_list","arguments":{}}}));
+    let ordinary = server.recv();
+    assert_eq!(ordinary["id"], 4);
+    assert_eq!(ordinary["result"]["isError"], false);
+    let mut polls = [
+        server.recv()["id"].as_u64().unwrap(),
+        server.recv()["id"].as_u64().unwrap(),
+    ];
+    polls.sort();
+    assert_eq!(polls, [1, 2]);
+}
+
+#[test]
+fn admission_shutdown_after_eof_or_output_failure_cancels_long_poll() {
+    for output_failure in [false, true] {
+        let world = World::new("mcp-admission-shutdown");
+        let mut child = world
+            .cv_command()
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"await_omen","arguments":{"regex":"never","timeout_secs":120}}})).unwrap();
+        if output_failure {
+            drop(child.stdout.take());
+            writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":2,"method":"ping"})).unwrap();
+        }
+        drop(stdin);
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("MCP shutdown wedged");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
