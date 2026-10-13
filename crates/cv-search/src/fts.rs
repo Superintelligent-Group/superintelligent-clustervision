@@ -700,7 +700,7 @@ impl SweepPlanner<'_> {
         // id → (mtime, size) for every live doc — the incremental skip-set — plus the set of ids that
         // are folded-in sub-agent docs (they carry `parent_id`), which the reap below must leave alone
         // on a plain (no --subagents) refresh.
-        let (existing, folded, metadata) = if rebuild {
+        let (existing, folded, metadata, duplicate_meta) = if rebuild {
             Default::default()
         } else {
             read_indexed_metadata(index, f, true).unwrap_or_default()
@@ -761,9 +761,10 @@ impl SweepPlanner<'_> {
                 fts: !fts_fresh,
                 events,
                 existing: existing.contains_key(&r.id),
-                grew: existing
-                    .get(&r.id)
-                    .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
+                grew: !duplicate_meta.contains(&r.id)
+                    && existing
+                        .get(&r.id)
+                        .is_some_and(|&(_, old_size)| old_size > 0 && size > old_size),
                 prov,
                 mark: marks.get(r).cloned(),
                 source,
@@ -2036,7 +2037,7 @@ type IndexedSigs = (HashMap<String, (i64, i64)>, HashSet<String>);
 /// Read the [`IndexedSigs`] off every live meta doc in the index (one per session; stored fields
 /// are tiny, so this is cheap).
 fn read_indexed_sigs(index: &Index, f: &Fields) -> Result<IndexedSigs> {
-    let (sigs, folded, _) = read_indexed_metadata(index, f, false)?;
+    let (sigs, folded, _, _) = read_indexed_metadata(index, f, false)?;
     Ok((sigs, folded))
 }
 
@@ -2044,6 +2045,7 @@ type IndexedMetadata = (
     HashMap<String, (i64, i64)>,
     HashSet<String>,
     HashMap<String, DiscoveryMetadata>,
+    HashSet<String>,
 );
 
 fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Result<IndexedMetadata> {
@@ -2082,10 +2084,10 @@ fn read_indexed_metadata(index: &Index, f: &Fields, read_metadata: bool) -> Resu
             }
         }
     }
-    for id in duplicates {
-        metadata.remove(&id);
+    for id in &duplicates {
+        metadata.remove(id);
     }
-    Ok((out, folded, metadata))
+    Ok((out, folded, metadata, duplicates))
 }
 
 /// Matches the docs of one `kind`.
@@ -4286,6 +4288,83 @@ mod tests {
         );
         std::fs::remove_file(&older.path).unwrap();
         assert_eq!(sweep(&dir, vec![older, newer], false, false).unwrap().errors, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(oracle).unwrap();
+    }
+
+    #[test]
+    fn duplicate_meta_repair_with_valid_append_mark_replaces_the_whole_prefix() {
+        let home = IsolatedHome::new();
+        let dir = tmpdir();
+        let oracle = tmpdir();
+        let body = "sapphire ".repeat(8192);
+        let turns: Vec<_> = (0..70).map(|_| ("user", body.as_str())).collect();
+        let path = write_claude_msgs(&home.home, "repair-append", &turns);
+        let r = sref("repair-append", "same metadata", path);
+        sweep(&dir, vec![r.clone()], true, false).unwrap();
+        assert!(
+            cv_core::resume::MarkTable::load().get(&r).is_some(),
+            "fixture must establish a production checkpoint"
+        );
+        // The independent old collector creates duplicate prefix/meta records, while leaving
+        // the valid production checkpoint available for the subsequent real append.
+        index_refs(&dir, &[r.clone(), r.clone()], true).unwrap();
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&r.path).unwrap(),
+            "{}",
+            serde_json::json!({"type":"user","uuid":"tail","sessionId":"repair-append",
+                "message":{"role":"user","content":"amber appended tail"}})
+        )
+        .unwrap();
+        let marks = cv_core::resume::MarkTable::load();
+        let head = marks.get(&r).unwrap();
+        let adapter = cv_core::harness::for_harness(r.harness).unwrap();
+        let version = cv_core::resume::version(adapter.as_ref(), RESUME_TAG).unwrap();
+        assert!(head.holds(&r.path, std::fs::metadata(&r.path).unwrap().len(), &version));
+        assert!(cv_core::resume::state(&r, head)
+            .unwrap()
+            .get::<FtsState>(FTS_LAYER)
+            .is_some());
+        let (index, fields) = open_existing(&dir).unwrap();
+        let plan = SweepPlanner {
+            index: &index,
+            f: &fields,
+            dir: &dir,
+            refs: std::slice::from_ref(&r),
+            rebuild: false,
+            subagents: false,
+        }
+        .plan()
+        .unwrap();
+        assert!(plan.jobs[0].existing && plan.jobs[0].dependencies_fresh);
+        assert!(
+            !plan.jobs[0].grew,
+            "corruption must disable otherwise valid append reuse"
+        );
+        let repaired = sweep(&dir, vec![r.clone()], false, false).unwrap();
+        assert_eq!((repaired.changed, repaired.resumed, repaired.errors), (1, 0, 0));
+        index_refs(&oracle, std::slice::from_ref(&r), false).unwrap();
+        let stored = |path: &Path| {
+            use tantivy::schema::document::Document;
+            let index = Index::open_in_dir(path).unwrap();
+            let searcher = index.reader().unwrap().searcher();
+            let mut docs = Vec::new();
+            for segment in searcher.segment_readers() {
+                let store = segment.get_store_reader(0).unwrap();
+                for id in segment.doc_ids_alive() {
+                    let doc: TantivyDocument = store.get(id).unwrap();
+                    docs.push(doc.to_json(&index.schema()));
+                }
+            }
+            docs.sort();
+            docs
+        };
+        assert_eq!(stored(&dir), stored(&oracle));
+        assert_eq!(
+            text_search_ids(&dir, "amber").unwrap(),
+            text_search_ids(&oracle, "amber").unwrap()
+        );
         std::fs::remove_dir_all(dir).unwrap();
         std::fs::remove_dir_all(oracle).unwrap();
     }
