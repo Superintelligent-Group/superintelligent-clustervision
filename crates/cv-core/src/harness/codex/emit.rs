@@ -4,7 +4,7 @@
 
 use crate::emit::fidelity::unrepresentable;
 use crate::emit::*;
-use crate::harness::store::write_jsonl;
+use crate::harness::store::JsonlStage;
 use crate::harness::EmitResult;
 use crate::ir::{Block, GitInfo, Harness, MessageKind, Role, Session};
 use anyhow::{Context, Result};
@@ -47,7 +47,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
 
     let ts_str = now.to_rfc3339_opts(SecondsFormat::Millis, true);
 
-    let mut lines: Vec<Value> = Vec::new();
+    let mut lines = JsonlStage::new();
 
     // session_meta first line.
     let mut meta = Map::new();
@@ -82,7 +82,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         "type": "session_meta",
         "timestamp": ts_str,
         "payload": Value::Object(meta),
-    }));
+    }))?;
 
     // The model rides in a `turn_context` record (per-turn config: model/cwd/approval/sandbox) —
     // that's the ONLY place Codex's own parser (and ours, `apply_turn_context`) reads a model id
@@ -104,7 +104,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 "model": model,
                 "summary": "auto",
             },
-        }));
+        }))?;
     }
 
     for msg in &session.messages {
@@ -130,7 +130,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 "type": "compacted",
                 "timestamp": ts,
                 "payload": { "message": text },
-            }));
+            }))?;
             continue;
         }
 
@@ -144,23 +144,11 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         "role": "developer",
                         "content": [{ "type": "input_text", "text": text }],
                     }),
-                ));
+                ))?;
             }
             Role::User => {
-                let text = msg.text().unwrap_or_default();
-                // The `response_item` message is what Codex feeds back into the model on resume;
-                // the `event_msg` is only the UI transcript event. Emit BOTH (matching real
-                // rollouts) — without the response_item the resumed model has no memory of the
-                // user's turns. User content uses `input_text`.
-                lines.push(codex_response_item(
-                    &ts,
-                    json!({
-                        "type": "message",
-                        "role": "user",
-                        "content": [{ "type": "input_text", "text": text }],
-                    }),
-                ));
-                lines.push(codex_event_msg(&ts, json!({ "type": "user_message", "message": text })));
+                let text = message_text(msg);
+                push_text(&mut lines, &ts, "user", "input_text", "user_message", &text)?;
             }
             Role::Assistant => {
                 let first_record = lines.len();
@@ -168,21 +156,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 for b in &msg.content {
                     match b {
                         Block::Text { text } => {
-                            // Same as user turns: the response_item carries the assistant text
-                            // into the resumed model context; the event_msg is UI-only. Assistant
-                            // content uses `output_text`.
-                            lines.push(codex_response_item(
-                                &ts,
-                                json!({
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "content": [{ "type": "output_text", "text": text }],
-                                }),
-                            ));
-                            lines.push(codex_event_msg(
-                                &ts,
-                                json!({ "type": "agent_message", "message": text }),
-                            ));
+                            push_text(&mut lines, &ts, "assistant", "output_text", "agent_message", text)?;
                         }
                         Block::Thinking { text, encrypted, .. } => {
                             let mut p = Map::new();
@@ -209,7 +183,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                             if let Some(enc) = encrypted {
                                 p.insert("encrypted_content".into(), json!(enc));
                             }
-                            lines.push(codex_response_item(&ts, Value::Object(p)));
+                            lines.push(codex_response_item(&ts, Value::Object(p)))?;
                         }
                         Block::ToolUse { id, name, input, .. } => {
                             let args = serde_json::to_string(input.resolve()?.as_ref())?;
@@ -221,7 +195,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                     "name": name,
                                     "arguments": args,
                                 }),
-                            ));
+                            ))?;
                         }
                         Block::File { path, source, .. } => {
                             let label = path.as_deref().or(source.as_deref()).unwrap_or("?");
@@ -231,7 +205,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                     "type": "agent_message",
                                     "message": format!("[file: {label}]"),
                                 }),
-                            ));
+                            ))?;
                         }
                         Block::ToolResult { .. } | Block::Image { .. } => {}
                     }
@@ -247,7 +221,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                         lines.push(codex_event_msg(
                             &ts,
                             json!({ "type": "token_count", "info": { "last_token_usage": info } }),
-                        ));
+                        ))?;
                     }
                 }
             }
@@ -286,7 +260,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                     "name": tool_name.clone().unwrap_or_else(|| "unknown".into()),
                                     "arguments": "{}",
                                 }),
-                            ));
+                            ))?;
                         }
                         lines.push(codex_response_item(
                             &ts,
@@ -295,14 +269,14 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                 "call_id": tool_use_id,
                                 "output": output,
                             }),
-                        ));
+                        ))?;
                     }
                 }
             }
         }
     }
 
-    write_jsonl(&file_path, &lines)?;
+    lines.publish(&file_path)?;
 
     Ok(EmitResult {
         path: file_path,
@@ -365,4 +339,97 @@ fn codex_git(g: &GitInfo) -> Value {
         m.insert("repository_url".into(), json!(r));
     }
     Value::Object(m)
+}
+
+// Borrow payload strings rather than constructing a second Value tree for each text twin.
+#[derive(serde::Serialize)]
+struct Record<'a, T> {
+    r#type: &'a str,
+    timestamp: &'a str,
+    payload: T,
+}
+#[derive(serde::Serialize)]
+struct TextItem<'a> {
+    r#type: &'a str,
+    text: &'a str,
+}
+#[derive(serde::Serialize)]
+struct TextMessage<'a> {
+    r#type: &'a str,
+    role: &'a str,
+    content: [TextItem<'a>; 1],
+}
+#[derive(serde::Serialize)]
+struct TextEvent<'a> {
+    r#type: &'a str,
+    message: &'a str,
+}
+fn push_text(
+    lines: &mut JsonlStage,
+    ts: &str,
+    role: &str,
+    content_type: &str,
+    event_type: &str,
+    text: &str,
+) -> Result<()> {
+    lines.push(Record {
+        r#type: "response_item",
+        timestamp: ts,
+        payload: TextMessage {
+            r#type: "message",
+            role,
+            content: [TextItem {
+                r#type: content_type,
+                text,
+            }],
+        },
+    })?;
+    lines.push(Record {
+        r#type: "event_msg",
+        timestamp: ts,
+        payload: TextEvent {
+            r#type: event_type,
+            message: text,
+        },
+    })
+}
+fn message_text(message: &crate::ir::Message) -> std::borrow::Cow<'_, str> {
+    let mut blocks = message.content.iter().filter_map(|block| match block {
+        Block::Text { text } => Some(text),
+        _ => None,
+    });
+    match (blocks.next(), blocks.next()) {
+        (Some(text), None) => std::borrow::Cow::Borrowed(text),
+        (None, _) => std::borrow::Cow::Borrowed(""),
+        _ => std::borrow::Cow::Owned(message.text().unwrap_or_default()),
+    }
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+    #[test]
+    fn borrowed_text_twins_preserve_wire_bytes() -> Result<()> {
+        let world = cv_testkit::World::new("codex-text-stage");
+        for (role, content_type, event_type) in [
+            ("user", "input_text", "user_message"),
+            ("assistant", "output_text", "agent_message"),
+        ] {
+            let text = "a\"\\\nλ";
+            let mut stage = JsonlStage::new();
+            push_text(&mut stage, "fixed", role, content_type, event_type, text)?;
+            let path = world.base.join(role);
+            stage.publish(&path)?;
+            let expected = format!(
+                "{}\n{}\n",
+                serde_json::to_string(&codex_response_item(
+                    "fixed",
+                    json!({"type":"message", "role":role, "content":[{"type":content_type,"text":text}]})
+                ))?,
+                serde_json::to_string(&codex_event_msg("fixed", json!({"type":event_type,"message":text})))?
+            );
+            assert_eq!(std::fs::read(&path)?, expected.as_bytes());
+        }
+        Ok(())
+    }
 }

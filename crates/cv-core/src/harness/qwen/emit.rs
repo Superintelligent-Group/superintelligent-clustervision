@@ -10,6 +10,7 @@
 //! (`--out ~/.qwen`, or a scratch dir: the file goes to its `projects/`).
 
 use crate::emit::*;
+use crate::harness::store::JsonlStage;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, Message, MessageKind, Origin, Role, Session};
 use anyhow::{Context, Result};
@@ -137,7 +138,8 @@ struct Writer<'a> {
     branch: Option<String>,
     last_uuid: Option<String>,
     fallback_ts: String,
-    lines: Vec<String>,
+    lines: JsonlStage,
+    forked_from: Option<&'a str>,
 }
 
 impl Writer<'_> {
@@ -160,7 +162,12 @@ impl Writer<'_> {
             r.insert("gitBranch".into(), json!(b));
         }
         r.extend(fields);
-        self.lines.push(serde_json::to_string(&Value::Object(r))?);
+        if self.lines.is_empty() {
+            if let Some(from) = self.forked_from {
+                r.insert("forkedFrom".into(), json!({ "sessionId": from }));
+            }
+        }
+        self.lines.push(Value::Object(r))?;
         self.last_uuid = Some(uuid);
         Ok(())
     }
@@ -211,7 +218,8 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         last_uuid: None,
         fallback_ts: stamp(session.created_at.or(session.updated_at))
             .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
-        lines: Vec::new(),
+        lines: JsonlStage::new(),
+        forked_from: session.lineage.forked_from.as_deref(),
     };
 
     let msgs = &session.messages;
@@ -324,15 +332,12 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     if let Some(t) = &session.title {
         w.system(stamp(session.updated_at), "custom_title", json!({ "title": t }))?;
     }
-    if let (Some(from), Some(first)) = (&session.lineage.forked_from, w.lines.first_mut()) {
-        let mut rec: Map<String, Value> = serde_json::from_str(first)?;
-        rec.insert("forkedFrom".into(), json!({ "sessionId": from }));
-        *first = serde_json::to_string(&Value::Object(rec))?;
+    if w.lines.is_empty() {
+        // The original Qwen writer emits one blank line even for an empty session.
+        fs::write(&path, b"\n").with_context(|| format!("writing {}", path.display()))?;
+    } else {
+        w.lines.publish(&path)?;
     }
-
-    let mut body = w.lines.join("\n");
-    body.push('\n');
-    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(EmitResult {
         path,
         new_id: new_id.clone(),
@@ -410,5 +415,43 @@ mod tests {
             assert_eq!(projects_dir(&out), home.join("projects"));
         }
         assert_eq!(sanitize_cwd("/home/u/my proj.x"), "-home-u-my-proj-x");
+    }
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+    #[test]
+    fn first_record_fork_and_empty_session_shape() -> Result<()> {
+        let world = cv_testkit::World::new("qwen-stage");
+        let mut session = Session::new("source", Harness::Qwen);
+        session.cwd = Some("/synthetic/qwen".into());
+        session.lineage.forked_from = Some("parent-session".into());
+        let opts = EmitOptions {
+            new_id: Some("synthetic-qwen".into()),
+            ..Default::default()
+        };
+        let empty = emit(&session, &world.base, &opts)?;
+        assert_eq!(fs::read(&empty.path)?, b"\n");
+        for role in [Role::User, Role::Assistant] {
+            let mut message = Message::new(role);
+            message.content.push(Block::Text {
+                text: "escaped\"\\\nλ".into(),
+            });
+            session.messages.push(message);
+        }
+        let result = emit(&session, &world.base, &opts)?;
+        let body = fs::read_to_string(&result.path)?;
+        assert!(body.ends_with('\n'));
+        let records: Vec<Value> = body
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()?;
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["forkedFrom"]["sessionId"], "parent-session");
+        assert!(records[1].get("forkedFrom").is_none());
+        assert_eq!(records[1]["parentUuid"], records[0]["uuid"]);
+        assert_eq!(records[0]["message"]["parts"][0]["text"], "escaped\"\\\nλ");
+        Ok(())
     }
 }

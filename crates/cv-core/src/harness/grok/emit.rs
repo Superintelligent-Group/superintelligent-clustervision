@@ -3,7 +3,7 @@
 //! (`EmitOptions`, `effective_cwd`, the fidelity table) is in [`crate::emit`].
 
 use crate::emit::*;
-use crate::harness::store::write_jsonl;
+use crate::harness::store::JsonlStage;
 use crate::harness::EmitResult;
 use crate::ir::{Block, Harness, Role, Session};
 use anyhow::{Context, Result};
@@ -89,20 +89,20 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     // chat_history alone cannot express a failed tool result — the Grok parser derives
     // `ToolResult.is_error`/`status` ONLY from `updates.jsonl` `tool_call_update` entries — so
     // without the sidecar every ported failure came back as a success.
-    let mut lines: Vec<Value> = Vec::new();
-    let mut updates: Vec<Value> = Vec::new();
+    let mut lines = JsonlStage::new();
+    let mut updates = JsonlStage::new();
     for msg in &session.messages {
         match msg.role {
             Role::System => {
                 let text = grok_concat_text(msg);
-                lines.push(json!({ "type": "system", "content": text }));
+                lines.push(json!({ "type": "system", "content": text }))?;
             }
             Role::User => {
                 let text = grok_concat_text(msg);
                 lines.push(json!({
                     "type": "user",
                     "content": [{ "type": "text", "text": text }],
-                }));
+                }))?;
             }
             Role::Assistant => {
                 let mut line = Map::new();
@@ -147,7 +147,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                 if !calls.is_empty() {
                     line.insert("tool_calls".into(), Value::Array(calls));
                 }
-                lines.push(Value::Object(line));
+                lines.push(Value::Object(line))?;
             }
             // Tool turns map to `tool_result` lines (the parser turns these back into Role::Tool).
             Role::Tool => {
@@ -164,7 +164,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                             "type": "tool_result",
                             "tool_call_id": tool_use_id,
                             "content": content,
-                        }));
+                        }))?;
                         // ACP-style status entry: the source status verbatim when it has one,
                         // else derived from `is_error` (Grok's own terminal states).
                         let status = status
@@ -181,16 +181,16 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                                     "status": status,
                                 },
                             },
-                        }));
+                        }))?;
                     }
                 }
             }
         }
     }
     let chat_path = session_dir.join("chat_history.jsonl");
-    write_jsonl(&chat_path, &lines)?;
+    lines.publish(&chat_path)?;
     if !updates.is_empty() {
-        write_jsonl(&session_dir.join("updates.jsonl"), &updates)?;
+        updates.publish(&session_dir.join("updates.jsonl"))?;
     }
 
     Ok(EmitResult {

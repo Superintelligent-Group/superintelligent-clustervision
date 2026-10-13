@@ -2,7 +2,7 @@
 //! wrote the files. An adapter imports these and keeps only what is genuinely its own — where its
 //! files are and what its records mean.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +10,8 @@ pub(crate) mod bytes;
 pub(crate) mod document;
 pub(crate) mod json;
 pub(crate) mod jsonl;
+mod jsonl_write;
+pub(crate) use jsonl_write::JsonlStage;
 pub(crate) mod text;
 
 #[cfg(feature = "sqlite")]
@@ -74,11 +76,9 @@ pub(crate) fn xdg_data_dir() -> Option<PathBuf> {
 
 /// Write `lines` as JSONL (one compact JSON value per line) to `path`, replacing the file.
 pub(crate) fn write_jsonl(path: &Path, lines: &[Value]) -> Result<()> {
-    let mut buf = String::new();
-    for v in lines {
-        buf.push_str(&serde_json::to_string(v)?);
-        buf.push('\n');
+    let mut stage = JsonlStage::new();
+    for value in lines {
+        stage.push(value)?;
     }
-    std::fs::write(path, buf).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    stage.publish(path)
 }

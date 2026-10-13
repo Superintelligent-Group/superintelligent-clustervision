@@ -3,7 +3,7 @@
 //! (`EmitOptions`, `effective_cwd`, the fidelity table) is in [`crate::emit`].
 
 use crate::emit::*;
-use crate::harness::store::write_jsonl;
+use crate::harness::store::JsonlStage;
 use crate::harness::wire::anthropic;
 use crate::harness::EmitResult;
 use crate::ir::{Block, MessageKind, Role, Session};
@@ -45,7 +45,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     let created = session.created_at.or(session.updated_at).unwrap_or_else(Utc::now);
     let created_iso = created.to_rfc3339_opts(SecondsFormat::Millis, true);
 
-    let mut lines: Vec<Value> = Vec::new();
+    let mut lines = JsonlStage::new();
     // Header line.
     let mut header = Map::new();
     header.insert("type".into(), json!("session"));
@@ -55,7 +55,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     if !cwd_str.is_empty() {
         header.insert("cwd".into(), json!(cwd_str));
     }
-    lines.push(Value::Object(header));
+    lines.push(Value::Object(header))?;
 
     // A `session_info` entry carries the session title (OpenClaw's `name`), which the reader reads
     // back as `Session::title` — the `sessions.json`/`session_nodes` index label alone is only a
@@ -67,7 +67,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             "parentId": Value::Null,
             "timestamp": created_iso,
             "name": title,
-        }));
+        }))?;
     }
 
     // Message lines, parent-linked (v3).
@@ -107,7 +107,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             _ => None,
         };
         if let Some(entry) = control {
-            lines.push(entry);
+            lines.push(entry)?;
             parent = Some(entry_id);
             continue;
         }
@@ -161,11 +161,11 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             "parentId": parent,
             "timestamp": ts_iso,
             "message": inner,
-        }));
+        }))?;
         parent = Some(entry_id);
     }
 
-    write_jsonl(&file_path, &lines)?;
+    lines.publish(&file_path)?;
 
     // sessions.json index: merge-or-create.
     let index_path = sessions_dir.join("sessions.json");
