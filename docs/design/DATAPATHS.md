@@ -14,17 +14,16 @@ operation controls demonstrate redundant work. Claude export, Cursor rich window
 turn transformations now have measured fixes and operation controls. The completion audit found
 one further linked-record prune ownership defect; that fix and its strengthened CI gate are
 integrated. Current-schema fleet composition exposed guarded-empty freshness and duplicate-copy
-indexing defects; guarded-empty reuse, canonical FTS copies and canonical semantic copies are
-integrated. Event publication still needs explicit source/provenance authority so a formerly
-indexed copy or parent cannot remain falsely fresh; that connected fix is active. Qwen has no
-local data, so its synthetic carrier work is explicitly deferred. This changes priority, not the correctness or fidelity requirements.
+indexing defects; guarded-empty, canonical-copy and event-authority fixes are integrated. The
+corrected cold/unchanged/append/clean-reference composition passes with frozen primary stores
+plus guarded, observed-stable external sidecars (see the final fleet evidence below). Qwen has no local data, so its synthetic carrier work is explicitly deferred. This changes priority, not the correctness or fidelity requirements.
 
 | User operation | What we know | Next question / action |
 |---|---|---|
 | List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Catalog setup is shared across listing/discovery read and publication stages; changed-harness refresh now also reuses that owner. Cold discovery still derives counts from content. Persisted metadata is fetched by demanded path/tuple, reusing the operation catalog owner; standalone cached discovery batches initialize lazily once. | Matched eight-session whole-CLI controls show 34.03% fewer warm-list instructions and 13.59% fewer cold-list instructions, with identical output; see the [comparison artifact](../../tools/profiling/results/catalog-reader-comparison-arm64.json). This isolates setup work and does not rank the real fleet. First-process keyed cache demand cuts instructions 89.1% for one changed source plus 4,096 unrelated rows; forced full warm discovery of 4,096 demanded files costs 9.0% more. The bounded batching experiment was rejected for a small gain and added complexity. Preserve freshness and exact counts. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection stops at the required ranked prefix. Counted facts now use atomic per-candidate count/provenance lookups; metadata/index decisions can avoid the lookup entirely. | Full filtering and exact totals retain batch loading. In the frozen 64-session whole-command control, the limited query reduces two bodies versus 63 for the full-filter oracle, with identical output; its warm repeat reduces none. Metadata inventory, rank preparation and text membership still scale with fleet size. Zero-limit JSON validates arguments then skips that work. Required source errors remain fatal. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP stages CLI output in bounded memory and forwards continuation hints. Browser first pages now render without awaiting EOF metadata; deferred-fetch checks preserve paging and navigation. Sidecar retrieval retains checked descriptors and owns only requested content or demanded diagnostics. Forward CLI JSON windows project discarded Claude message extras after full validation; selected rich output and EOF metadata remain exact. Cursor IDE rich lazy windows now use the existing checked selected builder: the 64 MiB discarded-bubble control falls from 235 MB to 329 KB requested Rust heap. | Preserve exact CLI semantics and bounded transport. CLI frames serialize once and batch writes. Sidecar scans still validate every row and detect duplicate IDs; output size remains demand-dependent. Persistent MCP read state remains separate. |
-| Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds; existing controls preserve event/count/search results for unchanged indexed metadata. Changed copied metadata now rejects skip/resume, fixing stale title/body conjunctions; unchanged-title appends retain resume. Older indexes rebuild once to establish that authority. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Verified Claude metadata continuation now frames only the 549-byte stable append in an 8.4 MB source; FTS replays 1,433 bytes from its earlier checkpoint. A changed title correctly forces a full FTS rewrite. Metadata acceptance and provisional EOF records remain exact under the immutable-prefix append contract. A copied 3.78 GB index retains every large segment through sixteen tiny commits; compaction and current-schema fleet rebuild remain separate controls. |
+| Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds; existing controls preserve event/count/search results for unchanged indexed metadata. Changed copied metadata now rejects skip/resume, fixing stale title/body conjunctions; unchanged-title appends retain resume. Older indexes rebuild once to establish that authority. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Matched eight-session unchanged-index controls show 14.98% fewer instructions after catalog reuse, with identical output. Verified Claude metadata continuation now frames only the 549-byte stable append in an 8.4 MB source; FTS replays 1,433 bytes from its earlier checkpoint. A changed title correctly forces a full FTS rewrite. Metadata acceptance and provisional EOF records remain exact under the immutable-prefix append contract. A copied 3.78 GB index retains every large segment through sixteen tiny commits; that older-index geometry control remains distinct from the completed current-schema fleet composition. The 6,889-reference cold/unchanged/append/clean-reference control passes; seven fork-dependent siblings remain an accepted append fanout cost. See [fleet evidence](FTS-FLEET-COMPOSITION.json) for scope and unmeasured physical-work limits. |
 | Transform / export | Verified Codex port retains checked source-backed bodies. Splice retains selected guarded messages. Distill retains checked selected sources, analyzes per-message demand, shares one prepared tail, and stages borrowed sidecars; pack-only analysis skips the unused elision roster. Pack shares excerpt/event traversal when events are stale. | Actual verified Claude port now peaks at 1.40 MB for the large Native/Text thinking controls, versus 325 MB before. Prune projects Thinking, ASCII declassification and ordinary usage repair through checked sources; the large Thinking and usage controls fall to 270 KB and 1.32 MB requested live Rust heap. Matched instruction controls improve Thinking+revival 62.2% and usage repair 19.0%. Linked-record tool-input lookup now resolves only the selected input; its 64 MiB control falls from 134 MB to 271 KB, and the existing Thinking CI gate exercises the composition. Selected Unicode fields and demanded oversized metadata remain explicit limits. Requested distill products and staged archive/prune/dataset output still grow with demand. |
 
 ### Measurement correction: count the work (2026-10-12)
@@ -556,7 +555,7 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Search activation for retained text and original dependency guards; checked labels and semantic cache invalidation.
 - [x] Audit transaction batching and avoid Tantivy writer startup for unchanged refreshes; retain pending compaction.
 - [x] Production byte-tier compaction on a copied 3.78 GB existing fleet index: tiny commits preserve large segments and exact query ID multisets; older-schema geometry, not a current-schema rebuild.
-- [x] Current-schema 6,889-reference store composition: cold/unchanged/resumed append/clean rebuild, exact stored-document and representative CLI-query oracles; stable external-sidecar and physical-work limits recorded. The frozen current-schema cold sweep now succeeds for 6,889 refs across 13 harnesses with no errors; checksums and SQLite integrity pass. Its unchanged repeat exposes eight guarded-empty Kimi rereads and duplicate OpenClaw copy instability. Those fixes and corrected incremental/full-reference comparisons are active.
+- [x] Current-schema 6,889-reference store composition: cold/unchanged/resumed append/clean rebuild, exact stored-document and representative CLI-query oracles; stable external-sidecar and physical-work limits recorded. Settled guarded-empty, canonical-copy and event-authority fixes produce zero unchanged work; the 812-byte append changes eight sessions and resumes one. Stored documents and representative queries match an independent clean reference, with checksums and SQLite integrity passing. Scope is frozen primary stores plus guarded, observed-stable external sidecars; see [final evidence](FTS-FLEET-COMPOSITION.json).
 - [x] Stream predicate-sized rich query facts; cross-harness oracle and shared source probes.
 - [x] Stream tool histograms and enforce semantic body/label caps, including tool input serialization.
 - [x] Bounded verified API page continuations and head metadata cache, including external dependencies and oversized-state fallback.
@@ -3312,8 +3311,9 @@ The existing metadata scan detects repeated valid meta documents and forces one 
 rewrite; ordinary multiple body chunks remain valid. Narrow independent clean-index controls
 cover divergent bodies, reversed inputs, timestamp ties, vanished-copy fallback, meaningful
 all-missing errors, duplicate-record repair, and adopted-agent parent provenance. This does not
-expand the existing global-ID namespace into harness-qualified index identities. Full-fleet
-cold/unchanged/append/reference composition remains pending until the corrected CLI is built.
+expand the existing global-ID namespace into harness-qualified index identities. The completed full-fleet
+cold/unchanged/append/reference composition is recorded below and in
+[FTS-FLEET-COMPOSITION.json](FTS-FLEET-COMPOSITION.json).
 
 Follow-up integration disables append reuse when duplicate metadata requires repair: a valid
 checkpoint is insufficient because a suffix deletion would preserve duplicate prefix documents.
@@ -3354,7 +3354,9 @@ source path establishes authority, and remains distinct from an empty cwd. SyncT
 freshness compare expected attribution. `can_resume` is an output-ownership gate, combined by
 FTS with its existing source/checkpoint guards; it is not a proof of source-prefix contents.
 A resumed publication rechecks authority inside its transaction before any mutations, so an
-intervening writer cannot splice A's suffix onto B's retained prefix.
+intervening writer cannot splice A's suffix onto B's retained prefix. The settled `9e9d622e`
+fix acquires an immediate transaction before this authority read, avoiding a deferred WAL
+read-to-write snapshot upgrade; the two-connection contention regression proves that boundary.
 
 Narrow actual publication/read controls cover divergent copied tool events; folded↔direct
 attribution; changed cwd; historical competing path stamps; nullable-column migration preserving
@@ -3417,3 +3419,8 @@ remain in [event publication controls](../../crates/cv-core/src/events.rs), incl
 `published_event_authority_tracks_copy_provenance_and_cwd_atomically` and
 `publication_owns_writer_before_authority_read_and_rejects_intervening_change`; the latter
 reproduces the old WAL snapshot-upgrade failure without another fleet rebuild.
+
+The fleet affordance-count multiset includes complete count values, not just session IDs. Its
+unchanged append hash is expected: ordinary user text and an `Edit` tool call add two messages
+and one event but no affordance kind. The selected session's counts match the independent cold
+reference; metadata message counts and event hashes change as expected.
