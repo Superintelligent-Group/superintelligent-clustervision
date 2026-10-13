@@ -18,7 +18,14 @@ pub(crate) struct SourceDescriptor {
 /// Different captured identities of a single path are deliberately separate accepted sources.
 #[derive(Default)]
 pub(crate) struct SourceRegistry {
-    ids: HashMap<(std::path::PathBuf, super::Identity), usize>,
+    ids: HashMap<
+        (
+            std::path::PathBuf,
+            super::Identity,
+            Option<std::sync::Arc<crate::source::ReadSet>>,
+        ),
+        usize,
+    >,
     sources: Vec<JsonSource>,
     decoded_ids: HashMap<usize, usize>,
     decoded: Vec<std::sync::Arc<crate::harness::store::bytes::ByteSource>>,
@@ -27,7 +34,11 @@ impl SourceRegistry {
     /// Replace a source value with an explicit transport placeholder without resolving its bytes.
     pub(crate) fn detach(&mut self, value: &mut Json) -> Option<SourceDescriptor> {
         let Json::Source(range) = value else { return None };
-        let key = (range.source.0.path.clone(), range.source.0.identity.clone());
+        let key = (
+            range.source.0.path.clone(),
+            range.source.0.identity.clone(),
+            range.source.0.reads.clone(),
+        );
         let source = *self.ids.entry(key).or_insert_with(|| {
             let id = self.sources.len();
             self.sources.push(range.source.clone());
@@ -86,6 +97,37 @@ impl SourceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dependency_guards_do_not_collapse_different_wal_states_or_get_recaptured() {
+        let world = cv_testkit::World::in_process("json-source-read-guard");
+        let path = world.base.join("source.json");
+        let wal = world.base.join("source.json-wal");
+        std::fs::write(&path, r#"{"value":"old"}"#).unwrap();
+        let mut reads = crate::source::ReadSet::default();
+        reads.record(&wal);
+        let before = JsonSource::capture_with_reads(&path, &reads).unwrap();
+        let mut value = before.read_document(|view| view.to_json()).unwrap();
+        let mut registry = SourceRegistry::default();
+        let descriptor = registry.detach(&mut value).unwrap();
+        std::fs::write(&wal, b"new WAL").unwrap();
+        let mut reads = crate::source::ReadSet::default();
+        reads.record(&wal);
+        let after = JsonSource::capture_with_reads(&path, &reads).unwrap();
+        let mut value = after.read_document(|view| view.to_json()).unwrap();
+        registry.detach(&mut value).unwrap();
+        assert_eq!(registry.sources.len(), 2);
+        assert_ne!(before, after);
+        assert!(registry.restore(descriptor).unwrap().canonical_len().is_err());
+        let value = after.read_document(|view| view.to_json()).unwrap();
+        let error = value
+            .with_view::<()>(|_| {
+                std::fs::remove_file(&wal)?;
+                anyhow::bail!("intentional callback stop")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("dependencies changed"));
+    }
+
     #[test]
     fn decoded_documents_register_one_arena_and_original_identity() {
         let world = cv_testkit::World::in_process("decoded-source-transport");

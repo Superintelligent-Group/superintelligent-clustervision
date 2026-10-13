@@ -71,11 +71,12 @@ pub(crate) struct JsonSource(Arc<CapturedSource>);
 struct CapturedSource {
     path: PathBuf,
     identity: Identity,
+    reads: Option<Arc<crate::source::ReadSet>>,
     decoded: std::sync::Mutex<Option<Arc<crate::harness::store::bytes::ByteSource>>>,
 }
 impl PartialEq for CapturedSource {
     fn eq(&self, other: &Self) -> bool {
-        self.path == other.path && self.identity == other.identity
+        self.path == other.path && self.identity == other.identity && self.reads == other.reads
     }
 }
 impl Eq for CapturedSource {}
@@ -83,6 +84,7 @@ impl std::hash::Hash for CapturedSource {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.path.hash(state);
         self.identity.hash(state);
+        self.reads.hash(state);
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -133,12 +135,21 @@ impl JsonSource {
     }
 
     pub(crate) fn capture(path: &Path) -> Result<Self> {
+        Self::capture_with_reads(path, &crate::source::ReadSet::default())
+    }
+    pub(crate) fn capture_with_reads(path: &Path, reads: &crate::source::ReadSet) -> Result<Self> {
+        let source = Self::capture_guarded(path, Some(Arc::new(reads.clone())))?;
+        source.check()?;
+        Ok(source)
+    }
+    fn capture_guarded(path: &Path, reads: Option<Arc<crate::source::ReadSet>>) -> Result<Self> {
         // Preserve symlink spelling so later retargeting changes the observed identity.
         let path = std::path::absolute(path).context("locating JSON source")?;
         let identity = Identity::read(&path)?;
         Ok(Self(Arc::new(CapturedSource {
             path,
             identity,
+            reads,
             decoded: std::sync::Mutex::new(None),
         })))
     }
@@ -148,6 +159,16 @@ impl JsonSource {
             "JSON source changed: {}",
             self.0.path.display()
         );
+        self.check_reads()
+    }
+    fn check_reads(&self) -> Result<()> {
+        if let Some(reads) = &self.0.reads {
+            anyhow::ensure!(
+                reads.fresh(&mut crate::source::Probe::default()),
+                "JSON source dependencies changed or unavailable: {}",
+                self.0.path.display()
+            );
+        }
         Ok(())
     }
     #[cfg(any(not(feature = "mmap"), test))]
@@ -164,7 +185,7 @@ impl JsonSource {
             "JSON source changed: {}",
             self.0.path.display()
         );
-        Ok(())
+        self.check_reads()
     }
     fn range(&self, offset: u64, len: u64) -> Result<JsonRange> {
         anyhow::ensure!(len != 0, "JSON range is empty");
@@ -242,7 +263,7 @@ impl JsonSource {
         std::mem::size_of::<CapturedSource>() + 2 * std::mem::size_of::<usize>() + self.0.path.capacity()
     }
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
-        self.0.path == other.0.path && self.0.identity == other.0.identity
+        self == other
     }
     /// Caller must have syntax AND Value-compatible scalar/depth validation for this complete
     /// range since capture. Quotes/containers are included; surrounding whitespace is excluded.

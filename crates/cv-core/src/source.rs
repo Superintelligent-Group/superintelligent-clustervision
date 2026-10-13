@@ -34,13 +34,13 @@ fn absolute(path: &Path) -> Option<PathBuf> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct Entry {
     path: PathBuf,
     state: Option<FileState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct FileState {
     len: u64,
     modified_ns: u64,
@@ -90,7 +90,7 @@ impl Stamp {
 
 /// The metadata captured immediately before a consumer reads dynamically resolved paths.
 /// Captures absence too. Repeated paths retain the first stamp; publication revalidates it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReadSet {
     entries: BTreeMap<PathBuf, Entry>,
     known: bool,
