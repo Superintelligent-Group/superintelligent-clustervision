@@ -85,6 +85,30 @@ class DriverTests(unittest.TestCase):
                                           for row in rows)
                     self.assertEqual(payload, 257)
 
+    def test_selected_gate_rejects_changed_serialized_record(self):
+        manifest = {"harness": "cursor", "id": "fixture", "path": "source", "root": "root",
+                    "expected_messages": 5}
+        doctor = {"messages": 5, "detail": {"messages": 5}}
+        full = {"detail": {"record_written": True, "serialized_record_bytes": 42, "record_sha256": "full"}}
+        changed = {"detail": dict(full["detail"], record_sha256="changed")}
+        with patch.object(budget.subprocess, "check_output", return_value=json.dumps(manifest)), \
+             patch.object(budget, "probe", side_effect=[(doctor, 0), (full, 0), (doctor, 0), (doctor, 0), (changed, 0)]):
+            with self.assertRaisesRegex(AssertionError, "dataset differs"):
+                budget.selected_payloads("unused", Path("unused"), {}, ["cursor"])
+
+    def test_selected_fixture_native_shapes_and_late_sentinel(self):
+        generator = Path(__file__).with_name("perf-fixture.py")
+        with tempfile.TemporaryDirectory(prefix="cv-test-selected-") as directory:
+            for harness, shape in budget.SELECTED_PAYLOAD_CASES:
+                command = [sys.executable, str(generator), "cursor" if harness == "cursor-ide" else harness,
+                           str(Path(directory) / f"{harness}-{shape}"), "--shape", shape,
+                           "--records", "2", "--payload-bytes", "257", "--escaped"]
+                manifest = json.loads(subprocess.check_output(command, text=True))
+                self.assertEqual(manifest["decoded_payload_bytes"], 257)
+                self.assertEqual(manifest["selected_payload_bytes"], 257)
+                self.assertGreater(manifest["physical_input_bytes"], 257)
+                self.assertGreaterEqual(manifest["expected_messages"], 5)
+
     def sqlite_driver(self):
         # Import the actual command under Python -I without relying on ambient module paths.
         tools = Path(__file__).parent

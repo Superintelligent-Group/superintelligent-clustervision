@@ -85,7 +85,7 @@ def active_formats(binary, root, env, baseline=None, formats=None, mmap=True):
         for escaped in (False, True):
             peaks = {"discard": [], "discover": []}
             for size in SIZES:
-                command = [sys.executable, str(generator), format_name,
+                command = [sys.executable, str(generator), "cursor" if format_name == "cursor-ide" else format_name,
                            str(root / f"{format_name}-{shape}-{size}-{escaped}"),
                            "--payload-bytes", str(size), "--records", str(size // (256 << 10)), "--shape", shape]
                 if escaped:
@@ -118,7 +118,7 @@ def active_formats(binary, root, env, baseline=None, formats=None, mmap=True):
                       f"{format_name} {shape} {operation} mmap={mmap} escaped={escaped}")
             if baseline:
                 # Fidelity runs remain separate from allocation probes and use small payloads.
-                command = [sys.executable, str(generator), format_name,
+                command = [sys.executable, str(generator), "cursor" if format_name == "cursor-ide" else format_name,
                            str(root / f"parity-{format_name}-{escaped}"), "--payload-bytes", str(64 << 10),
                            "--records", "4", "--shape", shape]
                 if escaped:
@@ -205,6 +205,63 @@ def metadata_facts(binary, root, env, baseline=None):
                                   "full_reference_peak_live_rust_bytes": reference_peak}), flush=True)
             assert reports[0] == reports[1], "unused metadata changed the demanded doctor report"
             bound(peaks, MIB, MIB // 4, f"doctor metadata facts {harness} escaped={escaped}")
+
+
+# Full/rich ownership is a reference, not a bounded-memory promise. Native SQLite
+# allocations are outside these live Rust counters; file/block indexes may grow.
+SELECTED_PAYLOAD_CASES = (("kimi-code", "selected"), ("opencode-files", "selected"),
+                          ("opencode", "selected"), ("opencode", "selected-v2"),
+                          ("cursor", "selected"), ("cursor-ide", "selected-ide"), ("goose", "selected"))
+
+
+def selected_payloads(binary, root, env, formats=None):
+    generator = Path(__file__).with_name("perf-fixture.py")
+    for format_name, shape in SELECTED_PAYLOAD_CASES:
+        if formats and format_name not in formats:
+            continue
+        for history in (False, True):
+            for escaped in (False, True):
+                peaks = {operation: [] for operation in ("discard", "doctor", "dataset", "dataset-miss")}
+                for size in SIZES:
+                    records = size // (256 << 10) if history else 1
+                    command = [sys.executable, str(generator), "cursor" if format_name == "cursor-ide" else format_name,
+                               str(root / f"payload-{format_name}-{shape}-{history}-{size}-{escaped}"),
+                               "--payload-bytes", str(size), "--records", str(records), "--shape", shape]
+                    if escaped:
+                        command.append("--escaped")
+                    manifest = json.loads(subprocess.check_output(command, env=env, text=True))
+                    common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
+                    reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, True)
+                    dataset_reference, _ = probe(binary, ["dataset-collect", *common, "--mode", "full",
+                                                           "--query", "tool:gate-final", "--hash-output"], env, True)
+                    for operation in peaks:
+                        if operation == "discard":
+                            arguments = ["discard", *common, "--mode", "lazy"]
+                        elif operation == "doctor":
+                            arguments = ["doctor", *common, "--mode", "facts"]
+                        else:
+                            query = "tool:gate-final" if operation == "dataset" else "tool:gate-missing"
+                            arguments = ["dataset-collect", *common, "--mode", "lazy", "--query", query, "--hash-output"]
+                        row, peak = probe(binary, arguments, env, True)
+                        if operation in ("discard", "doctor"):
+                            assert row["messages"] == manifest["expected_messages"], "selected payload messages skipped"
+                        if operation == "doctor":
+                            assert row["detail"] == reference["detail"], "selected facts doctor differs from full report"
+                        elif operation == "dataset":
+                            for key in ("record_written", "serialized_record_bytes", "record_sha256"):
+                                assert row["detail"][key] == dataset_reference["detail"][key], "selected dataset differs from full output"
+                            assert row["detail"]["record_written"], "late tool sentinel did not match"
+                        elif operation == "dataset-miss":
+                            assert not row["detail"]["record_written"], "absent tool query matched"
+                            assert row["detail"]["serialized_record_bytes"] == 0
+                            assert row["detail"]["record_sha256"] == hashlib.sha256(b"").hexdigest()
+                        peaks[operation].append(peak)
+                        print(json.dumps({"case": f"selected-{format_name}-{shape}-{operation}",
+                                          "history": history, "escaped": escaped, "decoded_payload_bytes": size,
+                                          "records": records, "peak_live_rust_bytes": peak}), flush=True)
+                for operation, values in peaks.items():
+                    bound(values, STORE_CEILING, STORE_GROWTH,
+                          f"selected {format_name}/{shape} {operation} history={history} escaped={escaped}")
 
 
 def queries(binary, root, env):
@@ -426,13 +483,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("probe", type=Path)
     parser.add_argument("--no-mmap-probe", required=True, type=Path)
-    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "metadata-facts", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
+    parser.add_argument("--only", choices=("stores", "chunks", "active", "portable-docs", "selected-docs", "encoded-arguments", "doctor", "metadata-facts", "selected-payloads", "query", "events", "stats"), help="focused local check; default pass runs stores and chunks")
     parser.add_argument("--baseline-probe", type=Path, help="with active/doctor/metadata-facts/stats, separately check baseline behavior parity")
-    parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed"),
+    parser.add_argument("--format", action="append", choices=("cline-sdk", "opensession", "chatgpt-export", "claude-export", "kimi", "zed", "kimi-code", "opencode-files", "opencode", "cursor", "cursor-ide", "goose"),
                         help="repeat to focus --only active on selected native formats")
     args = parser.parse_args()
-    if args.format and args.only not in ("active", "portable-docs"):
-        parser.error("--format applies only to active/portable-docs")
+    if args.format and args.only not in ("active", "portable-docs", "selected-payloads"):
+        parser.error("--format applies only to active/portable-docs/selected-payloads")
     portable_formats = ("cline-sdk", "opensession", "chatgpt-export", "claude-export")
     if args.only == "portable-docs" and any(f not in portable_formats for f in args.format or []):
         parser.error("portable-docs supports only document formats")
@@ -447,6 +504,8 @@ def main():
             doctors(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
         elif args.only == "metadata-facts":
             metadata_facts(args.probe.resolve(), root, env, args.baseline_probe.resolve() if args.baseline_probe else None)
+        elif args.only == "selected-payloads":
+            selected_payloads(args.probe.resolve(), root, env, args.format)
         elif args.only == "query":
             queries(args.probe.resolve(), root, env)
         elif args.only == "events":

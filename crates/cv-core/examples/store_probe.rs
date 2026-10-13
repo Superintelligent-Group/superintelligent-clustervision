@@ -394,7 +394,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 }
                 record.is_some()
             } else {
-                let session = cv_core::stream::collect_with(adapter, r, &ParseOptions::lazy())?;
+                let session = cv_core::stream::collect_with(adapter, r, &opts)?;
                 out.messages = session.messages.len();
                 let matched = match query.as_ref() {
                     Some(query) => cv_core::query::matches_full(query, r, &session, &texts)?,
