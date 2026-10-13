@@ -221,14 +221,14 @@ SELECTED_PAYLOAD_CASES = (("kimi-code", "selected"), ("opencode-files", "selecte
                           ("cursor", "selected"), ("cursor-ide", "selected-ide"), ("goose", "selected"))
 
 
-def selected_payloads(binary, root, env, formats=None):
+def selected_payloads(binary, root, env, formats=None, operations=None):
     generator = Path(__file__).with_name("perf-fixture.py")
     for format_name, shape in SELECTED_PAYLOAD_CASES:
         if formats and format_name not in formats:
             continue
         for history in (False, True):
             for escaped in (False, True):
-                peaks = {operation: [] for operation in ("discard", "doctor", "dataset", "dataset-miss")}
+                peaks = {operation: [] for operation in (operations or ("discard", "doctor", "dataset", "dataset-miss"))}
                 for size in SIZES:
                     records = size // (256 << 10) if history else 1
                     command = [sys.executable, str(generator), "cursor" if format_name == "cursor-ide" else format_name,
@@ -238,7 +238,9 @@ def selected_payloads(binary, root, env, formats=None):
                         command.append("--escaped")
                     manifest = json.loads(subprocess.check_output(command, env=env, text=True))
                     common = [manifest["harness"], manifest["id"], manifest["path"], "--root", manifest["root"]]
-                    reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, True, fd_limit=64)
+                    reference = None
+                    if "doctor" in peaks:
+                        reference, _ = probe(binary, ["doctor", *common, "--mode", "full"], env, True, fd_limit=64)
                     dataset_reference, _ = probe(binary, ["dataset-collect", *common, "--mode", "full",
                                                            "--query", "tool:gate-final", "--hash-output"], env, True, fd_limit=64)
                     for operation in peaks:

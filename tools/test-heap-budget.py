@@ -92,9 +92,10 @@ class DriverTests(unittest.TestCase):
         full = {"detail": {"record_written": True, "serialized_record_bytes": 42, "record_sha256": "full"}}
         changed = {"detail": dict(full["detail"], record_sha256="changed")}
         with patch.object(budget.subprocess, "check_output", return_value=json.dumps(manifest)), \
-             patch.object(budget, "probe", side_effect=[(doctor, 0), (full, 0), (doctor, 0), (doctor, 0), (changed, 0)]):
+             patch.object(budget, "probe", side_effect=[(doctor, 0), (full, 0), (doctor, 0), (doctor, 0), (changed, 0)]) as calls:
             with self.assertRaisesRegex(AssertionError, "dataset differs"):
                 budget.selected_payloads("unused", Path("unused"), {}, ["cursor"])
+            self.assertEqual(calls.call_args_list[-1].args[1][0], "dataset")
 
     def test_selected_fixture_native_shapes_and_late_sentinel(self):
         generator = Path(__file__).with_name("perf-fixture.py")
