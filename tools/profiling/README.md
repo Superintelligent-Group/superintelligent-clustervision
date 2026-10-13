@@ -286,3 +286,35 @@ Tantivy statistics can include deleted postings until merge. Indexed body text i
 so the snapshot oracle compares all live stored fields plus the explicitly listed term queries,
 not every possible query or complete IR fidelity. This fixed single-primary control establishes
 an overlap target; it does not rank a real fleet or measure physical storage I/O.
+
+### Scoped keyed discovery versus full demand (2026-10-13)
+
+[Matched instruction evidence](results/discovery-keyed-cpu-arm64.json) compares
+`1377fdc9` with `b199c972`, identical default-feature CLI builds using the pinned
+Linux control above. Actual `cv ls --json --harness claude --limit 100000` counts
+36,874,230/36,857,176 baseline instructions versus4,023,954/4,023,954 keyed for one
+changed Claude source plus4096unrelated persisted cache rows:89.085% fewer.
+Forced full discovery (`--fresh`) of4096demanded warm files counts
+501,433,563/501,373,628 versus546,727,785/545,854,238:8.952% more. Repeat spread is
+at most0.160%; stdout/stderr match native and cross-revision exactly (one session,
+325bytes;4096sessions,5,599,219bytes). This is guest instruction work, not timing.
+
+First full-run SQLite source attribution increases41,838,251→64,660,153,
+accounting for22.822M of45.294M added instructions; serialization attribution is
+unchanged. File attribution is not inclusive call-tree attribution. Scoped keyed
+reads are valuable; explicit full demand merits a requested-path batch candidate,
+without resurrecting fleet-wide unrelated cache payload retention.
+
+[Reproduction](discovery-cpu-control.py) creates synthetic sources/frozen seeds,
+restores the same canonical catalog/binary paths, then invokes the existing
+Cachegrind/compare tools. Build the two archived revisions into distinct binaries
+at `/scratch/keyed-discovery-cpu/cv-before` and `cv-after` with the controls above;
+place common build metadata at `build.json` and sources at `before`/`after`.
+The source/archive/binary hashes and exact controls are in the artifact. Exported
+builds both stamp `unknown`; forced affected-crate compilation establishes their
+source. An initial identical-binary Cargo mtime reuse was detected and rejected;
+touch exported source/build inputs or force an own-target scoped clean. Original
+raw profiles/fixtures/targets remain in `cv-cachegrind-control` under
+`/scratch/keyed-discovery-cpu`; host evidence/report is at
+`/Users/ember/dev/cv-worktrees/keyed-discovery-cpu-evidence`. Existing artifacts
+were retained; installed CLI and real stores were untouched.
