@@ -117,16 +117,21 @@ pub fn discover_all() -> Vec<SessionRef> {
     // Persist freshly-scanned metadata (pruning vanished files) so the next discovery reuses it.
     discover_cache::persist(true);
 
-    // Refresh the catalog per harness so `sessions`/`find` can answer without re-scanning the
-    // fleet, recording the watch set the freshness probe stats.
-    let mut out = Vec::new();
-    for (h, roots, refs, before) in results {
-        let Some(refs) = refs else { continue };
-        catalog::replace_harness(h, &refs, &catalog::watches_for(h, &roots, &refs), &before);
-        out.extend(refs);
-    }
-    catalog::stamp_full_sync();
-    out
+    // Publish every successful harness in one SQL snapshot. Enumeration remains fresh;
+    // unchanged rows can be retained only after comparing the complete ordered inventory.
+    let publications: Vec<_> = results
+        .iter()
+        .filter_map(|(h, roots, refs, before)| {
+            refs.as_ref()
+                .map(|refs| (*h, refs.as_slice(), catalog::watches_for(*h, roots, refs), before))
+        })
+        .collect();
+    catalog::publish_all(&publications);
+    results
+        .into_iter()
+        .filter_map(|(_, _, refs, _)| refs)
+        .flatten()
+        .collect()
 }
 
 /// Every known session, served from the catalog when it's provably fresh — the **fast read path**

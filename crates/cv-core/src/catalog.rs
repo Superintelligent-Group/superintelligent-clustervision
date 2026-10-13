@@ -3,7 +3,7 @@
 //!
 //! [`crate::find`] used to resolve one session id by calling `discover()` on **every** adapter and
 //! scanning the whole fleet — O(all sessions across all harnesses) for a single `cv show <id>`. The
-//! catalog turns that into an indexed lookup: [`crate::discover_all`] replaces every harness's rows
+//! catalog turns that into an indexed lookup: [`crate::discover_all`] publishes every successful harness's rows
 //! here, and `find` consults it first (O(1)/O(log n)), falling back to a full scan only on a miss
 //! (which then re-warms the catalog).
 //!
@@ -31,6 +31,13 @@ use std::path::{Path, PathBuf};
 pub use writer::Writer;
 
 pub(crate) type PrimaryReads = std::collections::HashMap<std::path::PathBuf, crate::source::ReadSet>;
+
+pub(crate) type Publication<'a> = (
+    Harness,
+    &'a [SessionRef],
+    Vec<(std::path::PathBuf, i64)>,
+    &'a PrimaryReads,
+);
 
 #[cfg(feature = "sqlite")]
 mod imp {
@@ -242,16 +249,14 @@ mod imp {
     }
 
     /// Insert (or replace) every ref through `stmt` — shared by [`sync`] and [`replace_harness`].
-    fn insert_refs(tx: &rusqlite::Transaction, refs: &[SessionRef]) {
-        let Ok(mut stmt) = tx.prepare(
+    fn insert_refs(tx: &rusqlite::Transaction, refs: &[SessionRef]) -> rusqlite::Result<()> {
+        let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO sessions
              (harness,id,path,cwd,title,created_at,updated_at,message_count,created_ns,updated_ns)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        ) else {
-            return;
-        };
+        )?;
         for r in refs {
-            let _ = stmt.execute(params![
+            stmt.execute(params![
                 r.harness.as_str(),
                 r.id,
                 r.path.to_string_lossy(),
@@ -262,8 +267,9 @@ mod imp {
                 r.message_count as i64,
                 r.created_at.and_then(|t| t.timestamp_nanos_opt()),
                 r.updated_at.and_then(|t| t.timestamp_nanos_opt()),
-            ]);
+            ])?;
         }
+        Ok(())
     }
 
     /// Upsert every ref in one transaction, deleting nothing — the *additive* sync for callers
@@ -272,8 +278,9 @@ mod imp {
     pub fn sync(refs: &[SessionRef]) {
         let Some(mut conn) = open() else { return };
         let Ok(tx) = conn.transaction() else { return };
-        insert_refs(&tx, refs);
-        let _ = tx.commit();
+        if insert_refs(&tx, refs).is_ok() {
+            let _ = tx.commit();
+        }
     }
 
     /// Bracket known primary sources before discovery. New uncached paths stay unknown until
@@ -302,9 +309,101 @@ mod imp {
     /// post-discovery sync. Deleting first is what makes vanished sessions vanish from
     /// [`all_sessions`]; the transaction keeps concurrent readers from seeing the gap.
     pub(crate) fn replace_harness(h: Harness, refs: &[SessionRef], watches: &[(PathBuf, i64)], before: &PrimaryReads) {
+        let sources = prepare_sources(h, refs, before);
+        let Some(mut conn) = open() else { return };
+        let Ok(tx) = conn.transaction() else { return };
+        if publish_harness_in(&tx, h, refs, watches, &sources, true).is_ok() {
+            let _ = tx.commit();
+        }
+    }
+
+    fn matches_sessions_in<'a>(
+        conn: &Connection,
+        refs: impl Iterator<Item = &'a SessionRef>,
+    ) -> rusqlite::Result<bool> {
+        let mut stmt = conn.prepare(&format!("SELECT {REF_COLUMNS} FROM sessions ORDER BY rowid"))?;
+        let rows = stmt.query_map([], row_to_ref)?;
+        let mut refs = refs;
+        for row in rows {
+            let Some(a) = row? else { return Ok(false) };
+            let Some(b) = refs.next() else { return Ok(false) };
+            if a.harness != b.harness
+                || a.id != b.id
+                || a.path != b.path
+                || a.cwd != b.cwd
+                || a.title != b.title
+                || a.created_at != b.created_at
+                || a.updated_at != b.updated_at
+                || a.message_count != b.message_count
+            {
+                return Ok(false);
+            }
+        }
+        Ok(refs.next().is_none())
+    }
+
+    #[cfg(test)]
+    fn matches_sessions<'a>(refs: impl Iterator<Item = &'a SessionRef>) -> bool {
+        open()
+            .and_then(|conn| matches_sessions_in(&conn, refs).ok())
+            .unwrap_or(false)
+    }
+
+    /// Compare and publish the full ordered output in one SQL snapshot. Cache guards are
+    /// prepared before taking the writer lock, preserving the cache-to-SQL lock order.
+    pub(crate) fn publish_all(rows: &[Publication<'_>]) {
+        let sources: Vec<_> = rows
+            .iter()
+            .map(|(h, refs, _, before)| prepare_sources(*h, refs, before))
+            .collect();
+        let Some(mut conn) = open() else { return };
+        let Ok(tx) = conn.transaction() else { return };
+        let Ok(equal) = matches_sessions_in(&tx, rows.iter().flat_map(|(_, refs, _, _)| refs.iter())) else {
+            return;
+        };
+        for ((h, refs, watches, _), sources) in rows.iter().zip(&sources) {
+            if publish_harness_in(&tx, *h, refs, watches, sources, !equal).is_err() {
+                return;
+            }
+        }
+        if stamp_full_sync_in(&tx).is_ok() {
+            let _ = tx.commit();
+        }
+    }
+
+    /// Reconcile existing watch/guard rows without rewriting equal values.
+    fn reconcile_rows(
+        tx: &rusqlite::Transaction,
+        h: Harness,
+        table: &str,
+        value: &str,
+        rows: &std::collections::HashMap<String, rusqlite::types::Value>,
+    ) -> rusqlite::Result<()> {
+        let mut stmt = tx.prepare(&format!("SELECT path,{value} FROM {table} WHERE harness=?1"))?;
+        let old: std::collections::HashMap<String, rusqlite::types::Value> = stmt
+            .query_map([h.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for path in old.keys().filter(|path| !rows.contains_key(*path)) {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE harness=?1 AND path=?2"),
+                params![h.as_str(), path],
+            )?;
+        }
+        let mut insert = tx.prepare(&format!(
+            "INSERT OR REPLACE INTO {table}(harness,path,{value}) VALUES(?1,?2,?3)"
+        ))?;
+        for (path, val) in rows.iter().filter(|(path, val)| old.get(*path) != Some(*val)) {
+            insert.execute(params![h.as_str(), path, val])?;
+        }
+        Ok(())
+    }
+
+    type SourceRows = std::collections::HashMap<String, rusqlite::types::Value>;
+
+    fn prepare_sources(h: Harness, refs: &[SessionRef], before: &PrimaryReads) -> SourceRows {
         // Resolve cache guards before acquiring the SQLite writer: cache persistence takes
         // the cache lock first, so reversing that order here could deadlock.
-        let mut source_rows = Vec::new();
+        let mut source_rows = std::collections::HashMap::new();
         let adapter = crate::harness::for_harness(h);
         let mut seen = HashSet::new();
         for r in refs {
@@ -318,32 +417,39 @@ mod imp {
                 .or_else(|| crate::discover_cache::captured_reads(&primary));
             if let Some(reads) = reads {
                 if let Ok(json) = serde_json::to_string(&reads) {
-                    source_rows.push((&r.path, json));
+                    source_rows.insert(
+                        r.path.to_string_lossy().into_owned(),
+                        rusqlite::types::Value::Text(json),
+                    );
                 }
             }
         }
-        let Some(mut conn) = open() else { return };
-        let Ok(tx) = conn.transaction() else { return };
-        let _ = tx.execute("DELETE FROM sessions WHERE harness=?1", params![h.as_str()]);
-        let _ = tx.execute("DELETE FROM watched WHERE harness=?1", params![h.as_str()]);
-        let _ = tx.execute("DELETE FROM primary_sources WHERE harness=?1", params![h.as_str()]);
-        insert_refs(&tx, refs);
-        for (path, json) in source_rows {
-            let _ = tx.execute(
-                "INSERT INTO primary_sources(harness,path,reads) VALUES(?1,?2,?3)",
-                params![h.as_str(), path.to_string_lossy(), json],
-            );
+        source_rows
+    }
+
+    fn publish_harness_in(
+        tx: &rusqlite::Transaction,
+        h: Harness,
+        refs: &[SessionRef],
+        watches: &[(PathBuf, i64)],
+        source_rows: &SourceRows,
+        rewrite_sessions: bool,
+    ) -> rusqlite::Result<()> {
+        if rewrite_sessions {
+            tx.execute("DELETE FROM sessions WHERE harness=?1", params![h.as_str()])?;
+            insert_refs(tx, refs)?;
         }
-        {
-            let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO watched(harness,path,mtime_ns) VALUES(?1,?2,?3)")
-            else {
-                return;
-            };
-            for (path, mtime_ns) in watches {
-                let _ = stmt.execute(params![h.as_str(), path.to_string_lossy(), mtime_ns]);
-            }
-        }
-        let _ = tx.commit();
+        let watch_rows = watches
+            .iter()
+            .map(|(path, mtime)| {
+                (
+                    path.to_string_lossy().into_owned(),
+                    rusqlite::types::Value::Integer(*mtime),
+                )
+            })
+            .collect();
+        reconcile_rows(tx, h, "primary_sources", "reads", source_rows)?;
+        reconcile_rows(tx, h, "watched", "mtime_ns", &watch_rows)
     }
 
     /// Compute the watch set for one harness from a finished discovery: the harness roots, every
@@ -501,8 +607,9 @@ mod imp {
         Some(stale)
     }
 
-    /// Every catalog row, in insertion (= discovery) order: [`replace_harness`] deletes + inserts
-    /// each harness's refs in the order discovery produced them, so after a full sync `rowid`
+    /// Every catalog row, in insertion (= discovery) order. Full publication preserves rowids
+    /// only when its complete ordered refs match; otherwise it reinserts successful harnesses
+    /// in discovery order. Thus after a full sync `rowid`
     /// order reproduces [`crate::discover_all`]'s output order exactly — which keeps `cv ls`'s
     /// stable sorts byte-identical even across rows whose timestamps tie. `None` on any sqlite
     /// error — callers fall back to a full discovery. Note `Some(vec![])` is a valid answer (a
@@ -528,12 +635,12 @@ mod imp {
     }
 
     /// Stamp "a full discovery just completed" (the [`last_full_sync`] the staleness backstop reads).
-    pub(crate) fn stamp_full_sync() {
-        let Some(conn) = open() else { return };
-        let _ = conn.execute(
+    fn stamp_full_sync_in(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute(
             "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('last_full_sync',?1)",
             params![chrono::Utc::now().timestamp().to_string()],
-        );
+        )?;
+        Ok(())
     }
 
     /// A full parse counted `n` turns in `r`: write it into `r`'s catalog row and its scan-cache
@@ -800,6 +907,141 @@ mod imp {
         }
 
         #[test]
+        fn publication_preserves_full_tie_order_and_failed_harness_rows() {
+            let w = cv_testkit::World::in_process("publication-order");
+            let mut a = db_ref(Harness::Claude, w.base.join("a"));
+            a.id = "a".into();
+            let mut b = db_ref(Harness::Gemini, w.base.join("b"));
+            b.id = "b".into();
+            let mut failed = db_ref(Harness::Devin, w.base.join("failed"));
+            failed.id = "failed".into();
+            sync(&[a.clone(), b.clone()]);
+            assert!(matches_sessions([&a, &b].into_iter()));
+            assert!(!matches_sessions([&b, &a].into_iter()), "ties retain adapter order");
+            let before = PrimaryReads::default();
+            let publish = |bs: &[SessionRef]| {
+                publish_all(&[
+                    (Harness::Claude, std::slice::from_ref(&a), Vec::new(), &before),
+                    (Harness::Gemini, bs, Vec::new(), &before),
+                ])
+            };
+            b.message_count = 1;
+            publish(std::slice::from_ref(&b));
+            assert!(matches_sessions([&a, &b].into_iter()));
+            // Intervening additive publication after enumeration must defeat the skip.
+            let mut intervening = b.clone();
+            intervening.message_count = 909;
+            sync(&[intervening]);
+            publish(std::slice::from_ref(&b));
+            assert!(matches_sessions([&a, &b].into_iter()));
+            sync(std::slice::from_ref(&failed));
+            publish(std::slice::from_ref(&b));
+            assert!(matches_sessions([&failed, &a, &b].into_iter()));
+            let mut new = b.clone();
+            new.id = "new".into();
+            publish(&[b.clone(), new]);
+            publish(std::slice::from_ref(&b));
+            assert!(matches_sessions([&failed, &a, &b].into_iter()));
+            let conn = open().unwrap();
+            conn.execute(
+                "INSERT INTO sessions(harness,id,path,message_count) VALUES('future-harness','future','future',0)",
+                [],
+            )
+            .unwrap();
+            publish(std::slice::from_ref(&b));
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM sessions WHERE harness='future-harness'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+        }
+
+        #[test]
+        fn publication_failure_rolls_back_rows_guards_and_full_sync_stamp() {
+            let w = cv_testkit::World::in_process("publication-abort");
+            let path = w.base.join("session.jsonl");
+            std::fs::write(&path, "before").unwrap();
+            let a = db_ref(Harness::Claude, path.clone());
+            let mut before = PrimaryReads::default();
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(&path);
+            before.insert(path.clone(), reads.clone());
+            publish_all(&[(
+                Harness::Claude,
+                std::slice::from_ref(&a),
+                vec![(path.clone(), 1)],
+                &before,
+            )]);
+            let conn = open().unwrap();
+            conn.execute("UPDATE catalog_meta SET value='1' WHERE key='last_full_sync'", [])
+                .unwrap();
+            let guard: String = conn
+                .query_row(
+                    "SELECT reads FROM primary_sources WHERE path=?1",
+                    [path.to_string_lossy()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut changed = a.clone();
+            changed.message_count = 2;
+            std::fs::write(&path, "after!").unwrap();
+            let mut newer = crate::source::ReadSet::default();
+            newer.record(&path);
+            before.insert(path.clone(), newer);
+            conn.execute_batch("CREATE TRIGGER reject_publication BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'publication'); END;").unwrap();
+            publish_all(&[(
+                Harness::Claude,
+                std::slice::from_ref(&changed),
+                vec![(path.clone(), 2)],
+                &before,
+            )]);
+            assert!(matches_sessions(std::iter::once(&a)));
+            assert_eq!(last_full_sync(), Some(1));
+            let unchanged: String = conn
+                .query_row(
+                    "SELECT reads FROM primary_sources WHERE path=?1",
+                    [path.to_string_lossy()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(unchanged, guard);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT mtime_ns FROM watched WHERE path=?1",
+                    [path.to_string_lossy()],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            conn.execute_batch("DROP TRIGGER reject_publication;").unwrap();
+            // Restoring original captured proof must not bless the intervening file rewrite.
+            before.insert(path.clone(), reads.clone());
+            publish_all(&[(
+                Harness::Claude,
+                std::slice::from_ref(&changed),
+                vec![(path.clone(), 2)],
+                &before,
+            )]);
+            let published: String = conn
+                .query_row(
+                    "SELECT reads FROM primary_sources WHERE path=?1",
+                    [path.to_string_lossy()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<crate::source::ReadSet>(&published).unwrap(),
+                reads
+            );
+            assert!(!reads.fresh(&mut crate::source::Probe::default()));
+        }
+
+        #[test]
         fn watches_track_cursor_cli_metadata_without_database_changes() {
             let world = cv_testkit::World::in_process("catalog-cursor-cli-meta");
             let path = world.base.join("store.db");
@@ -921,7 +1163,7 @@ pub use imp::{
 };
 #[cfg(feature = "sqlite")]
 pub(crate) use imp::{
-    all_sessions, capture_primary_reads, last_full_sync, open_db, probe_stale, replace_harness, stamp_full_sync,
+    all_sessions, capture_primary_reads, last_full_sync, open_db, probe_stale, publish_all, replace_harness,
     watches_for,
 };
 
@@ -984,6 +1226,9 @@ pub(crate) fn replace_harness(
 }
 
 #[cfg(not(feature = "sqlite"))]
+pub(crate) fn publish_all(_rows: &[Publication<'_>]) {}
+
+#[cfg(not(feature = "sqlite"))]
 pub(crate) fn capture_primary_reads(_a: &dyn crate::Adapter) -> PrimaryReads {
     Default::default()
 }
@@ -1007,5 +1252,3 @@ pub(crate) fn all_sessions() -> Option<Vec<SessionRef>> {
 pub(crate) fn last_full_sync() -> Option<i64> {
     None
 }
-#[cfg(not(feature = "sqlite"))]
-pub(crate) fn stamp_full_sync() {}

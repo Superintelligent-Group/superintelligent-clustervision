@@ -1,10 +1,9 @@
-//! A persistent, content-addressed cache for the cheap metadata that `discover` produces.
+//! A persistent cache for the cheap metadata that `discover` produces.
 //!
-//! Discovery's expensive step is reading + JSON-parsing every transcript just to extract a handful
-//! of metadata fields. But transcripts only change by being appended to, so a file whose
-//! `(mtime, size)` is unchanged since last time has unchanged metadata. This cache keys on exactly
-//! that: a hit returns the stored [`SessionRef`]s without touching the file, so steady-state
-//! discovery costs one `stat` per file instead of a full read+parse.
+//! Discovery's expensive step is reading + JSON-parsing every transcript to extract metadata.
+//! Cache hits require unchanged `(mtime, size)` and captured file identity, rejecting appends,
+//! timestamp-preserving replacements and rewrites. A hit returns stored [`SessionRef`]s without
+//! reading transcript content; full discovery still freshly enumerates each harness's inventory.
 //!
 //! It's process-global and shared by `cv` and the desktop app via the `scan_cache` table in
 //! the shared catalog db (see [`crate::catalog`], which owns the DDL; the rows also feed the
@@ -197,7 +196,7 @@ pub(crate) fn persist(prune: bool) {
     let Some(cache) = CACHE.get() else {
         return;
     };
-    if !cache.any_dirty.swap(false, Ordering::Relaxed) && !prune {
+    if !cache.any_dirty.load(Ordering::Relaxed) && !prune {
         return;
     }
     #[cfg(feature = "sqlite")]
@@ -206,16 +205,45 @@ pub(crate) fn persist(prune: bool) {
             return;
         };
         clear_invalidated(cache);
-        let Ok(tx) = conn.transaction() else { return };
-        let mut g = cache.entries.write().unwrap();
-        {
-            let Ok(mut stmt) =
-                tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads) VALUES(?1,?2,?3,?4,?5,?6)")
-            else {
+        // Full discovery still checks every persisted path, including malformed cache rows
+        // omitted by load. Pruning therefore keeps its existing completeness semantics.
+        let mut prune_paths: std::collections::HashSet<String> = if prune {
+            let Ok(mut stmt) = conn.prepare("SELECT path FROM scan_cache") else {
                 return;
             };
-            for (path, e) in g.iter_mut().filter(|(_, e)| e.dirty) {
+            let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+                return;
+            };
+            let Ok(paths) = rows.collect::<rusqlite::Result<_>>() else {
+                return;
+            };
+            paths
+        } else {
+            Default::default()
+        };
+        let mut g = cache.entries.write().unwrap();
+        if prune {
+            // Match the previous flush-then-prune behavior for newly scanned files that
+            // vanished before publication, checking each persisted/dirty path only once.
+            prune_paths.extend(
+                g.iter()
+                    .filter(|(_, e)| e.dirty)
+                    .map(|(path, _)| path.to_string_lossy().into_owned()),
+            );
+        }
+        let vanished: Vec<_> = prune_paths.into_iter().filter(|p| !Path::new(p).exists()).collect();
+        if vanished.is_empty() && !g.values().any(|entry| entry.dirty) {
+            return;
+        }
+        let Ok(tx) = conn.transaction() else { return };
+        let mut written = Vec::new();
+        {
+            let Ok(mut stmt) = tx.prepare("INSERT OR REPLACE INTO scan_cache(path,mtime_ns,size,refs,interpretation_version,source_reads) VALUES(?1,?2,?3,?4,?5,?6)") else { return };
+            for (path, e) in g.iter().filter(|(_, e)| e.dirty) {
                 let Ok(refs) = serde_json::to_string(&e.refs) else {
+                    continue;
+                };
+                let Ok(reads) = serde_json::to_string(&e.reads) else {
                     continue;
                 };
                 if stmt
@@ -225,33 +253,35 @@ pub(crate) fn persist(prune: bool) {
                         e.size as i64,
                         refs,
                         INTERPRETATION_VERSION,
-                        serde_json::to_string(&e.reads).unwrap()
+                        reads
                     ])
-                    .is_ok()
+                    .is_err()
                 {
-                    e.dirty = false;
+                    return;
                 }
+                written.push(path.clone());
             }
         }
-        if prune {
-            let vanished: Vec<String> = tx
-                .prepare("SELECT path FROM scan_cache")
-                .ok()
-                .and_then(|mut stmt| {
-                    stmt.query_map([], |r| r.get::<_, String>(0))
-                        .ok()
-                        .map(|rows| rows.flatten().filter(|p| !Path::new(p).exists()).collect())
-                })
-                .unwrap_or_default();
-            if let Ok(mut del) = tx.prepare("DELETE FROM scan_cache WHERE path=?1") {
-                for p in &vanished {
-                    let _ = del.execute(rusqlite::params![p]);
-                    g.remove(Path::new(p));
-                }
+        for path in &vanished {
+            if tx.execute("DELETE FROM scan_cache WHERE path=?1", [path]).is_err() {
+                return;
             }
         }
-        drop(g);
-        let _ = tx.commit();
+        if tx.commit().is_err() {
+            return;
+        }
+        // A failed transaction retains dirty flags for retry rather than losing its writes.
+        for path in written {
+            if let Some(entry) = g.get_mut(&path) {
+                entry.dirty = false;
+            }
+        }
+        for path in vanished {
+            g.remove(Path::new(&path));
+        }
+        cache
+            .any_dirty
+            .store(g.values().any(|entry| entry.dirty), Ordering::Relaxed);
     }
 }
 
@@ -380,6 +410,65 @@ mod tests {
         .unwrap();
         assert!(load().entries.read().unwrap().is_empty());
     }
+    #[test]
+    fn failed_flush_retries_and_prunes_newly_vanished_entries() {
+        let w = cv_testkit::World::in_process("scan-persist-retry");
+        let path = w.base.join("retry.jsonl");
+        std::fs::write(&path, "data").unwrap();
+        let r = SessionRef {
+            path: path.clone(),
+            id: "retry".into(),
+            harness: crate::Harness::Claude,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            message_count: 1,
+        };
+        let conn = crate::catalog::open_db().unwrap();
+        cached_scan(&path, || Some(r.clone()));
+        conn.execute_batch(
+            "CREATE TRIGGER reject_cache BEFORE INSERT ON scan_cache BEGIN SELECT RAISE(ABORT,'retry'); END;",
+        )
+        .unwrap();
+        persist(false);
+        assert!(CACHE.get().unwrap().entries.read().unwrap().get(&path).unwrap().dirty);
+        conn.execute_batch("DROP TRIGGER reject_cache;").unwrap();
+        persist(false);
+        assert!(!CACHE.get().unwrap().entries.read().unwrap().get(&path).unwrap().dirty);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM scan_cache WHERE path=?1",
+                [path.to_string_lossy()],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        let vanished = w.base.join("newly-vanished.jsonl");
+        std::fs::write(&vanished, "data").unwrap();
+        cached_scan(&vanished, || {
+            Some(SessionRef {
+                path: vanished.clone(),
+                ..r
+            })
+        });
+        std::fs::remove_file(&vanished).unwrap();
+        // Include a malformed persisted row: pruning must not rely only on loaded entries.
+        conn.execute("INSERT INTO scan_cache(path,mtime_ns,size,refs,source_reads) VALUES('missing-malformed',1,1,'broken','broken')", []).unwrap();
+        persist(true);
+        assert!(!CACHE.get().unwrap().entries.read().unwrap().contains_key(&vanished));
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM scan_cache WHERE path=?1 OR path='missing-malformed'",
+                [vanished.to_string_lossy()],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn discovery_mutation_keeps_original_identity_and_forces_rescan() {
         let w = cv_testkit::World::in_process("scan-mutation");

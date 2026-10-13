@@ -1800,3 +1800,35 @@ Limits: adapters may still produce an owned largest-record fallback; full metada
 payloads still cost their demanded size. Preparation intentionally reads through EOF. This removes
 retained discarded histories and the loom body clone, not all source scanning or all native writer
 materialization. Distill can reuse the primitive but is not migrated by this change.
+Fresh discovery publication avoids unchanged writes (2026-10-12). `cv index` keeps its
+`discover_all` boundary: every adapter still enumerates its current inventory, including new
+project directories outside the previous watch set. Publication compares the entire ordered
+ref sequence with the catalog inside the transaction that publishes all successful harnesses;
+only an identical full sequence retains session rowids.
+Independent per-harness skipping would move changed harnesses behind unchanged ones and
+alter stable sorts on tied timestamps. Any changed sequence therefore republishes successful
+harnesses in their existing order; failed harnesses retain their previous rows as before.
+Watch and primary-source rows are reconciled against existing values, retaining unchanged
+rows and updating/removing only changed entries. Guard values remain the original captured
+before-read identities, never newly sampled post-read identities.
+
+A production `discover_all` regression installs SQLite write-audit triggers on `sessions`,
+`watched`, `primary_sources` and `scan_cache`. After one successful single-session scan, the
+unchanged full scan emits **zero row mutations** across those tables. Appending one message
+emits two session mutations (delete/insert), one scan-cache replacement and one primary-guard
+replacement. Newly created project directories and removed sessions remain visible in the
+fresh inventory and catalog; a separate multi-harness regression checks order across changes,
+additions, removals and retained failed-harness rows. Complete unchanged discovery results
+are equal, including timestamps and metadata. The full-sync backstop timestamp publishes
+in the same commit; an injected row failure
+rolls back session rows, guards, watches and that stamp. A deterministic intervening additive
+publication proves equality is decided inside publication rather than using an earlier hint.
+
+Scan-cache persistence avoids its write transaction/prepared insert when there are no dirty
+or vanished entries. Full pruning still selects and stats every persisted path, including
+malformed rows omitted by cache loading, and deduplicates newly dirty paths into that check.
+A newly scanned file that disappears before publication is still pruned. Dirty flags clear
+only after a successful transaction; an injected SQLite failure proves the flush retries.
+This evidence counts actual SQL mutations, not elapsed time, instruction counts or content
+reads. Enumeration, captured-primary metadata probes, watch reconstruction and pruning stats
+remain; this change removes publication writes without claiming those operations disappeared.

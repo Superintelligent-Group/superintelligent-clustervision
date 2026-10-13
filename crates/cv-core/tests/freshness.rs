@@ -397,3 +397,86 @@ fn additive_row_without_captured_source_forces_refresh() {
     cv_core::catalog::sync(&[unknown]);
     assert_eq!(ids(&cv_core::sessions()), vec!["alphasess"]);
 }
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn full_discovery_avoids_unchanged_publication_but_enumerates_new_project_paths() {
+    let w = World::in_process("discovery-publication");
+    let alpha = write_session(&w, "-project", "alpha", 2);
+    let first = cv_core::discover_all();
+    let db = rusqlite::Connection::open(w.cv_home.join("catalog.db")).unwrap();
+    db.execute_batch("CREATE TABLE publication_audit(kind TEXT,table_name TEXT);")
+        .unwrap();
+    for table in ["sessions", "watched", "primary_sources", "scan_cache"] {
+        for kind in ["INSERT", "UPDATE", "DELETE"] {
+            db.execute_batch(&format!("CREATE TRIGGER audit_{table}_{kind} AFTER {kind} ON {table} BEGIN INSERT INTO publication_audit VALUES('{kind}','{table}'); END;")).unwrap();
+        }
+    }
+    let writes = || {
+        db.query_row("SELECT count(*) FROM publication_audit", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    let ordered = |refs: &[SessionRef]| serde_json::to_value(refs).unwrap();
+    let second = cv_core::discover_all();
+    assert_eq!(ordered(&first), ordered(&second));
+    assert_eq!(writes(), 0, "unchanged full inventory must not mutate publication rows");
+
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&alpha)
+        .unwrap()
+        .write_all(user_line("alpha", 2).as_bytes())
+        .unwrap();
+    let appended = cv_core::discover_all();
+    assert_eq!(appended.iter().find(|r| r.id == "alpha").unwrap().message_count, 3);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM publication_audit WHERE table_name='sessions'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM publication_audit WHERE table_name='scan_cache'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM publication_audit WHERE table_name='primary_sources'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    db.execute("DELETE FROM publication_audit", []).unwrap();
+    assert_eq!(ordered(&appended), ordered(&cv_core::discover_all()));
+    assert_eq!(writes(), 0);
+
+    // A fresh inventory must find directories absent from the previous watch set.
+    let beta = write_session(&w, "-new-deep-project", "beta", 1);
+    let added = cv_core::discover_all();
+    assert!(added.iter().any(|r| r.id == "beta"));
+    assert!(writes() > 0);
+    db.execute("DELETE FROM publication_audit", []).unwrap();
+    fs::remove_file(beta).unwrap();
+    let removed = cv_core::discover_all();
+    assert!(!removed.iter().any(|r| r.id == "beta"));
+    assert!(writes() > 0);
+    let catalog_order: Vec<String> = db
+        .prepare("SELECT id FROM sessions ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(catalog_order, removed.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+}

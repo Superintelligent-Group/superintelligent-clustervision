@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Splice retains only selected messages and moves them into the composition, avoiding materialization and cloning of discarded histories.
+- Fresh discovery avoids rewriting unchanged catalog rows while preserving inventory freshness, session order, source guards, and vanished-file pruning.
 
 - Limited JSON queries evaluate only the ranked candidates needed for their window; unread lower-ranked transcripts cannot invalidate selected results.
 - Generated MCP tools stage large output in bounded memory and retain successful stderr, including continuation hints, as a second content block.
