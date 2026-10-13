@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cursor selected reads preserve empty editor-state fallbacks instead of failing on an empty backing range.
+- Portable Gemini replay retains checked record ranges without copying giant lines or unused metadata.
+
 - Large retained-text previews read bounded windows instead of scanning complete bodies before returning a short prefix.
 
 - Gemini reads composite tool results and formatted thoughts with bounded selected-payload memory while preserving output.
