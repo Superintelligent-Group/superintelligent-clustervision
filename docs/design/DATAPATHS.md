@@ -2212,3 +2212,23 @@ the counts Reader. These controls and their limits are recorded in
 [`QUERY-WORKFLOW-EVIDENCE.json`](QUERY-WORKFLOW-EVIDENCE.json), under `limited_window_work` and
 `demand_counts_work`. Discovery, rank metadata/sorting and text-index membership preparation
 remain whole-operation costs; this evidence makes no end-to-end speedup claim.
+
+
+FTS final compaction work (2026-10-13): the bottom tier now ends at its documented **8 MiB**,
+rather than 64 MiB. A real-Writer control uses one 4,096-term cold body and 24 small append
+commits with replaceable meta records, scaling the floor to half the measured cold segment.
+The legacy selector rewrites the cold lineage three times; the corrected selector never does.
+Both execute three merges and end with four segments. Selected input segment file lengths fall
+130,975 → 35,371 bytes; new output segment file lengths fall 103,710 → 7,967 bytes. Common,
+cold-only and latest-append queries return exact session IDs before/after each compaction;
+the final common query requests 25 stored identities for 25 matching live body docs in both
+variants. This does not bound metadata reads, decompressed blocks or per-segment query setup.
+
+The earlier once-per-tier byte-amortization claim was too strong: bottom-tier outputs can remain
+in their tier and merge again, and `DEAD_RATIO` is deleted **document** share rather than deleted
+physical-byte share. A tier still selects all eligible segments, so fanout remains unbounded.
+Unchanged sources can finish pending compaction from an interrupted prior run. This fix avoids
+one demonstrated cold-segment rewrite pattern; it is not a large-fleet I/O bound. The narrow
+append control, full-tier/rest control and unchanged-pending-compaction control pass. See
+[FTS-COMPACTION-WORK-CONTROL.json](FTS-COMPACTION-WORK-CONTROL.json) for deterministic work
+accounting and exact fixture/query scope; no timing campaign or full index sweep was run.

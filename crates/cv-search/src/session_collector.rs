@@ -121,6 +121,9 @@ pub(crate) struct TopSessions {
     pub(crate) filter: Option<SessionFilter>,
     #[cfg(test)]
     pub(crate) full_documents: bool,
+    #[cfg(test)]
+    /// Competitive stored identity requests; excludes filter and metadata lookups.
+    pub(crate) stored_reads: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     id: Field,
     limit: usize,
 }
@@ -132,6 +135,8 @@ impl TopSessions {
             filter: None,
             #[cfg(test)]
             full_documents: false,
+            #[cfg(test)]
+            stored_reads: None,
         }
     }
 }
@@ -143,6 +148,8 @@ impl Collector for TopSessions {
             filter: self.filter.clone(),
             #[cfg(test)]
             full_documents: self.full_documents,
+            #[cfg(test)]
+            stored_reads: self.stored_reads.clone(),
             filter_cache: HashMap::new(),
             id: self.id,
             ordinal,
@@ -189,6 +196,8 @@ impl Collector for TopSessions {
 pub(crate) struct SessionSegment {
     #[cfg(test)]
     full_documents: bool,
+    #[cfg(test)]
+    stored_reads: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     filter: Option<SessionFilter>,
     filter_cache: HashMap<String, bool>,
     id: Field,
@@ -202,6 +211,10 @@ impl SegmentCollector for SessionSegment {
     fn collect(&mut self, doc: DocId, score: Score) {
         if self.error.is_some() || !self.winners.competitive_score(score) {
             return;
+        }
+        #[cfg(test)]
+        if let Some(reads) = &self.stored_reads {
+            reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let identity = {
             #[cfg(test)]

@@ -207,6 +207,14 @@ fn open_writer(index: &Index, heap: usize) -> Result<Writer> {
 /// The next full byte-size tier or mostly-deleted segment. Both planning and execution use
 /// this selection, so an unchanged refresh can skip its writer only when no compaction is pending.
 fn compaction_candidates(dir: &Path, index: &Index) -> Result<Option<Vec<tantivy::index::SegmentId>>> {
+    compaction_candidates_at_floor(dir, index, TIER_FLOOR)
+}
+
+fn compaction_candidates_at_floor(
+    dir: &Path,
+    index: &Index,
+    floor: u64,
+) -> Result<Option<Vec<tantivy::index::SegmentId>>> {
     let bytes = |m: &tantivy::index::SegmentMeta| -> u64 {
         m.list_files()
             .iter()
@@ -216,7 +224,7 @@ fn compaction_candidates(dir: &Path, index: &Index) -> Result<Option<Vec<tantivy
     };
     let tier = |b: u64| -> u32 {
         let mut t = 0;
-        let mut cap = TIER_FLOOR * TIER_FANOUT as u64;
+        let mut cap = floor;
         while b > cap {
             t += 1;
             cap = cap.saturating_mul(TIER_FANOUT as u64);
@@ -238,12 +246,24 @@ fn compaction_candidates(dir: &Path, index: &Index) -> Result<Option<Vec<tantivy
 
 /// Merge the committed segments by size tier, synchronously: any tier holding [`TIER_FANOUT`]
 /// segments becomes one segment, and a segment past [`DEAD_RATIO`] is rewritten alone, until no
-/// rule fires. An unchanged index merges nothing; each byte is rewritten about once per tier it
-/// climbs, so the cost is amortized over the runs that wrote it. Returns the merges run.
+/// rule fires. An unchanged source set can still finish compaction left pending by an earlier run.
+/// Bottom-tier outputs can remain in that tier and merge again; deletion cleanup uses document
+/// share, not physical deleted-byte share.
+/// Byte tiers constrain grouping, but do not guarantee one rewrite per byte per tier.
+/// Returns the merges run.
 fn compact(dir: &Path, index: &Index, writer: &mut Writer) -> Result<usize> {
+    compact_with_candidates(dir, index, writer, compaction_candidates)
+}
+
+fn compact_with_candidates(
+    dir: &Path,
+    index: &Index,
+    writer: &mut Writer,
+    mut candidates: impl FnMut(&Path, &Index) -> Result<Option<Vec<tantivy::index::SegmentId>>>,
+) -> Result<usize> {
     let mut merges = 0;
     loop {
-        let pick = compaction_candidates(dir, index)?;
+        let pick = candidates(dir, index)?;
         let Some(ids) = pick else { break };
         writer.merge(&ids).wait().context("merging segments")?;
         merges += 1;
@@ -5394,5 +5414,183 @@ mod tests {
         let hits = text_search(&dir, "common", 50).unwrap();
         assert_eq!(hits.len(), TIER_FANOUT);
         std::fs::remove_dir_all(&dir).ok();
+    }
+    #[derive(Default, Debug)]
+    struct MergeBytes {
+        inputs: u64,
+        outputs: u64,
+        merges: usize,
+        cold_rewrites: usize,
+        final_segments: usize,
+    }
+    fn segment_bytes(dir: &Path, meta: &tantivy::index::SegmentMeta) -> u64 {
+        meta.list_files()
+            .iter()
+            .filter_map(|path| std::fs::metadata(dir.join(path)).ok())
+            .map(|meta| meta.len())
+            .sum()
+    }
+    fn measured_compact(
+        dir: &Path,
+        index: &Index,
+        writer: &mut Writer,
+        floor: u64,
+        cold: &mut HashSet<tantivy::index::SegmentId>,
+    ) -> MergeBytes {
+        let mut work = MergeBytes::default();
+        let mut pending: Option<(HashSet<tantivy::index::SegmentId>, bool)> = None;
+        compact_with_candidates(dir, index, writer, |dir, index| {
+            let metas = index.searchable_segment_metas()?;
+            if let Some((before, rewrote_cold)) = pending.take() {
+                for meta in metas.iter().filter(|meta| !before.contains(&meta.id())) {
+                    work.outputs += segment_bytes(dir, meta);
+                    if rewrote_cold {
+                        cold.insert(meta.id());
+                    }
+                }
+            }
+            let pick = compaction_candidates_at_floor(dir, index, floor)?;
+            if let Some(ids) = &pick {
+                work.merges += 1;
+                let rewrote_cold = ids.iter().any(|id| cold.contains(id));
+                work.cold_rewrites += usize::from(rewrote_cold);
+                work.inputs += metas
+                    .iter()
+                    .filter(|meta| ids.contains(&meta.id()))
+                    .map(|meta| segment_bytes(dir, meta))
+                    .sum::<u64>();
+                pending = Some((metas.iter().map(|meta| meta.id()).collect(), rewrote_cold));
+            }
+            Ok(pick)
+        })
+        .unwrap();
+        work
+    }
+    fn session_ids_and_reads(dir: &Path, term: &str) -> (Vec<String>, usize) {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let (index, f) = open_existing(dir).unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let query = QueryParser::for_index(&index, vec![f.body]).parse_query(term).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut collector = crate::session_collector::TopSessions::new(f.id, 16);
+        collector.stored_reads = Some(reads.clone());
+        let mut ids: Vec<_> = searcher
+            .search(&query, &collector)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect();
+        ids.sort();
+        (ids, reads.load(Ordering::Relaxed))
+    }
+    fn append_merge_control(legacy: bool) -> (MergeBytes, Vec<String>, usize) {
+        use tantivy::{
+            query::{BooleanQuery, TermQuery},
+            schema::IndexRecordOption,
+        };
+        let dir = tmpdir();
+        let (index, f) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        let mut cold_doc = TantivyDocument::default();
+        cold_doc.add_text(f.id, "cold");
+        cold_doc.add_text(f.kind, KIND_BODY);
+        let words: String = (0..4096).map(|n| format!("coldword{n:08x} ")).collect();
+        cold_doc.add_text(f.body, format!("common {words}"));
+        writer.add_document(cold_doc).unwrap();
+        writer.commit().unwrap();
+        let cold_meta = index.searchable_segment_metas().unwrap().pop().unwrap();
+        let cold_bytes = segment_bytes(&dir, &cold_meta);
+        let floor = cold_bytes / 2;
+        eprintln!("append tier scale: cold={cold_bytes} bytes, floor={floor} bytes, legacy={legacy}");
+        let mut cold = HashSet::from([cold_meta.id()]);
+        let mut total = MergeBytes::default();
+        for n in 0..24 {
+            // An immutable body chunk and replaceable meta doc per append. Dead meta docs
+            // are exactly half of their segment, preserving DEAD_RATIO's strict boundary.
+            writer
+                .delete_query(Box::new(BooleanQuery::intersection(vec![
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(f.id, "hot"),
+                        IndexRecordOption::Basic,
+                    )),
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(f.kind, KIND_META),
+                        IndexRecordOption::Basic,
+                    )),
+                ])))
+                .unwrap();
+            let mut body = TantivyDocument::default();
+            body.add_text(f.id, "hot");
+            body.add_text(f.kind, KIND_BODY);
+            body.add_text(f.body, format!("common appendword{n:08x}"));
+            writer.add_document(body).unwrap();
+            let mut meta = TantivyDocument::default();
+            meta.add_text(f.id, "hot");
+            meta.add_text(f.kind, KIND_META);
+            writer.add_document(meta).unwrap();
+            writer.commit().unwrap();
+            let small = index
+                .searchable_segment_metas()
+                .unwrap()
+                .into_iter()
+                .find(|meta| !cold.contains(&meta.id()) && meta.num_deleted_docs() == 0)
+                .unwrap();
+            assert!(segment_bytes(&dir, &small) < floor);
+            let term = format!("appendword{n:08x}");
+            let before = session_ids_and_reads(&dir, "common");
+            let cold_hit = session_ids_and_reads(&dir, "coldword00000000");
+            let append_hit = session_ids_and_reads(&dir, &term);
+            assert_eq!(cold_hit, (vec!["cold".into()], 1));
+            assert_eq!(append_hit, (vec!["hot".into()], 1));
+            let work = measured_compact(
+                &dir,
+                &index,
+                &mut writer,
+                if legacy { floor * TIER_FANOUT as u64 } else { floor },
+                &mut cold,
+            );
+            total.inputs += work.inputs;
+            total.outputs += work.outputs;
+            total.merges += work.merges;
+            total.cold_rewrites += work.cold_rewrites;
+            assert_eq!(session_ids_and_reads(&dir, "common"), before);
+            assert_eq!(session_ids_and_reads(&dir, "coldword00000000"), cold_hit);
+            assert_eq!(session_ids_and_reads(&dir, &term), append_hit);
+            assert_eq!(before.0, ["cold", "hot"]);
+            assert_eq!(
+                before.1,
+                n + 2,
+                "one identity request per live matching body, not every stored document"
+            );
+        }
+        total.final_segments = index.searchable_segment_ids().unwrap().len();
+        let (ids, reads) = session_ids_and_reads(&dir, "common");
+        assert_eq!(
+            measured_compact(
+                &dir,
+                &index,
+                &mut writer,
+                if legacy { floor * TIER_FANOUT as u64 } else { floor },
+                &mut cold
+            )
+            .merges,
+            0
+        );
+        std::fs::remove_dir_all(dir).ok();
+        (total, ids, reads)
+    }
+    #[test]
+    fn append_compaction_keeps_the_cold_segment_above_the_bottom_tier() {
+        let (legacy, ids, reads) = append_merge_control(true);
+        let (fixed, fixed_ids, fixed_reads) = append_merge_control(false);
+        assert_eq!((ids, reads), (fixed_ids, fixed_reads));
+        assert!(legacy.cold_rewrites >= 2, "legacy: {legacy:?}");
+        assert_eq!(fixed.cold_rewrites, 0, "fixed: {fixed:?}");
+        assert!(fixed.inputs < legacy.inputs, "inputs {fixed:?} versus {legacy:?}");
+        assert!(fixed.outputs < legacy.outputs, "outputs {fixed:?} versus {legacy:?}");
+        eprintln!("append merge bytes: legacy={legacy:?}, fixed={fixed:?}");
     }
 }
