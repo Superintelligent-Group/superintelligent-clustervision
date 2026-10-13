@@ -18,8 +18,8 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 | List / find a session | Known-ID lookup bypasses fleet discovery. Warm listing uses cached metadata and verifies all captured primary identities. Cold discovery still derives counts from content. | Preserve warm paths. Distinguish inventory discovery, source validation and exact counting; investigate their coupling before tuning more line scanners. |
 | Filter the fleet | All 6,714 common count maps match the earlier control; the current frozen query completes all 6,883 refs. Limited JSON selection now stops at the required ranked prefix, preserves stable order, and fails on needed read errors. | Keep complete filtering for exact totals/statistics. Counted `has:plan` can reuse facts; parse predicates still inspect needed bodies. The fact table still loads fleet-wide, so total work is not bounded solely by the window size. |
 | Read / navigate | API has verified bounded continuations; CLI requires final EOF metadata. Generated MCP now stages CLI output in bounded memory and forwards continuation hints; it still loses persistent read state. | Preserve exact CLI semantics and bounded transport. Account for repeated traversals, copies and staged bytes before unifying read engines with different metadata contracts. |
-| Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still discovers the fleet first. | Carry work accounting across the CLI discovery boundary; inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
-| Transform / export | Verified Codex port retains checked source-backed bodies. Prune/archive/dataset can still scan or stage whole output; archive replacement necessarily writes a new complete artifact. | Hold further Claude emitter work. Count traversals and staged/output bytes for small selections from large histories; consolidate selection/emission where contracts align. |
+| Refresh / search | Production sweep tests now assert zero callbacks/document submissions/writer opens when unchanged. Resumed appends deliver fewer callbacks and body bytes than whole rebuilds, with exact search/event/count parity. CLI `index` still enumerates the fleet; unchanged publication now avoids session/watch/primary/scan-cache row mutations. | Carry work accounting across the CLI discovery boundary; inspect logical index mutations, publication and compaction separately. Current tests cover successful sweeps, not every possible merge or failure path. |
+| Transform / export | Verified Codex port retains checked source-backed bodies. Prune/archive/dataset can still scan or stage whole output; archive replacement necessarily writes a new complete artifact. | Hold further Claude emitter work. Splice now retains only selected guarded messages and moves them into the composition; EOF metadata still requires a scan. Inspect remaining full collectors and consumer correctness. |
 
 ### Measurement correction: count the work (2026-10-12)
 
@@ -1769,12 +1769,13 @@ is unchanged and can still produce a giant response. Subprocess startup and pers
 state remain separate work.
 
 Actual CLI/MCP parity checks cover first, adjacent, repeated and budgeted windows, giant default
-output and failed commands. All nine decoded first-text comparisons match CLI output, including
-the two continuation hints in second blocks. Narrow transport tests cover arbitrary request ids,
+output and failed commands. Eight successful first-text comparisons match CLI stdout; the failure
+case matches the prior MCP error prefix and trimmed stderr. Two successful cases retain continuation
+hints in second blocks. Narrow transport tests cover arbitrary request ids,
 UTF-8 splits and invalid bytes, stderr/failure trimming, broken response pipes, protocol errors,
 notifications, concurrent child drains and cancellation; a shared string oracle checks tiny and
-64 KiB reader boundaries. Private evidence: staged-protocol-parity.json and staged-transport-heap.json
-under /private/tmp/cv-mcp-http-operation-evidence/.
+64 KiB reader boundaries. Durable counts and parity hashes are in
+[`MCP-TRANSPORT-WORK.json`](MCP-TRANSPORT-WORK.json).
 
 ### Selected splice preparation (Sol, 2026-10-12)
 
@@ -1800,6 +1801,7 @@ Limits: adapters may still produce an owned largest-record fallback; full metada
 payloads still cost their demanded size. Preparation intentionally reads through EOF. This removes
 retained discarded histories and the loom body clone, not all source scanning or all native writer
 materialization. Distill can reuse the primitive but is not migrated by this change.
+
 Fresh discovery publication avoids unchanged writes (2026-10-12). `cv index` keeps its
 `discover_all` boundary: every adapter still enumerates its current inventory, including new
 project directories outside the previous watch set. Publication compares the entire ordered
@@ -1832,6 +1834,7 @@ only after a successful transaction; an injected SQLite failure proves the flush
 This evidence counts actual SQL mutations, not elapsed time, instruction counts or content
 reads. Enumeration, captured-primary metadata probes, watch reconstruction and pruning stats
 remain; this change removes publication writes without claiming those operations disappeared.
+
 One-pass staged Session JSON (2026-10-12): CLI JSON selection previously wrote each selected
 message through the compact serializer to count `max_bytes`, then traversed its lazy bodies
 again through the pretty serializer for the spool. The shared CLI/archive frame writer now

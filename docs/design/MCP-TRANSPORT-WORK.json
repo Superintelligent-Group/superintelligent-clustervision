@@ -1,0 +1,183 @@
+{
+  "source_commit": "31a1ec73",
+  "scope": "Generated MCP child capture through JSON-RPC writer; synthetic fixture data only.",
+  "limits": [
+    "Heap counts exclude child heap, native allocations, mmap pages, and allocator overhead.",
+    "Wire sizes differ between parity and allocation probes because request ids differ.",
+    "First-message soft-cap exception remains; large output adds private spool I/O.",
+    "These are historical operation controls, not a CI budget or wall-clock speedup."
+  ],
+  "protocol_parity": [
+    {
+      "source": "moderate",
+      "operation": "first",
+      "wire_bytes": 40200,
+      "wire_sha256": "e609938a4d186dbc908f6f7d6d0f6e5f36a88baace83e6e6bc55a48b06c82f3a",
+      "first_text_bytes": 38151,
+      "first_text_sha256": "8e800fdaf874f325ea86227702b3c32906b248a7192fb56ee2f2ad9cd8a3a7de",
+      "content_blocks": 1,
+      "stderr_text": "",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "moderate",
+      "operation": "adjacent",
+      "wire_bytes": 40200,
+      "wire_sha256": "45780d287ebcc0abbb86ae15a309c8b74abe786ccca836723cae2be9296017a2",
+      "first_text_bytes": 38151,
+      "first_text_sha256": "34115e5e967ed221444161a6b0703cdf376863e301aa2fc98063694db3f9f117",
+      "content_blocks": 1,
+      "stderr_text": "",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "moderate",
+      "operation": "repeat",
+      "wire_bytes": 40200,
+      "wire_sha256": "87b42641f95bd32225eb52a719284a393fbefc5fa87b6622b4e5753cfe93f5ff",
+      "first_text_bytes": 38151,
+      "first_text_sha256": "8e800fdaf874f325ea86227702b3c32906b248a7192fb56ee2f2ad9cd8a3a7de",
+      "content_blocks": 1,
+      "stderr_text": "",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "moderate",
+      "operation": "budget",
+      "wire_bytes": 1496,
+      "wire_sha256": "d7cc145ab12a936854a5f690379c3493d505b820417f89f736b942b19e327c5e",
+      "first_text_bytes": 1252,
+      "first_text_sha256": "0f93894e0986150e6530bf98283b7822f454630fc64990dff4ec643a64fec060",
+      "content_blocks": 2,
+      "stderr_text": "\u2026 continue with --range 1..",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "giant",
+      "operation": "first",
+      "wire_bytes": 39147697,
+      "wire_sha256": "db913a3769f6e346e318c00997686e6b6779673133acc29cc38ca993a4906be1",
+      "first_text_bytes": 25166505,
+      "first_text_sha256": "8cba9597f15d9a14b2f967c92c979351306265c6951c28a00d43eb098571ae0e",
+      "content_blocks": 1,
+      "stderr_text": "",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "giant",
+      "operation": "adjacent",
+      "wire_bytes": 871,
+      "wire_sha256": "f06060ea40e97351e4caba7273541c7943d2822044065b016d300489586c2087",
+      "first_text_bytes": 689,
+      "first_text_sha256": "47b3bbcf0aa207659b909c01d63429ded389e49498e4e97bdec67c935d97b24f",
+      "content_blocks": 1,
+      "stderr_text": "",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "giant",
+      "operation": "repeat",
+      "wire_bytes": 39147697,
+      "wire_sha256": "cb2e830127c4c52c9aa39e57b784d05c8d7401a727455bb291561ad0d7d46203",
+      "first_text_bytes": 25166505,
+      "first_text_sha256": "8cba9597f15d9a14b2f967c92c979351306265c6951c28a00d43eb098571ae0e",
+      "content_blocks": 1,
+      "stderr_text": "",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "giant",
+      "operation": "default",
+      "wire_bytes": 39147754,
+      "wire_sha256": "c2484490fb4bdf5d5e04136604536104c2ae7957fbe34c49d2dc95e87c628600",
+      "first_text_bytes": 25166505,
+      "first_text_sha256": "8cba9597f15d9a14b2f967c92c979351306265c6951c28a00d43eb098571ae0e",
+      "content_blocks": 2,
+      "stderr_text": "\u2026 continue with --range 1..",
+      "isError": false,
+      "oracle": "exact CLI stdout",
+      "matches_oracle": true
+    },
+    {
+      "source": "moderate",
+      "operation": "failure",
+      "wire_bytes": 223,
+      "wire_sha256": "7c9a553734723832fc84ac0db7498af68c768296901ebc00a2969e2e00b07e56",
+      "first_text_bytes": 132,
+      "first_text_sha256": "304631e932fd5589b16ff8d9d3eeede18f5238126f48ecfcd8ff54c0e221e647",
+      "content_blocks": 1,
+      "stderr_text": "no session (and no sub-agent) matching \"nonexistent-fixture\"",
+      "isError": true,
+      "oracle": "prior MCP failure prefix plus trimmed CLI stderr",
+      "matches_oracle": true
+    }
+  ],
+  "transport_heap": [
+    {
+      "mode": "owned",
+      "wire_bytes": 40186,
+      "heap": {
+        "baseline_live_bytes": 4454,
+        "peak_live_bytes": 212776,
+        "peak_above_baseline_bytes": 208322,
+        "stage_end_live_bytes": 4454,
+        "allocation_requests": 61,
+        "requested_bytes": 378508
+      },
+      "source": "moderate"
+    },
+    {
+      "mode": "staged",
+      "wire_bytes": 40186,
+      "heap": {
+        "baseline_live_bytes": 4455,
+        "peak_live_bytes": 139247,
+        "peak_above_baseline_bytes": 134792,
+        "stage_end_live_bytes": 4503,
+        "allocation_requests": 25,
+        "requested_bytes": 135215
+      },
+      "source": "moderate"
+    },
+    {
+      "mode": "owned",
+      "wire_bytes": 39147683,
+      "heap": {
+        "baseline_live_bytes": 4453,
+        "peak_live_bytes": 151001707,
+        "peak_above_baseline_bytes": 150997254,
+        "stage_end_live_bytes": 4453,
+        "allocation_requests": 80,
+        "requested_bytes": 276828017
+      },
+      "source": "giant"
+    },
+    {
+      "mode": "staged",
+      "wire_bytes": 39147683,
+      "heap": {
+        "baseline_live_bytes": 4454,
+        "peak_live_bytes": 1054227,
+        "peak_above_baseline_bytes": 1049773,
+        "stage_end_live_bytes": 4502,
+        "allocation_requests": 34,
+        "requested_bytes": 1978748
+      },
+      "source": "giant"
+    }
+  ]
+}
