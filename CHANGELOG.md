@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- OpenCode discovery counts readable roles consistently, including duplicate keys and malformed headers; cached discovery refreshes once.
+
 - Goose partial reads stage SQLite payloads in bounded memory; doctor retains typed facts without decoding large native metadata bags.
 - Native JSONL exports stage bounded bytes and stream records for Codex, Grok, OpenClaw and Qwen without retaining complete output histories.
 

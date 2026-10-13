@@ -36,7 +36,7 @@ struct Cache {
 
 /// Bump when discovery changes the interpretation of unchanged source bytes.
 #[cfg(feature = "sqlite")]
-pub(crate) const INTERPRETATION_VERSION: u32 = 2;
+pub(crate) const INTERPRETATION_VERSION: u32 = 3;
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static INVALIDATE: AtomicBool = AtomicBool::new(false);
 
@@ -300,10 +300,18 @@ mod tests {
         assert_eq!(cached_scan(&path, || Some(old.clone())).unwrap().id, "old");
         persist(false);
         let conn = crate::catalog::open_db().unwrap();
+        conn.execute(
+            "UPDATE scan_cache SET interpretation_version=?1",
+            [INTERPRETATION_VERSION - 1],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE catalog_meta SET value=?1 WHERE key='discovery_version'",
+            [(INTERPRETATION_VERSION - 1).to_string()],
+        )
+        .unwrap();
         conn.execute_batch(
-            "UPDATE scan_cache SET interpretation_version=1;
-            UPDATE catalog_meta SET value='1' WHERE key='discovery_version';
-            INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('last_full_sync','1');
+            "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('last_full_sync','1');
             INSERT OR REPLACE INTO watched(harness,path,mtime_ns) VALUES('gemini','old-watch',1);",
         )
         .unwrap();
