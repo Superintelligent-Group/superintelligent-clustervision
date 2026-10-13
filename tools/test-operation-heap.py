@@ -65,6 +65,10 @@ class BudgetTests(unittest.TestCase):
             with self.assertRaises((AssertionError, KeyError)):
                 gate.codex_output_digest(path)
 
+    def test_previous_same_harness_complete_ownership_exceeds_cap(self):
+        with self.assertRaisesRegex(AssertionError, "exceeds"):
+            gate.checked_peak(self.measured(267060266))
+
     def test_measured_peak_with_platform_slack_passes(self):
         self.assertEqual(gate.checked_peak(self.measured(463595)), 463595)
 

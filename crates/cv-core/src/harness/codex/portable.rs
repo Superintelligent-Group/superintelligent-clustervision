@@ -121,10 +121,10 @@ impl Rollout {
         self.source.check()?;
         Ok(detector.found)
     }
-    fn projection(&self, range: Range, spans: bool, agents: bool) -> Result<Option<Projection>> {
+    fn projection(&self, range: Range, spans: bool, agents: bool, complete: bool) -> Result<Option<Projection>> {
         self.value(range, |view| {
             let Some((record, output)) = function_output_fields(view)? else {
-                return super::selected::project(view, &self.source, spans, agents)
+                return super::selected::project(view, &self.source, spans, agents, complete)
                     .map(|p| p.map(Projection::Selected));
             };
             let Some(output) = output else { return Ok(None) };
@@ -368,7 +368,7 @@ fn stream_at(rollout: &Rollout, id: &str, state: ResumeState, at: u64, sink: &mu
             continue;
         }
         let projection = if range.len > crate::lazy::INLINE_MAX as u64 {
-            rollout.projection(range, reading.flavor.spans, has_events)
+            rollout.projection(range, reading.flavor.spans, has_events, ctx.complete)
         } else {
             Ok(None)
         };

@@ -194,7 +194,179 @@ pub(super) fn selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Adapter;
     use crate::{Block, Harness, Message, Role, Text};
+    fn assert_serialized_equal(actual: &Session, expected: &Session) -> Result<()> {
+        let a = serde_json::to_vec(actual)?;
+        let b = serde_json::to_vec(expected)?;
+        if a != b {
+            let offset = a
+                .iter()
+                .zip(&b)
+                .position(|(a, b)| a != b)
+                .unwrap_or(a.len().min(b.len()));
+            let start = offset.saturating_sub(80);
+            anyhow::bail!(
+                "serialized IR differs at {offset}: actual={} expected={}",
+                String::from_utf8_lossy(&a[start..a.len().min(offset + 160)]),
+                String::from_utf8_lossy(&b[start..b.len().min(offset + 160)])
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_claude_preparation_matches_owned_fields_order_and_carriers() -> Result<()> {
+        let world = cv_testkit::World::new("port-prepare-complete");
+        let path = world.base.join("session.jsonl");
+        let body = "escaped\n\" λ".repeat(12000);
+        let rows = vec![
+            serde_json::json!({"type":"user","uuid":"u","cwd":"/synthetic/complete","timestamp":"2026-10-12T12:00:00Z","message":{"role":"user","content":body}}),
+            serde_json::json!({"type":"assistant","uuid":"synthetic","future_before":null,"isSidechain":false,"userType":"external","isApiErrorMessage":true,"errorDetails":{"small":"kept"},"requestId":"request","version":"v","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":body}],"future_message":17,"id":"provider-response-id","stop_reason":null,"stop_sequence":null,"stop_details":{"small":"kept"}}}),
+            serde_json::json!({"type":"user","uuid":"compact","isCompactSummary":true,"message":{"role":"user","content":body}}),
+            serde_json::json!({"type":"assistant","uuid":"a","message":{"role":"assistant","content":[{"type":"thinking","thinking":body,"signature":"signed"},{"type":"tool_use","id":"c","name":"Read","input":{"blob":body}}]}}),
+            serde_json::json!({"type":"user","uuid":"r","toolUseResult":{"stdout":"kept","agentId":"agent","status":"completed"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":body}]}}),
+            serde_json::json!({"type":"future-meta","sessionId":"old","message":{"content":"verbatim carrier"},"unknown":{"kept":true}}),
+        ];
+        let mut wire = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        wire.push_str(&format!(r#"{{"type":"user","uuid":"ordered","future_before":1,"message":{{"role":"user","content":{}}},"future_after_one":2,"future_after_two":3}}"#, serde_json::to_string(&body)?));
+        wire.push('\n');
+        wire.push_str(r#"{"type":"user","uuid":"old","uuid":"last","future":1,"future":2,"message":{"role":"user","content":"duplicate keys"}}"#);
+        wire.push_str("\n{\"type\":\"user\",\"uuid\":\"invalid\",\"message\":{\"content\":\"must skip\"},\"ignored\":\"\\ud800\"}\n");
+        fs::write(&path, &wire)?;
+        let reference = SessionRef::new("session", Harness::Claude, &path);
+        let adapter = crate::harness::claude::Claude::detect();
+        for (extra, usage_identity) in [(true, false), (false, false), (false, true)] {
+            let owned_options = ParseOptions {
+                extra,
+                usage_identity,
+                ..ParseOptions::complete()
+            };
+            let expected = crate::stream::collect_with(&adapter, &reference, &owned_options)?;
+            assert!(expected
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .all(|block| text(block).is_none_or(|t| t.inline_str().is_some())));
+            let checked_options = ParseOptions {
+                spans: true,
+                ..owned_options
+            };
+            struct Facts(crate::stream::CollectSink);
+            impl MessageSink for Facts {
+                fn extra_projection(&self) -> crate::stream::ExtraProjection {
+                    crate::stream::ExtraProjection::Facts
+                }
+                fn message(&mut self, message: Message) -> Flow {
+                    self.0.message(message)
+                }
+            }
+            let mut facts = Facts(crate::stream::CollectSink::default());
+            adapter.stream(&reference, &checked_options, &mut facts)?;
+            let mut fact_session = Session::new("facts", Harness::Claude);
+            fact_session.source_path = Some(path.clone());
+            fact_session.messages = facts.0.messages;
+            fact_session.materialize()?;
+            let actual_bytes = serde_json::to_vec(&fact_session.messages)?;
+            let expected_bytes = serde_json::to_vec(&expected.messages)?;
+            anyhow::ensure!(
+                actual_bytes == expected_bytes,
+                "complete overrides Facts construction demand"
+            );
+            let actual = super::parse(&adapter, &reference, &checked_options)?;
+            assert!(actual
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .any(|block| matches!(text(block), Some(Text::Source(_)))));
+            let mut materialized = actual.clone();
+            materialized.materialize()?;
+            assert_serialized_equal(&materialized, &expected)?;
+            let options = EmitOptions {
+                new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                ..Default::default()
+            };
+            let (old, old_report) = super::super::emit_report(
+                &expected,
+                Harness::Claude,
+                &world.base.join(format!("owned-{extra}")),
+                &options,
+            )?;
+            let (new, new_report) = super::super::emit_report(
+                &actual,
+                Harness::Claude,
+                &world.base.join(format!("checked-{extra}")),
+                &options,
+            )?;
+            assert_eq!(fs::read(&new.path)?, fs::read(&old.path)?, "extra={extra}");
+            assert_eq!(serde_json::to_value(new_report)?, serde_json::to_value(old_report)?);
+            let before = fs::read(&new.path)?;
+            let prepared = actual;
+            fs::write(&path, b"{}")?;
+            assert!(super::super::emit_report(
+                &prepared,
+                Harness::Claude,
+                &world.base.join(format!("checked-{extra}")),
+                &options
+            )
+            .is_err());
+            assert_eq!(fs::read(&new.path)?, before);
+            fs::write(&path, &wire)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_codex_preparation_matches_owned_acceptance_and_late_carriers() -> Result<()> {
+        let world = cv_testkit::World::new("port-prepare-complete-codex");
+        let path = world.base.join("rollout.jsonl");
+        let body = "escaped\n\" λ".repeat(12000);
+        let mut rows = vec![
+            serde_json::json!({"type":"session_meta","timestamp":"2026-10-12T12:00:00Z","payload":{"id":"session","cwd":"/synthetic/complete","future":"kept"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":body}]}}),
+        ];
+        // The layout detector deliberately commits to no NL events after this gap.
+        for i in 0..35 {
+            rows.push(serde_json::json!({"type":"world_state","payload":{"i":i,"future":"kept"}}));
+        }
+        rows.extend([
+            serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":body}],"encrypted_content":"opaque"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"c","name":"Read","arguments":serde_json::json!({"blob":body}).to_string()}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":body}}),
+            serde_json::json!({"type":"event_msg","future_top":"kept","payload":{"type":"user_message","message":body,"future_payload":"kept"}}),
+        ]);
+        let mut wire = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        wire.push_str("{\"type\":\"compacted\",\"payload\":{\"message\":\"must skip\",\"replacement_history\":[{\"ignored\":\"\\ud800\"}]}}\n");
+        fs::write(&path, &wire)?;
+        let reference = SessionRef::new("session", Harness::Codex, &path);
+        let adapter = crate::harness::codex::Codex::detect();
+        let expected = crate::stream::collect_with(&adapter, &reference, &ParseOptions::complete())?;
+        let actual = super::super::parse_for_emit(&adapter, &reference, Harness::Codex)?;
+        assert!(actual
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|block| matches!(text(block), Some(Text::Source(_)))));
+        let mut materialized = actual.clone();
+        materialized.materialize()?;
+        assert_serialized_equal(&materialized, &expected)?;
+        let options = EmitOptions {
+            new_id: Some("00000000-0000-0000-0000-000000000001".into()),
+            ..Default::default()
+        };
+        let (old, old_report) =
+            super::super::emit_report(&expected, Harness::Codex, &world.base.join("owned"), &options)?;
+        let (new, new_report) =
+            super::super::emit_report(&actual, Harness::Codex, &world.base.join("checked"), &options)?;
+        assert_eq!(fs::read(&new.path)?, fs::read(&old.path)?);
+        assert_eq!(serde_json::to_value(new_report)?, serde_json::to_value(old_report)?);
+        let before = fs::read(&new.path)?;
+        fs::write(&path, b"{}")?;
+        assert!(super::super::emit_report(&actual, Harness::Codex, &world.base.join("checked"), &options).is_err());
+        assert_eq!(fs::read(&new.path)?, before);
+        Ok(())
+    }
+
     #[test]
     fn actual_claude_preparation_retains_original_body_identity() -> Result<()> {
         let world = cv_testkit::World::new("port-prepare-claude");

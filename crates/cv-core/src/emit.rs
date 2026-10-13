@@ -498,9 +498,9 @@ pub fn prepare_selected(
     prepare::selected(adapter, reference, &options, start, end)
 }
 
-/// Parse at native emission fidelity. Same-harness ports retain complete records; cross-harness
-/// Codex, Claude and cross-harness Gemini ports retain full metadata with guarded lazy payloads consumed directly by
-/// their staged writers. Same-harness complete records retain their existing parser contract.
+/// Parse at native emission fidelity. Claude/Codex retain guarded full or complete bodies;
+/// cross-harness Gemini retains guarded full bodies. Same-harness Gemini keeps its complete
+/// owned compatibility path. Public full/complete parsing still owns bodies by default.
 pub fn parse_for_emit(
     adapter: &dyn crate::harness::Adapter,
     reference: &SessionRef,
@@ -511,15 +511,17 @@ pub fn parse_for_emit(
     } else {
         ParseOptions::full()
     };
-    if checked_target(target) && reference.harness != target {
+    let checked =
+        checked_target(target) && (reference.harness != target || matches!(target, Harness::Claude | Harness::Codex));
+    if checked {
         options.spans = true;
     }
-    let mut session = if checked_target(target) && reference.harness != target {
+    let mut session = if checked {
         prepare::parse(adapter, reference, &options)?
     } else {
         crate::stream::collect_with(adapter, reference, &options)?
     };
-    if !checked_target(target) || reference.harness == target {
+    if !checked {
         session.materialize()?;
     }
     Ok(session)
