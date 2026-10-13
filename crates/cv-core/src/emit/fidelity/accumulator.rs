@@ -87,26 +87,13 @@ pub(in crate::emit) fn source_features(target: Harness, thinking: ThinkingMode, 
 }
 
 pub(super) fn marker(text: &crate::lazy::Text, resolver: &crate::lazy::Resolver) -> Result<String> {
-    if let Some(inline) = text.inline_str() {
-        return Ok(match inline.trim_start().chars().next() {
-            Some(ch @ ('/' | '?')) => ch.to_string(),
-            Some(_) => "x".into(),
-            None => String::new(),
-        });
-    }
-    let mut first = None;
-    text.try_for_each_chunk(resolver, 64 * 1024, |chunk| {
-        if first.is_none() {
-            first = chunk.chars().find(|ch| !ch.is_whitespace());
-        }
-        Ok(())
-    })?;
-    Ok(match first {
-        Some('/' | '?') => first.unwrap().to_string(),
+    Ok(match crate::emit::thinking::first_character(text, resolver, true)? {
+        Some(ch @ ('/' | '?')) => ch.to_string(),
         Some(_) => "x".into(),
         None => String::new(),
     })
 }
+
 fn project(message: &Message, resolver: &crate::lazy::Resolver, target: Harness) -> Result<Message> {
     let mut facts = Message::new(message.role);
     facts.id = message.id.as_ref().map(|_| String::new());
