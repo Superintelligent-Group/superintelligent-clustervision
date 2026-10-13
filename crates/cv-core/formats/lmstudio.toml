@@ -6,7 +6,6 @@
 
 harness = "lmstudio"
 source_files = ["harness/lmstudio.rs"]
-ignore_literals = ["Untitled"]
 store = [
   "~/.lmstudio/conversations/<ms-epoch>.conversation.json",
 ]
