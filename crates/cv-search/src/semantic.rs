@@ -1388,19 +1388,17 @@ mod tests {
         .unwrap();
         let before = std::fs::read(&store).unwrap();
         std::fs::remove_file(&a).unwrap();
-        assert!(
-            refresh(
-                &store,
-                &refs,
-                "fake",
-                1,
-                ReadSet::default(),
-                |r| fake_doc(r, None),
-                |_| panic!("all-missing copy must not encode"),
-                |_, _| panic!("all-missing copy must not save")
-            )
-            .is_err()
-        );
+        assert!(refresh(
+            &store,
+            &refs,
+            "fake",
+            1,
+            ReadSet::default(),
+            |r| fake_doc(r, None),
+            |_| panic!("all-missing copy must not encode"),
+            |_, _| panic!("all-missing copy must not save")
+        )
+        .is_err());
         assert_eq!(std::fs::read(&store).unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
     }
