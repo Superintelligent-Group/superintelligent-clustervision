@@ -1468,7 +1468,6 @@ mod db {
             assert_eq!(count, 1, "authority rejection preserves the published stamp");
         }
     }
-
 }
 
 #[cfg(feature = "sqlite")]
