@@ -32,11 +32,15 @@ bounded ownership with exact bytes and fatal UTF-8 behavior preserved. Cline/Roo
 is integrated: the 32 MiB Cline control falls from 134 MB to 276 KB requested live Rust heap,
 with exact files and fidelity report. The first matched Cline instruction comparison refutes a
 speed claim: 990.55M to 1,113.94M instructions (about 12.46% more), with exact output parity.
-Attribution identifies repeated UTF-8/counting work in the shared single-string writer; repair
-and the original-workload recheck are in progress. Gemini complete rehome is also integrated,
+The shared single-string repair removes the unused counting pass; the matched isolated repair
+executes 1,046.78M instructions, 5.68% more than the owned baseline, with exact output parity.
+Root accepts this measured CPU tradeoff for the large bounded-memory benefit and retained strict
+source validation; no further validation-state machinery is justified by this control. This is
+not a speed claim or a pending permission decision. Gemini complete rehome is also integrated,
 with native/portable frozen-output controls and a 277 KB peak for the 32 MiB operation.
-Continue/LM Studio emission has targeted fixes and controls underway;
-the final gate batch waits for this source work to settle. Changes must preserve complete output, metadata, acceptance and source-error
+Continue/LM Studio checked emission and direct-source guards are integrated, with exact native
+and portable output/failure controls. Runtime source work for this batch has settled; the final
+gate batch follows the completed evidence update. Changes must preserve complete output, metadata, acceptance and source-error
 semantics; shared checked readers/writers take priority over new format machinery. Qwen has no local data, so its synthetic carrier work is explicitly deferred.
 This changes priority, not the correctness or fidelity requirements.
 
@@ -605,7 +609,9 @@ Tracker (keep unfinished work visible; measurements determine later ordering):
 - [x] Claude checked output records, per-block Native/Text/Drop handling and streamed strict resumability verification; actual port allocation/fidelity and native/portable compatibility controls pass.
 - [x] Same-harness Claude/Codex complete preparation retains checked ordinary payloads while preserving complete carriers; checked Gemini emission preserves the frozen writer's output. Composed export/rehome controls pass; see the operation-specific evidence below.
 - [x] Shared Cline/Roo export streams checked Anthropic history; frozen native/portable file oracles and the actual Cline allocation control preserve output, fidelity and source-failure behavior.
-- [ ] Remaining emitters and same-harness Gemini complete preparation: distinguish required metadata ownership from avoidable ordinary-payload materialization using actual operations.
+- [x] Gemini complete rehome retains checked payloads in both recording formats; exact metadata/replay/acceptance oracles and the actual modern rehome gate preserve the complete contract.
+- [x] Continue/LM Studio checked export and bounded title fallback preserve frozen output and direct captured-source failures, including discarded fields and LM whitespace-thinking projection.
+- [ ] Remaining emitters and other same-harness complete preparation: distinguish required metadata ownership from avoidable ordinary-payload materialization using actual operations. Grok/OpenClaw writers and same-target preparation outside Claude/Codex/Gemini remain candidates, not covered by the preceding allocation claims.
 - [x] Prune compact decision facts, staged history/sidecars and sequential usage repair.
 - [x] Prune source-selected large-record decisions, shared source restamping, source-backed payload mutation and parent reroot, with exact duplicate-field and native/portable compatibility controls.
 - [x] Prune Thinking, ASCII declassification and ordinary usage-record projections, with whole-operation output parity and CI heap caps.
