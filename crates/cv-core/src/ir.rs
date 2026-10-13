@@ -922,6 +922,17 @@ impl Message {
 }
 
 impl SessionRef {
+    /// Compare copies of one logical session, with the preferred copy sorting first.
+    /// Newest update (or creation) wins; harness and path break ties deterministically.
+    pub fn preferred_copy_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .updated_at
+            .or(other.created_at)
+            .cmp(&self.updated_at.or(self.created_at))
+            .then_with(|| self.harness.as_str().cmp(other.harness.as_str()))
+            .then_with(|| self.path.cmp(&other.path))
+    }
+
     /// A bare ref — the three facts discovery always has (id, harness, where on disk) and nothing
     /// else known yet. Adapters fill the rest with struct-update syntax
     /// (`SessionRef { cwd, title, ..SessionRef::new(id, h, path) }`).

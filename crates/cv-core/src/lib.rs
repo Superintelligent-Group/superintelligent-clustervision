@@ -597,7 +597,7 @@ fn resolve_id(
 /// they resolve to the most recently updated copy rather than an arbitrary one. Prefix hits naming
 /// more than one distinct session are an error rather than a silent "first one wins".
 fn pick(mut hits: Vec<SessionRef>, id: &str) -> Result<Option<SessionRef>> {
-    hits.sort_by_key(|r| (r.id != id, std::cmp::Reverse(r.updated_at.or(r.created_at))));
+    hits.sort_by(|a, b| (a.id != id).cmp(&(b.id != id)).then_with(|| a.preferred_copy_cmp(b)));
     if hits.first().is_some_and(|r| r.id == id) {
         return Ok(hits.into_iter().next());
     }
@@ -622,3 +622,46 @@ fn ambiguous<'a>(id: &str, hits: impl Iterator<Item = &'a SessionRef>) -> anyhow
 
 /// Bounded text projections for API and search consumers.
 pub mod projection;
+
+#[cfg(test)]
+mod copy_authority_tests {
+    use super::*;
+
+    #[test]
+    fn exact_copy_authority_is_newest_then_deterministic_and_harness_qualified() {
+        let world = cv_testkit::World::in_process("copy-authority");
+        let make = |name: &str, harness, updated| {
+            let path = world.home.join(name);
+            std::fs::write(&path, "{}").unwrap();
+            SessionRef {
+                updated_at: chrono::DateTime::from_timestamp(updated, 0),
+                ..SessionRef::new("same", harness, path)
+            }
+        };
+        let old = make("a", Harness::Claude, 1);
+        let new = make("z", Harness::Claude, 2);
+        for refs in [vec![old.clone(), new.clone()], vec![new.clone(), old.clone()]] {
+            assert_eq!(pick(refs, "same").unwrap().unwrap().path, new.path);
+        }
+        let tie = make("b", Harness::Claude, 2);
+        for refs in [vec![tie.clone(), new.clone()], vec![new.clone(), tie.clone()]] {
+            assert_eq!(pick(refs, "same").unwrap().unwrap().path, tie.path);
+        }
+        let foreign = make("foreign", Harness::Codex, 3);
+        let resolved = resolve_id(vec![old.clone(), foreign], "same", Some(Harness::Claude))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.0.path, old.path);
+        std::fs::remove_file(&new.path).unwrap();
+        assert_eq!(
+            resolve_id(vec![new, old.clone()], "same", None)
+                .unwrap()
+                .unwrap()
+                .0
+                .path,
+            old.path
+        );
+        let prefix = SessionRef::new("same-longer", Harness::Claude, tie.path);
+        assert_eq!(pick(vec![prefix, old.clone()], "same").unwrap().unwrap().path, old.path);
+    }
+}
