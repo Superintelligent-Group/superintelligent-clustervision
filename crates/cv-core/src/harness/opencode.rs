@@ -524,23 +524,28 @@ mod db {
     /// (2.x) or holds nothing for the session.
     pub(super) fn todos(r: &SessionRef) -> Option<crate::affordance::Affordance> {
         let conn = open_ro(&r.path).ok()?;
-        if !has_table(&conn, "todo") {
-            return None;
-        }
-        let mut st = conn
-            .prepare("SELECT content, status FROM todo WHERE session_id = ?1 ORDER BY position")
-            .ok()?;
-        let items: Vec<crate::affordance::Item> = st
-            .query_map([&r.id], |row| {
-                Ok(crate::affordance::Item {
-                    content: row.get(0)?,
-                    status: row.get(1)?,
-                })
-            })
-            .ok()?
-            .filter_map(|x| x.ok())
-            .collect();
-        crate::affordance::plan_state(crate::affordance::Kind::Plan, "todo", items)
+        conn.read(|conn| {
+            if !has_table(&conn, "todo") {
+                return Ok(None);
+            }
+            let mut st = conn.prepare("SELECT content, status FROM todo WHERE session_id = ?1 ORDER BY position")?;
+            let items: Vec<crate::affordance::Item> = st
+                .query_map([&r.id], |row| {
+                    Ok(crate::affordance::Item {
+                        content: row.get(0)?,
+                        status: row.get(1)?,
+                    })
+                })?
+                .filter_map(|x| x.ok())
+                .collect();
+            Ok(crate::affordance::plan_state(
+                crate::affordance::Kind::Plan,
+                "todo",
+                items,
+            ))
+        })
+        .ok()
+        .flatten()
     }
 
     pub(super) fn is_db_ref(r: &SessionRef) -> bool {
@@ -561,18 +566,20 @@ mod db {
     /// 2.x writes only the new tables, so they win). Either table set may be absent: a 1.x database
     /// has no `session_v2`, a database 2.x created has no `session`.
     pub(super) fn discover(db: &Path) -> Result<Vec<SessionRef>> {
-        let mut reads = crate::source::ReadSet::default();
-        let mut wal = db.as_os_str().to_owned();
-        wal.push("-wal");
-        reads.record(&PathBuf::from(wal));
-        let source = crate::json::JsonSource::capture_with_reads(db, &reads)?;
-        let result = discover_snapshot(db, &source);
-        source.check()?;
-        result
+        let conn = open_ro(db)?;
+        conn.read(|reader| {
+            let source = crate::json::JsonSource::capture_with_reads(db, reader.reads())?;
+            let result = discover_snapshot(db, &source, reader);
+            source.check()?;
+            result
+        })
     }
 
-    fn discover_snapshot(db: &Path, source: &crate::json::JsonSource) -> Result<Vec<SessionRef>> {
-        let conn = open_ro(db)?;
+    fn discover_snapshot(
+        db: &Path,
+        source: &crate::json::JsonSource,
+        conn: &rusqlite::Connection,
+    ) -> Result<Vec<SessionRef>> {
         let _transaction = conn.unchecked_transaction()?;
         let mut refs = if has_table(&conn, "session_v2") && has_table(&conn, "session_message") {
             discover_v2(&conn, db)?
@@ -720,14 +727,13 @@ mod db {
     /// Stream one db-backed session: the `session` row → [`Session`] metadata + `extra`, then each
     /// `message` row with its `part` rows hydrated and mapped one message at a time.
     pub(super) fn stream(r: &SessionRef, opts: &ParseOptions, sink: &mut dyn MessageSink) -> Result<Session> {
-        let mut reads = crate::source::ReadSet::default();
-        let mut wal = r.path.clone().into_os_string();
-        wal.push("-wal");
-        reads.record(&PathBuf::from(wal));
-        let source = crate::json::JsonSource::capture_with_reads(&r.path, &reads)?;
-        let result = stream_snapshot(r, opts, sink, &source);
-        source.check()?;
-        result
+        let conn = open_ro(&r.path)?;
+        conn.read(|reader| {
+            let source = crate::json::JsonSource::capture_with_reads(&r.path, reader.reads())?;
+            let result = stream_snapshot(r, opts, sink, &source, reader);
+            source.check()?;
+            result
+        })
     }
 
     fn stream_snapshot(
@@ -735,8 +741,8 @@ mod db {
         opts: &ParseOptions,
         sink: &mut dyn MessageSink,
         source: &crate::json::JsonSource,
+        conn: &rusqlite::Connection,
     ) -> Result<Session> {
-        let conn = open_ro(&r.path)?;
         let _transaction = conn.unchecked_transaction()?;
         let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena()?);
         // The 2.x tables win for a session in both (a migrated database; module doc of `v2`).
@@ -2445,6 +2451,56 @@ mod tests {
         }
         drop(connection);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn cold_wal_selected_text_keeps_original_guard_without_creating_sidecars() {
+        let dir = std::env::temp_dir().join(format!("cv-opencode-cold-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let writer = make_db(&db, false);
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        seed_session(&writer, "session", false);
+        let body = "selected ".repeat(8192);
+        writer
+            .execute(
+                "UPDATE part SET data=?1 WHERE id='prt_a'",
+                [json!({"type":"text","text":body}).to_string()],
+            )
+            .unwrap();
+        let shm = dir.join("opencode.db-shm");
+        fs::remove_file(&shm).unwrap();
+        let adapter = OpenCode::with_db(db);
+        let reference = adapter.discover().unwrap().remove(0);
+        assert_eq!(reference.message_count, 2);
+        let mut messages = Vec::new();
+        let mut sink = crate::stream::TryFnSink::new(|message| {
+            messages.push(message);
+            Ok(crate::stream::Flow::Continue)
+        });
+        adapter.stream(&reference, &ParseOptions::lazy(), &mut sink).unwrap();
+        let Block::Text { text } = &messages[0].content[0] else {
+            panic!("selected text")
+        };
+        assert_eq!(
+            text.try_resolve_prefix(&crate::lazy::Resolver::new(None), u64::MAX)
+                .unwrap()
+                .as_ref(),
+            body
+        );
+        assert!(!shm.exists(), "original store must remain untouched");
+        writer
+            .execute("UPDATE session SET title='changed' WHERE id='session'", [])
+            .unwrap();
+        assert!(
+            text.try_resolve_prefix(&crate::lazy::Resolver::new(None), 8).is_err(),
+            "copied payload must validate original WAL"
+        );
+        drop(writer);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
