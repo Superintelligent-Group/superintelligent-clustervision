@@ -207,6 +207,7 @@ fn hot_kind<'de, D: Deserializer<'de>>(d: D) -> Result<Str<'de>, D::Error> {
 struct AgentReturn<'a> {
     agent_id: Raw<'a>,
     status: Raw<'a>,
+    restorable: Raw<'a>,
 }
 impl<'de: 'a, 'a> Deserialize<'de> for AgentReturn<'a> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -214,6 +215,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for AgentReturn<'a> {
         Ok(Self {
             agent_id: fields.agent_id,
             status: fields.status,
+            restorable: fields.restorable,
         })
     }
 }
@@ -246,6 +248,8 @@ struct AgentReturnFields<'a> {
     agent_id: Raw<'a>,
     #[serde(borrow, default)]
     status: Raw<'a>,
+    #[serde(borrow, default)]
+    restorable: Raw<'a>,
 }
 
 #[derive(Deserialize)]
@@ -373,8 +377,14 @@ pub(super) fn ingest(
             .unwrap_or_else(|| user_kind_from_head(user_origin, &head.text)),
     };
     let (role, kind, origin) = classify_conversation(role, class, false);
+    // Strict Value compatibility above preserves full-extra record acceptance, including
+    // unselected malformed sidecars. Only field construction follows the sink's demand.
+    let facts_only = opts.facts_only()
+        || (!opts.complete
+            && opts.wants_full_extra()
+            && sink.extra_projection() == crate::stream::ExtraProjection::Facts);
     let mut bag = Map::new();
-    if synthetic && !opts.facts_only() {
+    if synthetic && !facts_only {
         if let Some(value) = record.is_api_error_message {
             bag.insert("isApiErrorMessage".into(), Value::Bool(value));
         }
@@ -389,7 +399,11 @@ pub(super) fn ingest(
             }
         }
     }
-    if opts.facts_only() {
+    if facts_only {
+        if let Some(raw) = agent_return.as_ref().and_then(|result| result.restorable.0) {
+            let restorable: Value = serde_json::from_str(raw.get()).ok()?;
+            attach_tool_use_result_owned(&mut blocks, serde_json::json!({"restorable":restorable}));
+        }
         if let Some(id) = serde_json::from_slice::<UsageIdentity>(slice).ok()?.0 {
             bag.insert("message.id".into(), Value::String(id));
         }

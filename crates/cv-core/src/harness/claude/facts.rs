@@ -1,5 +1,5 @@
 //! Shared metadata facts for Claude reducers. Selection happens before unrelated sidecars become
-//! Values. Full/complete codecs do not use this projection.
+//! Values. Full/complete message construction does not use this projection.
 
 use super::*;
 use crate::json::JsonView;
@@ -29,8 +29,9 @@ pub(super) fn compact_metadata(view: JsonView<'_>) -> Result<Option<Value>> {
     Ok(Some(Value::Object(fields)))
 }
 
-/// The classification-only shape of `toolUseResult`. `agentId` is a presence test, including null;
-/// only a string status can distinguish the asynchronous launch receipt.
+/// Classification/count facts from `toolUseResult`. `agentId` is a presence test, including null;
+/// only a string status can distinguish the asynchronous launch receipt. Generic checkpoint
+/// counting also needs `restorable`, independently of the sidecar's unrelated rich payload.
 #[cfg(not(feature = "mmap"))]
 pub(super) fn agent_return(view: JsonView<'_>) -> Result<Value> {
     if !view.is_object()? {
@@ -45,7 +46,18 @@ pub(super) fn agent_return(view: JsonView<'_>) -> Result<Value> {
             fields.insert("status".into(), status.resolve()?.into_owned());
         }
     }
+    if let Some(restorable) = view.get("restorable")? {
+        fields.insert("restorable".into(), restorable.resolve()?.into_owned());
+    }
     Ok(Value::Object(fields))
+}
+
+/// Generic checkpoint counting consumes this field even on Claude tool results. Other rich
+/// sidecar fields remain unowned.
+pub(super) fn attach_restorable(blocks: &mut [Block], sidecar: &Value) {
+    if let Some(restorable) = sidecar.get("restorable") {
+        attach_tool_use_result_owned(blocks, serde_json::json!({"restorable": restorable}));
+    }
 }
 
 /// Attachment interpretation still needs the prompt snapshot as well as its subtype.
@@ -170,7 +182,7 @@ fn keys(shape: Shape) -> &'static [&'static str] {
     match shape {
         Shape::Message => &["role", "content", "model", "usage", "id"],
         Shape::Attachment => &["type", "systemPrompt"],
-        Shape::AgentReturn => &["agentId", "status"],
+        Shape::AgentReturn => &["agentId", "status", "restorable"],
         Shape::Compaction => &["trigger", "preTokens", "durationMs"],
         Shape::Origin => &["kind"],
         Shape::Snapshot => &["trackedFileBackups"],

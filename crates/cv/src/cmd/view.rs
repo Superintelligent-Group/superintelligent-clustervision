@@ -431,6 +431,18 @@ fn staged_session_json(
         }
     }
     impl cv_core::MessageSink for Selection {
+        fn extra_projection(&self) -> cv_core::stream::ExtraProjection {
+            if self.tail.is_some()
+                || (self.error.is_none()
+                    && self.next.is_none()
+                    && self.seen >= self.start
+                    && self.end.is_none_or(|end| self.seen < end))
+            {
+                cv_core::stream::ExtraProjection::Full
+            } else {
+                cv_core::stream::ExtraProjection::Facts
+            }
+        }
         fn meta(&mut self, session: &Session) {
             self.resolver = session.resolver();
         }
@@ -1505,6 +1517,130 @@ fn md_message(m: &Message) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_extra_demand_preserves_owned_windows_acceptance_and_eof() -> Result<()> {
+        let world = cv_testkit::World::in_process("window-extra-demand");
+        let path = world.base.join("source.jsonl");
+        let huge = "escaped λ\n\"".repeat(10000);
+        let rows = [
+            serde_json::json!({"type":"user","uuid":"u","message":{"content":"first"}}),
+            serde_json::json!({"type":"assistant","uuid":"a","message":{"model":"model","id":"response","content":[{"type":"tool_use","id":"call","name":"Task","input":{"description":"task"}}]}}),
+            serde_json::json!({"type":"user","uuid":"r","toolUseResult":{"agentId":"agent","status":"finished","stdout":huge,"restorable":["file.rs"]},"message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"tiny result"}]}}),
+            serde_json::json!({"type":"user","uuid":"last","gitBranch":"late-branch","message":{"content":"last"}}),
+            serde_json::json!({"type":"custom-title","customTitle":"EOF title"}),
+        ];
+        let mut wire = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        // Full-extra Value acceptance drops this row. A lean/Facts parse alone would accept it
+        // and shift every following message index, so it must remain validated even unselected.
+        wire.insert_str(
+            wire.find(&rows[3].to_string()).unwrap(),
+            r#"{"type":"user","uuid":"bad","toolUseResult":{"ignored":"\ud800"},"message":{"content":"bad"}}
+"#,
+        );
+        std::fs::write(&path, wire)?;
+        let r = SessionRef::new("source", Harness::Claude, &path);
+        let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
+        struct FactsCollect(cv_core::stream::CollectSink);
+        impl cv_core::MessageSink for FactsCollect {
+            fn extra_projection(&self) -> cv_core::stream::ExtraProjection {
+                cv_core::stream::ExtraProjection::Facts
+            }
+            fn message(&mut self, m: Message) -> cv_core::Flow {
+                self.0.message(m)
+            }
+        }
+        let mut rich = cv_core::stream::CollectSink::default();
+        let (_, expected_counts) =
+            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy_extra(), &mut rich)?;
+        let mut facts = FactsCollect(Default::default());
+        let (_, actual_counts) =
+            cv_core::stream::stream_counting(adapter.as_ref(), &r, &cv_core::ParseOptions::lazy_extra(), &mut facts)?;
+        assert_eq!(rich.messages.len(), facts.0.messages.len());
+        let expected_counts = expected_counts.unwrap();
+        let actual_counts = actual_counts.unwrap();
+        assert_eq!(actual_counts.turns, expected_counts.turns);
+        assert_eq!(actual_counts.counts, expected_counts.counts);
+        assert_eq!(
+            actual_counts.counts.get(&cv_core::affordance::Kind::Checkpoint),
+            Some(&1)
+        );
+        let mut complete = FactsCollect(Default::default());
+        let mut complete_full = cv_core::stream::CollectSink::default();
+        adapter.try_stream(&r, &cv_core::ParseOptions::complete(), &mut complete)?;
+        adapter.try_stream(&r, &cv_core::ParseOptions::complete(), &mut complete_full)?;
+        assert_eq!(
+            serde_json::to_value(&complete.0.messages)?,
+            serde_json::to_value(&complete_full.messages)?
+        );
+        for (window, budget) in [
+            (Some(Window::First(1)), None),
+            (Some(Window::Range(2, Some(3))), None),
+            (Some(Window::Range(3, Some(4))), None),
+            (Some(Window::Last(1)), None),
+            (Some(Window::First(0)), None),
+            (None, Some(1)),
+        ] {
+            let (expected, next) = full_json_window(adapter.as_ref(), &r, window, budget);
+            let expected = serde_json::to_vec_pretty(&expected)?;
+            let (actual, actual_next) = staged_session_json(adapter.as_ref(), &r, window, budget, false)?;
+            let mut bytes = Vec::new();
+            actual.copy_to(&mut bytes)?;
+            bytes.pop(); // CLI's trailing newline is outside the Session JSON oracle.
+            assert_eq!(bytes, expected, "{window:?}/{budget:?}");
+            assert_eq!(actual_next, next);
+        }
+        Ok(())
+    }
+
+    /// Actual command boundary; fixture/catalog preparation and the independent owned oracle
+    /// are outside the allocation interval. Run alone in an explicitly isolated scratch home.
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "isolated whole-command allocation control; requires explicit scratch inputs"]
+    fn whole_command_window_extra_control() -> Result<()> {
+        let path = PathBuf::from(std::env::var("CV_WINDOW_PROBE_SOURCE")?);
+        let range = std::env::var("CV_WINDOW_PROBE_RANGE").unwrap_or_else(|_| "0..1".into());
+        let reference = SessionRef::new("window-extra", Harness::Claude, &path);
+        cv_core::catalog::sync(std::slice::from_ref(&reference));
+        let budget = std::env::var("CV_WINDOW_PROBE_BUDGET")
+            .ok()
+            .map(|value| value.parse())
+            .transpose()?;
+        let args = WindowArgs {
+            first: None,
+            last: None,
+            range: budget.is_none().then_some(range),
+            around: None,
+            context: 5,
+            max_bytes: budget,
+        };
+        if std::env::var("CV_WINDOW_PROBE_ORACLE").as_deref() == Ok("1") {
+            let adapter = cv_core::harness::for_harness(Harness::Claude).unwrap();
+            let (session, next) = full_json_window(adapter.as_ref(), &reference, args.window()?, budget);
+            let _ = next;
+            println!("{}", serde_json::to_string_pretty(&session)?);
+            return Ok(());
+        }
+        let before = cv_testkit::heap::begin();
+        let result = cmd_show(
+            "window-extra",
+            Some("claude".into()),
+            true,
+            &args,
+            ShowView {
+                subagents: false,
+                agent: None,
+                pre_compaction: None,
+                tree: false,
+                kind: None,
+                summaries: false,
+            },
+        );
+        let heap = cv_testkit::heap::end(before);
+        eprintln!("CV_WINDOW_HEAP {}", serde_json::to_string(&heap)?);
+        result
+    }
 
     #[cfg(feature = "probe-heap")]
     #[test]

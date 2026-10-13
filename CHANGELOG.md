@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Forward JSON windows avoid constructing unselected Claude rich metadata, preserving record acceptance, selected details and final session metadata.
+- Claude checkpoint counts retain restorable result facts; cached counts from older views are recomputed.
+
 - Browser transcript loading defers events and sub-agent reads until the first page arrives, avoiding duplicate enrichment requests and prioritizing messages.
 - Distill owns requested products per message; pack-only analysis skips sidecar rosters while preserving statistics, checked-source errors, tails and resume output.
 - Changed-session listing fetches only demanded discovery-cache rows and shares its catalog connection, avoiding unrelated serialized payload copies.

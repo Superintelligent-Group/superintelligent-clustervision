@@ -2796,3 +2796,52 @@ Combined-branch checks pass the three metadata/migration regressions at `8c24dbe
 restored-mtime FTS/events/counts full-rebuild oracle at `684bac7`. The integrated SQLite probe
 also verifies its allocator self-test and reports 912,208 B native peak / 48,000 B largest request
 for the retained 8 MB OpenCode control. These scoped checks supplement the lane evidence.
+
+### Forward JSON window message-extra demand (2026-10-13)
+
+Actual `show --json` forward-window selection requested full extras from every accepted message
+before discarding messages outside the window. Claude therefore decoded an unselected giant
+`toolUseResult` into owned details even when its output was one small user message. This was
+construction work beyond the required EOF count/title/git traversal, not a missing-memory metric.
+Simply downgrading ParseOptions would be incorrect: malformed ignored rich fields can change
+record acceptance, message indices and final counts.
+
+`MessageSink::extra_projection` is an advisory next-message construction demand, defaulting to
+Full. The CLI staging sink requests the existing common Facts union before/after a known forward
+window, or after its byte-budget continuation is latched. It still requests Full for selected
+messages, the candidate needed to decide a byte budget and unknown Last tails. ErrorGuard,
+Counting and AffordanceSink forward demand; Tee keeps Full while either live consumer needs it.
+Only eligible native/positioned Claude conversation producers activate the hint. Unsupported
+adapters, complete records, owned/unusual fallbacks and session metadata retain their contracts.
+
+Original options remain authoritative for acceptance and EOF metadata. Native Value-compatibility
+validation and positioned read_range_value validation precede construction projection. Invalid
+unselected sidecars retain rich-codec omission; no early stop skips final session metadata.
+Typed classification, usage and the common counting facts remain available. Generic checkpoint
+counting also examines Claude details.restorable: this fact is now retained by native, positioned
+and owned Facts projections. Affordance VIEW_VERSION advances 4 → 5; prior version 4 checkpoint-zero
+rows miss and recount. This corrects the old Facts omission without a public schema change.
+
+The focused [runner](../../tools/profiling/window-extra.py) calls actual cmd_show from isolated
+probe-heap test processes against synthetic cataloged paths. Its independent oracle uses the
+unchanged full adapter parse, then slices and applies the byte budget. Allocation starts before
+resolution and ends after EOF parsing, count publication, document staging and stdout emission;
+fixture/catalog preparation, test startup, clap parsing and oracle construction are excluded.
+[WINDOW-EXTRA-WORK.json](WINDOW-EXTRA-WORK.json) records exact command/oracle outputs and requested
+allocations for 16/64 MiB unselected escaped sidecars plus selected-rich/malformed controls.
+At 16/64 MiB, peak requested heap above baseline changes from 33,622,366/134,285,662 B
+to 329,082 B at either size, while requested bytes change from 51,037,457/202,032,401 B
+to 703,636 B. Each 680-byte forward-window output matches both command baseline and owned
+oracle exactly. Selected-rich and malformed-unselected outputs also remain exact. These numbers
+are the focused artifact's fixed fixture path, not a fleet estimate.
+Source hashes and identities remain unchanged. This is not a timing/CPU, physical-memory or
+MCP startup measurement; native allocations, mmap, stacks and allocator overhead are excluded.
+
+Native/portable controls preserve selected rich messages, post-malformed indices, complete-mode
+output, exact counted maps and EOF title/git/model. Native windows cover first, range, empty,
+Last and byte-budget continuation; required candidate construction remains full until a budget
+is decided. Wrapper controls prove union/forwarding and checkpoint facts. Existing borrowed
+vocabulary/corpus and Facts reducer/validation controls remain exact. Unknown tails, large
+selected extras/restorable facts, malformed giant/unusual owned fallbacks and other harnesses
+remain potential ownership floors. This changes construction demand, not EOF traversal or the
+resident MCP execution model.

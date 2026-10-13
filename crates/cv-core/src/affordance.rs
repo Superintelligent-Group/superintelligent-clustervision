@@ -500,6 +500,9 @@ impl<'a> AffordanceSink<'a> {
 }
 
 impl MessageSink for AffordanceSink<'_> {
+    fn extra_projection(&self) -> crate::stream::ExtraProjection {
+        self.inner.extra_projection()
+    }
     fn dependency(&mut self, path: &std::path::Path) {
         if !self.failed {
             self.inner.dependency(path);
@@ -1332,7 +1335,7 @@ fn message_rows(harness: Harness, m: &Message, i: usize, resolver: &crate::lazy:
 /// The view's version, stored beside the catalog's counts: bump it whenever a kind, a table row or
 /// a reader changes what [`Counter`] would count, so rows an older view counted read as "not
 /// counted" and are recounted, instead of answering `has:<new kind>` with a stale no.
-pub const VIEW_VERSION: u32 = 4;
+pub const VIEW_VERSION: u32 = 5;
 
 /// Affordance counts by kind: what the catalog stores per session so `has:<kind>` never parses.
 pub type Counts = std::collections::BTreeMap<Kind, u32>;

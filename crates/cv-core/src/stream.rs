@@ -37,7 +37,7 @@ pub enum ExtraProjection {
     /// - Claude `message.id`, with the same precedence as full extras (usage deduplication);
     /// - Kimi Code `origin_kind`, Hermes `display_kind`, Codex `item_type`, OpenCode
     ///   `metadata.source` (affordance classification);
-    /// - OpenCode `patches[].hash/files`, `snapshot.start/files` and Devin tool-result
+    /// - OpenCode `patches[].hash/files`, `snapshot.start/files` and Claude/Devin tool-result
     ///   `details.restorable` (checkpoint affordances);
     /// - session `permission_modes`, Devin `agent_mode`, OpenCode permission rules
     ///   (`permission`, `pattern`, `action`) and `revert.messageID/snapshot`, and common
@@ -226,6 +226,14 @@ pub enum Flow {
 /// full `parse`) always does. Sinks that must render a header ahead of the body (e.g. `cv show`)
 /// use it; most sinks ignore it and just read the returned `Session` afterward.
 pub trait MessageSink {
+    /// Rich fields needed for the next delivered message. This advisory construction demand
+    /// never weakens the parse options' record acceptance, source checks or EOF session metadata.
+    /// Unsupported adapters may keep full fields. Wrappers combine/forward their consumers'
+    /// demand; Facts retains the common reducer union needed by counting and affordances.
+    fn extra_projection(&self) -> ExtraProjection {
+        ExtraProjection::Full
+    }
+
     fn message(&mut self, m: Message) -> Flow;
 
     /// Return a latched consumer error, if any. A source-backed field can fail while being
@@ -304,6 +312,9 @@ impl ErrorGuard<'_> {
     }
 }
 impl MessageSink for ErrorGuard<'_> {
+    fn extra_projection(&self) -> ExtraProjection {
+        self.inner.extra_projection()
+    }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.capture();
         self.error.take().or_else(|| {
@@ -493,6 +504,15 @@ impl TeeSink<'_> {
     }
 }
 impl MessageSink for TeeSink<'_> {
+    fn extra_projection(&self) -> ExtraProjection {
+        if (!self.a_stopped && self.a.extra_projection() == ExtraProjection::Full)
+            || (!self.b_stopped && self.b.extra_projection() == ExtraProjection::Full)
+        {
+            ExtraProjection::Full
+        } else {
+            ExtraProjection::Facts
+        }
+    }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.capture();
         self.error.take().or_else(|| {
@@ -823,6 +843,9 @@ impl<'a> Counting<'a> {
 }
 
 impl MessageSink for Counting<'_> {
+    fn extra_projection(&self) -> ExtraProjection {
+        self.inner.extra_projection()
+    }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         let error = self.error.take().or_else(|| self.inner.take_error());
         self.failed |= error.is_some();
@@ -954,6 +977,50 @@ mod tests {
         let mut m = Message::new(Role::User);
         m.content = vec![Block::Text { text: t.into() }];
         m
+    }
+
+    #[test]
+    fn extra_construction_demand_forwards_and_unions_without_losing_counter_facts() {
+        struct Demand(ExtraProjection);
+        impl MessageSink for Demand {
+            fn extra_projection(&self) -> ExtraProjection {
+                self.0
+            }
+            fn message(&mut self, _: Message) -> Flow {
+                Flow::Stop
+            }
+        }
+        let mut facts = Demand(ExtraProjection::Facts);
+        let mut full = Demand(ExtraProjection::Full);
+        let mut tee = TeeSink::new(&mut facts, &mut full);
+        assert_eq!(tee.extra_projection(), ExtraProjection::Full);
+        tee.b_stopped = true;
+        assert_eq!(tee.extra_projection(), ExtraProjection::Facts);
+        let r = SessionRef::new("facts", crate::Harness::Claude, "source");
+        let mut counter = Counting::new(&r, &mut facts, None);
+        assert_eq!(counter.extra_projection(), ExtraProjection::Facts);
+        let mut result = Message::new(Role::Tool);
+        result.content.push(Block::ToolResult {
+            tool_use_id: "c".into(),
+            content: "result".into(),
+            is_error: false,
+            tool_name: None,
+            status: None,
+            details: Some(serde_json::json!({"restorable":["file.rs"]})),
+        });
+        counter.message(result);
+        let counted = counter
+            .affordances
+            .finish(&Session::new("facts", crate::Harness::Claude), &[]);
+        assert_eq!(counted.get(&crate::affordance::Kind::Checkpoint), Some(&1));
+        let mut guard = ErrorGuard {
+            inner: &mut facts,
+            error: None,
+            failed: false,
+        };
+        assert_eq!(guard.extra_projection(), ExtraProjection::Facts);
+        let affordance = crate::affordance::AffordanceSink::new(crate::Harness::Claude, &mut guard);
+        assert_eq!(affordance.extra_projection(), ExtraProjection::Facts);
     }
 
     /// A sink that records the texts it saw and stops after `stop_after` messages.

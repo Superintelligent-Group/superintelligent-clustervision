@@ -1312,6 +1312,8 @@ mod imp {
                 "_v": crate::affordance::VIEW_VERSION - 1,
             });
             assert_eq!(counts_of(&previous.to_string()), None);
+            // View4's Claude Facts projection omitted generic restorable checkpoint details.
+            assert_eq!(counts_of(r#"{"checkpoint":0,"_v":4}"#), None);
         }
     }
 }

@@ -1667,6 +1667,10 @@ fn parse_message_projected(
         if let Some(tur) = v.get("toolUseResult").filter(|t| !t.is_null()) {
             attach_tool_use_result(&mut blocks, tur);
         }
+    } else if opts.facts_only() {
+        if let Some(tur) = v.get("toolUseResult") {
+            facts::attach_restorable(&mut blocks, tur);
+        }
     }
 
     // A `user` line carrying only tool results is really a Tool turn.

@@ -254,7 +254,19 @@ pub(super) fn stream(
         } else if range.len == 0 {
             // A giant whitespace-only physical record has no JSON body.
         } else if opts.spans && !opts.complete {
-            match source.read_range_value(range.offset, range.len, |view| conversation(view, opts)) {
+            let projected;
+            let message_opts =
+                if opts.wants_full_extra() && sink.extra_projection() == crate::stream::ExtraProjection::Facts {
+                    projected = ParseOptions {
+                        extra_projection: crate::stream::ExtraProjection::Facts,
+                        ..opts.clone()
+                    };
+                    &projected
+                } else {
+                    opts
+                };
+            // read_range_value retains strict full-record acceptance before projection.
+            match source.read_range_value(range.offset, range.len, |view| conversation(view, message_opts)) {
                 Ok(Some((meta, content))) => {
                     published |= content.blocks.iter().any(sourced);
                     if published {
@@ -272,7 +284,7 @@ pub(super) fn stream(
                         meta.get("timestamp").and_then(Value::as_str).and_then(parse_ts),
                     );
                     let ty = meta.get("type").and_then(Value::as_str).unwrap_or("");
-                    if let Some(message) = parse_message_projected(ty, &meta, opts, None, Some(content)) {
+                    if let Some(message) = parse_message_projected(ty, &meta, message_opts, None, Some(content)) {
                         let ctx = SpanCtx {
                             slice: &[],
                             base_off: range.offset,
@@ -400,6 +412,85 @@ mod tests {
     use super::*;
     use crate::stream::CollectSink;
     use serde_json::json;
+
+    #[test]
+    fn selected_extra_demand_preserves_acceptance_counts_and_eof() -> Result<()> {
+        let world = cv_testkit::World::in_process("claude-positioned-extra-demand");
+        let path = world.base.join("source.jsonl");
+        let body = "escaped λ\n\"".repeat(10000);
+        let mut rows = vec![
+            json!({"type":"user","uuid":"first","message":{"content":"selected"}}),
+            json!({"type":"assistant","uuid":"call","message":{"content":[{"type":"tool_use","id":"c","name":"Task","input":{"description":"task"}}]}}),
+            json!({"type":"user","uuid":"result","toolUseResult":{"restorable":["file.rs"],"agentId":"agent","status":"completed","stdout":body},"message":{"content":[{"type":"tool_result","tool_use_id":"c","content":"small"}]}}),
+            json!({"type":"user","uuid":"last","gitBranch":"late-branch","message":{"content":"last"}}),
+            json!({"type":"custom-title","customTitle":"EOF title"}),
+        ].into_iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        rows.insert(3, r#"{"type":"user","uuid":"invalid","toolUseResult":{"ignored":"\ud800"},"message":{"content":"must be omitted"}}"#.into());
+        fs::write(&path, rows.join("\n"))?;
+        let r = SessionRef::new("source", Harness::Claude, &path);
+        let opts = ParseOptions::lazy_extra();
+        let mut expected = CollectSink::default();
+        let mut old = new_session_for("source", Some(path.clone()), &opts);
+        let mut spawns = crate::affordance::AffordanceSink::new(Harness::Claude, &mut expected);
+        for row in &rows {
+            if let Ok(value) = serde_json::from_str::<Value>(row) {
+                ingest_value(&mut old, &value, &opts, &mut spawns, None);
+            }
+        }
+        drop(spawns);
+        for selected in [0, 2, 3] {
+            struct Select {
+                selected: usize,
+                seen: usize,
+                keep: Option<Message>,
+                counter: crate::affordance::Counter,
+            }
+            impl MessageSink for Select {
+                fn extra_projection(&self) -> crate::stream::ExtraProjection {
+                    if self.seen == self.selected {
+                        crate::stream::ExtraProjection::Full
+                    } else {
+                        crate::stream::ExtraProjection::Facts
+                    }
+                }
+                fn message(&mut self, m: Message) -> Flow {
+                    self.counter.note(&m).unwrap();
+                    if self.seen == self.selected {
+                        self.keep = Some(m);
+                    }
+                    self.seen += 1;
+                    Flow::Continue
+                }
+            }
+            let mut sink = Select {
+                selected,
+                seen: 0,
+                keep: None,
+                counter: crate::affordance::Counter::new(&r),
+            };
+            let file = fs::File::open(&path)?;
+            let mut actual = stream(
+                new_session_for("source", Some(path.clone()), &opts),
+                &file,
+                None,
+                0,
+                &opts,
+                &mut sink,
+            )?;
+            let mut full_counter = crate::affordance::Counter::new(&r);
+            for message in &expected.messages {
+                full_counter.note(message)?;
+            }
+            assert_eq!(sink.seen, expected.messages.len());
+            assert_eq!(sink.counter.finish(&actual, &[]), full_counter.finish(&old, &[]));
+            actual.messages = vec![sink.keep.unwrap()];
+            actual.materialize()?;
+            let mut oracle = old.clone();
+            oracle.messages = vec![expected.messages[selected].clone()];
+            assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(&oracle)?);
+        }
+        Ok(())
+    }
 
     #[test]
     fn positioned_giant_conversations_match_existing_codec_and_metadata() {
