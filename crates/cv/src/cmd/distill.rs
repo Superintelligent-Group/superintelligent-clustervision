@@ -85,6 +85,25 @@ pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, Pat
     let p = Path::new(spec);
     let mut s = adapter.parse(&r)?;
     s.materialize()?;
+    enrich_path_meta(&mut s, p);
+    let path = r.path.clone();
+    Ok((s, path))
+}
+
+/// Selected prefix with full EOF metadata and original-count validation. Other load callers
+/// retain their existing full-session contract.
+fn load_upto(spec: &str, harness: Option<Harness>, upto: usize) -> Result<(Session, PathBuf)> {
+    let (reference, adapter) = resolve_source(spec, harness)?;
+    let (mut session, total) = cv_core::emit::prepare_selected(adapter.as_ref(), &reference, 0, Some(upto))?;
+    if upto == 0 || upto > total {
+        return usage(format!("--upto {upto}: the session has {total} messages"));
+    }
+    session.materialize()?;
+    enrich_path_meta(&mut session, Path::new(spec));
+    Ok((session, reference.path))
+}
+
+fn enrich_path_meta(s: &mut Session, p: &Path) {
     // A sub-agent transcript read by path: its label lives in the sibling `<stem>.meta.json`
     // (the resolver path reads it through the parent's sub-agent tree instead).
     if p.is_file() {
@@ -100,8 +119,6 @@ pub(crate) fn load(spec: &str, harness: Option<Harness>) -> Result<(Session, Pat
             }
         }
     }
-    let path = r.path.clone();
-    Ok((s, path))
 }
 
 fn new_agent_id() -> String {
@@ -305,13 +322,10 @@ pub(crate) fn cmd_distill(
     json_out: bool,
 ) -> Result<()> {
     let want = parse_harness(&harness)?;
-    let (mut s, src_path) = load(spec, want)?;
-    if let Some(n) = upto {
-        if n == 0 || n > s.messages.len() {
-            return usage(format!("--upto {n}: the session has {} messages", s.messages.len()));
-        }
-        s.messages.truncate(n);
-    }
+    let (s, src_path) = match upto {
+        Some(n) => load_upto(spec, want, n)?,
+        None => load(spec, want)?,
+    };
     enum Products {
         Pack(Distilled),
         Resume(PreparedDistillation),
@@ -364,4 +378,92 @@ pub(crate) fn cmd_distill(
         print!("{}", d.pack());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn distill_prefix_inherits_codex_and_opensession_full_parity() -> Result<()> {
+        let world = cv_testkit::World::new("distill-prefix-other-harnesses");
+        let codex = world.base.join("codex.jsonl");
+        let rows = [
+            json!({"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"codex","cwd":"/tmp/project","source":"cli"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"prompt λ"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}}),
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"call","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}}),
+            json!({"type":"turn_context","payload":{"cwd":"/tmp/final","model":"model","approval_policy":"on-request"}}),
+        ];
+        std::fs::write(&codex, rows.iter().map(|row| format!("{row}\n")).collect::<String>())?;
+        let opensession = world.base.join("wrapped.opensession.json");
+        let mut original = Session::new("wrapped", Harness::Codex);
+        for text in ["prompt λ", "reply", "tail"] {
+            let mut message = cv_core::Message::new(cv_core::Role::User);
+            message.content.push(cv_core::Block::Text { text: text.into() });
+            original.messages.push(message);
+        }
+        std::fs::write(
+            &opensession,
+            serde_json::to_vec(&cv_core::harness::opensession::document(&original))?,
+        )?;
+        for (path, harness) in [(codex, Harness::Codex), (opensession, Harness::OpenSession)] {
+            let spec = path.to_str().unwrap();
+            let (full, _) = load(spec, Some(harness))?;
+            assert!(!full.messages.is_empty());
+            for n in [1, full.messages.len()] {
+                let mut expected = full.clone();
+                expected.messages.truncate(n);
+                let (actual, _) = load_upto(spec, Some(harness), n)?;
+                assert_eq!(
+                    serde_json::to_value(actual)?,
+                    serde_json::to_value(expected)?,
+                    "{harness} prefix"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn distill_prefix_matches_full_load_truncate_and_eof_path_meta() -> Result<()> {
+        let world = cv_testkit::World::new("distill-prefix");
+        let path = world.base.join("agent.jsonl");
+        let mut bytes = Vec::new();
+        for index in 0..9 {
+            serde_json::to_writer(
+                &mut bytes,
+                &json!({
+                    "type":"user", "uuid":format!("u{index}"), "cwd":format!("/tmp/eof-{index}"),
+                    "timestamp":format!("2025-01-01T00:00:0{index}Z"), "permissionMode":format!("mode-{index}"),
+                    "message":{"role":"user", "content":if index == 0 { "selected λ".to_string() } else { "discarded".repeat(128 * 1024) }}
+                }),
+            )?;
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes)?;
+        std::fs::write(
+            path.with_extension("meta.json"),
+            r#"{"description":"path agent","agentType":"reviewer"}"#,
+        )?;
+        let spec = path.to_str().unwrap();
+        let (full, original_path) = load(spec, None)?;
+        for n in [1, 3, 9] {
+            let mut expected = full.clone();
+            expected.messages.truncate(n);
+            let (actual, actual_path) = load_upto(spec, None, n)?;
+            assert_eq!(actual_path, original_path);
+            assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(&expected)?);
+            let opts = DistillOptions::default();
+            let old = distill(&expected, &opts)?;
+            let new = distill(&actual, &opts)?;
+            assert_eq!(new.pack(), old.pack());
+            assert_eq!(serde_json::to_value(new.stats)?, serde_json::to_value(old.stats)?);
+        }
+        for n in [0, 10] {
+            let error = load_upto(spec, None, n).unwrap_err();
+            assert_eq!(error.to_string(), format!("--upto {n}: the session has 9 messages"));
+            assert!(error.downcast_ref::<crate::util::UsageError>().is_some());
+        }
+        Ok(())
+    }
 }

@@ -2008,3 +2008,22 @@ Limits: this removes repeated product construction, not full-source loading or f
 The resumable route retains its prepared tail until consumption; original source ownership and
 required Markdown/sidecar output remain. Spooling sidecar output and selected `--upto` loading are
 separate follow-ups, not claims of bounded whole-distill heap.
+
+
+### Distill selected prefix boundary (Sol, 2026-10-13)
+
+`cmd/distill.rs::load_upto` now reuses `emit::prepare_selected(0, Some(n))`, validates `n` against
+its original EOF count before materializing selected messages, and applies the same extracted
+path/meta enrichment as ordinary `load`. Other consumers retain the old full-load API. EOF metadata,
+full message fidelity, parsed underlying harness and original usage-error text/type are preserved.
+Actual CLI-loader oracles compare full-load/truncate with selected prefixes, complete Session,
+pack and stats, EOF timestamps/modes and path metadata; Codex and wrapped-Codex OpenSession controls
+also compare full-mode Session parity. The source-preparation guard mechanism is unchanged.
+
+`DISTILL-PREFIX-EVIDENCE.json` / `examples/distill_prefix_probe.rs` count requested Rust heap,
+not timings or RSS. A nine-message Claude source keeps its first tiny message and discards eight
+large messages. At 16/64 MiB discarded history, old parse/materialize/truncate peaks at
+20,952,623 / 83,744,303 bytes above baseline; selected preparation/materialization stays at 9,104
+bytes at either size. Selected output hashes match, nine messages are still counted and one is
+retained. This refutes discarded payload materialization on the measured source path; it does not
+claim no EOF scan or bounds on every adapter's largest owned fallback.

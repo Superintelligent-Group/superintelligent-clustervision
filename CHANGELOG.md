@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Distill prefixes materialize only messages selected by `--upto`, preserving final session metadata and original-count validation.
+
 - Transcript windows render before full-session metadata arrives; late metadata preserves loaded pages, pagination, expanded prompts and the current selection.
 - Distill reuses one prepared tail; findings-only analysis skips unused sidecar copies, tail rendering and token accounting.
 
