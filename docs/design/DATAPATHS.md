@@ -3588,3 +3588,28 @@ requests, not RSS or timings; see `PRUNE-UNICODE-EVIDENCE.json` for frozen hashe
 Σ/EOF, titlecase, Cased+Ignorable overlap, long ignorable runs, escaped UTF-16, branch-private
 hits and insensitive needles; clippy passes. `check-operation-heap.py` adds one 64 MiB emoji
 declassification control under the existing 4 MiB cap with frozen source/output/sidecar hashes.
+
+
+### Current integration and lifecycle follow-up (2026-10-13, Codex)
+
+The combined checked export source passed 72 emitter tests and five whole-operation controls:
+Claude export, Codex Text/Drop export, Gemini export and complete Claude rehome. Their frozen
+output/source contracts pass; peaks are 1,398,437 / 283,018 / 405,758 / 276,587 / 284,651 B.
+Reports are retained under `excellence-evidence/rehome-gemini-integration` outside the repository.
+The run-based contextual prune repair additionally passed 54 scoped tests and the four
+Thinking/ASCII/Unicode/usage controls, preserving frozen outputs. A subsequent one-pass repair
+removes contextual replay; its instruction comparison is pending. No full gate run or push has
+been performed for this batch.
+
+Two holistic lifecycle/admission questions now have concrete owners:
+
+- SQLite cold snapshots use named private directories and destructor cleanup. Abrupt process
+  exit bypasses that cleanup. Reproduce cancellation on an owned database, then ensure abandoned
+  copies can be reclaimed safely without deleting live snapshots or touching producer stores.
+- MCP accepts one handler thread per frame and retains completed responses in an unbounded
+  channel. An actual 128-request tools/list burst with stdout withheld accumulated 7,031,442 B
+  of response output, retaining every request ID on drain. Bound admitted work through response
+  publication, preserve ordinary control results through backpressure, and keep parked long polls
+  from consuming ordinary execution capacity. This is a concurrency/lifetime control, not a
+  claim about per-response payload size or measured aggregate heap. Evidence is retained under
+  `encoded-arguments-evidence/mcp-burst` outside the repository.
