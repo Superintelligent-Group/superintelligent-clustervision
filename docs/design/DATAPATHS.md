@@ -986,3 +986,16 @@ whole-adapter heap, disk or RSS bound is claimed.
 Private evidence: `/Users/ember/dev/cv-worktrees/resume-kimi-evidence/summary.json`,
 `clean-cpu.json`, `before-heap.json`, `after-heap.json`, `composite-ulimit64-heap.json` and
 `composite-ulimit64-fidelity.json`; `clean_bench.py` retains the clean comparison driver.
+
+Shared append buffering (2026-10-12): a 64 KiB BufWriter now batches writes before the independent
+copying arena writer. Successful and failed producer output flushes before the append returns;
+failed ranges remain unreachable and never truncate published prefixes. Large BufWriter bypass
+writes still traverse the owned-copy guard. Active transport scratch is bounded by a 64 KiB buffer
+plus at most 64 KiB copying scratch; neither survives the append.
+
+Matched native debug control uses the actual JsonView canonical writer on an array of 200,000
+integers, alternating three runs of the safe unbuffered writer and buffered writer in one binary.
+All outputs match exactly (1,288,891 bytes). Unbuffered times are 1.454593/1.332232/1.388012 s;
+buffered 0.166260/0.158701/0.146978 s (median 8.75x). This measures scalar-heavy syscall
+amortization, not a producer-wide release CPU or heap claim. The private probe source and control
+results are in `encoded-arguments-evidence/append-buffer-{control-probe.rs,canonical-control.json}`.

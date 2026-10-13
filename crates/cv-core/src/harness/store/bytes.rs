@@ -160,10 +160,22 @@ impl ByteSource {
         let offset = file.metadata()?.len();
         // O_APPEND makes published prefixes immutable even while positioned readers run.
         // Failed appends remain unreachable; truncating could invalidate mapped views.
-        f(&mut AppendWriter {
-            file: &mut file,
-            scratch: Vec::new(),
-        })?;
+        {
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::with_capacity(
+                64 * 1024,
+                AppendWriter {
+                    file: &mut file,
+                    scratch: Vec::new(),
+                },
+            );
+            let produced = f(&mut writer);
+            // Flush before observing the published extent. Failed producer output remains an
+            // unreachable append, and the producer's error takes precedence over a flush error.
+            let flushed = writer.flush();
+            produced?;
+            flushed?;
+        }
         let end = file.metadata()?.len();
         Ok((offset, end - offset))
     }
@@ -275,6 +287,25 @@ impl<F: std::borrow::Borrow<std::fs::File>> std::io::Read for FileReader<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn arena_small_writes_flush_before_publishing_length() {
+        let source = ByteSource::arena().unwrap();
+        let expected = b"small escaped fragment\n".repeat(10000);
+        let (offset, len) = source
+            .append(|out| {
+                for byte in &expected {
+                    out.write_all(std::slice::from_ref(byte))?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(len, expected.len() as u64);
+        let mut actual = Vec::new();
+        std::io::Read::read_to_end(&mut source.reader().unwrap(), &mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn arena_failed_appends_never_truncate_published_prefixes() {
         use std::io::Read;
