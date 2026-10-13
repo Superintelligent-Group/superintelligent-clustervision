@@ -409,7 +409,7 @@ pub fn spawn_returns(h: Harness, name: &str) -> Option<Returns> {
 pub const DEFERRED: &str = "tool_call";
 
 /// The `(name key, arguments key)` of `h`'s deferred-tool wrapper.
-fn deferred_keys(h: Harness) -> (&'static str, &'static str) {
+pub(crate) fn deferred_keys(h: Harness) -> (&'static str, &'static str) {
     match h {
         Harness::OpenClaw => ("id", "args"),
         _ => ("name", "arguments"),

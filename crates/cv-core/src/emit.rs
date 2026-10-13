@@ -161,6 +161,7 @@ pub(crate) fn checked_target(target: Harness) -> bool {
             | Harness::Hermes
             | Harness::Grok
             | Harness::Qwen
+            | Harness::OpenClaw
     )
 }
 
