@@ -96,6 +96,22 @@ impl Stamp {
     }
 }
 
+/// Lifetime of a multi-session source operation. SQLite cold-store snapshots are reused while
+/// this guard or any reader is alive and removed when the last owner drops. Without an outer
+/// guard, standalone session reads remain safe but may repeat copying on non-cloning filesystems.
+#[must_use]
+pub struct ReadScope {
+    #[cfg(feature = "sqlite")]
+    _sqlite: crate::harness::store::sqlite::ReadScope,
+}
+
+pub fn read_scope() -> ReadScope {
+    ReadScope {
+        #[cfg(feature = "sqlite")]
+        _sqlite: crate::harness::store::sqlite::read_scope(),
+    }
+}
+
 /// The metadata captured immediately before a consumer reads dynamically resolved paths.
 /// Captures absence too. Repeated paths retain the first stamp; publication revalidates it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

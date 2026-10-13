@@ -139,6 +139,7 @@ pub struct LiveSearch {
 /// Trade-off, stated plainly: a match beyond a session's capped head is missed here; finding those
 /// is the index's job (`cv index`).
 pub fn live_search(query: &str, want: Option<Harness>, limit: usize) -> Result<LiveSearch> {
+    let _sources = crate::source::read_scope();
     let needle = query.to_lowercase();
     let mut out = LiveSearch {
         hits: Vec::new(),

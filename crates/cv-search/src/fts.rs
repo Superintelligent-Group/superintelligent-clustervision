@@ -298,10 +298,12 @@ const CHUNK_BYTES: usize = if cfg!(all(test, not(feature = "probe-heap"))) {
 /// hundreds of transcripts (~900 MB) — and folded-in sub-agent docs carry the provenance fields so
 /// a hit knows which agent of which workflow of which parent it came from.
 pub fn index_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<usize> {
+    let _sources = cv_core::source::read_scope();
     index_sessions(dir, cv_core::discover_all(), rebuild, subagents)
 }
 
 pub fn index_sessions(dir: &Path, refs: Vec<cv_core::SessionRef>, rebuild: bool, subagents: bool) -> Result<usize> {
+    let _sources = cv_core::source::read_scope();
     let swept = sweep(dir, refs, rebuild, subagents)?;
     if !rebuild {
         eprintln!(

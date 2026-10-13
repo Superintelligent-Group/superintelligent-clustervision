@@ -14,6 +14,7 @@ pub(crate) struct ReadConnection {
     connection: Connection,
     reads: crate::source::ReadSet,
     _snapshot: Option<std::sync::Arc<ColdSnapshot>>,
+    _scope: ReadScope,
 }
 
 impl std::ops::Deref for ReadConnection {
@@ -35,6 +36,30 @@ impl ReadConnection {
         check_reads(&self.reads)?;
         result
     }
+}
+
+/// Retain at an operation boundary that reads multiple sessions. Dropping the final scope or
+/// reader releases the one cached backing, including its directory; no process-global files
+/// survive idle operations. Concurrent/nested scopes share this bounded cache.
+pub(crate) struct ReadScope {
+    cache: std::sync::Arc<SnapshotCache>,
+}
+
+struct SnapshotCache(std::sync::Mutex<Option<std::sync::Arc<ColdSnapshot>>>);
+
+pub(crate) fn read_scope() -> ReadScope {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static ACTIVE: OnceLock<Mutex<Weak<SnapshotCache>>> = OnceLock::new();
+    let mut active = ACTIVE
+        .get_or_init(|| Mutex::new(Weak::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = active.upgrade().unwrap_or_else(|| {
+        let cache = Arc::new(SnapshotCache(Mutex::new(None)));
+        *active = Arc::downgrade(&cache);
+        cache
+    });
+    ReadScope { cache }
 }
 
 struct ColdSnapshot {
@@ -67,11 +92,15 @@ fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 /// SQLite may create WAL/SHM even with READ_ONLY. Missing WAL auxiliaries therefore use a
 /// checked private copy; existing live auxiliaries keep ordinary SQLite locking/read semantics.
 /// One cached snapshot avoids copying a cold multi-session database once per session. This is
-/// bounded to one idle database, with active connections retaining their own snapshot lifetime.
+/// bounded to one database per active operation, with readers retaining snapshot lifetime.
 pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
+    open_ro_with_copy_check(path, |_| Ok(()))
+}
+
+fn open_ro_with_copy_check(path: &Path, copied: impl FnOnce(&Path) -> Result<()>) -> Result<ReadConnection> {
     use std::io::Read;
-    use std::sync::{Arc, Mutex, OnceLock};
-    static COLD: OnceLock<Mutex<Option<Arc<ColdSnapshot>>>> = OnceLock::new();
+    use std::sync::Arc;
+    let scope = read_scope();
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -82,14 +111,19 @@ pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
     reads.record(&sidecar(&path, "-wal"));
     reads.record(&sidecar(&path, "-journal"));
     let mut header = [0; 20];
-    std::fs::File::open(&path)?.read_exact(&mut header)?;
+    match std::fs::File::open(&path)?.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => header.fill(0),
+        Err(error) => return Err(error.into()),
+    }
     check_reads(&reads)?;
     let cold = &header[..16] == b"SQLite format 3\0"
         && (header[18] == 2 || header[19] == 2)
         && (!sidecar(&path, "-wal").exists() || !sidecar(&path, "-shm").exists());
     let snapshot = if cold {
-        let mut cache = COLD
-            .get_or_init(|| Mutex::new(None))
+        let mut cache = scope
+            .cache
+            .0
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite snapshot cache poisoned"))?;
         if let Some(snapshot) = cache
@@ -120,6 +154,7 @@ pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
                     std::fs::copy(original, sidecar(&snapshot.database, suffix))?;
                 }
             }
+            copied(&snapshot.database)?;
             check_reads(&reads)?;
             let snapshot = Arc::new(snapshot);
             *cache = Some(Arc::clone(&snapshot));
@@ -139,6 +174,7 @@ pub(crate) fn open_ro(path: &Path) -> Result<ReadConnection> {
         connection,
         reads,
         _snapshot: snapshot,
+        _scope: scope,
     })
 }
 
@@ -245,8 +281,42 @@ mod tests {
         assert!(!sidecar(&database, "-wal").exists());
         assert!(!sidecar(&database, "-shm").exists());
         assert!(second.execute("INSERT INTO t VALUES(8)", []).is_err());
+        let private_directory = first._snapshot.as_ref().unwrap().directory.clone();
+        let scope = read_scope();
         drop(first);
         drop(second);
+        for _ in 0..32 {
+            let reader = open_ro(&database).unwrap();
+            assert_eq!(reader._snapshot.as_ref().unwrap().directory, private_directory);
+            reader
+                .read(|r| Ok(r.query_row("SELECT x FROM t", [], |row| row.get::<_, i64>(0))?))
+                .unwrap();
+        }
+        assert!(private_directory.exists());
+        drop(scope);
+        assert!(!private_directory.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn copy_race_rejects_source_change_and_removes_private_backing() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (directory, database) = fixture();
+        {
+            let writer = Connection::open(&database).unwrap();
+            writer
+                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x);")
+                .unwrap();
+        }
+        let mut private = None;
+        let result = open_ro_with_copy_check(&database, |copied| {
+            private = copied.parent().map(Path::to_path_buf);
+            let writer = Connection::open(&database)?;
+            writer.execute("INSERT INTO t VALUES(9)", [])?;
+            Ok(())
+        });
+        assert!(result.err().unwrap().to_string().contains("dependencies changed"));
+        assert!(!private.unwrap().exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 

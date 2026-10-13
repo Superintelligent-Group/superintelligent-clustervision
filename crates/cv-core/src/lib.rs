@@ -77,6 +77,7 @@ use anyhow::Result;
 /// [`sessions`] a trustworthy fast read afterwards. Most read-side callers want [`sessions`]
 /// instead; call this when you need a guaranteed-fresh scan (e.g. `cv ls --fresh`, indexers).
 pub fn discover_all() -> Vec<SessionRef> {
+    let _sources = source::read_scope();
     let adapters = harness::all();
 
     // Per-adapter outcome: refs on success, `None` on error (the catalog keeps that harness's

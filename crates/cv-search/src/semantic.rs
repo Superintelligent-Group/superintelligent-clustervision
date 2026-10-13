@@ -363,10 +363,12 @@ const EMBED_BATCH: usize = 128;
 
 /// Refresh only sessions whose selected semantic sources have changed.
 pub fn embed_all(path: &Path) -> Result<usize> {
+    let _sources = cv_core::source::read_scope();
     embed_sessions(path, &cv_core::discover_all())
 }
 
 pub fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize> {
+    let _sources = cv_core::source::read_scope();
     if refs.is_empty() {
         return refresh(
             path,

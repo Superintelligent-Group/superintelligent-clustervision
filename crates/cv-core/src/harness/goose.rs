@@ -399,6 +399,7 @@ fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> R
     stream_db_opts(conn, r, &ParseOptions::full(), sink)
 }
 
+#[cfg(test)]
 fn stream_db_opts(
     conn: &Connection,
     r: &SessionRef,
