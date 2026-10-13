@@ -1,4 +1,4 @@
-//! Cursor IDE adapter — chat/composer history in VS Code-style `state.vscdb` (SQLite).
+//! Cursor adapter — IDE chat/composer `state.vscdb` and Agent CLI blob stores (SQLite).
 //!
 //! See `docs/FORMATS.md`. Cursor stores conversations across two SQLite databases:
 //!
@@ -55,8 +55,13 @@ impl Cursor {
             .or_else(default_user_dir)
             .filter(|p| p.exists());
         let cli_home = std::env::var_os("CURSOR_CONFIG_DIR")
+            .filter(|value| !value.to_string_lossy().trim().is_empty())
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(|base| PathBuf::from(base).join("cursor")))
+            .or_else(|| {
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .filter(|value| !value.to_string_lossy().trim().is_empty())
+                    .map(|base| PathBuf::from(base).join("cursor"))
+            })
             .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")))
             .filter(|path| path.is_dir());
         Cursor { user_dir, cli_home }
