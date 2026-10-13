@@ -300,11 +300,29 @@ impl Adapter for OpenCode {
                 if let Ok(rd) = fs::read_dir(&mdir) {
                     for e in rd.filter_map(|e| e.ok()) {
                         let path = e.path();
-                        if let Ok(t) = fs::read_to_string(&path) {
-                            if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                                let when = v.pointer("/time/created").and_then(Value::as_i64).unwrap_or(0);
-                                order.push((when, path));
+                        let Ok(source) = crate::json::JsonSource::capture(&path) else {
+                            continue;
+                        };
+                        match source.read_syntax(|view| {
+                            if !view.accepts_value()? {
+                                return Ok(None);
                             }
+                            let when = view
+                                .get("time")?
+                                .map(|time| time.get("created"))
+                                .transpose()?
+                                .flatten()
+                                .map(|created| created.as_number())
+                                .transpose()?
+                                .flatten()
+                                .and_then(|number| number.as_i64())
+                                .unwrap_or(0);
+                            Ok(Some(when))
+                        }) {
+                            Ok(Some(when)) => order.push((when, path)),
+                            Ok(None) => {}
+                            Err(error) if error.is::<crate::json::InvalidJson>() => {}
+                            Err(error) => return Err(error),
                         }
                     }
                 }
@@ -315,15 +333,30 @@ impl Adapter for OpenCode {
 
             // Re-read one message file at a time, emit, then drop before the next.
             for (_, path) in &order {
-                let Ok(t) = fs::read_to_string(path) else { continue };
-                let Ok(mv) = serde_json::from_str::<Value>(&t) else {
-                    continue;
-                };
-                let msg_id = mv.get("id").and_then(Value::as_str).unwrap_or("");
                 let built = if _opts.spans {
+                    let Ok(source) = crate::json::JsonSource::capture(path) else {
+                        continue;
+                    };
+                    let header = match source.read_syntax(|view| {
+                        if !view.accepts_value()? {
+                            return Ok(None);
+                        }
+                        ProjectedHeader::read(view).map(Some)
+                    }) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => continue,
+                        Err(error) if error.is::<crate::json::InvalidJson>() => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let msg_id = header.value.get("id").and_then(Value::as_str).unwrap_or("");
                     let parts = self.load_projected_parts(msg_id)?;
-                    build_projected(&mv, &parts)
+                    build_header_projected(&header, &parts)
                 } else {
+                    let Ok(t) = fs::read_to_string(path) else { continue };
+                    let Ok(mv) = serde_json::from_str::<Value>(&t) else {
+                        continue;
+                    };
+                    let msg_id = mv.get("id").and_then(Value::as_str).unwrap_or("");
                     build_messages(&mv, &self.load_parts(msg_id))
                 };
                 for mut built in built {
@@ -369,19 +402,27 @@ fn fold_into_session(s: &mut Session, m: &mut Message) -> Result<()> {
 /// Count a session's conversational turns: message records whose `role` is `user`/`assistant`.
 /// The [`SessionRef::message_count`] contract is user+assistant turns only — counting directory
 /// entries (the old behavior) also picked up system/summary records and any stray files, so the
-/// number disagreed with every other adapter. Message files are small metadata records (the heavy
-/// content lives in part files, which this never touches), so the peek stays cheap.
+/// number disagreed with every other adapter. Project only the role while validating each header;
+/// older headers can contain large inline summaries. This never touches part files.
 fn count_turns(dir: &std::path::Path) -> usize {
     let Ok(rd) = fs::read_dir(dir) else { return 0 };
     rd.filter_map(|e| e.ok())
-        .filter(|e| {
-            let Ok(text) = fs::read_to_string(e.path()) else {
+        .filter(|entry| {
+            let Ok(source) = crate::json::JsonSource::capture(&entry.path()) else {
                 return false;
             };
-            let Ok(v) = serde_json::from_str::<Value>(&text) else {
-                return false;
-            };
-            matches!(v.get("role").and_then(Value::as_str), Some("user") | Some("assistant"))
+            source
+                .read_syntax(|view| {
+                    if !view.accepts_value()? {
+                        return Ok(false);
+                    }
+                    Ok(view
+                        .get("role")?
+                        .map(|role| role.resolve())
+                        .transpose()?
+                        .is_some_and(|role| matches!(role.as_str(), Some("user") | Some("assistant"))))
+                })
+                .unwrap_or(false)
         })
         .count()
 }
@@ -725,7 +766,22 @@ mod db {
             return stream_v2(&conn, s, opts, sink, source, &arena);
         }
 
-        let mut msgs = conn.prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")?;
+        let (mut msgs, message_rowid) = if opts.spans {
+            match conn
+                .prepare("SELECT id, rowid, typeof(data) FROM message WHERE session_id = ?1 ORDER BY time_created, id")
+            {
+                Ok(statement) => (statement, true),
+                Err(_) => (
+                    conn.prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")?,
+                    false,
+                ),
+            }
+        } else {
+            (
+                conn.prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")?,
+                false,
+            )
+        };
         let (mut parts, part_rowid) = if opts.spans {
             match conn.prepare("SELECT rowid, id, typeof(data) FROM part WHERE message_id = ?1 ORDER BY id") {
                 Ok(statement) => (statement, true),
@@ -743,10 +799,49 @@ mod db {
         let mut rows = msgs.query(rusqlite::params![r.id])?;
         while let Some(row) = rows.next()? {
             let mid: String = row.get(0)?;
-            let data: String = row.get(1)?;
-            let Ok(Value::Object(mut mv)) = serde_json::from_str::<Value>(&data) else {
-                continue;
+            let mut header = if opts.spans {
+                let (offset, len) = if message_rowid {
+                    if row.get::<_, String>(2)? != "text" {
+                        anyhow::bail!("OpenCode SQLite message data is not TEXT");
+                    }
+                    crate::harness::store::sqlite::append_cell(&conn, "message", "data", row.get(1)?, &arena)?
+                } else {
+                    let data = row.get_ref(1)?.as_str()?;
+                    arena.append(|writer| {
+                        writer.write_all(data.as_bytes())?;
+                        Ok(())
+                    })?
+                };
+                if len == 0 {
+                    continue;
+                }
+                match source.read_backing_syntax(arena.clone(), offset, len, |view| {
+                    if !view.accepts_value()? || !view.is_object()? {
+                        return Ok(None);
+                    }
+                    ProjectedHeader::read(view).map(Some)
+                }) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => continue,
+                    Err(error) if error.is::<crate::json::InvalidJson>() => {
+                        if !backing_utf8(&arena, offset, len)? {
+                            anyhow::bail!("OpenCode SQLite message data is not UTF-8");
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                let data: String = row.get(1)?;
+                let Ok(Value::Object(mv)) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                ProjectedHeader {
+                    value: Value::Object(mv),
+                    summary: None,
+                }
             };
+            let mv = header.value.as_object_mut().unwrap();
             mv.insert("id".into(), json!(mid));
             mv.insert("sessionID".into(), json!(r.id));
             let mut part_rows = parts.query(rusqlite::params![mid])?;
@@ -801,9 +896,9 @@ mod db {
                 }
             }
             let built = if opts.spans {
-                build_projected(&Value::Object(mv), &projected)
+                build_header_projected(&header, &projected)
             } else {
-                build_messages(&Value::Object(mv), &pv)
+                build_messages(&header.value, &pv)
             };
             for mut built in built {
                 fold_into_session(&mut s, &mut built)?;
@@ -910,14 +1005,7 @@ mod db {
                             && value.is_string()?
                         {
                             text = value.source_text()?;
-                            data.insert(
-                                key.to_owned(),
-                                json!(if value.source_range()?.is_some_and(|(_, len)| len > 2) {
-                                    "x"
-                                } else {
-                                    ""
-                                }),
-                            );
+                            data.insert(key.to_owned(), json!(if nonempty_string(value)? { "x" } else { "" }));
                         } else if key == "content" && ty == "assistant" && value.is_array()? {
                             for item in value.array()?.unwrap() {
                                 parts.push(ProjectedPart::read_inner(item?, source, arena, true)?);
@@ -1004,7 +1092,7 @@ mod db {
 /// trailing `Role::Tool` message (mirroring the Claude adapter) so conversions re-encode them
 /// correctly. Returns 0–2 messages.
 fn build_messages(mv: &Value, parts: &[Value]) -> Vec<Message> {
-    build_parts(mv, parts.iter().map(|v| (v, None)))
+    build_parts(mv, parts.iter().map(|v| (v, None)), None)
 }
 
 fn json_text(
@@ -1054,6 +1142,90 @@ fn decoded_input(
     view.argument(true)
 }
 
+fn nonempty_string(view: crate::json::JsonView<'_>) -> Result<bool> {
+    match view.source_range()? {
+        Some((_, len)) => Ok(len > 2),
+        None => Ok(view.resolve()?.as_str().is_some_and(|text| !text.is_empty())),
+    }
+}
+
+struct ProjectedHeader {
+    value: Value,
+    summary: Option<crate::lazy::Text>,
+}
+
+impl ProjectedHeader {
+    fn read(view: crate::json::JsonView<'_>) -> Result<Self> {
+        let keys = [
+            "id",
+            "role",
+            "parentID",
+            "time",
+            "modelID",
+            "model",
+            "tokens",
+            "cost",
+            "agent",
+            "mode",
+            "providerID",
+            "finish",
+            "error",
+            "variant",
+            "structured",
+            "format",
+            "system",
+            "tools",
+            "path",
+            "summary",
+        ];
+        let Some(fields) = view.select_fields(&keys)? else {
+            return Ok(Self {
+                value: Value::Null,
+                summary: None,
+            });
+        };
+        let mut object = Map::new();
+        let mut summary = None;
+        for (key, value) in keys.into_iter().zip(fields) {
+            let Some(value) = value else { continue };
+            if key == "summary" {
+                if let Some(fields) = value.select_fields(&["body", "title", "diffs"])? {
+                    let mut selected = Map::new();
+                    let has_body = fields[0].is_some();
+                    for (index, (key, value)) in ["body", "title", "diffs"].into_iter().zip(fields).enumerate() {
+                        let Some(value) = value else { continue };
+                        if index < 2 {
+                            let text = value.source_text()?;
+                            if index == 0 || !has_body {
+                                summary = text;
+                            }
+                            selected.insert(
+                                key.to_owned(),
+                                if value.is_string()? {
+                                    json!(if nonempty_string(value)? { "x" } else { "" })
+                                } else {
+                                    Value::Null
+                                },
+                            );
+                        } else {
+                            selected.insert(key.to_owned(), value.resolve()?.into_owned());
+                        }
+                    }
+                    object.insert(key.to_owned(), Value::Object(selected));
+                } else {
+                    object.insert(key.to_owned(), value.as_bool()?.map(Value::Bool).unwrap_or(Value::Null));
+                }
+            } else {
+                object.insert(key.to_owned(), value.resolve()?.into_owned());
+            }
+        }
+        Ok(Self {
+            value: Value::Object(object),
+            summary,
+        })
+    }
+}
+
 struct ProjectedPart {
     value: Value,
     text: Option<crate::lazy::Text>,
@@ -1096,14 +1268,7 @@ impl ProjectedPart {
         view.for_each_entry(|key, value| {
             if key == "text" && matches!(ty.as_str(), "text" | "reasoning") && value.is_string()? {
                 part.text = value.source_text()?;
-                object.insert(
-                    key.to_owned(),
-                    json!(if value.source_range()?.is_some_and(|(_, len)| len > 2) {
-                        "x"
-                    } else {
-                        ""
-                    }),
-                );
+                object.insert(key.to_owned(), json!(if nonempty_string(value)? { "x" } else { "" }));
             } else if key == "state" && ty == "tool" && value.is_object()? {
                 let mut state = Map::new();
                 value.for_each_entry(|key, value| {
@@ -1186,13 +1351,23 @@ impl ProjectedPart {
     }
 }
 
+#[cfg(test)]
 fn build_projected(mv: &Value, parts: &[ProjectedPart]) -> Vec<Message> {
-    build_parts(mv, parts.iter().map(|p| (&p.value, Some(p))))
+    build_parts(mv, parts.iter().map(|p| (&p.value, Some(p))), None)
+}
+
+fn build_header_projected(header: &ProjectedHeader, parts: &[ProjectedPart]) -> Vec<Message> {
+    build_parts(
+        &header.value,
+        parts.iter().map(|p| (&p.value, Some(p))),
+        header.summary.as_ref(),
+    )
 }
 
 fn build_parts<'a>(
     mv: &Value,
     parts: impl IntoIterator<Item = (&'a Value, Option<&'a ProjectedPart>)>,
+    summary_text: Option<&crate::lazy::Text>,
 ) -> Vec<Message> {
     let role = match mv.get("role").and_then(Value::as_str) {
         Some("assistant") => Role::Assistant,
@@ -1319,7 +1494,7 @@ fn build_parts<'a>(
         if let Some(text) = summary {
             if !text.is_empty() {
                 m.content.push(Block::Text {
-                    text: text.to_string().into(),
+                    text: summary_text.cloned().unwrap_or_else(|| text.to_string().into()),
                 });
             }
         }
@@ -1773,6 +1948,55 @@ mod tests {
         );
         // the boolean must NOT be rendered as a text body; the real text comes from parts
         assert!(matches!(&m.content[0], Block::Text { text } if text == "compacted history…"));
+    }
+
+    #[test]
+    fn projected_headers_preserve_summary_precedence_and_part_fallback() {
+        let dir = std::env::temp_dir().join(format!("cv-opencode-header-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("message.json");
+        let body = "summary\n\"text\" 🌟".repeat(9000);
+        for summary in [
+            json!({"body":body,"title":body,"diffs":[{"file":"a.rs"}]}),
+            json!({"title":body}),
+            json!({"body":"","title":body}),
+            json!({"body":null,"title":body}),
+            Value::Bool(true),
+        ] {
+            let value = json!({"id":"m","role":"assistant","time":{"created":2},"summary":summary,"ignored":body});
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let source = crate::json::JsonSource::capture(&path).unwrap();
+            let header = source.read_syntax(ProjectedHeader::read).unwrap();
+            for with_parts in [false, true] {
+                let parts = if with_parts {
+                    vec![json!({"type":"text","text":"part wins"})]
+                } else {
+                    vec![]
+                };
+                let arena = std::sync::Arc::new(crate::harness::store::bytes::ByteSource::arena().unwrap());
+                let projected = parts
+                    .iter()
+                    .map(|part| ProjectedPart::read(part.into(), &source, &arena).unwrap())
+                    .collect::<Vec<_>>();
+                let mut actual = build_header_projected(&header, &projected);
+                for message in &mut actual {
+                    message.materialize(&crate::lazy::Resolver::new(None)).unwrap();
+                }
+                assert!(
+                    serde_json::to_value(actual).unwrap()
+                        == serde_json::to_value(build_messages(&value, &parts)).unwrap(),
+                    "summary precedence differs with_parts={with_parts}"
+                );
+            }
+        }
+        let value = json!({"id":"m","role":"user","summary":{"body":body}});
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let source = crate::json::JsonSource::capture(&path).unwrap();
+        let header = source.read_syntax(ProjectedHeader::read).unwrap();
+        let mut messages = build_header_projected(&header, &[]);
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(messages[0].materialize(&crate::lazy::Resolver::new(None)).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
