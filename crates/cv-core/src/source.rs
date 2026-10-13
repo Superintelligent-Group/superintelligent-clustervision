@@ -514,7 +514,7 @@ impl Probe {
                             #[serde(default)]
                             id: String,
                         }
-                        let file = std::fs::File::open(&message).ok()?;
+                        let file = std::fs::File::open(message).ok()?;
                         let id: MessageId = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
                         directories.push(storage.join("part").join(id.id));
                     }
@@ -590,18 +590,26 @@ pub fn unchanged_from(r: &SessionRef, primary: &Path, snapshot: &Snapshot) -> bo
     if current_primary != snapshot.primary {
         return false;
     }
-    let Some(before) = snapshot.dependencies.as_ref().and_then(Stamp::records) else {
+    let Some(stamp) = snapshot.dependencies.as_ref() else {
         return false;
     };
     let Some(now) = probe.dependency_entries(r, primary) else {
         return false;
     };
-    before.entries == now
-        && before.reads.as_ref().is_none_or(|reads| {
-            reads
-                .iter()
-                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
-        })
+    // Directory enumeration is complete. Only metadata probes are needed for dynamic reads;
+    // release path lists before parsing the captured inventory's owned paths.
+    probe.directories.clear();
+    let Some(Records { entries, reads, .. }) = stamp.records() else {
+        return false;
+    };
+    let same = entries == now;
+    drop(entries);
+    drop(now);
+    same && reads.as_ref().is_none_or(|reads| {
+        reads
+            .iter()
+            .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+    })
 }
 
 pub type Update = (SessionRef, Snapshot);
@@ -881,6 +889,15 @@ mod tests {
         std::fs::write(storage.join("part/mid/new.json"), "new").unwrap();
         assert_eq!(unchanged(&r, &updated), reference(&updated));
         assert!(!unchanged(&r, &updated));
+        let populated = Probe::default().snapshot(&r).with_reads(&ReadSet::default());
+        std::fs::remove_file(storage.join("part/mid/new.json")).unwrap();
+        std::fs::remove_file(&part).unwrap();
+        std::fs::remove_dir(storage.join("part/mid")).unwrap();
+        assert_eq!(unchanged(&r, &populated), reference(&populated));
+        assert!(
+            !unchanged(&r, &populated),
+            "directory removal changes captured membership"
+        );
     }
 
     #[test]

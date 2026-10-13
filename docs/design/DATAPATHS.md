@@ -1244,3 +1244,10 @@ shares cached directory lists. On the same isolated 256-turn control, publicatio
 fell further from 2,173,149 to 1,765,968 bytes; external Snapshot size remained 299,289 bytes.
 Remaining source metadata still grows with file cardinality. The original MISS gate must be
 rerun after integration; this control is not a substitute for that activated consumer check.
+
+Publication now also finishes directory enumeration before parsing captured inventory paths,
+releases the completed directory lists, and drops compared inventory lists before checking
+conditional dynamic reads. Cached first-observed metadata remains available for those checks.
+The isolated publication peak fell further from 1,765,968 to 1,472,420 bytes with unchanged
+allocation requests/bytes and wire size. Directory membership/removal and conditional-absence
+oracles continue to match the former serialized comparison.
