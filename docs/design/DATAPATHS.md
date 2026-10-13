@@ -3825,7 +3825,8 @@ listing synth_title policy.
 
 Independent frozen old-writer oracles compare exact pretty wire for Native/Text/Drop modes,
 including user reasoning, signature-only thinking, usage/model attachment, files/images and
-canonical tool arguments/results. Changed-source controls preserve an existing transcript.
+canonical tool arguments/results. Review added plain-whitespace user/assistant thinking to all
+three mode oracles: Text obeys the shared Drop fate; Native retains nonempty whitespace. Changed-source controls preserve an existing transcript.
 Native Continue/LM Studio scoped tests and both portable writer oracles pass, as do both library
 clippy configurations and pinned formatting. Cross-harness preparation selects checked sources;
 same-harness complete parsing retains its existing owned-carrier contract.

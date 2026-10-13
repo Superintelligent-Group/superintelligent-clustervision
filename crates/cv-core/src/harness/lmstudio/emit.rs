@@ -26,7 +26,7 @@ fn projected<'a>(block: &'a Block, mode: ThinkingMode, resolver: &Resolver) -> R
                 false,
             )));
         }
-        if mode == ThinkingMode::Drop {
+        if fate == crate::emit::ThinkingFate::Drop {
             return Ok(None);
         }
         if crate::emit::thinking::first_character(text, resolver, false)?.is_none() {
@@ -328,6 +328,14 @@ mod tests {
             encrypted: None,
             redacted: false,
         });
+        for message in &mut lazy.messages[..2] {
+            message.content.push(Block::Thinking {
+                text: " \n\t ".into(),
+                signature: None,
+                encrypted: None,
+                redacted: false,
+            });
+        }
         let mut owned = lazy.clone();
         owned.materialize()?;
         for mode in [
