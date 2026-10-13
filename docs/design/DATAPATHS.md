@@ -3337,3 +3337,30 @@ performs one read, one encoded row and one save; unchanged input performs none. 
 reversed-input rebuild is byte-identical. Refresh, ranking, source-guard tests and library clippy
 pass in the owner tree. These tests inject encoding, so no model download or real-fleet embedding
 claim is involved; combined integration checks remain pending.
+
+### Event output authority (2026-10-13)
+
+Event rows and attribution have one output per `(harness,id)`, whereas historical skip stamps
+were `(harness,id,path)`. Publishing copy B could leave A's matching file/dependency stamps
+claiming freshness for B's output. Source identity also cannot detect changing only folded
+parent/agent/workflow attribution, or the discovered working directory used to resolve relative
+event paths. The current published authority is therefore source path, provenance and input
+`cwd`, recorded on the existing `event_sessions` row. Publication clears competing path stamps
+and commits authority, rows, one skip stamp and source baseline in the same SQL transaction.
+
+Existing catalogs gain nullable source-path/cwd columns without losing event rows. Unknown
+legacy authority misses lazily and repairs on the next successful ingest; NULL cwd is legitimate once a
+source path establishes authority, and remains distinct from an empty cwd. SyncTable and direct
+freshness compare expected attribution. `can_resume` is an output-ownership gate, combined by
+FTS with its existing source/checkpoint guards; it is not a proof of source-prefix contents.
+A resumed publication rechecks authority inside its transaction before any mutations, so an
+intervening writer cannot splice A's suffix onto B's retained prefix.
+
+Narrow actual publication/read controls cover divergent copied tool events; folded↔direct
+attribution; changed cwd; historical competing path stamps; nullable-column migration preserving
+old output; unchanged after repair; and a stale planner rejected at publication with rows/stamps
+untouched. Same-authority prefix retention remains supported. Standalone bulk event ingestion
+expands all parents' forests before selecting one live/newest deterministic copy per qualified
+identity; direct attribution wins identical-copy ties. Owned duplicate-parent fixtures preserve
+and actually ingest disjoint adopted children; missing-preferred and all-missing cases preserve
+live fallback and meaningful source errors. No extra fleet reread or latency claim is implied.

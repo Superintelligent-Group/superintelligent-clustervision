@@ -553,6 +553,8 @@ mod db {
                  parent_id  TEXT,
                  agent_id   TEXT,
                  workflow   TEXT,
+                 source_path TEXT,
+                 source_cwd TEXT,
                  UNIQUE(harness, session_id)
              );
              CREATE TABLE IF NOT EXISTS event_targets(
@@ -594,7 +596,49 @@ mod db {
             conn.execute_batch("ALTER TABLE event_sync ADD COLUMN size INTEGER;")
                 .ok()?;
         }
+        let has_source_path: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('event_sessions') WHERE name='source_path')",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        if !has_source_path {
+            conn.execute_batch("ALTER TABLE event_sessions ADD COLUMN source_path TEXT;")
+                .ok()?;
+        }
+        let has_source_cwd: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('event_sessions') WHERE name='source_cwd')",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        if !has_source_cwd {
+            conn.execute_batch("ALTER TABLE event_sessions ADD COLUMN source_cwd TEXT;")
+                .ok()?;
+        }
         Some(conn)
+    }
+
+    fn authority_matches(conn: &Connection, r: &SessionRef, prov: &Provenance) -> rusqlite::Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM event_sessions es JOIN event_sync s
+               ON s.harness=es.harness AND s.id=es.session_id AND s.path=es.source_path
+             WHERE es.harness=?1 AND es.session_id=?2 AND es.source_path=?3
+               AND es.parent_id IS ?4 AND es.agent_id IS ?5 AND es.workflow IS ?6
+               AND es.source_cwd IS ?7 AND s.mtime_ns != 0 AND s.size >= 0)",
+            params![
+                r.harness.as_str(),
+                r.id,
+                r.path.to_string_lossy(),
+                prov.parent_id,
+                prov.agent_id,
+                prov.workflow,
+                r.cwd.as_ref().map(|p| p.to_string_lossy())
+            ],
+            |row| row.get(0),
+        )
     }
 
     /// The event-catalog freshness predicate over a stored `(mtime_ns, size)` stamp, shared with
@@ -624,8 +668,17 @@ mod db {
         let Some(conn) = open() else { return false };
         let stored: Option<(i64, Option<i64>)> = conn
             .query_row(
-                "SELECT mtime_ns, size FROM event_sync WHERE harness=?1 AND id=?2 AND path=?3",
-                params![r.harness.as_str(), r.id, r.path.to_string_lossy()],
+                "SELECT s.mtime_ns, s.size FROM event_sync s JOIN event_sessions es
+                   ON es.harness=s.harness AND es.session_id=s.id AND es.source_path=s.path
+                 WHERE s.harness=?1 AND s.id=?2 AND s.path=?3
+                   AND es.parent_id IS NULL AND es.agent_id IS NULL AND es.workflow IS NULL
+                   AND es.source_cwd IS ?4",
+                params![
+                    r.harness.as_str(),
+                    r.id,
+                    r.path.to_string_lossy(),
+                    r.cwd.as_ref().map(|p| p.to_string_lossy())
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .ok();
@@ -655,7 +708,12 @@ mod db {
     /// opened, every check returns `false` (don't re-stream the corpus into a broken db).
     /// `(harness, id, path) → (mtime_ns, size)` — one loaded `event_sync` stamp per session
     /// (size is `None` on rows written before the size column existed).
-    type SyncRows = std::collections::HashMap<(String, String, String), (i64, Option<i64>)>;
+    struct SyncEntry {
+        signature: (i64, Option<i64>),
+        cwd: Option<String>,
+        provenance: Provenance,
+    }
+    type SyncRows = std::collections::HashMap<(String, String, String), SyncEntry>;
 
     pub struct SyncTable {
         /// The loaded skip-table; `None` when the catalog is unavailable.
@@ -669,7 +727,9 @@ mod db {
                 let mut conn = open()?;
                 let tx = conn.transaction().ok()?;
                 let mut stmt = tx
-                    .prepare("SELECT harness, id, path, mtime_ns, size FROM event_sync")
+                    .prepare("SELECT s.harness, s.id, s.path, s.mtime_ns, s.size, es.parent_id, es.agent_id, es.workflow, es.source_cwd
+                              FROM event_sync s JOIN event_sessions es
+                                ON es.harness=s.harness AND es.session_id=s.id AND es.source_path=s.path")
                     .ok()?;
                 let rows = stmt
                     .query_map([], |row| {
@@ -679,7 +739,15 @@ mod db {
                                 row.get::<_, String>(1)?,
                                 row.get::<_, String>(2)?,
                             ),
-                            (row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?),
+                            SyncEntry {
+                                signature: (row.get(3)?, row.get(4)?),
+                                cwd: row.get(8)?,
+                                provenance: Provenance {
+                                    parent_id: row.get(5)?,
+                                    agent_id: row.get(6)?,
+                                    workflow: row.get(7)?,
+                                },
+                            },
                         ))
                     })
                     .ok()?;
@@ -719,15 +787,53 @@ mod db {
             source: &crate::source::Snapshot,
             probe: &mut crate::source::Probe,
         ) -> bool {
+            self.needs_ingest_with_provenance(r, source, &Provenance::default(), probe)
+        }
+
+        /// Freshness of the one published output: source copy, provenance, tuple and dependencies.
+        pub fn needs_ingest_with_provenance(
+            &self,
+            r: &SessionRef,
+            source: &crate::source::Snapshot,
+            provenance: &Provenance,
+            probe: &mut crate::source::Probe,
+        ) -> bool {
             let Some(rows) = &self.rows else { return false };
             let key = (
                 r.harness.as_str().to_string(),
                 r.id.clone(),
                 r.path.to_string_lossy().into_owned(),
             );
-            !sync_fresh(rows.get(&key).copied(), source.primary.0, source.primary.1, || {
-                self.dependencies
-                    .fresh_with_probe(r, source.primary, &source.dependencies, probe)
+            !sync_fresh(
+                rows.get(&key)
+                    .filter(|entry| {
+                        entry.provenance == *provenance
+                            && entry.cwd.as_deref() == r.cwd.as_ref().map(|p| p.to_string_lossy()).as_deref()
+                    })
+                    .map(|entry| entry.signature),
+                source.primary.0,
+                source.primary.1,
+                || {
+                    self.dependencies
+                        .fresh_with_probe(r, source.primary, &source.dependencies, probe)
+                },
+            )
+        }
+        /// Whether retained prefix events belong to this source copy and expected provenance.
+        /// This is separate from unchanged freshness: an ordinary append changes the tuple.
+        pub fn can_resume(&self, r: &SessionRef, provenance: &Provenance) -> bool {
+            self.rows.as_ref().is_some_and(|rows| {
+                rows.get(&(
+                    r.harness.as_str().to_owned(),
+                    r.id.clone(),
+                    r.path.to_string_lossy().into_owned(),
+                ))
+                .is_some_and(|entry| {
+                    entry.signature.0 != 0
+                        && entry.signature.1.is_some_and(|size| size >= 0)
+                        && entry.provenance == *provenance
+                        && entry.cwd.as_deref() == r.cwd.as_ref().map(|p| p.to_string_lossy()).as_deref()
+                })
             })
         }
     }
@@ -852,6 +958,9 @@ mod db {
     ) -> Result<()> {
         let tx = conn.transaction()?;
         let harness = r.harness.as_str();
+        if from > 0 && !authority_matches(&tx, r, prov)? {
+            anyhow::bail!("event prefix belongs to another or unknown output authority");
+        }
         tx.execute(
             "INSERT OR IGNORE INTO event_sessions(harness, session_id) VALUES(?1,?2)",
             params![harness, r.id],
@@ -859,9 +968,17 @@ mod db {
         // Stamp provenance on every record (idempotent re-ingest keeps it current); top-level
         // sessions write NULLs, which leaves the existing top-level rows exactly as before.
         tx.execute(
-            "UPDATE event_sessions SET parent_id=?3, agent_id=?4, workflow=?5
+            "UPDATE event_sessions SET parent_id=?3, agent_id=?4, workflow=?5, source_path=?6, source_cwd=?7
              WHERE harness=?1 AND session_id=?2",
-            params![harness, r.id, prov.parent_id, prov.agent_id, prov.workflow],
+            params![
+                harness,
+                r.id,
+                prov.parent_id,
+                prov.agent_id,
+                prov.workflow,
+                r.path.to_string_lossy(),
+                r.cwd.as_ref().map(|p| p.to_string_lossy())
+            ],
         )?;
         let session = tx.query_row(
             "SELECT id FROM event_sessions WHERE harness=?1 AND session_id=?2",
@@ -928,6 +1045,10 @@ mod db {
             }
         }
         tx.execute(
+            "DELETE FROM event_sync WHERE harness=?1 AND id=?2",
+            params![harness, r.id],
+        )?;
+        tx.execute(
             "INSERT OR REPLACE INTO event_sync(harness,id,path,mtime_ns,size) VALUES(?1,?2,?3,?4,?5)",
             params![harness, r.id, r.path.to_string_lossy(), mtime_ns, size],
         )?;
@@ -980,50 +1101,84 @@ mod db {
     /// so `cv touched`/`cv events` see what the agents did — not just the orchestrator. Off by
     /// default (the forest can be hundreds of transcripts / ~900 MB).
     pub fn ingest_all(force: bool, subagents: bool) -> Result<usize> {
-        let mut n = 0usize;
+        let sources = collect_sources(crate::discover_all(), subagents);
         let sync = SyncTable::load();
         let mut probe = crate::source::Probe::default();
-        for r in crate::discover_all() {
+        let mut n = 0;
+        for (r, provenance) in sources {
             let source = probe.snapshot(&r);
-            let top_stale = sync.needs_ingest_with_probe(&r, &source, &mut probe);
-            if force || top_stale {
-                match ingest_ref(&r) {
-                    Ok(_) => n += 1,
-                    Err(e) => {
-                        eprintln!("cv: event ingest failed for {} ({}): {e:#}", r.id, r.harness)
-                    }
-                }
+            if !force && !sync.needs_ingest_with_provenance(&r, &source, &provenance, &mut probe) {
+                continue;
             }
-            if subagents {
-                n += ingest_forest(&r, &sync, force);
+            match ingest_subagent(&r, &provenance) {
+                Ok(_) => n += 1,
+                Err(error) => eprintln!("cv: event ingest failed for {} ({}): {error:#}", r.id, r.harness),
             }
         }
         Ok(n)
     }
 
-    /// Fold the sub-agent forest of one top-level session into the catalog, skipping unchanged
-    /// transcripts (by the `event_sync` `(mtime, size)` signature) unless `force`. Best-effort per
-    /// agent: an unreadable sub-agent transcript is skipped, not fatal. Returns the number of
-    /// agents (re)ingested.
-    fn ingest_forest(parent: &SessionRef, sync: &SyncTable, force: bool) -> usize {
-        let mut n = 0usize;
-        for sub in crate::subagent_tree_of(parent) {
-            let sr = &sub.session;
-            let (mtime_ns, size) = crate::offsets::file_sig(&crate::source::primary_path(sr));
-            if !force && !sync.needs_ingest(sr, mtime_ns, size) {
-                continue;
-            }
-            let prov = Provenance {
-                parent_id: Some(parent.id.clone()),
-                agent_id: Some(sub.agent_id().to_string()),
-                workflow: sub.workflow.clone(),
-            };
-            match ingest_subagent(sr, &prov) {
-                Ok(_) => n += 1,
-                Err(_) => continue,
+    pub(super) fn collect_sources(refs: Vec<SessionRef>, subagents: bool) -> Vec<(SessionRef, Provenance)> {
+        let mut sources: Vec<_> = refs.into_iter().map(|r| (r, Provenance::default())).collect();
+        if subagents {
+            let folded: Vec<_> = sources
+                .iter()
+                .flat_map(|(parent, _)| {
+                    crate::subagent_tree_of(parent).into_iter().map(|sub| {
+                        let provenance = Provenance {
+                            parent_id: Some(parent.id.clone()),
+                            agent_id: Some(sub.agent_id().to_owned()),
+                            workflow: sub.workflow.clone(),
+                        };
+                        (sub.session, provenance)
+                    })
+                })
+                .collect();
+            sources.extend(folded);
+        }
+        preferred_sources(sources)
+    }
+
+    /// Events have one output per harness/id, independent of how many source copies discovery
+    /// returns. Resolve that output once before publication; direct attribution wins equal copies.
+    pub(super) fn preferred_sources(
+        sources: impl IntoIterator<Item = (SessionRef, Provenance)>,
+    ) -> Vec<(SessionRef, Provenance)> {
+        let mut copies: std::collections::HashMap<_, (SessionRef, Provenance)> = std::collections::HashMap::new();
+        for (r, provenance) in sources {
+            let key = (r.harness, r.id.clone());
+            match copies.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert((r, provenance));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let (old, old_provenance) = entry.get();
+                    let order = (!r.path.exists())
+                        .cmp(&(!old.path.exists()))
+                        .then_with(|| r.preferred_copy_cmp(old))
+                        .then_with(|| {
+                            (
+                                !provenance.is_empty(),
+                                &provenance.parent_id,
+                                &provenance.agent_id,
+                                &provenance.workflow,
+                            )
+                                .cmp(&(
+                                    !old_provenance.is_empty(),
+                                    &old_provenance.parent_id,
+                                    &old_provenance.agent_id,
+                                    &old_provenance.workflow,
+                                ))
+                        });
+                    if order.is_lt() {
+                        entry.insert((r, provenance));
+                    }
+                }
             }
         }
-        n
+        let mut refs: Vec<_> = copies.into_values().collect();
+        refs.sort_by(|(a, _), (b, _)| a.harness.as_str().cmp(b.harness.as_str()).then_with(|| a.id.cmp(&b.id)));
+        refs
     }
 
     /// All persisted events of one session in transcript order, optionally filtered by kind.
@@ -1243,6 +1398,18 @@ mod db_stub {
             _source: &crate::source::Snapshot,
             _probe: &mut crate::source::Probe,
         ) -> bool {
+            false
+        }
+        pub fn needs_ingest_with_provenance(
+            &self,
+            _r: &SessionRef,
+            _source: &crate::source::Snapshot,
+            _provenance: &Provenance,
+            _probe: &mut crate::source::Probe,
+        ) -> bool {
+            false
+        }
+        pub fn can_resume(&self, _r: &SessionRef, _provenance: &Provenance) -> bool {
             false
         }
     }
@@ -1631,6 +1798,221 @@ mod tests {
         }];
         let ev = extract(&m, 0, None).unwrap();
         assert!(ev[0].detail.as_ref().unwrap().chars().count() <= DETAIL_MAX);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn published_event_authority_tracks_copy_provenance_and_cwd_atomically() {
+        let world = cv_testkit::World::in_process("events-authority");
+        let fixture = |name: &str, target: &str| {
+            let path = world.base.join(format!("{name}.jsonl"));
+            let line = serde_json::json!({"type":"assistant","uuid":"a","sessionId":"shared",
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":"call","name":"Read","input":{"file_path":target}}]}});
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            let mut r = SessionRef::new("shared", crate::Harness::Claude, path);
+            r.cwd = Some("/first".into());
+            r
+        };
+        let a = fixture("copy-a", "a.rs");
+        let b = fixture("copy-b", "b.rs");
+        let direct = Provenance::default();
+        let folded = Provenance {
+            parent_id: Some("parent".into()),
+            agent_id: Some("agent".into()),
+            workflow: Some("workflow".into()),
+        };
+        let stale = |r: &SessionRef, prov: &Provenance| {
+            let mut probe = crate::source::Probe::default();
+            let source = probe.snapshot(r);
+            SyncTable::load().needs_ingest_with_provenance(r, &source, prov, &mut probe)
+        };
+        let rows = || format!("{:?}", events_for("claude", "shared", None));
+        ingest_ref(&a).unwrap();
+        assert!(!stale(&a, &direct));
+        let planned = SyncTable::load();
+        assert!(planned.can_resume(&a, &direct));
+        ingest_ref(&b).unwrap();
+        assert!(stale(&a, &direct));
+        assert!(!stale(&b, &direct));
+        assert!(!needs_ingest(&b, file_mtime_ns(&b.path)));
+        assert!(!SyncTable::load().can_resume(&a, &direct));
+        assert_eq!(
+            events_for("claude", "shared", None)[0].target.as_deref(),
+            Some("/first/b.rs")
+        );
+        let conn = crate::catalog::open_db().unwrap();
+        let a_sig = crate::offsets::file_sig(&a.path);
+        conn.execute(
+            "INSERT INTO event_sync(harness,id,path,mtime_ns,size) VALUES('claude','shared',?1,?2,?3)",
+            rusqlite::params![a.path.to_string_lossy(), a_sig.0, a_sig.1],
+        )
+        .unwrap();
+        assert!(
+            stale(&a, &direct),
+            "a competing historical path stamp cannot claim published output"
+        );
+        assert!(!stale(&b, &direct));
+        let before = rows();
+        let source = crate::source::Probe::default().snapshot(&a);
+        let empty = || SpoolingSink::new(None).into_spool().unwrap();
+        assert!(
+            record_spooled_with_source(&a, 1, empty(), &source, &direct).is_err(),
+            "publication rechecks authority after planning"
+        );
+        assert_eq!(rows(), before);
+        assert!(
+            !stale(&b, &direct),
+            "failed prefix publication leaves stamps and output together"
+        );
+        ingest_subagent(&b, &folded).unwrap();
+        assert!(stale(&b, &direct));
+        assert!(needs_ingest(&b, file_mtime_ns(&b.path)));
+        assert!(!stale(&b, &folded));
+        assert_eq!(
+            events_for("claude", "shared", None)[0].parent_id.as_deref(),
+            Some("parent")
+        );
+        let source = crate::source::Probe::default().snapshot(&b);
+        assert!(record_spooled_with_source(&b, 1, empty(), &source, &direct).is_err());
+        ingest_ref(&b).unwrap();
+        assert!(!stale(&b, &direct));
+        assert!(stale(&b, &folded));
+        assert!(events_for("claude", "shared", None)[0].parent_id.is_none());
+        let mut changed = b.clone();
+        changed.cwd = Some("/second".into());
+        assert!(stale(&changed, &direct));
+        assert!(!SyncTable::load().can_resume(&changed, &direct));
+        ingest_ref(&changed).unwrap();
+        assert_eq!(
+            events_for("claude", "shared", None)[0].target.as_deref(),
+            Some("/second/b.rs")
+        );
+        assert!(!stale(&changed, &direct));
+        let conn = crate::catalog::open_db().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM event_sync WHERE id='shared'", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute("UPDATE event_sessions SET source_path=NULL", []).unwrap();
+        assert!(stale(&changed, &direct), "legacy output has no authoritative path");
+        assert!(!SyncTable::load().can_resume(&changed, &direct));
+        assert!(record_spooled_with_source(&changed, 1, empty(), &source, &direct).is_err());
+        ingest_ref(&changed).unwrap();
+        assert!(!stale(&changed, &direct));
+        let before = rows();
+        let source = crate::source::Probe::default().snapshot(&changed);
+        record_spooled_with_source(&changed, 1, empty(), &source, &direct).unwrap();
+        assert_eq!(rows(), before, "same-authority prefix retention remains supported");
+        conn.execute_batch(
+            "ALTER TABLE event_sessions DROP COLUMN source_path; ALTER TABLE event_sessions DROP COLUMN source_cwd;",
+        )
+        .unwrap();
+        assert!(
+            stale(&changed, &direct),
+            "existing catalog gains nullable authority and misses lazily"
+        );
+        assert_eq!(rows(), before, "authority migration keeps old event output available");
+        ingest_ref(&changed).unwrap();
+        assert!(!stale(&changed, &direct));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn event_source_selection_is_newest_qualified_and_direct_on_identical_copy() {
+        let world = cv_testkit::World::in_process("events-copy-selection");
+        let old_path = world.base.join("older.jsonl");
+        let new_path = world.base.join("newer.jsonl");
+        std::fs::write(&old_path, []).unwrap();
+        std::fs::write(&new_path, []).unwrap();
+        let mut older = SessionRef::new("same", crate::Harness::Claude, &old_path);
+        older.updated_at = chrono::DateTime::from_timestamp(1, 0);
+        let mut newer = older.clone();
+        newer.path = new_path.clone();
+        newer.updated_at = chrono::DateTime::from_timestamp(2, 0);
+        let mut other = older.clone();
+        other.harness = crate::Harness::Codex;
+        let folded = Provenance {
+            parent_id: Some("parent".into()),
+            ..Default::default()
+        };
+        let inputs = vec![
+            (older, Provenance::default()),
+            (newer.clone(), folded),
+            (other, Provenance::default()),
+            (newer.clone(), Provenance::default()),
+        ];
+        let selected = db::preferred_sources(inputs.clone());
+        let reverse = db::preferred_sources(inputs.into_iter().rev());
+        assert_eq!(format!("{selected:?}"), format!("{reverse:?}"));
+        assert_eq!(selected.len(), 2);
+        let (r, provenance) = selected
+            .iter()
+            .find(|(r, _)| r.harness == crate::Harness::Claude)
+            .unwrap();
+        assert_eq!(r.path, newer.path);
+        assert!(provenance.is_empty());
+        std::fs::remove_file(&new_path).unwrap();
+        let older = SessionRef {
+            path: old_path.clone(),
+            updated_at: chrono::DateTime::from_timestamp(1, 0),
+            ..newer.clone()
+        };
+        let select = || {
+            db::preferred_sources(vec![
+                (newer.clone(), Provenance::default()),
+                (older.clone(), Provenance::default()),
+            ])
+        };
+        assert_eq!(
+            select()[0].0.path,
+            old_path,
+            "live older copy beats disappeared preferred copy"
+        );
+        std::fs::remove_file(&old_path).unwrap();
+        assert_eq!(
+            select()[0].0.path,
+            new_path,
+            "all-missing preserves newest error source"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn event_forest_selection_keeps_unique_children_of_nonpreferred_parent_copies() {
+        let world = cv_testkit::World::in_process("events-forest-selection");
+        let mut parents = Vec::new();
+        for (name, timestamp) in [("older", 1), ("newer", 2)] {
+            let dir = world.base.join(name);
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("parent.jsonl");
+            std::fs::write(&path, []).unwrap();
+            let mut parent = SessionRef::new("parent", crate::Harness::Claude, &path);
+            parent.updated_at = chrono::DateTime::from_timestamp(timestamp, 0);
+            let agents = dir.join("parent/subagents");
+            std::fs::create_dir_all(&agents).unwrap();
+            let line = serde_json::json!({"type":"assistant", "uuid":name, "sessionId":name,
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":"call","name":"Read","input":{"file_path":format!("/{name}.rs")}}]}});
+            std::fs::write(agents.join(format!("agent-{name}.jsonl")), format!("{line}\n")).unwrap();
+            parents.push(parent);
+        }
+        let selected = db::collect_sources(parents.clone(), true);
+        assert_eq!(selected.len(), 3, "one preferred parent plus both disjoint children");
+        assert_eq!(
+            selected.iter().find(|(r, _)| r.id == "parent").unwrap().0.path,
+            parents[1].path
+        );
+        for (r, provenance) in selected.iter().filter(|(_, provenance)| !provenance.is_empty()) {
+            ingest_subagent(r, provenance).unwrap();
+            let rows = events_for(r.harness.as_str(), &r.id, None);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].parent_id.as_deref(), Some("parent"));
+        }
+        assert_eq!(
+            format!("{selected:?}"),
+            format!("{:?}", db::collect_sources(parents.into_iter().rev().collect(), true))
+        );
     }
 
     #[cfg(feature = "sqlite")]

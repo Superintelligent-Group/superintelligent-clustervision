@@ -4,6 +4,8 @@
 
 - Semantic refresh selects one live copy per harness-qualified session identity, preventing duplicate-store source errors and repairing old duplicate vector rows.
 
+- Event caches bind published rows to source copy, attribution and working directory, preventing stale copied-session reuse and incompatible append prefixes.
+
 - Indexing skips unchanged empty transcripts when captured source guards are fresh; missing files and historical unknown signatures still invalidate.
 
 - Prune resolves linked tool inputs without materializing unrelated earlier assistant content, preserving metadata and sidecar fidelity.
