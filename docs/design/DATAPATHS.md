@@ -2318,16 +2318,16 @@ builds were compared for behavior only, with no work or timing inference.
 
 ### Fleet-scale operation follow-up (2026-10-13, in progress)
 
-- First-use scoped discovery currently loads and decodes the complete persisted scan cache.
-  Investigate deferred decoding within existing cache entries, measuring unrelated-row growth;
-  avoid per-file catalog opens, eager SQLite-only loading and new operation-scope machinery.
+- First-use scoped discovery now retains serialized cache payloads and decodes matching demanded
+  rows. The operation control below measures unrelated-row growth; bulk SQL strings still scale
+  with cache size. No per-file catalog opens or new operation-scope machinery were introduced.
 - Small unqueried JSON listings now heapify borrowed candidates and select in stable rank order;
   the unrequested tail stays unordered. Queried windows and exact text totals keep full sorting.
   The work/memory tradeoff and natural-run controls are recorded below.
 - Filtered ranked search now shares compact query-local decisions/addresses across segments,
   retaining no title/cwd documents. The ranked-query control below preserves legacy body-only
-  fallbacks and stored-document failures. Multiple `text:` needles still repeat reader setup;
-  shared reader setup for those needles is the next separate change.
+  fallbacks and stored-document failures. Multiple `text:` needles also share one reader snapshot
+  through the separate batch API described below.
 - MCP startup reuse is completed: one parsed clap tree, released after identical tool extraction.
   The operation audit below retains child dispatch and bounded staging; no persistent daemon
   replacement is justified by the current controls.
@@ -2437,3 +2437,33 @@ IDs. Empty batches open nothing. The existing no-source/all-chunk-matches contro
 five batch needles, including a malformed middle needle, with separate production searches;
 complete IDs and errors match. This removes repeated setup, not matching-document work;
 queries share one consistent index snapshot rather than reopening between predicates.
+
+### First-process scoped discovery: deferred cache payloads (2026-10-13)
+
+`discover_cache::Entry` retains a persisted row's serialized refs/read set until a matching path
+and cheap tuple demand it. Successful decoding releases encoded strings; malformed payloads
+remain misses. Already decoded hits and captured read sets retain shared-lock access. Only first
+decoding upgrades the lock, rechecking the tuple before reuse. Count updates, original source
+guards, interpretation invalidation, dirty publication and vanished-file pruning keep their
+existing contracts. SQLite-only refreshes still never load the transcript cache unnecessarily.
+
+The reusable [control](../../tools/profiling/discovery-cache.py) runs production `sessions()` in
+fresh processes against one canonical scratch catalog path, with one stale Claude primary and
+zero or 4,096 unrelated cache rows. The final [allocation artifact](../../tools/profiling/results/discovery-cache-allocation-native.json)
+reports 50,421 → 13,549 allocation requests, 21,478,200 → 8,967,285 requested bytes, and
+13,748,681 → 7,948,688 peak requested Rust heap bytes above baseline for the larger case.
+All four output digests match and the refreshed count is two; stderr is empty. The zero-unrelated
+case retains the same 20,706-byte peak. Compiler/features/profile are matched; these are synthetic
+allocation controls, not elapsed-time, native allocation or mapped-page measurements.
+
+Bulk SQL string copying/retention and persistence's map walk remain proportional to cache size.
+This change avoids eager nested metadata decoding without a new connection pool or partial-load
+scope protocol; it does not establish bounded first-use cache memory.
+
+Combined-branch checks pass four cache controls, three ranked search controls and the CLI batch
+membership control. The cache lane also passes eleven freshness controls, native/portable cache
+tests and no-SQL compilation. At `c9f18ba`, ten actual CLI listing commands on 48 synthetic sessions
+match installed `ef75a100` stdout/stderr exactly: all sort keys/directions, enrichment, queried,
+wide and empty windows. Two-row windows exercise heap activation. Input hashes remain unchanged;
+raw results are retained at `excellence-evidence/listing-cli-parity/results.json`. These checks
+cover integration behavior, not a new full convergence or end-to-end speed measurement.
