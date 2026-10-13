@@ -21,12 +21,34 @@ work is explicitly deferred. This changes priority, not the correctness or fidel
 | Refresh / search | No-op FTS planning avoids writer startup, but CLI `index` still discovers the fleet first. Full-fleet merge/query and interactive latency during indexing are unmeasured. | Measure complete unchanged / append refresh and indexed query, then index alongside a read. Account for discovery, merge/publication and aggregate process resources. |
 | Transform / export | Verified Codex port has measured 23–29% CPU and large heap improvements. Prune/archive/dataset can still scan or stage whole output. | Hold further Claude emitter work. Measure small selections from large histories and actual bytes written before optimizing occasional whole-output operations. |
 
-Each representative operation needs cold/warm/one-change labels, time to first **useful** output,
-total elapsed time, CPU, output size, physical memory/RSS, source and temporary I/O, and peak/lifetime
-of cache or spool disk. Heap counters remain regression ceilings. A progress banner is not a result;
-a failed command is not a performance success. Filesystem cache and concurrent load must be reported.
-Measure concurrent index + interactive read after single-operation costs are understood. Avoid
-claiming that one process's byte permits bound the machine's total memory.
+### Measurement correction: count the work (2026-10-12)
+
+Shared machines are too noisy for small wall-clock differences to steer this pass. The timings
+above and below are historical observations, not rankings or regression gates. Pause new timing
+campaigns, including concurrent index/read sampling. Keep cold/warm/one-change **application state**
+labels, but optimize repeatable work on identical inputs and verify identical useful results:
+
+- Instructions executed by an optimized binary with debug information, using Cachegrind on Linux.
+  Pin compiler, features, architecture, workload, catalog state and worker count. Repeat an identical
+  control to establish actual reproducibility; randomized hashing, paths and scheduling can still
+  vary the work. Keep setup/output hashing separate when attributing operation costs.
+- Candidate bodies opened, parser callbacks, bytes scanned/decoded/copied, and complete traversals.
+  Count at existing boundaries as needed; file size and callback count alone do not measure I/O.
+- SQLite statements/VM steps and logical index additions/deletions, where instrumentation is
+  available. Unchanged refresh should avoid parsing and writer startup; an append should reuse
+  verified history. Segment layout and merge scheduling are separate from logical work totals.
+- Allocation requests and cumulative requested bytes, retained heap, staged/output bytes and spool
+  lifetime. Existing heap probes exclude native allocations and file-backed mappings; concurrent
+  peaks and physical disk allocation are not strictly deterministic.
+
+Instruction count is a cost model, not a latency guarantee. Cachegrind's simplified cache simulation
+does not describe Apple Silicon caches; instruction-only profiles are the initial target. Its
+[manual](https://valgrind.org/docs/manual/cg-manual.html) explains these limits. ARM64 Linux is
+[supported](https://valgrind.org/info/platforms.html), ARM64 Darwin is not. Local Docker Desktop
+provides an ARM64 Linux route; a small executable probe is being established before adding gates.
+Do not build a general telemetry framework or replace existing production paths with benchmark-only
+implementations. Elapsed/CPU times may remain coarse observations, never evidence by themselves of
+a small improvement. Avoid claiming one process's byte permits bound total machine memory.
 
 Use existing benchmark/probe machinery and a small representative workload set. The selected-payload
 matrix tests exact output and allocation ceilings; it does not measure responsiveness, warm reuse,
