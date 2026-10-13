@@ -17,7 +17,7 @@
 
 use crate::util::{parse_harness, report, resolve, short_id, usage};
 use anyhow::{bail, Context, Result};
-use cv_core::distill::{distill, findings, resumable_session, DistillOptions, Distilled};
+use cv_core::distill::{distill, findings, prepare_distill, DistillOptions, Distilled, PreparedDistillation};
 use cv_core::ir::{Harness, Session, SessionRef};
 use cv_core::EmitOptions;
 use serde_json::{json, Value};
@@ -312,7 +312,19 @@ pub(crate) fn cmd_distill(
         }
         s.messages.truncate(n);
     }
-    let mut d = distill(&s, &opts)?;
+    enum Products {
+        Pack(Distilled),
+        Resume(PreparedDistillation),
+    }
+    let mut products = if matches!(target, Target::PackOnly) {
+        Products::Pack(distill(&s, &opts)?)
+    } else {
+        Products::Resume(prepare_distill(&s, &opts)?)
+    };
+    let d = match &mut products {
+        Products::Pack(d) => d,
+        Products::Resume(prepared) => &mut prepared.distilled,
+    };
     for other in with {
         let (o, _) = load(other, None)?;
         d.head_md.push_str(&findings(&o, &opts)?);
@@ -330,11 +342,12 @@ pub(crate) fn cmd_distill(
             .and_then(Value::as_str)
             .unwrap_or(&s.label())
     );
-    let emitted = match &target {
-        Target::PackOnly => Emitted::default(),
-        _ => {
-            let ir = resumable_session(&s, &d, &opts)?;
-            emit_to(&ir, &target, &d.elided, &src_path, &description)?
+    let (d, emitted) = match products {
+        Products::Pack(d) => (d, Emitted::default()),
+        Products::Resume(prepared) => {
+            let (d, ir) = prepared.into_resumable_session(&s);
+            let emitted = emit_to(&ir, &target, &d.elided, &src_path, &description)?;
+            (d, emitted)
         }
     };
     let mut h = report_text(&d, &emitted);

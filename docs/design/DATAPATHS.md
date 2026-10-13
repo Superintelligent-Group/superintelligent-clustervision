@@ -162,6 +162,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Dataset | Streamed selection and bounded output staging; late predicates retain source descriptors in private spools | Bounded slice decoding reduces matched-query spool CPU; demanded owned producer fields remain |
 | Pack/tools/token stats | Tool histograms fold per-message event scratch; pack excerpts use a ring; ordered usage rows reuse a bounded dependency-validated cache | Cold ledger publication, exact dedup I/O and model roster growth; tiny native sources bypass caching |
 | Reshape/emit | Bounded shared JSONL stage; native Codex ports retain checked lazy bodies; verification reduces compact facts | Message roster/selected metadata, complete carriers, Claude record rewrites and other emitters/materializing thinking transforms |
+| Distill/findings | Shared analysis demand and one prepared tail reused for Markdown, token accounting and resumable composition; findings omit unused output products | Full-source loader, demanded facts/timeline text, sidecar retention and publication remain |
 | Prune/revive | Compact selection facts and source positions; transcript/sidecar staging with sequential record rewrites | Giant changed records remain owned; additional scans/staging currently increase CPU |
 | MCP observe | Retained-message watch callbacks and checked capped searchable prefixes | Other full producer modes, owned metadata and uncapped MCP show windows remain separate |
 | Task coordination | Replay full append-only task log under CAS for writes | Separate workload; snapshot/tail only if measured task volume warrants it |
@@ -1973,3 +1974,34 @@ races, inactive-session enrichment, deduplication, head failures and whole-sessi
 The Chrome web selftest passes 62/62. This removes an application-level first-render dependency;
 it does not reduce EOF-head work, cancel background requests, add a metadata cache or change
 API contracts. No elapsed-time measurement or throughput claim is made.
+
+
+### Distill shared analysis products (Sol, 2026-10-13)
+
+Core distill now separates full-product and findings-only demand within the same fact/timeline
+analysis. Full analysis prepares the normalized tail once, rendering Markdown and estimating tail
+tokens from that same roster. Additive `prepare_distill` / `PreparedDistillation` lets resumable CLI
+routes append their `--with` findings and then consume/move the prepared tail into the output
+Session. Pack-only `distill` drops the roster after computing its products. Existing public
+`distill` and `resumable_session` wrappers remain compatible, including caller-supplied options.
+Tool-result facts borrow already-owned tool inputs rather than first cloning each entire Value.
+
+Findings retain the existing rendered-head section extraction (including embedded Markdown edge
+behavior), but skip unused elided-output copies, tail preparation/rendering and token statistics.
+All source materialization and facts scans still happen: demanded findings and original source
+error behavior are preserved. No loader, `--upto`, lazy-carrier, emitter, cache or event policy changed.
+
+Deterministic test-only boundary counters compare frozen pre-refactor orchestration in
+`cv-core/src/distill/legacy_products.rs`: full resumable analysis builds the tail 3 times before,
+1 time after; findings builds it 2 times before, 0 after. A findings fixture with more than 1 MiB
+of tool output copies more than 1 MiB into unused elisions before, 0 bytes after; its N source
+message-estimation requests become 0. Twelve keep-last/result-cap combinations compare exact
+head, tail, stats, elided roster, pack, compatibility APIs and resumable Session; sidecar lines and
+native Claude/Codex bytes match. Allocation-address assertions prove tail text moves into the
+consumed Session. Additional controls cover `--with` head/stat composition, embedded Markdown,
+thinking, caller-changed compatibility options, unknown trailing calls, Unicode and changed-source errors. CLI pack/resume `--with` smoke controls match pack bytes and stats, publish sidecars and preserve `--upto` bounds. No timing runs or full gates.
+
+Limits: this removes repeated product construction, not full-source loading or facts traversal.
+The resumable route retains its prepared tail until consumption; original source ownership and
+required Markdown/sidecar output remain. Spooling sidecar output and selected `--upto` loading are
+separate follow-ups, not claims of bounded whole-distill heap.

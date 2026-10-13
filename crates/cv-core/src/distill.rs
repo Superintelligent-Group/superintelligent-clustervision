@@ -133,6 +133,51 @@ impl Distilled {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Default, Debug)]
+struct Work {
+    tail_preparations: usize,
+    elided_copy_bytes: usize,
+    source_estimates: usize,
+}
+#[cfg(test)]
+thread_local! { static WORK: std::cell::Cell<Work> = std::cell::Cell::new(Work::default()); }
+#[cfg(test)]
+fn note_work(f: impl FnOnce(&mut Work)) {
+    WORK.with(|cell| {
+        let mut work = cell.get();
+        f(&mut work);
+        cell.set(work);
+    });
+}
+
+/// Full distillation products with one already transformed tail. Consume this value after
+/// adding optional findings to `distilled.head_md`; the tail moves into the resumable session.
+/// Unlike an implicit cache, this preparation owns its options and is consumed once.
+pub struct PreparedDistillation {
+    pub distilled: Distilled,
+    tail: Vec<Message>,
+    keep_last: usize,
+}
+impl PreparedDistillation {
+    pub fn into_resumable_session(self, source: &Session) -> (Distilled, Session) {
+        let output = session_with_tail(source, &self.distilled, self.keep_last, self.tail);
+        (self.distilled, output)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Demand {
+    Full,
+    Findings,
+}
+
+/// Prepare the pack, statistics, sidecar roster and resumable tail together. CLI resume routes
+/// consume the tail instead of constructing it again after rendering the pack.
+pub fn prepare_distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<PreparedDistillation> {
+    analyze(session, opts, Demand::Full)
+}
+
 // ── analysis ─────────────────────────────────────────────────────────────────────────────────
 
 /// One entry in the chronological record of what was said to and by the agent.
@@ -338,6 +383,8 @@ fn block_est(b: &Block) -> anyhow::Result<u64> {
 }
 
 fn message_est(m: &Message) -> anyhow::Result<u64> {
+    #[cfg(test)]
+    note_work(|work| work.source_estimates += 1);
     if !m.is_model_visible() {
         return Ok(0);
     }
@@ -425,6 +472,10 @@ fn note_paths(p: &str) -> bool {
 /// Distill `session` (any harness; materialized) into a context pack, a tail cut point and the
 /// elided-output list. Source-backed values are explicitly read before analysis; failures propagate.
 pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Distilled> {
+    Ok(prepare_distill(session, opts)?.distilled)
+}
+
+fn analyze(session: &Session, opts: &DistillOptions, demand: Demand) -> anyhow::Result<PreparedDistillation> {
     let session = crate::emit::materialized_session(session)?;
     let session = session.as_ref();
     let msgs = &session.messages;
@@ -600,9 +651,14 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Disti
                     };
                     let (name, input) = uses
                         .get(tool_use_id.as_str())
-                        .map(|c| Ok::<_, anyhow::Error>((c.name.to_string(), c.input.resolve()?.into_owned())))
+                        .map(|c| Ok::<_, anyhow::Error>((c.name.to_string(), c.input.resolve()?)))
                         .transpose()?
-                        .unwrap_or_else(|| (tool_name.clone().unwrap_or_default(), Value::Null));
+                        .unwrap_or_else(|| {
+                            (
+                                tool_name.clone().unwrap_or_default(),
+                                std::borrow::Cow::Owned(Value::Null),
+                            )
+                        });
                     let label = tool_label(&name, &input);
                     let out: &str = content;
                     let outcome = scan_result_facts(i, &name, &input, &label, out, *is_error, &mut facts);
@@ -634,11 +690,13 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Disti
                         });
                     }
                     let keep_whole = in_tail && out.len() <= opts.tail_result_max;
-                    if !keep_whole {
+                    if !keep_whole && demand == Demand::Full {
+                        #[cfg(test)]
+                        note_work(|work| work.elided_copy_bytes += out.len());
                         elided.push(Elided {
                             tool_use_id: tool_use_id.clone(),
                             tool_name: name.clone(),
-                            input: input.clone(),
+                            input: input.as_ref().clone(),
                             content: out.to_string(),
                         });
                     }
@@ -729,13 +787,29 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Disti
         h.push('\n');
     }
 
-    let tail_md = render_tail(msgs, tail_start, opts, &retrieve_ref, &session.resolver())?;
+    if demand == Demand::Findings {
+        return Ok(PreparedDistillation {
+            distilled: Distilled {
+                head_md: h,
+                tail_md: String::new(),
+                tail_start,
+                elided,
+                stats: DistillStats::default(),
+                label,
+                retrieve_ref,
+            },
+            tail: Vec::new(),
+            keep_last: opts.keep_last,
+        });
+    }
+    let tail = resumable_tail(msgs, tail_start, opts, &retrieve_ref, &session.resolver())?;
+    let tail_md = render_prepared_tail(&tail, tail_start, opts)?;
 
     let source_est_tokens: u64 = msgs
         .iter()
         .try_fold(0u64, |sum, message| Ok::<_, anyhow::Error>(sum + message_est(message)?))?;
     let pack_est_tokens = est(&h);
-    let tail_est_tokens: u64 = resumable_tail(msgs, tail_start, opts, &retrieve_ref, &session.resolver())?
+    let tail_est_tokens: u64 = tail
         .iter()
         .flat_map(|m| &m.content)
         .try_fold(0u64, |sum, block| Ok::<_, anyhow::Error>(sum + block_est(block)?))?;
@@ -761,14 +835,18 @@ pub fn distill(session: &Session, opts: &DistillOptions) -> anyhow::Result<Disti
         errors: facts.errors.len(),
         elided_outputs: elided.len(),
     };
-    Ok(Distilled {
-        head_md: h,
-        tail_md,
-        tail_start,
-        elided,
-        stats,
-        label,
-        retrieve_ref,
+    Ok(PreparedDistillation {
+        distilled: Distilled {
+            head_md: h,
+            tail_md,
+            tail_start,
+            elided,
+            stats,
+            label,
+            retrieve_ref,
+        },
+        tail,
+        keep_last: opts.keep_last,
     })
 }
 
@@ -1073,6 +1151,8 @@ fn resumable_tail(
     retrieve_ref: &str,
     resolver: &crate::Resolver,
 ) -> anyhow::Result<Vec<Message>> {
+    #[cfg(test)]
+    note_work(|work| work.tail_preparations += 1);
     let mut out: Vec<Message> = Vec::new();
     for m in &msgs[tail_start..] {
         match (m.role, m.kind) {
@@ -1132,14 +1212,7 @@ fn resumable_tail(
     Ok(out)
 }
 
-fn render_tail(
-    msgs: &[Message],
-    tail_start: usize,
-    opts: &DistillOptions,
-    retrieve_ref: &str,
-    resolver: &crate::Resolver,
-) -> anyhow::Result<String> {
-    let tail = resumable_tail(msgs, tail_start, opts, retrieve_ref, resolver)?;
+fn render_prepared_tail(tail: &[Message], tail_start: usize, opts: &DistillOptions) -> anyhow::Result<String> {
     if tail.is_empty() {
         return Ok(String::new());
     }
@@ -1149,7 +1222,7 @@ fn render_tail(
         "## 5. The last {} tool calls, verbatim (from message [{tail_start}] on)\n",
         opts.keep_last
     );
-    for m in &tail {
+    for m in tail {
         for b in &m.content {
             match b {
                 Block::Text { text } => {
@@ -1219,6 +1292,17 @@ pub fn resume_preamble(d: &Distilled, keep_last: usize) -> String {
 /// carry and is re-linked to the opening prompt, a hook attachment's child is re-linked over the
 /// gap, an unanswered trailing call is dropped (`harness::claude::emit::make_resumable`). This is a selector.
 pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions) -> anyhow::Result<Session> {
+    let tail = resumable_tail(
+        &session.messages,
+        d.tail_start,
+        opts,
+        &d.retrieve_ref,
+        &session.resolver(),
+    )?;
+    Ok(session_with_tail(session, d, opts.keep_last, tail))
+}
+
+fn session_with_tail(session: &Session, d: &Distilled, keep_last: usize, mut tail: Vec<Message>) -> Session {
     let mut first = Message::of_kind(Role::User, MessageKind::Prompt, Origin::Human);
     first.timestamp = session
         .messages
@@ -1226,15 +1310,8 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
         .and_then(|m| m.timestamp)
         .or(session.updated_at);
     first.content.push(Block::Text {
-        text: format!("{}{}", resume_preamble(d, opts.keep_last), d.head_md).into(),
+        text: format!("{}{}", resume_preamble(d, keep_last), d.head_md).into(),
     });
-    let mut tail = resumable_tail(
-        &session.messages,
-        d.tail_start,
-        opts,
-        &d.retrieve_ref,
-        &session.resolver(),
-    )?;
     let mut messages = vec![first];
     messages.append(&mut tail);
     let output = Session {
@@ -1256,7 +1333,7 @@ pub fn resumable_session(session: &Session, d: &Distilled, opts: &DistillOptions
         extra: serde_json::Map::new(),
     };
     // The selected tail was already materialized; earlier inputs were never demanded.
-    Ok(output)
+    output
 }
 
 /// Another lane's findings, for injection into this one's pack (`--with`): its own words (text,
@@ -1267,7 +1344,7 @@ pub fn findings(session: &Session, opts: &DistillOptions) -> anyhow::Result<Stri
         ledger: false,
         ..opts.clone()
     };
-    let d = distill(session, &o)?;
+    let d = analyze(session, &o, Demand::Findings)?.distilled;
     // Keep only the agent's own entries from the timeline and the facts section.
     let mut out = String::new();
     let _ = writeln!(out, "## Findings from another lane — {} (`{}`)\n", d.label, session.id);
@@ -1331,6 +1408,243 @@ pub(crate) mod tests {
             status: None,
             details: None,
         }
+    }
+
+    fn same_products(actual: &Distilled, expected: &Distilled) {
+        assert_eq!(actual.head_md, expected.head_md);
+        assert_eq!(actual.tail_md, expected.tail_md);
+        assert_eq!(actual.tail_start, expected.tail_start);
+        assert_eq!(actual.pack(), expected.pack());
+        assert_eq!(
+            serde_json::to_value(&actual.stats).unwrap(),
+            serde_json::to_value(&expected.stats).unwrap()
+        );
+        let elided = |d: &Distilled| {
+            d.elided
+                .iter()
+                .map(|e| serde_json::json!({"id":e.tool_use_id,"name":e.tool_name,"input":e.input,"content":e.content}))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(elided(actual), elided(expected));
+    }
+    #[test]
+    fn shared_products_match_frozen_oracle_and_move_one_prepared_tail() -> anyhow::Result<()> {
+        let mut source = lane();
+        // Embedded markdown exercises findings' existing section-extraction edge behavior.
+        source.messages.push(msg(
+            Role::Assistant,
+            MessageKind::Reply,
+            vec![text(
+                "### agent said nested
+kept?
+## 3. Facts
+body λ",
+            )],
+        ));
+        source.messages.push(msg(
+            Role::Assistant,
+            MessageKind::Reply,
+            vec![Block::Thinking {
+                text: "thought λ".into(),
+                signature: Some("signature".into()),
+                encrypted: None,
+                redacted: false,
+            }],
+        ));
+        let fixed_time = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")?.with_timezone(&chrono::Utc);
+        source.created_at = Some(fixed_time);
+        source.updated_at = Some(fixed_time);
+        let mut parent = None;
+        for (index, message) in source.messages.iter_mut().enumerate() {
+            let id = format!("00000000-0000-4000-8000-{:012}", index + 100);
+            message.id = Some(id.clone());
+            message.parent_id = parent.replace(id);
+            message.timestamp = Some(fixed_time);
+        }
+        let world = cv_testkit::World::new("distill-products-native");
+        for keep_last in [0, 2, 12, 999] {
+            for tail_result_max in [0, 17, 6000] {
+                let opts = DistillOptions {
+                    keep_last,
+                    tail_result_max,
+                    keep_tail_thinking: keep_last % 2 == 0,
+                    retrieve_ref: Some("retrieval".into()),
+                    ..Default::default()
+                };
+                WORK.with(|cell| cell.set(Work::default()));
+                let expected = legacy_products::distill(&source, &opts)?;
+                let expected_session = legacy_products::resumable_session(&source, &expected, &opts)?;
+                let old_work = WORK.with(|cell| cell.get());
+                WORK.with(|cell| cell.set(Work::default()));
+                let prepared = prepare_distill(&source, &opts)?;
+                same_products(&prepared.distilled, &expected);
+                let pointers: Vec<_> = prepared
+                    .tail
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .filter_map(|b| match b {
+                        Block::Text {
+                            text: crate::Text::Inline(text),
+                        } => Some(text.as_ptr()),
+                        _ => None,
+                    })
+                    .collect();
+                let (actual, actual_session) = prepared.into_resumable_session(&source);
+                let new_work = WORK.with(|cell| cell.get());
+                same_products(&actual, &expected);
+                assert_eq!(
+                    serde_json::to_value(&actual_session)?,
+                    serde_json::to_value(&expected_session)?
+                );
+                let moved: Vec<_> = actual_session
+                    .messages
+                    .iter()
+                    .skip(1)
+                    .flat_map(|m| &m.content)
+                    .filter_map(|b| match b {
+                        Block::Text {
+                            text: crate::Text::Inline(text),
+                        } => Some(text.as_ptr()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(pointers, moved, "prepared tail bodies must move");
+                assert_eq!(old_work.tail_preparations, 3);
+                assert_eq!(new_work.tail_preparations, 1);
+                assert_eq!(new_work.elided_copy_bytes, old_work.elided_copy_bytes);
+                assert_eq!(new_work.source_estimates, old_work.source_estimates);
+                let sidecar = |d: &Distilled| {
+                    d.elided
+                        .iter()
+                        .map(|e| crate::prune::sidecar_line(&e.tool_use_id, &e.tool_name, &e.input, &e.content))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(sidecar(&actual), sidecar(&expected));
+                if keep_last == 2 && tail_result_max == 17 {
+                    let mut expected_native = expected_session.clone();
+                    let mut actual_native = actual_session.clone();
+                    for session in [&mut expected_native, &mut actual_native] {
+                        session.messages[0].id = Some("00000000-0000-4000-8000-000000000001".into());
+                    }
+                    for target in [Harness::Claude, Harness::Codex] {
+                        let emit_opts = crate::emit::EmitOptions {
+                            new_id: Some("00000000-0000-4000-8000-000000000002".into()),
+                            ..Default::default()
+                        };
+                        let old = crate::emit::emit(
+                            &expected_native,
+                            target,
+                            &world.base.join(format!("old-{target}")),
+                            &emit_opts,
+                        )?;
+                        let new = crate::emit::emit(
+                            &actual_native,
+                            target,
+                            &world.base.join(format!("new-{target}")),
+                            &emit_opts,
+                        )?;
+                        assert!(
+                            std::fs::read(old.path)? == std::fs::read(new.path)?,
+                            "native {target} output"
+                        );
+                    }
+                }
+                same_products(&distill(&source, &opts)?, &expected);
+                assert_eq!(
+                    serde_json::to_value(resumable_session(&source, &expected, &opts)?)?,
+                    serde_json::to_value(&expected_session)?
+                );
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    fn prepared_products_allow_findings_append_and_preserve_source_errors() -> anyhow::Result<()> {
+        let source = lane();
+        let opts = DistillOptions {
+            keep_last: 2,
+            ..Default::default()
+        };
+        let mut expected = legacy_products::distill(&source, &opts)?;
+        let mut actual = prepare_distill(&source, &opts)?;
+        for d in [&mut expected, &mut actual.distilled] {
+            d.head_md.push_str(&findings(&source, &opts)?);
+            d.head_md.push('\n');
+            d.stats.pack_est_tokens = (d.head_md.len() as f64 / 3.5).ceil() as u64;
+            d.stats.distilled_est_tokens = d.stats.pack_est_tokens + d.stats.tail_est_tokens;
+        }
+        let expected_session = legacy_products::resumable_session(&source, &expected, &opts)?;
+        let (actual, actual_session) = actual.into_resumable_session(&source);
+        same_products(&actual, &expected);
+        assert_eq!(
+            serde_json::to_value(actual_session)?,
+            serde_json::to_value(expected_session)?
+        );
+        let changed_opts = DistillOptions {
+            tail_result_max: 17,
+            keep_tail_thinking: true,
+            ..opts.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(resumable_session(&source, &actual, &changed_opts)?)?,
+            serde_json::to_value(legacy_products::resumable_session(&source, &expected, &changed_opts)?)?,
+            "compatibility wrapper must honor its caller's options",
+        );
+        let world = cv_testkit::World::new("distill-products-source-error");
+        let path = world.base.join("body.json");
+        let bytes = serde_json::to_vec(&"guarded body".repeat(1024))?;
+        std::fs::write(&path, &bytes)?;
+        let guarded = crate::Json::source(&path, 0, bytes.len() as u64)?
+            .with_view(|view| view.source_text())?
+            .unwrap();
+        let mut source = Session::new("guarded", Harness::Claude);
+        source.messages.push(msg(
+            Role::User,
+            MessageKind::Prompt,
+            vec![Block::Text { text: guarded }],
+        ));
+        std::fs::write(&path, b"changed")?;
+        assert!(prepare_distill(&source, &opts).is_err());
+        assert!(distill(&source, &opts).is_err());
+        assert!(findings(&source, &opts).is_err());
+        assert!(legacy_products::distill(&source, &opts).is_err());
+        assert!(legacy_products::findings(&source, &opts).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn findings_only_matches_frozen_renderer_without_unused_products() -> anyhow::Result<()> {
+        let mut source = lane();
+        source.messages.push(msg(
+            Role::Tool,
+            MessageKind::ToolResult,
+            vec![result("e1", &"irrelevant tool output λ\n".repeat(65536), false)],
+        ));
+        source.messages.push(msg(
+            Role::Assistant,
+            MessageKind::Reply,
+            vec![text(
+                "### agent said nested
+body
+## 3. Facts
+facts text",
+            )],
+        ));
+        let opts = DistillOptions::default();
+        WORK.with(|cell| cell.set(Work::default()));
+        let expected = legacy_products::findings(&source, &opts)?;
+        let old_work = WORK.with(|cell| cell.get());
+        WORK.with(|cell| cell.set(Work::default()));
+        let actual = findings(&source, &opts)?;
+        let new_work = WORK.with(|cell| cell.get());
+        assert_eq!(actual, expected);
+        assert_eq!(old_work.tail_preparations, 2);
+        assert!(old_work.elided_copy_bytes > 1024 * 1024);
+        assert_eq!(old_work.source_estimates, source.messages.len());
+        assert_eq!(new_work.tail_preparations, 0);
+        assert_eq!(new_work.elided_copy_bytes, 0);
+        assert_eq!(new_work.source_estimates, 0);
+        Ok(())
     }
 
     /// The distill fixture: a lane with a brief, polls, a commit, an error, and a trailing call
@@ -1482,3 +1796,7 @@ pub(crate) mod tests {
         assert_eq!(hosts_in("scp -q ember@1.2.3.4:/srv/x /tmp/y"), vec!["ember@1.2.3.4"]);
     }
 }
+
+#[cfg(test)]
+#[path = "distill/legacy_products.rs"]
+mod legacy_products;

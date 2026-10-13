@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Transcript windows render before full-session metadata arrives; late metadata preserves loaded pages, pagination, expanded prompts and the current selection.
+- Distill reuses one prepared tail; findings-only analysis skips unused sidecar copies, tail rendering and token accounting.
 
 - Pack excerpts include checked source-backed text and report unavailable prefixes instead of silently omitting conversational content.
 - CLI JSON staging batches small writes through bounded operation buffers while preserving output, byte budgets, rollback and continuation hints.
