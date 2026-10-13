@@ -192,7 +192,7 @@ impl Adapter for Continue {
                     if let Some(message) = message {
                         if s.system_prompt.is_none() && message.kind == MessageKind::SystemPrompt {
                             let mut text_message = message.clone();
-                            text_message.materialize_text(&s.resolver());
+                            text_message.try_materialize_text(&s.resolver())?;
                             let text = text_message.text();
                             if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
                                 s.system_prompt = Some(text);

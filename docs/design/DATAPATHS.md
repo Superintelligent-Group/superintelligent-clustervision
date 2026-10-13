@@ -1942,3 +1942,14 @@ omission. The initial Cursor identity/model concern was refuted: `JsonView::text
 explicitly owns metadata, including decoded-backed strings above the inline threshold. Native
 owned/selected IDE producer oracle with 44–68 KiB IDs/models preserves the bubble/model
 exactly; existing retained source failure checks are unchanged. No production metadata conversion change is needed.
+
+Continue system-prompt extraction now uses the same checked text-materialization helper in its
+fallible stream before reading concatenated message text. Existing selected/owned metadata,
+source-change-after-Stop, deferred encoded arguments, and role/emit regressions remain exact.
+Current raw Continue text ordinarily uses Span; this migration covers its actual demanded
+text-error contract rather than claiming its system prompts necessarily use decoded Source
+backing. The audit's remaining limits are existing explicit contracts: direct string-like
+render/text helpers require materialized messages; best-effort Text resolution helpers do not
+report source failures; error-event detail intentionally omits lazy bodies; and `cat --input`
+fully owns requested JSON through checked serde. No further proven disconnected carrier
+consumer remains in the reviewed paths.
